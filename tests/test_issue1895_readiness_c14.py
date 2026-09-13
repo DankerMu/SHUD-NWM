@@ -527,15 +527,21 @@ def test_filesystem_reconciliation_distinguishes_plausible_from_reversed() -> No
 
 def test_g8_receipt_identity_and_exact_six_groups() -> None:
     groups = [_group(f"k{index}", index) for index in range(1, 7)]
-    baseline = persist_baseline_groups(groups)
+    from packages.common.node27_issue1895_receipt import durable_key
+
+    for group in groups:
+        group["key"] = durable_key(group["durable"])
+    baseline = persist_baseline_groups(groups, expected_count=6)
     assert len(baseline) == 6
-    assert_exact_cold_groups(groups, baseline=groups)
+    assert_exact_cold_groups(groups, baseline=groups, expected_count=6)
     drifted = [_group(f"k{index}", index) for index in range(1, 6)] + [_group("extra", 99)]
     with pytest.raises(Issue1895ReadinessError):
-        assert_exact_cold_groups(drifted, baseline=groups)
+        assert_exact_cold_groups(drifted, baseline=groups, expected_count=6)
     mixed = [_group("k1", 1, residency="mixed")] + [_group(f"k{index}", index) for index in range(2, 7)]
+    for group in mixed:
+        group["key"] = durable_key(group["durable"])
     with pytest.raises(Issue1895ReadinessError) as residency:
-        assert_exact_cold_groups(mixed, baseline=groups)
+        assert_exact_cold_groups(mixed, baseline=groups, expected_count=6)
     assert residency.value.code == "COLD_RESIDENCY_MIXED"
     receipt = {
         "schema_version": "1.1",
@@ -564,12 +570,15 @@ def test_g8_receipt_identity_and_exact_six_groups() -> None:
         remaining_complete_source_keys=(),
         newly_terminal_keys=(),
         baseline_keys=baseline_keys,
+        expected_count=6,
     )
     with pytest.raises(Issue1895ReadinessError) as leftover:
         assert_natural_tick_selection(
             receipt,
             remaining_complete_source_keys=(k7,),
             newly_terminal_keys=(),
+            baseline_keys=baseline_keys,
+            expected_count=6,
         )
     assert leftover.value.code == "TICK_NOOP_NOT_EXHAUSTIVE"
     selected_receipt = {
@@ -588,12 +597,15 @@ def test_g8_receipt_identity_and_exact_six_groups() -> None:
         remaining_complete_source_keys=(),
         newly_terminal_keys=(k7,),
         baseline_keys=baseline_keys,
+        expected_count=6,
     )
     with pytest.raises(Issue1895ReadinessError):
         assert_natural_tick_selection(
             selected_receipt,
             remaining_complete_source_keys=(k8,),
             newly_terminal_keys=(k8,),
+            baseline_keys=baseline_keys,
+            expected_count=6,
         )
     g8 = _gate("G8")
     assert "assert_natural_receipt_identity" in g8 or "head_sha" in g8

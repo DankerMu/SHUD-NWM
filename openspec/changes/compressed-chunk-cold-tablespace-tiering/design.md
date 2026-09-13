@@ -254,7 +254,7 @@ for a later rewrite. Both `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES`
 and `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` are mandatory positive integer
 byte inputs with no Python, shell, or example-template default. This fixture
 does not invent a universal reserve from disposable WAL observations.
-Issue #1895 derives `E` from the fresh six-group live catalog expansion census and
+Issue #1895 derives `E` from the fresh reviewed-N live catalog expansion census and
 uses that same byte value for both reserves: the WAL reserve is an explicitly
 conservative same-order expansion proxy, not a measured/per-group-attributed WAL
 claim and not the disposable 165736-byte LSN delta. Exact equality is admitted,
@@ -412,12 +412,12 @@ fresh canonical numeric `.Config.User`, never the historical deployment value.
 The read-only preflight freezes exact HEAD plus catalog/data/filesystem/API
 baselines. The six compressed groups observed on 2026-08-29 are a historical
 count only. A fresh census that does not require the absent cold target must
-resolve exactly six complete eligible source groups and bind each durable
+resolve exactly the externally reviewed N complete eligible source groups and bind each durable
 origin/window key, current compressed sibling, complete member digest,
 production inventory/parity, pre-compression expansion and retained-source
 bytes. A missing group, unexplained extra group or identity/count drift ends the window as NO-GO; the
-rollout never substitutes an arbitrary oldest six. Let `E` be the positive
-maximum `before_compression_total_bytes` and `S` the positive sum of the six
+rollout never substitutes an arbitrary oldest N. Let `E` be the positive
+maximum `before_compression_total_bytes` and `S` the positive sum of all N
 retained-source group bytes. Checked, non-overflowing canonical decimal policy
 is `cold_reserve=E`, `wal_reserve=E`, `install_required=S`, and
 `rollback_headroom=2*E`. Here `wal_reserve=E` is a conservative same-order proxy
@@ -425,6 +425,27 @@ from fresh live expansion, not a WAL measurement or attribution. The existing
 gates therefore require installer cold free >= `S + 2E`, and each group freshly
 requires cold free >= its expansion + `E` and hot free >= `E`; no disposable WAL
 number, LSN delta or historical free-space value supplies a default.
+
+Child #2291 defines N as an explicit canonical decimal input in 1..63, never a
+default or a value chosen from a current observation. G1 validates the original
+successful census and freezes N plus the existing held-reader whole-file SHA-256
+in its exclusive private policy. The existing semantic census digest covers
+ordered key/group-digest pairs, not the entire original document; it retains its
+meaning and is not replaced. Later original loaders require the independently
+frozen file hash and reviewed SHA before extracting N and validating strict
+integer required/resolved/config counts, raw unique ordered keys/groups and the
+canonical string capacity-policy count. Original provenance is not reinterpreted
+against a later observation's command bracket.
+
+All group/key-only readiness helpers receive validated N explicitly. G3 makes a
+fresh bounded observation through the same physical-parent/candidate/group owners,
+excluding legacy/third tables at admission and refusing incomplete/mixed/drifted
+admitted groups rather than filtering them to match N. It does not run parity or
+echo baseline N. Discovery retains extra-candidate visibility; actual ranges,
+all approved measured byte values and existing resource ceilings remain binding.
+G8 original-N reconciliation remains separate from newly-terminal natural-tick
+sets. No count-only result closes parent live acceptance. See
+`fixtures/issue-2291.md` for interfaces, invariant matrix and evidence scenarios.
 
 Before any live mutation, the exact reviewed SHA reruns the isolated #1892 oracle
 and requires current-run complete cold movement, inverse complete-group move-back,
@@ -438,11 +459,11 @@ container/catalog mutation entry. If installation fails or is interrupted while
 its private authority remains live, only the same installer state machine may
 reconcile or roll back that in-progress install. A terminal `installed` receipt
 closes and removes the authority; it does not leave an operator rollback handle.
-After install, a second census must match the same six keys and preimages with no
+After install, a second census must match the same N keys and preimages with no
 extra eligible group before the first movement SQL. A failure at this post-install
 boundary stops and preserves the terminally installed topology even when zero
-groups have moved. Enforce fixes `PER_TICK_BOUND=1` and does not start group N+1
-until group N's uniquely named, current-SHA, invocation-bracketed receipt proves
+groups have moved. Enforce fixes `PER_TICK_BOUND=1` and does not start group i+1
+until group i's uniquely named, current-SHA, invocation-bracketed receipt proves
 complete target, parity and filesystem reconciliation. Recurring timers remain
 stopped through a controlled ingest smoke and all catalog/data/display/performance
 gates; they resume only after a written preliminary GO.
@@ -622,7 +643,7 @@ Regression rows:
   origin with no parent/compressed-sibling fallback, and under isolated 2.10.2
   large-sibling data produces target-sensitive, sibling-independent results plus
   a plan naming no sibling; finite production timeouts remain unchanged.
-- Fresh pre-install and post-install census -> exactly the same six durable keys,
+- Fresh pre-install and post-install census -> exactly the same N durable keys,
   complete-source preimages and inventory/parity inputs with no extra eligible
   key, or zero movement and terminal NO-GO.
 - Cold decompression + replay + recompression -> every resulting member cold;

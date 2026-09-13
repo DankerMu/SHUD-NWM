@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the G5 pre-movement census against the original six-group preimage."""
+"""Bind the G5 pre-movement census against the reviewed original census preimage."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--digest", required=True)
     parser.add_argument("--bracket", required=True, type=Path)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--original-sha256", required=True)
     return parser
 
 
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         bind_pre_movement_census(
             current_path=args.current,
             original_path=args.original,
+            expected_original_sha256=args.original_sha256,
             expected_digest=args.digest,
             bracket_path=args.bracket,
             reviewed_sha=args.reviewed_sha,

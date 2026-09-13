@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from packages.common.node27_cold_residency_census_policy import CensusPolicyError, validate_reviewed_count
+from packages.common.node27_issue1895_receipt import durable_key
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 
 COMPRESSION_TIMER = "nhms-node27-timeseries-compression.timer"
 COMPRESSION_SERVICE = "nhms-node27-timeseries-compression.service"
-REQUIRE_COUNT = 6
 
 
 def assert_baseline_before_start(script: str) -> None:
@@ -93,6 +94,8 @@ def assert_natural_receipt_identity(
 
 
 def group_member_identity(group: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(group, Mapping):
+        raise Issue1895ReadinessError("group is not an object", code="GROUP_IDENTITY_INVALID", stage="census")
     durable = group.get("durable")
     if not isinstance(durable, Mapping):
         raise Issue1895ReadinessError(
@@ -122,52 +125,50 @@ def group_member_identity(group: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def persist_baseline_groups(groups: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
-    if len(groups) != REQUIRE_COUNT:
+def persist_baseline_groups(
+    groups: Sequence[Mapping[str, Any]],
+    *,
+    expected_count: int,
+) -> tuple[dict[str, Any], ...]:
+    try:
+        count = validate_reviewed_count(expected_count)
+    except CensusPolicyError:
         raise Issue1895ReadinessError(
-            "baseline census is not exactly six groups",
+            "reviewed count is invalid", code="BASELINE_COUNT_INVALID", stage="census"
+        ) from None
+    if len(groups) != count:
+        raise Issue1895ReadinessError(
+            "baseline count disagrees with reviewed authority",
             code="BASELINE_COUNT_INVALID",
             stage="census",
         )
-    keys = [str(group.get("key") or "") for group in groups]
-    if len(set(keys)) != REQUIRE_COUNT or any(not key for key in keys):
+    identities = tuple(group_member_identity(group) for group in groups)
+    keys = [item["key"] for item in identities]
+    if any(not isinstance(key, str) or not key for key in keys) or len(set(keys)) != count:
         raise Issue1895ReadinessError(
             "baseline census keys are not unique",
             code="BASELINE_KEYS_INVALID",
             stage="census",
         )
-    return tuple(group_member_identity(group) for group in groups)
+    if any(item["key"] != durable_key(item["durable"]) for item in identities):
+        raise Issue1895ReadinessError("baseline durable keys disagree", code="BASELINE_KEYS_INVALID", stage="census")
+    return identities
 
 
 def assert_exact_cold_groups(
     observed: Sequence[Mapping[str, Any]],
     *,
     baseline: Sequence[Mapping[str, Any]],
+    expected_count: int,
 ) -> None:
-    """Prove exactly the baseline six groups are cold, with no extra/missing identity."""
-
-    if baseline and "durable" in baseline[0] and "key" in baseline[0]:
-        expected = persist_baseline_groups(baseline)
-    else:
-        expected = tuple(baseline)
-    if len(expected) != REQUIRE_COUNT:
-        raise Issue1895ReadinessError(
-            "baseline identity set is not exactly six groups",
-            code="BASELINE_COUNT_INVALID",
-            stage="census",
-        )
-    observed_identities = [group_member_identity(group) for group in observed]
-    if len(observed_identities) != REQUIRE_COUNT:
-        raise Issue1895ReadinessError(
-            "post-tick census is not exactly six groups",
-            code="COLD_COUNT_INVALID",
-            stage="census",
-        )
+    """Prove the whole original identity set is cold, independent of new candidates."""
+    expected = persist_baseline_groups(baseline, expected_count=expected_count)
+    observed_identities = persist_baseline_groups(observed, expected_count=expected_count)
     expected_keys = {item["key"] for item in expected}
     observed_keys = {item["key"] for item in observed_identities}
     if expected_keys != observed_keys:
         raise Issue1895ReadinessError(
-            "post-tick census keys drifted from the baseline six",
+            "post-tick census keys drifted from the original baseline",
             code="COLD_KEYS_DRIFTED",
             stage="census",
         )
@@ -218,7 +219,8 @@ def assert_natural_tick_selection(
     *,
     remaining_complete_source_keys: Sequence[str],
     newly_terminal_keys: Sequence[str],
-    baseline_keys: Sequence[str] = (),
+    baseline_keys: Sequence[str],
+    expected_count: int,
 ) -> None:
     """Bind subsequent-tick semantics to independent pre/post catalog sets.
 
@@ -227,6 +229,18 @@ def assert_natural_tick_selection(
     migrated: exactly one new complete-target durable key equals the unique
     receipt migrated key; remaining complete-source keys/reasons equal deferred.
     """
+    try:
+        count = validate_reviewed_count(expected_count)
+    except CensusPolicyError:
+        raise Issue1895ReadinessError(
+            "reviewed count is invalid", code="BASELINE_COUNT_INVALID", stage="timer"
+        ) from None
+    if (
+        len(baseline_keys) != count
+        or any(not isinstance(key, str) or not key for key in baseline_keys)
+        or len(set(baseline_keys)) != count
+    ):
+        raise Issue1895ReadinessError("original keys disagree", code="BASELINE_KEYS_INVALID", stage="timer")
 
     outcome = receipt.get("outcome")
     selected = receipt.get("selected")

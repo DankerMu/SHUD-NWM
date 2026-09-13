@@ -248,7 +248,7 @@ Seams under test:
   tests, Ruff, independent review/verifier/Gap Sweep and exact-head CI, merge the
   child, then restart #1895 from G0. Local or isolated PASS does not satisfy the
   fresh production G1 retry.
-- [ ] 4.0B Merge child #2290 physical-parent admission before fresh production G0.
+- [x] 4.0B Merge child #2290 physical-parent admission before fresh production G0.
   Complete the `fixtures/issue-2290.md` invariant matrix: narrow signature and
   mandatory parent OID/Timescale ID; digest-bound inventory with unchanged wire
   keys; all selection/reload/locked/fresh/census/post-target/intersecting-group
@@ -267,6 +267,14 @@ Seams under test:
   independent current count to the admitted physical-parent population, with
   extra/missing/duplicate/stale/set/digest drift refusal and no truncation.
   Preserve per-tick1, E/S/2E arithmetic, actual ranges, timeouts and wire schemas.
+  Detailed contract, selected risk packs, invariant matrix and scenario evidence:
+  `fixtures/issue-2291.md`. Freeze N and held-reader whole-original-file SHA in
+  the existing private G1 policy; all later original loaders require that frozen
+  hash and reviewed SHA before consuming original N. Existing semantic digest,
+  original provenance, current brackets and natural newly-terminal sets retain
+  their separate meanings. Prove full non-six G5/G6/G8 traversal, 1/63 complete
+  artifacts within unchanged bounds, malformed/duplicate/extra/replaced originals,
+  real mixed-range population counts and every changed selector removal edge.
   Require node27 boundary/consumer/isolated-population evidence plus the normal
   fixture, selector-removal, review/verifier/final/CI gates; no production access.
 - [ ] 4.1 At the reviewed SHA, after 4.0A-4.0C merge and external readiness is supplied, execute the merged live runbook for the first
@@ -315,12 +323,12 @@ Seams under test:
   timer/writer/lock state, backup readiness, fresh root RAID/SMART evidence, API
   valid-times/publication and #1342 baselines. The six compressed groups observed
   on 2026-08-29 are a historical count, not reusable identities: the fresh
-  census must resolve exactly six complete eligible source groups and freeze
+  census must resolve exactly the externally reviewed N complete eligible source groups and freeze
   each durable key, current sibling/member digest, production inventory/parity,
   `before_compression_total_bytes` and `retained_source_bytes`; missing, extra or
-  unexplained drift ends this window as NO-GO, never an arbitrary oldest-six
+  unexplained drift ends this window as NO-GO, never an arbitrary oldest-N
   subset. Let `E` be the checked positive maximum expansion and `S` the checked
-  positive sum of all six retained-source byte values; freeze canonical decimal values
+  positive sum of all N retained-source byte values; freeze canonical decimal values
   `COLD_RESERVE=E`, `WAL_RESERVE=E`, `INSTALL_REQUIRED=S`, and
   `ROLLBACK_HEADROOM=2*E`, rejecting overflow or any stale/probe-derived value.
   `WAL_RESERVE=E` is an intentionally conservative same-order proxy derived from
@@ -350,7 +358,7 @@ Seams under test:
   invoking a fictional operator rollback. The historical manual container recipe
   is never an alternate install or rollback path.
 - [ ] 4.5 Run a dry-run preview and, before the first movement SQL, re-census the
-  same six 4.1 keys as complete source with the same inventory/parity inputs and
+  same N 4.1 keys as complete source with the same inventory/parity inputs and
   no unexplained extra eligible group. Set `PER_TICK_BOUND=1`; issue exactly one
   enforce invocation per group and do not issue the next until the unique
   current-run receipt passes head/time/config/outcome, complete residency,
@@ -411,8 +419,8 @@ Seams under test:
   The 4.0 census uses production catalog/inventory/parity owners without target
   preflight; 4.0A closes the live-discovered parent-hypertable scan by proving
   transparent business-row parity from the exact durable origin relation while
-  keeping the finite timeout; six remains a fresh count gate rather than reusable
-  identity.
+  keeping the finite timeout; externally reviewed N remains a fresh count gate
+  rather than reusable identity.
 - Published NHMS identity: tasks 4.0 and 4.6-4.8. C1-C3/G8 identity and digest
   binders, source-scoped current publication and raw C4 bytes prove the local
   acceptance chain first and exact-SHA live display identity only after merge.
