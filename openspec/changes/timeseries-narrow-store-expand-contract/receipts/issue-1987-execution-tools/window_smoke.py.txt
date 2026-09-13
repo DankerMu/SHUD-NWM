@@ -238,6 +238,7 @@ class BoundaryExecutor(w.Executor):
         self.seq += 1
         self.save()
         self.save_file(f"worker-{self.seq}.stderr", proc.stderr)
+        self.save_file(f"worker-{self.seq}.stdout", proc.stdout)
         w.require(proc.returncode == 0, "REAL_WORKER_FAILED")
         return json.loads(proc.stdout)
 

@@ -1357,9 +1357,11 @@ def worker(args):
                 "FORECAST_ONLY_COMPARATOR_REQUIRED",
             )
             cur.execute(
-                "SELECT h.run_key,h.basin_version_key,s.river_network_version_key,s.river_segment_key,h.cycle_time "
-                "FROM hydro.hydro_run h JOIN core.river_segment s ON s.river_segment_id=%s "
-                "AND s.river_network_version_id=%s WHERE h.run_id=%s AND h.basin_version_id=%s "
+                "SELECT h.run_key,bv.basin_version_key,rnv.river_network_version_key,s.river_segment_key,h.cycle_time "
+                "FROM hydro.hydro_run h JOIN core.basin_version bv ON bv.basin_version_id=h.basin_version_id "
+                "JOIN core.river_segment s ON s.river_segment_id=%s AND s.river_network_version_id=%s "
+                "JOIN core.river_network_version rnv ON rnv.river_network_version_id=s.river_network_version_id "
+                "WHERE h.run_id=%s AND h.basin_version_id=%s "
                 "AND h.model_id=%s AND h.scenario_id=ANY(%s) AND h.run_type='forecast'",
                 (
                     segment,
