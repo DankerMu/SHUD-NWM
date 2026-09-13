@@ -6,14 +6,14 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
 
 ## 1. Migration runner lock safety (#2277)
 
-- [ ] 1.1 `configure_migration_session(connection)` in `packages/common/migrate.py`; called from
+- [x] 1.1 `configure_migration_session(connection)` in `packages/common/migrate.py`; called from
   `main()` after connect, before `ensure_schema_migrations_table`; precedence env > non-zero session
   > `5s`; `statement_timeout` only from env; `set_config(..., false)` with bound parameter; prints
   effective values; invalid env → exit 1 naming the variable, before any statement.
   Verify: unit tests with fake connection/cursor — default (session `0`, env unset → `5s`, no
   statement_timeout call), PGOPTIONS-style session `30s`/`120s` kept, env `200ms`/`10min` applied,
   explicit env `0` applied, invalid value → `SystemExit(1)` and no `CREATE TABLE`/ledger SQL issued.
-- [ ] 1.2 Lock-failure diagnostics in `main()`: `55P03` → filename, error, effective lock_timeout,
+- [x] 1.2 Lock-failure diagnostics in `main()`: `55P03` → filename, error, effective lock_timeout,
   ≤20 non-self sessions in current database with `xact_start IS NOT NULL` ordered by xact_start
   (pid, usename, application_name, state, wait_event_type, xact age, query head = redact full text
   first, then truncate to 120 chars; text through `redact_database_dsn` + SQL `PASSWORD '<literal>'` redaction),
@@ -29,7 +29,7 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
   `NHMS_MIGRATE_LOCK_TIMEOUT=200ms` → exit 1 in < 10 s, output contains A's pid and
   application_name, `public.schema_migrations` has no row for the file; after A rolls back the
   same run exits 0 and records it.
-- [ ] 1.3 Library callers unchanged: real-DB or unit assertion that `apply_migration` leaves a
+- [x] 1.3 Library callers unchanged: real-DB or unit assertion that `apply_migration` leaves a
   caller connection's `lock_timeout` unchanged; existing `tests/test_migrations.py`,
   `tests/test_real_database_integration.py` pass untouched.
   Verify (orchestrator, node-27 isolated scratch DB — CI never calls `main()`): empty database,
@@ -37,7 +37,7 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
   (§9.6; 000059 `OWNER TO` needs it), timeout env unset, `python -m packages.common.migrate` → exit 0, ledger rows == number of
   `db/migrations/*.sql`, `SELECT count(*) FROM pg_index WHERE NOT indisvalid` == 0; plus
   `PGOPTIONS='-c lock_timeout=30s'` run prints `30s` kept.
-- [ ] 1.4 Runbook: `docs/runbooks/tier-node27-timeseries-storage.md` §4.10.2 — runner now defaults
+- [x] 1.4 Runbook: `docs/runbooks/tier-node27-timeseries-storage.md` §4.10.2 — runner now defaults
   `lock_timeout=5s`; precedence (env > PGOPTIONS > default); `statement_timeout` still only via
   PGOPTIONS/env; the CIC INVALID-index footgun (fresh bring-up/rebuild still applies the
   CONCURRENTLY files 000030–000054 under the default; only 000052 self-heals its INVALID index —
@@ -46,7 +46,7 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
 
 ## 2. Maintenance output freshness check (#1769 / #1770 check side)
 
-- [ ] 2.1 `collect_postgres` adds `maintenance_output = {status, summary, rows}` per spec: reloptions
+- [x] 2.1 `collect_postgres` adds `maintenance_output = {status, summary, rows}` per spec: reloptions
   override else `current_setting` thresholds; excludes `pg_catalog`/`information_schema`/`pg_toast`
   and `autovacuum_enabled=false`; negative `reltuples` → 0; ages in seconds; bounded to over-threshold
   or zero-stat rows, LIMIT 50; errors isolated to `status: "error"` without breaking other sections.
@@ -58,7 +58,7 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
   assertion on the reloptions table tolerates absence by retrying generation once) → the disabled one absent, the reloptions one carries the overridden threshold, a
   never-analyzed empty-page table with rows appears as zero-stat; row
   shape holds (column names/types as the evaluator expects).
-- [ ] 2.2 `_recommendations` derives `TABLE_STATISTICS_STALE`, `TABLE_VACUUM_DEBT_STALE` (warning),
+- [x] 2.2 `_recommendations` derives `TABLE_STATISTICS_STALE`, `TABLE_VACUUM_DEBT_STALE` (warning),
   `AUTOVACUUM_OUTPUT_STALLED` (critical, analyze-stale↔analyze maximum, vacuum-stale↔vacuum maximum),
   `MAINTENANCE_OUTPUT_UNAVAILABLE` (warning), `TABLE_ZERO_STATISTICS` (info); thresholds on
   `AuditThresholds` (`maintenance_stale_multiplier=10`, `maintenance_stale_age_seconds=86400`);
@@ -78,7 +78,7 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
   - `maintenance_output.status == "error"` → exactly `MAINTENANCE_OUTPUT_UNAVAILABLE` warning,
     existing codes unchanged, `main()` returns 0; `postgres.status != ok` → no maintenance findings
   - existing recommendation tests pass unchanged.
-- [ ] 2.3 Runbook `docs/runbooks/node-27-database-container-operations.md`: the five codes and their
+- [x] 2.3 Runbook `docs/runbooks/node-27-database-container-operations.md`: the five codes and their
   meaning; stop contract (SIGINT/300) is what keeps counters alive; `stats_reset IS NULL` is not
   evidence of no reset; counter-wipe blind spot; `core.basin`/`core.mesh_version` disposition.
 
@@ -87,20 +87,20 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
 - [x] 3.1 Read-only production probe captured: `evidence/2026-09-13-node27-autovacuum-output-probe.txt`
   (output live, 0 over-threshold, clean shutdown since 08-24, container stop contract present,
   000059 pending).
-- [ ] 3.2 Diagnosis receipt `evidence/issue-1769-1770-diagnosis.md`: mechanism conclusion (crash
+- [x] 3.2 Diagnosis receipt `evidence/issue-1769-1770-diagnosis.md`: mechanism conclusion (crash
   restart counter discard) with the SIGTERM burst source stated: `docker restart`/container stop →
   SIGTERM → smart shutdown emits `terminating ... due to administrator command` for autovacuum/
   background workers → clients never disconnect → Docker 10 s SIGKILL → crash recovery → PG15 stats
   discard (plus the integration-test `DROP DATABASE ... WITH FORCE` source noted 08-23), exclusion list, today's state, met_station regrowth (325 MB / 42,029 rows,
   HOT 9%), #1765 relation (delivered: critical → exit 1 + `OnFailure=`), basin/mesh_version
   disposition, deviation "live verdict green".
-- [ ] 3.3 node-27 isolated checkout at PR head: focused pytest (unit + `integration` tests against an
+- [x] 3.3 node-27 isolated checkout at PR head: focused pytest (unit + `integration` tests against an
   isolated scratch database, never production `nhms`), and a read-only governance audit against
   production with the new code → receipt shows `maintenance_output.status == "ok"` and the maintenance
   verdict recorded in `evidence/`.
 - [ ] 3.4 Rewrite the mechanism sections of #1769 and #1770 from "候选/未定" to "已定位" (issue comment
   or body edit linking the receipt), per #1770 08-23 closing condition 2.
-- [ ] 3.5 Follow-up issue for met_station churn/bloat regrowth (issue-scribe).
+- [x] 3.5 Follow-up issue for met_station churn/bloat regrowth (issue-scribe) → #2300.
 
 ## Evidence floor
 
