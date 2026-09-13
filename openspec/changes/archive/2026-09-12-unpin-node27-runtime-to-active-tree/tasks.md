@@ -145,9 +145,10 @@ REPO 键已在 1.1/1.5 断言，首跑 `Result` 由 1.17 在次日 **07:00Z 后*
       #2078 `/api/v1/layers?offset=999999999` → 200 `data: []`，`:8080` 上预热后 `/api/v1/runs` TTFB、255 条 junk 后再测 ≤ 10 ms；
       #2079 `:8080` 上不带头 / 外部 `x-nhms-cache-warm: refresh` / 正确 token 三组 TTFB（正确 token 组明显更慢）。不达标 → 记录。
 - [x] 1.16 `df` 改后；8 个 unit 终态 dump；CAPACITY HOLD 目录 `ls -la` 与改前逐字相同；备份目录路径与回滚命令入 receipt。
-- [ ] 1.17 **PR 后、次日 07:00Z 后**：`systemctl --user show` raw-retention / timeseries-compression / timeseries-retention 三个 service
+- [x] 1.17 **PR 后、次日 07:00Z 后**：`systemctl --user show` raw-retention / timeseries-compression / timeseries-retention 三个 service
       （加 1.14 未观测到的 download / frontier-alert）的 `ExecMainStartTimestamp`（须 `> T_START`）/ `ExecStart` / `Result` + 各自日志末段，
       以评论补记到 #2162（issue 因目标 2 保持 open）。
+      已补记（2026-09-13T07:31Z 只读采集）：#2162 issuecomment-5651954685 + 更正 issuecomment-5651982656，结论见 receipt §10。
 - [x] 2.1 receipt `docs/runbooks/receipts/2026-09-13-issue-2162-unpin-node27-runtime.md`（含 #2145 偏离 5 / 8 的结清段或「未结清」说明）。
 - [x] 2.2 `docs/runbooks/receipts/2026-09-08-issue-2032-mvt-cache-retention-node27.md` 追加 §7「5.3 部署」（指向 2.1），
       并把 §6 标题改为「历史：deferred 记录（已由 §7 执行）」指向 §7，避免自相矛盾。
