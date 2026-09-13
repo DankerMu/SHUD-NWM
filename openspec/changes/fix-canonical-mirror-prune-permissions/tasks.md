@@ -67,13 +67,22 @@ first.
   unchanged and say so.
 - [x] 2.6 `tests/test_canonical_precip_copyback_backfill.py`: extend
   `test_backfill_created_directories_stay_readable_under_a_restrictive_umask`
-  (every created directory `0o2775`); new
-  `test_backfill_created_cycle_directory_takes_the_source_roots_group`.
+  (two buckets: `canonical/` created by the run `0o755`, every other
+  created directory `0o2775`; review round 1 narrowed the first cut's
+  single `0o2775` bucket); new
+  `test_backfill_created_cycle_directory_takes_the_source_roots_group`;
+  new `test_backfill_leaves_a_pre_existing_mirror_root_mode_alone`
+  (pre-existing `canonical/` keeps its mode, round 2).
 - [x] 2.7 `tests/test_node27_raw_retention.py`: the documented-`jq` test gains
   case (iii) — a `production_execute` summary with one canonical
   `PermissionError` failure exits `1`; the docstring of
   `test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes`
-  no longer calls that the production shape.
+  no longer calls that the production shape; new
+  `test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing`
+  (`prcp_rate_or_amount/` `0o555`: one `PermissionError` in `failed[]`,
+  the `.nc` and both directories survive, `freed_bytes` excludes the
+  cycle, rc 1, the other lanes still delete — the mode half of the
+  fail-closed promise; review round 1).
 - [x] 2.8 Red proof: 2.1 (mode assertions), 2.2 (gid/mode on `<cycle>/`) and
   2.6 fail on pre-change source (batched red run, output kept in the PR
   evidence).
@@ -136,3 +145,8 @@ first.
   change and by #2104.
 - A storage source added later fails closed (clean `PermissionError`, zero
   bytes) until the documented per-source sweep runs — deliberate (D2).
+- The backfill prepares `canonical/` (`0o755`, only when created) under
+  the batch mutex before the first tree, so a run in which every tree is
+  then refused still leaves an empty `0o755` `canonical/` behind; before
+  this change directories were created only when a file was about to be
+  written (review round 1).

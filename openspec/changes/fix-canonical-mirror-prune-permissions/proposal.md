@@ -23,7 +23,9 @@ The mirror grows monotonically on the 1.7 TB volume shared with `pg_default`.
   `forcing/` copyback lanes keep `0o755` on their trees and clones (the
   forcing tree carries a default ACL where a wider group mode would move
   the mask). `ensure_traversable_copyback_directory`
-  is untouched. The one-shot backfill script applies the same directory mode.
+  is untouched. The one-shot backfill script applies the same directory mode
+  to every level it creates below `canonical/`, and keeps `canonical/`
+  itself at `0o755` — the one level neither producer nor the sweep widens.
 - **Existing tree (ops, not code).** A documented, idempotent sweep run on
   node-22 as the owner: `chgrp -R 1107` (shared group `nwmuser`, present on
   both hosts with `nwm` and `frd_muziyao` as members) and `chmod 2775` on
@@ -64,7 +66,7 @@ The mirror grows monotonically on the 1.7 TB volume shared with `pg_default`.
   directory-mode parameter; only `_copyback_canonical_precip`'s trees and
   commit clones use `0o2775`).
 - `scripts/canonical_precip_copyback_backfill.py` (`DIR_MODE`,
-  `_ensure_target_directory`).
+  `MIRROR_ROOT_MODE`, `_ensure_mirror_root`, `_ensure_target_directory`).
 - `scripts/node27_raw_retention.py` (comment only),
   `infra/env/node27-raw-retention.example` (operator check + prose).
 - `tests/test_tile_publisher.py`, `tests/test_canonical_precip_copyback_backfill.py`,

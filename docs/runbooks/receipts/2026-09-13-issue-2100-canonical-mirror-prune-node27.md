@@ -20,7 +20,7 @@ gfs dirs=85 not2775=85 notgid1107=2382 files=2297
 IFS dirs=85 not2775=85 notgid1107=2259 files=2174
 ```
 
-命令（pre-order：`find` 默认父先子后，任一时刻不会出现 `prcp_rate_or_amount/` 可写而 `<cycle>/` 不可写）：
+命令（pre-order：`find` 默认父先子后，任一时刻不会出现 `prcp_rate_or_amount/` 可写而 周期目录 不可写）：
 
 ```bash
 C=/ghdc/data/nwm/object-store/canonical
@@ -67,7 +67,22 @@ deleted_by_lane: canonical=24 raw=2   canonical reasons: [canonical_cycle_aged_o
 failed: []   unsafe_skips: []
 ```
 
-删除的 canonical key：gfs/IFS 各 12 个，`2026082312 … 2026082900`——包含上一 tick 报 `PermissionError` 的全部 22 个（`…082312 … …082812` × 2），另加 cutoff 前移（reference 09-12T00Z → 09-12T12Z）新老化的 `2026082900` × 2。raw 车道同 tick 删 `raw/IFS/2026082900`、`raw/gfs/2026082900`。
+删除的 canonical key（本 tick `deleted[]`，转录自 `jq -r '.deleted[].key'`）：
+
+```
+canonical/gfs/2026082312 canonical/gfs/2026082400 canonical/gfs/2026082412 canonical/gfs/2026082500 canonical/gfs/2026082512 canonical/gfs/2026082600 canonical/gfs/2026082612 canonical/gfs/2026082700 canonical/gfs/2026082712 canonical/gfs/2026082800 canonical/gfs/2026082812 canonical/gfs/2026082900
+canonical/IFS/2026082312 canonical/IFS/2026082400 canonical/IFS/2026082412 canonical/IFS/2026082500 canonical/IFS/2026082512 canonical/IFS/2026082600 canonical/IFS/2026082612 canonical/IFS/2026082700 canonical/IFS/2026082712 canonical/IFS/2026082800 canonical/IFS/2026082812 canonical/IFS/2026082900
+raw/IFS/2026082900 raw/gfs/2026082900
+```
+
+上一 tick（`raw-retention-20260913T033532Z.json`）`failed[].key` 的 22 条：
+
+```
+canonical/gfs/2026082312 canonical/gfs/2026082400 canonical/gfs/2026082412 canonical/gfs/2026082500 canonical/gfs/2026082512 canonical/gfs/2026082600 canonical/gfs/2026082612 canonical/gfs/2026082700 canonical/gfs/2026082712 canonical/gfs/2026082800 canonical/gfs/2026082812
+canonical/IFS/2026082312 canonical/IFS/2026082400 canonical/IFS/2026082412 canonical/IFS/2026082500 canonical/IFS/2026082512 canonical/IFS/2026082600 canonical/IFS/2026082612 canonical/IFS/2026082700 canonical/IFS/2026082712 canonical/IFS/2026082800 canonical/IFS/2026082812
+```
+
+对照：22 条 failed 全部出现在 24 条 canonical deleted 中；多出的 `2026082900` × 2 是 cutoff 前移（reference 09-12T00Z → 09-12T12Z）新老化的周期。raw 车道同 tick 删 `raw/IFS/2026082900`、`raw/gfs/2026082900`。
 
 Unit：
 
@@ -89,8 +104,8 @@ df -B1 /home used=497995923456 avail=1191671394304
 ## 3. 覆盖与未覆盖
 
 - 覆盖：design D2（存量目录）与 retention 路径（4.5、4.6）。
-- 未覆盖：D3/D4（生产者对新镜像周期的持久化）——只能在合入后 node-22 `git pull --ff-only` 并镜像出第一个新周期时观察；届时 `stat -c '%a %U %G'` `<cycle>/` 与 `prcp_rate_or_amount/` 应为 `2775 … nwmuser`，作为 post-merge 回执补记于此（§4）。
-- Sweep 与 node-22 部署之间镜像出的周期会落成 `<cycle>/` 0755 gid 1107 / `prcp_rate_or_amount/` 0755 gid 1078（干净拒绝，零字节），由 runbook §5.3 的 re-sweep 处理。
+- 未覆盖：D3/D4（生产者对新镜像周期的持久化）——只能在合入后 node-22 `git pull --ff-only` 并镜像出第一个新周期时观察；届时 `stat -c '%a %U %G'` 周期目录 与 `prcp_rate_or_amount/` 应为 `2775 … nwmuser`，作为 post-merge 回执补记于此（§4）。
+- Sweep 与 node-22 部署之间镜像出的周期会落成 周期目录 0755 gid 1107 / 其下 `prcp_rate_or_amount/` 0755 gid 1078（干净拒绝，零字节），由 runbook §5.3 的 re-sweep 处理。
 
 ## 4. Post-merge persistence（待补）
 

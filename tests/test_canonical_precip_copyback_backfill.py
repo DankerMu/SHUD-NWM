@@ -472,6 +472,49 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     }
 
 
+def test_backfill_leaves_a_pre_existing_mirror_root_mode_alone(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_ensure_mirror_root`'s EEXIST branch: a `canonical/` this run did not create.
+
+    The mirror root is prepared at `MIRROR_ROOT_MODE` only when this run's own
+    bare `mkdir` creates it. A `canonical/` that was already there -- whatever
+    mode the operator, the publisher or an older run left on it -- is not
+    widened, not narrowed, not touched, exactly like every other pre-existing
+    level. The distinctive `0o750` is neither of the two modes this script
+    writes, so a stray chmod from either side is visible.
+    """
+
+    if os.geteuid() == 0:
+        pytest.skip("root may chmod through anything, so 'left alone' would prove nothing")
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    mirror_root = copyback_root / "canonical"
+    mirror_root.mkdir()
+    os.chmod(mirror_root, 0o750)
+
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        summary = json.loads(capsys.readouterr().out)
+        # Read before the `finally` restores it, or the restore would be what the
+        # assertion below observes.
+        landed_mirror_root_mode = stat.S_IMODE(mirror_root.stat().st_mode)
+        created_below = sorted(path for path in mirror_root.rglob("*") if path.is_dir())
+        landed_below = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in created_below}
+    finally:
+        os.chmod(mirror_root, 0o755)
+
+    assert exit_code == 0
+    assert summary["totals"] == {"copied": 14, "skipped": 0, "failed": 0}
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    assert oct(landed_mirror_root_mode) == "0o750"
+    # The levels this run *did* create are still `DIR_MODE`, so the skip is
+    # scoped to the pre-existing mirror root rather than disabling the rule.
+    assert len(created_below) >= 8
+    assert landed_below == {str(path): "0o2775" for path in created_below}
+
+
 def test_backfill_created_cycle_directory_takes_the_source_roots_group(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

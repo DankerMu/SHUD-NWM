@@ -226,8 +226,8 @@ def _ensure_mirror_root(mirror_root: Path) -> None:
     probe-then-create, having no window between the two. The copyback root above
     it is guaranteed to exist by ``resolve_roots``' ``is_dir`` check.
 
-    Every error is deliberately swallowed rather than raised: whatever blocks
-    this ``mkdir`` blocks ``_ensure_target_directory`` too, one level deeper and
+    Every error from the ``mkdir`` is deliberately swallowed rather than raised:
+    whatever blocks it blocks ``_ensure_target_directory`` too, one level deeper and
     inside ``_mirror_file``'s ``except OSError``, so it reaches the summary as a
     recorded per-file failure instead of aborting the run with a traceback and
     no JSON at all. A regular file planted at ``canonical/`` is the worked
@@ -235,6 +235,13 @@ def _ensure_mirror_root(mirror_root: Path) -> None:
     An ``EEXIST`` from the publisher's own
     ``ensure_traversable_copyback_directory`` is the benign case and needs no
     repair: that writer wants 0o755 on this level too.
+
+    The ``chmod`` is outside that ``try`` on purpose, and the asymmetry is the
+    point: it runs only on a directory this call has just created, so a failure
+    there has no deeper level to re-surface at. Swallowing it would leave
+    ``canonical/`` at the process umask -- 0o750 under ``umask 027`` -- and
+    silently hide the whole mirror from node-27's reader account. A traceback is
+    the better outcome.
     """
 
     try:

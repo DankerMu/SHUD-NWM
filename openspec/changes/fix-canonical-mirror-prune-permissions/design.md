@@ -153,7 +153,9 @@ this change's mode change lands; a hard precondition recorded in the issue.
   mirrored — only when this run created it — so the
   per-level helper never creates the mirror root and a fresh copyback root
   (the 2026-09-06 bring-up shape) lands `canonical/` `755`, everything below
-  `2775`. `FILE_MODE` unchanged. The docstring's `0o755` sentence updated.
+  `2775`. Known limit: the root is prepared before the first tree is copied,
+  so a run in which every tree is then refused still leaves an empty `0755`
+  `canonical/` behind. `FILE_MODE` unchanged. The docstring's `0o755` sentence updated.
   (Review round 1: the first cut let the helper widen `canonical/` too.)
 - D5 **`PermissionError` becomes an incident.** The rmtree handler comment
   in `scripts/node27_raw_retention.py` points at the runbook section; the
@@ -197,11 +199,16 @@ this change's mode change lands; a hard precondition recorded in the issue.
 - Source-of-truth identity/contract: mode `0o2775` + gid 1107 on
   `canonical/<S>/` (ops), `<cycle>/` and `prcp_rate_or_amount/`
   (producers); `CANONICAL_MIRROR_DIRECTORY_MODE` / backfill `DIR_MODE` are
-  the same value as the sweep's `chmod 2775`.
+  the same value as the sweep's `chmod 2775`. The one level nobody widens,
+  `canonical/`, is paired the same way: backfill `MIRROR_ROOT_MODE` and the
+  traversal helper's `COPYBACK_DIRECTORY_MODE` are both `0o755`.
 - Producers: `services/tile_publisher/publisher.py::_copyback_canonical_precip`
   (asserts `<cycle>/`, passes the mode to the tree chmod and the backup
-  clone); `scripts/canonical_precip_copyback_backfill.py::_ensure_target_directory`;
-  the owner-side sweep (existing tree, gap cycles).
+  clone) and `_copyback_collected_object_tree` (re-asserts the temp tree
+  root, D3 2b); `scripts/canonical_precip_copyback_backfill.py::_ensure_mirror_root`
+  (`canonical/` at `0o755`, only when created, under the batch mutex) and
+  `_ensure_target_directory` (every level below at `DIR_MODE`); the
+  owner-side sweep (existing tree, gap cycles).
 - Validators/preflight: none in code by design (no pre-check in the delete
   loop; the rollout rules make the partial shape unreachable); runbook
   one-liners `find … -type d ! -perm -2775` and `find … ! -group 1107`.
@@ -237,6 +244,9 @@ this change's mode change lands; a hard precondition recorded in the issue.
   - `runs/` and `forcing/` lanes, backup clone included → `0755` / `0644`
     unchanged; `canonical/`, `canonical/<S>/`, `canonical/<S>/grid/` created
     by the traversal widening → `0755`, pre-existing ones untouched.
+  - fresh copyback root + backfill → `canonical/` `0755` (gid egid),
+    `canonical/<S>/`, `grid/`, `<cycle>/`, `prcp_rate_or_amount/` `2775`;
+    a pre-existing `canonical/` keeps its mode.
 
 ## Boundary-surface checklist (high)
 
@@ -263,7 +273,9 @@ this change's mode change lands; a hard precondition recorded in the issue.
   `_chmod_tree_readable` (keyword), the helper chain above,
   `_copyback_canonical_precip` (assert `<cycle>/`, pass the mode);
   `_copyback_collected_object_tree` (re-assert the temp tree root, D3 2b).
-- `scripts/canonical_precip_copyback_backfill.py`: `DIR_MODE`, docstring.
+- `scripts/canonical_precip_copyback_backfill.py`: `DIR_MODE`,
+  `MIRROR_ROOT_MODE`, `_ensure_mirror_root` (called inside
+  `_mirror_tree_under_batch_lock` before `mirror_tree`), docstrings.
 - `scripts/node27_raw_retention.py`: rmtree handler comment;
   `infra/env/node27-raw-retention.example`: operator block.
 - Tests: `tests/test_tile_publisher.py`,
@@ -419,7 +431,12 @@ Domain packs (NHMS profile, all eight considered):
   `test_publish_qdown_copybacks_complete_run_products_to_shared_object_store`
   (`0o755` / `0o644`).
 - `tests/test_canonical_precip_copyback_backfill.py::test_backfill_created_directories_stay_readable_under_a_restrictive_umask`
-  (extended): every created directory is `0o2775`; files `0o644`.
+  (extended): `canonical/` created by the run is `0o755`, every other
+  created directory `0o2775` (exact dict equality over the created set;
+  file `0o644` is pinned by the sibling promoted-files umask test).
+- `tests/test_canonical_precip_copyback_backfill.py::test_backfill_leaves_a_pre_existing_mirror_root_mode_alone`
+  (new, round 2): a pre-created `0o750` `canonical/` keeps `0o750`; the
+  levels the run creates below it are `0o2775`.
 - `tests/test_canonical_precip_copyback_backfill.py::test_backfill_created_cycle_directory_takes_the_source_roots_group`
   (new): `canonical/<S>/` at the destination pre-created with a second gid
   from `os.getgroups()` and `0o2775` (skip when unavailable) → the created
@@ -427,6 +444,13 @@ Domain packs (NHMS profile, all eight considered):
 - `tests/test_node27_raw_retention.py`: the #2104 `jq` test's healthy case
   still exits `0`, and a summary with one canonical `PermissionError` entry
   now exits `1` (new case (iii)).
+- `tests/test_node27_raw_retention.py::test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing`
+  (new, review round 1): `prcp_rate_or_amount/` `0o555` under a writable
+  cycle directory → exactly one `failed[]` entry with `error_type`
+  `PermissionError`, the `.nc` bytes and both directories survive,
+  top-level `freed_bytes` equals the sum of `deleted[]` and excludes the
+  cycle, rc 1, the raw and cache lanes still delete. Mode half only; the
+  gid half is D6 reasoning.
 - `uv run ruff check .`; `uv run pytest -q tests/test_tile_publisher.py
   tests/test_canonical_precip_copyback_backfill.py
   tests/test_node27_raw_retention.py`; `openspec validate
