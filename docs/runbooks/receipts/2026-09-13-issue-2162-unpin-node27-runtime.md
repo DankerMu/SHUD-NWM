@@ -148,7 +148,17 @@ systemctl --user daemon-reload && systemctl --user restart nhms-display-api.serv
 - 偏离 5（`.pbf` 数因 key 轮换上升，不作回归）：**结清**——`river-network-national` 字节与 ETag 改前后相同、cache-key 轮换、`.pbf` 8519 → 8690。
 - 偏离 8（解钉后首个 tick 证据）：**结清**——§2 首个自然 autopipe tick 四项；download（00:52:08 CST）与 frontier-alert（01:00:32 CST）首跑均已观测 `success`；三条 daily lane 按 1.17 次日补记。
 
-## 10. 待补（task 1.17，次日 07:00Z 后）
+## 10. task 1.17 补记（解钉后 daily lane 首跑，2026-09-13T07:31Z 只读采集）
 
-`nhms-node27-raw-retention` / `nhms-node27-timeseries-compression` / `nhms-node27-timeseries-retention`
-解钉后首跑：`ExecMainStartTimestamp > 2026-09-12T16:52:08Z`、`ExecStart` 路径、`Result`、日志尾部 → 评论到 #2162。
+T_START = `2026-09-12T16:52:08Z`；五个 unit 的 `ExecMainStartTimestamp` 均 `> T_START`，`ExecStart` 均在 `/home/nwm/NWM/` 下，drop-in `60-reslice-pin*` 数 0。
+评论：#2162 issuecomment-5651954685（初记）与 issuecomment-5651982656（更正 raw-retention 判读）。
+
+| unit | ExecMainStartTimestamp(UTC) | Result | 要点 |
+|---|---|---|---|
+| `nhms-node27-raw-retention` | 2026-09-13T03:35:32Z | `exit-code`（rc=1，预期稳态） | `planned=34 deleted=12 failed=22`，`freed_bytes=609787786`；22 条均为 canonical 车道 `PermissionError`（#2100）；`infra/env/node27-raw-retention.example` jq 判据 exit 0 |
+| `nhms-node27-timeseries-compression` | 2026-09-13T04:25:32Z | `success` | journal 仅 Starting/Finished，日志目录无新文件（已装 unit 落后仓库见 #2285） |
+| `nhms-node27-timeseries-retention` | 2026-09-13T05:15:32Z | `success` | drop 2 chunk，`outcome=enforced`，rc=0 |
+| `nhms-node27-download` | 2026-09-13T07:15:27Z | `success` | — |
+| `nhms-node27-frontier-alert` | 2026-09-13T07:30:00Z | `success` | — |
+
+结论：1.17 闭合。canonical 镜像不回收由 #2100 跟踪（现网证据 issuecomment-5651982328），不在本 change 范围。
