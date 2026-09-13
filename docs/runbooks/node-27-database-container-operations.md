@@ -205,4 +205,34 @@ writer/timer 的原有启用状态。恢复或终态 receipt 发布失败时保�
   这不是"能读写数据"而是命令执行。最小权限改造另行立单。
 - **`ssl = off`**。口令走 SCRAM 不会明文暴露，但查询与结果集明文过网；收到回环后风险大降。
 - autovacuum 在统计不再被反复清零之后是否恢复正常，需要等有机 churn 把计数器累积到阈值之上
-  才能验证，见 #1770。
+  才能验证，见 #1770。（2026-09-13 只读探针已见输出恢复；持续检查见 §7。）
+
+## 7. autovacuum / autoanalyze 输出新鲜度检查（#1769）
+
+资源治理审计（`scripts/node27_resource_governance.py`，每日 unit）在 receipt 的
+`postgres.maintenance_output` 里采集**输出**而不是配置：每表的有效触发阈值（表级 `reloptions`
+覆盖，否则集群设置；`reltuples < 0` 按 0 计）、`n_dead_tup` / `n_mod_since_analyze`、
+四个 last_* 时间的年龄（秒），以及用户表 `max(last_autovacuum)` / `max(last_autoanalyze)`。
+`reloptions` 含 `autovacuum_enabled=false` 的表（压缩 chunk 的幽灵计数器）不参与。
+行集只含超阈值或零统计的表，最多 50 行。
+
+| code | 严重度 | 含义 |
+|---|---|---|
+| `TABLE_STATISTICS_STALE` | warning | `n_mod_since_analyze` > 10 × 有效 analyze 阈值，且 `last_autoanalyze`/`last_analyze` 较新者为空或超过 24h |
+| `TABLE_VACUUM_DEBT_STALE` | warning | `n_dead_tup` > 10 × 有效 vacuum 阈值，且 `last_autovacuum`/`last_vacuum` 较新者为空或超过 24h |
+| `AUTOVACUUM_OUTPUT_STALLED` | critical | 有 analyze-stale 表且全库 `max(last_autoanalyze)` 为空或超过 24h，**或**有 vacuum-stale 表且 `max(last_autovacuum)` 为空或超过 24h（08-20 形态）；审计 exit 1 → `OnFailure=` 告警，receipt `status` 仍为 `completed` |
+| `MAINTENANCE_OUTPUT_UNAVAILABLE` | warning | `postgres` 可达但探针失败/缺失/畸形；看不见的输出**不算**健康 |
+| `TABLE_ZERO_STATISTICS` | info | `relpages = 0`、`reltuples < 0`、`n_live_tup > 0` 且从未 analyze |
+
+要点：
+
+- 判据用修改量与年龄，**不用**"双 NULL"引导签名，所以手工 `ANALYZE` 一次之后再次失修的表仍会报。
+- 让计数器活下来的是 §1 的停机契约（`StopSignal=SIGINT`、`StopTimeout=300`）；容器重建漏掉它，
+  下一次 `docker stop` 就是崩溃恢复。
+- **盲区**：崩溃丢弃计数器后，所有基于计数器的检查（包括本检查）都会读成绿色，而且
+  `stats_reset` 仍为 NULL——`stats_reset IS NULL` 不是"从未清零"的证据。预防靠停机契约；
+  规划器统计存于 `pg_statistic` 不受影响，双 NULL 的权威表由 autopipe 统计守卫的引导腿兜底。
+- `core.basin` / `core.mesh_version`（18 行、19 次修改，低于默认 analyze 阈值 50）会以
+  `TABLE_ZERO_STATISTICS` info 出现，这是预期处置：18 行表的估计误差无关紧要，
+  churn 过 50 后 autoanalyze 会把它们移出该类，届时若没移出由 stale 规则捕获。
+  不为它们加 `reloptions`（需要迁移，会破坏 I8 "待执行集合恰为 000059" 的门）。

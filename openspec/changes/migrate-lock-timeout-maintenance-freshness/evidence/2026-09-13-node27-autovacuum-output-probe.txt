@@ -1,0 +1,177 @@
+-- node-27 nhms read-only probe, SELECT only; captured 2026-09-13T07:17:27Z via: ssh nwm@node-27 'docker exec -i nhms-db psql -U nhms -d nhms -X -e' < probe.sql
+select now(), pg_postmaster_start_time(), version();
+              now              |   pg_postmaster_start_time    |                                                              version                                                              
+-------------------------------+-------------------------------+-----------------------------------------------------------------------------------------------------------------------------------
+ 2026-09-13 07:17:29.103729+00 | 2026-09-12 05:38:22.230577+00 | PostgreSQL 15.2 (Ubuntu 15.2-1.pgdg22.04+1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.3.0-1ubuntu1~22.04) 11.3.0, 64-bit
+(1 row)
+
+select name, setting from pg_settings where name in ('autovacuum','track_counts','autovacuum_naptime','autovacuum_max_workers','log_autovacuum_min_duration','autovacuum_freeze_max_age','lock_timeout','statement_timeout');
+            name             |  setting  
+-----------------------------+-----------
+ autovacuum                  | on
+ autovacuum_freeze_max_age   | 200000000
+ autovacuum_max_workers      | 10
+ autovacuum_naptime          | 10
+ lock_timeout                | 0
+ log_autovacuum_min_duration | 600000
+ statement_timeout           | 0
+ track_counts                | on
+(8 rows)
+
+select stats_reset, xact_commit from pg_stat_database where datname='nhms';
+ stats_reset | xact_commit 
+-------------+-------------
+             |     1184000
+(1 row)
+
+select max(last_autovacuum) filter (where schemaname not in ('pg_catalog','pg_toast','information_schema')) user_av,
+       max(last_autoanalyze) filter (where schemaname not in ('pg_catalog','pg_toast','information_schema')) user_aa,
+       max(last_autovacuum) all_av
+from pg_stat_all_tables;
+            user_av            |            user_aa            |            all_av             
+-------------------------------+-------------------------------+-------------------------------
+ 2026-09-13 06:37:28.234894+00 | 2026-09-13 06:51:54.735335+00 | 2026-09-13 06:52:04.421512+00
+(1 row)
+
+select datname, pid, backend_type, backend_start, state, left(query,80) q from pg_stat_activity where backend_type ilike '%autovacuum%' or query ilike '%autovacuum%';
+ datname |  pid  |    backend_type     |         backend_start         | state  |                                        q                                         
+---------+-------+---------------------+-------------------------------+--------+----------------------------------------------------------------------------------
+         |    31 | autovacuum launcher | 2026-09-12 05:38:22.414488+00 |        | 
+ nhms    | 37834 | client backend      | 2026-09-13 07:17:29.100819+00 | active | select datname, pid, backend_type, backend_start, state, left(query,80) q from p
+(2 rows)
+
+select count(*) filter (where backend_type='autovacuum worker') workers from pg_stat_activity;
+ workers 
+---------
+       0
+(1 row)
+
+select relid::regclass, phase, heap_blks_total, heap_blks_scanned from pg_stat_progress_vacuum;
+ relid | phase | heap_blks_total | heap_blks_scanned 
+-------+-------+-----------------+-------------------
+(0 rows)
+
+with t as (
+ select c.oid, n.nspname, c.relname, c.reltuples, s.n_dead_tup, s.n_mod_since_analyze, s.last_autovacuum, s.last_autoanalyze, s.last_vacuum, s.last_analyze, c.reloptions
+ from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_stat_all_tables s on s.relid=c.oid
+ where c.relkind in ('r','m','t') and not coalesce('autovacuum_enabled=false' = any(c.reloptions),false)
+)
+select nspname, relname, reltuples::bigint, n_dead_tup, n_mod_since_analyze,
+ round(n_dead_tup/(50+0.2*greatest(reltuples,0))::numeric,1) vac_x,
+ last_autovacuum, last_autoanalyze, last_vacuum
+from t where n_dead_tup > 50+0.2*greatest(reltuples,0) order by n_dead_tup desc limit 25;
+ nspname | relname | reltuples | n_dead_tup | n_mod_since_analyze | vac_x | last_autovacuum | last_autoanalyze | last_vacuum 
+---------+---------+-----------+------------+---------------------+-------+-----------------+------------------+-------------
+(0 rows)
+
+select datname, age(datfrozenxid) from pg_database;
+  datname  |   age   
+-----------+---------
+ postgres  | 1008288
+ template1 | 1008288
+ template0 | 1008288
+ nhms      | 1008288
+(4 rows)
+
+select count(*), max(now()-xact_start) from pg_stat_activity where xact_start is not null;
+ count |   max    
+-------+----------
+     1 | 00:00:00
+(1 row)
+
+select pid, usename, application_name, state, now()-xact_start xa, backend_xmin, left(query,60) from pg_stat_activity where backend_xmin is not null order by age(backend_xmin) desc limit 8;
+  pid  | usename | application_name | state  |    xa    | backend_xmin |                             left                             
+-------+---------+------------------+--------+----------+--------------+--------------------------------------------------------------
+ 37834 | nhms    | psql             | active | 00:00:00 |      1009005 | select pid, usename, application_name, state, now()-xact_sta
+(1 row)
+
+select slot_name, active, xmin, catalog_xmin from pg_replication_slots;
+ slot_name | active | xmin | catalog_xmin 
+-----------+--------+------+--------------
+(0 rows)
+
+select count(*) from pg_prepared_xacts;
+ count 
+-------
+     0
+(1 row)
+
+with t as (
+ select n.nspname, c.relname, c.reltuples, c.relpages, c.reloptions, s.n_mod_since_analyze, s.n_dead_tup, s.last_autoanalyze, s.last_analyze, s.last_autovacuum, s.autoanalyze_count, s.autovacuum_count,
+  coalesce((select split_part(o,'=',2)::float from unnest(c.reloptions) o where o like 'autovacuum_analyze_threshold=%'),50) ath,
+  coalesce((select split_part(o,'=',2)::float from unnest(c.reloptions) o where o like 'autovacuum_analyze_scale_factor=%'),0.1) asf
+ from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_stat_user_tables s on s.relid=c.oid
+ where c.relkind in ('r','m') and not coalesce('autovacuum_enabled=false' = any(c.reloptions),false)
+)
+select nspname, relname, reltuples::bigint, relpages, n_mod_since_analyze mods, round((ath+asf*greatest(reltuples,0))::numeric) thr,
+ round((n_mod_since_analyze/(ath+asf*greatest(reltuples,0)))::numeric,1) over_x, last_autoanalyze, last_analyze, autoanalyze_count
+from t where n_mod_since_analyze > ath+asf*greatest(reltuples,0) order by over_x desc limit 25;
+ nspname | relname | reltuples | relpages | mods | thr | over_x | last_autoanalyze | last_analyze | autoanalyze_count 
+---------+---------+-----------+----------+------+-----+--------+------------------+--------------+-------------------
+(0 rows)
+
+select count(*) filter (where last_autovacuum > now()-interval '24 hours') av24, count(*) filter (where last_autoanalyze > now()-interval '24 hours') aa24, count(*) total from pg_stat_user_tables;
+ av24 | aa24 | total 
+------+------+-------
+    9 |   12 |    80
+(1 row)
+
+select relname, n_dead_tup, n_live_tup, pg_size_pretty(pg_table_size(relid)) sz, last_autovacuum, autovacuum_count from pg_stat_user_tables where schemaname='met' and relname in ('met_station','interp_weight');
+    relname    | n_dead_tup | n_live_tup |   sz   |        last_autovacuum        | autovacuum_count 
+---------------+------------+------------+--------+-------------------------------+------------------
+ met_station   |       6309 |      42029 | 325 MB | 2026-09-13 06:01:22.123122+00 |               79
+ interp_weight |      11190 |     661573 | 275 MB | 2026-09-13 06:37:28.234894+00 |               17
+(2 rows)
+
+select relname, n_live_tup, n_dead_tup, n_mod_since_analyze, last_autoanalyze, last_analyze, autoanalyze_count, autovacuum_count, last_autovacuum from pg_stat_user_tables where schemaname='core' order by 1;
+         relname         | n_live_tup | n_dead_tup | n_mod_since_analyze |       last_autoanalyze        |         last_analyze          | autoanalyze_count | autovacuum_count |        last_autovacuum        
+-------------------------+------------+------------+---------------------+-------------------------------+-------------------------------+-------------------+------------------+-------------------------------
+ basin                   |         18 |          0 |                  19 |                               |                               |                 0 |                0 | 
+ basin_version           |         44 |          1 |                   1 | 2026-09-01 02:17:54.908212+00 | 2026-08-23 06:03:45.970126+00 |                 4 |                0 | 
+ mesh_version            |         18 |          1 |                  19 |                               |                               |                 0 |                0 | 
+ model_instance          |        197 |         30 |                  36 | 2026-09-01 02:34:53.13952+00  | 2026-08-23 05:13:21.080741+00 |                 2 |                1 | 2026-08-28 15:15:55.325815+00
+ river_network_version   |         44 |         10 |                   0 | 2026-09-12 05:39:10.288759+00 | 2026-08-23 06:03:45.972803+00 |                 5 |                0 | 
+ river_segment           |     555096 |          0 |                   0 | 2026-09-12 05:45:39.197203+00 | 2026-08-23 03:57:48.143538+00 |                 7 |                3 | 2026-09-12 05:44:22.109567+00
+ river_segment_crosswalk |     479601 |          0 |                   0 | 2026-09-12 05:39:47.337235+00 | 2026-08-23 03:57:51.198235+00 |                 7 |                3 | 2026-09-12 05:39:42.750625+00
+(7 rows)
+
+select c.relname, c.relpages, c.reltuples, c.reloptions from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='core' and c.relkind='r' order by 1;
+         relname         | relpages | reltuples |                               reloptions                                
+-------------------------+----------+-----------+-------------------------------------------------------------------------
+ basin                   |        0 |        -1 | 
+ basin_version           |        1 |        43 | {autovacuum_analyze_scale_factor=0,autovacuum_analyze_threshold=1}
+ mesh_version            |        0 |        -1 | 
+ model_instance          |       19 |       197 | 
+ river_network_version   |        2 |        44 | {autovacuum_analyze_scale_factor=0,autovacuum_analyze_threshold=1}
+ river_segment           |   127782 |    555096 | {autovacuum_analyze_scale_factor=0.01,autovacuum_analyze_threshold=500}
+ river_segment_crosswalk |    18763 |    479601 | {autovacuum_analyze_scale_factor=0.01,autovacuum_analyze_threshold=500}
+(7 rows)
+
+select count(*) from met.met_station;
+ count 
+-------
+ 42029
+(1 row)
+
+select pg_size_pretty(pg_relation_size('met.met_station')) heap, pg_size_pretty(pg_indexes_size('met.met_station')) idx;
+  heap  |  idx  
+--------+-------
+ 325 MB | 18 MB
+(1 row)
+
+select n_tup_upd, n_tup_hot_upd, n_tup_ins, n_tup_del, vacuum_count, last_vacuum from pg_stat_user_tables where relid='met.met_station'::regclass;
+ n_tup_upd | n_tup_hot_upd | n_tup_ins | n_tup_del | vacuum_count | last_vacuum 
+-----------+---------------+-----------+-----------+--------------+-------------
+    836009 |         78169 |     20484 |     10052 |            0 | 
+(1 row)
+
+
+-- docker inspect nhms-db (StopSignal StopTimeout ShmSize Created)
+SIGINT 300 1073741824 2026-09-12T05:38:21.102110123Z
+-- docker logs since 2026-08-24: shutdown/startup lines
+2026-09-12 05:38:22.270 UTC [29] LOG:  database system was shut down at 2026-09-11 16:45:18 UTC
+2026-09-12 05:38:22.415 UTC [1] LOG:  database system is ready to accept connections
+-- schema_migrations head
+000058_hot_timeseries_chunk_interval_3d.sql
+000057_river_network_version_geometry_generation.sql
+000056_hydro_run_parsed_at.sql

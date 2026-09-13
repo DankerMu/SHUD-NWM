@@ -36,6 +36,89 @@ WHERE (hypertable_schema, hypertable_name) IN ({RUNTIME_HYPERTABLES_SQL})
 """
 
 
+MAINTENANCE_OUTPUT_ROW_LIMIT = 50
+
+
+def _reloption_or_setting(name: str) -> str:
+    return (
+        f"COALESCE((SELECT split_part(o, '=', 2) FROM unnest(c.reloptions) AS o "
+        f"WHERE o LIKE '{name}=%' LIMIT 1)::float8, current_setting('{name}')::float8)"
+    )
+
+
+# Autovacuum output freshness (#1769): effective per-relation trigger thresholds
+# (reloptions override, else cluster settings; negative reltuples count as 0),
+# excluding relations autovacuum is told to skip (compressed-chunk phantom counters).
+MAINTENANCE_RELATIONS_CTE = f"""
+WITH rel AS (
+  SELECT n.nspname AS schema,
+         c.relname AS relation,
+         c.relpages::bigint AS relpages,
+         c.reltuples::float8 AS reltuples,
+         s.n_live_tup::bigint AS n_live_tup,
+         s.n_dead_tup::bigint AS n_dead_tup,
+         s.n_mod_since_analyze::bigint AS n_mod_since_analyze,
+         ({_reloption_or_setting("autovacuum_vacuum_threshold")}
+          + {_reloption_or_setting("autovacuum_vacuum_scale_factor")}
+            * greatest(c.reltuples::float8, 0))::float8 AS vacuum_threshold,
+         ({_reloption_or_setting("autovacuum_analyze_threshold")}
+          + {_reloption_or_setting("autovacuum_analyze_scale_factor")}
+            * greatest(c.reltuples::float8, 0))::float8 AS analyze_threshold,
+         s.last_autovacuum, s.last_vacuum, s.last_autoanalyze, s.last_analyze
+  FROM pg_stat_all_tables AS s
+  JOIN pg_class AS c ON c.oid = s.relid
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'm')
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+    AND n.nspname NOT LIKE 'pg\\_toast\\_temp\\_%'
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(c.reloptions) AS o
+      WHERE CASE WHEN o LIKE 'autovacuum\\_enabled=%' THEN NOT split_part(o, '=', 2)::boolean ELSE false END
+    )
+)
+"""
+
+MAINTENANCE_OUTPUT_ROWS_SQL = f"""
+{MAINTENANCE_RELATIONS_CTE}
+SELECT schema, relation, relpages, reltuples, n_live_tup, n_dead_tup, n_mod_since_analyze,
+       vacuum_threshold, analyze_threshold,
+       extract(epoch FROM now() - last_autovacuum)::float8 AS last_autovacuum_age_seconds,
+       extract(epoch FROM now() - last_vacuum)::float8 AS last_vacuum_age_seconds,
+       extract(epoch FROM now() - last_autoanalyze)::float8 AS last_autoanalyze_age_seconds,
+       extract(epoch FROM now() - last_analyze)::float8 AS last_analyze_age_seconds
+FROM rel
+WHERE n_dead_tup > vacuum_threshold
+   OR n_mod_since_analyze > analyze_threshold
+   OR (relpages = 0 AND reltuples < 0 AND n_live_tup > 0
+       AND last_autoanalyze IS NULL AND last_analyze IS NULL)
+ORDER BY greatest(n_dead_tup / greatest(vacuum_threshold, 1), n_mod_since_analyze / greatest(analyze_threshold, 1))
+         DESC NULLS LAST,
+         schema, relation
+LIMIT {MAINTENANCE_OUTPUT_ROW_LIMIT}
+"""
+
+MAINTENANCE_OUTPUT_SUMMARY_SQL = f"""
+{MAINTENANCE_RELATIONS_CTE}
+SELECT extract(epoch FROM now() - max(last_autovacuum))::float8 AS max_last_autovacuum_age_seconds,
+       extract(epoch FROM now() - max(last_autoanalyze))::float8 AS max_last_autoanalyze_age_seconds,
+       count(*) FILTER (WHERE n_dead_tup > vacuum_threshold)::bigint AS over_vacuum_threshold_count,
+       count(*) FILTER (WHERE n_mod_since_analyze > analyze_threshold)::bigint AS over_analyze_threshold_count,
+       count(*)::bigint AS relation_count
+FROM rel
+"""
+
+
+def collect_maintenance_output(cursor: Any) -> dict[str, Any]:
+    """Autovacuum/autoanalyze output probe; a failure is recorded, never raised."""
+    try:
+        rows = _psycopg_rows(cursor, MAINTENANCE_OUTPUT_ROWS_SQL)
+        summary = _psycopg_rows(cursor, MAINTENANCE_OUTPUT_SUMMARY_SQL)
+    except Exception as error:
+        return {"status": "error", "error": type(error).__name__}
+    return {"status": "ok", "summary": summary[0] if summary else {}, "rows": rows}
+
+
 def compression_lag_seconds(env: Mapping[str, str] | None = None) -> int:
     """Prefer the compression-lane env, then the documented compression default."""
     values = os.environ if env is None else env
@@ -424,6 +507,7 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
                 LIMIT 20
                 """,
             )
+            result["maintenance_output"] = collect_maintenance_output(cursor)
             result["external_pg_tblspc_targets"] = _psycopg_rows(
                 cursor,
                 """

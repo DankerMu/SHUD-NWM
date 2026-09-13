@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -79,6 +80,8 @@ class AuditThresholds:
     temp_bytes_warn: int = 50 * GIB
     wal_warn_bytes: int = 10 * GIB
     dead_tuple_warn_pct: float = 10.0
+    maintenance_stale_multiplier: float = 10.0
+    maintenance_stale_age_seconds: float = 86400.0
 
 
 @dataclass(frozen=True)
@@ -423,7 +426,180 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
                         "action": "Let autovacuum finish or schedule manual VACUUM during a quiet window.",
                     }
                 )
+        recommendations.extend(_maintenance_output_recommendations(postgres, thresholds))
     return recommendations
+
+
+_MISSING = object()
+
+
+def _number(value: Any) -> float | None:
+    """A finite JSON/DB number, else None (bool, str and NaN are not numbers)."""
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _age(row: Mapping[str, Any], key: str) -> float | None | object:
+    """Age in seconds, None when the event never happened, `_MISSING` when malformed."""
+    value = row.get(key, _MISSING)
+    if value is None:
+        return None
+    number = _number(value)
+    return _MISSING if number is None else number
+
+
+def _output_is_stale(ages: Iterable[float | None], stale_age_seconds: float) -> bool:
+    """The newer of the observed outputs is absent or older than the stale age."""
+    present = [age for age in ages if age is not None]
+    return not present or min(present) > stale_age_seconds
+
+
+def _maintenance_output_recommendations(
+    postgres: Mapping[str, Any], thresholds: AuditThresholds
+) -> list[dict[str, Any]]:
+    section = postgres.get("maintenance_output")
+    summary = section.get("summary") if isinstance(section, Mapping) else None
+    rows = section.get("rows") if isinstance(section, Mapping) else None
+    summary_ages = (
+        {key: _age(summary, key) for key in ("max_last_autoanalyze_age_seconds", "max_last_autovacuum_age_seconds")}
+        if isinstance(summary, Mapping)
+        else {}
+    )
+    if (
+        not isinstance(section, Mapping)
+        or section.get("status") != "ok"
+        or not isinstance(rows, list)
+        or not summary_ages
+        or _MISSING in summary_ages.values()
+    ):
+        return [
+            {
+                "severity": "warning",
+                "area": "postgres",
+                "code": "MAINTENANCE_OUTPUT_UNAVAILABLE",
+                "evidence": {
+                    "status": section.get("status") if isinstance(section, Mapping) else None,
+                    "error": section.get("error") if isinstance(section, Mapping) else None,
+                },
+                "action": "Restore the autovacuum output probe; unobserved maintenance output is not healthy.",
+            }
+        ]
+
+    multiplier = thresholds.maintenance_stale_multiplier
+    stale_age = thresholds.maintenance_stale_age_seconds
+    stale: list[dict[str, Any]] = []
+    zero_statistics: list[dict[str, Any]] = []
+    analyze_stale = 0
+    vacuum_stale = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        schema, relation = row.get("schema"), row.get("relation")
+        if not isinstance(schema, str) or not isinstance(relation, str):
+            continue
+        name = f"{schema}.{relation}"
+        ages = {
+            key: _age(row, key)
+            for key in (
+                "last_autoanalyze_age_seconds",
+                "last_analyze_age_seconds",
+                "last_autovacuum_age_seconds",
+                "last_vacuum_age_seconds",
+            )
+        }
+        if _MISSING in ages.values():
+            continue
+        for kind, count_key, threshold_key, age_keys in (
+            ("analyze", "n_mod_since_analyze", "analyze_threshold", ("last_autoanalyze", "last_analyze")),
+            ("vacuum", "n_dead_tup", "vacuum_threshold", ("last_autovacuum", "last_vacuum")),
+        ):
+            count, threshold = _number(row.get(count_key)), _number(row.get(threshold_key))
+            if count is None or threshold is None or threshold < 0:
+                continue
+            output_ages = [ages[f"{key}_age_seconds"] for key in age_keys]
+            if count <= multiplier * threshold or not _output_is_stale(output_ages, stale_age):
+                continue
+            if kind == "analyze":
+                analyze_stale += 1
+            else:
+                vacuum_stale += 1
+            stale.append(
+                {
+                    "severity": "warning",
+                    "area": "postgres",
+                    "code": "TABLE_STATISTICS_STALE" if kind == "analyze" else "TABLE_VACUUM_DEBT_STALE",
+                    "evidence": {
+                        "relation": name,
+                        count_key: int(count),
+                        threshold_key: threshold,
+                        "ratio": round(count / threshold, 1) if threshold > 0 else None,
+                        **{f"{key}_age_seconds": ages[f"{key}_age_seconds"] for key in age_keys},
+                    },
+                    "action": (
+                        "Autoanalyze is not keeping up with this relation; check autovacuum workers and counters."
+                        if kind == "analyze"
+                        else "Autovacuum is not keeping up with this relation; check workers, xmin horizon and locks."
+                    ),
+                }
+            )
+        relpages, reltuples, live = (_number(row.get(key)) for key in ("relpages", "reltuples", "n_live_tup"))
+        if (
+            relpages == 0
+            and reltuples is not None
+            and reltuples < 0
+            and live is not None
+            and live > 0
+            and ages["last_autoanalyze_age_seconds"] is None
+            and ages["last_analyze_age_seconds"] is None
+        ):
+            zero_statistics.append(
+                {
+                    "severity": "info",
+                    "area": "postgres",
+                    "code": "TABLE_ZERO_STATISTICS",
+                    "evidence": {
+                        "relation": name,
+                        "relpages": int(relpages),
+                        "reltuples": reltuples,
+                        "n_live_tup": int(live),
+                        "n_mod_since_analyze": row.get("n_mod_since_analyze"),
+                    },
+                    "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+                }
+            )
+
+    findings = list(stale)
+    max_autoanalyze_age = summary_ages["max_last_autoanalyze_age_seconds"]
+    max_autovacuum_age = summary_ages["max_last_autovacuum_age_seconds"]
+    stalled_outputs = []
+    if analyze_stale and _output_is_stale([max_autoanalyze_age], stale_age):
+        stalled_outputs.append("autoanalyze")
+    if vacuum_stale and _output_is_stale([max_autovacuum_age], stale_age):
+        stalled_outputs.append("autovacuum")
+    if stalled_outputs:
+        findings.append(
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "AUTOVACUUM_OUTPUT_STALLED",
+                "evidence": {
+                    "stalled_outputs": stalled_outputs,
+                    "statistics_stale_relations": analyze_stale,
+                    "vacuum_debt_stale_relations": vacuum_stale,
+                    "max_last_autoanalyze_age_seconds": max_autoanalyze_age,
+                    "max_last_autovacuum_age_seconds": max_autovacuum_age,
+                    "stale_age_seconds": stale_age,
+                },
+                "action": (
+                    "Database-wide autovacuum output is silent while tables demand it: check the launcher, "
+                    "track_counts, and whether a crash restart wiped the statistics counters."
+                ),
+            }
+        )
+    findings.extend(zero_statistics)
+    return findings
 
 
 def build_receipt(config: AuditConfig) -> dict[str, Any]:
