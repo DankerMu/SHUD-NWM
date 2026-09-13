@@ -17,10 +17,9 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
-from packages.common.compressed_chunk_cold_target import run_bounded_command
-from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
-from packages.common.node27_cold_tablespace_evidence import EvidencePolicy, verify_root_storage_evidence
+from packages.common.node27_pgdata_command import CommandError, run_bounded_command
+from packages.common.node27_pgdata_container import normalize_raw_inspect
+from packages.common.node27_pgdata_evidence import EvidencePolicy, verify_root_storage_evidence
 from packages.common.safe_fs import (
     atomic_write_bytes_no_follow,
     directory_identity_no_follow,
@@ -246,7 +245,7 @@ class Host:
     ):
         try:
             result = run_bounded_command(argv, timeout=timeout, max_bytes=max_bytes)
-        except (ColdRuntimeError, OSError):
+        except (CommandError, OSError):
             raise MigrationError("host command unavailable, timed out or exceeded output bound") from None
         require(allow_failure or result.returncode == 0, "host command failed; recovery may be required")
         return result

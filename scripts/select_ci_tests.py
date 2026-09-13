@@ -2513,7 +2513,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_external_contract_snapshot.json",
-        ("tests/test_node27_external_contract_snapshot.py",),
+        (
+            "tests/test_node27_external_contract_snapshot.py",
+            "tests/test_node27_pgdata_container.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
     ),
     PathTestRule(
         # #1644: the committed OpenAPI snapshot is the drift oracle's subject, so
@@ -4221,6 +4226,59 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # not by same-stem test filename.  These rows attach their direct public
     # contracts while the shared-library baseline remains additive below.
     PathTestRule(
+        "packages/common/node27_pgdata_command.py",
+        (
+            "tests/test_node27_pgdata_command.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_container.py",
+        (
+            "tests/test_node27_pgdata_container.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_cold_tablespace_container.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_evidence.py",
+        (
+            "tests/test_node27_pgdata_evidence.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "packages/common/node27_pgdata_host.py",
         (
             "tests/test_node27_pgdata_migrate.py",
@@ -4280,8 +4338,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_install.py",
             "tests/test_node27_cold_tablespace_recovery_contract.py",
             "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_pgdata_migrate.py",
-            "tests/test_node27_pgdata_migrate_oracle.py",
         ),
     ),
     PathTestRule(

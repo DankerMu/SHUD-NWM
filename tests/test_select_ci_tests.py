@@ -329,6 +329,12 @@ def test_lifecycle_owner_edge_reds_when_removed(monkeypatch: pytest.MonkeyPatch,
 
 def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consumers() -> None:
     expected = {
+        "packages/common/node27_external_contract_snapshot.json": {
+            "tests/test_node27_external_contract_snapshot.py",
+            "tests/test_node27_pgdata_container.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
         "packages/common/node27_pgdata_host.py": {
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
@@ -341,8 +347,44 @@ def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consu
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
         },
-        "packages/common/node27_cold_tablespace_container.py": {
+        "packages/common/node27_pgdata_command.py": {
+            "tests/test_node27_pgdata_command.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "packages/common/node27_pgdata_container.py": {
+            "tests/test_node27_pgdata_container.py",
             "tests/test_node27_cold_tablespace_container.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
+        "packages/common/node27_pgdata_evidence.py": {
+            "tests/test_node27_pgdata_evidence.py",
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
         },
@@ -560,22 +602,14 @@ NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
     ),
     # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
     # the probe stdlib-only) and derives both threshold ceilings from it.
-    "services/orchestrator/scheduler_file_providers.py": frozenset(
-        {"tests/test_node22_refresh_timer_health.py"}
-    ),
+    "services/orchestrator/scheduler_file_providers.py": frozenset({"tests/test_node22_refresh_timer_health.py"}),
     # The probe's own installer and units were routed from the start but had no
     # pin: the suite runs the installer as a subprocess and `read_text`s both
     # units, and without these three rules none of them selects it (the
     # installer falls back to the generic shell baseline, the units to nothing).
-    "scripts/install_node22_refresh_timer_health.sh": frozenset(
-        {"tests/test_node22_refresh_timer_health.py"}
-    ),
-    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset(
-        {"tests/test_node22_refresh_timer_health.py"}
-    ),
-    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset(
-        {"tests/test_node22_refresh_timer_health.py"}
-    ),
+    "scripts/install_node22_refresh_timer_health.sh": frozenset({"tests/test_node22_refresh_timer_health.py"}),
+    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset({"tests/test_node22_refresh_timer_health.py"}),
+    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset({"tests/test_node22_refresh_timer_health.py"}),
 }
 
 
@@ -584,9 +618,7 @@ NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
     sorted(NODE22_REFRESH_READER_EDGES.items()),
     ids=[PurePosixPath(source).name for source in sorted(NODE22_REFRESH_READER_EDGES)],
 )
-def test_node22_refresh_reader_edges_select_every_suite_that_reads_them(
-    source: str, readers: frozenset[str]
-) -> None:
+def test_node22_refresh_reader_edges_select_every_suite_that_reads_them(source: str, readers: frozenset[str]) -> None:
     selected = set(select_tests([source], repo_root=Path(".")))
 
     assert readers <= selected, f"{source} lost a reader: {sorted(readers - selected)}"
@@ -603,9 +635,7 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
     """
     from scripts import select_ci_tests
 
-    mutant = tuple(
-        rule for rule in PATH_TEST_RULES if rule.pattern not in NODE22_REFRESH_READER_EDGES
-    )
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in NODE22_REFRESH_READER_EDGES)
     assert len(mutant) == len(PATH_TEST_RULES) - len(NODE22_REFRESH_READER_EDGES)
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
@@ -3681,16 +3711,20 @@ def test_container_contract_change_selects_its_derived_dependent_closure() -> No
     assert INVARIANT_SUITE_PATH in selected
 
 
-def test_contract_snapshot_fixture_change_selects_its_snapshot_suite() -> None:
-    # The committed fixture is the hermetic suite's ground truth, so a
-    # fixture-only PR (the runbook's patch-version drift disposition) must still
-    # select a suite that asserts; otherwise CI degrades to the collect-only
-    # smoke and re-baselines drift with zero assertions.
+def test_contract_snapshot_fixture_change_selects_its_snapshot_and_pgdata_consumers() -> None:
+    # The committed fixture is the snapshot suite's ground truth and the PGDATA
+    # container owner's image pin. Fixture-only changes must exercise both the
+    # drift contract and actual relocation consumers, not collect-only smoke.
     assert Path(CONTRACT_SNAPSHOT_FIXTURE_PATH).is_file()
 
     selected = select_tests([CONTRACT_SNAPSHOT_FIXTURE_PATH], repo_root=Path("."))
 
-    assert selected == ["tests/test_node27_external_contract_snapshot.py"]
+    assert selected == [
+        "tests/test_node27_external_contract_snapshot.py",
+        "tests/test_node27_pgdata_container.py",
+        "tests/test_node27_pgdata_migrate.py",
+        "tests/test_node27_pgdata_migrate_oracle.py",
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 

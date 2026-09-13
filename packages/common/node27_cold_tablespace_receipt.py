@@ -10,13 +10,13 @@ from typing import Any
 
 import jsonschema
 
-from packages.common.node27_cold_tablespace_container import ContainerSnapshot
 from packages.common.node27_cold_tablespace_identity import (
     PRODUCTION_IDENTITY,
     ColdTablespaceIdentity,
     validate_identity_for_action,
 )
 from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies, InstallResult
+from packages.common.node27_pgdata_container import ContainerSnapshot
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 

@@ -1,8 +1,8 @@
 # Mandatory selective-cold retirement — active implementation contract
 
-Status: proposed target only. This revision updates documentation/specification
-and removes one obsolete bringup-checklist wording test and its private helper.
-The merged cold runtime remains present; runtime retirement is still pending.
+Status: implementation in progress. R1.1/R1.2 and the PGDATA portion of R1.5
+have source and isolated node-27 verification; their PR review/merge is separate.
+Other retirement tasks remain pending and the cold runtime is still present.
 The sole executable retirement plan is this file. Old cold deployment approval
 does not authorize retirement, and disabling a lane is not code retirement.
 
@@ -31,20 +31,23 @@ budget fields. Real launcher and collection/survivor proofs are required.
 
 ## R1 — Transfer minimal surviving consumers to their actual owners
 
-- [ ] R1.1 Migrate `packages/common/node27_pgdata_host.py` and
+- [x] R1.1 Migrate `packages/common/node27_pgdata_host.py` and
   `node27_pgdata_migrate.py` off cold imports. Transfer `run_bounded_command` and
   required process-kill/pipe/output-bound closure into PGDATA-owned command/host
   code; translate `ColdRuntimeError` at the PGDATA error boundary. Transfer only
   consumed `ContainerSnapshot` normalization/serialization from
   `node27_cold_tablespace_container.py` into PGDATA-owned container code.
   Exclude `with_cold_bind`, `build_recreate_argv` and cold rollback planning.
-- [ ] R1.2 Transfer consumed `EvidencePolicy`, descriptor/mdadm/both-member SMART
+- [x] R1.2 Transfer consumed `EvidencePolicy`, descriptor/mdadm/both-member SMART
   verification and dataclasses from `node27_cold_tablespace_evidence.py` into
   PGDATA-owned evidence code. Do not carry installer path/capacity/backup-inventory
   machinery without a real retained consumer. Use existing
   `node27_external_contract_snapshot.json` / `node27_container_contract.py` for
   the image pin, not a copied literal or `compressed_chunk_cold_residency.py`.
   Respect existing module-size boundaries.
+  Slice evidence: `evidence/retirement-pgdata-verification.json`; fixture:
+  `fixtures/retirement-pgdata-owner-transfer.md`. No production relocation or
+  global R1/R3 completion is claimed.
 - [ ] R1.3 Move generic `collect_filesystem`, `collect_postgres`,
   `collect_working_set`, `bytes_pretty`, `run_command` and required sampling
   helpers from `node27_cold_governance*` to resource-governance-owned code used by

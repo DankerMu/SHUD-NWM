@@ -1,0 +1,215 @@
+{
+  "status": "Implemented the dependency-closed PGDATA owner-transfer slice; ready for parent formatting, verification, independent review and CI. No validation, build, lint, formatter, test, SSH, production, commit, push or PR operations were run.",
+  "changed_files": {
+    "new": [
+      "packages/common/node27_pgdata_command.py",
+      "packages/common/node27_pgdata_container.py",
+      "packages/common/node27_pgdata_evidence.py",
+      "tests/test_node27_pgdata_command.py",
+      "tests/test_node27_pgdata_container.py",
+      "tests/test_node27_pgdata_evidence.py"
+    ],
+    "modified": [
+      "packages/common/compressed_chunk_cold_target.py",
+      "packages/common/node27_cold_governance_runtime.py",
+      "packages/common/node27_cold_tablespace_container.py",
+      "packages/common/node27_cold_tablespace_evidence.py",
+      "packages/common/node27_cold_tablespace_host.py",
+      "packages/common/node27_cold_tablespace_integration.py",
+      "packages/common/node27_cold_tablespace_observation.py",
+      "packages/common/node27_cold_tablespace_receipt.py",
+      "packages/common/node27_cold_tablespace_recovery.py",
+      "packages/common/node27_cold_tablespace_topology.py",
+      "packages/common/node27_pgdata_host.py",
+      "packages/common/node27_pgdata_migrate.py",
+      "scripts/node27_cold_tablespace_install.py",
+      "scripts/select_ci_tests.py",
+      "tests/test_compressed_chunk_cold_target.py",
+      "tests/test_node27_cold_tablespace_container.py",
+      "tests/test_node27_cold_tablespace_evidence.py",
+      "tests/test_node27_cold_tablespace_host.py",
+      "tests/test_node27_cold_tablespace_install.py",
+      "tests/test_node27_cold_tablespace_integration.py",
+      "tests/test_node27_cold_tablespace_recovery_contract.py",
+      "tests/test_node27_cold_tablespace_root_evidence.py",
+      "tests/test_node27_pgdata_migrate.py",
+      "tests/test_node27_pgdata_migrate_oracle.py",
+      "tests/test_select_ci_tests.py",
+      "docs/runbooks/tier-node27-timeseries-storage.md"
+    ]
+  },
+  "implementation": {
+    "command": "Moved run_bounded_command, _kill and _close_pipes into node27_pgdata_command. CommandError is a standalone RuntimeError, not a cold subclass/alias. Preserved argv execution, runner injection, per-stream byte ceilings, elapsed-time loop, child kill/wait, pipe closure, replacement UTF-8 decoding and nonzero CompletedProcess results. Retained existing bounded refusal text so cold boundary translation preserves messages.",
+    "container": "Moved ContainerContractError, ContainerSnapshot, normalization, serialization and their complete consumed private helper closure into node27_pgdata_container. Snapshot fields, canonical JSON, digest and public/private payload implementations are preserved. PINNED_IMAGE_ID reads host_context.nhms_db_image_id.value from the existing node27_external_contract_snapshot.json; no image literal was copied.",
+    "cold_container": "with_cold_bind is now a cold-owned function taking the PGDATA snapshot, rather than a method on the generic snapshot. Migrated every actual method caller. build_recreate_argv, diff_container_config and rollback_plan stay cold-owned and call the real PGDATA owner through a module import; no moved symbol facade/re-export remains.",
+    "evidence": "Moved EvidencePolicy, DescriptorEvidence, RaidEvidence, SmartEvidence, RootStorageHealth, constants and descriptor/envelope/RAID/both-SMART closure into node27_pgdata_evidence. BackupCoverage, parse_backup_inventory and path/capacity decisions remain cold-owned. Cold backup inventory directly consumes the PGDATA descriptor/envelope/payload helpers; no copied implementation.",
+    "tests": "Moved real child stdout/stderr/timeout tests to PGDATA command tests, changing direct error assertions to CommandError. Moved generic snapshot/config/serializer/default-isolation/refusal tests and their shared fixtures to PGDATA container tests. Moved RAID/both-SMART/descriptor identity-age-mode-command-subject acceptance/refusal tests and fixture helpers to PGDATA evidence tests. Cold behavior suites consume the moved owners/fixtures directly. Existing cold Docker action timeout test still asserts ColdHostError and injects the new owner CommandError.",
+    "selectors": "Added individual explicit producer PathTestRule rows for all three PGDATA owners selecting migration plus oracle and actual cold behavioral consumers. Evidence includes root-evidence, CLI/integration, recovery and both governance consumers instead of carrying old underselection. Snapshot JSON selection now includes its new direct PGDATA container/migration/oracle consumers. Removed obsolete PGDATA selection from the cold container producer. Updated selector expectation maps.",
+    "docs": "Updated both withdrawn G2/G5 runbook parser import blocks to PGDATA EvidencePolicy/mdadm/SMART while retaining cold backup inventory imports. Updated retained PGDATA proof instructions to name the actual new owner suites; explicitly preserved withdrawn G0–G8 status."
+  },
+  "caller_and_error_census": {
+    "command_runtime": [
+      {
+        "caller": "node27_pgdata_host.Host.command",
+        "translation": "CommandError or OSError -> existing secret-safe MigrationError from None; nonzero status gate unchanged"
+      },
+      {
+        "caller": "compressed_chunk_cold_target.inspect_container_identity_observation",
+        "translation": "command.CommandError -> ColdRuntimeError(str(error), error_class='target_identity', stage='target_identity')"
+      },
+      {
+        "caller": "compressed_chunk_cold_target.inspect_container_writable",
+        "translation": "Same explicit local ColdRuntimeError translation"
+      },
+      {
+        "caller": "node27_cold_tablespace_host.DockerBoundary.action",
+        "translation": "CommandError -> existing ColdHostError('Docker action timed out')"
+      },
+      {
+        "caller": "node27_cold_tablespace_host.DockerBoundary._json / inspect",
+        "translation": "CommandError -> existing ColdHostError('Docker inspection timed out')"
+      },
+      {
+        "caller": "node27_cold_tablespace_host.DockerBoundary._container_names / inspect_optional / current_and_stopped_cold_binds",
+        "translation": "CommandError -> ColdHostError('Docker container inventory is unavailable')"
+      },
+      {
+        "caller": "node27_cold_tablespace_host.SystemdBoundary.inspect_quiescence",
+        "translation": "CommandError -> ColdHostError('writer/timer state inspection failed')"
+      }
+    ],
+    "command_tests": [
+      "test_node27_pgdata_command calls the real new owner and expects CommandError",
+      "test_compressed_chunk_cold_target imports the command directly for remaining behavioral probes, with cold public inspector tests retaining ColdRuntimeError",
+      "test_node27_cold_tablespace_host retains its existing public ColdHostError assertions and patches the existing host IO seam"
+    ],
+    "container_runtime": [
+      "node27_pgdata_host: normalize_raw_inspect",
+      "node27_pgdata_migrate: normalize_raw_inspect, serialize_container_argv, snapshot-derived PINNED_IMAGE_ID",
+      "node27_cold_tablespace_container: PGDATA ContainerSnapshot, ContainerContractError, serialize_container_argv via module reference",
+      "node27_cold_tablespace_host: MAX_INSPECT_BYTES",
+      "node27_cold_tablespace_observation: ContainerSnapshot, normalize_raw_inspect; cold with_cold_bind function",
+      "node27_cold_tablespace_receipt: ContainerSnapshot",
+      "node27_cold_tablespace_recovery: ContainerSnapshot",
+      "node27_cold_tablespace_topology: ContainerSnapshot, normalize_raw_inspect"
+    ],
+    "container_tests": [
+      "test_node27_pgdata_container",
+      "test_node27_pgdata_migrate",
+      "test_node27_pgdata_migrate_oracle (image pin)",
+      "test_node27_cold_tablespace_container",
+      "test_node27_cold_tablespace_install",
+      "test_node27_cold_tablespace_integration",
+      "test_node27_cold_tablespace_recovery_contract"
+    ],
+    "evidence_runtime": [
+      "node27_pgdata_host: EvidencePolicy, verify_root_storage_evidence",
+      "node27_cold_tablespace_evidence.parse_backup_inventory: EvidencePolicy plus _read_exact_descriptor, _verify_envelope, _identity_payload via PGDATA module",
+      "node27_cold_tablespace_host: EvidencePolicy, verify_root_storage_evidence",
+      "node27_cold_tablespace_integration: EvidencePolicy, verify_root_storage_evidence",
+      "node27_cold_governance_runtime: EvidencePolicy",
+      "scripts/node27_cold_tablespace_install.py: EvidencePolicy"
+    ],
+    "evidence_tests": [
+      "test_node27_pgdata_evidence owns generic behavior and reusable fixture helpers",
+      "test_node27_cold_tablespace_evidence retains backup/path/capacity behavior and imports generic fixture helpers from new test owner",
+      "test_node27_cold_tablespace_host imports EvidencePolicy directly",
+      "test_node27_cold_tablespace_root_evidence imports the real owner and moves its os.fstat boundary patch to that owner"
+    ],
+    "manual_callers": [
+      "docs/runbooks/tier-node27-timeseries-storage.md: both withdrawn evidence parser blocks now directly import PGDATA EvidencePolicy/parse_mdadm_evidence/parse_smart_evidence"
+    ],
+    "reference_method": "No reference-capable LSP tool was available; used scoped symbol/import/attribute census across packages, scripts, tests, services and docs. Remaining old imports found by census consume only still-cold-owned operations, not the moved symbols."
+  },
+  "shared_boundaries": [
+    {
+      "boundary": "PGDATA migration state machine and offline CLI",
+      "disposition": "Inspected consumed seams; unchanged except imports/image ownership. No new stages/actions, no activate/rollback/release implementation changes."
+    },
+    {
+      "boundary": "Bounded child and pipe lifecycle",
+      "disposition": "Moved existing implementation rather than redesigning it. It kills/reaps the direct child and closes inherited pipes on timeout; it does not introduce process-group killing."
+    },
+    {
+      "boundary": "Container snapshot wire/digest and unsupported-field admission",
+      "disposition": "Moved unchanged. Removed only cold bind method from generic snapshot and updated consumers to the cold function."
+    },
+    {
+      "boundary": "Evidence policy schema",
+      "disposition": "Preserved fields including backup_argv and expected_pgdata to avoid changing the policy contract. Backup parsing itself remains cold-owned; PGDATA health does not call it."
+    },
+    {
+      "boundary": "Evidence/receipt publication",
+      "disposition": "Existing ValueError and public host translations preserved. Private descriptor metadata and payload redaction unchanged; no schema files changed."
+    },
+    {
+      "boundary": "Governance",
+      "disposition": "Only direct EvidencePolicy ownership changed. No sampling, capacity, working-set or deployment behavior migrated."
+    },
+    {
+      "boundary": "Protective legacy rejection",
+      "disposition": "Unchanged literal cold-bind rejection in migrate._validate_paths and active/enabled cold service/timer rejection in Host.units_snapshot. No PGDATA runtime/test cold imports remain."
+    },
+    {
+      "boundary": "Large-file guard",
+      "disposition": "Existing maxLines=1000 policy inspected; no configuration/exemption changes. New owner modules are approximately 118/575/345 lines from tool snapshots; host and migrate shrank by one line each. Parent should include final size check after formatting."
+    }
+  ],
+  "invariant_coverage": [
+    {
+      "row": "Producer/process",
+      "implementation": "PGDATA command owner plus Host.command and explicit cold translations",
+      "pending_evidence": "Run migrated command tests; safe Host.command success/nonzero/secret-safe timeout smoke and inherited-pipe smoke below."
+    },
+    {
+      "row": "Validators",
+      "implementation": "Moved descriptor/envelope/root mdadm and exact two-member SMART closure; cold backup remains an actual consumer",
+      "pending_evidence": "Run PGDATA evidence plus cold root-evidence/host suites; existing fixture migration is behavior-preserving, no fabricated red proof."
+    },
+    {
+      "row": "Storage/state",
+      "implementation": "Migration state transitions/fences/copy/rebind/pre-write rollback/post-release refusal unchanged",
+      "pending_evidence": "Run migration unit suite and isolated exact-image Docker oracle with real assertions."
+    },
+    {
+      "row": "Entry/caller",
+      "implementation": "Full direct import/method-call migration and producer selector closure",
+      "pending_evidence": "Run selector suite, cold CLI/install/integration/recovery/governance consumers and default backend regression."
+    },
+    {
+      "row": "Downstream",
+      "implementation": "Exact snapshot normalization/serializer moved; cold bind/service refusals preserved",
+      "pending_evidence": "Run PGDATA container/migration and cold container/integration suites."
+    },
+    {
+      "row": "Evidence",
+      "implementation": "Snapshot wire/digest/public-private payload and evidence dataclasses/parsers preserved",
+      "pending_evidence": "Run moved snapshot/evidence behavioral tests and cold receipts exercised by install/recovery suites."
+    },
+    {
+      "row": "Error cutover",
+      "implementation": "Standalone CommandError; PGDATA MigrationError; explicit ColdRuntimeError/ColdHostError translations",
+      "pending_evidence": "Run migrated command and existing cold public-boundary suites; parent smoke should exercise Host.command refusal without raw secret leakage."
+    }
+  ],
+  "pending_validation_commands": [
+    "Parent-only formatting/import sorting on changed Python (not run here); moved blocks intentionally await the centralized formatter.",
+    "uv run pytest -q tests/test_node27_pgdata_command.py tests/test_node27_pgdata_container.py tests/test_node27_pgdata_evidence.py tests/test_node27_pgdata_migrate.py tests/test_node27_external_contract_snapshot.py tests/test_select_ci_tests.py",
+    "uv run pytest -q tests/test_compressed_chunk_cold_target.py tests/test_compressed_chunk_cold_runtime.py tests/test_node27_cold_tablespace_container.py tests/test_node27_cold_tablespace_evidence.py tests/test_node27_cold_tablespace_host.py tests/test_node27_cold_tablespace_install.py tests/test_node27_cold_tablespace_recovery_contract.py tests/test_node27_cold_tablespace_root_evidence.py tests/test_node27_cold_tablespace_cli.py tests/test_node27_cold_tablespace_integration.py tests/test_node27_cold_governance.py tests/test_node27_resource_governance.py",
+    "NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_migrate_oracle.py",
+    "uv run python -c 'import sys; from packages.common.node27_pgdata_host import Host; h=Host(); r=h.command([sys.executable,\"-c\",\"print(42)\"]); assert r.stdout == \"42\\n\"; r=h.command([sys.executable,\"-c\",\"raise SystemExit(7)\"],allow_failure=True); assert r.returncode == 7'",
+    "uv run python -c 'import sys; from packages.common.node27_pgdata_host import Host,MigrationError; h=Host(); exec(\"try:\\n h.command([sys.executable,\\\"-c\\\",\\\"import sys,time; print(\\\\\\\"private-secret\\\\\\\",file=sys.stderr,flush=True); time.sleep(10)\\\"],timeout=1)\\nexcept MigrationError as e:\\n assert str(e) == \\\"host command unavailable, timed out or exceeded output bound\\\"\\n assert \\\"private-secret\\\" not in str(e)\\nelse:\\n raise AssertionError(\\\"timeout was accepted\\\")\")'",
+    "uv run python -c 'import sys,time; from packages.common.node27_pgdata_command import CommandError,run_bounded_command; source=\"import os,time; pid=os.fork(); time.sleep(2) if pid == 0 else None; os._exit(0)\"; start=time.monotonic(); exec(\"try:\\n run_bounded_command([sys.executable,\\\"-c\\\",source],timeout=1)\\nexcept CommandError:\\n assert time.monotonic()-start < 2\\nelse:\\n raise AssertionError(\\\"inherited pipe was not bounded\\\")\"); time.sleep(2)'",
+    "uv run python scripts/node27_pgdata_migrate.py --help",
+    "uv run ruff check .",
+    "uv run pytest -q"
+  ],
+  "deviations_and_limits": [
+    "No scope deviations; compression/governance extraction, C4/SQL migration, R3 deletion, canonical specs and parent accounting were left untouched.",
+    "Added explicit ColdHostError containment for container-name inventory and systemd quiescence, which previously allowed the generic cold command error to escape. This closes the actual consumed command boundary rather than leaking the new PGDATA CommandError through cold public operations.",
+    "Deleted two incidental/source-pin target tests (dataclass field presence and source string absence), one cold-bind constant equality test, and a tautological evidence digest assertion under the test-discipline requirement. Their behavioral neighboring tests remain.",
+    "Existing behavior tests were moved/adapted, not newly invented; no red-proof stash was created and no red/green claim is made.",
+    "Advisor completion consultation timed out; no review PASS is claimed.",
+    "Parent must run centralized formatting/lint and all requested node27 proofs before declaring the slice verified. No tests or validation commands were run in this task."
+  ]
+}

@@ -6,11 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
-from packages.common.node27_cold_tablespace_container import (
-    ContainerSnapshot,
-    diff_container_config,
-    normalize_raw_inspect,
-)
+from packages.common.node27_cold_tablespace_container import diff_container_config
 from packages.common.node27_cold_tablespace_evidence import (
     PathObservation,
     assess_fresh_path,
@@ -25,6 +21,7 @@ from packages.common.node27_cold_tablespace_receipt import (
     path_payload,
 )
 from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies, InstallInterrupted
+from packages.common.node27_pgdata_container import ContainerSnapshot, normalize_raw_inspect
 
 WRITER_TIMER_UNITS = (
     "nhms-node27-autopipe.service",
@@ -414,9 +411,7 @@ def topology_blockers(
         blockers.append("another current container has a cold bind")
     complete_ready = False
     if topology == "expected" and bind:
-        receipt["readback"] = readback(
-            connection, deps, identity, expected_device_identity=expected_device_identity
-        )
+        receipt["readback"] = readback(connection, deps, identity, expected_device_identity=expected_device_identity)
         if receipt["readback"]["approved"]:
             complete_ready = True
         else:

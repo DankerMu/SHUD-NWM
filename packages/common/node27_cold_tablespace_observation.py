@@ -18,7 +18,7 @@ from packages.common.node27_cold_tablespace_authority import (
     remove_authority,
     write_authority,
 )
-from packages.common.node27_cold_tablespace_container import ContainerSnapshot, normalize_raw_inspect
+from packages.common.node27_cold_tablespace_container import with_cold_bind
 from packages.common.node27_cold_tablespace_identity import ColdTablespaceIdentity
 from packages.common.node27_cold_tablespace_pending import classify_pending
 from packages.common.node27_cold_tablespace_receipt import (
@@ -32,6 +32,7 @@ from packages.common.node27_cold_tablespace_types import (
     InstallDependencies,
     InstallResult,
 )
+from packages.common.node27_pgdata_container import ContainerSnapshot, normalize_raw_inspect
 
 
 class NamedObservationError(RuntimeError):
@@ -58,7 +59,7 @@ def authority_payload(
         },
         "expected": {
             "cold_bind": identity.cold_bind,
-            "config_digest": snapshot.with_cold_bind(identity=identity).config_digest,
+            "config_digest": with_cold_bind(snapshot, identity=identity).config_digest,
             "resolved_image_id": snapshot.resolved_image_id,
         },
         "path": {
@@ -170,8 +171,7 @@ def inspect_named_optional(
 
     if deps.inspect_named_container_optional is None:
         raise NamedObservationError(
-            f"named container optional inspection boundary is unavailable for {name}"
-            f" ({identity.container_name})"
+            f"named container optional inspection boundary is unavailable for {name} ({identity.container_name})"
         )
     try:
         raw = deps.inspect_named_container_optional(name)
@@ -202,9 +202,7 @@ def _record_rollback_progress(
 
     return write_recovery(
         config.recovery_path,
-        advance_authority(
-            authority, phase="terminal_pending_cleanup", pending_action=None, **ownership_update
-        ),
+        advance_authority(authority, phase="terminal_pending_cleanup", pending_action=None, **ownership_update),
     )
 
 

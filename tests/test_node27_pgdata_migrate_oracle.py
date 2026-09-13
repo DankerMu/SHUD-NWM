@@ -15,7 +15,7 @@ from pathlib import Path
 import psycopg2
 import pytest
 
-from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
+from packages.common.node27_pgdata_container import PINNED_IMAGE_ID
 from packages.common.safe_fs import rmtree_no_follow
 
 pytestmark = [pytest.mark.integration, pytest.mark.timescaledb_210, pytest.mark.node27_docker]

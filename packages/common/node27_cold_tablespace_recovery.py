@@ -13,7 +13,6 @@ from packages.common.node27_cold_tablespace_authority import (
     authority_exists,
     read_authority,
 )
-from packages.common.node27_cold_tablespace_container import ContainerSnapshot
 from packages.common.node27_cold_tablespace_observation import (
     NamedObservationError,
     _adopt_pending_post,
@@ -58,6 +57,7 @@ from packages.common.node27_cold_tablespace_types import (
     InstallInterrupted,
     InstallResult,
 )
+from packages.common.node27_pgdata_container import ContainerSnapshot
 from packages.common.redaction import redact_text
 
 __all__ = [

@@ -322,13 +322,12 @@ of stale rollback after durable release, including partial release. An image
 primitive experiment alone is not CLI/state/oracle proof. No isolated result
 proves live C1–C4, HDD latency, ingest, or backup/disposal readiness.
 
-R1 must migrate the PGDATA command/container/evidence and ordinary capacity
-consumer tests to their surviving owners before R3 deletes cold-named tests.
-The former extra `test_node27_cold_governance.py` and
-`test_node27_cold_tablespace_container.py` invocations are historical coverage
-dependencies, not permanent PGDATA prerequisites. The commands above do not
-claim this transfer is complete; R1 must update them with the actual surviving
-coverage before deletion, without inventing replacement test names.
+PGDATA command, exact-container and hardware-evidence coverage now lives in
+`test_node27_pgdata_command.py`, `test_node27_pgdata_container.py` and
+`test_node27_pgdata_evidence.py`, included by the commands above. Still-live cold
+callers consume those PGDATA owners directly and retain separate cold behavior
+tests; that does not authorize the withdrawn G0–G8 rollout. Ordinary capacity
+coverage remains with resource governance pending its separate R1 transfer.
 
 ### B. Later approved window: fresh admission and baseline
 
@@ -1373,9 +1372,9 @@ export MDADM_EVIDENCE BACKUP_EVIDENCE SMART_A_DEVICE SMART_B_DEVICE SMART_A SMAR
 import json, os
 from datetime import UTC, datetime
 from pathlib import Path
-from packages.common.node27_cold_tablespace_evidence import (
+from packages.common.node27_cold_tablespace_evidence import parse_backup_inventory
+from packages.common.node27_pgdata_evidence import (
     EvidencePolicy,
-    parse_backup_inventory,
     parse_mdadm_evidence,
     parse_smart_evidence,
 )
@@ -2012,9 +2011,9 @@ export MDADM_EVIDENCE BACKUP_EVIDENCE SMART_A_DEVICE SMART_B_DEVICE SMART_A SMAR
 import json, os
 from datetime import UTC, datetime
 from pathlib import Path
-from packages.common.node27_cold_tablespace_evidence import (
+from packages.common.node27_cold_tablespace_evidence import parse_backup_inventory
+from packages.common.node27_pgdata_evidence import (
     EvidencePolicy,
-    parse_backup_inventory,
     parse_mdadm_evidence,
     parse_smart_evidence,
 )
