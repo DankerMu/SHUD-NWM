@@ -1,0 +1,40 @@
+{
+  "source_sha": "317ca7d48ddd2cfaceea74d07ff0ef6addc1093e",
+  "node": "node27",
+  "checkout": "/home/nwm/tmp/issue1895-c4-acceptance-owner",
+  "node_version": "v22.22.2",
+  "targeted": {
+    "passed": 934,
+    "seconds": 221.33
+  },
+  "real_node": {
+    "passed": 2,
+    "deselected": 25,
+    "skipped": 0
+  },
+  "cli_smoke": "synthetic freeze-bind-verify PASS; wrong reviewed SHA refuses with exit 1 and no output/freeze rewrite",
+  "mutant": {
+    "removed": "verify post-binder approved/freeze/binding rechecks",
+    "red_failed": 3,
+    "restored_passed": 3
+  },
+  "full_backend": {
+    "passed": 20218,
+    "skipped": 335,
+    "warnings": 1,
+    "seconds": 3598.84,
+    "warning": "ecCodes library unavailable to cfgrib"
+  },
+  "local": "Ruff PASS; active and canonical OpenSpec strict PASS; scoped Markdown PASS",
+  "logs": [
+    "retirement-c4-node27.log",
+    "retirement-c4-selector-red.log"
+  ],
+  "limits": [
+    "Synthetic C4 artifact is not live browser or production deployment acceptance.",
+    "No production env/unit/DB mutation or node22 access.",
+    "R1.4 workload, remaining R1.5, R2-R5 and epic stay open."
+  ],
+  "smoke_script": "\"\"\"Disposable synthetic C4 CLI proof; never a live browser/deployment PASS.\"\"\"\nimport json\nimport os\nfrom pathlib import Path\nimport subprocess\nimport sys\nimport tempfile\nimport time\n\nsys.path.insert(0, str(Path.cwd()))\nfrom tests.test_node27_c4_production_acceptance import write_closed_c4_fixture\n\nroot = Path(tempfile.mkdtemp(prefix=\"c4-cli-\", dir=os.environ[\"TMPDIR\"]))\nsha = subprocess.check_output([\"git\", \"rev-parse\", \"HEAD\"], text=True).strip()\napproved = root / \"approved.json\"\napproved.write_text(json.dumps({\"status\": \"PASS\", \"head_sha\": sha, \"reviewed_sha\": sha}))\napproved.chmod(0o600)\ncli = [sys.executable, \"scripts/node27_c4_production_acceptance.py\"]\nreceipt = root / \"receipt.json\"\nfreeze = root / \"freeze.json\"\nbinding = root / \"binding.json\"\nacceptance = root / \"acceptance.json\"\ndef invoke(args, expected=0):\n    result = subprocess.run(cli + args, capture_output=True, text=True, timeout=30)\n    assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)\n    return result\n\ninvoke([\"freeze\", \"--approved-record\", str(approved), \"--reviewed-sha\", sha,\n        \"--receipt\", str(receipt), \"--frontend-origin\", \"https://display.example.test\",\n        \"--api-origin\", \"https://api.example.test\", \"--basin-id\", \"basins_qhh\",\n        \"--segment-id\", \"basins_qhh_shud_reach_000001\", \"--output\", str(freeze)])\ntime.sleep(1)\nstart = int(time.time())\nend = start\nwrite_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)\nfreeze_bytes = freeze.read_bytes()\ninvoke([\"bind\", \"--freeze\", str(freeze), \"--reviewed-sha\", sha,\n        \"--cmd-start\", str(start), \"--cmd-end\", str(end), \"--output\", str(binding)])\ninvoke([\"verify\", \"--freeze\", str(freeze), \"--binding\", str(binding),\n        \"--reviewed-sha\", sha, \"--output\", str(acceptance)])\nassert json.loads(acceptance.read_text())[\"status\"] == \"PASS\"\nassert freeze.read_bytes() == freeze_bytes\nrefused = root / \"refused.json\"\nwrong_sha = \"a\" * 40 if sha != \"a\" * 40 else \"b\" * 40\ninvoke([\"bind\", \"--freeze\", str(freeze), \"--reviewed-sha\", wrong_sha,\n        \"--cmd-start\", str(start), \"--cmd-end\", str(end), \"--output\", str(refused)], 1)\nassert not refused.exists() and freeze.read_bytes() == freeze_bytes\nprint(json.dumps({\"proof\": \"SYNTHETIC_REAL_NODE_CLI_PASS\", \"source_sha\": sha,\n                  \"positive\": \"freeze-bind-verify\", \"negative\": \"SHA mismatch refuses without rewrite\",\n                  \"node\": subprocess.check_output([\"/usr/bin/node\", \"--version\"], text=True).strip(),\n                  \"live_browser_or_deployment_pass\": False}))\n",
+  "mutant_script": "\"\"\"Delete only verify's post-binder original-record checks, then restore bytes.\"\"\"\nfrom pathlib import Path\nimport subprocess\nimport sys\n\npath = Path('services/production_closure/c4_production_acceptance.py')\noriginal = path.read_bytes()\ntext = original.decode()\nstart = text.index('    _assert_source_unchanged(approved_path, approved_identity, approved_parent)', text.index('    _assert_identity_match(observed_c4', text.index('def verify(')))\nend = text.index('    record = {', start)\nassert '_raw, after_binding' in text[start:end]\ntests = ['tests/test_node27_c4_production_acceptance.py::' + name for name in [\n    'test_verify_refuses_when_approved_record_mutates_across_binder',\n    'test_verify_refuses_when_freeze_mutates_across_binder',\n    'test_verify_refuses_when_binding_mutates_across_binder']]\ntry:\n    path.write_text(text[:start] + text[end:])\n    red = subprocess.run([sys.executable, '-m', 'pytest', '-q', *tests], timeout=120)\n    assert red.returncode == 1, red.returncode\nfinally:\n    path.write_bytes(original)\nassert path.read_bytes() == original\nsubprocess.run([sys.executable, '-m', 'pytest', '-q', *tests], check=True, timeout=120)\nprint('C4_POST_BINDER_MUTANT_KILLED_AND_RESTORED')\n"
+}

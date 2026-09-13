@@ -60,8 +60,8 @@ error、permission/runtime 错误、超时、Slurm 请求或非 GET/HEAD 控制�
 
 ### Requirement: 私有闭集证据接受链
 
-producer、schema、semantic validator、publisher 和 binder
-SHALL 一起交付，状态为 PASS/BLOCKED/FAIL。字段 MUST 闭集、脱敏、限长/限深/限大小；跨字段 source/job/log/时间关系由 semantic 与 binder 验证。输出 MUST 使用 euid-owned
+producer、schema、semantic validator、publisher 和 binder SHALL
+一起交付，状态为 PASS/BLOCKED/FAIL。字段 MUST 闭集、脱敏、限长/限深/限大小；跨字段 source/job/log/时间关系由 semantic 与 binder 验证。输出 MUST 使用 euid-owned
 0700 parent 与 0600 regular
 single-link 文件，no-follow/exclusive/no-clobber 发布、fsync/readback，拒绝交换/变化；清理只允许本次创建的对象。C4
 binder MUST 绑定当次五输入、秒粒度执行 bracket 与 POSIX identity
