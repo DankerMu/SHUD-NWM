@@ -1,0 +1,69 @@
+{
+  "status": "confirmed_existing_external_operational_blocker_no_changes",
+  "cause": "The scheduled raw-retention execution reached real deletion, successfully removed raw-lane targets, but failed to delete 22 canonical mirror cycle directories because nwm lacks directory write authority on the frd_muziyao:nfsdata 0755 canonical tree. This is the already documented OPEN #2100 permission boundary, not a new governance/window executor defect.",
+  "latest_failure": {
+    "unit": "nhms-node27-raw-retention.service",
+    "started_and_exited_local": "2026-09-13 11:35:32 CST (+08:00)",
+    "started_and_finished_utc": "2026-09-13T03:35:32Z",
+    "InvocationID": "4a8a082fc61444eebc0429514dab9816",
+    "ActiveState": "failed",
+    "SubState": "failed",
+    "Result": "exit-code",
+    "ExecMainStatus": "1",
+    "MainPID": "0",
+    "ControlPID": "0",
+    "DropInPaths": ""
+  },
+  "entrypoint_and_source_boundary": [
+    "Installed user unit: /home/nwm/.config/systemd/user/nhms-node27-raw-retention.service:6-9 sets WorkingDirectory=/home/nwm/NWM and ExecStart=/home/nwm/NWM/scripts/node27_raw_retention_once.sh.",
+    "Wrapper :127-129 invokes /home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_raw_retention.py --summary-path ... and captures its exit code. :132-133 logs and returns that code.",
+    "Active Python source :550-564 executes shutil.rmtree(target.path), catches OSError, records error/error_type into failed[], and continues. Its existing :555-562 comment explicitly identifies canonical ownership/mode and tracks the remedy in #2100.",
+    "main():670-676 writes the completed receipt and returns 1 when counts.failed is nonzero. Therefore receipt status=completed does NOT mean unit success."
+  ],
+  "receipt": {
+    "path": "/home/nwm/node27-raw-retention-logs/raw-retention-20260913T033532Z.json",
+    "schema": "nhms.node27_raw_retention.production.v4",
+    "status": "completed",
+    "execution_mode": "production_execute",
+    "counts": {
+      "planned": 34,
+      "deleted": 12,
+      "failed": 22,
+      "skipped": 123
+    },
+    "freed_bytes": 609787786,
+    "failed_targets": "11 canonical/gfs cycles and 11 canonical/IFS cycles, 2026082312 through 2026082812; every failed entry has error_type=PermissionError.",
+    "successful_targets": "12 raw/{IFS,gfs} cycle directories. These were deleted by the earlier scheduled service, not by this diagnostic session.",
+    "cutoff": "2026-08-29T00:00:00Z",
+    "watermark_reference": "2026-09-12T00:00:00Z",
+    "log_confirmation": "raw-retention.log:249: [2026-09-13T03:35:32Z] node27-raw-retention: done rc=1 elapsed_sec=0 summary=/home/nwm/node27-raw-retention-logs/raw-retention-20260913T033532Z.json"
+  },
+  "readonly_permission_evidence": {
+    "command": "ssh 210.77.77.27 'getfacl -cp /home/ghdc/nwm/object-store/canonical/gfs/2026082312 /home/ghdc/nwm/object-store/canonical/IFS/2026082312 && stat -c \"%A %a %U %G %u %g %n\" /home/ghdc/nwm/object-store/canonical/gfs/2026082312 /home/ghdc/nwm/object-store/canonical/IFS/2026082312'",
+    "output": "Both directories: drwxr-xr-x 755 frd_muziyao nfsdata 1103 1078. Each ACL is only user::rwx, group::r-x, other::r-x; no named-user write grant.",
+    "executor_identity": "id reports uid=1005(nwm), gid=1005(nwm), supplementary groups sudo/docker/nwmuser; no nfsdata membership.",
+    "ancestry": "namei shows canonical and canonical/gfs also 0755 frd_muziyao:nfsdata.",
+    "limit": "The particular .nc filename named in the historical first error was absent when namei inspected it later. No claim is made about who subsequently changed that leaf. The failed cycle directories and their non-writable ACLs remain directly observed."
+  },
+  "known_issue_classification": {
+    "exact_match": {
+      "number": 2100,
+      "state": "OPEN",
+      "title": "ops(node-27): canonical \u955c\u50cf\u526a\u679d\u5bf9 nwm \u6052 PermissionError \u2014\u2014 \u6811\u5c5e frd_muziyao:nfsdata \u800c\u526a\u679d\u8005\u662f nwm\uff0c\u8f66\u9053\u6784\u9020\u6027\u5220\u4e0d\u6389\u4efb\u4f55\u5b57\u8282\uff08#2011/PR #2099 \u7684 PR Boundary \u4e4b\u5916\uff0cwatermark \u518d\u8fdb\u4e00\u5929\u5373\u663e\u5f62\uff09",
+      "evidence": "Issue text records the same uid/mode split, canonical deletion boundary, and expected PermissionError once watermark advances. Current actual receipt now demonstrates that predicted failure."
+    },
+    "excluded_adjacent_issue": {
+      "number": 2285,
+      "state": "OPEN",
+      "relationship": "Known installed-unit drift is real, but not the cause of this invocation's exit1. For raw-retention the issue records an old Description and missing ExecStartPre mkdir. Here the log directory existed, the wrapper ran Python, and a real completed receipt contains canonical PermissionErrors. Installing the newer base unit alone would not grant canonical deletion authority."
+    },
+    "other_excluded_titles": "#2282 concerns display restart process matching; #2283 concerns prewarm rc logging; #2284 concerns MVT receipt filename collisions. None explains this retention PermissionError. No fixes attempted."
+  },
+  "safe_prerequisite": [
+    "Keep the window before T0; do not recover or loosen REQUIRED_UNIT_NOT_ADMITTED to conceal this failed producer.",
+    "Separate explicit operational authority is needed to resolve #2100's canonical deletion-authority contract for both existing directories and future producer-created directories. Group membership alone cannot fix 0755 directories; a one-time permission adjustment alone does not prove persistence.",
+    "After an independently authorized remediation, require a genuine successful retention execution/receipt with no canonical PermissionError and an admitted actual unit state before retrying the window. This diagnostic does not authorize running that destructive retention operation now.",
+    "Preserve the successful governance pin/runtime/environment repair, serving APIs, HOLD/YD, and existing failure evidence. No reset-failed, timer action, replay, shared chmod, deletion, source change, or DB write was performed."
+  ],
+  "scope": "Read-only journal, source, receipt, systemctl show, id/namei/getfacl/stat, and GitHub issue reads only. No runner was rerun and no recovery operation was invoked."
+}

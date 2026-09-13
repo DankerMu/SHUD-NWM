@@ -1,0 +1,126 @@
+{
+  "verdict": "approve",
+  "round": "independent-final-gap-sweep-post-R5",
+  "not_round_6": true,
+  "reviewed_head_sha": "f24c3fb37be392300052c0d0ebf0ee35366a4599",
+  "previous_clean": "7feb32fbec66a5130fbd6bb98bb077bb8b04ba9e",
+  "authorization": "governance-systemd-final-round-authorization.json; user \u4fee\u590d\u5e76\u8fdb\u884c\u6700\u540e\u4e00\u8f6e\u5ba1\u6838; authorized_comprehensive_rounds=[5]; this seat is the post-R5 independent final sweep, not a sixth comprehensive round",
+  "r5_baseline": "all 3 R5 seats findings[] empty at f24c3fb37; I8OpR5Full/State/Evidence clean",
+  "production_mutation": "env_CAS_only_retained; governance_pin_timer_stage_not_started; window_DB_API_not_started",
+  "this_seat_ran_no_runtime": true,
+  "hash_method": "Independently recomputed SHA-256 of frozen live/receipt files and of supplied proof artifacts. Live equals receipts for all four tools. Window files and governance_pgdata.patch.txt match 7feb. Local hash/JSON/regex parsing of supplied proofs only; this seat executed no executor, smoke, service, SSH, DB, lint, or test runner.",
+  "digests": {
+    "governance_stage.py": "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c",
+    "governance_smoke.py": "711d89eecdb449194c9ed217d28c2187e136e8d668c8ffc7da6c6bbbbaba6587",
+    "window_execute.py": "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
+    "window_smoke.py": "d760502a28d508cbb5cab67027625dcfd5f3d3ab62937a86d0959601299f367e",
+    "governance_pgdata.patch.txt": "e23143a1d70ba4f64e9c42f9af31728fadb18820fa8ab89e72fbdd3dd64b12be",
+    "live_equals_receipts": true,
+    "window_unchanged_from_7feb": true,
+    "pgdata_patch_unchanged_from_7feb": true,
+    "governance_stage_from_7feb": "54b4cb3c51c8a72c4548be8dfb5227a1fff034e0c0bfa0b6446cc3ec5f8b4442",
+    "governance_smoke_from_7feb": "22d8ddb40b463985a312e572c3389fa0a60996af4b12fdb189441543aba7612d",
+    "actual-systemd-config-inventory.txt": "3cc16c212626a9e8162984bfa90230705df626cd7198098e18c30c91403056d8",
+    "governance-systemd-smoke.txt": "ae324bef9b54e8e854cd92c12430de0430a15e58f97e47f64aea767ee028eca4",
+    "governance-systemd-final-preflight.txt": "c6e6a0b0bbf100c5cc8bfb5c6c95da532caf6e3c2bbfd432c4835a56803cba55",
+    "governance-active-env-final-preflight.txt": "c6e6a0b0bbf100c5cc8bfb5c6c95da532caf6e3c2bbfd432c4835a56803cba55",
+    "executed-systemd-inventory-driver.py.txt": "1ada0569a3f60d39cafa6bc7f28dcd79fcba8fc0f07c49169dafeb78459c0c85",
+    "governance-env-repair-receipt.txt": "9f045c1e678627fdc199799b49052937f40ee6c69689614acbbc5c2eb040cd8f",
+    "env_repair_new_sha256": "eb8411b7bdb78a342a4b4c1f27cef2a6ce310eb9b2b7f423eabbc5cdf498baef",
+    "governance-stage-observed.txt": "251c15cd418e09a310f1266807187c526020dda339e8fbd6045209e3fbb3cde3",
+    "typed_empty_a_sb_0": "1ba584c0426450785e7ca56c6789b3f538d2a0c09e7cb170da2c87462d9277f1",
+    "omitted_show_empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "red_late_prepare_admission_payload": "11901cb37e71657d343c68e1d484bb2d7f6e08c73fab27954622fd5cd0945ae6",
+    "green_late_prepare_admission_payload": "0cb0a1811f919fe46447c6a3fd43495fed1e2d16d17ae3f3caaee87b6639980d",
+    "green_entrypoint_admission_payload": "aca85a9227852c265b49ec5e3b785a317eac23588c97939c0e3ed667a7dac327",
+    "actual_readiness_red_green_proof_wrapper": "1e1cc56e17d3e4a63ce9d9340dc5f643d89fb601b09d443f32e3d4c429c09626",
+    "unchanged_36d55_executor": "2b726c5c573b97992270f4a90db853ec22cde8192678d508a2c50c595281417f"
+  },
+  "findings": [],
+  "new_candidates": [],
+  "highest_candidate_severity": null,
+  "blocking_candidates": false,
+  "independent_verification_required_for_new_p1": "Any new P1 would require independent verifier plus gate; none found. This seat does not authorize a fix, R6, or a new stage retry.",
+  "delta_from_7feb": [
+    "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_stage.py.txt",
+    "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_smoke.py.txt"
+  ],
+  "contract": {
+    "show_strict_unchanged": "governance_stage.py:192-195 still requires every requested key. config() requests Transient then FragmentPath/DropInPaths for every nontransient service/timer. Missing DropInPaths remains SYSTEMD_PROPERTY_MISSING.",
+    "environment_files_service_only": "config():277 calls service_environment_files only when name.endswith('.service'); timers get \"\" and never request EnvironmentFiles or busctl.",
+    "nonempty_textual_path": "service_environment_files:217-222: nonempty stripped show() text requires EnvironmentFiles= prefix and no embedded newline, then existing regex/safe()/digest. Explicit printed EnvironmentFiles= does not take the typed path.",
+    "omitted_empty_array_path": "Empty stripped show() stdout is the only busctl path: native Manager.GetUnit then typed Service.EnvironmentFiles exactly a(sb) 0.",
+    "fail_closed": "invalid object path -> SYSTEMD_UNIT_RESOLUTION_INVALID; nonempty/wrong-type typed value -> ENVIRONMENT_FILES_EMPTY_UNPROVEN; unknown/query failure -> COMMAND_FAILED; missing common FragmentPath/DropInPaths -> SYSTEMD_PROPERTY_MISSING. No global missing-property default.",
+    "native_resolution": "GetUnit(name) supplies the object path; regex o \"(/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+)\" matches actual systemd 249 encodings. Handwritten unit-name escaping is not used.",
+    "parser_and_guards_unchanged": "Existing re.findall(/[^\\s;]+) (ignore_errors=yes|no) plus safe()/digest still apply to nonempty lists.",
+    "stage_rollback": "stage():608-655 snapshots config() before backups/timer stop/pin; invariants() after timer_stopped and unstage re-compare config(). rollback() stops timer, removes only owned pin if present, daemon-reload, dropins(), restore_timer(); does not rewrite foreign env files. recover() exists; constructor does not auto-rollback.",
+    "no_broadened_unit_permissions": "No enable/disable/mask/reset-failed. Smoke asserts those verbs absent. Inventory allowlist is show|list-unit-files plus GetUnit plus Service.EnvironmentFiles get-property only."
+  },
+  "parent_supplied_proof_not_rerun": {
+    "actual_inventory": "PASS; source_sha256=67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c; 69 readonly commands; 18 config entries; 8 typed-empty services (empty show then GetUnit + a(sb) 0); 2 textual nonempty (frontier-alert, timeseries-compression-replay) without busctl; 8 timers without EnvironmentFiles/busctl; 6 Transient=yes probed then skipped. Executed driver persisted hash assert + readonly allowlist; Executor.__new__ plus pin assignment only; no constructor, locks, service ops, or DB. Proves published config() compatibility, not construction/staging/audit/rollback.",
+    "smoke": "governance-systemd-smoke.txt: published hashes match live; 10 checks then JSON; surface governance_system_boundary_fakes_real_private_files; real_services_exercised=false; database_exercised=false. Check[0] omitted-display + fail-closed matrix then nonempty snapshot; check[9] config_drift phases prepared,timer_stopped,rollback_pending,rolled_back; timer restored; foreign replacement bytes retained. Smoke uses three fake units, not eight real services. Boundary.systemctl rewrites foreign bytes on every timer stop including rollback stop; combined source+smoke supports final-byte preservation, smoke alone does not prove every intermediate write.",
+    "preflight": "governance-systemd-final-preflight.txt and governance-active-env-final-preflight.txt identical PREFLIGHT_OK, phase not_started, error null. Preflight does not call config() and is not staging.",
+    "old_actual_stage": "governance-stage-observed.txt FAIL SYSTEMD_PROPERTY_MISSING, phase not_started, runtime_retained true. Diagnosis: failed inside config() before backups/pin/timer mutation. Pin absent; service failed/timer active+enabled unchanged.",
+    "env_repair": "governance-env-repair-receipt.txt PASS; approved single PGDATA assignment only; old_sha256 ac867365... new_sha256 eb8411b7...; private backup; mode/owner/other bytes preserved. Not a stage success.",
+    "new_stage": "not retried; not claimed complete."
+  },
+  "window_preserved_from_7feb": {
+    "hashes_identical": true,
+    "D12_SQL_cache_worker_unchanged": true,
+    "14_cli_plus_8_real_DB_matrix": "carried from approved 7feb; parent-run PASS; this seat did not rerun",
+    "late_prepare_red_green": "RED 36d55 6 stops BLOCKED_FENCED vs GREEN 7feb 0 actions PREPARATION_INCOMPLETE; payloads 11901cb37e / 0cb0a1811f / aca85a9227 unchanged",
+    "oid_binding_limitation": "Actual prepare control flow with fixture expected-OID substitution; production comparison remains 24541. I8-R1-OID stays REFUTED.",
+    "optional_EnvironmentFiles": "window_execute.py:321-326 unit() optional-parses; 753-759 uses explicit c['env_files'] plus u.get('EnvironmentFiles',''); no SYSTEMD_PROPERTY_MISSING on omitted empty arrays."
+  },
+  "class_closure": {
+    "I8-R5-GOV-EMPTY-ENVFILES": "CLOSED_IN_SOURCE_AND_PARENT_PROOF",
+    "I8-R5-GOV-STAGE-ROLLBACK-FOREIGN": "CLOSED_IN_SOURCE_AND_SMOKE",
+    "I8-FINAL-LATE-PREPARE-ADMISSION": "REMAINS_CLOSED_UNCHANGED_WINDOW",
+    "I8-FINAL-RECOVER-ADMISSION": "REMAINS_CLOSED_UNCHANGED_WINDOW",
+    "R1_CONFIRMED_closed": [
+      "I8-R1-PATH",
+      "I8-R1-PERF",
+      "I8-R1-CACHE",
+      "I8-R1-PROOF",
+      "I8-R1-INGRESS",
+      "I8-R1-FENCE"
+    ],
+    "R1_REFUTED_stay_refuted": [
+      "I8-R1-IMMUTABLE",
+      "I8-R1-OID",
+      "I8-R1-SCHEMA",
+      "I8-R1-BASELINE",
+      "I8-R1-TIMER",
+      "I8-R1-LOCALTIMEOUT",
+      "I8-R1-AUTOPIPE",
+      "I8-R1-BASEUNIT"
+    ]
+  },
+  "verification_gaps": [
+    "This seat executed no executor, smoke, service, SSH, DB, lint, or test runner. Local hash/JSON/regex parsing of frozen artifacts and supplied proofs only.",
+    "Actual inventory is parent-executed via executed-systemd-inventory-driver.py.txt. This seat independently matched source SHA, allowlist, 69/18 counts, pairing, and systemd 249 encodings; it did not observe the remote process.",
+    "Governance smoke fakes systemd/process/HTTP/docker/git; private files are real. Not an actual unit start.",
+    "Preflight PREFLIGHT_OK does not call config() and is not staging.",
+    "14 CLI + 8 matrix + late-prepare RED/GREEN remain parent-run 7feb evidence, independently hash-verified, not re-executed."
+  ],
+  "residual_risks": [
+    "First live governance stage can still abort at unexercised production seams: real service start/audit/device-binding, Result=success/ExecMainStatus=0/no-critical receipt, concurrent foreign unit change after this inventory, installed wrapper/import origin.",
+    "Unknown prior executor state is not upgraded into empty fence history; fresh prepare remains required for proxy/fence_epochs.",
+    "Isolated 34.12s write and 168-point OLD/NEW workers remain prior unchanged proof, not a production write-time guarantee."
+  ],
+  "remaining_execution_gates": [
+    "Actual governance unit stage/audit on node27: new execution, Result=success, ExecMainStatus=0, no-critical receipt, actual PGDATA device binding; lock-skip is not success. New stage NOT retried until this final approval is consumed by parent.",
+    "window_execute prepare on production identity (OID 24541, GOV success, snapshots, proxy/fence_epochs history)",
+    "Fenced production window / 000059 / start_runtime NEW / four real NEW national routes with miss|bypass",
+    "Live systemd/ingress/yd/HOLD mutation still forbidden until those gates",
+    "Full I8b task 5.2 live/cross-day/actual-window/four-routes/P95/EXPLAIN/browser/lifecycle remain execution gates, not PASS",
+    "#1987 and #2280 stay open"
+  ],
+  "out_of_scope_escalations": [],
+  "non_blocking_notes": [
+    "This is an artifact-review approve of frozen f24c3fb37 vs approved 7feb, not production PASS.",
+    "Inventory wrapper proves published config() against real node27 systemd 249 output under a readonly allowlist; it does not prove Executor construction, staging, audit, or rollback on the host.",
+    "Smoke JSON has no literal PASS token; success is completing ten scenario assertions then printing checks. Appended git fetch footer after that JSON is capture noise, not a smoke defect."
+  ],
+  "scope_method": "Independent final gap-sweep of the current f24c3fb37 operational artifact against the clean R5 baseline. Inspected service-property/native-unit-resolution/config-drift/rollback/error-boundary plus whole-artifact compatibility. Typed empty cannot mask nonempty/unknown; foreign config remains untouched; unit permissions not broadened. Window/D12/source/admission/cache owners inherited from identical 7feb hashes. Did not repeat R5 comprehensive audit. Did not reopen six R1 CONFIRMED or eight R1 REFUTED classes."
+}

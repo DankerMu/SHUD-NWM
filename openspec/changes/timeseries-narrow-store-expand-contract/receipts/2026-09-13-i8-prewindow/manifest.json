@@ -1,0 +1,151 @@
+{
+  "date": "2026-09-13",
+  "issue": 1987,
+  "related_issue": 2280,
+  "status": "BLOCKED_BEFORE_T0",
+  "blocker_issue": 2100,
+  "tool_head": "f24c3fb37be392300052c0d0ebf0ee35366a4599",
+  "active_runtime_old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+  "approved_new_runtime_sha": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+  "review": {
+    "comprehensive_rounds": 5,
+    "final_round": "clean",
+    "independent_final": "approve",
+    "counter_reset": false,
+    "artifacts_sha256": {
+      "governance_stage.py": "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c",
+      "governance_smoke.py": "711d89eecdb449194c9ed217d28c2187e136e8d668c8ffc7da6c6bbbbaba6587",
+      "window_execute.py": "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
+      "window_smoke.py": "d760502a28d508cbb5cab67027625dcfd5f3d3ab62937a86d0959601299f367e"
+    }
+  },
+  "verification": {
+    "window_late_prepare_red_green": "Actual prepare post-snapshot pg_dump exit23, disk reload and real main: old six stop actions; fixed zero actions. Exact authoritative small selector independently returns168 points with the prior response digest.",
+    "window_cli_cases": 14,
+    "window_recovery_cases": 8,
+    "governance_smoke_cases": 10,
+    "actual_systemd_inventory": {
+      "commands": 69,
+      "config_entries": 18,
+      "scope": "read-only systemctl/busctl, published config owner"
+    },
+    "ruff": "PASS on changed executors/harnesses"
+  },
+  "governance": {
+    "phase": "staged",
+    "state_keys": [
+      "audit_digest",
+      "audit_started_ns",
+      "backups",
+      "configs",
+      "direction",
+      "env_digest",
+      "health",
+      "hold_digest",
+      "identity",
+      "old_failure",
+      "outcome",
+      "phase",
+      "pin_digest",
+      "previous_execution",
+      "service_result",
+      "timer",
+      "updated_at"
+    ],
+    "service_result": {
+      "ActiveState": "inactive",
+      "ExecMainExitTimestampMonotonic": "2156167964756",
+      "ExecMainStartTimestampMonotonic": "2156152734754",
+      "ExecMainStatus": "0",
+      "InvocationID": "8196756214c94c2dafa7d1d3ba22a872",
+      "Result": "success"
+    },
+    "audit_digest_recorded": "19102933a35f3e0cec059b0c62bed3180cf9db6a41d42e3d1e1459737af60fa3",
+    "audit_digest_actual": "19102933a35f3e0cec059b0c62bed3180cf9db6a41d42e3d1e1459737af60fa3",
+    "audit_keys": [
+      "execution_mode",
+      "filesystem",
+      "finished_at",
+      "paths",
+      "postgres",
+      "recommendations",
+      "safety",
+      "schema_version",
+      "started_at",
+      "status",
+      "systemd",
+      "working_set"
+    ],
+    "schema_version": "nhms.node27_resource_governance.audit.v1",
+    "status": "completed",
+    "execution_mode": "read_only_audit",
+    "critical_count": 0,
+    "paths": {
+      "object_store_root": "/home/ghdc/nwm/object-store",
+      "pgdata_root": "/data/GHDC/nhms-primary/pgdata",
+      "repo_root": "/home/nwm/NWM"
+    },
+    "working_set_filesystem": {
+      "blockers": [],
+      "device_identity": "9:0:7539273700150526131",
+      "path": "/data/GHDC/nhms-primary/pgdata",
+      "status": "ok"
+    },
+    "safety": {
+      "database_url_redacted": true,
+      "destructive_actions_enabled": false,
+      "notes": [
+        "This receipt is read-only.",
+        "It does not drop chunks, vacuum full, delete object-store artifacts, or modify systemd units."
+      ]
+    }
+  },
+  "governance_state_dir": "/home/nwm/.local/state/issue1987-governance-f24c3fb37",
+  "retained_runtime": "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+  "environment_repair": {
+    "old_sha256": "ac86736512187cfc1f21b711a3573aba8df6756f7a66432f464ba81b4b9ee3fd",
+    "new_sha256": "eb8411b7bdb78a342a4b4c1f27cef2a6ce310eb9b2b7f423eabbc5cdf498baef",
+    "scope": "Only NODE27_GOVERNANCE_PGDATA_ROOT assignment; all other bytes and mode/owner preserved",
+    "backup": "/home/nwm/.local/state/issue1987-governance-7feb32fbe/env-before-private.env"
+  },
+  "prepare": {
+    "state": "/home/nwm/.local/state/issue1987-window-f24c3fb37-run",
+    "input_bundle": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2",
+    "check": "REQUIRED_UNIT_NOT_ADMITTED",
+    "phase": "PREPARATION_FAILED",
+    "owned_process_exited": true,
+    "owned_child": null,
+    "t0_started": false,
+    "window_command_executed": false,
+    "source_changed": false,
+    "database_migration_executed": false,
+    "display_stopped": false,
+    "input_setup_corrections": "Separate fresh state from inputs; use opaque core.river_segment ID instead of guessed alias. No source changes."
+  },
+  "raw_retention_blocker": {
+    "unit": "nhms-node27-raw-retention.service",
+    "invocation": "4a8a082fc61444eebc0429514dab9816",
+    "at_utc": "2026-09-13T03:35:32Z",
+    "result": "exit-code",
+    "exit_status": 1,
+    "receipt": "/home/nwm/node27-raw-retention-logs/raw-retention-20260913T033532Z.json",
+    "counts": {
+      "planned": 34,
+      "deleted": 12,
+      "failed": 22,
+      "skipped": 123
+    },
+    "cause": "22 canonical directory deletions failed PermissionError: frd_muziyao:nfsdata 0755, no nwm write ACL",
+    "scheduled_deletions_not_by_this_session": true,
+    "existing_evidence_url": "https://github.com/DankerMu/SHUD-NWM/issues/2100#issuecomment-5651982328"
+  },
+  "unchanged_boundaries": [
+    "No reset-failed or admission weakening",
+    "No shared chmod/ACL/group/ownership change",
+    "No node22 mutation or cold activation",
+    "No foreign HOLD/YD changes",
+    "No raw-retention rerun or deletion by this session",
+    "No independent physical disaster-recovery claim"
+  ],
+  "remaining": "Task5.2 and #1987/#2280 remain open. Resolve #2100 under its own authority and prerequisites, obtain genuine successful retention receipt, then create fresh preparation. All post-window performance/lifecycle/browser/cross-day evidence remains pending."
+}

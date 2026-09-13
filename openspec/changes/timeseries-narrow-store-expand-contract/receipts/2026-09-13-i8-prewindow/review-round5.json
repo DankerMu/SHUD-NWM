@@ -1,0 +1,33 @@
+{
+  "round": 5,
+  "head": "f24c3fb37be392300052c0d0ebf0ee35366a4599",
+  "previous_clean": "7feb32fbec66a5130fbd6bb98bb077bb8b04ba9e",
+  "authorization": "governance-systemd-final-round-authorization.json; user \u4fee\u590d\u5e76\u8fdb\u884c\u6700\u540e\u4e00\u8f6e\u5ba1\u6838",
+  "counter_reset": false,
+  "lenses": [
+    "correctness+integration",
+    "invariant-state+security-perf",
+    "test-evidence+spec-compliance"
+  ],
+  "seats": [
+    "I8OpR5Full",
+    "I8OpR5State",
+    "I8OpR5Evidence"
+  ],
+  "artifacts": {
+    "governance_stage.py": "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c",
+    "governance_smoke.py": "711d89eecdb449194c9ed217d28c2187e136e8d668c8ffc7da6c6bbbbaba6587",
+    "window_execute.py": "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
+    "window_smoke.py": "d760502a28d508cbb5cab67027625dcfd5f3d3ab62937a86d0959601299f367e"
+  },
+  "proof": [
+    "../governance-systemd-smoke.txt",
+    "../actual-systemd-config-inventory.txt",
+    "../governance-systemd-final-preflight.txt",
+    "governance-live-property-diagnosis.json"
+  ],
+  "live_state": "Only reviewed PGDATA env assignment repaired with backup; actual previous stage refused before pin/timer mutation. New stage not retried; DB migration/API stop not started.",
+  "hard_limit": "No round6; notclean closes ordinaryloop and requires terminal gate disposition.",
+  "outcome": "clean",
+  "verified_findings": 0
+}

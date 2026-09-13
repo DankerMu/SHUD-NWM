@@ -213,6 +213,13 @@
   is superseded by private schema/route/runtime snapshots, preserved legacy facts and rehearsed D12.
   Preparation was explicitly merged before live/cross-day verification. No independent physical
   DR claim; keep 5.2 and #2280 open until actual evidence succeeds.
+  **2026-09-13 live admission:** `receipts/2026-09-13-i8-prewindow/manifest.json` records
+  the reviewed execution tools, successful real governance staging (fresh audit, zero criticals,
+  correct primary-device binding), and the actual preparation refusal before T0.
+  `nhms-node27-raw-retention.service` remains failed because of the existing canonical deletion
+  permission boundary #2100. No window migration or display stop occurred. Preserve the owned
+  governance pin/runtime; resolve #2100 under its own authority and obtain a genuine successful
+  retention receipt before fresh preparation. Do not reset failed state or weaken admission.
   **5.1 evidence:** `receipts/2026-09-12-i8-rollback/` records actual OLD parser/reader
   `5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c` and NEW runtime
   `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb` on node-27's exact production-image
