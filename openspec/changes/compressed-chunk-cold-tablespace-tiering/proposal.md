@@ -79,7 +79,11 @@ every index move together, not merely the near-empty origin chunk shell.
 - #2290: physical-parent admission, all catalog/runtime/census/post-target callers,
   distinct wide/narrow fixtures, identity-bound inventory digests and isolated
   rename/replacement proof; detailed fixture in `fixtures/issue-2290.md`.
-- #2291: dependent reviewed-count/baseline cutover and G3 population alignment,
-  without per-tick/time-budget expansion or production execution.
+- #2291: dependent reviewed-count/baseline cutover and G3 population alignment;
+  explicit N in 1..63 is frozen with the original private census's held-byte SHA,
+  validated once and passed through every readiness consumer. Preserve semantic
+  digest/wire meanings and separate natural newly-terminal sets. Detailed risk
+  and evidence contract: `fixtures/issue-2291.md`; no per-tick/time-budget
+  expansion or production execution.
 - No row-schema migration, public API change, TimescaleDB/PostgreSQL upgrade,
   node-22 scheduling change, or archive-lane restoration.

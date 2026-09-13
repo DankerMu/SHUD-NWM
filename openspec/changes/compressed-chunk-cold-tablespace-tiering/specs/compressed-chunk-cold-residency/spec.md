@@ -672,8 +672,8 @@ census, probe, install, movement, live C1-C4 or timer operation SHALL occur, and
 no local, mock, historical or CI evidence SHALL be described as live PASS.
 
 The census SHALL use production catalog, inventory and parity owners without
-requiring the not-yet-created cold target. Historical six SHALL be only a fresh
-count expectation, never a reusable key set or selector. Every C1-C3/G8
+requiring the not-yet-created cold target. Historical six SHALL NOT supply the
+reviewed count, reusable key set or selector. Every C1-C3/G8
 acceptance owner SHALL fail closed on missing or mismatched required input,
 reviewed SHA, invocation bracket, identity or digest and on stale, partial,
 secret-bearing or unapproved private-path evidence. Private receipt publication
@@ -715,6 +715,58 @@ fallback SHALL NOT satisfy this acceptance chain.
 - **WHEN** canonical readonly validation is imported or patched and when a changed G0 surface is selected for CI
 - **THEN** existing public/patch seams remain observable and all relevant assertion-bearing test partitions execute rather than degrading to collect-only
 
+### Requirement: Reviewed cardinality MUST remain bound to the frozen original census
+
+The explicit reviewed count N SHALL be canonical decimal 1..63 at CLI boundaries
+and a strict integer, excluding bool, in original census count fields. No default,
+historical-six fallback, observation-derived expectation or oldest-N truncation
+SHALL exist. G1 SHALL validate its successful private same-run original against N,
+reviewed SHA and its command bracket and freeze N plus the existing held-reader
+whole-file SHA-256 in the existing exclusive private policy. Existing semantic
+census digest and receipt wire meanings SHALL remain unchanged.
+
+Later original loaders SHALL verify the independently frozen file hash and
+reviewed SHA before consuming original required count; resolved/config counts,
+raw unique ordered keys/groups, durable identities and canonical string capacity
+count SHALL agree. Map construction SHALL NOT hide duplicates. Current evidence
+SHALL NOT supply expected original hash or N. G5/G6/G8 helpers SHALL receive the
+validated N explicitly and retain digest/parity/private-file/bracket checks,
+one-group sequential suffix semantics and distinct natural newly-terminal sets.
+
+G3 SHALL observe current eligible physical parents through the shared catalog
+owners, exclude legacy/third tables at admission and refuse invalid admitted
+groups rather than filtering them to match N. It SHALL preserve extra visibility,
+actual ranges and all resource limits without rerunning full parity or returning
+baseline N as an observation. Every approved measured byte value SHALL contribute
+to unchanged E/S/reserve/rollback arithmetic. Count-only success or unavailable
+narrow river proof SHALL NOT constitute parent live acceptance.
+
+#### Scenario: Non-six original authority traverses every gate
+
+- **WHEN** a complete successful original contains reviewed N distinct groups
+- **THEN** G5, every G6 call from 1 through N and G8 consume the same frozen N and
+  identities, with per-tick bound one and independent newly-terminal semantics
+
+#### Scenario: Changed or malformed original authority refuses
+
+- **WHEN** count fields disagree, a group is duplicated/missing/extra/replaced,
+  ordering or parity drifts, or the original is self-consistently rewritten
+- **THEN** the affected gate refuses against the original frozen hash/count/set
+  before observation or mutation, without recomputing its expected authority
+
+#### Scenario: Supported boundary counts do not waive resource limits
+
+- **WHEN** reviewed input is 1 or 63 and complete serialized artifacts fit limits
+- **THEN** public consumers accept the count unchanged; malformed or over-bound
+  counts and oversized artifacts refuse without truncation or budget expansion
+
+#### Scenario: Independent count excludes unrelated populations and detects extras
+
+- **WHEN** admitted narrow/forcing origins have differing actual ranges alongside
+  compressed legacy/third-table origins, and an extra admitted origin appears
+- **THEN** the pinned-engine census and independent count use only admitted
+  origins, and the extra is detected rather than truncated into agreement
+
 ### Requirement: Live rollout MUST preserve data, hot placement, display behavior and performance
 
 Before node-27 access, the rollout SHALL commit and review an executable live
@@ -741,14 +793,14 @@ The rollout SHALL freeze the exact reviewed head and pre-mutation container,
 cluster/catalog, group identity, row-count/checksum, dual-filesystem and public
 API baselines. The six compressed groups observed on 2026-08-29 SHALL be treated
 as a historical count, not as reusable group identity. Before mutation, a census
-that does not require the absent cold target SHALL resolve exactly six complete
+that does not require the absent cold target SHALL resolve exactly the externally reviewed N complete
 eligible source groups and bind every durable origin/window key, current
 compressed sibling, member digest, production inventory/parity,
 `before_compression_total_bytes`, and retained-source bytes. Missing, extra or
 unexplained count/identity drift SHALL terminate the window as NO-GO rather than
 selecting an arbitrary subset.
 
-Let `E` be the checked positive maximum of the six expansion values and `S` the
+Let `E` be the checked positive maximum of all N expansion values and `S` the
 checked positive sum of their retained-source bytes. With checked non-overflowing
 canonical decimals, the rollout SHALL configure `cold_reserve=E`,
 `wal_reserve=E`, `install_required=S`, and `rollback_headroom=2*E`.
@@ -765,7 +817,7 @@ oracle and prove a complete `nhms_cold` move, inverse `pg_default` move-back,
 parity and owned-resource cleanup, followed by live read-only compatibility
 checks. The rollout SHALL then quiesce writers and conflicting lifecycle
 operations, install the fresh target only through the reviewed #1894 installer,
-and re-census the same six keys and complete-source preimages with no unexplained
+and re-census the same N keys and complete-source preimages with no unexplained
 extra eligible group before the first movement SQL.
 
 Enforce SHALL use `PER_TICK_BOUND=1` and SHALL issue only one invocation at a
@@ -822,9 +874,9 @@ post-merge archival after final strict validation.
 #### Scenario: Historical baseline is rebound before mutation
 
 - **WHEN** the fresh preflight census runs before the first live mutation
-- **THEN** it resolves exactly six complete eligible source groups and records every durable key, member/inventory/parity and capacity input, or ends the window as NO-GO without choosing an arbitrary six
+- **THEN** it resolves exactly the externally reviewed N complete eligible source groups and records every durable key, member/inventory/parity and capacity input, or ends the window as NO-GO without choosing an arbitrary N or deriving N from the observation
 
-#### Scenario: Capacity inputs derive from the same six-group preimage
+#### Scenario: Capacity inputs derive from the same reviewed-N group preimage
 
 - **WHEN** the rollout freezes the installer and runner capacity values
 - **THEN** it checks positive non-overflowing `E` and `S`, records `cold_reserve=E`, `wal_reserve=E` as a live-expansion proxy rather than a WAL measurement, `install_required=S`, `rollback_headroom=2*E`, and rejects historical or disposable values as substitutes
@@ -842,11 +894,11 @@ post-merge archival after final strict validation.
 #### Scenario: Post-install census is unchanged before movement
 
 - **WHEN** the fresh target is installed and the first movement is about to start
-- **THEN** the same six keys remain complete source with matching inventory/parity and no unexplained extra eligible key, or movement remains zero, rollout is NO-GO, and the terminally installed topology remains preserved
+- **THEN** the same N keys remain complete source with matching inventory/parity and no unexplained extra eligible key, or movement remains zero, rollout is NO-GO, and the terminally installed topology remains preserved
 
 #### Scenario: Existing eligible groups migrate with data parity
 
-- **WHEN** the controlled rollout processes the six census-bound baseline compressed groups with one invocation per group
+- **WHEN** the controlled rollout processes the N census-bound baseline compressed groups with one invocation per group
 - **THEN** every invocation is current-run-bound, every complete group is cold with no mixed member, row count/identity/aggregate checksum and representative query results match before/after, and filesystem deltas reconcile against relation bytes before the next invocation
 
 #### Scenario: Hot window remains writable and hot
