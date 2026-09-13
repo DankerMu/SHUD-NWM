@@ -1,0 +1,172 @@
+{
+  "maintenance_output": {
+    "rows": [
+      {
+        "analyze_threshold": 7344103.600000001,
+        "last_analyze_age_seconds": 3727.906296,
+        "last_autoanalyze_age_seconds": 5545.264402,
+        "last_autovacuum_age_seconds": 90.763916,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 73440538,
+        "n_mod_since_analyze": 9106500,
+        "relation": "_hyper_3_113_chunk",
+        "relpages": 2501854,
+        "reltuples": 73440536.0,
+        "schema": "_timescaledb_internal",
+        "vacuum_threshold": 14688157.200000001
+      },
+      {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "basin",
+        "relpages": 0,
+        "reltuples": -1.0,
+        "schema": "core",
+        "vacuum_threshold": 50.0
+      },
+      {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 1,
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "mesh_version",
+        "relpages": 0,
+        "reltuples": -1.0,
+        "schema": "core",
+        "vacuum_threshold": 50.0
+      },
+      {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 9,
+        "n_live_tup": 1,
+        "n_mod_since_analyze": 15,
+        "relation": "dimension_slice",
+        "relpages": 0,
+        "reltuples": -1.0,
+        "schema": "_timescaledb_catalog",
+        "vacuum_threshold": 50.0
+      },
+      {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 8,
+        "n_mod_since_analyze": 8,
+        "relation": "audit_log",
+        "relpages": 0,
+        "reltuples": -1.0,
+        "schema": "ops",
+        "vacuum_threshold": 50.0
+      },
+      {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 4,
+        "n_mod_since_analyze": 4,
+        "relation": "schema_migrations",
+        "relpages": 0,
+        "reltuples": -1.0,
+        "schema": "public",
+        "vacuum_threshold": 50.0
+      }
+    ],
+    "status": "ok",
+    "summary": {
+      "max_last_autoanalyze_age_seconds": 165.093419,
+      "max_last_autovacuum_age_seconds": 90.771729,
+      "over_analyze_threshold_count": 1,
+      "over_vacuum_threshold_count": 0,
+      "relation_count": 76
+    }
+  },
+  "maintenance_recommendations": [
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "core.basin",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "core.mesh_version",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 1,
+        "n_mod_since_analyze": 15,
+        "relation": "_timescaledb_catalog.dimension_slice",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 8,
+        "n_mod_since_analyze": 8,
+        "relation": "ops.audit_log",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 4,
+        "n_mod_since_analyze": 4,
+        "relation": "public.schema_migrations",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    }
+  ],
+  "postgres_status": "ok"
+}

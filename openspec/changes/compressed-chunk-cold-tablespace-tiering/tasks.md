@@ -28,6 +28,11 @@ does not authorize retirement, and disabling a lane is not code retirement.
   available-space binding, unknown/conflict refusal, bounded observations and
   `/data/GHDC` observation. Remove cold inventory/topology/history/receipt
   branches, `--cold-governance-*` inputs and `cold_tablespace_governance` output.
+  Preserve the subsequently merged #2277/#1769 maintenance-output collection,
+  effective thresholds, freshness/unavailable recommendations and behavioral
+  tests when extracting this sampler; these are ordinary governance, not
+  cold-only inventory. This does not assert production deployment or close
+  any remaining maintenance/recovery duty.
 - [ ] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
   procedure in `docs/runbooks/tier-node27-timeseries-storage.md` must own its
   generic SQL/API/browser/ingest workload and evidence instructions rather than

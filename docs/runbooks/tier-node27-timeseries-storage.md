@@ -5915,6 +5915,37 @@ Lock/statement timeout leaves the window stopped. Inspect ledger and physical
 catalog before a separately authorized retry; the runner autocommits per
 statement and earlier pending files are not an all-files transaction.
 
+Runner session guard (#2277; the command above is unchanged and still valid):
+
+- The runner itself now bounds lock waits. `lock_timeout` precedence is
+  `NHMS_MIGRATE_LOCK_TIMEOUT` > a non-zero session value (the `PGOPTIONS`
+  above, or a role/database setting) > default `5s`. An explicit
+  `NHMS_MIGRATE_LOCK_TIMEOUT=0` is the only way to wait unboundedly; an empty
+  value counts as unset. `statement_timeout` has no default: it comes only
+  from `PGOPTIONS`/role settings or `NHMS_MIGRATE_STATEMENT_TIMEOUT`. An
+  invalid value exits 1 before any statement, naming the variable.
+- Before the first statement the receipt log carries exactly two lines, e.g.
+  with the window command above:
+  `Migration session lock_timeout=5s (source: client)` and
+  `Migration session statement_timeout=2min (source: client)`
+  (`source: session` = runner default/env; `client` = `PGOPTIONS`).
+- On `55P03` the runner prints the failing file, the error, the effective
+  `lock_timeout`, and up to 20 other sessions in this database with an open
+  transaction, oldest first (pid, usename, application_name, state,
+  wait_event_type, xact age, first 120 characters of the redacted query), then
+  exits 1 without recording the ledger row. It never retries or cancels. For a
+  non-superuser role the query text may read `<insufficient privilege>`. On
+  `57014` it names the effective `statement_timeout`. A failure of the
+  diagnostic itself prints `diagnostic unavailable: <class>` and keeps exit 1.
+- CONCURRENTLY footgun: `CREATE INDEX CONCURRENTLY` waits on old transactions
+  through the lock manager, so a lock timeout can leave an INVALID index that
+  `IF NOT EXISTS` skips on retry. Fresh bring-up/rebuilds still apply the
+  CONCURRENTLY files 000030–000054 under the default guard, and only 000052
+  self-heals its INVALID index. After any lock-timeout failure on a
+  CONCURRENTLY file, run
+  `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;` and drop
+  the listed index from that file before retrying.
+
 Before serving: confirm old canonical OID is now `_legacy`, new canonical OID
 differs, canonical has key/enum-only fact shape and one-day dimension, expected
 three indexes, key-form compression settings and owner `nhms_ingest_rw`.

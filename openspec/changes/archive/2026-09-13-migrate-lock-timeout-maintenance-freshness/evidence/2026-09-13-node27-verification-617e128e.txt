@@ -1,0 +1,79 @@
+# node-27 isolated checkout /home/nwm/NWM-issue-2277 @ 617e128e25224ed76d657e1081f83a00d8382dfc; disposable exact-image cluster nwm-it2277-scratch (image ad39c4fbc5c4, removed after run); production nhms only read via collect_postgres
+## run 1 (verify.log, secrets redacted by construction: password generation fell back to a fixed prefix because host openssl is broken -> one false-positive assertion collision with the probe filename; rerun below with a /dev/urandom password)
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              feat/issue-2277-migrate-lock-timeout -> FETCH_HEAD
+ * [new branch]        feat/issue-2277-migrate-lock-timeout -> origin/feat/issue-2277-migrate-lock-timeout
+Preparing worktree (detached HEAD 617e128e)
+Updating files:  96% (4053/4217)Updating files:  97% (4091/4217)Updating files:  98% (4133/4217)Updating files:  99% (4175/4217)Updating files: 100% (4217/4217)Updating files: 100% (4217/4217), done.
+HEAD is now at 617e128e fix(migrate): default lock_timeout guard + actionable lock diagnostics; governance autovacuum output-freshness check (#2277, #1769, #1770)
+HEAD is now at 617e128e fix(migrate): default lock_timeout guard + actionable lock diagnostics; governance autovacuum output-freshness check (#2277, #1769, #1770)
+Python 3.11.15
+openssl: /lib/x86_64-linux-gnu/libssl.so.3: version `OPENSSL_3.2.0' not found (required by openssl)
+openssl: /lib/x86_64-linux-gnu/libcrypto.so.3: version `OPENSSL_3.0.9' not found (required by openssl)
+openssl: /lib/x86_64-linux-gnu/libcrypto.so.3: version `OPENSSL_3.2.0' not found (required by openssl)
+21cba756c3ae23411e0ef405d88d1dcdf6046b83ac2a9dda10e19aad0ebb5ec8
+/var/run/postgresql:5432 - no response
+/var/run/postgresql:5432 - accepting connections
+== focused unit + integration pytest
+            if password:
+>               assert password not in out
+E               AssertionError: assert 'it2277_' not in 'Migration s...ore retry.\n'
+E                 
+E                 'it2277_' is contained here:
+E                   n: 999901_it2277_lock_probe.sql
+E                 ?          +++++++
+E                   canceling statement due to lock timeout
+E                   Lock wait exceeded effective lock_timeout=200ms.
+E                   Sessions in this database with an open transaction (oldest first, at most 20):...
+E                 
+E                 ...Full output truncated (2 lines hidden), use '-vv' to show
+
+tests/test_migrate_lock_timeout_integration.py:91: AssertionError
+1 failed, 218 passed in 8.67s
+rc_pytest=1
+== full history guarded main() on empty db
+NOTICE:  created role nhms_ingest_rw
+NOTICE:  created role nhms_download_rw
+rc_full=0
+Migration session lock_timeout=5s (source: session)
+Migration session statement_timeout=0 (source: default)
+Applied migration: 000001_extensions.sql
+Applied migration: 000059_river_timeseries_narrow_expand.sql
+Migrations complete: 53 applied, 0 skipped, 53 total.
+files=53
+ledger=53
+invalid_indexes=0
+== PGOPTIONS 30s kept (rerun, all skipped)
+Migration session lock_timeout=30s (source: client)
+Migration session statement_timeout=2min (source: client)
+Skipped migration: 000027_cycle_status_canonical_incomplete.sql
+Migrations complete: 0 applied, 53 skipped, 53 total.
+== invalid env
+Migration session configuration failed: Invalid NHMS_MIGRATE_LOCK_TIMEOUT='five-seconds': invalid value for parameter "lock_timeout": "five-seconds"
+rc_invalid=1
+== read-only governance audit against production (isolated checkout)
+prod_url_present=yes
+rc_live=0
+DONE
+
+## run 2 (pytest2.log)
+617e128e25224ed76d657e1081f83a00d8382dfc
+........................................................................ [ 32%]
+........................................................................ [ 65%]
+........................................................................ [ 98%]
+...                                                                      [100%]
+219 passed in 6.99s
+rc_pytest=0
+============================== 5 passed in 2.63s ===============================
+1
+DONE
+
+## full_migrate.log (head/tail)
+Migration session lock_timeout=5s (source: session)
+Migration session statement_timeout=0 (source: default)
+Applied migration: 000001_extensions.sql
+Applied migration: 000002_schemas.sql
+Applied migration: 000003_enums.sql
+Applied migration: 000058_hot_timeseries_chunk_interval_3d.sql
+Applied migration: 000059_river_timeseries_narrow_expand.sql
+Migrations complete: 53 applied, 0 skipped, 53 total.

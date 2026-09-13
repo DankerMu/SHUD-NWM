@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import jsonschema
@@ -825,3 +826,426 @@ def test_governance_lock_does_not_live_on_the_root_volume() -> None:
 
     assert 'LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-$LOG_ROOT/node27-resource-governance.lock}"' in text
     assert "/tmp/node27-resource-governance.lock" not in text
+
+
+# ---------------------------------------------------------------------------
+# #1769 / #1770 — autovacuum and autoanalyze judged by output, not configuration
+# ---------------------------------------------------------------------------
+
+_HOUR = 3600.0
+_DAY = 86400.0
+_MAINTENANCE_CODES = {
+    "TABLE_STATISTICS_STALE",
+    "TABLE_VACUUM_DEBT_STALE",
+    "AUTOVACUUM_OUTPUT_STALLED",
+    "MAINTENANCE_OUTPUT_UNAVAILABLE",
+    "TABLE_ZERO_STATISTICS",
+}
+# The pre-change recommendation sequence of `_base_receipt()`, read off the
+# existing builder; the maintenance check must append, never reorder or drop.
+_BASE_RECEIPT_EXISTING_CODES = [
+    "WORKING_SET_FILESYSTEM_UNAVAILABLE",
+    "PGDATA_USAGE_UNAVAILABLE",
+    "ROOT_FREE_BELOW_CRITICAL",
+    "HOME_FREE_BELOW_WARNING",
+    "DATABASE_SIZE_ABOVE_WARNING",
+    "TEMP_SPILL_LOGGING_DISABLED",
+    "TIMESCALE_RETENTION_POLICY_MISSING",
+    "TIMESCALE_COMPRESSION_POLICY_MISSING",
+    "HYPERTABLE_INDEX_RATIO_HIGH",
+    "DEAD_TUPLE_HOTSPOT",
+]
+
+
+def _maintenance_row(schema: str = "core", relation: str = "river_segment", **fields: object) -> dict:
+    row: dict = {
+        "schema": schema,
+        "relation": relation,
+        "relpages": 100,
+        "reltuples": 1000.0,
+        "n_live_tup": 1000,
+        "n_dead_tup": 0,
+        "n_mod_since_analyze": 0,
+        "vacuum_threshold": 250.0,
+        "analyze_threshold": 150.0,
+        "last_autovacuum_age_seconds": 600.0,
+        "last_vacuum_age_seconds": None,
+        "last_autoanalyze_age_seconds": 600.0,
+        "last_analyze_age_seconds": None,
+    }
+    row.update(fields)
+    return row
+
+
+def _river_segment_1769(**fields: object) -> dict:
+    # reloptions threshold 500 / scale 0.01 over reltuples 209126 -> 2591.26.
+    historical = {
+        "relpages": 127782,
+        "reltuples": 209126.0,
+        "n_live_tup": 209126,
+        "n_mod_since_analyze": 94380,
+        "analyze_threshold": 500 + 0.01 * 209126,
+        "vacuum_threshold": 50 + 0.2 * 209126,
+        "last_autoanalyze_age_seconds": None,
+        "last_analyze_age_seconds": 3.5 * _DAY,
+        "last_autovacuum_age_seconds": 10 * 60.0,
+    }
+    return _maintenance_row(**{**historical, **fields})
+
+
+def _maintenance_section(rows: list, *, max_autoanalyze: object = 600.0, max_autovacuum: object = 600.0) -> dict:
+    return {
+        "status": "ok",
+        "summary": {
+            "max_last_autoanalyze_age_seconds": max_autoanalyze,
+            "max_last_autovacuum_age_seconds": max_autovacuum,
+            "over_vacuum_threshold_count": 0,
+            "over_analyze_threshold_count": 0,
+            "relation_count": 80,
+        },
+        "rows": rows,
+    }
+
+
+def _healthy_receipt(maintenance_output: object = None, *, postgres_status: str = "ok") -> dict:
+    """A receipt with no pre-existing finding, so maintenance findings stand alone."""
+    postgres: dict = {"status": postgres_status}
+    if maintenance_output is not None:
+        postgres["maintenance_output"] = maintenance_output
+    return {
+        "schema_version": governance.SCHEMA_VERSION,
+        "status": "completed",
+        "execution_mode": "read_only_audit",
+        "filesystem": {
+            "filesystems": {"root": {"free_bytes": 900 * governance.GIB}, "home": {"free_bytes": 900 * governance.GIB}},
+            "path_sizes": {"pgdata_root": {"status": "ok", "bytes": 10}},
+        },
+        "working_set": {
+            "projection_status": "ok",
+            "working_set_filesystem": {"status": "ok", "path": "/data/GHDC", "device_identity": "8:12", "blockers": []},
+            "working_set_free_bytes": 900 * governance.GIB,
+            "uncompressed_bytes": 1,
+            "projected_peak_bytes": 1,
+        },
+        "postgres": postgres,
+    }
+
+
+def _maintenance_findings(receipt: dict) -> list[dict]:
+    return [
+        item
+        for item in governance._recommendations(receipt, governance.AuditThresholds())
+        if item["code"] in _MAINTENANCE_CODES
+    ]
+
+
+def test_maintenance_thresholds_default_to_the_1769_criterion() -> None:
+    thresholds = governance.AuditThresholds()
+    assert thresholds.maintenance_stale_multiplier == 10
+    assert thresholds.maintenance_stale_age_seconds == 86400
+
+
+def test_healthy_receipt_has_no_recommendation_at_all() -> None:
+    receipt = _healthy_receipt(_maintenance_section([]))
+    assert governance._recommendations(receipt, governance.AuditThresholds()) == []
+
+
+def test_1769_river_segment_row_is_statistics_stale() -> None:
+    findings = _maintenance_findings(_healthy_receipt(_maintenance_section([_river_segment_1769()])))
+
+    assert [(item["severity"], item["code"]) for item in findings] == [("warning", "TABLE_STATISTICS_STALE")]
+    evidence = findings[0]["evidence"]
+    assert evidence["relation"] == "core.river_segment"
+    assert evidence["ratio"] == 36.4
+    assert evidence["n_mod_since_analyze"] == 94380
+    assert evidence["last_autoanalyze_age_seconds"] is None
+    assert evidence["last_analyze_age_seconds"] == 3.5 * _DAY
+
+
+def test_decimal_database_values_are_judged_like_floats() -> None:
+    row = _river_segment_1769(
+        reltuples=Decimal("209126"),
+        n_mod_since_analyze=Decimal("94380"),
+        analyze_threshold=Decimal("2591.26"),
+        last_analyze_age_seconds=Decimal("302400.5"),
+    )
+    findings = _maintenance_findings(_healthy_receipt(_maintenance_section([row])))
+
+    assert [item["code"] for item in findings] == ["TABLE_STATISTICS_STALE"]
+    assert findings[0]["evidence"]["ratio"] == 36.4
+
+
+def test_freshly_autoanalyzed_row_has_no_finding() -> None:
+    row = _river_segment_1769(n_mod_since_analyze=0, last_autoanalyze_age_seconds=10 * 60.0)
+    assert _maintenance_findings(_healthy_receipt(_maintenance_section([row]))) == []
+
+
+def test_recent_output_suppresses_the_warning_even_when_counts_are_high() -> None:
+    row = _river_segment_1769(last_autoanalyze_age_seconds=2 * _HOUR)
+    assert _maintenance_findings(_healthy_receipt(_maintenance_section([row]))) == []
+
+
+def test_manually_analyzed_table_that_is_stale_again_still_warns() -> None:
+    row = _maintenance_row(
+        relation="model_instance",
+        analyze_threshold=100.0,
+        n_mod_since_analyze=2000,
+        last_autoanalyze_age_seconds=None,
+        last_analyze_age_seconds=5 * _DAY,
+    )
+    findings = _maintenance_findings(_healthy_receipt(_maintenance_section([row])))
+
+    assert [(item["severity"], item["code"]) for item in findings] == [("warning", "TABLE_STATISTICS_STALE")]
+    assert findings[0]["evidence"]["ratio"] == 20.0
+
+
+def _met_station_0820() -> dict:
+    vacuum_threshold = 50 + 0.2 * 42029
+    return _maintenance_row(
+        schema="met",
+        relation="met_station",
+        reltuples=42029.0,
+        n_live_tup=42029,
+        n_dead_tup=round(65.9 * vacuum_threshold),
+        vacuum_threshold=vacuum_threshold,
+        last_autovacuum_age_seconds=67 * _HOUR,
+        last_autoanalyze_age_seconds=61 * _HOUR,
+    )
+
+
+def test_0820_database_wide_silence_is_critical_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _healthy_receipt(
+        _maintenance_section([_met_station_0820()], max_autoanalyze=61 * _HOUR, max_autovacuum=67 * _HOUR)
+    )
+    receipt["recommendations"] = governance._recommendations(receipt, governance.AuditThresholds())
+    findings = [item for item in receipt["recommendations"] if item["code"] in _MAINTENANCE_CODES]
+
+    assert [(item["severity"], item["code"]) for item in findings] == [
+        ("warning", "TABLE_VACUUM_DEBT_STALE"),
+        ("critical", "AUTOVACUUM_OUTPUT_STALLED"),
+    ]
+    assert findings[0]["evidence"]["relation"] == "met.met_station"
+    assert findings[0]["evidence"]["ratio"] == 65.9
+    assert findings[1]["evidence"]["stalled_outputs"] == ["autovacuum"]
+    assert findings[1]["evidence"]["max_last_autovacuum_age_seconds"] == 67 * _HOUR
+
+    summary_path = tmp_path / "resource-governance.json"
+    rc, out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+    assert rc == 1
+    assert err.splitlines() == [f"{_CRITICAL_ANCHOR}AUTOVACUUM_OUTPUT_STALLED"]
+    assert out == ""
+    assert json.loads(summary_path.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_stale_warning_with_fresh_output_maxima_is_warning_only_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _healthy_receipt(
+        _maintenance_section([_met_station_0820()], max_autoanalyze=10 * 60.0, max_autovacuum=10 * 60.0)
+    )
+    receipt["recommendations"] = governance._recommendations(receipt, governance.AuditThresholds())
+
+    assert [(item["severity"], item["code"]) for item in receipt["recommendations"]] == [
+        ("warning", "TABLE_VACUUM_DEBT_STALE")
+    ]
+    rc, _out, err = _run_main(monkeypatch, capsys, receipt, tmp_path / "resource-governance.json")
+    assert rc == 0
+    assert err == ""
+
+
+def test_autoanalyze_only_silence_is_critical_while_autovacuum_runs() -> None:
+    receipt = _healthy_receipt(
+        _maintenance_section([_river_segment_1769()], max_autoanalyze=61 * _HOUR, max_autovacuum=10 * 60.0)
+    )
+    findings = _maintenance_findings(receipt)
+
+    assert [(item["severity"], item["code"]) for item in findings] == [
+        ("warning", "TABLE_STATISTICS_STALE"),
+        ("critical", "AUTOVACUUM_OUTPUT_STALLED"),
+    ]
+    assert findings[1]["evidence"]["stalled_outputs"] == ["autoanalyze"]
+
+
+def test_vacuum_silence_alone_does_not_escalate_analyze_stale_rows() -> None:
+    receipt = _healthy_receipt(
+        _maintenance_section([_river_segment_1769()], max_autoanalyze=10 * 60.0, max_autovacuum=61 * _HOUR)
+    )
+    assert [item["code"] for item in _maintenance_findings(receipt)] == ["TABLE_STATISTICS_STALE"]
+
+
+def test_never_produced_output_maxima_count_as_silent() -> None:
+    receipt = _healthy_receipt(_maintenance_section([_met_station_0820()], max_autoanalyze=None, max_autovacuum=None))
+    assert [item["severity"] for item in _maintenance_findings(receipt)] == ["warning", "critical"]
+
+
+def test_core_basin_zero_statistics_is_info_only() -> None:
+    row = _maintenance_row(
+        relation="basin",
+        relpages=0,
+        reltuples=-1.0,
+        n_live_tup=18,
+        n_dead_tup=0,
+        n_mod_since_analyze=19,
+        vacuum_threshold=50.0,
+        analyze_threshold=50.0,
+        last_autovacuum_age_seconds=None,
+        last_autoanalyze_age_seconds=None,
+        last_analyze_age_seconds=None,
+    )
+    findings = _maintenance_findings(
+        _healthy_receipt(_maintenance_section([row], max_autoanalyze=61 * _HOUR, max_autovacuum=67 * _HOUR))
+    )
+
+    assert [(item["severity"], item["code"]) for item in findings] == [("info", "TABLE_ZERO_STATISTICS")]
+    assert findings[0]["evidence"]["relation"] == "core.basin"
+
+
+def test_probe_error_is_exactly_one_unavailable_warning_and_keeps_existing_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    error_section = {"status": "error", "error": "QueryCanceled"}
+    base = _base_receipt()
+    base["postgres"]["maintenance_output"] = error_section
+    codes = [item["code"] for item in governance._recommendations(base, governance.AuditThresholds())]
+
+    assert codes == [*_BASE_RECEIPT_EXISTING_CODES, "MAINTENANCE_OUTPUT_UNAVAILABLE"]
+
+    receipt = _healthy_receipt(error_section)
+    receipt["recommendations"] = governance._recommendations(receipt, governance.AuditThresholds())
+    assert receipt["recommendations"] == [
+        {
+            "severity": "warning",
+            "area": "postgres",
+            "code": "MAINTENANCE_OUTPUT_UNAVAILABLE",
+            "evidence": {"status": "error", "error": "QueryCanceled"},
+            "action": receipt["recommendations"][0]["action"],
+        }
+    ]
+    rc, _out, err = _run_main(monkeypatch, capsys, receipt, tmp_path / "resource-governance.json")
+    assert rc == 0
+    assert err == ""
+
+
+def test_healthy_probe_leaves_existing_code_sequence_unchanged() -> None:
+    base = _base_receipt()
+    base["postgres"]["maintenance_output"] = _maintenance_section([])
+    codes = [item["code"] for item in governance._recommendations(base, governance.AuditThresholds())]
+    assert codes == _BASE_RECEIPT_EXISTING_CODES
+
+
+@pytest.mark.parametrize(
+    "section",
+    (
+        None,
+        "not-a-mapping",
+        {"status": "ok", "rows": []},
+        {"status": "ok", "summary": {}, "rows": []},
+        {
+            "status": "ok",
+            "summary": {"max_last_autoanalyze_age_seconds": "1h", "max_last_autovacuum_age_seconds": 1.0},
+            "rows": [],
+        },
+        {
+            "status": "ok",
+            "summary": {"max_last_autoanalyze_age_seconds": 1.0, "max_last_autovacuum_age_seconds": 1.0},
+            "rows": "not-a-list",
+        },
+        {"status": "skipped"},
+    ),
+    ids=("missing", "non-mapping", "no-summary", "empty-summary", "string-age", "rows-not-list", "status-not-ok"),
+)
+def test_malformed_or_missing_probe_is_unavailable_not_green(section: object) -> None:
+    findings = _maintenance_findings(_healthy_receipt(section))
+    assert [(item["severity"], item["code"]) for item in findings] == [("warning", "MAINTENANCE_OUTPUT_UNAVAILABLE")]
+
+
+def test_postgres_not_ok_emits_no_maintenance_finding() -> None:
+    receipt = _healthy_receipt({"status": "error", "error": "QueryCanceled"}, postgres_status="blocked")
+    assert _maintenance_findings(receipt) == []
+
+
+def test_malformed_rows_are_skipped_without_raising() -> None:
+    rows = [
+        "not-a-mapping",
+        _maintenance_row(schema=None),
+        _river_segment_1769(n_mod_since_analyze="94380"),
+        _river_segment_1769(analyze_threshold=None),
+        _river_segment_1769(last_analyze_age_seconds="3.5 days"),
+        _river_segment_1769(n_mod_since_analyze=True),
+        _river_segment_1769(analyze_threshold=float("nan")),
+        _river_segment_1769(relation="valid"),
+    ]
+    findings = _maintenance_findings(_healthy_receipt(_maintenance_section(rows)))
+
+    assert [(item["code"], item["evidence"]["relation"]) for item in findings] == [
+        ("TABLE_STATISTICS_STALE", "core.valid")
+    ]
+
+
+class _MaintenanceFakeCursor:
+    def __init__(self, fail_maintenance: bool) -> None:
+        self.fail_maintenance = fail_maintenance
+        self._rows: list = []
+
+    def __enter__(self) -> _MaintenanceFakeCursor:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        import psycopg2.errors
+
+        self._rows = []
+        if "WITH rel AS" in sql:
+            if self.fail_maintenance:
+                raise psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+            if "max_last_autovacuum_age_seconds" in sql:
+                self._rows = [{"max_last_autovacuum_age_seconds": 1.0, "max_last_autoanalyze_age_seconds": 2.0}]
+            else:
+                self._rows = [{"schema": "core", "relation": "basin"}]
+        elif "FROM pg_tablespace" in sql and "spcname = 'nhms_cold'" in sql and "location" in sql:
+            self._rows = [{"tablespace": "nhms_cold", "location": "/cold"}]
+
+    def fetchall(self) -> list:
+        return self._rows
+
+
+class _MaintenanceFakeConnection:
+    def __init__(self, fail_maintenance: bool) -> None:
+        self.fail_maintenance = fail_maintenance
+        self.autocommit = False
+
+    def cursor(self) -> _MaintenanceFakeCursor:
+        return _MaintenanceFakeCursor(self.fail_maintenance)
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("fail_maintenance", (True, False), ids=("probe-error", "probe-ok"))
+def test_collect_postgres_isolates_maintenance_output_failure(
+    monkeypatch: pytest.MonkeyPatch, fail_maintenance: bool
+) -> None:
+    import psycopg2
+
+    from packages.common.node27_cold_governance_collection import collect_postgres
+
+    monkeypatch.setattr(psycopg2, "connect", lambda *_a, **_k: _MaintenanceFakeConnection(fail_maintenance))
+
+    result = collect_postgres("postgresql://user:pw@localhost/nhms")
+
+    assert result["status"] == "ok"
+    if fail_maintenance:
+        assert result["maintenance_output"] == {"status": "error", "error": "QueryCanceled"}
+    else:
+        assert result["maintenance_output"] == {
+            "status": "ok",
+            "summary": {"max_last_autovacuum_age_seconds": 1.0, "max_last_autoanalyze_age_seconds": 2.0},
+            "rows": [{"schema": "core", "relation": "basin"}],
+        }
+    for section in ("dead_tuple_hotspots", "external_pg_tblspc_targets", "cold_relation_by_tablespace"):
+        assert section in result
+    assert result["cold_tablespace"] == [{"tablespace": "nhms_cold", "location": "/cold"}]
