@@ -962,29 +962,3 @@ def test_no_ssh_paste_is_mistaken_for_local_execution() -> None:
     assert "bash -s <<'REMOTE'" in g0
     assert "heredoc body is executed" in g0
     assert "never in a local shell" in g0 or "Nothing in the heredoc body runs locally" in g0
-
-
-def _assert_bringup_checklist_g0_c4_contract(text: str) -> None:
-    prose = _norm(text)
-    assert re.search(r"#2137.{0,80}不访问\s*node-27", prose)
-    assert re.search(r"#2137.{0,80}不产.{0,24}live receipt", prose)
-    assert re.search(r"#2137.{0,40}先行合并", prose)
-    assert re.search(r"前置合并后.{0,48}#1895.{0,48}(node-27|27 实机)", prose)
-    assert re.search(r"C4.{0,80}只执行.{0,80}test:e2e:live-c4-display", prose)
-    assert re.search(r"e2e/monitoring\.spec\.ts.{0,24}不是 C4.{0,12}替代", prose)
-
-
-def test_bringup_checklist_requires_2137_merge_before_1895_and_c4_promoted_lane() -> None:
-    text = (REPO_ROOT / "docs/runbooks/node-27-bringup-checklist.md").read_text(encoding="utf-8")
-    _assert_bringup_checklist_g0_c4_contract(text)
-    for old, new in (
-        ("#2137 不访问 node-27，也不产 live receipt", "#2137 访问 node-27，也产 live receipt"),
-        ("先行合并", "后行合并"),
-        ("只有该前置合并后，#1895", "即使未合并，#1895"),
-        ("test:e2e:live-c4-display", "e2e/monitoring.spec.ts"),
-        ("不是 C4", "是 C4"),
-    ):
-        mutant = text.replace(old, new, 1)
-        assert mutant != text, old
-        with pytest.raises(AssertionError):
-            _assert_bringup_checklist_g0_c4_contract(mutant)

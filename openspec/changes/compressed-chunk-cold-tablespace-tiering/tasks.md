@@ -1,7 +1,8 @@
 # Mandatory selective-cold retirement — active implementation contract
 
-Status: proposed target only. This revision changes documentation/specification;
-the merged cold code remains present and retirement implementation is pending.
+Status: proposed target only. This revision updates documentation/specification
+and removes one obsolete bringup-checklist wording test and its private helper.
+The merged cold runtime remains present; runtime retirement is still pending.
 The sole executable retirement plan is this file. Old cold deployment approval
 does not authorize retirement, and disabling a lane is not code retirement.
 

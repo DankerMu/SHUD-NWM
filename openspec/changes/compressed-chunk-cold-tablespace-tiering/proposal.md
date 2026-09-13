@@ -6,8 +6,10 @@ and not a new general storage acceptance project. Shared functionality was
 placed in cold modules but is still used by PGDATA relocation, ordinary resource
 governance and manual verification; those consumers must survive the removal.
 
-This is a proposed target revision only. Cold code remains present; no removal,
-production operation, issue closure or archive is performed by this revision.
+This is a proposed target revision only. Cold runtime remains present; no runtime
+removal, production operation, issue closure or archive is performed here.
+The obsolete bringup-checklist wording test and its private helper are removed:
+they required the withdrawn #2137-before-#1895 cold rollout as current guidance.
 The completed delivery ledger and immutable evidence retain their historical
 meaning and cannot authorize the new retirement implementation.
 
