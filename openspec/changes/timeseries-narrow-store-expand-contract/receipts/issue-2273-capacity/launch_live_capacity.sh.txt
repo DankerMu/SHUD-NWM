@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# One-off #2273 audit launcher: no production config edits, secrets stay on node-27.
+set -euo pipefail
+umask 077
+REPO="${1:?private checkout required}"
+case "$REPO" in /home/nwm/tmp/issue-2273-*) ;; *) exit 2;; esac
+test "$(dirname "$REPO")" = /home/nwm/tmp
+test "$(readlink -f "$REPO")" = "$REPO"
+test -d "$REPO/.git"
+test ! -L "$REPO/.venv"
+SHA="${2:?runtime SHA required}"
+OUTPUT="${3:?exclusive evidence directory required}"
+readonly REPO SHA OUTPUT
+ENV_FILE=/home/nwm/NWM/infra/env/node27-resource-governance.env
+test -f "$ENV_FILE"
+test ! -L "$ENV_FILE"
+test "$(stat -c '%a' "$ENV_FILE")" = 600
+test "$(stat -c '%u' "$ENV_FILE")" = "$(id -u)"
+set -a
+. "$ENV_FILE"
+set +a
+: "${DATABASE_URL:?DATABASE_URL_MISSING}"
+export PATH="$HOME/.local/bin:$PATH"
+export TMPDIR=/home/nwm/tmp
+exec uv run --project "$REPO" python \
+  "$REPO/openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-2273-capacity/capture_live_capacity.py.txt" \
+  --repo "$REPO" --sha "$SHA" --output "$OUTPUT"

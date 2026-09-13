@@ -1,0 +1,162 @@
+[2026-09-12T16:50:22Z] OUT=/home/nwm/tmp/2162/out-20260912T165022Z BK=/home/nwm/nhms-unpin-backup-2162-20260912T165022Z
+[2026-09-12T16:50:22Z] == 1.1 baseline
+head=a8db554d branch=hotfix/node27-rollback-pre-2073 porcelain=0
+dep-diff-lines=0
+venv=Python 3.11.15
+display MainPID=1933082 uvicorn_8080_pids=[1933082 ] ActiveState=active cwd=/home/nwm/NWM-reslice-original-5a86841c cmd=/home/nwm/NWM-reslice-original-5a86841c/.venv/bin/python -m uvicorn apps.api.mai
+timer nhms-node27-raw-retention: { OnCalendar=*-*-* 03:35:00 UTC ; next_elapse=Sun 2026-09-13 11:35:00 CST } Sun 2026-09-13 11:35:00 CST 
+timer nhms-node27-timeseries-compression: { OnCalendar=*-*-* 04:25:00 UTC ; next_elapse=Sun 2026-09-13 12:25:00 CST } Sun 2026-09-13 12:25:00 CST 
+timer nhms-node27-timeseries-retention: { OnCalendar=*-*-* 05:15:00 UTC ; next_elapse=Sun 2026-09-13 13:15:00 CST } Sun 2026-09-13 13:15:00 CST 
+timer nhms-node27-resource-governance: { OnCalendar=*-*-* 04:10:00 UTC ; next_elapse=Sun 2026-09-13 12:10:00 CST } Sun 2026-09-13 12:10:00 CST 
+timer nhms-node27-download: { OnUnitActiveUSec=30min ; next_elapse=3w 3d 4h 54min 24.162ms } { OnBootUSec=5min ; next_elapse=5min }  
+timer nhms-node27-frontier-alert: { OnCalendar=*-*-* *:00/30:00 ; next_elapse=Sun 2026-09-13 01:00:00 CST } Sun 2026-09-13 01:00:00 CST 
+timer nhms-node27-autopipe: { OnUnitActiveUSec=10min ; next_elapse=3w 3d 4h 34min 22.128ms } { OnBootUSec=7min ; next_elapse=7min }  
+display env: NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt token_key=0
+yd :8081 pid=3163766 health=200
+cache locks=8520 pbf=8516 size=1.2G
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   71G   23G  76% /
+/dev/mapper/ubuntu--vg-home        1.7T  459G  1.1T  30% /home
+/dev/md0                            15T  1.8T   12T  14% /data/GHDC
+000056_hydro_run_parsed_at.sql|2026-09-12 11:31:55.725341+00
+000057_river_network_version_geometry_generation.sql|2026-09-12 11:31:56.411303+00
+000058_hot_timeseries_chunk_interval_3d.sql|2026-09-12 11:31:57.27682+00
+total 12
+drwx------ 2 nwm nwm 4096 Sep 12 13:49 .
+drwxrwxr-x 4 nwm nwm 4096 Sep 11 09:08 ..
+-rw------- 1 nwm nwm    0 Sep 12 13:49 resume-approved
+-rw------- 1 nwm nwm 3282 Sep 12 15:11 state.json
+hold resume-approved present=yes; 91-fences=0
+unit diff nhms-node27-raw-retention: 6 lines
+unit diff nhms-node27-timeseries-compression: 8 lines
+local  /api/v1/layers: 200 5790 0.002771
+public /api/v1/layers: 200 5790 0.091234
+local  river-network-national/5/25/12 (pre): 200 142594 0.010713 etag=W/"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83" cache=hit
+public offset=999999999 (pre, expect 500): 200 77 0.161631
+run_id sample=fcst_ifs_2026091112_dg_fa180301403c9833e11bfa933ffd5a27
+public pre hydro-national 9999-12-31T23:59:59-08:00: 500 21 0.148543
+public pre hydro/{run} 9999-12-31T23:59:59-08:00: 500 21 0.111531
+public pre hydro-national 0001-01-01T00:00:00+08:00: 500 21 0.153456
+public pre hydro/{run} 0001-01-01T00:00:00+08:00: 500 21 0.115053
+public pre hydro-national not-an-instant: 422 298 0.097115
+public pre hydro/{run} not-an-instant: 422 298 0.096641
+frontier-alert last: success Sun 2026-09-13 00:30:32 CST 
+[2026-09-12T16:50:23Z] == 1.3 stop writer timers
+settled after 10s: autopipe=inactive download=inactive
+autopipe per-tick log: /home/nwm/autopipe-logs/autopipe.log (139431320 bytes)
+[2026-09-12T16:50:23Z] == 1.4 backup -> /home/nwm/nhms-unpin-backup-2162-20260912T165022Z
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-display-api.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-autopipe.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-download.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/NWM/infra/env/display.env
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/NWM/infra/env/node27-ingest.env
+[2026-09-12T16:50:23Z] == 1.5 remove 8 pins, daemon-reload, mechanical diff
+unit gate: expected == after (8 units, 0 residual lines)
+env resource-governance: NODE27_RESOURCE_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
+env timeseries-compression: NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
+env timeseries-retention: NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM
+env cold-residency: NODE27_COLD_RESIDENCY_REPO_ROOT=/home/nwm/NWM
+remaining drop-ins under /home/nwm/.config/systemd/user: 0
+[2026-09-12T16:50:24Z] == 1.6 NHMS_DISPLAY_CACHE_WARM_TOKEN
+token source: /usr/bin/openssl rand -hex 32 (OpenSSL 3.0.2 15 Mar 2022 (Library: OpenSSL 3.0.2 15 Mar 2022))
+token: written to both, lines equal, modes=600 600
+[2026-09-12T16:50:24Z] == 1.7 install retention env + units
+retention env: regular file, 600, NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt, ENABLED/PLAN_ONLY lines commented
+[2026-09-12T16:50:24Z] == 1.8 restart display (systemd branch of start-display-api.sh, by hand)
+/health ok at 2026-09-12T16:50:27Z
+display MainPID=2186965 cwd=/home/nwm/NWM cmd=/home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 --workers 2 
+display env: NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt token_key=1
+smoke: basin_id=basins_wj
+yd :8081 pid=3163766 (before 3163766) health=200
+[2026-09-12T16:50:27Z] == 1.9 read-surface gate on :8080
+/api/v1/layers: 200 6073 0.608187
+/api/v1/runs: 200 58212 0.080986
+cycles: http=200 source=gfs cycle=2026-09-11T12:00:00Z vt=2026-09-11T12:00:00Z default_cycle=2026-09-11T12:00:00Z
+river-network-national/5/25/12: 200 142594 1.722165 etag=W/"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83" cache=miss
+hydro-national/q_down/2026-09-11T12:00:00Z/4/12/6: 200 1374104 7.115568 cache=miss
+hydro-national/gfs/2026-09-11T12:00:00Z/q_down/2026-09-11T12:00:00Z/4/12/6: 200 1374068 47.164427 cache=miss
+read-surface gate: zero 500
+[2026-09-12T16:51:24Z] == 1.10 prewarm lock counts (writers still stopped)
+before prewarm: locks=8520 pbf=8519
+prewarm rc=1 elapsed=43s token_unset_warnings=0
+{"requests_total":183,"failed_count":10,"cache_hits":2,"deadline_skipped":0,"elapsed_seconds":42.471,"tile_failed":0,"png_out_of_contract":0,"per_source":{"gfs":{"cycle":"2026-09-11T12:00:00Z","discharge_requests":65,"png_ok":0,"png_failed":5,"error":null},"ifs":{"cycle":"2026-09-11T12:00:00Z","discharge_requests":65,"png_ok":0,"png_failed":5,"error":null}}}
+     10   failure: status=404 error=HTTP 404 code=PRECIP_CYCLE_NOT_MIRRORED reason=mirror_root_unconfigured kind=png
+tile failures by class (from truncated failures[], exact only when failed_count<=20): 
+after prewarm: locks=8520 pbf=8690 (delta locks=0 pbf=171)
+lock gate: after <= before
+river-network-national/5/25/12 (2nd): 200 142594 0.010961 cache=hit
+[2026-09-12T16:52:07Z] == 1.11 plan-only first run
+plan-only rc=0 summary=/home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-20260912T165207Z.json
+{"status":"completed","execution_mode":"plan_only","counts":{"deleted":0,"failed":0,"planned":0,"skipped":0},"precip_root_untouched":"/home/nwm/.cache/nhms/mvt/precip","precip_paths":0,"retention_days":14,"cutoff":"2026-08-29T16:52:07Z"}
+[2026-09-12T16:52:07Z] == 1.12 enable timer
+Created symlink /home/nwm/.config/systemd/user/timers.target.wants/nhms-node27-mvt-cache-retention.timer → /home/nwm/.config/systemd/user/nhms-node27-mvt-cache-retention.timer.
+NEXT                        LEFT          LAST                        PASSED       UNIT                                     ACTIVATES
+Sun 2026-09-13 12:05:00 CST 11h left      n/a                         n/a          nhms-node27-mvt-cache-retention.timer    nhms-node27-mvt-cache-retention.service
+[2026-09-12T16:52:07Z] == 1.13 operator-started production tick
+production tick systemctl rc=0 unit=inactive result=success summary=/home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-20260912T165207Z.json
+[2026-09-12T16:52:08Z] RECORD: production tick wrote no new summary
+retention timer LastTriggerUSec= (empty => the summary above came from the operator start, not the timer)
+health criterion rc=0
+{"status":"completed","execution_mode":"production_execute","counts":{"deleted":0,"failed":0,"planned":0,"skipped":0},"skipped_by_reason":{}}
+[2026-09-12T16:52:07Z] node27-mvt-cache-retention: start summary=/home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-20260912T165207Z.json
+{"cache_root": "/home/nwm/.cache/nhms/mvt", "counts": {"deleted": 0, "failed": 0, "planned": 0, "skipped": 0}, "cutoff": "2026-08-29T16:52:07Z", "deleted": [], "enabled": true, "execution_mode": "production_execute", "failed": [], "finished_at": "2026-09-12T16:52:08Z", "freed_bytes": 0, "plan_only": false, "planned": [], "precip_root_untouched": "/home/nwm/.cache/nhms/mvt/precip", "reference_time": "2026-09-12T16:52:07Z", "retention_days": 14, "schema_version": "nhms.node27_mvt_cache_retention.production.v1", "skipped": [], "started_at": "2026-09-12T16:52:07Z", "status": "completed"}
+[2026-09-12T16:52:08Z] node27-mvt-cache-retention: done rc=0 elapsed_sec=1 summary=/home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-20260912T165207Z.json
+[2026-09-12T16:52:08Z] == 1.14 start writer timers
+[2026-09-12T16:52:08Z] writer timers started (EXIT trap or step 14)
+window: stop=2026-09-12T16:50:23Z restart_display=2026-09-12T16:50:24Z start=2026-09-12T16:52:08Z
+[2026-09-12T16:52:08Z] waiting for first natural autopipe tick from /home/nwm/NWM (<= 30 min)
+first tick: done Result=success ExecMainStartTimestamp=Sun 2026-09-13 00:52:08 CST ExecMainExitTimestamp=Sun 2026-09-13 00:52:18 CST 
+first tick ExecStart: { path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_autopipe_cron.sh
+tick log lines=687 seed_failed_import=0 token_unset=0 prewarm_rc_lines=1
+[2026-09-12T16:52:08Z] autopipe: start
+[2026-09-12T16:52:17Z] autopipe: phase=ingest elapsed_sec=9
+[2026-09-12T16:52:18Z] autopipe: phase=coverage_backstop elapsed_sec=1
+[2026-09-12T16:52:18Z] autopipe: national MVT prewarm (z=3,4,5)
+[2026-09-12T16:52:18Z] autopipe: MVT prewarm rc=0 (non-fatal)
+[2026-09-12T16:52:18Z] autopipe: phase=mvt_prewarm elapsed_sec=0
+[2026-09-12T16:52:18Z] autopipe: done rc=0 elapsed_sec=10
+{"requests_total":183,"failed_count":10,"cache_hits":173,"tile_failed":0,"png_failed":10}
+after first tick: locks=8520 pbf=8690
+nhms-node27-download first run after unpin: NOT OBSERVED in window (last start=Sun 2026-09-13 00:52:08 CST <= T_START=2026-09-12T16:52:08Z) -> 1.17
+nhms-node27-frontier-alert first run after unpin: NOT OBSERVED in window (last start=Sun 2026-09-13 00:30:32 CST <= T_START=2026-09-12T16:52:08Z) -> 1.17
+[2026-09-12T16:52:28Z] == 1.14b operator-started resource-governance audit (read-only lane)
+Job for nhms-node27-resource-governance.service failed because the control process exited with error code.
+See "systemctl --user status nhms-node27-resource-governance.service" and "journalctl --user -xeu nhms-node27-resource-governance.service" for details.
+resource-governance start rc=1 exit-code Sun 2026-09-13 00:52:28 CST { path=/home/nwm/NWM/scripts/node27_resource_governance_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_resource_governance_once.sh 
+Sep 13 00:52:36 ghdc node27_resource_governance_once.sh[2188687]: RESOURCE_GOVERNANCE_CRITICAL:DATABASE_SIZE_ABOVE_CRITICAL
+Sep 13 00:52:36 ghdc systemd[2047]: nhms-node27-resource-governance.service: Main process exited, code=exited, status=1/FAILURE
+Sep 13 00:52:36 ghdc systemd[2047]: nhms-node27-resource-governance.service: Failed with result 'exit-code'.
+Sep 13 00:52:36 ghdc systemd[2047]: Failed to start NHMS node-27 resource governance audit.
+Sep 13 00:52:36 ghdc systemd[2047]: nhms-node27-resource-governance.service: Triggering OnFailure= dependencies.
+Sep 13 00:52:36 ghdc systemd[2047]: nhms-node27-resource-governance.service: Consumed 8.212s CPU time.
+[2026-09-12T16:52:36Z] == 1.15 public re-tests
+public hydro-national 9999-12-31T23:59:59-08:00: 422 VALIDATION_ERROR
+public hydro/{run} 9999-12-31T23:59:59-08:00: 422 VALIDATION_ERROR
+public hydro-national 0001-01-01T00:00:00+08:00: 422 VALIDATION_ERROR
+public hydro/{run} 0001-01-01T00:00:00+08:00: 422 VALIDATION_ERROR
+public hydro-national not-an-instant: 422 VALIDATION_ERROR
+public hydro/{run} not-an-instant: 422 VALIDATION_ERROR
+public offset=999999999: 200 data_len=0
+#2078 warm /api/v1/runs ttfb x3: 0.002054 0.003343 0.002104 
+#2078 after 255 junk /api/v1/runs ttfb x3: 0.002815 0.005480 0.002120 
+#2079 no header ttfb x3: 0.002378 0.002151 0.002164 
+#2079 external refresh header ttfb x3: 0.002218 0.002187 0.002156 
+#2079 correct token ttfb x3: 0.077778 0.071178 0.078855 
+[2026-09-12T16:52:49Z] == 1.16 final state
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   71G   23G  76% /
+/dev/mapper/ubuntu--vg-home        1.7T  459G  1.1T  30% /home
+/dev/md0                            15T  1.8T   12T  14% /data/GHDC
+capacity-hold dir: unchanged
+drop-ins remaining: 0; frozen copy HEAD=5a86841c porcelain=1
+NEXT                        LEFT          LAST                        PASSED       UNIT                                     ACTIVATES
+Sun 2026-09-13 01:02:08 CST 9min left     Sun 2026-09-13 00:52:08 CST 41s ago      nhms-node27-autopipe.timer               nhms-node27-autopipe.service
+Sun 2026-09-13 01:22:08 CST 29min left    Sun 2026-09-13 00:52:08 CST 41s ago      nhms-node27-download.timer               nhms-node27-download.service
+Sun 2026-09-13 12:05:00 CST 11h left      n/a                         n/a          nhms-node27-mvt-cache-retention.timer    nhms-node27-mvt-cache-retention.service
+● nhms-node27-resource-governance.service     loaded failed failed NHMS node-27 resource governance audit
+[2026-09-12T16:52:49Z] DONE rc=6

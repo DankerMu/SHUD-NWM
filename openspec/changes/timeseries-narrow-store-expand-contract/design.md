@@ -102,7 +102,25 @@ parser 抛 `LegacyStoreWriteRefused`（parser CLI 退出码独立命名，与 co
 per-tick 推导按表分别陈述：正名表 1 天 chunk，每表每天到达 1 个 terminal chunk（两表 2/天）；`_legacy` 表 7 天宽、切换后**零到达**，只剩有限存量（river ≤ 2 个 239–508 GB chunk，forcing ≤ 2 个）。wall 关系按最坏组合算：一个 legacy 7 天 chunk ≈ 6 s/GB × 508 GB ≈ 51 min 已逼近 60 min 单 chunk 超时与 65 min 整 tick wall，因此过渡配方是：**expand 前**先用手动 tick（bound 1）把 legacy 存量 chunk 压完（本 change 之外已对 chunk 91 执行的同一配方），expand 后 legacy 只剩 range_end 在未来的最后一个 chunk；稳态 bound 4 满足 2/天 < 4 与 4 × 7.5 min = 30 min < 65 min。timer 节奏结论重述：1 天 chunk 把到达率从每周 2 个改成每天 2 个，日频 timer 仍充分，无需改频率。模板 `PER_TICK_BOUND=4` 保持并重钉（注释改写推导），`LAG_SECONDS` 赋值改为 172800、`one chunk width` 注释删除。
 
 ### D8 治理：工作集 + 峰值预测，空态与 watermark 缺失有定义
-采集（只读目录）：`uncompressed_bytes`、`daily_ingest_bytes`（最近 7 天按 chunk `range_start` 分日的未压缩体量均值）、`next_compressible_at`（最老未压缩 chunk 的 `range_end + lag`，lag 读自 compression env 的同一变量）、`home_free_bytes`、`projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − watermark))`（单位：天，可为小数）。critical：`projected_peak_bytes > home_free_bytes − safety_margin_bytes`（默认 100 GiB）；warning：`uncompressed_bytes > working_set_warn_bytes`（默认 400 GiB）。空态：无未压缩 chunk → `next_compressible_at = null`、`projected_peak_bytes = uncompressed_bytes`、`projection_status = "no_uncompressed_chunk"`，不报 critical；watermark 不可用 → 与压缩 runner 同一 fail-closed 语义：`projection_status = "watermark_unavailable"`、发 critical `WATERMARK_UNAVAILABLE`（这是车道自身故障，必须到人）。`DATABASE_SIZE_ABOVE_*` 降为 info。`timeseries-db-retention` 的"critical 即非零退出"契约不变；新 capability 只新增推荐码。
+采集（只读目录）：`uncompressed_bytes`、`daily_ingest_bytes`（最近 7 天按 chunk `range_start`
+分日的未压缩体量均值）、`next_compressible_at`（最老未压缩 chunk 的 `range_end + lag`，
+lag 读自 compression env 的同一变量）、`projected_peak_bytes = uncompressed_bytes +
+daily_ingest_bytes × max(0, days(next_compressible_at − watermark))`（单位：天，可为小数）。
+2026-09-12 用户授权 #2273 更正原 `/home` 假设：直接观察配置 PGDATA 的 resolved path、
+device identity 与 `f_bavail`，当前输出为 `working_set_free_bytes` 与 `working_set_filesystem`；
+禁止按路径前缀或从 home/cold 标签挑容量。critical 为 `projected_peak_bytes >
+working_set_free_bytes − safety_margin_bytes`（默认 100 GiB），推荐码
+`PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE`；warning 仍为工作集超过默认 400 GiB。
+计算峰值的 catalog/watermark 状态与目的盘容量状态独立：目标缺失或身份冲突发
+`WORKING_SET_FILESYSTEM_UNAVAILABLE`，即使空工作集也不得伪装健康；已有 PGDATA du
+观测缺失独立发 `PGDATA_USAGE_UNAVAILABLE`，不新增递归扫描，也不借用 `/home` 余量。
+同设备的多个正常标签不是歧义，冲突指配置目标自身的证据不一致。
+目标证据有效且无未压缩 chunk 时，`next_compressible_at = null`、
+`projected_peak_bytes = uncompressed_bytes`、`projection_status = "no_uncompressed_chunk"`，
+不发峰值 critical；watermark 不可用仍为 `watermark_unavailable` 与 `WATERMARK_UNAVAILABLE`。
+`DATABASE_SIZE_ABOVE_*` 仍为 info，任何 critical 非零退出。历史 cold receipt 1.0 的旧 home
+形状保持可读，新生产者只写闭合的目的盘形状；不把旧字段作为当前容量 fallback。
+stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约见 `fixtures/I6b-2273.md`。
 
 ### D9 forcing 批次：同模式，串在 river contract 之后
 `met.met_station.station_key`、`met.forcing_version.forcing_version_key`：`INTEGER GENERATED ALWAYS AS IDENTITY UNIQUE`（先在 node-27 只读实测行数/索引体量并在 throwaway 库测 ADD COLUMN 锁时长）。枚举 `met.forcing_variable` / `met.forcing_unit` / `met.forcing_quality_flag`（沿 000050 的 `<domain>_<concept>` 命名），由生产写方 `MVP_STATION_VARIABLES` ∪ 现网 `pg_stats` ∪ seeds 三源并集生成，seed 词表（`t2m` 等）显式排除并记录。窄表 `met.forcing_station_timeseries`：`forcing_version_key, station_key, valid_time, variable_e, value, unit_e, quality_flag_e NOT NULL`，`native_resolution TEXT NULL`；主键 `(forcing_version_key, station_key, variable_e, valid_time)`；二级索引 `forcing_ts_version_variable_time_key_idx (forcing_version_key, variable_e, valid_time DESC)`（`qhh_latest_window_idx` 的键形后继，QHH 回落 CTE 用）；`segmentby (forcing_version_key, station_key)`，`orderby (variable_e, valid_time)`；1 天 chunk；FK 两个键列。`source_id` 由 `met.forcing_version` join 推导，`basin_version_id` 由 `met.met_station`（经 `station_key`）join 推导——语义变更：coverage 与 QHH 回落以站点权威 basin 为准，等价性测试须构造行内值与站点权威值不一致的用例。路由列 `met.forcing_version.timeseries_store`。写方两处走同一写守卫。读方经独立的 `render_forcing_ts_sql(template_pair, store)`：forcing legacy 表**没有键列**（IDENTITY 键只落在 authority 表，legacy 表形状不变），river 的"删标记块"机制对它不适用，legacy/narrow 是两份分别注册的模板而不是一份模板减几行；forcing 侧不引入任何 `#1342` 标记。读方九处（`display_coverage` station 腿；`forecast_store` 的 QHH 回落 CTE、station-series 行 helper、station-forcing membership 校验、forcing-readiness overall 与 per-variable 行；`best_available` 的 forcing-inputs 列表；`qhh_production_bootstrap` 的 forcing-state 计数 join；`reset_qhh_smoke_db` 的 forcing DELETE），外加 live-evidence 的 forcing 计划形状钉子按 store 分支；两处写侧写后校验查询（forcing-producer 的 `verify_forcing_version_children`、domain-handoff apply 的行数校验）随写方在 I12 一起改为按 `forcing_version_key` 读窄表；shape oracle 的 forcing census 把仓内每个 `met.forcing_station_timeseries` SQL 站点钉为"已注册"或"仅名字引用的豁免项"（payload 清单、行数键、目录钉子、生命周期工具），避免改名后漏站点直接报 `column forcing_version_id does not exist`。

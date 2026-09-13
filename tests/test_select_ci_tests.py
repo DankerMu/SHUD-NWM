@@ -54,6 +54,7 @@ from scripts.select_ci_tests import (
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+    ORIGIN_CHUNK_PARITY_TESTS,
     PATH_TEST_RULES,
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
@@ -309,9 +310,7 @@ def test_lifecycle_producer_selects_its_owner_suite(producer: str, owner: str) -
 
 
 @pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
-def test_lifecycle_owner_edge_reds_when_removed(
-    monkeypatch: pytest.MonkeyPatch, producer: str, owner: str
-) -> None:
+def test_lifecycle_owner_edge_reds_when_removed(monkeypatch: pytest.MonkeyPatch, producer: str, owner: str) -> None:
     from scripts import select_ci_tests
 
     patched = tuple(
@@ -2014,6 +2013,7 @@ QHH_STATIC_TEST = "tests/test_qhh_scripts_static.py"
 def test_qhh_catalog_script_selects_runtime_owner(script: str) -> None:
     assert QHH_STATIC_TEST in select_tests([f"scripts/{script}.py"], repo_root=Path("."))
 
+
 QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.py"
 PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
 TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
@@ -2936,9 +2936,7 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
     # also names it must not false-red the pin. The selector meta-guard joins
     # every same-name source route, so it is part of the union here; #2185's
     # write-surface scan joins because apps/** is one of its roots.
-    assert selected == sorted(
-        {*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH}
-    )
+    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH})
 
 
 # The `git ls-files` pathspecs for the same-name derivation are derived from the
@@ -5352,10 +5350,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
     # scans, so #1656's write-site invariant and #2185's river-segment
     # write-surface scan both join the union too.
     assert (
-        sorted(
-            set(CORE_SMOKE_TESTS)
-            | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH}
-        )
+        sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH})
         == selected
     )
 
@@ -9535,8 +9530,10 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
     ("module_path", "suite"),
     (
         ("services/tile_publisher/publisher.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
-        ("services/tile_publisher/forcing_copyback_backfill.py",
-         "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+        (
+            "services/tile_publisher/forcing_copyback_backfill.py",
+            "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+        ),
         ("db/seeds/seed_demo.py", "tests/test_river_ts_dual_write_integration.py"),
     ),
 )
@@ -10045,6 +10042,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ("tests/retention_test_helpers.py", "tests/test_retention.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
     ("tests/cold_residency_fakes.py", "tests/test_node27_cold_residency.py"),
+    (
+        "tests/cold_residency_identity_mutants.py",
+        "tests/test_issue2224_origin_chunk_parity.py",
+    ),
     # The literal-path half (#1498): this pair exists only because
     # test_shud_runtime.py carries the exact string "tests/mock_shud_omp.py" and
     # runs it as a subprocess. It imports nothing from the module, so a
@@ -10815,6 +10816,8 @@ def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
 
     violations = _supplemental_roots_violations(reduced, probe="scripts/brand_new_thing.py")
     assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
+
+
 # --------------------------------------------------------------------------
 # #2185 river-segment write-surface routing meta-guards
 # --------------------------------------------------------------------------
@@ -11146,8 +11149,7 @@ def test_write_surface_derivation_rejects_nonlinear_rebinds_of_production_dirs(
     for case, source in (
         (
             "augmented",
-            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
-            'PRODUCTION_DIRS += ("db",)\n',
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\nPRODUCTION_DIRS += ("db",)\n',
         ),
         (
             "conditional",
@@ -11191,9 +11193,7 @@ def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
         ("lone-augmented", 'PRODUCTION_DIRS += ("db",)\n'),
         (
             "lone-nested",
-            "import os\n\n"
-            'if os.environ.get("NHMS_X"):\n'
-            '    PRODUCTION_DIRS = ("apps", "services")\n',
+            'import os\n\nif os.environ.get("NHMS_X"):\n    PRODUCTION_DIRS = ("apps", "services")\n',
         ),
     ):
         monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
@@ -13048,9 +13048,154 @@ def test_issue1895_cli_producer_rules_red_when_removed(monkeypatch: pytest.Monke
         )
 
 
+ORIGIN_CHUNK_PARITY_OWNERS = (
+    "packages/common/compressed_chunk_cold_runtime_catalog.py",
+    "packages/common/compressed_chunk_cold_runtime.py",
+    "scripts/node27_cold_residency_census.py",
+    "packages/common/node27_issue1895_post_target.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+    "packages/common/compressed_chunk_cold_residency.py",
+    "packages/common/compressed_chunk_cold_receipt.py",
+)
+
+ORIGIN_CHUNK_PARITY_OWNER_LEGS = {
+    "packages/common/compressed_chunk_cold_runtime.py": {
+        "tests/test_node27_write_roles.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_select_ci_tests.py",
+    },
+    "scripts/node27_cold_residency_census.py": {
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_select_ci_tests.py",
+    },
+    "packages/common/compressed_chunk_cold_residency.py": {
+        "tests/test_node27_write_roles.py",
+        "tests/test_compressed_chunk_cold_residency.py",
+        "tests/test_select_ci_tests.py",
+    },
+    "packages/common/compressed_chunk_cold_receipt.py": {
+        "tests/test_node27_cold_residency.py",
+        "tests/test_node27_cold_residency_publication.py",
+        "tests/test_node27_cold_residency_phase2.py",
+        "tests/test_node27_cold_residency_runtime_identity.py",
+        "tests/test_node27_cold_residency_schema_compat.py",
+        "tests/test_timeseries_storage_schemas.py",
+    },
+}
+ORIGIN_CHUNK_PARITY_PARTITIONS = (
+    "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_compressed_chunk_cold_runtime_proof.py",
+    "tests/test_node27_cold_residency.py",
+    "tests/test_node27_cold_residency_phase2.py",
+    "tests/test_node27_cold_residency_census.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
+    "tests/test_issue1895_readiness_storage.py",
+    "tests/test_issue1895_runbook_contract.py",
+    "tests/test_issue2224_origin_chunk_parity.py",
+    "tests/test_issue2224_origin_parity_integration.py",
+    "tests/test_issue2224_origin_parity_runbook_contract.py",
+)
+
+
+def test_origin_chunk_parity_owners_preserve_existing_legs_and_select_new_partitions() -> None:
+    assert set(ORIGIN_CHUNK_PARITY_TESTS) == set(ORIGIN_CHUNK_PARITY_PARTITIONS)
+    for owner in ORIGIN_CHUNK_PARITY_OWNERS:
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        missing = sorted(set(ORIGIN_CHUNK_PARITY_PARTITIONS) - selected)
+        assert not missing, f"{owner}: origin-chunk parity partitions missing {missing}"
+        expected_legs = ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())
+        lost = sorted(expected_legs - selected)
+        assert not lost, f"{owner}: existing same-name/write-role/importer legs missing {lost}"
+
+
+def _owner_route_rules(owner: str) -> list[PathTestRule]:
+    return [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
+
+
+def _mutant_without_partition(owner: str, removed: str) -> tuple[PathTestRule, ...]:
+    matching = _owner_route_rules(owner)
+    assert matching, f"{owner}: no PATH_TEST_RULES route"
+    assert any(removed in rule.tests for rule in matching), f"{owner}: matched route does not own {removed}"
+    return tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != removed)) if rule.pattern == owner else rule
+        for rule in PATH_TEST_RULES
+    )
+
+
+def _same_name_partition(owner: str) -> str | None:
+    candidate = f"tests/test_{Path(owner).stem}.py"
+    return candidate if candidate in ORIGIN_CHUNK_PARITY_PARTITIONS else None
+
+
+@pytest.mark.parametrize(
+    ("owner", "removed"),
+    [(owner, removed) for owner in ORIGIN_CHUNK_PARITY_OWNERS for removed in ORIGIN_CHUNK_PARITY_PARTITIONS]
+    + [
+        ("packages/common/compressed_chunk_cold_receipt.py", removed)
+        for removed in sorted(
+            ORIGIN_CHUNK_PARITY_OWNER_LEGS["packages/common/compressed_chunk_cold_receipt.py"]
+            - set(ORIGIN_CHUNK_PARITY_PARTITIONS)
+        )
+    ],
+)
+def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    removed: str,
+) -> None:
+    from scripts import select_ci_tests
+
+    matching = _owner_route_rules(owner)
+    assert matching, f"{owner}: expected an explicit PATH_TEST_RULES route"
+    same_name = _same_name_partition(owner)
+    mutant = _mutant_without_partition(owner, removed)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    if same_name == removed:
+        monkeypatch.setattr(select_ci_tests, "_same_name_backend_python_test", lambda _path: None)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert removed not in selected, f"{owner}: coincidental union still selected {removed}"
+    remaining = (set(ORIGIN_CHUNK_PARITY_PARTITIONS) | ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())) - {removed}
+    if same_name == removed:
+        # Disabling same-name derivation also removes its derived meta-guard rider.
+        # The unmutated owner assertion above still requires that guard.
+        remaining.discard(SELECTOR_META_GUARD_TEST)
+    missing_remaining = sorted(remaining - selected)
+    assert not missing_remaining, f"{owner}: remaining partitions vanished {missing_remaining}"
+
+
+def test_runtime_integration_test_only_change_selects_marker_contract_exactly() -> None:
+    owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
+    marker = "tests/test_node27_cold_tablespace_marker_contract.py"
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == {owner, marker, SELECTOR_META_GUARD_TEST, "tests/test_issue2290_cold_parent_admission.py"}
+
+
+def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
+    marker = "tests/test_node27_cold_tablespace_marker_contract.py"
+    matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
+    assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
+    assert matching[0].stop_on_match is True
+    assert matching[0].tests == (owner, marker, "tests/test_issue2290_cold_parent_admission.py")
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert marker not in selected
+    assert "tests/test_issue2290_cold_parent_admission.py" not in selected
+    assert owner in selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
 def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
     selected = set(select_tests(["docs/runbooks/tier-node27-timeseries-storage.md"], repo_root=Path(".")))
     assert "tests/test_issue1895_runbook_contract.py" in selected
+    assert "tests/test_issue2224_origin_parity_runbook_contract.py" in selected
     assert "tests/test_issue1895_readiness_performance_live.py" in selected
     # The runbook's broader sequential/cold-residency owners stay intact.
     for suite in (
@@ -13415,6 +13560,7 @@ ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS: dict[str, tuple[str, ...]] = {
         *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
         "tests/test_issue1895_readiness_performance_publication.py",
         "tests/test_issue1895_runbook_contract.py",
+        "tests/test_issue2290_cold_parent_admission.py",
     ),
 }
 
@@ -17561,3 +17707,120 @@ def test_registry_partition_live_commands_name_all_seven_suites() -> None:
     assert oracle["bug008_command"] == ("uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count")
     # The retained-core BUG-008 command is still a live, correct recipe: it collects and
     # passes exactly the two frozen cases (proven in the execution-semantics row above).
+
+
+PHYSICAL_PARENT_ADMISSION_OWNERS = (
+    "packages/common/compressed_chunk_cold_runtime_catalog.py",
+    "packages/common/compressed_chunk_cold_runtime.py",
+    "packages/common/compressed_chunk_cold_tick.py",
+    "packages/common/node27_issue1895_catalog.py",
+    "packages/common/node27_issue1895_performance_live.py",
+    "packages/common/node27_issue1895_post_target.py",
+    "scripts/node27_cold_residency_census.py",
+    "tests/cold_residency_fakes.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+)
+
+
+@pytest.mark.parametrize("owner", PHYSICAL_PARENT_ADMISSION_OWNERS)
+def test_physical_parent_admission_owner_route_has_independent_removal_proof(monkeypatch, owner):
+    from scripts import select_ci_tests
+
+    suite = "tests/test_issue2290_cold_parent_admission.py"
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert suite in before
+    rules_name = (
+        "SUPPORT_MODULE_TEST_RULES"
+        if owner == "tests/cold_residency_fakes.py"
+        else "CHANGED_TEST_FILE_RULES"
+        if owner.startswith("tests/")
+        else "PATH_TEST_RULES"
+    )
+    rules = getattr(select_ci_tests, rules_name)
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1, f"{owner}: expected one explicit {rules_name} route"
+    original = matching[0]
+    assert original.tests.count(suite) == 1
+    assert original.stop_on_match is (rules_name == "CHANGED_TEST_FILE_RULES")
+    assert not original.only_when_any_changed
+    assert set(original.tests) <= before
+    mutant = tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, rules_name, mutant)
+    changed = [rule for rule in mutant if rule.pattern == owner]
+    assert changed == [replace(original, tests=tuple(test for test in original.tests if test != suite))]
+    after = set(select_tests([owner], repo_root=Path(".")))
+    assert suite not in after
+    assert after == before - {suite}
+    assert set(original.tests) - {suite} <= after
+    if owner.startswith("tests/"):
+        assert SELECTOR_META_GUARD_TEST in before & after
+
+
+def test_physical_parent_fake_performance_route_has_independent_removal_proof(monkeypatch):
+    from scripts import select_ci_tests
+
+    owner = "tests/cold_residency_fakes.py"
+    suite = "tests/test_issue1895_readiness_performance_live.py"
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert suite in before
+    rules = select_ci_tests.SUPPORT_MODULE_TEST_RULES
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1
+    original = matching[0]
+    assert original.tests.count(suite) == 1
+    assert not original.stop_on_match
+    assert not original.only_when_any_changed
+    assert set(original.tests) <= before
+    mutant = tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", mutant)
+    after = set(select_tests([owner], repo_root=Path(".")))
+    assert suite not in after
+    assert after == before - {suite}
+    assert set(original.tests) - {suite} <= after
+    assert SELECTOR_META_GUARD_TEST in before & after
+
+
+@pytest.mark.parametrize(
+    ("owner", "suite"),
+    [
+        ("packages/common/compressed_chunk_cold_runtime_catalog.py", "tests/test_issue2290_cold_parent_admission.py"),
+        ("packages/common/compressed_chunk_cold_runtime_catalog.py", "tests/test_issue1895_readiness_storage.py"),
+        (
+            "packages/common/compressed_chunk_cold_runtime_catalog.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
+        ),
+        ("packages/common/node27_issue1895_post_target.py", "tests/test_issue1895_readiness_storage.py"),
+        (
+            "packages/common/node27_issue1895_performance_live.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
+        ),
+        ("tests/cold_residency_fakes.py", "tests/test_issue1895_readiness_storage.py"),
+        ("tests/cold_residency_fakes.py", "tests/test_issue1895_readiness_performance_live_cli.py"),
+    ],
+)
+def test_admission_readiness_owner_asserting_suite_removal_preserves_other_legs(monkeypatch, owner, suite):
+    from scripts import select_ci_tests
+
+    rules_name = "SUPPORT_MODULE_TEST_RULES" if owner.startswith("tests/") else "PATH_TEST_RULES"
+    rules = getattr(select_ci_tests, rules_name)
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1
+    original = matching[0]
+    assert suite in original.tests
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert set(original.tests) <= before
+    mutant = tuple(
+        replace(rule, tests=tuple(target for target in rule.tests if target != suite))
+        if rule.pattern == owner
+        else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, rules_name, mutant)
+    assert set(select_tests([owner], repo_root=Path("."))) == before - {suite}

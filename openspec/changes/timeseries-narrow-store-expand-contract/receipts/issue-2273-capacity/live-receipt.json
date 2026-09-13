@@ -1,0 +1,114 @@
+{
+  "scope": "Live CLI capacity proof only; no deployment or overall-health claim",
+  "status": "PASS",
+  "runtime_sha": "f15ef6790d28bddfa67774646e4446034ca1ad5c",
+  "command": [
+    "/home/nwm/tmp/issue-2273-oracle/.venv/bin/python3",
+    "/home/nwm/tmp/issue-2273-oracle/scripts/node27_resource_governance.py",
+    "--repo-root",
+    "/home/nwm/NWM",
+    "--pgdata-root",
+    "/data/GHDC/nhms-primary/pgdata",
+    "--summary-path",
+    "/home/nwm/tmp/issue-2273-live-20260912T164951Z/private-audit.json",
+    "--quiet"
+  ],
+  "database_guard": {
+    "database": "nhms",
+    "role": "nhms_display_ro",
+    "transaction_read_only": "on",
+    "statement_timeout_ms": 20000,
+    "lock_timeout_ms": 5000
+  },
+  "before": {
+    "at": "2026-09-12T16:50:04.382098+00:00",
+    "path": "/data/GHDC/nhms-primary/pgdata",
+    "device_identity": "9:0:7539273700150526131",
+    "free_bytes": 13098615066624
+  },
+  "after": {
+    "at": "2026-09-12T16:50:33.309818+00:00",
+    "path": "/data/GHDC/nhms-primary/pgdata",
+    "device_identity": "9:0:7539273700150526131",
+    "free_bytes": 13098615050240
+  },
+  "audit_started_at": "2026-09-12T16:50:04Z",
+  "audit_finished_at": "2026-09-12T16:50:33Z",
+  "audit_status": "completed",
+  "cli_exit_code": 0,
+  "working_set": {
+    "daily_ingest_bytes": 71666082962.28572,
+    "next_compressible_at": "2026-09-12T00:00:00+00:00",
+    "projected_peak_bytes": 1247297401417.1428,
+    "projection_status": "ok",
+    "uncompressed_bytes": 1211464359936,
+    "watermark": "2026-09-11T12:00:00+00:00",
+    "working_set_filesystem": {
+      "blockers": [],
+      "device_identity": "9:0:7539273700150526131",
+      "path": "/data/GHDC/nhms-primary/pgdata",
+      "status": "ok"
+    },
+    "working_set_free_bytes": 13098615050240
+  },
+  "safety_margin_bytes": 107374182400,
+  "destination_peak_critical": false,
+  "all_critical_codes": [],
+  "filesystem_samples": {
+    "home": {
+      "device_identity": "253:1:11491905541504749415",
+      "free_bytes": 1197852897280,
+      "free_pretty": "1.1 TiB",
+      "path": "/home",
+      "reserved_bytes": 90503221248,
+      "status": "ok",
+      "total_bytes": 1780170539008,
+      "total_pretty": "1.6 TiB",
+      "used_bytes": 491814420480,
+      "used_pct": 27.627,
+      "used_pretty": "458.0 GiB"
+    },
+    "cold": {
+      "device_identity": "9:0:7539273700150526131",
+      "free_bytes": 13098615066624,
+      "free_pretty": "11.9 TiB",
+      "path": "/data/GHDC",
+      "reserved_bytes": 800054939648,
+      "status": "ok",
+      "total_bytes": 15873497141248,
+      "total_pretty": "14.4 TiB",
+      "used_bytes": 1974827134976,
+      "used_pct": 12.441,
+      "used_pretty": "1.8 TiB"
+    },
+    "pgdata_root_fs": {
+      "device_identity": "9:0:7539273700150526131",
+      "free_bytes": 13098615050240,
+      "free_pretty": "11.9 TiB",
+      "path": "/data/GHDC/nhms-primary/pgdata",
+      "reserved_bytes": 800054939648,
+      "status": "ok",
+      "total_bytes": 15873497141248,
+      "total_pretty": "14.4 TiB",
+      "used_bytes": 1974827151360,
+      "used_pct": 12.441,
+      "used_pretty": "1.8 TiB"
+    }
+  },
+  "pgdata_usage": {
+    "bytes": 1268185399296,
+    "device_identity": "9:0:7539273700150526131",
+    "path": "/data/GHDC/nhms-primary/pgdata",
+    "pretty": "1.2 TiB",
+    "status": "ok"
+  },
+  "raw_audit_sha256": "5b096fa7bc5561895320420f4e9e37d22229381888bbec3597d7ce535ed87f06",
+  "raw_audit_policy": "Full audit retained privately; public proof contains only actual CLI capacity fields.",
+  "source_sha256": {
+    "packages/common/node27_cold_governance_collection.py": "a31236c3098fdf8d066ee95c18025bd1bc14959b33090346c3bce4394b2df967",
+    "scripts/node27_resource_governance.py": "ba35189cff2da06a48c617949abe4dcc41b2cd20af50fde8a2d8f6a806b16b74",
+    "schemas/node27_cold_governance_receipt.schema.json": "c80bed1bdcebb13292607a49df590312dd63e37c13773ec4a80003a3d015a77b"
+  },
+  "capture_sha256": "9b397315e14f0f8408833925436b26da8272c951885af16c5ce6900a870492db",
+  "mutations": "Only private evidence files; no units/pins/schema/roles/data changed"
+}

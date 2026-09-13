@@ -163,7 +163,10 @@ def test_governance_rejects_secret_bearing_evidence_before_publication(tmp_path:
     write_cold_governance_receipt(config.receipt_path, receipt, schema)
 
 
-def test_governance_history_baseline_trend_stale_and_identity_drift_are_bounded(tmp_path: Path) -> None:
+@pytest.mark.parametrize("working_shape", ["absent", "historical", "current"])
+def test_governance_history_baseline_trend_stale_and_identity_drift_are_bounded(
+    tmp_path: Path, working_shape: str
+) -> None:
     prior_path = tmp_path / "prior.json"
     prior_config = GovernanceConfig(receipt_path=prior_path, head_sha=SHA)
     prior, schema = build_cold_governance_receipt(
@@ -176,6 +179,26 @@ def test_governance_history_baseline_trend_stale_and_identity_drift_are_bounded(
         ),
         evidence=_evidence(),
     )
+    if working_shape != "absent":
+        prior["working_set"] = {
+            "uncompressed_bytes": 600,
+            "daily_ingest_bytes": 75,
+            "next_compressible_at": "2026-09-03T00:00:00+00:00",
+            "projection_status": "ok",
+            "projected_peak_bytes": 750,
+        }
+        if working_shape == "historical":
+            prior["working_set"]["home_free_bytes"] = 900
+        else:
+            prior["working_set"].update(
+                working_set_free_bytes=900,
+                working_set_filesystem={
+                    "path": "/data/GHDC/nhms-primary/pgdata",
+                    "device_identity": "8:12",
+                    "status": "ok",
+                    "blockers": [],
+                },
+            )
     write_cold_governance_receipt(prior_path, prior, schema)
     config = GovernanceConfig(
         receipt_path=tmp_path / "current.json",
@@ -227,6 +250,42 @@ def test_governance_history_baseline_trend_stale_and_identity_drift_are_bounded(
     assert drifted["outcome"] == "refusal"
     assert drifted["trend"]["status"] == "invalid"
     assert "mode" in " ".join(drifted["blockers"])
+
+
+@pytest.mark.parametrize("mutation", ["hybrid", "null-ok-path", "null-ok-device", "invalid-free", "extra-binding-key"])
+def test_current_working_set_schema_rejects_ambiguous_evidence(tmp_path: Path, mutation: str) -> None:
+    root = Path(__file__).resolve().parents[1] / "schemas"
+    schema = json.loads((root / "node27_cold_governance_receipt.schema.json").read_text())
+    receipt = json.loads((root / "examples/node27_cold_governance_receipt.example.json").read_text())
+    working = {
+        "uncompressed_bytes": 600,
+        "daily_ingest_bytes": 75,
+        "next_compressible_at": "2026-09-03T00:00:00+00:00",
+        "projection_status": "ok",
+        "projected_peak_bytes": 750,
+        "working_set_free_bytes": 900,
+        "working_set_filesystem": {
+            "path": "/data/GHDC/nhms-primary/pgdata",
+            "device_identity": "8:12",
+            "status": "ok",
+            "blockers": [],
+        },
+    }
+    receipt["working_set"] = working
+    if mutation == "hybrid":
+        working["home_free_bytes"] = 900
+    elif mutation == "null-ok-path":
+        working["working_set_filesystem"]["path"] = None
+    elif mutation == "null-ok-device":
+        working["working_set_filesystem"]["device_identity"] = None
+    elif mutation == "invalid-free":
+        working["working_set_filesystem"].update(status="unavailable", blockers=["PGDATA_FILESYSTEM_UNAVAILABLE"])
+    else:
+        working["working_set_filesystem"]["home_alias"] = True
+    output = tmp_path / "invalid.json"
+    with pytest.raises(jsonschema.ValidationError):
+        write_cold_governance_receipt(output, receipt, schema)
+    assert not output.exists()
 
 
 def test_governance_receipt_examples_are_schema_valid() -> None:

@@ -2,9 +2,10 @@
 
 ### Requirement: Cold-residency eligibility MUST derive from terminal compressed business-time state
 
-The system SHALL consider a chunk for cold residency only when it belongs to
-`hydro.river_timeseries` or `met.forcing_station_timeseries`, is currently
-compressed, and its half-open range satisfies `range_end <= business_watermark
+The system SHALL consider a chunk for cold residency only when it belongs to an
+admitted physical parent for `hydro.river_timeseries` or
+`met.forcing_station_timeseries`, is currently compressed, and its half-open range
+satisfies `range_end <= business_watermark
 - compression_lag`. The business watermark SHALL be the existing display
 catalog forecast watermark; missing or unreadable truth SHALL block selection
 without a wall-clock fallback. The same facts SHALL be revalidated after
@@ -24,6 +25,61 @@ relation locks are acquired and before any movement.
 
 - **WHEN** an initially selected chunk is decompressed, dropped, renamed, or otherwise changes compression identity before the migration transaction locks and revalidates it
 - **THEN** the transaction performs no stale move and reports a deferred or recovery-classified result
+
+### Requirement: Cold admission MUST bind physical parents rather than reused canonical names
+
+The river cold parent SHALL satisfy the post-expand narrow key/enum contract and
+SHALL NOT contain the legacy text-key projection, even if surrogate keys coexist.
+The canonical forcing parent SHALL retain its current supported shape. Each
+admitted inventory SHALL bind a positive PostgreSQL parent relation OID and
+Timescale hypertable ID, in addition to schema/name and all physical-order user
+columns. These IDs SHALL be mandatory internal inputs to candidate/origin
+membership checks and SHALL participate in the existing inventory digest; closed
+receipt/inventory wire keys and parity checksum semantics SHALL remain unchanged.
+
+Every selection, origin reload, locked revalidation, fresh readback, persisted
+reconciliation, census and post-target/intersecting observation SHALL preserve the
+expected binding. Missing, ambiguous, invalid or replaced parent identity SHALL
+fail closed before mutation or prevent a false success on uncertain readback.
+The system SHALL NOT adopt a new parent through a name-only overload or a default
+identity. Legacy parents SHALL NOT be candidates or fallbacks; a valid narrow
+parent SHALL remain admissible after legacy is absent. Eligibility and parity
+SHALL use each origin's actual catalog bounds, never a default chunk interval.
+
+#### Scenario: Wide parent cannot be mistaken for the post-expand river
+
+- **WHEN** the canonical river name denotes the old wide table, including a wide table with surrogate-key additions, or parent metadata is missing or ambiguous
+- **THEN** admission refuses before parity, intent or movement; a migration filename or ledger entry cannot override the observed schema
+
+#### Scenario: Narrow and legacy coexist after the rename
+
+- **WHEN** the old wide parent is renamed to legacy and a distinct canonical narrow parent is populated alongside canonical forcing
+- **THEN** only origins belonging to the bound narrow and forcing physical parents enter cold selection; compressed legacy origins remain excluded and untouched
+
+#### Scenario: Legacy absence does not disable valid narrow admission
+
+- **WHEN** the canonical narrow parent is valid and no legacy parent remains
+- **THEN** admission succeeds subject to the unchanged eligibility and environment gates, without requiring a legacy relation as a marker
+
+#### Scenario: Same-name same-column parent replacement invalidates evidence
+
+- **WHEN** a parent relation OID or Timescale hypertable ID changes while its canonical name and column descriptors remain the same
+- **THEN** the inventory digest changes and prior selection/baseline/parity authority cannot be reused; reload or locked validation rejects the mismatch before movement and uncertain fresh reconciliation cannot publish success
+
+#### Scenario: Distinct real chunk ranges are preserved
+
+- **WHEN** admitted origins and excluded legacy history have different one-, three- or seven-day catalog ranges
+- **THEN** every admitted origin retains its actual half-open bounds, forcing remains supported, and no global interval calculation selects legacy or manufactures a window
+
+#### Scenario: Catalog rename cannot mix identity and column observations
+
+- **WHEN** a canonical name changes owners while parent inventory is being derived
+- **THEN** the inventory contains one consistently observed physical parent's IDs and descriptors or fails closed; it cannot combine a wide parent's identity with a different narrow parent's columns
+
+#### Scenario: Preparation does not authorize production execution
+
+- **WHEN** only the origin-parity or physical-parent preparation child has merged
+- **THEN** production G0 remains blocked until both #2290 and #2291 are merged and separate external readiness is supplied; isolated tests are not live rollout evidence
 
 ### Requirement: A residency group MUST include all physical storage owned by both chunk relations
 
@@ -149,15 +205,50 @@ reported as success.
 - **WHEN** the moving process is interrupted or loses its connection around commit
 - **THEN** a new connection reconciles every group member and target-window parity without blindly replaying the move; complete source requires the original compressed sibling identity, while only a complete committed target may carry the probe-proven replacement sibling
 
+Production parity SHALL require the current durable origin schema and name as
+explicit, non-optional input derived from the resolved origin OID/schema/name and
+window. It SHALL reject a missing or empty identifier, the allowlisted parent,
+the current compressed sibling, or any mismatch with that resolved durable
+identity; no overload, default or inventory parent name may recover by reading the
+parent hypertable. G1 census, runtime preflight/locked/recompression/post-commit/
+reconciliation paths and post-target named-group observation SHALL all use this
+same origin-qualified owner. The probe-private fixture parity helper is unchanged.
+
 #### Scenario: Target-chunk parity cannot be hidden by sibling rows
 
 - **WHEN** migration parity is checked before, inside and after the transaction
 - **THEN** count, per-column non-null counts and deterministic multiset checksum
-  are computed over exactly the origin chunk's half-open `[range_start,
+  are computed by selecting from the exact quoted physical relation in the
+  durable origin chunk identity, over that origin's half-open `[range_start,
   range_end)` window and every non-dropped user column in validated physical
-  order, so an unrelated same-table chunk cannot offset or hide target data loss;
-  PostgreSQL returns one bounded aggregate row and the production client never
-  fetches or materializes all business rows
+  order, so an unrelated same-table chunk cannot be scanned, offset, or hide
+  target data loss; the parent hypertable and the compressed sibling's encoded
+  columns are forbidden substitutes, a missing or invalid origin identity has no
+  parent fallback, PostgreSQL returns one bounded aggregate row, and the
+  production client never fetches or materializes all business rows
+
+#### Scenario: Compressed origin reads remain business-row scoped
+
+- **WHEN** TimescaleDB 2.10.2 stores a selected origin as a compressed chunk while
+  the same hypertable contains larger compressed or uncompressed sibling chunks
+- **THEN** an isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 execution proves both
+  result and plan: the origin-qualified parity query returns the selected chunk's
+  transparent business rows, changing sibling rows cannot change its parity,
+  changing a target row does change it, and the execution plan names no sibling
+  chunk; SQL-string inspection alone cannot satisfy this oracle, and direct
+  compressed-storage columns, an `ONLY` form that suppresses transparent
+  decompression, mutation by `decompress_chunk`, or changing the census
+  `3600000`-millisecond or runtime `3600s` finite ceilings cannot satisfy it
+
+#### Scenario: Invalid origin identity has no fallback
+
+- **WHEN** unit or integration input omits the origin, supplies quoted identifiers,
+  names the allowlisted parent or compressed sibling, drifts the durable OID/name/
+  window, or the selected origin disappears before execution
+- **THEN** valid quoted origins remain exactly quoted, while every missing,
+  substituted, drifted or disappeared identity fails before a parent/sibling read
+  or parity success; unit SQL-shape assertions support this refusal contract but
+  do not replace the executed TimescaleDB result-and-plan oracle
 
 #### Scenario: Locked parity and inventory are freshly revalidated
 
@@ -720,8 +811,13 @@ post-merge archival after final strict validation.
 
 #### Scenario: Executable runbook precedes remote access
 
-- **WHEN** Issue #1895 reaches its first node-27 observation
-- **THEN** the exact reviewed head already contains all census, evidence, install, one-group, halt, receipt and closure commands and explicitly forbids the historical manual container recipe for the cold bind
+- **WHEN** Issue #1895 reaches its first node-27 observation or retries G1 after
+  the `a8db554d6402bec642e9a05627eae64b2b79aec3` parent-scan timeout
+- **THEN** the exact reviewed head already contains all census, evidence, install,
+  one-group, halt, receipt and closure commands, explicitly forbids the historical
+  manual container recipe for the cold bind, requires #2224 merged before retry,
+  rejects the failed census/bracket and absent policy/baseline as reusable
+  evidence, and starts a new maintenance window from G0 at the new merged SHA
 
 #### Scenario: Historical baseline is rebound before mutation
 

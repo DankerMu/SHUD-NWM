@@ -1,0 +1,8 @@
+8d7
+< ExecStartPre=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check
+10d8
+< ExecStart=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce
+13c11
+< TimeoutStartSec=7842
+---
+> TimeoutStartSec=3940

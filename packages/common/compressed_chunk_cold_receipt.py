@@ -266,6 +266,7 @@ def _require_intent_evidence(document: Mapping[str, Any]) -> None:
                 stage="startup",
             ) from error
         durable = item.get("durable") if isinstance(item.get("durable"), Mapping) else {}
+        before_durable = before.get("durable") if isinstance(before.get("durable"), Mapping) else {}
         try:
             start = datetime.fromisoformat(str(durable.get("range_start")).replace("Z", "+00:00"))
             end = datetime.fromisoformat(str(durable.get("range_end")).replace("Z", "+00:00"))
@@ -276,6 +277,21 @@ def _require_intent_evidence(document: Mapping[str, Any]) -> None:
         if not (same_start and same_end):
             raise ColdReceiptError(
                 "before parity window does not match durable identity",
+                error_class="corrupt_intent",
+                stage="startup",
+            )
+        identity_fields = (
+            "hypertable_schema",
+            "hypertable_name",
+            "origin_oid",
+            "origin_schema",
+            "origin_name",
+            "range_start",
+            "range_end",
+        )
+        if any(durable.get(field) != before_durable.get(field) for field in identity_fields):
+            raise ColdReceiptError(
+                "outer durable identity does not match before durable identity",
                 error_class="corrupt_intent",
                 stage="startup",
             )

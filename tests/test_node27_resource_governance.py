@@ -78,6 +78,31 @@ def test_write_summary_rejects_relative_path(tmp_path: Path) -> None:
     assert json.loads(output.read_text(encoding="utf-8")) == {"status": "completed"}
 
 
+def test_summary_sink_redacts_path_device_and_error_evidence(tmp_path: Path) -> None:
+    output = tmp_path / "receipt.json"
+    governance._write_summary(
+        output,
+        {
+            "working_set": {
+                "working_set_free_bytes": None,
+                "working_set_filesystem": {
+                    "path": "/srv/password=path-secret",
+                    "device_identity": "password=device-secret",
+                    "status": "unavailable",
+                    "blockers": ["PGDATA_FILESYSTEM_UNAVAILABLE"],
+                },
+            },
+            "filesystem": {"error": "postgresql://user:driver-secret@example/db?password=query-secret"},
+        },
+    )
+    text = output.read_text()
+    for secret in ("path-secret", "device-secret", "driver-secret", "query-secret"):
+        assert secret not in text
+    receipt = json.loads(text)
+    assert receipt["working_set"]["working_set_filesystem"]["status"] == "unavailable"
+    assert receipt["working_set"]["working_set_free_bytes"] is None
+
+
 def test_config_does_not_emit_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql://secret-user:secret-pass@localhost:55432/nhms")
     args = governance.build_parser().parse_args(["--repo-root", "/tmp/repo", "--object-store-root", "/tmp/os"])

@@ -1,0 +1,10 @@
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-display-api.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-autopipe.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-download.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/NWM/infra/env/display.env
+/home/nwm/nhms-unpin-backup-2162-20260912T165022Z/home/nwm/NWM/infra/env/node27-ingest.env

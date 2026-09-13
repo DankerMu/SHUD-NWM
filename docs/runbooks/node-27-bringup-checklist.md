@@ -340,8 +340,12 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
 
   `/` 只有几十 GB 且以前无人自动看守：一次跨两天的 pytest 用
   `/tmp/pytest-of-nwm` 把它塞满，直接阻塞了当时 PR 的 live receipt。
-  `/home` 是 pgdata + object store 共用卷，`/data/GHDC` 是 `ghdc` 表空间 +
-  归档根（口径与已知偏差见 `docs/runbooks/current-production-ops.md`）。
+  当前宿主 PGDATA 是 `/data/GHDC/nhms-primary/pgdata`，容器 bind 仍为
+  `/home/postgres/pgdata/data`；工作集峰值须比较配置目标的实际设备与可用字节，
+  不能借用独立 `/home` telemetry，目标不可用时也不能回退到 `/home`。
+  `/home` 保留旧副本及临时文件等 residual use，不是当前 PGDATA；冷层仍未启用。
+  Issue #2273 的源码修正不表示旧 pinned runtime 已部署修正或服务健康，
+  I8 前须取得批准的目标容量证据（口径见 `docs/runbooks/current-production-ops.md`）。
 - [ ] 在 27 上跑 pytest 之前先把临时根挪出 `/`：
 
   ```bash

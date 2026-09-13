@@ -1,0 +1,72 @@
+[2026-09-12T16:47:05Z] OUT=/home/nwm/tmp/2162/out-20260912T164705Z BK=/home/nwm/nhms-unpin-backup-2162-20260912T164705Z
+[2026-09-12T16:47:05Z] == 1.1 baseline
+head=a8db554d branch=hotfix/node27-rollback-pre-2073 porcelain=0
+dep-diff-lines=0
+venv=Python 3.11.15
+display MainPID=1933082 uvicorn_8080_pids=[1933082 ] ActiveState=active cwd=/home/nwm/NWM-reslice-original-5a86841c cmd=/home/nwm/NWM-reslice-original-5a86841c/.venv/bin/python -m uvicorn apps.api.mai
+timer nhms-node27-raw-retention: { OnCalendar=*-*-* 03:35:00 UTC ; next_elapse=Sun 2026-09-13 11:35:00 CST } Sun 2026-09-13 11:35:00 CST 
+timer nhms-node27-timeseries-compression: { OnCalendar=*-*-* 04:25:00 UTC ; next_elapse=Sun 2026-09-13 12:25:00 CST } Sun 2026-09-13 12:25:00 CST 
+timer nhms-node27-timeseries-retention: { OnCalendar=*-*-* 05:15:00 UTC ; next_elapse=Sun 2026-09-13 13:15:00 CST } Sun 2026-09-13 13:15:00 CST 
+timer nhms-node27-resource-governance: { OnCalendar=*-*-* 04:10:00 UTC ; next_elapse=Sun 2026-09-13 12:10:00 CST } Sun 2026-09-13 12:10:00 CST 
+timer nhms-node27-download: { OnUnitActiveUSec=30min ; next_elapse=3w 3d 4h 40min 32.315718s } { OnBootUSec=5min ; next_elapse=5min }  
+timer nhms-node27-frontier-alert: { OnCalendar=*-*-* *:00/30:00 ; next_elapse=Sun 2026-09-13 01:00:00 CST } Sun 2026-09-13 01:00:00 CST 
+timer nhms-node27-autopipe: { OnUnitActiveUSec=10min ; next_elapse=3w 3d 4h 25min 32.315531s } { OnBootUSec=7min ; next_elapse=7min }  
+display env: NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt token_key=0
+yd :8081 pid=3163766 health=200
+cache locks=8520 pbf=8516 size=1.2G
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   71G   23G  76% /
+/dev/mapper/ubuntu--vg-home        1.7T  459G  1.1T  30% /home
+/dev/md0                            15T  1.8T   12T  14% /data/GHDC
+000056_hydro_run_parsed_at.sql|2026-09-12 11:31:55.725341+00
+000057_river_network_version_geometry_generation.sql|2026-09-12 11:31:56.411303+00
+000058_hot_timeseries_chunk_interval_3d.sql|2026-09-12 11:31:57.27682+00
+total 12
+drwx------ 2 nwm nwm 4096 Sep 12 13:49 .
+drwxrwxr-x 4 nwm nwm 4096 Sep 11 09:08 ..
+-rw------- 1 nwm nwm    0 Sep 12 13:49 resume-approved
+-rw------- 1 nwm nwm 3282 Sep 12 15:11 state.json
+hold resume-approved present=yes; 91-fences=0
+unit diff nhms-node27-raw-retention: 6 lines
+unit diff nhms-node27-timeseries-compression: 8 lines
+local  /api/v1/layers: 200 5790 0.112913
+public /api/v1/layers: 200 5790 0.099413
+local  river-network-national/5/25/12 (pre): 200 142594 0.047790 etag=W/"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83" cache=hit
+public offset=999999999 (pre, expect 500): 200 77 0.234606
+run_id sample=fcst_ifs_2026091112_dg_fa180301403c9833e11bfa933ffd5a27
+public pre hydro-national 9999-12-31T23:59:59-08:00: 500 21 0.163410
+public pre hydro/{run} 9999-12-31T23:59:59-08:00: 500 21 0.121170
+public pre hydro-national 0001-01-01T00:00:00+08:00: 500 21 0.141956
+public pre hydro/{run} 0001-01-01T00:00:00+08:00: 500 21 0.108762
+public pre hydro-national not-an-instant: 422 298 0.099976
+public pre hydro/{run} not-an-instant: 422 298 0.103287
+frontier-alert last: success Sun 2026-09-13 00:30:32 CST 
+[2026-09-12T16:47:07Z] == 1.3 stop writer timers
+settled after 10s: autopipe=inactive download=inactive
+autopipe per-tick log: /home/nwm/autopipe-logs/autopipe.log (139409190 bytes)
+[2026-09-12T16:47:07Z] == 1.4 backup -> /home/nwm/nhms-unpin-backup-2162-20260912T164705Z
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-display-api.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-autopipe.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-download.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service.d/60-reslice-pin-original-5a86841c.conf
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/NWM/infra/env/display.env
+/home/nwm/nhms-unpin-backup-2162-20260912T164705Z/home/nwm/NWM/infra/env/node27-ingest.env
+[2026-09-12T16:47:07Z] == 1.5 remove 8 pins, daemon-reload, mechanical diff
+unit gate: expected == after (8 units, 0 residual lines)
+env resource-governance: NODE27_RESOURCE_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
+env timeseries-compression: NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
+env timeseries-retention: NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM
+env cold-residency: NODE27_COLD_RESIDENCY_REPO_ROOT=/home/nwm/NWM
+remaining drop-ins under /home/nwm/.config/systemd/user: 0
+[2026-09-12T16:47:07Z] == 1.6 NHMS_DISPLAY_CACHE_WARM_TOKEN
+openssl: /lib/x86_64-linux-gnu/libssl.so.3: version `OPENSSL_3.2.0' not found (required by openssl)
+openssl: /lib/x86_64-linux-gnu/libcrypto.so.3: version `OPENSSL_3.0.9' not found (required by openssl)
+openssl: /lib/x86_64-linux-gnu/libcrypto.so.3: version `OPENSSL_3.2.0' not found (required by openssl)
+[2026-09-12T16:47:07Z] ROLLBACK (token generation)
+[2026-09-12T16:47:08Z] rollback: display never restarted in this window -- pinned process untouched, no restart needed
+[2026-09-12T16:47:08Z] rollback: display WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+[2026-09-12T16:47:08Z] writer timers started (EXIT trap or step 14)

@@ -4522,3 +4522,42 @@ later-round catches core=269、rotated=270、phase=57、skipped=15。
 记录 deferral：keep/cut 仍待维护者决策；本次 epic 实现与合并授权不含审核策略调整。
 现行 keep 与座位上限不变，共享 timeseries OpenSpec 继续 active。
 
+### Revisit 2026-09-12（post PR #2279 / issue #1987 first slice）
+
+追加后实测 641 行、631 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 high 一轮四席：一项格式事实 CONFIRMED/DISCARD，无可达影响；
+另一项交叉引用候选 REFUTED，零 actionable catch，最终 gap sweep approve。
+只交付 5.1；5.2 与 issue #1987 保持 open，不将回退演练借作生产 receipt。
+记录 deferral：策略 keep/cut 仍待维护者决策，本次合并授权不含策略调整。
+现行 keep、座位上限及共享 OpenSpec active 状态不变。
+
+### Revisit 2026-09-12（post PR #2286 / issue #2162 目标 1）
+
+追加后实测 642 行、632 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 fixture tier `none`（零代码，node-27 运维窗口 + receipt），无 Phase 4 轮次；
+Phase 0.5 fixture review 三轮只读（spec-compliance+test-evidence）属 fixture 审查，不计入多轮样本。
+本单不增加后轮 catch，不能据此推断轮换收益。
+记录 deferral：keep/cut 仍待维护者决策；本次目标 1 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
+
+### Revisit 2026-09-12（post PR #2288 / issue #2273）
+
+追加后实测 644 行、634 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 high 一轮四席，无运行时阻塞发现；TE-2 的 ADR 检查缺口已补证据，计一个证据 catch。
+TE-1 为未来模板一致性的 PLAUSIBLE P2 note，非 blocking，不计 net catch；
+按 workflow 0.35 不另开 P2 修复轮次。最终头独立 gap sweep approve，CI green。
+本单不增加后轮样本，不能据此调整轮换；keep/cut 决策仍待维护者，
+记录 deferral：本次修复与合并授权不含审查策略调整。现行 keep、座位上限不变。
+共享 timeseries OpenSpec 保持 active，#1987 实机窗口与后续 epic tasks 未借此完成。
+
+### Revisit 2026-09-12（post PR #2248 / issue #2224）
+
+追加后实测 644 行、634 merged、10 terminal；210 个多轮样本，
+later-round catches core=270、rotated=270、phase=57、skipped=15。
+本单 high 三轮；第二轮的一项 receipt selector 覆盖缺口由 pinned test-evidence
+发现并独立确认，第三轮与最终 gap sweep 无新候选；不构成新增轮换收益证据。
+记录 deferral：keep/cut 仍待维护者决策；本次 #1891–#1895 范围内的合并预授权
+不含审核策略调整。现行 keep、座位上限与共享 OpenSpec active 状态不变。

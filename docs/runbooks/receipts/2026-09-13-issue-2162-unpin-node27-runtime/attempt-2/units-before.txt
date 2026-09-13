@@ -1,0 +1,53 @@
+## nhms-display-api
+DropInPaths=/home/nwm/.config/systemd/user/nhms-display-api.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash -lc set -a; . /home/nwm/NWM-reslice-original-5a86841c/infra/env/display.env; set +a; export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"; exec /home/nwm/NWM-reslice-original-5a86841c/.venv/bin/python -m uvicorn apps.api.main:app --host "${NHMS_DISPLAY_HOST:-127.0.0.1}" --port "${NHMS_DISPLAY_API_PORT:-8080}" --workers "${NHMS_DISPLAY_WORKERS:-2}"
+FragmentPath=/home/nwm/.config/systemd/user/nhms-display-api.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-autopipe
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-autopipe.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=NODE27_AUTOPIPE_BOOTSTRAP_LOG=/home/nwm/autopipe-logs/bootstrap.log PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_AUTOPIPE_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_AUTOPIPE_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-ingest.env
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM-reslice-original-5a86841c/scripts/node27_autopipe_cron.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/autopipe-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-autopipe.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-download
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-download.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_DOWNLOAD_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_DOWNLOAD_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-download.env
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM-reslice-original-5a86841c/scripts/node27_download_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-download.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-raw-retention
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_RAW_RETENTION_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_RAW_RETENTION_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-raw-retention.env
+ExecStart={ path=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_raw_retention_once.sh ; argv[]=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_raw_retention_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-timeseries-retention
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_TIMESERIES_RETENTION_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-timeseries-retention.env
+ExecStart={ path=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_timeseries_retention_once.sh ; argv[]=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_timeseries_retention_once.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-timeseries-retention-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-timeseries-compression
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM-reslice-original-5a86841c NODE27_TIMESERIES_COMPRESSION_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-timeseries-compression.env NODE27_COLD_RESIDENCY_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-cold-residency.env
+ExecStart={ path=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_timeseries_compression_once.sh ; argv[]=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_timeseries_compression_once.sh --enforce
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-resource-governance
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_RESOURCE_GOVERNANCE_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_RESOURCE_GOVERNANCE_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-resource-governance.env
+ExecStart={ path=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_resource_governance_once.sh ; argv[]=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_resource_governance_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
+## nhms-node27-frontier-alert
+DropInPaths=/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service.d/60-reslice-pin-original-5a86841c.conf
+Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1 PYTHONPATH=/home/nwm/NWM-reslice-original-5a86841c NODE27_FRONTIER_ALERT_REPO=/home/nwm/NWM-reslice-original-5a86841c NODE27_FRONTIER_ALERT_ENV_FILE=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-frontier-alert.env
+EnvironmentFiles=/home/nwm/NWM-reslice-original-5a86841c/infra/env/node27-frontier-alert.env (ignore_errors=no)
+ExecStart={ path=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_frontier_stall_alert_once.sh ; argv[]=/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_frontier_stall_alert_once.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-frontier-alert-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service
+WorkingDirectory=/home/nwm/NWM-reslice-original-5a86841c
