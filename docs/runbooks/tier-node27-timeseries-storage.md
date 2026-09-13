@@ -1382,7 +1382,7 @@ set -a
 . /home/nwm/NWM/infra/env/node27-timeseries-compression.env
 set +a
 : "${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS:?configured compression lag is required}"
-CUTOFF_COUNT="$(uv run --no-sync python scripts/node27_issue1895_cutoff_count.py \
+CUTOFF_COUNT="$(uv run --no-sync python -m scripts.node27_issue1895_cutoff_count \
   --original "$ORIGINAL_CENSUS" --original-sha256 "$ORIGINAL_CENSUS_SHA256" --reviewed-sha "$REVIEWED_SHA")"
 test "$CUTOFF_COUNT" = "$REQUIRE_COUNT" || { echo "NO-GO: cutoff count $CUTOFF_COUNT != $REQUIRE_COUNT" >&2; exit 1; }
 TARGET_ABSENT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
@@ -2037,7 +2037,7 @@ COLD_REL_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager
   "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_tablespace t ON t.oid=c.reltablespace WHERE t.spcname='nhms_cold'")"
 test "$COLD_REL_COUNT" = "0" || { echo "NO-GO: $COLD_REL_COUNT cold-resident relations before movement" >&2; exit 1; }
 export ORIGINAL_CENSUS="$RUN_ROOT/census/pre-target-$RUN_STAMP.json"
-uv run --no-sync python scripts/node27_issue1895_census_bind.py \
+uv run --no-sync python -m scripts.node27_issue1895_census_bind \
   --current "$PRE_MOVEMENT_CENSUS" \
   --original "$ORIGINAL_CENSUS" \
   --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
@@ -2174,7 +2174,7 @@ while IFS= read -r GROUP; do
     > "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
   chmod 600 "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
   printf 'group=%s before=%s after=%s\n' "$GROUP" "$START_FREE" "$END_FREE" >> "$FILESYSTEM_LOG"
-  uv run --no-sync python scripts/node27_issue1895_sequential_receipt.py \
+  uv run --no-sync python -m scripts.node27_issue1895_sequential_receipt \
     --receipt "$RECEIPT" --census "$ORIGINAL_CENSUS" --call-index "$GROUP_INDEX" --migrate-outcome migrated \
     --original-sha256 "$ORIGINAL_CENSUS_SHA256" --reviewed-sha "$REVIEWED_SHA"
   /home/nwm/NWM/.venv/bin/python - "$RECEIPT" "$BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS" "$GROUP" "$E" "$ORIGINAL_CENSUS_SHA256" <<'PY'
@@ -2648,7 +2648,7 @@ W8_PATH="$RUN_ROOT/census/w8-$RUN_STAMP.json"
 test ! -e "$PRE_NATURAL"
 # PRE_NATURAL proves durable catalog sets before timer restoration. It is not a
 # receipt horizon and never supplies the receipt's expected watermark/cutoff.
-uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+uv run --no-sync python -m scripts.node27_issue1895_post_target_observe \
   --baseline "$ORIGINAL_CENSUS" --output "$PRE_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
   --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
@@ -2829,14 +2829,14 @@ set +a
 : "${NODE27_COLD_RESIDENCY_LAG_SECONDS:?cold lag is required}"
 POST_NATURAL="$RUN_ROOT/census/post-natural-$RUN_STAMP.json"
 test ! -e "$POST_NATURAL"
-uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+uv run --no-sync python -m scripts.node27_issue1895_post_target_observe \
   --baseline "$ORIGINAL_CENSUS" --output "$POST_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
   --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
 chmod 600 "$POST_NATURAL"
 NEWLY="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; from packages.common.node27_issue1895_post_target import newly_terminal_keys; _pr, pre, _pf = read_held_private_json(Path(sys.argv[1]), label="G8 pre-natural", stage="post-target"); _po, post, _of = read_held_private_json(Path(sys.argv[2]), label="G8 post-natural", stage="post-target"); print("\n".join(newly_terminal_keys(pre_target_keys=pre["complete_target_keys"], post_target_keys=post["complete_target_keys"])))' "$PRE_NATURAL" "$POST_NATURAL")"
 REMAINING="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, post, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 post-natural remaining", stage="post-target"); print("\n".join(post["complete_source_keys"]))' "$POST_NATURAL")"
-uv run --no-sync python scripts/node27_issue1895_group_reconcile.py \
+uv run --no-sync python -m scripts.node27_issue1895_group_reconcile \
   --baseline "$ORIGINAL_CENSUS" \
   --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --observed "$POST_NATURAL" \

@@ -204,7 +204,6 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
         )
     assert digest.value.code == "CENSUS_DIGEST_DRIFT"
     g5 = " ".join(_gate_lines("G5"))
-    assert "scripts/node27_issue1895_census_bind.py" in g5
     assert 'assert current["verdict"]' not in g5
 
 
@@ -381,7 +380,6 @@ def test_g6_sequential_receipts_bind_one_migrated_key_and_suffix() -> None:
     with pytest.raises(Issue1895ReadinessError):
         assert_sequential_tick_receipt(extra, ordered_keys=KEYS, call_index=1, expected_count=6)
     g6 = " ".join(_gate_lines("G6"))
-    assert "scripts/node27_issue1895_sequential_receipt.py" in g6
     assert 'len(receipt["selected"]) == 1 and not receipt["deferred"]' not in g6
 
 
@@ -637,7 +635,6 @@ def test_g8_natural_tick_uses_independent_pre_post_sets() -> None:
             baseline_keys=KEYS,
         )
     g8 = " ".join(_gate_lines("G8"))
-    assert "scripts/node27_issue1895_post_target_observe.py" in g8
     assert "scripts/node27_cold_residency_census.py" not in g8
     assert "REMAINING_ALL_SOURCE" not in g8
 

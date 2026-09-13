@@ -895,7 +895,7 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_issue1895_runbook_contract.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        (*ISSUE1895_RUNBOOK_CONTRACT_TESTS, "tests/test_issue2291_reviewed_census_count.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -999,7 +999,11 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_node27_cold_residency_census.py",
-        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS + ISSUE1895_READINESS_TESTS,
+        (
+            *NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+            *ISSUE1895_READINESS_TESTS,
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1223,6 +1227,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_readiness_performance_live.py",
             "tests/test_issue1895_readiness_storage.py",
             "tests/test_issue1895_readiness_performance_live_cli.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
     ),
     PathTestRule(

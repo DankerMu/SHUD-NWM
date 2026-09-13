@@ -745,3 +745,102 @@ def test_g6_executable_key_extraction_cannot_authorize_replacement(tmp_path: Pat
     with pytest.raises(Issue1895ReadinessError):
         exec(program, {})
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "gate,module,occurrences",
+    [
+        ("G3", "node27_issue1895_cutoff_count", 1),
+        ("G5", "node27_issue1895_census_bind", 1),
+        ("G6", "node27_issue1895_sequential_receipt", 1),
+        ("G8", "node27_issue1895_post_target_observe", 2),
+        ("G8", "node27_issue1895_group_reconcile", 1),
+    ],
+)
+def test_documented_original_cli_reaches_validation_without_pythonpath(
+    tmp_path: Path,
+    gate: str,
+    module: str,
+    occurrences: int,
+) -> None:
+    import os
+    import shlex
+    import subprocess
+    import sys
+
+    from tests.test_issue1895_runbook_contract import _gate
+
+    # A held, hash-matching original reaches the shared validator (including its
+    # post-target import), but invalid N prevents every database connection.
+    invalid = document(3)
+    invalid["required_group_count"] = 0
+    original, frozen = private_json(tmp_path / "private" / "original.json", invalid)
+    missing = str(original.with_name("missing.json"))
+    output = original.with_name("output.json")
+    inputs = {
+        "node27_issue1895_cutoff_count": ["--original", str(original)],
+        "node27_issue1895_census_bind": [
+            "--original",
+            str(original),
+            "--current",
+            missing,
+            "--bracket",
+            missing,
+            "--digest",
+            invalid["census_digest"],
+        ],
+        "node27_issue1895_sequential_receipt": [
+            "--census",
+            str(original),
+            "--receipt",
+            missing,
+            "--call-index",
+            "1",
+        ],
+        "node27_issue1895_post_target_observe": [
+            "--baseline",
+            str(original),
+            "--output",
+            str(output),
+            "--lag-seconds",
+            str(LAG),
+        ],
+        "node27_issue1895_group_reconcile": [
+            "--baseline",
+            str(original),
+            "--observed",
+            missing,
+            "--receipt",
+            missing,
+            "--expected-cutoff",
+            invalid["cutoff"],
+            "--expected-watermark",
+            invalid["watermark"],
+        ],
+    }
+    prefix = "uv run --no-sync python "
+    launches = [
+        shlex.split(line.split(prefix, 1)[1].strip().removesuffix("\\").strip())
+        for line in _gate(gate).splitlines()
+        if prefix in line and module in line
+    ]
+    assert len(launches) == occurrences
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "NHMS_DISPLAY_READONLY_DATABASE_URL": "postgresql://nhms_display_ro@127.0.0.1:1/nhms",
+    }
+    for launch in launches:
+        completed = subprocess.run(
+            [sys.executable, *launch, *inputs[module], "--original-sha256", frozen, "--reviewed-sha", SHA],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 1, completed.stderr
+        assert "CENSUS_KEYS_INVALID" in completed.stderr
+        assert "Traceback" not in completed.stderr and "ModuleNotFoundError" not in completed.stderr
+        assert completed.stdout == "" and not output.exists()

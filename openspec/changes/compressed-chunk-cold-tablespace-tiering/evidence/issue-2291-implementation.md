@@ -27,9 +27,31 @@ not counted as red. Raw output and SHA-bound driver are retained in
 This is executed regression evidence using simulated catalog boundaries, not
 pinned-engine proof or a production observation.
 
-## Remaining verification
+## Tests-only checkpoint boundary
 
-Source implementation is in progress. No green result, isolated pinned-engine
-result, default regression, selector closure, review result or exact-head CI is
-claimed by this checkpoint. No production DB/active-checkout or G0-G8 operation
-was performed. #1895/#1891 and shared production tasks remain open.
+The tests-only checkpoint made no green, pinned-engine, default-regression,
+selector, review or CI claim. Subsequent results below identify their own SHA.
+No production DB/active-checkout or G0-G8 operation was performed.
+#1895/#1891 and shared production tasks remain open.
+
+## Initial implementation validation
+
+At `230e8c5817d038b933c32f8210e4c1a05d594d39`, local Ruff and strict OpenSpec
+passed. Node27 focused run:1131 passed,4 failed. Failures identified an unmigrated
+partial G1 policy test and the missing new-suite importer leg in the existing
+shared-fakes selector rule. Repairs preserve original closure/removal guards.
+
+The pinned PG15.2/TimescaleDB2.10.2 runtime oracle at that same SHA passed:
+1 passed,1 deselected. It exercised real admitted narrow/forcing count4,
+compressed excluded legacy/third tables, differing1/7-day ranges, added admitted
+origin count5 and census NO-GO, then restored fixture state. Existing physical
+parent/origin/role/plan/recompression/rollback/cleanup assertions remained invoked.
+
+Actual clean-env CLI process smoke also caught direct-file launch failing with
+`ModuleNotFoundError: scripts` before validation. The runbook now uses the
+repository's existing `python -m scripts.<module>` convention for all five
+affected original-loading entrypoints. Added subprocess coverage extracts those
+actual launches and reaches original refusal without PYTHONPATH, database
+observation or publication. This documented invocation change is a recorded
+plan deviation; no sys.path shim, package change or fallback was introduced.
+Corrected-head green remains to be executed; earlier results are not its proof.

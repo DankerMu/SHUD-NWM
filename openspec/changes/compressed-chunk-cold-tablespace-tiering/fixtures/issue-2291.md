@@ -243,3 +243,10 @@ Any additional changed helper, fake or harness owner receives its actual
 assertion-bearing suite through its current unique rule, with independent
 removal proof. Existing selector tests/meta-guards and support-module routes
 remain; a newly added route does not replace coverage of unchanged siblings.
+
+Executed CLI smoke found direct-file Python launch cannot resolve the existing
+`scripts` package imports in a clean environment. All five affected runbook CLI
+entrypoints use the existing `python -m scripts.<module>` convention from repo
+cwd. Real subprocess tests extract those documented launches without PYTHONPATH
+and reach original-validation refusal, including both G8 observations. This is
+an invocation cutover, not a sys.path shim or packaging/schema change.

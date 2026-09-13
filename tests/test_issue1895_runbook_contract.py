@@ -385,40 +385,67 @@ def _held_fence(gate: str, needle: str) -> str:
 
 
 def test_g1_freeze_validates_digest_as_lowercase_hex_and_bytes_as_decimal(tmp_path: Path) -> None:
+    import copy
+
+    from tests.test_issue2291_reviewed_census_count import SHA, document, frozen_files
+
     freeze = next(body for _opening, body in _gate_bash("G1") if "CENSUS_DIGEST" in body and "POLICY_FILE" in body)
     python = _python_heredoc(freeze)
-    digest = "0a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789"
-    os.chmod(tmp_path, 0o700)
-    census = tmp_path / "census.json"
-    policy_bytes = {
-        "E": "4096",
-        "S": "8192",
-        "cold_reserve_bytes": "4096",
-        "wal_reserve_bytes": "4096",
-        "install_required_bytes": "16384",
-        "rollback_headroom_bytes": "8192",
+    original = document(3)
+    census, _current, bracket, frozen_sha = frozen_files(tmp_path / "private", original)
+    policy = census.parent / "capacity-policy.env"
+    environment = {
+        **os.environ,
+        "CENSUS_ARTIFACT": str(census),
+        "POLICY_FILE": str(policy),
+        "PYTHONPATH": str(REPO_ROOT),
+        "REQUIRE_COUNT": "3",
+        "REVIEWED_SHA": SHA,
+        "CENSUS_BRACKET": str(bracket),
     }
-    census.write_text(
-        json.dumps({"verdict": "GO", "census_digest": digest, "capacity_policy": policy_bytes}),
-        encoding="utf-8",
-    )
-    os.chmod(census, 0o600)
-    policy = tmp_path / "capacity-policy.env"
     completed = subprocess.run(
         [sys.executable, "-c", python],
         cwd=tmp_path,
-        env={**os.environ, "CENSUS_ARTIFACT": str(census), "POLICY_FILE": str(policy), "PYTHONPATH": str(REPO_ROOT)},
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    text = policy.read_text(encoding="utf-8")
-    assert f"CENSUS_DIGEST={digest}" in text
-    assert "E=4096" in text and "S=8192" in text
-    assert re.search(r"\[0-9a-f\]\{64\}", python)
-    values_block = python.split("values = {", 1)[1].split("}", 1)[0]
-    assert "CENSUS_DIGEST" not in values_block
+    values = dict(line.split("=", 1) for line in policy.read_text().splitlines())
+    assert values["CENSUS_DIGEST"] == original["census_digest"]
+    assert values["ORIGINAL_CENSUS_SHA256"] == frozen_sha
+    assert values["REQUIRE_COUNT"] == "3"
+    assert values["E"] == "1274" and values["S"] == "307200"
+    assert policy.stat().st_mode & 0o777 == 0o600
+
+    sentinel = census.parent / "unsafe-value-executed"
+    for index, (field, unsafe) in enumerate(
+        (
+            ("census_digest", original["census_digest"].upper()),
+            ("census_digest", f"$(touch {sentinel})"),
+            ("E", "01274"),
+            ("S", f"307200; touch {sentinel}"),
+        )
+    ):
+        invalid = copy.deepcopy(original)
+        if field == "census_digest":
+            invalid[field] = unsafe
+        else:
+            invalid["capacity_policy"][field] = unsafe
+        census.write_text(json.dumps(invalid), encoding="utf-8")
+        refused_policy = census.parent / f"refused-{index}.env"
+        refused = subprocess.run(
+            [sys.executable, "-c", python],
+            cwd=tmp_path,
+            env={**environment, "POLICY_FILE": str(refused_policy)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert not refused_policy.exists()
+        assert not sentinel.exists()
 
 
 def test_current_run_g1_g3_g4_g5_g6_g8_fences_use_held_helpers() -> None:
@@ -442,12 +469,7 @@ def test_current_run_g1_g3_g4_g5_g6_g8_fences_use_held_helpers() -> None:
     enforce = next(body for _opening, body in _gate_bash("G5") if '"outcome"' in body and "installed" in body)
     assert "json.load(open" not in enforce and "open(bracket)" not in enforce
     assert "read_held_private_json" in enforce and "read_held_private_text" in enforce
-    g5, g6, g8 = (" ".join(_gate_lines(name)) for name in ("G5", "G6", "G8"))
-    assert "scripts/node27_issue1895_census_bind.py" in g5
-    assert "scripts/node27_issue1895_sequential_receipt.py" in g6
     assert "read_held_private_json" in _gate("G6")
-    assert "scripts/node27_issue1895_group_reconcile.py" in g8
-    assert "scripts/node27_issue1895_post_target_observe.py" in g8
 
 
 # Isolated oracle: real probe schema tokens
@@ -552,7 +574,6 @@ def test_runner_receipt_requires_fresh_migrated_and_one_per_receipt() -> None:
     g6 = _gate("G6")
     assert "unique_migrated_observation" in g6
     assert "assert_sequential_tick_receipt" in g6
-    assert "scripts/node27_issue1895_sequential_receipt.py" in g6
     assert 'len(receipt["selected"]) == 1 and not receipt["deferred"]' not in g6
     assert "already_cold" in _gate("G8")
     assert 'in {"migrated", "already_cold"}' not in g6
@@ -801,8 +822,6 @@ def test_g8_observes_natural_tick_through_systemd_fields_not_sleep_or_inotify() 
 def test_g8_noop_requires_catalog_proof_and_moved_key_presence() -> None:
     g8 = _gate("G8")
     assert "REMAINING_ALL_SOURCE" not in g8
-    assert "scripts/node27_issue1895_post_target_observe.py" in g8
-    assert "scripts/node27_issue1895_group_reconcile.py" in g8
     assert "assert_natural_receipt_identity" in g8
     assert "newly_terminal_keys" in g8
     assert "complete_source_keys" in g8
@@ -827,7 +846,7 @@ def test_g8_binds_a_post_tick_external_horizon_before_receipt_or_group_validatio
     w8_owner = g8.index("scripts/node27_issue1895_watermark.py")
     receipt_identity = g8.index("assert_natural_receipt_identity")
     receipt_horizon = g8.index("assert_independent_receipt_horizon")
-    group_reconcile = g8.index("scripts/node27_issue1895_group_reconcile.py")
+    group_reconcile = g8.index("node27_issue1895_group_reconcile")
     pre_observation = g8.index('output "$PRE_NATURAL"')
 
     assert pre_observation < restore < service_success < service_exit < w8_owner

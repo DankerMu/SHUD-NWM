@@ -12630,6 +12630,59 @@ def test_cold_residency_fakes_rule_importer_edge_is_load_bearing(
     ], f"the closure guard did not bite on the deleted edge: {offenders}"
 
 
+def test_cold_residency_fakes_reviewed_count_edge_preserves_all_prior_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    consumer = "tests/test_issue2291_reviewed_census_count.py"
+    rule = _support_rule_for(COLD_RESIDENCY_FAKES_PRODUCER)
+    before = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
+    assert consumer in rule.tests and consumer in before
+    assert set(rule.tests) <= before
+    mutant = replace(rule, tests=tuple(target for target in rule.tests if target != consumer))
+    monkeypatch.setattr(
+        _prod_module,
+        "SUPPORT_MODULE_TEST_RULES",
+        tuple(
+            mutant if existing.pattern == COLD_RESIDENCY_FAKES_PRODUCER else existing
+            for existing in _prod_module.SUPPORT_MODULE_TEST_RULES
+        ),
+    )
+    selected = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
+    assert selected == before - {consumer}
+    derived = _derived_support_module_importers([COLD_RESIDENCY_FAKES_PRODUCER])
+    assert _support_module_closure_offenders(
+        modules=[COLD_RESIDENCY_FAKES_PRODUCER],
+        derived=derived,
+        select=lambda _module: selected,
+    ) == [f"{COLD_RESIDENCY_FAKES_PRODUCER} -> {consumer}: derived non-gated importer suite is not selected"]
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ],
+)
+def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(monkeypatch, owner: str) -> None:
+    consumer = "tests/test_issue2291_reviewed_census_count.py"
+    rules = _prod_module.CHANGED_TEST_FILE_RULES
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1 and matching[0].stop_on_match
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert consumer in matching[0].tests and consumer in before
+    assert set(matching[0].tests) <= before
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != consumer))
+            if rule.pattern == owner
+            else rule
+            for rule in rules
+        ),
+    )
+    assert set(select_tests([owner], repo_root=Path("."))) == before - {consumer}
+
+
 # Issue #1929 producer -> consumer closure. The contract spans four surfaces
 # (target inspector, runtime identity, CLI/env config, receipt schema) and a
 # change on ONE of them invalidates assertions on another — e.g. deleting the
