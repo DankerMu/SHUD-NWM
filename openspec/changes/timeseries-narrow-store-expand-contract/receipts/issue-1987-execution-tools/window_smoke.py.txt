@@ -41,7 +41,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 
 IMAGE = "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
 
@@ -329,10 +329,16 @@ def scenario(args):
         yd_pids=[],
         authorized_timers=[w.TIMERS[0], w.TIMERS[1]],
         api_health_path="/health",
+        yd_health_path="/health",
+        public_base_url="https://fixture.invalid",
+        proxy={
+            "master_pid": os.getpid(),
+            "files": {str(root / "proxy.conf"): w.digest(b"immutable admitted fixture\n")},
+        },
     )
     w.private_write(root / "config.json", json.dumps(config).encode())
     files = {}
-    for name in ("HOLD-state.json", "resume-approved", "foreign.conf"):
+    for name in ("HOLD-state.json", "resume-approved", "foreign.conf", "proxy.conf"):
         path = root / name
         w.private_write(path, b"immutable admitted fixture\n")
         files[str(path)] = {"sha256": w.digest(path.read_bytes())}
@@ -403,6 +409,8 @@ def scenario(args):
         legacy_catalog=e.table_metadata("hydro", "river_timeseries"),
         forcing_catalog=e.table_metadata("met", "forcing_station_timeseries"),
     )
+    if args.case == "happy":
+        late_prepare_admission(e)
     before = e.catalog(), e.ledger()
     session = psycopg2.connect(dsn) if args.case == "session" else None
     e.inject = args.case if args.case in {"stop", "fence"} else None
@@ -552,6 +560,257 @@ def scenario(args):
             default=str,
         )
     )
+
+
+def late_prepare_admission(e):
+    """Real prepare/save/run failure, then disk-reconstructed main invocations."""
+    original_executor, original_safe_path, original_argv = w.Executor, w.safe_path, sys.argv
+    root, assets = e.root / "late-prepare", e.root / "late-prepare-assets"
+    assets.mkdir(mode=0o700)
+    hold = "/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json"
+    paths = {hold: assets / "state.json", str(Path(hold).parent / "resume-approved"): assets / "resume-approved"}
+    w.private_write(paths[hold], b'{"phase":"lifted-and-fences-removed"}')
+    w.private_write(paths[str(Path(hold).parent / "resume-approved")], b"fixture approval\n")
+    config = json.loads(json.dumps(e.c))
+    config.update(
+        repo="/home/nwm/NWM",
+        restore_branch="new",
+        restore_ref="refs/remotes/fixture/new",
+        env_files=[str(assets / "fixture.env")],
+        protected_files=list(paths),
+        lock_files=sorted(w.LOCKS),
+        admission={},
+    )
+    w.private_write(assets / "fixture.env", b"# fixture-only installed environment\n")
+    for key in ("go", "d12", "capacity", "artifacts", "governance"):
+        path = assets / (key + ".evidence")
+        data = ("fixture boundary evidence: " + key).encode()
+        w.private_write(path, data)
+        config["admission"][key] = {"path": str(path), "sha256": w.digest(data)}
+    config_path = e.root / "late-prepare-config.json"
+    w.private_write(config_path, json.dumps(config).encode())
+    external_units = {}
+    for name in w.TIMERS + w.SERVICES:
+        fragment = assets / name
+        w.private_write(fragment, ("# fixture installed unit: " + name + "\n").encode())
+        unit = dict.fromkeys(w.PROPS, "")
+        unit.update(
+            LoadState="loaded",
+            ActiveState="active",
+            SubState="running",
+            Result="success",
+            MainPID="1",
+            UnitFileState="enabled",
+            FragmentPath=str(fragment),
+            WorkingDirectory=config["repo"],
+            ExecStart=config["repo"] + "/fixture-command",
+            ExecMainStatus="0",
+            ExecMainStartTimestampMonotonic="0",
+        )
+        if name == "nhms-node27-timeseries-compression.service":
+            unit["TimeoutStartUSec"] = "1h 5min 40s"
+        external_units[name] = unit
+    before_units = json.loads(json.dumps(external_units))
+    before_catalog, before_ledger = e.catalog(), e.ledger()
+    fixture_oid = int(e.sql("SELECT 'hydro.river_timeseries'::regclass::oid"))
+    w.require(
+        len(before_catalog) == 1 and before_catalog[0]["oid"] == fixture_oid,
+        "LATE_PREPARE_REAL_OID_REQUIRED",
+    )
+    prepare = original_executor.prepare
+    replacements = sum(type(value) is int and value == 24541 for value in prepare.__code__.co_consts)
+    w.require(replacements == 1, "FROZEN_PREPARE_OID_BINDING_CHANGED")
+    constants = tuple(
+        fixture_oid if type(value) is int and value == 24541 else value for value in prepare.__code__.co_consts
+    )
+    bound_prepare = FunctionType(
+        prepare.__code__.replace(co_consts=constants),
+        prepare.__globals__,
+        prepare.__name__,
+        prepare.__defaults__,
+        prepare.__closure__,
+    )
+    binding = {
+        "original_expected_oid": 24541,
+        "fixture_expected_oid": fixture_oid,
+        "transformed_constant_count": replacements,
+        "source_sha256": w.digest(Path(w.__file__).read_bytes()),
+        "limitation": (
+            "Actual prepare control flow with fixture expected-OID substitution, not byte-identical execution."
+        ),
+    }
+    lock_paths = {path: str(assets / ("lock-" + str(index))) for index, path in enumerate(sorted(w.LOCKS))}
+
+    class LatePrepareExecutor(BoundaryExecutor):
+        prepare = bound_prepare
+
+        def run(self, argv, **kwargs):
+            if argv == ["docker", "inspect", "nhms-db"]:
+                return json.dumps(
+                    [
+                        {
+                            "Id": "5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f",
+                            "State": {"Running": True},
+                            "Image": IMAGE,
+                            "Mounts": [
+                                {
+                                    "Source": "/data/GHDC/nhms-primary/pgdata",
+                                    "Destination": "/home/postgres/pgdata/data",
+                                }
+                            ],
+                        }
+                    ]
+                ).encode()
+            if argv in (
+                ["systemctl", "--user", "list-unit-files", "--no-pager", "--no-legend"],
+                ["systemctl", "--user", "list-units", "--all", "--no-pager", "--no-legend"],
+                ["systemctl", "--user", "list-timers", "--all", "--no-pager"],
+            ):
+                return b""
+            if argv == ["docker", "exec", "nhms-db", "pg_dump", "-U", "nhms", "-d", "nhms", "--schema-only"]:
+                # Only the external pg_dump process is substituted. The real
+                # executor.run persists child/returncode and raises COMMAND_FAILED.
+                self.dump_invocations += 1
+                return original_executor.run(
+                    self,
+                    [sys.executable, "-c", "raise SystemExit(23)"],
+                    cwd=self.fixture.old_repo,
+                    **kwargs,
+                )
+            return super().run(argv, **kwargs)
+
+        def git(self, *args, repo=None):
+            if repo is not None:
+                w.require(str(repo) == self.fixture.new_repo, "UNKNOWN_STAGED_GIT_BOUNDARY")
+                if args == ("rev-parse", "HEAD"):
+                    return w.NEW
+                if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+                    return ""
+                raise w.Refusal("UNKNOWN_STAGED_GIT_BOUNDARY")
+            if args == ("symbolic-ref", "--short", "HEAD"):
+                return "old"
+            if args in (
+                ("rev-parse", "--verify", "refs/heads/new^{commit}"),
+                ("rev-parse", "--verify", "refs/remotes/fixture/new^{commit}"),
+            ):
+                return w.NEW
+            return super().git(*args, repo=repo)
+
+        def drain(self):
+            original = self.c["lock_files"]
+            self.c["lock_files"] = [lock_paths[path] for path in original]
+            try:
+                return super().drain()
+            finally:
+                self.c["lock_files"] = original
+
+        def audit_roles(self):
+            original = self.repo
+            self.repo = Path(self.fixture.old_repo)
+            try:
+                return super().audit_roles()
+            finally:
+                self.repo = original
+
+    def safe_boundary(path, private=False):
+        return original_safe_path(paths.get(str(path), path), private)
+
+    reports = []
+    saved_env = {key: os.environ.get(key) for key in ("DATABASE_URL", "I8_INGEST_DSN", "I8_DISPLAY_DSN")}
+
+    def invoke(command, go):
+        instances = []
+
+        def factory(cli_args):
+            fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
+            instance = LatePrepareExecutor(fixture, e.dsn, cli_args=cli_args)
+            instance.units = external_units
+            instance.dump_invocations = 0
+            instances.append(instance)
+            return instance
+
+        w.Executor = factory
+        sys.argv = [str(Path(w.__file__).resolve()), command, "--state", str(root)]
+        if command == "prepare":
+            sys.argv += ["--config", str(config_path)]
+        if go:
+            sys.argv += ["--go", "Danker"]
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                rc = w.main()
+        finally:
+            for instance in instances:
+                os.close(instance.lock)
+        name = command + ("-go" if go else "-no-go")
+        e.save_file("late-prepare-" + name + ".stdout", output.getvalue().encode())
+        receipt = json.loads(output.getvalue())
+        actions = instances[0].system_actions if instances else []
+        record = {
+            "case": name,
+            "returncode": rc,
+            "receipt": receipt,
+            "system_actions": actions,
+            "dump_invocations": instances[0].dump_invocations if instances else 0,
+            "serving_unchanged": external_units == before_units,
+            "catalog_unchanged": e.catalog() == before_catalog,
+            "ledger_unchanged": e.ledger() == before_ledger,
+        }
+        reports.append(record)
+        e.save_file("late-prepare-admission.json", json.dumps({"binding": binding, "cases": reports}).encode())
+        return record
+
+    try:
+        w.safe_path = safe_boundary
+        os.environ.update({key: e.dsn for key in saved_env})
+        result = invoke("prepare", False)
+        w.require(
+            result["returncode"] == 1
+            and result["receipt"]["check"] == "COMMAND_FAILED"
+            and result["dump_invocations"] == 1
+            and not result["system_actions"],
+            "POST_SNAPSHOT_PG_DUMP_FAILURE_NOT_REACHED",
+        )
+        persisted = (root / "state.json").read_bytes()
+        snapshot = json.loads(persisted)
+        w.require(
+            all(key in snapshot for key in ("old_oid", "units", "files", "ledger_before", "old_branch", "fence_epochs"))
+            and "legacy_read" not in snapshot
+            and snapshot.get("child_pid") is None
+            and snapshot.get("last_command_rc") == 23,
+            "REAL_LATE_PREPARE_SNAPSHOT_REQUIRED",
+        )
+        e.save_file("late-prepare-persisted.json", persisted)
+        e.save_file("late-prepare-pg_dump-failure.txt", (root / "failure-private.txt").read_bytes())
+        for command, go, expected in (
+            ("recover", False, "RECOVERY_GO_REQUIRED"),
+            ("status", False, None),
+            ("recover", True, "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY"),
+        ):
+            result = invoke(command, go)
+            w.require(
+                not result["system_actions"]
+                and result["serving_unchanged"]
+                and result["catalog_unchanged"]
+                and result["ledger_unchanged"],
+                "LATE_PREPARE_RECOVERY_MUTATED_SERVING",
+            )
+            receipt = result["receipt"]
+            w.require(
+                result["returncode"] == (0 if command == "status" else 1)
+                and receipt.get("check") == expected
+                and receipt.get("inspection_only")
+                and "recovery_command" not in receipt
+                and not receipt.get("phase", "").startswith("BLOCKED_FENCE"),
+                "LATE_PREPARE_REFUSAL_OR_GUIDANCE",
+            )
+    finally:
+        w.Executor, w.safe_path, sys.argv = original_executor, original_safe_path, original_argv
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def entrypoint_admission(e):
