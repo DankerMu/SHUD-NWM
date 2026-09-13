@@ -17502,9 +17502,9 @@ def _registry_addition_integration_nodes(additions: Sequence[dict[str, Any]]) ->
 
 
 def _registry_owner_of(oracle: dict[str, Any], additions: Sequence[dict[str, Any]]) -> dict[str, str]:
-    """Definition name -> owning partition over ``frozen rows ∪ additions``."""
-    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
-    owner_of.update({record["name"]: record["owner"] for record in additions})
+    """Definition name -> owning partition over ``frozen rows ∪ additions``; frozen wins on a collision."""
+    owner_of = {record["name"]: record["owner"] for record in additions}
+    owner_of.update({name: row[0] for name, row in oracle["rows"].items()})
     return owner_of
 
 
@@ -17742,7 +17742,7 @@ REGISTRY_PARTITION_DEMO_FROZEN_NAME = "test_registry_import_checksum_conflict_ro
 REGISTRY_PARTITION_DEMO_AUTH_OWNER = "tests/test_basins_registry_import_auth.py"
 REGISTRY_PARTITION_DEMO_PARSER_OWNER = "tests/test_basins_registry_import_parser.py"
 REGISTRY_PARTITION_DEMO_AUTH_NAME = "test_argparse_import_basins_registry_rejects_unknown_auth_role_before_preparation"
-_REGISTRY_PARTITION_DEMO_AUTH_ADDITION = '''
+_REGISTRY_PARTITION_DEMO_AUTH_ADDITION = """
 
 def test_argparse_import_basins_registry_rejects_unknown_auth_role_before_preparation(
     tmp_path: Path,
@@ -17770,8 +17770,8 @@ def test_argparse_import_basins_registry_rejects_unknown_auth_role_before_prepar
     assert exit_code == 1
     assert json.loads(capsys.readouterr().err)["status"] == "blocked"
     assert not report_path.exists()
-'''
-_REGISTRY_PARTITION_DEMO_ADDITION = '''
+"""
+_REGISTRY_PARTITION_DEMO_ADDITION = """
 
 @pytest.mark.integration
 def test_registry_import_viewer_role_writes_no_model_instance_row(
@@ -17805,7 +17805,7 @@ def test_registry_import_viewer_role_writes_no_model_instance_row(
             cursor.execute("SELECT count(*) AS n FROM core.model_instance WHERE model_id = %s", (model_id,))
             row = cursor.fetchone()
     assert row["n"] == 0
-'''
+"""
 _REGISTRY_FAKE_BASE_COMMIT = "a" * 40
 
 
@@ -18244,18 +18244,22 @@ def test_registry_partition_registered_addition_absent_from_the_tree_is_named_wi
         )
 
 
-def test_registry_partition_proofs_hold_with_a_non_empty_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The proofs above read the REAL ledger: simulate a first genuine registered addition in
-    # another allowed partition (auth, in memory) and re-run their core GREEN/RED arms.
+def _registry_non_empty_ledger_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Add one registered in-memory auth addition ON TOP of the real ledger; re-run the proofs.
+
+    Module globals are resolved at call time, so a caller may have already patched the
+    ledger accessor and reader to simulate a real ledger that carries genuine additions.
+    """
     module = sys.modules[__name__]
     oracle = _registry_partition_oracle()
+    real = _registry_partition_additions()
     real_read = _registry_read_partition_text
     auth_text = real_read(REGISTRY_PARTITION_DEMO_AUTH_OWNER) + _REGISTRY_PARTITION_DEMO_AUTH_ADDITION
 
     def read(path: str) -> str:
         return auth_text if path == REGISTRY_PARTITION_DEMO_AUTH_OWNER else real_read(path)
 
-    printed = _registry_definition_violations(oracle, [], read)
+    printed = _registry_definition_violations(oracle, real, read)
     assert len(printed) == 1 and printed[0].startswith(f"{REGISTRY_PARTITION_DEMO_AUTH_OWNER}::"), printed
     auth_record = {
         "issue": 2183,
@@ -18266,11 +18270,11 @@ def test_registry_partition_proofs_hold_with_a_non_empty_ledger(monkeypatch: pyt
         "nodes": [REGISTRY_PARTITION_DEMO_AUTH_NAME],
         "integration_nodes": [],
     }
-    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": [auth_record]}
+    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": [*real, auth_record]}
     assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
     monkeypatch.setattr(module, "_registry_read_partition_text", read)
-    monkeypatch.setattr(module, "_registry_partition_additions", lambda: [dict(auth_record)])
-    assert _registry_definition_violations(oracle, [auth_record], read) == []
+    monkeypatch.setattr(module, "_registry_partition_additions", lambda: [*real, dict(auth_record)])
+    assert _registry_definition_violations(oracle, [*real, auth_record], read) == []
 
     for proof in (
         test_registry_partition_unregistered_addition_reds_the_definitions_checker_by_name,
@@ -18283,6 +18287,56 @@ def test_registry_partition_proofs_hold_with_a_non_empty_ledger(monkeypatch: pyt
         test_registry_partition_registered_addition_absent_from_the_tree_is_named_with_its_partition,
     ):
         proof()
+
+
+def test_registry_partition_proofs_hold_with_a_non_empty_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The proofs above read the REAL ledger: simulate a first genuine registered addition in
+    # another allowed partition (auth, in memory) and re-run their core GREEN/RED arms.
+    _registry_non_empty_ledger_proof(monkeypatch)
+
+
+def test_registry_partition_non_empty_ledger_proof_unions_a_pre_existing_addition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The union with the real ledger is load-bearing: pretend the REAL ledger already holds a
+    # genuine addition (the auth demo text re-homed under another name in the security
+    # partition, in memory), then run the non-empty-ledger proof on top of it.
+    module = sys.modules[__name__]
+    oracle = _registry_partition_oracle()
+    owner = "tests/test_basins_registry_import_security.py"
+    name = "test_argparse_import_basins_registry_security_rejects_unknown_auth_role_before_preparation"
+    real_read = _registry_read_partition_text
+    security_text = real_read(owner) + _REGISTRY_PARTITION_DEMO_AUTH_ADDITION.replace(
+        REGISTRY_PARTITION_DEMO_AUTH_NAME, name
+    )
+
+    def read(path: str) -> str:
+        return security_text if path == owner else real_read(path)
+
+    printed = _registry_definition_violations(oracle, _registry_additions_with(), read)
+    assert len(printed) == 1 and printed[0].startswith(f"{owner}::{name} is neither"), printed
+    record = {
+        "issue": 2183,
+        "base_commit": REGISTRY_PARTITION_DEMO_BASE_COMMIT,
+        "owner": owner,
+        "name": name,
+        "row": json.loads(printed[0].split("observed row=", 1)[1]),
+        "nodes": [name],
+        "integration_nodes": [],
+    }
+    simulated_real = _registry_additions_with(record)
+    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": simulated_real}
+    assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
+    monkeypatch.setattr(module, "_registry_read_partition_text", read)
+    monkeypatch.setattr(module, "_registry_partition_additions", lambda: [dict(r) for r in simulated_real])
+
+    # Discriminator: the pre-fix bare-list shape (no real additions) reds on the tree, naming
+    # the pre-existing addition; the union shape is green.
+    bare = _registry_definition_violations(oracle, [], read)
+    assert any(v.startswith(f"{owner}::{name} is neither") for v in bare), bare
+    assert _registry_definition_violations(oracle, _registry_partition_additions(), read) == []
+
+    _registry_non_empty_ledger_proof(monkeypatch)
 
 
 def test_registry_partition_ledger_checker_reads_before_state_only_through_git(
