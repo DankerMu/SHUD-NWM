@@ -37,6 +37,15 @@ decisions). Ordering gate: this change merges **before** #2100's mode change.
   `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`
   that describes the shipped clause as matching only `_root_unsafe`.
 
+- [x] 1.5 `scripts/select_ci_tests.py`: path-exact row
+  `infra/env/node27-raw-retention.example` ->
+  `tests/test_node27_raw_retention.py` + `tests/test_node27_mvt_cache_retention.py`
+  (review round 1: the test now executes the example's `jq`; the glob rows
+  select zero readers of it — #2195 shape, #2032 precedent).
+- [x] 1.6 `infra/env/node27-raw-retention.example` prose (review round 1):
+  errno fields promised only for `detail: path_unavailable`; all-sources
+  `_source_unsafe` reading; the payload is appended to the wrapper log.
+
 ## 2. Tests (`tests/test_node27_raw_retention.py`, pinned to 3.11 like the ancestor test; every mode-changing test carries the `os.geteuid() == 0` skip guard and restores modes in `finally`)
 
 - [x] 2.1 `test_an_untraversable_canonical_root_retires_only_that_lane`
@@ -61,20 +70,25 @@ decisions). Ordering gate: this change merges **before** #2100's mode change.
 - [x] 2.9 `test_an_untraversable_raw_source_root_retires_only_that_source`
   (`store/raw/gfs` at `0o444`, `raw/` traversable; the raw per-source caller
   builds its key from the on-disk name, a different caller from 2.6's).
+- [x] 2.10 `test_an_unreadable_precip_cache_source_root_retires_only_that_source`
+  (review round 1: the fifth per-source surface had no assertion).
+- [x] 2.11 Review round 1 docstring fix: the ESTALE test pins
+  `_resolve_lane_root`'s `resolved is None` forwarding branch, not its
+  `except OSError` branch.
 
 ## 3. Evidence Floor
 
-- [ ] 3.1 `uv run ruff check .` clean.
-- [ ] 3.2 `uv run pytest -q tests/test_node27_raw_retention.py` green locally.
-- [ ] 3.3 node-27: same pytest file green in a disposable worktree
+- [x] 3.1 `uv run ruff check .` clean.
+- [x] 3.2 `uv run pytest -q tests/test_node27_raw_retention.py` green locally.
+- [x] 3.3 node-27: same pytest file green in a disposable worktree
   (`/home/nwm/tmp/wt-2104`, `TMPDIR=/home/nwm/tmp`, `uv sync` inside the
   worktree only; `/home/nwm/NWM` untouched), run as `nwm` so the mode cases
   and the `jq` test execute (no skips other than the documented root guard).
-- [ ] 3.4 node-27 item-4 receipt: documented `jq` check exits non-zero on
+- [x] 3.4 node-27 item-4 receipt: documented `jq` check exits non-zero on
   `raw-retention-20260912T054536Z.json` and zero on the freshest summary.
-- [ ] 3.5 `openspec validate fix-raw-retention-lane-root-locality --strict
+- [x] 3.5 `openspec validate fix-raw-retention-lane-root-locality --strict
   --no-interactive` valid.
-- [ ] 3.6 PR body states the ordering gate: merged before #2100's mode change.
+- [x] 3.6 PR body states the ordering gate: merged before #2100's mode change.
 
 ## Known limits (recorded, not deferred)
 

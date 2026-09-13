@@ -78,9 +78,12 @@ and writes the receipt the operator check reads).
    lane-level one; rewrite the "Forward pointer … Tracked as #2104 item 3"
    paragraph and the exit-code table line to describe the errno-carrying
    entries. Route (a) — synthesising a lane-level `<prefix>_root_unsafe` when
-   every configured source fails — is rejected: it would report a state the
-   probes did not observe (the lane root *was* traversable) and would still
-   hide a single failing source among healthy ones.
+   every configured source fails — is rejected: it would hide a single failing source among healthy ones, and
+   the lane-level entry would have to be synthesised because the lane-root
+   gate never exercises the lane root's own `x` (every probe stats it from
+   its parent). The operator reading is therefore: per-source entries for
+   every configured source under one lane prefix mean the lane root itself
+   lost `x`; a single entry means one source root.
 5. **Item 4 (stale receipt).** No code. Route (a) is already live in the
    example (`finished_at` within 26h). The evidence is a receipt line from
    node-27: the documented `jq` on a stale summary file exits non-zero and on

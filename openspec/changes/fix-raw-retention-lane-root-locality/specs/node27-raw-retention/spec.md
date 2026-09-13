@@ -46,6 +46,14 @@ A listing that raised SHALL NOT be reported as an empty directory.
   key `raw/gfs` and no raw target is deleted
 - **AND** the aged canonical and precip-cache targets are deleted
 
+#### Scenario: one precip-cache source directory unreadable inside a traversable cache lane
+
+- **WHEN** `<cache>/precip` is traversable and `<cache>/precip/IFS` is mode `0o444`
+- **THEN** `skipped[]` carries one entry with key `precip-cache/IFS`, reason
+  `precip_cache_source_unsafe`, detail `path_unavailable` and `error_type`
+  `PermissionError`
+- **AND** aged cycles under `<cache>/precip/gfs` are still deleted
+
 ### Requirement: Unavailable-path skip entries carry the errno
 
 Skip entries with detail `path_unavailable` SHALL carry `error` (the `OSError`

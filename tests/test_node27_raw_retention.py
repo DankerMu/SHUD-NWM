@@ -1051,6 +1051,53 @@ def test_an_untraversable_raw_source_root_retires_only_that_source(
     assert not aged_cache.exists()
 
 
+def test_an_unreadable_precip_cache_source_root_retires_only_that_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The third lane's per-source leg: `<cache>/precip/IFS` at 0o444 keeps `gfs` pruning.
+
+    Same `_collect_mapped_lane` code path as the canonical source test, but the
+    lane the display API writes -- a PNG cache directory left mode-crippled must
+    cost its own source's cycles, not the cache lane and not the run.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    gfs_cache = _write_cache_cycle(cache, "gfs", "2026060100")
+    ifs_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    ifs_cache_root = cache / "precip" / "IFS"
+    ifs_cache_root.chmod(0o444)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        ifs_cache_root.chmod(0o755)
+
+    assert exit_code == 0
+    unsafe = _entries(payload, "precip_cache_source_unsafe")
+    assert _keys(unsafe) == ["precip-cache/IFS"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert unsafe[0]["path"] == str(ifs_cache_root)
+    assert unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "PermissionError"
+    assert _keys(payload["deleted"]) == [
+        "raw/gfs/2026060100",
+        "canonical/IFS/2026060100",
+        "precip-cache/gfs/2026060100",
+    ]
+    assert payload["failed"] == []
+    assert payload["counts"]["failed"] == 0
+    assert not raw_cycle.exists()
+    assert not canonical_cycle.exists()
+    assert not gfs_cache.exists()
+    assert ifs_cache.exists()
+
+
 def test_iter_dirs_reports_the_listing_error_instead_of_raising(tmp_path: Path) -> None:
     """`([], error)` and `([], None)` are different answers: unavailable vs empty."""
     if os.geteuid() == 0:
@@ -1087,9 +1134,17 @@ def test_a_stale_lane_root_handle_is_reported_with_its_errno(
     """ESTALE on an NFS lane root: same local skip, and the errno reaches the receipt.
 
     `<object-store>` itself going stale is a preflight blocker (rc=2); only a
-    LANE root lands in `_resolve_lane_root`'s `except OSError`, which is the
-    path pinned here. ESTALE maps to no `OSError` subclass, so `error_type` is
-    the base class name -- the field is the exception class, never a reason.
+    LANE root lands in `_resolve_lane_root`. The branch pinned here is that
+    function's FORWARDING branch, not its `except OSError`: only `Path.resolve`
+    is patched, and the `is_symlink`/`exists`/`is_dir` predicates ahead of it
+    run on lstat/stat, so the ESTALE is raised and caught inside
+    `_safe_resolved_dir`, which returns a `path_unavailable` blocker whose
+    `error`/`error_type` the `resolved is None` branch copies onto the skip
+    entry. `_resolve_lane_root`'s own `except OSError` is covered by
+    `test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes`, where
+    the store at 0o000 makes the first predicate's lstat raise. ESTALE maps to
+    no `OSError` subclass, so `error_type` is the base class name -- the field
+    is the exception class, never a reason.
     """
     store = tmp_path / "store"
     cache = tmp_path / "cache"
@@ -1131,12 +1186,17 @@ def test_a_stale_lane_root_handle_is_reported_with_its_errno(
 def _documented_operator_jq_program() -> str:
     """The `jq -e '...'` program as the env example teaches it, not a copy of it."""
     lines = _RETENTION_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
-    start = next(index for index, line in enumerate(lines) if "jq -e '" in line)
+    start = next((index for index, line in enumerate(lines) if "jq -e '" in line), None)
+    assert start is not None, f"no `jq -e '` opening marker in {_RETENTION_ENV_EXAMPLE}"
     end = next(
-        index
-        for index, line in enumerate(lines)
-        if index > start and "' \"$(ls -t" in line
+        (
+            index
+            for index, line in enumerate(lines)
+            if index > start and "' \"$(ls -t" in line
+        ),
+        None,
     )
+    assert end is not None, f"no `' \"$(ls -t` closing marker in {_RETENTION_ENV_EXAMPLE}"
     body = [lines[index].lstrip().lstrip("#").strip() for index in range(start + 1, end)]
     return "\n".join(body)
 

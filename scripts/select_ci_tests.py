@@ -3216,6 +3216,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_mvt_cache_retention.py",),
     ),
     PathTestRule(
+        # #2104, same ground as the #2032 row above: the two globs that match
+        # this template (`infra/env/node27-*.example` -> write-roles, which
+        # only scans every template for DSN users and credential placeholders;
+        # `infra/env/**` -> the docker runtime pin, which never opens it) assert
+        # nothing about this file's body, so a template-only PR selected a
+        # non-empty set with zero readers of the documented criterion -- the
+        # #2195 shape. Both targets below really read this path:
+        # `tests/test_node27_raw_retention.py::_documented_operator_jq_program`
+        # EXTRACTS the documented `jq` program out of this file and runs it
+        # against a real summary, so a typo in the program reds there and
+        # nowhere else, and
+        # `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+        # pins the sibling-runner cross-reference in it. Additive: the glob rows
+        # still match and every target set is unioned.
+        "infra/env/node27-raw-retention.example",
+        (
+            "tests/test_node27_raw_retention.py",
+            "tests/test_node27_mvt_cache_retention.py",
+        ),
+    ),
+    PathTestRule(
         "infra/env/node27-timeseries-compression.example",
         (
             "tests/test_node27_timeseries_compression.py",
