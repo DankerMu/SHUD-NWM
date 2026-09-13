@@ -4633,3 +4633,12 @@ later-round catches core=282、rotated=270、phase=60、skipped=15。
 该席 0 候选（第三轮整体 clean），轮换未带来额外 catch，单例不足以推断收益或成本。
 记录 deferral：keep/cut 仍待维护者决策；本批合并预授权不含审核策略调整。
 现行 keep 与座位上限不变。
+
+### Revisit 2026-09-13（post PR #2318 / issue #1895）
+
+追加 #2318 与前一 bookkeeping PR #2312 后实测 657 行、647 merged、
+10 terminal；218 个多轮样本，later-round catches core=282、rotated=270、
+phase=60、skipped=15。#2318 high 单轮四席 clean，唯一 Note 是证据来源精度，
+独立确认后仅补说明；#2312 none 零轮。均不增加轮换样本。
+记录 deferral：keep/cut 仍待维护者决策；epic merge 预授权不含审核策略调整。
+现行 keep、座位上限不变，后续 R1.4/R1.6/R2–R5 仍按原退役契约执行。
