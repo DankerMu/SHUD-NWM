@@ -1627,10 +1627,6 @@ export interface components {
             segment_count?: number | null;
             mesh_uri?: string | null;
             mesh_checksum?: string | null;
-            /** @description mv.properties_json (core.mesh_version.properties_json, JSONB NOT NULL DEFAULT '{}'). Emitted only by the lifecycle route, whose projection -- unlike _model_asset_detail -- does not pop this key. */
-            mesh_properties_json?: {
-                [key: string]: unknown;
-            };
             shud_code_version: string;
             rshud_code_version?: string | null;
             autoshud_code_version?: string | null;

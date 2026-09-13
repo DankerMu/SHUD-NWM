@@ -210,7 +210,7 @@ POST /api/v1/hindcast/submit
 - Hindcast 结果的 run_type = "hindcast"，scenario_id = "hindcast_replay"
 - Hindcast 入库到同一 river_timeseries 表，但不自动发布到前端业务产品
 - Hindcast 结果可被 Flood Frequency Engine 作为历史样本使用
-- 前端默认不展示 hindcast 数据；analyst 角色可在高级查询中按 run_type 筛选 hindcast 结果
+- 前端默认不展示 hindcast 数据；forecast-series 查询接口与 OpenAPI 匿名声明一致，可按 `run_types=hindcast` 筛选，不设角色闸门（#2081）
 - Hindcast 不产生 StateSnapshot（不参与业务 warm-start 链路），除非显式配置
 
 **与阶段路线的关系**：Hindcast 能力在阶段 5（洪水频率/重现期产品）前完成，作为历史样本生产的前置依赖。

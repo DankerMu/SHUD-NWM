@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,9 +37,6 @@ from packages.common.request_auth import (
 )
 
 POLICY_CONFIG_ERROR = "POLICY_CONFIG_ERROR"
-
-_TRUTHY = {"1", "true", "yes", "on"}
-_LIVE_AUTH_BACKENDS = {"live", "live_idp", "oidc", "saml"}
 
 __all__ = [
     "ACTION_MATRIX",
@@ -138,46 +134,3 @@ def _record_decision(request: Request, decision: PolicyDecision, *, payload: Map
         decisions = []
         request.state.auth_policy_decisions = decisions
     decisions.append(audit_record(decision, request_id=getattr(request.state, "request_id", None), payload=payload))
-
-
-def _allow_dev_role_header() -> bool:
-    return os.getenv("ALLOW_DEV_ROLE_HEADER", "").strip().lower() in _TRUTHY
-
-
-def _production_mode() -> bool:
-    return os.getenv("NHMS_AUTH_MODE", "").strip().lower() in {"production", "live", "live_idp"}
-
-
-def _live_auth_requested() -> bool:
-    auth_backend = os.getenv("AUTH_BACKEND", "").strip().lower()
-    auth_mode = os.getenv("NHMS_AUTH_MODE", "").strip().lower()
-    return auth_backend in _LIVE_AUTH_BACKENDS or auth_mode in {"live", "live_idp"}
-
-
-def _live_auth_release_blocked() -> bool:
-    return _live_auth_requested() and not _trusted_live_auth_proof_available()
-
-
-def _release_blocked_auth_context() -> AuthContext:
-    return AuthContext(
-        actor_id="release-blocked",
-        roles=(),
-        auth_mode="live_idp",
-        live_backend_auth_executed=False,
-    )
-
-
-def _trusted_live_auth_proof_enabled() -> bool:
-    return os.getenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "").strip().lower() == "test_internal"
-
-
-def _trusted_live_auth_proof_available() -> bool:
-    token = os.getenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "").strip()
-    return _trusted_live_auth_proof_enabled() and bool(token) and not _production_mode()
-
-
-def _internal_live_proof_token_matches(request: Request) -> bool:
-    if not _trusted_live_auth_proof_available():
-        return False
-    configured_token = os.getenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "").strip()
-    return request.headers.get("X-NHMS-Internal-Live-Proof", "") == configured_token

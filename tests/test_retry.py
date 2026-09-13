@@ -1833,7 +1833,12 @@ def test_manual_retry_download_source_cycle_redacts_secret_runtime_root_evidence
 _PUBLIC_ROOT_PLACEHOLDERS = frozenset({"[local-path]", "[uri]", "[object-uri]"})
 
 
-def _assert_public_runtime_root_resolution(mapping: Any, *, forbidden_roots: tuple[str, ...]) -> None:
+def _assert_public_runtime_root_resolution(
+    mapping: Any,
+    *,
+    forbidden_roots: tuple[str, ...],
+    expected_placeholders: dict[str, str | None] | None = None,
+) -> None:
     """The one wire shape both retry lanes must render for ``runtime_root_resolution``.
 
     #1961 (database lane over-exposed absolute roots) and #1965 (file lane
@@ -1844,7 +1849,19 @@ def _assert_public_runtime_root_resolution(mapping: Any, *, forbidden_roots: tup
     the renderer itself: ``_LOCAL_RUNTIME_ROOT_FIELDS`` (``retry.py``) are the
     filesystem roots, and the remaining ``resolved`` entries
     (``object_store_prefix``, ``published_artifact_uri_prefix``) are URI-valued.
+
+    ``expected_placeholders`` pins an exact placeholder for named ``resolved``
+    fields and takes precedence over the default classification: a local root
+    field whose configured value is itself a scheme-anchored URI (accepted by
+    ``_resolve_runtime_root_candidate`` without local-path safety, #1976)
+    renders ``[uri]``/``[object-uri]``, never ``[local-path]``.  ``None`` pins the
+    file lane's durable withholding: its write boundary
+    (``_strip_redaction_placeholders``) stores an exact ``[uri]``/``[object-uri]``
+    placeholder as ``None``.  Callers that do not pass it keep the default
+    assertions unchanged.
     """
+
+    expected_placeholders = expected_placeholders or {}
 
     assert isinstance(mapping, dict)
     resolved = mapping["resolved"]
@@ -1853,7 +1870,9 @@ def _assert_public_runtime_root_resolution(mapping: Any, *, forbidden_roots: tup
         assert isinstance(entry, dict), f"{field_name} must stay a mapping, got {entry!r}"
         assert entry["present"] is True
         assert isinstance(entry["source"], str) and entry["source"]
-        if field_name in _LOCAL_RUNTIME_ROOT_FIELDS:
+        if field_name in expected_placeholders:
+            assert entry["value"] == expected_placeholders[field_name], f"{field_name} value={entry['value']!r}"
+        elif field_name in _LOCAL_RUNTIME_ROOT_FIELDS:
             assert entry["value"] == "[local-path]", f"{field_name} value={entry['value']!r}"
         else:
             # ``""`` is the constructor's unset sentinel, not a rendering:
@@ -2014,6 +2033,134 @@ def test_db_lane_public_evidence_read_hides_whitespace_bearing_runtime_roots(
         persisted = _events(store)[-1].details["runtime_root_resolution"]["resolved"]
         assert persisted["workspace_dir"]["value"] == workspace_root
         assert persisted["object_store_root"]["value"] == object_store_root
+
+
+_PUBLIC_SBATCH_OPEN_ERROR = "sbatch: error: cannot open [local-path] for writing"
+
+
+def _sbatch_open_error(workspace_root: str) -> RuntimeError:
+    return RuntimeError(f"sbatch: error: cannot open {workspace_root}/run-42/job.sbatch for writing")
+
+
+def _post_db_lane_retry(store: PipelineStore, gateway: Any) -> Any:
+    service = RetryService(store, RetryConfig(max_retries=3))
+    app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+    app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+    previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+    os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+    try:
+        client = TestClient(app)
+        return client.post("/api/v1/runs/cycle_ifs_2026053106/retry", headers={"X-User-Role": "operator"})
+    finally:
+        if previous_allow_dev_role_header is None:
+            os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+        else:
+            os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+        app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+        app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
+def _create_db_lane_download_job(store: PipelineStore) -> PipelineJob:
+    return _create_job(
+        store,
+        job_id="job_cycle_ifs_2026053106_download",
+        run_id="cycle_ifs_2026053106",
+        error_code="NODE_FAILURE",
+        retry_count=1,
+        cycle_id="ifs_2026053106",
+        job_type="download_source_cycle",
+        stage="download",
+    )
+
+
+def test_retry_api_db_lane_503_renders_local_paths_in_gateway_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9/R10/R11 (#1975) — the 503 ``error_message`` renders paths like its sibling evidence.
+
+    ``error.message`` / ``details.error_message`` used to pass secrets redaction
+    only, so the sbatch absolute path travelled verbatim next to a
+    ``runtime_root_resolution`` that renders the same root as ``[local-path]``.
+    The durable job row and event keep the raw text for operators.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root = "/srv/nhms/workspace"
+    object_store_root = "/srv/nhms/object-store"
+    raw_error = f"sbatch: error: cannot open {workspace_root}/run-42/job.sbatch for writing"
+    with _store() as store:
+        job = _create_db_lane_download_job(store)
+        _insert_submission_event(
+            store,
+            job,
+            {"workspace_dir": workspace_root, "object_store_root": object_store_root},
+        )
+
+        response = _post_db_lane_retry(store, _RecordingGateway(error=_sbatch_open_error(workspace_root)))
+
+        assert response.status_code == 503
+        error = response.json()["error"]
+        assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+        assert error["message"] == _PUBLIC_SBATCH_OPEN_ERROR
+        assert error["details"]["error_message"] == _PUBLIC_SBATCH_OPEN_ERROR
+        response_body = json.dumps(response.json(), sort_keys=True)
+        assert workspace_root not in response_body
+        assert object_store_root not in response_body
+        _assert_public_runtime_root_resolution(
+            error["details"]["runtime_root_resolution"],
+            forbidden_roots=(workspace_root, object_store_root),
+        )
+
+        event = _events(store)[-1]
+        assert event.status_to == "submission_failed"
+        assert event.message == f"Manual retry submission failed: {raw_error}"
+        assert event.details["error_message"] == raw_error
+        assert store.get_job(error["details"]["job_id"]).error_message == raw_error
+
+
+def test_retry_api_db_lane_503_classifies_whitespace_bearing_uri_roots_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R15 (#1976), database lane — spaced scheme-anchored roots leak no post-space tail.
+
+    ``_resolve_runtime_root_candidate`` accepts URI-style roots without local
+    safety checks, so these literals resolve and reach the public renderer.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    with _store() as store:
+        job = _create_db_lane_download_job(store)
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "file:///srv/nhms data/ws",
+                "object_store_root": "s3://nhms prod/objects",
+                "object_store_prefix": "s3://nhms-prod/pre fix",
+            },
+        )
+
+        response = _post_db_lane_retry(store, _RecordingGateway(error=_sbatch_open_error("/srv/nhms/workspace")))
+
+        assert response.status_code == 503
+        details = response.json()["error"]["details"]
+        assert details["error_message"] == _PUBLIC_SBATCH_OPEN_ERROR
+        evidence = details["runtime_root_resolution"]
+        assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root", "object_store_prefix"}
+        _assert_public_runtime_root_resolution(
+            evidence,
+            forbidden_roots=("data/ws", "prod/objects", "pre fix", " fix"),
+            expected_placeholders={
+                "workspace_dir": "[uri]",
+                "object_store_root": "[object-uri]",
+                "object_store_prefix": "[object-uri]",
+            },
+        )
+        rendered = json.dumps(response.json(), sort_keys=True)
+        for tail in ("data/ws", "prod/objects", "pre fix", " fix"):
+            assert tail not in rendered, tail
+        persisted = _events(store)[-1].details["runtime_root_resolution"]["resolved"]
+        assert persisted["object_store_root"]["value"] == "s3://nhms prod/objects"
 
 
 def test_manual_retry_submission_failure_marks_submission_failed() -> None:
@@ -3352,6 +3499,73 @@ def test_retry_api_file_lane_503_hides_whitespace_bearing_runtime_roots(
         evidence,
         forbidden_roots=(str(workspace_root), str(object_store_root), *tails),
     )
+
+
+def _file_lane_sbatch_open_error_gateway(workspace_root: str) -> Any:
+    class _PathErrorGateway:
+        def submit_job(self, request: Any) -> Any:
+            raise _sbatch_open_error(workspace_root)
+
+    return _PathErrorGateway()
+
+
+def test_retry_api_file_lane_503_renders_local_paths_in_gateway_error_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R10 (#1975) — the file lane renders the same gateway text to the same literal as the DB lane."""
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root, object_store_root = _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    fixture["gateway"] = _file_lane_sbatch_open_error_gateway(str(workspace_root))
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert response.json()["error"]["message"] == _PUBLIC_SBATCH_OPEN_ERROR
+    assert details["error_message"] == _PUBLIC_SBATCH_OPEN_ERROR
+    rendered = json.dumps(response.json())
+    assert str(workspace_root) not in rendered
+    assert str(object_store_root) not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R15 (#1976), file lane — the same spaced URI literals as the DB lane, same public shape."""
+
+    _clear_runtime_root_env(monkeypatch)
+    monkeypatch.setenv("WORKSPACE_ROOT", "file:///srv/nhms data/ws")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", "s3://nhms prod/objects")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms-prod/pre fix")
+    fixture = _file_lane_retry_fixture(tmp_path)
+    fixture["gateway"] = _file_lane_sbatch_open_error_gateway("/srv/nhms/workspace")
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert details["error_message"] == _PUBLIC_SBATCH_OPEN_ERROR
+    evidence = details["runtime_root_resolution"]
+    assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root", "object_store_prefix"}
+    # The renderer classifies each value whole ([uri]/[object-uri]); the file
+    # lane's durable write boundary then withholds exact URI placeholders as
+    # ``None`` (``_strip_redaction_placeholders``, pre-existing, also for
+    # whitespace-free URI roots).  Before #1976 the partial rendering
+    # ``"[uri] data/ws"`` was not an exact placeholder, so the tail was persisted
+    # and served.
+    _assert_public_runtime_root_resolution(
+        evidence,
+        forbidden_roots=("data/ws", "prod/objects", "pre fix", " fix"),
+        expected_placeholders={
+            "workspace_dir": None,
+            "object_store_root": None,
+            "object_store_prefix": None,
+        },
+    )
+    rendered = json.dumps(response.json())
+    for tail in ("data/ws", "prod/objects", "pre fix", " fix"):
+        assert tail not in rendered, tail
 
 
 def test_retry_api_file_lane_legacy_bare_string_root_entry_passes_through(

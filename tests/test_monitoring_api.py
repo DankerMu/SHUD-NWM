@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -7,7 +8,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -185,6 +188,53 @@ def test_pipeline_stages_support_queued_and_skipped_public_job_statuses() -> Non
         returned_statuses = {job["job_id"]: job["status"] for job in jobs_response.json()["data"]["items"]}
         assert returned_statuses["job_queued"] == "queued"
         assert returned_statuses["job_skipped"] == "skipped"
+
+
+_RAW_SBATCH_ERROR = "sbatch: error: cannot open /srv/nhms/workspace/run-42/job.sbatch for writing"
+_PUBLIC_SBATCH_ERROR = "sbatch: error: cannot open [local-path] for writing"
+
+
+def test_pipeline_read_payloads_render_local_paths_in_error_message() -> None:
+    """R12/R12b (#1975): GET job and stage payloads render ``error_message`` like the retry 503.
+
+    The persisted job row keeps the raw text; only the public read is rendered.
+    """
+
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_sbatch_path_failure",
+            cycle_id=cycle_id,
+            stage="convert",
+            status="failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message=_RAW_SBATCH_ERROR,
+        )
+        with _client(store) as client:
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 10},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert jobs_response.status_code == 200
+        items = {item["job_id"]: item for item in jobs_response.json()["data"]["items"]}
+        assert items["job_sbatch_path_failure"]["error_message"] == _PUBLIC_SBATCH_ERROR
+        assert "/srv/nhms/workspace" not in jobs_response.text
+
+        assert stages_response.status_code == 200
+        convert = next(stage for stage in stages_response.json()["data"] if stage["stage"] == "convert")
+        results = {result["job_id"]: result for result in convert["basin_results"]}
+        assert results["job_sbatch_path_failure"]["error_message"] == _PUBLIC_SBATCH_ERROR
+        assert "/srv/nhms/workspace" not in stages_response.text
+
+        assert store.get_job("job_sbatch_path_failure").error_message == _RAW_SBATCH_ERROR
 
 
 def test_pipeline_stages_skipped_only_stage_projects_skipped() -> None:
@@ -2436,6 +2486,61 @@ def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -
         assert decision["execution_mode"] != "backend_route_executed"
         assert gateway.cancelled == []
         assert store.get_job("job_wrong_proof").status == "running"
+
+
+@pytest.mark.parametrize(
+    ("configured_token", "proof_header"),
+    [
+        # (a) header byte 0xE4 is not ASCII; httpx rejects a non-ASCII ``str``
+        # value client-side, so the raw latin-1 bytes are sent.
+        ("proof-token", b"\xe4"),
+        # (b) non-ASCII configured token and the SAME value on the wire: a plain
+        # ``==`` over Starlette's latin-1 decoded header matches and authenticates.
+        ("pr\u00f6of-token", "pr\u00f6of-token".encode("latin-1")),
+    ],
+    ids=["non_ascii_header", "non_ascii_configured_token"],
+)
+def test_live_auth_non_ascii_proof_release_blocks_without_500(
+    monkeypatch: Any, configured_token: str, proof_header: bytes
+) -> None:
+    """#2169: the live-proof secret compares as ASCII bytes in constant time; non-ASCII fails closed."""
+
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", configured_token)
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_non_ascii_proof", run_id="run_non_ascii_proof", status="running")
+        with _client(store, gateway):
+            # Sent through httpx's ASGI transport, which hands the raw header
+            # bytes to Starlette unchanged (Starlette decodes them as latin-1).
+            # ``TestClient`` would re-encode a bytes value as UTF-8 on the way
+            # in, so the server would never see the latin-1 wire value.
+            response = asyncio.run(
+                _asgi_post(
+                    "/api/v1/runs/run_non_ascii_proof/cancel",
+                    headers={
+                        "X-NHMS-Internal-Live-Proof": proof_header,
+                        "X-Live-User-ID": b"alice",
+                        "X-Live-User-Roles": b"operator",
+                    },
+                )
+            )
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["auth_mode"] == "live_idp"
+        assert decision["execution_mode"] == "release_blocked"
+        assert gateway.cancelled == []
+        assert store.get_job("job_non_ascii_proof").status == "running"
+
+
+async def _asgi_post(path: str, *, headers: dict[str, bytes]) -> Any:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(path, headers=headers)
 
 
 def test_retry_service_direct_call_requires_policy_evidence() -> None:

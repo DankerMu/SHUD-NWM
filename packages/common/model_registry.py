@@ -3600,6 +3600,11 @@ def _enforce_river_segment_serialized_budget(payload: Mapping[str, Any], *, max_
 
 def _model_public_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     detail = dict(row)
+    # #2038: lifecycle rows alias ``mv.properties_json AS mesh_properties_json``
+    # (raw source paths and package checksums).  Mirror ``_model_asset_detail``
+    # and drop it; ``preflight.lineage.mesh_properties`` reads the raw row and
+    # carries its own audit redaction.
+    detail.pop("mesh_properties_json", None)
     detail["resource_profile"] = _sanitize_public_json_value(_json_mapping(detail.get("resource_profile")))
     detail["lifecycle_state"] = str(
         detail.get("lifecycle_state") or ("active" if detail.get("active_flag") else "inactive")

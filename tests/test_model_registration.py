@@ -21,10 +21,13 @@ from packages.common.model_registry import (
     InvalidPayloadError,
     InvalidReferenceError,
     MissingResourceError,
+    ModelLifecycleAuditPersistenceError,
     ModelRegistryError,
     PsycopgModelRegistryStore,
     RiverSegmentGeoJsonBudgetError,
     _is_unsafe_source_value,
+    _lifecycle_audit_persistence_failure_result,
+    _model_public_projection,
     geometry_to_wkt,
     sanitize_model_detail_payload,
     sanitize_model_list_payload,
@@ -3974,6 +3977,281 @@ def test_model_lifecycle_operation_response_populates_basin_id(
     assert result["previous_model"]["basin_id"] == "basin", (
         "lifecycle response previous_model.basin_id must be populated via JOIN-backed rows."
     )
+
+
+# --- #2038: lifecycle/active projections never carry raw mesh properties ---------------
+
+_RAW_MESH_PROPERTY_TOKENS = (
+    "/volume/data/nwm/Basins/basin_raw/source-root-2038",
+    "/home/ghdc/nwm/Basins/basin_raw/resolved-2038",
+    "mesh-package-checksum-2038",
+    "mesh-inventory-checksum-2038",
+    "raw-mesh-manifest-2038",
+)
+
+
+def _raw_mesh_properties(marker: str) -> dict[str, Any]:
+    # Shape of workers/model_registry/basins_registry_import mesh properties
+    # (the five keys the #2038 issue names); every value is a scan token.
+    return {
+        "shud_input_name": f"basin_raw_{marker}",
+        "source_path": _RAW_MESH_PROPERTY_TOKENS[0],
+        "resolved_source_path": _RAW_MESH_PROPERTY_TOKENS[1],
+        "package_checksum": f"sha256:{_RAW_MESH_PROPERTY_TOKENS[2]}",
+        "source_inventory_checksum": f"sha256:{_RAW_MESH_PROPERTY_TOKENS[3]}",
+        "manifest_uri": f"s3://nhms/{_RAW_MESH_PROPERTY_TOKENS[4]}/manifest.json",
+    }
+
+
+def _lifecycle_row_with_raw_mesh_properties(model_id: str, *, active: bool) -> dict[str, Any]:
+    # Columns of `_fetch_model_lifecycle_row` (mi.* plus the JOIN aliases).
+    return {
+        "model_id": model_id,
+        "model_name": model_id,
+        "basin_id": "basin_raw",
+        "basin_name": "Basin Raw",
+        "basin_version_id": "basin_raw_v01",
+        "basin_checksum": "basin-checksum",
+        "river_network_version_id": "basin_raw_rivnet_v01",
+        "river_network_checksum": "rivnet-checksum",
+        "mesh_version_id": "basin_raw_mesh_v01",
+        "mesh_uri": f"s3://nhms/models/{model_id}/package/basin_raw.sp.mesh",
+        "mesh_checksum": "mesh-checksum",
+        "mesh_properties_json": _raw_mesh_properties(model_id),
+        "calibration_version_id": "basin_raw_cal_v01",
+        "shud_code_version": "2.0",
+        "model_package_uri": f"s3://nhms/models/{model_id}/package/",
+        "package_checksum": "model-package-sha",
+        "resource_profile": {"shud_input_name": "basin_raw"},
+        "active_flag": active,
+        "lifecycle_state": "active" if active else "inactive",
+        "segment_count": 2,
+        "created_at": "2026-05-14T00:00:00Z",
+    }
+
+
+def _assert_no_raw_mesh_properties(result: dict[str, Any]) -> None:
+    for key in ("model", "previous_model"):
+        projected = result.get(key)
+        if projected is not None:
+            assert "mesh_properties_json" not in projected, key
+    rendered = json.dumps(result, default=str)
+    assert "mesh_properties_json" not in rendered
+    for token in _RAW_MESH_PROPERTY_TOKENS:
+        assert token not in rendered, token
+
+
+def _patch_lifecycle_store_with_raw_mesh_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    preflight_status: str = "ready",
+    audit_error: Exception | None = None,
+    hook_error: Exception | None = None,
+) -> dict[str, dict[str, Any]]:
+    rows = {
+        "candidate_model": _lifecycle_row_with_raw_mesh_properties("candidate_model", active=False),
+        "current_active": _lifecycle_row_with_raw_mesh_properties("current_active", active=True),
+    }
+
+    class FakeCursor:
+        def execute(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def fetchone(self) -> dict[str, Any]:
+            return {"log_id": 77}
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    def update_lifecycle_state(
+        _self: PsycopgModelRegistryStore, _cursor: object, model_id: str, lifecycle_state: str
+    ) -> dict[str, Any]:
+        rows[model_id] = {
+            **rows[model_id],
+            "lifecycle_state": lifecycle_state,
+            "active_flag": lifecycle_state == "active",
+        }
+        return dict(rows[model_id])
+
+    real_preflight = PsycopgModelRegistryStore._build_model_operation_preflight
+
+    def preflight(self: PsycopgModelRegistryStore, **kwargs: Any) -> dict[str, Any]:
+        # Real preflight (so `lineage.mesh_properties` keeps its audit redaction
+        # in the scanned body), with the gate outcome forced per scenario.
+        result = real_preflight(self, **kwargs)
+        result["status"] = preflight_status
+        result["blockers"] = (
+            [{"code": "TEST_BLOCKER", "message": "forced"}] if preflight_status == "blocked" else []
+        )
+        return result
+
+    def insert_audit(*_args: object, **_kwargs: object) -> int:
+        if audit_error is not None:
+            raise audit_error
+        return 99
+
+    def dispatch_hooks(*_args: object, **_kwargs: object) -> None:
+        if hook_error is not None:
+            raise hook_error
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_lock_basin_version_scope", lambda *_args: None)
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_model_lifecycle_row",
+        lambda _self, _cursor, model_id, *, for_update: dict(rows[model_id]) if model_id in rows else None,
+    )
+    monkeypatch.setattr(
+        PsycopgModelRegistryStore,
+        "_fetch_active_model_for_scope",
+        lambda _self, _cursor, _basin_version_id, *, for_update: dict(rows["current_active"]),
+    )
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_fetch_trustworthy_rollback_history", lambda *_a, **_k: None)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_fetch_direct_grid_activation_history", lambda *_a, **_k: None)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_update_model_lifecycle_state", update_lifecycle_state)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_build_model_operation_preflight", preflight)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_insert_model_lifecycle_audit", insert_audit)
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_dispatch_pre_activation_hooks", dispatch_hooks)
+    return rows
+
+
+def test_model_public_projection_drops_raw_mesh_properties() -> None:
+    row = _lifecycle_row_with_raw_mesh_properties("candidate_model", active=False)
+    assert all(token in json.dumps(row) for token in _RAW_MESH_PROPERTY_TOKENS)  # non-vacuous input
+
+    projected = _model_public_projection(row)
+
+    assert "mesh_properties_json" not in projected
+    _assert_no_raw_mesh_properties({"model": projected})
+    # The sibling public projection that always popped it stays unchanged (R8).
+    assert "mesh_properties_json" not in sanitize_model_detail_payload(row)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "scenario", "expected_status"),
+    [
+        ("candidate_model", "allowed", "allowed"),
+        ("current_active", "already_current", "already_current"),
+        ("candidate_model", "blocked", "blocked"),
+        ("candidate_model", "refused", "refused"),
+        ("candidate_model", "audit_persistence_failure", "blocked"),
+    ],
+)
+def test_model_lifecycle_operation_outcomes_carry_no_raw_mesh_properties(
+    monkeypatch: pytest.MonkeyPatch, model_id: str, scenario: str, expected_status: str
+) -> None:
+    from packages.common.state_clone_hook import StateCloneCutoverRefusedError
+
+    _patch_lifecycle_store_with_raw_mesh_rows(
+        monkeypatch,
+        preflight_status="blocked" if scenario == "blocked" else "ready",
+        audit_error=RuntimeError("audit insert failed") if scenario == "audit_persistence_failure" else None,
+        hook_error=(
+            StateCloneCutoverRefusedError(source_id="gfs", refusal_scope="missing_approval")
+            if scenario == "refused"
+            else None
+        ),
+    )
+    store = PsycopgModelRegistryStore("postgresql://example")
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id="model-admin",
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id=model_id,
+    )
+
+    result = store.model_lifecycle_operation(model_id, operation="activate", policy_decision=decision)
+
+    assert result["status"] == expected_status
+    assert result["model"]["model_id"] == model_id
+    if scenario == "audit_persistence_failure":
+        assert {"code": "LIFECYCLE_AUDIT_PERSISTENCE_FAILED"}.items() <= result["preflight"]["blockers"][-1].items()
+        assert result["previous_model"]["model_id"] == "current_active"
+    _assert_no_raw_mesh_properties(result)
+
+
+def test_lifecycle_audit_persistence_failure_result_carries_no_raw_mesh_properties() -> None:
+    result = _lifecycle_audit_persistence_failure_result(
+        model=_lifecycle_row_with_raw_mesh_properties("candidate_model", active=False),
+        current_active=_lifecycle_row_with_raw_mesh_properties("current_active", active=True),
+        operation="activate",
+        preflight={"status": "ready", "blockers": []},
+    )
+
+    assert result["previous_model"]["model_id"] == "current_active"
+    _assert_no_raw_mesh_properties(result)
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_and_active_routes_carry_no_raw_mesh_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_lifecycle_store_with_raw_mesh_rows(monkeypatch)
+    store = PsycopgModelRegistryStore("postgresql://example")
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        lifecycle_response = await client.post(
+            "/api/v1/models/candidate_model/lifecycle",
+            headers=_model_admin_headers(),
+            json={"operation": "activate"},
+        )
+        active_response = await client.put(
+            "/api/v1/models/candidate_model/active",
+            headers=_model_admin_headers(),
+            json={"active": True},
+        )
+
+    assert lifecycle_response.status_code == 200, lifecycle_response.text
+    lifecycle_data = lifecycle_response.json()["data"]
+    assert lifecycle_data["status"] == "allowed"
+    assert lifecycle_data["previous_model"]["model_id"] == "current_active"
+    _assert_no_raw_mesh_properties(lifecycle_response.json())
+    # Second call sees the now-active candidate: PUT /active answers already_current.
+    assert active_response.status_code == 200, active_response.text
+    assert active_response.json()["data"]["status"] == "already_current"
+    _assert_no_raw_mesh_properties(active_response.json())
+
+
+@pytest.mark.asyncio
+async def test_model_lifecycle_audit_persistence_failure_503_carries_no_raw_mesh_properties(
+    fake_store: FakeModelRegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raise_audit_failure(model_id: str, **_kwargs: Any) -> dict[str, Any]:
+        raise ModelLifecycleAuditPersistenceError(
+            _lifecycle_audit_persistence_failure_result(
+                model=_lifecycle_row_with_raw_mesh_properties(model_id, active=False),
+                current_active=_lifecycle_row_with_raw_mesh_properties("current_active", active=True),
+                operation="activate",
+                preflight={"status": "ready", "blockers": []},
+            ),
+            RuntimeError("audit insert failed"),
+        )
+
+    monkeypatch.setattr(fake_store, "model_lifecycle_operation", raise_audit_failure)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/models/candidate_model/lifecycle",
+            headers=_model_admin_headers(),
+            json={"operation": "activate"},
+        )
+
+    assert response.status_code == 503, response.text
+    error = response.json()["error"]
+    assert error["code"] == "MODEL_LIFECYCLE_AUDIT_PERSISTENCE_FAILED"
+    assert error["details"]["model"]["model_id"] == "candidate_model"
+    _assert_no_raw_mesh_properties(error["details"])
+    _assert_no_raw_mesh_properties(response.json())
 
 
 def _assert_model_page(body: dict[str, Any], *, expected_ids: set[str], expected_limit: int) -> None:
