@@ -172,7 +172,13 @@ def _safe_resolved_dir(path: Path, *, label: str) -> tuple[Path | None, dict[str
     try:
         resolved = path.expanduser().resolve(strict=True)
     except OSError as error:
-        return None, {"field": label, "reason": "path_unavailable", "path": str(path), "error": str(error)}
+        return None, {
+            "field": label,
+            "reason": "path_unavailable",
+            "path": str(path),
+            "error": str(error),
+            "error_type": type(error).__name__,
+        }
     if resolved == Path("/"):
         return None, {"field": label, "reason": "path_is_root", "path": str(resolved)}
     if not resolved.is_dir():
@@ -280,11 +286,15 @@ def _resolve_lane_root(
     instead of `<lane>_root_unsafe` / `path_unavailable`. That is still safe --
     one per-lane skip, no wider blast radius -- but the receipt mislabels "not
     traversable" as "absent". `pyproject.toml` declares `requires-python
-    >=3.11`, so the mislabel is inside the supported range; the label fix is
-    tracked by #2104.
+    >=3.11`, so the mislabel is inside the supported range; it is a documented
+    limit that #2104 did NOT fix (an explicit non-goal there, as in #2099), so
+    no open issue promises the label.
 
     Locality is the promise this function makes on every supported version, so
-    an unreadable root is one lane's skip like any other.
+    an unreadable root is one lane's skip like any other. #2104 extended that
+    promise past this gate: every probe here stats the lane root FROM ITS
+    PARENT, so the first syscall that needs `x` on the lane root itself lives
+    in `_collect_mapped_lane` / `_iter_dirs`, and those are wrapped too.
     """
     try:
         if root.is_symlink():
@@ -304,21 +314,43 @@ def _resolve_lane_root(
                 "detail": "path_not_directory",
             }
         resolved, blocker = _safe_resolved_dir(root, label=f"{prefix}_root")
-    except OSError:
-        return None, {
-            "key": key,
-            "reason": f"{prefix}_root_unsafe",
-            "path": str(root),
-            "detail": "path_unavailable",
-        }
+    except OSError as error:
+        return None, _unavailable_skip(
+            key=key, reason=f"{prefix}_root_unsafe", path=root, error=error
+        )
     if resolved is None:
-        return None, {
+        entry: dict[str, Any] = {
             "key": key,
             "reason": f"{prefix}_root_unsafe",
             "path": str(root),
             "detail": (blocker or {}).get("reason", "path_unsafe"),
         }
+        # The errno the probe saw, when the blocker carries one. Forwarded
+        # rather than re-derived so `error_type` is always the exception class
+        # name (#2104 item 3), never a reason string.
+        for field in ("error", "error_type"):
+            value = (blocker or {}).get(field)
+            if value is not None:
+                entry[field] = value
+        return None, entry
     return resolved, None
+
+
+def _unavailable_skip(*, key: str, reason: str, path: Path, error: OSError) -> dict[str, Any]:
+    """The one skip shape for "a probe on this path raised" (#2104).
+
+    Lane roots and per-source roots share it so the receipt reads the same way
+    at both depths: the pinned `(reason, detail)` pair plus the errno that the
+    pre-#2104 receipt dropped on the floor.
+    """
+    return {
+        "key": key,
+        "reason": reason,
+        "path": str(path),
+        "detail": "path_unavailable",
+        "error": str(error),
+        "error_type": type(error).__name__,
+    }
 
 
 def _collect_raw_lane(
@@ -327,12 +359,33 @@ def _collect_raw_lane(
     """Raw lane: iterate the directories that exist and match them case-insensitively."""
     skipped: list[dict[str, Any]] = []
     targets: list[RetentionTarget] = []
-    for source_dir in _iter_dirs(raw_root):
+    source_dirs, listing_error = _iter_dirs(raw_root)
+    if listing_error is not None:
+        skipped.append(
+            _unavailable_skip(
+                key=RAW_LANE_KEY,
+                reason=f"{RAW_LANE_KEY}_root_unsafe",
+                path=raw_root,
+                error=listing_error,
+            )
+        )
+    for source_dir in source_dirs:
         source_key = source_dir.name.lower()
         if source_key not in config.sources:
             skipped.append({"key": f"{RAW_LANE_KEY}/{source_dir.name}", "reason": "source_not_enabled"})
             continue
-        for cycle_dir in _iter_dirs(source_dir):
+        cycle_dirs, source_error = _iter_dirs(source_dir)
+        if source_error is not None:
+            skipped.append(
+                _unavailable_skip(
+                    key=f"{RAW_LANE_KEY}/{source_dir.name}",
+                    reason=f"{RAW_LANE_KEY}_source_unsafe",
+                    path=source_dir,
+                    error=source_error,
+                )
+            )
+            continue
+        for cycle_dir in cycle_dirs:
             key = f"{RAW_LANE_KEY}/{source_dir.name}/{cycle_dir.name}"
             cycle_time = _parse_cycle_name(cycle_dir.name)
             if cycle_time is None:
@@ -362,6 +415,7 @@ def _collect_mapped_lane(
     *,
     lane_root: Path,
     key_prefix: str,
+    skip_prefix: str,
     reason: str,
     cutoff: datetime,
 ) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
@@ -372,6 +426,10 @@ def _collect_mapped_lane(
     `precip-cache/ifs/...` path can be produced from the lower-case configured
     token: the storage spelling can only come out of the shared normalizer, so
     the mirror tree and the PNG cache tree are addressed by one identity.
+
+    `key_prefix` spells the lane in target keys (`precip-cache`); `skip_prefix`
+    is the lane's skip vocabulary (`precip_cache`), so a per-source failure
+    reads `precip_cache_source_unsafe` beside `precip_cache_root_unsafe`.
     """
     skipped: list[dict[str, Any]] = []
     targets: list[RetentionTarget] = []
@@ -384,20 +442,35 @@ def _collect_mapped_lane(
             skipped.append({"key": f"{key_prefix}/{source}", "reason": "source_unmappable"})
             continue
         source_root = lane_root / storage_source
-        # Known limit (#2104): every probe in `_resolve_lane_root` and
-        # `_safe_resolved_dir` stats the lane root FROM ITS PARENT, so they
-        # need `x` on `object-store`, never on the lane root itself. A
-        # `canonical/` at 0770/0700 therefore clears the whole lane-root gate,
-        # and this is the first syscall needing `x` on `canonical` itself: on
-        # the pinned 3.11 it raises PermissionError, nothing between here and
-        # `main()` catches `OSError`, so all three lanes end with zero
-        # deletions and no summary is written. Not reachable on node-27's
-        # measured tree (object-store 775, canonical 755); it becomes reachable
-        # if a permission change removes this uid's traversal of `canonical/`.
-        # #2104 must land before #2100's mode change.
-        if source_root.is_symlink() or not source_root.is_dir():
+        # First syscall that needs `x` on the lane root itself (the lane-root
+        # gate only ever stats it from its parent). Locality contract:
+        # openspec spec `node27-raw-retention` -- one source's OSError retires
+        # that source, never the lane and never the run.
+        try:
+            if source_root.is_symlink() or not source_root.is_dir():
+                continue
+        except OSError as error:
+            skipped.append(
+                _unavailable_skip(
+                    key=f"{key_prefix}/{storage_source}",
+                    reason=f"{skip_prefix}_source_unsafe",
+                    path=source_root,
+                    error=error,
+                )
+            )
             continue
-        for cycle_dir in _iter_dirs(source_root):
+        cycle_dirs, listing_error = _iter_dirs(source_root)
+        if listing_error is not None:
+            skipped.append(
+                _unavailable_skip(
+                    key=f"{key_prefix}/{storage_source}",
+                    reason=f"{skip_prefix}_source_unsafe",
+                    path=source_root,
+                    error=listing_error,
+                )
+            )
+            continue
+        for cycle_dir in cycle_dirs:
             key = f"{key_prefix}/{storage_source}/{cycle_dir.name}"
             if cycle_dir.name == GRID_DIR_NAME:
                 skipped.append({"key": key, "reason": "grid_definitions_preserved"})
@@ -455,6 +528,7 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
             config,
             lane_root=canonical_root,
             key_prefix=CANONICAL_LANE_KEY,
+            skip_prefix="canonical",
             reason=CANONICAL_LANE_REASON,
             cutoff=cutoff,
         )
@@ -476,6 +550,7 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
             config,
             lane_root=cache_root,
             key_prefix=PRECIP_CACHE_LANE_KEY,
+            skip_prefix="precip_cache",
             reason=PRECIP_CACHE_LANE_REASON,
             cutoff=cutoff,
         )
@@ -484,12 +559,23 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
     return targets, skipped
 
 
-def _iter_dirs(parent: Path) -> list[Path]:
+def _iter_dirs(parent: Path) -> tuple[list[Path], OSError | None]:
+    """`parent`'s real subdirectories, plus the `OSError` that stopped the listing.
+
+    The comprehension is inside the `try` because `iterdir()` is not the only
+    syscall here: on a readable but non-traversable directory (`0o444`)
+    `iterdir()` succeeds and the first `is_dir()` raises EACCES -- on the pinned
+    3.11 that escaped every caller and retired the whole run (#2104 item 2).
+
+    The error is returned instead of swallowed so a caller can never read a
+    listing that raised as an empty directory: `([], None)` means empty,
+    `([], error)` means unavailable, and the two get different skip entries.
+    """
     try:
         entries = sorted(parent.iterdir())
-    except OSError:
-        return []
-    return [entry for entry in entries if entry.is_dir() and not entry.is_symlink()]
+        return [entry for entry in entries if entry.is_dir() and not entry.is_symlink()], None
+    except OSError as error:
+        return [], error
 
 
 def _target_payload(target: RetentionTarget) -> dict[str, Any]:

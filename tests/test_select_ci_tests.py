@@ -2599,6 +2599,65 @@ def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_read
     )
 
 
+RAW_RETENTION_ENV_TEMPLATE = "infra/env/node27-raw-retention.example"
+
+
+def test_raw_retention_env_template_selects_exactly_its_readers_and_glob_suites() -> None:
+    """#2104: the raw-retention template must select the two suites that open it.
+
+    `tests/test_node27_raw_retention.py::_documented_operator_jq_program` slices the
+    documented `jq -e` program out of THIS file and
+    `test_documented_operator_check_goes_red_on_an_unsafe_skip` runs it with real `jq`
+    against a real summary, so the operator criterion is asserted from this path and
+    nowhere else;
+    `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+    `read_text`s the same path and pins the sibling-runner cross-reference in it.
+    Before the path-exact row this template matched only `infra/env/node27-*.example`
+    (-> `tests/test_node27_write_roles.py`, which scans every `infra/env/*.example` for
+    DSN users and credential placeholders and asserts nothing else about this body) and
+    `infra/env/**` (-> `tests/test_two_node_docker_runtime.py`, which never opens it): a
+    non-empty selection with ZERO readers of the documented criterion, the #2195 shape,
+    so an edited `jq` program passed targeted PR CI unexecuted.
+
+    EXACT set, not membership: both glob rows are untouched and rule matches accumulate
+    (`selected.update(rule.tests)`, no `stop_on_match`), so the correct answer is four
+    suites, not the two readers alone -- the same reason the #2195 pin above is exact.
+    """
+    assert Path(RAW_RETENTION_ENV_TEMPLATE).exists()
+
+    assert set(select_tests([RAW_RETENTION_ENV_TEMPLATE], repo_root=Path("."))) == {
+        "tests/test_node27_mvt_cache_retention.py",
+        "tests/test_node27_raw_retention.py",
+        "tests/test_node27_write_roles.py",
+        "tests/test_two_node_docker_runtime.py",
+    }
+
+
+def test_raw_retention_env_template_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2104 red leg: dropping the path-exact row drops both readers, not the whole set.
+
+    Same idiom as the #2195 red leg -- the length assertion proves the mutant really
+    removed a row, and the surviving non-empty selection is what makes the point: the
+    glob rows keep PR CI green and plausible while the suites that execute the `jq`
+    program sit unrun.
+    """
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != RAW_RETENTION_ENV_TEMPLATE)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests([RAW_RETENTION_ENV_TEMPLATE], repo_root=Path(".")))
+
+    assert "tests/test_node27_raw_retention.py" not in selected, (
+        "mutant table without the raw-retention template rule still selects the jq-executing suite"
+    )
+    assert "tests/test_node27_mvt_cache_retention.py" not in selected, (
+        "mutant table without the raw-retention template rule still selects the sibling reader"
+    )
+    assert selected, "the mutant selection is empty, so this leg would red for the wrong reason"
+
+
 def test_combined_pr_selection_includes_all_focused_auth_suites() -> None:
     # #1684 EVID-01 combined leg: the full PR changed-file set must include
     # every focused split module, not just the ones that ride slurm_gateway/**

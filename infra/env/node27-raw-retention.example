@@ -88,27 +88,47 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #         and canonical), `failed[]` stays empty, `main()` returns 0, and the
 #         cache lane keeps pruning, so `counts.deleted` and `freed_bytes` still
 #         look healthy. Reproduced locally on 3.11 by dropping `x` on the object
-#         store: rc=0, counts {'deleted': 1, 'failed': 0, 'skipped': 2}. An
-#         ESTALE raised on a lane root lands in that same `except OSError`; an
+#         store: rc=0, counts {'deleted': 1, 'failed': 0, 'skipped': 2} -- there
+#         a predicate's lstat raises and `_resolve_lane_root`'s `except OSError`
+#         builds the entry. An ESTALE on a lane root lands in the SAME entry
+#         shape by whichever of the two routes sees the stale handle first: a
+#         raising predicate takes that `except OSError`, while an ESTALE out of
+#         `resolve()` is caught inside `_safe_resolved_dir`, returned as a
+#         `path_unavailable` blocker and forwarded -- `error`/`error_type`
+#         included -- by `_resolve_lane_root`'s `resolved is None` branch. An
 #         ESTALE on `<object-store>` itself is a preflight blocker instead.
-#       * A stale receipt. If the run raises before writing its summary (#2104
-#         items 1 and 4) no new file appears, so `ls -t ... | head -1` returns
-#         the PREVIOUS tick's healthy file.
+#       * A stale receipt. If the run raises before writing its summary no new
+#         file appears, so `ls -t ... | head -1` returns the PREVIOUS tick's
+#         healthy file. #2104 closed the crash path on the lane/source probes --
+#         an unwrapped probe on a lane root or a source root, which used to
+#         retire all three lanes and skip `_write_summary` entirely; what is
+#         left is a tick that dies before `_write_summary` for a reason outside
+#         those probes. The one known today is `_dir_size`'s `rglob` walk over a
+#         deletion target (#2309): its generator is advanced OUTSIDE the `try`
+#         and `pathlib` swallows only `PermissionError` while iterating, so a
+#         non-EACCES `OSError` there -- ESTALE, EIO -- still escapes
+#         `collect_targets`. The freshness clause below is the only thing that
+#         catches any of them.
 #     Check freshness, execution mode and the failure kind together:
 #       jq -e '
 #         (.execution_mode == "production_execute")
 #         and ((.finished_at | fromdateiso8601) > (now - 26*3600))
 #         and ([.failed[]  | select(.error_type != "PermissionError")]        | length == 0)
-#         and ([.skipped[] | select(.reason | endswith("_root_unsafe"))]      | length == 0)
+#         and ([.skipped[] | select(.reason | endswith("_unsafe"))]           | length == 0)
 #       ' "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
 #     26h is not a magic constant: it is the 24h tick of
 #     nhms-node27-raw-retention.timer (`OnCalendar=*-*-* 03:35:00 UTC`, daily)
-#     plus slack. Exit codes over seven summary shapes -- six produced by
-#     driving the shipped script, the stale one a real summary with only
-#     `finished_at` aged past the window:
+#     plus slack. Exit codes over eight summary shapes -- seven produced by
+#     driving the shipped script (the newest of them, a per-source
+#     `*_source_unsafe` skip, is driven by
+#     `tests/test_node27_raw_retention.py::test_documented_operator_check_goes_red_on_an_unsafe_skip`,
+#     which extracts and runs THIS `jq` program rather than a copy of it), the
+#     stale one a real summary with only `finished_at` aged past the window:
 #       0  expected steady state -- fresh file, `production_execute`,
-#          `PermissionError` entries only, no lane-root skip.
-#       1  a lane silently retired via `*_root_unsafe`.
+#          `PermissionError` entries only, no `*_unsafe` skip at either depth.
+#       1  a lane silently retired via `*_root_unsafe`, or one source inside a
+#          live lane via `*_source_unsafe` -- clause 4 matches every reason
+#          ending in `_unsafe`, at both depths.
 #       1  a stale receipt, i.e. no new summary since the last tick.
 #       1  a genuine IO failure in `failed[]` (driven as `error_type: "OSError"`
 #          / `[Errno 30] Read-only file system`) -- read its `key`/`error`.
@@ -124,8 +144,9 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #          there.
 #     Exit 0 means those four clauses and nothing more: fresh summary,
 #     `production_execute`, every `failed[]` entry a `PermissionError` (on ANY
-#     lane -- the clause does not single out canonical), and no `*_root_unsafe`
-#     lane root. It does NOT mean all three lanes ran: a lane that retired
+#     lane -- the clause does not single out canonical), and no `*_unsafe` skip
+#     of either depth (no `*_root_unsafe` lane root, no `*_source_unsafe`
+#     source root). It does NOT mean all three lanes ran: a lane that retired
 #     itself with `<lane>_root_missing` or `precip_cache_root_unconfigured`
 #     passes clause 4 deliberately, because `_resolve_lane_root` treats absence
 #     as a benign per-lane skip and matching it would hold a fresh install at
@@ -133,16 +154,41 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #     and `<cache>/precip` both absent -> counts {'deleted': 1, 'failed': 0},
 #     criterion still exits 0.
 #     Lane liveness lives in `skipped[]`, so read it on every tick --
-#     `jq '.skipped[] | select(.key | contains("/") | not)' <summary>` lists
-#     exactly the lane-level retirements. The same `_root_missing` reason means
+#     `jq '.skipped[] | select(.key | contains("/") | not)' <summary>` lists the
+#     entries keyed by a bare lane name, while
+#     `jq '.skipped[] | select(.reason | endswith("_source_unsafe"))' <summary>`
+#     lists the per-source ones (#2104). Read BOTH: a retired lane root does not
+#     always produce a lane-level entry. Every probe in the lane-root gate stats
+#     the lane root FROM ITS PARENT and never exercises that root's own `x`, and
+#     the canonical and precip-cache lanes then walk the CONFIGURED sources
+#     instead of listing their root -- so one of those two lane roots losing `x`
+#     surfaces (on the pinned 3.11 interpreter) as one `<prefix>_source_unsafe`
+#     entry per configured source and NO lane-level entry at all; that is what
+#     the `canonical/` 0o000 reproduction writes. The raw lane does list its own
+#     root, so there the same mode change reads `raw_root_unsafe` instead.
+#     Reading them: one `*_source_unsafe` entry names that one source root
+#     (e.g. `canonical/IFS` alone); a full set covering every configured source
+#     of one mapped lane means check that LANE root's own mode first, because a
+#     mapped lane root that lost `x` can only appear this way.
+#     The same `_root_missing` reason means
 #     opposite things per lane: `precip_cache_root_missing` is expected until
 #     the display API caches its first PNG (`<cache>/precip` is created lazily
 #     on write, services/precip/cache.py), whereas `canonical_root_missing` on
 #     node-27 means the mirror tree is gone.
-#     Forward pointer: those `skipped[]` entries carry no errno, and
-#     `_resolve_lane_root` discards the `OSError` without logging it, so when
-#     the `_root_unsafe` clause trips the errno is in NEITHER the JSON nor the
-#     wrapper log -- probe the path by hand. Tracked as #2104 item 3.
+#     Reading an `*_unsafe` entry (#2104 item 3, delivered): the entries whose
+#     `detail` is `path_unavailable` -- and only those -- carry `error` (the
+#     `OSError` text, path included) and `error_type` (the exception class name
+#     -- `PermissionError` for EACCES, plain `OSError` for ESTALE) beside `key`,
+#     `reason`, `path` and `detail`, so that errno no longer has to be probed by
+#     hand. An `*_root_unsafe` entry with any other detail (`path_is_symlink`,
+#     `path_not_directory`) carries neither field: the SHAPE of the root
+#     disqualified it, no syscall raised, so there is no errno to report. The
+#     errno outlives the per-tick JSON: the runner prints the whole summary
+#     payload to stdout and the wrapper appends runner stdout+stderr to
+#     `$NODE27_RAW_RETENTION_LOG_FILE` (default `<log root>/raw-retention.log`),
+#     so that append-only log still holds the payload -- errno included -- after
+#     the summary files rotate. The errno is never written as a line of its
+#     own -- it reaches that log only inside the payload.
 
 # Rollout/rollback gates (issue #1407). Both default to today's execute-only
 # behaviour, so leaving them unset changes nothing:
