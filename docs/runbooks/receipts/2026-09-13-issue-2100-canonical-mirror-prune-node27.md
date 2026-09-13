@@ -109,4 +109,10 @@ df -B1 /home used=497995923456 avail=1191671394304
 
 ## 4. Post-merge persistence（待补）
 
+- 2026-09-13：PR #2314 已合入 master（merge `a78f6c311b83e554306ea3ae63aae29721adfc9a`），issue #2100 关闭。
+- node-22 调用方式（只读核实）：canonical copyback 由 `nhms-compute-scheduler.service`（`Type=oneshot`，
+  `nhms-compute-scheduler.timer` 触发）每 pass 以 `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli plan-production --submit --continuous --max-passes 1`
+  起新进程；`git pull --ff-only` 后下一 pass 即生效，无需重启、无需 `uv sync`。核实时活动树在 `7b38bcb8`，落后 master 51 个提交。
+- 待补：node-22 部署后首个新镜像周期的 `stat -c '%a %U %G'`（周期目录与 `prcp_rate_or_amount/`，期望 `2775 frd_muziyao nwmuser`）与 gap 周期补扫结果。
+
 （合入并 node-22 部署后由 follow-up 填写：首个新镜像周期两级 `stat`、re-sweep 结果。）

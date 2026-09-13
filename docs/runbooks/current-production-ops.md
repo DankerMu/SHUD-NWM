@@ -2600,8 +2600,8 @@ ssh -p 32099 nwm@210.77.77.27 \
 - 每一级的 `2775` 都是**显式写上去的**：`os.chmod` 会清 setgid，所以代码里没有任何地方依赖
   "这个位能活过一次 chmod"。产出侧两个常量同值——`services/tile_publisher/publisher.py`
   的 `CANONICAL_MIRROR_DIRECTORY_MODE` 与 `scripts/canonical_precip_copyback_backfill.py`
-  的 `DIR_MODE`，都是 `0o2775`，且都只作用于**自己创建**的目录。两个产出侧的分工不同，
-  按真实口径写：
+  的 `DIR_MODE`，都是 `0o2775`，且都只作用于自己**拥有**的目录（publisher 对 `<cycle>/`
+  无论是否由本次调用创建都断言，见下）。两个产出侧的分工不同，按真实口径写：
   - publisher 用 copyback 通用 helper 建穿越层（`canonical/`、`canonical/<S>/`、
     `canonical/<S>/grid/`），落 `0755`；`2775` 落在它自己拥有的层——`<cycle>/`、本次
     copyback 的临时树根、以及复制进来的树内各级（`prcp_rate_or_amount/`、

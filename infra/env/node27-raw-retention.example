@@ -65,8 +65,10 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 # HOW TO READ THIS UNIT (issue #2011; node-27 observations 2026-09-06, local
 # reproductions marked as such; the canonical lane's permission model is #2100).
 # Steady state since #2100: every canonical mirror directory this runner has to
-# remove -- `canonical/<S>/`, `<cycle>/` and its `prcp_rate_or_amount/` -- is
-# `2775` with group `nwmuser` (gid 1107), which `nwm` is a member of. The mirror
+# remove (`<cycle>/` and its `prcp_rate_or_amount/`) or unlink from (their
+# parent `canonical/<S>/`, which needs `w+x` for the `rmdir` and is never
+# removed itself) is `2775` with group `nwmuser` (gid 1107), which `nwm` is a
+# member of. The mirror
 # producers write that mode on every directory they own and the owner-side sweep
 # in docs/runbooks/current-production-ops.md 5.3 covers the rest, so aged
 # canonical cycles are actually deleted, `failed[]` is EMPTY, the runner returns
