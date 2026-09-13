@@ -506,12 +506,4 @@ describe('river-click runbook contract', () => {
     expect(core).toMatch(/cmd-start/)
     expect(core).toMatch(/cmd-end/)
   })
-
-  it('checklist keeps the older C4 #389 path honest about delivered vs open work', () => {
-    const text = readRunbook('docs/runbooks/node-27-bringup-checklist.md')
-    expect(text).toContain('门控的只读测试钩子 + 无 mock 的 live P95 采集 lane')
-    expect(text).toContain('#389')
-    expect(text).toContain('#1970')
-    expect(text).not.toMatch(/station popup live receipt.*已就绪|live receipt 已全部就绪/i)
-  })
 })

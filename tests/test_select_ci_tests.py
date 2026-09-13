@@ -35,6 +35,7 @@ from scripts.select_ci_tests import (
     BASINS_PACKAGE_PUBLICATION_TESTS,
     BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS,
     BASINS_REGISTRY_IMPORT_TESTS,
+    C4_PRODUCTION_ACCEPTANCE_TESTS,
     CALIBRATION_OVERRIDES_PATH,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
@@ -367,7 +368,7 @@ def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consu
             "tests/test_node27_cold_tablespace_integration.py",
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
-            "tests/test_node27_c4_production_acceptance.py",
+            *C4_PRODUCTION_ACCEPTANCE_TESTS,
         },
         "packages/common/node27_pgdata_container.py": {
             "tests/test_node27_pgdata_container.py",
@@ -1000,7 +1001,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             "tests/test_retention_copyback_mutex.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
-            "tests/test_node27_c4_production_acceptance.py",
+            *C4_PRODUCTION_ACCEPTANCE_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
         }
@@ -1024,7 +1025,7 @@ def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_s
         selected = select_tests([owner], repo_root=Path("."))
         assert expected <= set(selected), owner
     publication = set(select_tests(["packages/common/safe_fs_publication.py"], repo_root=Path(".")))
-    assert "tests/test_node27_c4_production_acceptance.py" in publication
+    assert set(C4_PRODUCTION_ACCEPTANCE_TESTS) <= publication
 
     script_selected = select_tests(
         ["scripts/node22_scheduler_journal_retention.py"],
@@ -13688,7 +13689,7 @@ def test_issue1895_evidence_io_selects_only_its_c1_c3_consumer_plus_additive_rid
         TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
         WRITE_SURFACE_SCAN_PATH,
         *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-        "tests/test_node27_c4_production_acceptance.py",
+        *C4_PRODUCTION_ACCEPTANCE_TESTS,
     }
     matching = [rule for rule in PATH_TEST_RULES if rule.pattern == producer]
     assert len(matching) == 1
@@ -19261,9 +19262,6 @@ def test_reviewed_count_fixture_owner_selects_consumers_and_each_removal(monkeyp
     assert set(select_tests([ISSUE2291_COUNT_SUITE], repo_root=Path("."))) == before - {suite}
 
 
-C4_PRODUCTION_ACCEPTANCE_TESTS = ("tests/test_node27_c4_production_acceptance.py",)
-
-
 def test_c4_production_acceptance_owners_select_their_suite() -> None:
     expected = set(C4_PRODUCTION_ACCEPTANCE_TESTS)
     for producer in (
@@ -19277,6 +19275,12 @@ def test_c4_production_acceptance_owners_select_their_suite() -> None:
     ):
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert expected <= selected, f"{producer} lost C4 acceptance suite: {sorted(expected - selected)}"
+
+
+def test_c4_production_acceptance_suite_split_selects_both_halves() -> None:
+    for producer in C4_PRODUCTION_ACCEPTANCE_TESTS:
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert set(C4_PRODUCTION_ACCEPTANCE_TESTS) <= selected, producer
 
 
 def test_c4_production_acceptance_shared_producers_keep_prior_consumers() -> None:
@@ -19306,3 +19310,4 @@ def test_c4_production_acceptance_owner_rules_red_when_removed(monkeypatch: pyte
         if producer.startswith("scripts/"):
             continue
         assert "tests/test_node27_c4_production_acceptance.py" not in selected, producer
+        assert "tests/test_node27_c4_production_acceptance_boundaries.py" not in selected, producer

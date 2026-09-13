@@ -61,6 +61,22 @@ def _report(error: C4AcceptanceError) -> int:
     return 1
 
 
+def _announce_pass(message: str) -> int:
+    """Write the stage PASS line while still in main(); never reflush a broken pipe."""
+
+    try:
+        print(message)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        try:
+            sys.stdout = open("/dev/null", "w")
+        except OSError:
+            pass
+        print("C4_STDOUT_CLOSED: success output could not be delivered", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
@@ -75,8 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 segment_id=args.segment_id,
                 output=args.output,
             )
-            print("C4 production acceptance freeze PASS")
-            return 0
+            return _announce_pass("C4 production acceptance freeze PASS")
         if args.command == "bind":
             bind(
                 freeze_path=args.freeze,
@@ -85,16 +100,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cmd_end=args.cmd_end,
                 output=args.output,
             )
-            print("C4 production acceptance bind PASS")
-            return 0
+            return _announce_pass("C4 production acceptance bind PASS")
         verify(
             freeze_path=args.freeze,
             binding_path=args.binding,
             reviewed_sha=args.reviewed_sha,
             output=args.output,
         )
-        print("C4 production acceptance verify PASS")
-        return 0
+        return _announce_pass("C4 production acceptance verify PASS")
     except C4AcceptanceError as error:
         return _report(error)
 
