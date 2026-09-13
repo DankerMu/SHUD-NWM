@@ -1,0 +1,6 @@
+diff --git a/infra/env/node27-resource-governance.env b/infra/env/node27-resource-governance.env
+--- a/infra/env/node27-resource-governance.env
++++ b/infra/env/node27-resource-governance.env
+@@ -3 +3 @@
+-NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-pgdata
++NODE27_GOVERNANCE_PGDATA_ROOT=/data/GHDC/nhms-primary/pgdata
