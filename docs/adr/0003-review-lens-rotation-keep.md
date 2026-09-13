@@ -4598,3 +4598,11 @@ later-round catches core=270、rotated=270、phase=57、skipped=15。
 本单 high 单轮（四席 clean、0 候选），Phase 7 gap sweep clean；单轮 PR 不进入轮换归因样本，
 不能据此判断轮换收益。记录 deferral：keep/cut 仍待维护者决策；本次合并预授权
 不含审核策略调整。现行 keep、座位上限不变。
+
+### Revisit 2026-09-13（post PR #2305 / issues #2081 #2169 #2038 #1975 #1976）
+
+追加后实测 650 行、640 merged、10 terminal；213 个多轮样本，
+later-round catches core=270、rotated=270、phase=57、skipped=15。
+本单 high 单轮（四席 clean、0 候选），Phase 7 gap sweep clean；单轮 PR 不进入轮换归因样本，
+不能据此判断轮换收益。记录 deferral：keep/cut 仍待维护者决策；本次合并预授权
+不含审核策略调整。现行 keep、座位上限不变。
