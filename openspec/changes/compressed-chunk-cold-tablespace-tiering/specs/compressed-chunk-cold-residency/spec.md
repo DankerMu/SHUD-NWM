@@ -30,6 +30,12 @@ or wholesale renamed cold subsystem SHALL substitute for extraction.
 - **THEN** ordinary governance still observes `/data/GHDC` and attributes current PGDATA to its actual device with unknown/conflict refusal
 - **AND** PGDATA manual instructions resolve to retained workload/evidence owners without a dangling cold rollout reference; independent C4 and canonical readonly validation remain available
 
+#### Scenario: C4's production acceptance outlives the retired caller
+
+- **WHEN** R3 removes the old G0/C3 publisher/binder
+- **THEN** R1 has already delivered the existing display owner's Bringup-C4 production acceptance entrypoint and matching C4 delta, preserving reviewed-SHA freeze and exact-byte SHA-256/file-identity re-verification against the original binding record
+- **AND** missing or mismatched SHA/bindings and changed C4 bytes/file identity refuse; local C4 CLI PASS alone is insufficient, and no SHA/digest fields are added to its closed schema/CLI
+
 ### Requirement: Ordinary compression SHALL have no cold launch dependency
 
 R2 SHALL remove paired cold env/budget assembly and the cold launcher leg while
@@ -48,9 +54,14 @@ preserving safe configuration, execution and ordinary maintenance behavior.
 
 ### Requirement: Cold-only implementations and rollout surfaces SHALL be removed rather than retained dormant
 
-R3 SHALL follow R1/R2 consumer cutovers or ship atomically with them. It SHALL
-remove the package/CLI/config/schema/example/test/CI and SQL grant-audit families
-listed in tasks.md, including old G0-G8 and manual callers after migration.
+Destructive changes SHALL publish with their actual dependency closure. The
+single-lane budget/preflight/unit cutover SHALL merge with cold runner/wrapper
+and affected direct/transitive test/config/schema/selector removal, after only
+the retained-consumer transfers needed by those paths. Other R3 closures may
+publish separately after their own transfers; no merge may leave paired-API callers.
+R3 SHALL remove the package/CLI/config/schema/example/test/CI and SQL
+grant-audit families listed in tasks.md, including old G0-G8/manual callers and
+the G7-only explicit-cycle recorder capability, #2227 test and selector edges.
 Tests/docs SHALL accompany source changes. Migrations 000058/000059, current data,
 regular maintenance, independent C4 and generic readonly SHALL remain intact.
 
@@ -63,6 +74,17 @@ regular maintenance, independent C4 and generic readonly SHALL remain intact.
 
 - **WHEN** the cold CREATE grant and positive grant audit are removed from provisioning source
 - **THEN** unrelated role/ownership/membership/trigger/default/security audits remain and no live REVOKE, DROP or data deletion is authorized
+
+#### Scenario: A paired-budget consumer remains after the interface cutover
+
+- **WHEN** a proposed intermediate merge removes the cold preflight/budget API while a cold executable, applicable test or selector still depends on it
+- **THEN** that merge is refused; complete its actual retained-consumer transfers and R2/R3 caller closure rather than adding an alias, a broken intermediate or unrelated whole-group prerequisites
+
+#### Scenario: A retired recorder still has a canonical or test consumer
+
+- **WHEN** R3 deletes the G7-only `node27_issue1895_query` recorder
+- **THEN** its `explicit-cycle-query-binding` requirements, dedicated #2227 test and selector edges retire in the same cutover, without changing the shipping forecast owner
+- **AND** governance example/current-operations guidance and mixed lifecycle/Docker gate tests receive their explicit R3.7 dispositions; generic mutex and collection safety survive
 
 ### Requirement: Retirement SHALL replace active authority without rewriting completed history
 
@@ -81,8 +103,8 @@ updated only with their matching implementation cutover.
 #### Scenario: Final archive would promote withdrawn cold additions
 
 - **WHEN** closeout prepares archive or another final disposition
-- **THEN** review preserves and validates surviving-spec updates while excluding withdrawn cold-enabling additions and any newly enabled cold capability
-- **AND** `--skip-specs`, if used, follows explicit preservation of survivor updates; `--no-validate` is forbidden and this document revision executes no archive
+- **THEN** review preserves and validates surviving-spec updates and the G7-only REMOVED delta, including removal of its empty canonical capability, while excluding withdrawn cold-enabling additions and any newly enabled cold capability
+- **AND** `--skip-specs`, if used, follows explicit application and validation of those updates/removals; `--no-validate` is forbidden and this document revision executes no archive
 
 ### Requirement: Closure SHALL require deletion proof and separately authorized effective-deployment handoff
 

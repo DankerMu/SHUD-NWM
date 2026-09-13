@@ -19,8 +19,10 @@ R4 更正权威并保留历史，不晋升 withdrawn ADDED cold specs；R5 验�
 
 本清单 C1–C4、river-click 和既有只读/展示 producer 继续由各自 owner 承担；
 **不把 #1895 改造成新的全面 display/storage acceptance 项目**。旧 issue1895
-C1/C2/C3/performance 接受器不是独立 C4 的前置；R1 必须迁移/repoint 真正保留的
-手工/PGDATA consumers 后 R3 才能删除旧出口。此修订不声称源码已移除、effective unit
+C1/C2/C3/performance 包装不是本地 C4 producer/binder 的前置，但其中必要的
+外层 SHA/digest 保证必须按 R1.6 迁交 **Bringup-C4 production acceptance**。
+R1 必须迁移/repoint 真正保留的手工/PGDATA consumers 后 R3 才能删除旧出口。
+此修订不声称源码已移除、effective unit
 已观测或生产已清理。冷样本/I9/I8/#2162/#2017 不是一揽子退役依赖，部署仍须协调
 真实 owner 和 foreign holds；既有容量、升级、恢复职责不取消，也不新增 RPO/RTO gate。
 
@@ -202,8 +204,10 @@ ingest / download / compression / retention 及当时计划的 cold-residency �
 - [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB
   状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 +
   `/ops`，**拒 historical latest 冒充**。通用 cross-plane 身份和双源要求保留。
-  原 #1895 direct-current C3 对 C4 bytes、DB/API identity、registry/valid-times
-  的 rollout 接受器已撤回；确有保留消费者的能力按 R1 迁移，不保留整个旧链。
+  原 #1895 direct-current C3 的冷 rollout 已撤回，但独立 C4 生产接受所需的
+  reviewed-SHA/exact-byte digest 校验不能一起撤销：R1.6 必须将该最小职责迁交
+  本清单 C4 的既有 display owner（**Bringup-C4 production acceptance**）。
+  不迁移 C3 其他已撤销的冷 baseline/完整周期检查，不保留整个旧链。
   通用 producer-complete full-scope/twelve-lane aggregator 仍只接受完整
   producer bundle，不能用空目录或旧 C3 receipt 冒充。
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane `PASS`；单源为 `PARTIAL`。
@@ -225,8 +229,15 @@ ingest / download / compression / retention 及当时计划的 cold-residency �
 - [ ] 由该 C4 lane 实测 display 模式控件隐藏/禁用、无 retry·cancel·Slurm
   POST、queue-depth unavailable、诊断复制、人工 22 恢复指引，并证明 27 只展示
   22 的结果而不创建控制面 receipt。
-- [ ] 保留当前运行 identity、exact bytes/digest、时间括号与 reviewed SHA 的证据绑定；
-  C4 CLI PASS 不替代 C1–C3 的各自证据。旧 G0/G8 不再是 C4 的外层 gate。
+- [ ] **Bringup-C4 production acceptance** 由既有 display 上线 owner 承担：
+  执行前从获批准的交付/C1 记录冻结 reviewed SHA，将当次 C4 原始字节
+  sha256、文件身份、五输入和执行 bracket 绑定到原外层接受记录；最终接受
+  重新读取并比对，不从待接受文件或最终观察反推/覆盖预期。
+  缺记录、SHA 不符、字节或文件身份变化均拒绝；C4 CLI PASS 不替代此外层
+  gate 或 C1–C3 的独立证据，也不向 C4 闭集 schema/既有 CLI 增加 SHA/digest 字段。
+  R1.6 必须先交付并登记真实入口、代码 owner、记录来源及拒绝证明，R3 才能
+  删除原 G0/C3 中的相应能力。新归属是待实现的交接目标，不声称新入口已经存在；
+  旧冷 G0–G8 不恢复为上线流程。
 
 Issue #389 的 station popup/bbox/framing 与 #342 station-MVT 是独立缺口，不挂在
 本 C4 checkbox 下。#1970 已交付的河段 click oracle 仍由上述 C4 lane live 执行。

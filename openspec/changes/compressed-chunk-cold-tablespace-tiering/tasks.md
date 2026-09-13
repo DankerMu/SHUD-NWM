@@ -6,6 +6,29 @@ The merged cold runtime remains present; runtime retirement is still pending.
 The sole executable retirement plan is this file. Old cold deployment approval
 does not authorize retirement, and disabling a lane is not code retirement.
 
+## Publication DAG and smallest safe merge boundaries
+
+R1/R2 work may be prepared concurrently; this is not permission to publish an
+R2-only destructive interface change. R4.3's fresh fixture review is the entry
+gate before implementation, regardless of its position in the numbered groups.
+
+| Publication slice | Prerequisite | Minimal mergeable scope and proof |
+|---|---|---|
+| Owner-transfer PRs (R1) | R4.3 fixture approval | One retained-owner transfer with all actual callers, tests, selectors and contracts; preserve still-used callers until their cutover, without a legacy facade. |
+| Compression cutover and dependent retirement (R2 + dependent R3 rows) | Only retained-consumer transfers needed by the removed paths | Single-lane preflight/budget/unit/compression wrapper together with cold runner/wrapper removal and all affected direct/transitive tests, config, schema and selector edges. No intermediate merge keeps a caller of removed paired-budget APIs. |
+| Other retirement slices (remaining R3) | Each deleted owner's actual R1 transfers; C4 acceptance before G0/C3 removal | Delete complete caller/owner closures with matching contracts and tests; unrelated SQL, governance or G7 deletions need not wait for compression cutover. |
+| Effective handoff and closure (R5) | Runtime-retirement proof and R4 authority updates | Separately approved actual deployment disposition and linked survivor evidence; no source-only closure. |
+
+Suggested fixture level for implementation slices: expanded; effective repair
+intensity: high. Atomicity follows actual dependency closure, not whole task
+groups. Do not split a closure across PRs leaving broken imports/CLIs/tests, or
+serialize unrelated owner transfers. A single integration owner serializes shared
+`select_ci_tests.py` and contract mutations; tests/docs accompany each merge.
+An owner-transfer slice cannot silently remove a shared export still used by
+unretired callers. The final post-merge compression launch needs no cold env,
+and no unit, executable or retained test depends on `--launch cold` or paired
+budget fields. Real launcher and collection/survivor proofs are required.
+
 ## R1 — Transfer minimal surviving consumers to their actual owners
 
 - [ ] R1.1 Migrate `packages/common/node27_pgdata_host.py` and
@@ -43,6 +66,12 @@ does not authorize retirement, and disabling a lane is not code retirement.
   entire cold acceptance stack. Preserve
   `services/production_closure/readonly_db_validation.py` and
   `scripts/validate_readonly_db_boundary.py`.
+  Explicit-cycle SQL performance is a retained manual consumer: transfer any
+  required query capture, canonical parameter validation, native EXPLAIN binding
+  and deterministic query identity from the old recorder to this workload owner
+  with behavioral proof before R3.6. Preserve meaning, not synthetic positional
+  compatibility or the four-lane cold protocol. A shipping query API alone is
+  not the replacement performance recorder or its identity validation.
 - [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,
   pre-write restoration, no stale post-write rollback, bounded commands and
@@ -53,6 +82,19 @@ does not authorize retirement, and disabling a lane is not code retirement.
   `e2e/live-c4-display.spec.ts`, producer/binder/schema and
   `openspec/specs/c4-live-display-evidence`) survives: old publication-current
   consumes C4, not the reverse. Generic readonly survives old C2's removal.
+- [ ] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
+  SHA-256/file-identity recheck from G0/C3 to the existing display deployment
+  owner's **Bringup-C4 production acceptance** seam. R1 must ship and record its
+  real public entrypoint, code owner, original binding-record provenance and
+  assertion-bearing acceptance/refusal tests before R3 deletes the old owner.
+  Freeze reviewed SHA from approved delivery/C1 evidence before execution,
+  bind the initial accepted C4 bytes/identity/inputs/bracket, then recheck against
+  that record at final acceptance. Missing bindings, mismatched SHA or changed
+  bytes/identity refuse; do not derive new expectations from the final read.
+  Keep the independent C4 closed schema/CLI unchanged, do not restore broader
+  retired C3 checks, and never substitute local C4 CLI PASS for this outer gate
+  or independent C1-C3 proof. Apply the matching `c4-live-display-evidence`
+  MODIFIED delta with this transfer; generic “C4 survives” wording is not proof.
 
 ## R2 — Detach normal compression while preserving safety
 
@@ -80,8 +122,13 @@ does not authorize retirement, and disabling a lane is not code retirement.
 
 ## R3 — Delete cold-only runtime and old G0-G8 delivery surfaces
 
-R1 and R2 are independent preparation groups. R3 depends on both consumer
-cutovers, or ships atomically with them. Tests/docs accompany every source slice.
+R1 and R2 may be prepared independently; publication follows actual dependency
+closures in the DAG above. In particular `node27_cold_residency.py` and
+`node27_cold_residency_once.sh`, their affected direct/transitive test consumers,
+config/schema and selector entries disappear in the same merge that removes
+their preflight/paired-budget API. Complete only the retained-consumer transfers
+needed by that deletion first. Other R3 closures may publish separately once
+their own consumers are migrated; no broken executable or compatibility facade.
 The source census found 95 candidate Python files (38 cold package, 6 cold CLI,
 31 issue1895 package, 20 issue1895 CLI); these are families to classify after
 extraction, not wildcard deletion authority or proof of dynamic completeness.
@@ -119,16 +166,43 @@ extraction, not wildcard deletion authority or proof of dynamic completeness.
   assertion-bearing surviving suites with no stale collection imports.
   Preserve independent C4 and generic readonly suites. Leave migrations
   `000058`/`000059`, ordinary compression/retention and current data unchanged.
+- [ ] R3.6 Retire the G7-only `explicit-cycle-query-binding` capability with
+  `node27_issue1895_query`'s recorder/capture-validator/digest and retired
+  performance/lanes callers. Delete
+  `tests/test_issue2227_explicit_cycle_named_binding.py` and `ISSUE2227_*`
+  selector edges in that same atomic cutover, applying its REMOVED delta.
+  Its purpose and callers are #1895/G7-only; a test import is not justification
+  to promote dead recorder code. Keep the real shipping forecast owner,
+  native named psycopg binding, API and independent tests unchanged.
+- [ ] R3.7 Close the following mixed/non-Python rows in the atomic cutover.
+  These are explicit work items, not work deferred to R5's audit.
+
+| Surface | Required disposition | Closure proof |
+|---|---|---|
+| `infra/env/node27-resource-governance.example` | Remove only the cold-governance option block with the Python CLI/config branch; preserve PGDATA and maintenance configuration | No retired `NODE27_COLD_GOVERNANCE_*` declarations; surviving audit config smoke |
+| `docs/runbooks/current-production-ops.md` database role table | Remove cold env/CREATE grant as current runtime guidance; preserve ordinary roles and distinguish pending source removal from live revocation | Role/source/docs matrix agrees; no current instruction activates cold |
+| `packages/common/node27_timeseries_lifecycle_lock.py` and `tests/test_node27_timeseries_lifecycle_lock.py` | Keep the fixed mutex implementation; update stale peer prose and remove the cold CLI test branch while retaining compression/retention/replay/PGDATA exclusion behavior | Surviving contention/override tests execute without importing the deleted CLI |
+| `tests/test_node27_cold_tablespace_marker_contract.py` | Delete cold AST/source pins; move its generic Docker collection-gate behavior test into proposed `tests/test_node27_docker_collection_gate.py`, without cold fakes, and update selector ownership | New unmarked gate test proves Docker opt-in does not unlock ordinary DB integration; old cold test file/import gone |
+| `scripts/diagnostic/display-cold-waterfall.sh` | Retain: “cold” means display cache/startup latency, not tablespace residency; no such npm script exists in current frontend package | No name-only retirement or change to this independent diagnostic |
+
+The last row is an explicit exclusion, not a new implementation task. Generic
+Docker collection gates in `tests/conftest.py` remain unchanged; only their
+retired test container changes owner.
 
 ## R4 — Correct active authority and preserve history
 
 - [ ] R4.1 Implement the proposed surviving-capability deltas beside this file
   with their matching source changes: PGDATA placement, compression launch/roles,
-  runtime role provisioning and CI selection. Canonical `openspec/specs/**`
+  runtime role provisioning, CI selection and C4 production-acceptance ownership.
+  Canonical `openspec/specs/**`
   remains the current implemented contract until that cutover; do not claim
   this document-only revision has already removed code.
-- [ ] R4.2 Reconcile #1891/#1895, ADR 0002, storage runbook and bringup checklist
-  with mandatory retirement and actual surviving owners. The former pending
+  Apply the `explicit-cycle-query-binding` REMOVED delta with R3.6 and remove
+  its now-empty canonical capability, not leave a stale G7 Purpose behind.
+  This does not remove shipping forecast behavior or its independent contracts.
+- [ ] R4.2 Reconcile #1891/#1895, ADR 0002, storage runbook, bringup checklist
+  and `docs/runbooks/current-production-ops.md` with mandatory retirement and
+  actual surviving owners. The former pending
   rollout is withdrawn, not executed. Keep completed ledger below and immutable
   `evidence/**`, `fixtures/**` and `probe-1892-throwaway.md` as historical records,
   never active deployment authority. Runtime synthetic examples are not
@@ -140,11 +214,12 @@ extraction, not wildcard deletion authority or proof of dynamic completeness.
   these edits. Require fresh independent review, finding verification, Gap
   Sweep, regression evidence and exact-head CI before merge.
 - [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
-  surviving-spec updates but never promotes withdrawn cold-enabling ADDED
-  requirements. There is no canonical `compressed-chunk-cold-residency`
-  capability to remove. If using `openspec archive --skip-specs`, first apply
-  and validate the surviving deltas explicitly; skipping promotion must not
-  discard those updates. Never use `--no-validate`. Do not archive during this
+  surviving-spec updates and the G7-only REMOVED delta but never promotes withdrawn
+  cold-enabling ADDED requirements. There is no canonical
+  `compressed-chunk-cold-residency` capability to remove. If using
+  `openspec archive --skip-specs`, first apply and validate those updates/removals,
+  including removal of the empty G7 capability; skipping promotion must not
+  discard them. Never use `--no-validate`. Do not archive during this
   specification revision or while implementation remains pending.
 
 ## R5 — Verify survivors, authorize deployment handoff, then close
@@ -157,6 +232,36 @@ extraction, not wildcard deletion authority or proof of dynamic completeness.
   Ruff/OpenSpec/frontend checks plus node27 targeted, required full/backend and
   isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 regression. No test/PASS or fresh
   review is claimed by this planning revision.
+
+  Implementation-stage commands below belong on node-27 (owned checkout/venv,
+  `TMPDIR=/home/nwm/tmp`, no production database substitution):
+
+  ```bash
+  uv run pytest -q tests/test_node27_pgdata_migrate.py tests/test_node27_resource_governance.py tests/test_node27_timeseries_compression.py tests/test_node27_timeseries_retention.py tests/test_node27_timeseries_lifecycle_lock.py tests/test_node27_write_roles.py tests/test_node27_external_contract_snapshot.py tests/test_select_ci_tests.py
+  NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_migrate_oracle.py
+  uv run pytest -q tests/test_node27_docker_collection_gate.py
+  uv run pytest -q
+  ```
+
+  The collection-gate path is the explicit R3.7 migration target, not a file
+  claimed to exist in this review revision. The PGDATA unit and oracle paths
+  both exist now and are retained. The isolated command must execute real
+  oracle assertions; empty selection or all-skipped output cannot satisfy it.
+  Retained/transferred test paths and their selector rows move together.
+  Record the actual compression-only wrapper launch/refusal smoke invocation
+  using a private compression env and no cold env; `--help` alone is not
+  production or database proof. For C4/manual authority, use the unchanged
+  local binder's input/bracket/private-file behavioral suites and R1.6's
+  real outer acceptance tests (missing/mismatched SHA or changed bytes/identity),
+  plus execute each retained documented entrypoint in an appropriate safe
+  mode. Reconcile actual command paths with both runbooks and the R3.7 matrix;
+  do not replace the removed prose-pin test with a new wording assertion.
+  On the local frontend, `pnpm test` covers its surviving C4 binder/producer
+  suites; any required real C4 browser proof remains node-27/owner-authorized.
+  Local contract checks are
+  `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`
+  and Ruff/Markdown checks on the changed surface. No command here is claimed
+  to have run for runtime retirement in this contract review.
 - [ ] R5.2 Separately authorize effective-deployment handoff at the final release:
   identify actual unit/dropins/env/ExecStartPre and referenced paths, coordinate
   owners and foreign holds, remove retired cold activation/configuration without

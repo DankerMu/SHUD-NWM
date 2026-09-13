@@ -16,10 +16,10 @@ The sole retirement contract is the active change
 
 - **R1:** transfer minimal PGDATA command/container/evidence, ordinary governance
   capacity sampling and genuinely retained manual/shared consumers to their actual owners.
-- **R2:** independently detach normal compression from cold env, paired budgets
+- **R2:** detach normal compression from cold env, paired budgets
   and launcher, retaining safe inert parsing, bounded execution and lifecycle locking.
-- **R3:** after R1 and R2, delete cold-only runtime, old G0–G8 wrappers,
-  schemas/examples/tests, CI targets and cold SQL grant/audit. Tests/docs accompany
+- **R3:** after each affected consumer transfer, delete cold-only runtime, old G0–G8
+  wrappers, schemas/examples/tests, CI targets and cold SQL grant/audit. Tests/docs accompany
   each source slice; leaving code dormant is not closure.
 - **R4:** correct active authority while preserving completed delivery and immutable
   evidence; withdraw old pending rollout, never mark it executed or promote its
@@ -689,13 +689,25 @@ manufacture a selective-cold sample. Preserve SQL/API/browser one-warm-up plus
 decompression; normal `DecompressChunk` of its own candidate is allowed. Buffer
 accounting is root Plan Shared Hit+Read, not summed parent/child counters.
 Missing DB/browser evidence remains pending, never mocked PASS.
+The retained manual SQL workload also needs capture/parameter validation, native
+EXPLAIN execution and deterministic query identity. R1.4 transfers the minimum
+needed behavior and tests from the old recorder before its deletion; shipping
+`forecast_series()` alone is not a replacement recorder. Its synthetic positional
+compatibility and four-lane G7 protocol need not survive.
 
 The old G7 C1/C2/C3/performance CLIs below are real manual consumers, not an
 exemption from retirement. R1 must transfer any still-required observation,
 identity/content binding and performance producer/validator with schema/tests
 to its actual PGDATA/display/readonly owner and repoint this guidance **before**
 R3 deletes its old exit. No replacement CLI is asserted to exist yet. Independent
-C4 does not depend on the old C3/G8 acceptors; retain its real producer/binder.
+C4's local producer/binder remains, but its outer reviewed-SHA/exact-byte digest
+and file-identity guarantee currently lives in G0/C3. R1.6 must transfer it to the
+existing display owner's **Bringup-C4 production acceptance** seam and deliver
+its real entrypoint, original binding-record provenance and rejection proof
+before deleting that old owner. Missing/mismatched SHA or changed C4 bytes/file
+identity refuse; local C4 CLI PASS cannot replace outer acceptance or C1-C3
+evidence. The C4 closed schema/CLI remains unchanged. This is a required transfer,
+not proof that a successor entrypoint is already deployed.
 Existing controlled-ingest/natural-tick and pre/post-write rollback obligations
 stay in PGDATA §D, subject to the actual hold owner's separate authorization.
 

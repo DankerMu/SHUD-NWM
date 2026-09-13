@@ -55,9 +55,19 @@ Runbook/manual CLI invocations count as consumers. Before deleting old C1/C2/C3/
 performance exits, repoint PGDATA workload/evidence instructions to their actual
 PGDATA/display/readonly owners, transferring any genuinely retained producer,
 validator, schema and tests together. Do not retain all issue1895 wrappers merely
-to preserve names or leave a dangling “see C1-C4 below”. Independent C4 has no
-reverse dependency on the old publication-current binder. The canonical readonly
-facade and `validate_readonly_db_boundary.py` survive the old C2 acceptor.
+to preserve names or leave a dangling “see C1-C4 below”. Independent C4's local
+producer/binder does not import C3, but its canonical production-acceptance
+contract still requires the outer reviewed-SHA/exact-byte check currently owned
+by G0/C3. R1.6 transfers that guarantee to the existing display deployment owner's
+**Bringup-C4 production acceptance** seam, with a real entrypoint and original
+binding record before the old owner can be deleted. Approved delivery/C1 evidence
+freezes reviewed SHA before execution; final acceptance rechecks SHA and exact
+C4 bytes/file identity against the initial record, never a recomputed expectation.
+Missing/mismatched/swapped bindings refuse. Keep the five local C4 inputs,
+bracket, private-file rules and closed schema/CLI; do not add SHA/digest fields
+there or revive the broader retired C3 checks. The C4 MODIFIED delta and callers
+move with the source transfer. The canonical readonly facade and
+`validate_readonly_db_boundary.py` survive the old C2 acceptor.
 
 ## R2 — Detach normal compression while preserving safety
 
@@ -78,11 +88,16 @@ unit templates prove source intent only, never effective production state.
 
 ## R3 — Delete cold-only runtime and old G0-G8 delivery surfaces
 
-R1 and R2 can proceed independently. Only after their consumer cutovers (or in
-one atomic final change) remove the cold and issue1895 families enumerated in
-tasks.md. Delete issue1895 before cold or together, since it imports cold catalog,
-probe and census owners. The 95-file Python census is a candidate-family map,
-not wildcard deletion permission or proof of dynamic runtime coverage.
+R1/R2 preparation can proceed concurrently. Publish destructive changes with
+their actual dependency closure: the single-lane budget/preflight/unit/compression
+wrapper merges with cold runner/wrapper removal and all affected direct/transitive
+test/config/schema/selector edges. Complete only the R1 transfers needed by those
+removed paths first. Other R3 closures may merge separately once their own retained
+consumers are migrated; G0/C3 removal specifically waits for outer C4 acceptance.
+Do not introduce compatibility aliases, broken intermediates or unrelated
+whole-group prerequisites. Shared selector/contract edits have one integration
+owner; concrete publication slices and the entry review gate are
+in tasks.md. The candidate-family census is not wildcard deletion permission.
 
 Remove cold-only CLIs/wrappers/env, installer/probe/governance and old rollout
 acceptors, schemas/synthetic examples/tests/fakes/mutants, selector ownership and
@@ -95,6 +110,22 @@ to their owners and retire incidental source-text/default-count pins. Close
 shared fixtures/conftest/import/generated/non-Python consumers, not filenames
 alone. C4 and generic readonly retain independent tests and authority.
 
+The `explicit-cycle-query-binding` capability belongs to the retired #1895/G7
+recorder, including synthetic positional captures and four-lane evidence. Its
+REMOVED delta, `test_issue2227_explicit_cycle_named_binding.py` and selector edges
+leave with that recorder; a test dependency is not a reason to promote dead code.
+R1.4 first transfers the minimum capture, canonical parameter validation, native
+EXPLAIN binding and deterministic query identity needed by the retained PGDATA
+manual workload, with real entrypoint and behavioral proof. The matching PGDATA
+ADDED requirement preserves that guarantee; shipping SQL alone is not a recorder.
+Only the synthetic positional/four-lane G7 protocol and obsolete owner retire.
+The shipping forecast owner and native named query behavior are unchanged.
+R3's mixed-surface matrix additionally owns the governance env example, current
+production role guidance, cold branch of the shared lifecycle-lock test, and
+relocation of generic Docker collection-gate behavior before deleting cold AST
+tests. The fixed runtime mutex and display-cache cold-waterfall diagnostic stay;
+“cold” in a name is not a storage ownership criterion.
+
 ## R4 — Correct active authority and preserve history
 
 The proposed MODIFIED deltas copy full affected canonical requirement blocks and
@@ -105,7 +136,10 @@ already shipped. Matching source/spec/test/doc cutover is required at implementa
 
 The former cold-only ADDED delta was never promoted to a canonical cold
 capability. Its replacement contains retirement/closeout requirements only; do
-not invent REMOVED entries for nonexistent canonical requirements. Completed
+not invent REMOVED entries for nonexistent cold requirements. In contrast,
+the G7-only `explicit-cycle-query-binding` capability does exist and its three
+requirements are explicitly removed with R3; no stale canonical G7 Purpose stays.
+Completed
 ledger remains non-normative history. Outstanding old rollout is explicitly
 withdrawn and active runbooks/issues must point to surviving owners and R1-R5.
 
@@ -116,8 +150,9 @@ risk packs. Record an invariant-to-public-seam matrix for each task group, obtai
 independent review/finding verification/Gap Sweep and exact-head CI. Historical
 cold fixture approvals cannot satisfy these gates.
 
-At final archive, first review how surviving MODIFIED/ADDED updates are applied
-and validated; then disposition this change without promoting withdrawn cold
+At final archive, first review how surviving MODIFIED/ADDED updates and the
+G7-only REMOVED delta are applied and validated; then disposition this change
+without promoting withdrawn cold
 additions or creating enabled cold capability. `openspec archive --skip-specs`
 is the supported skip-promotion mechanism after survivor updates are explicitly
 preserved. It is not permission to omit those updates; `--no-validate` is never

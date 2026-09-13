@@ -36,18 +36,23 @@ before retirement closure; keeping it disabled or as future-use stubs is insuffi
 This accepts a direction, not a claim that code or production references are gone.
 
 The authoritative groups are **R1** minimal PGDATA/governance/shared and manual
-consumer transfer to actual owners; **R2** independent normal-compression
+consumer transfer to actual owners; **R2** normal-compression
 decoupling from cold env/paired budgets/launcher with safety intact; **R3** deletion
 of cold-only runtime, old G0–G8 wrappers, schemas/examples/tests/CI and cold SQL
-grant-audit after R1/R2; **R4** active-authority correction without rewriting
+grant-audit with each actual dependency closure; **R4** active-authority correction without rewriting
 completed history or promoting withdrawn ADDED cold specs; **R5** survivor proof,
 separately authorized effective-deployment handoff and honest closure. Tests/docs
 accompany each source slice. These are summaries, not a parallel implementation plan.
 
 PGDATA command/container/evidence guards, ordinary device-bound capacity sampling,
 compression/retention/lifecycle locking, generic readonly validation and independent
-C4/river-click producers survive. Actual runbook/CLI consumers must migrate and be
-repointed before their old exits disappear. #1895 is not a new comprehensive
+C4/river-click producers survive. C4's outer reviewed-SHA/exact-byte digest and
+file-identity acceptance guarantee must transfer from G0/C3 to the existing display
+owner's Bringup-C4 production acceptance seam under R1.6, without changing the
+closed C4 protocol or treating local CLI PASS as overall acceptance. R1 must
+deliver the real entrypoint and rejection proof before R3 removes the old owner.
+Actual runbook/CLI consumers must migrate and be repointed before their old
+exits disappear. #1895 is not a new comprehensive
 storage/display acceptance epic. Cold samples, I9, I8, #2162 and #2017 are not
 blanket retirement prerequisites; deployment must still coordinate their actual
 owners and foreign holds. Existing upgrade, capacity and recovery obligations
