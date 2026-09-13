@@ -1550,7 +1550,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # retain the file-journal closure. A separate stop_on_match rule would
         # shift selection because first match wins.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[0],
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py", "tests/test_node27_c4_production_acceptance.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1558,7 +1558,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # publication and restore. It needs both its filesystem contract and
         # the two journal-retention behavioral partitions.
         "packages/common/safe_fs_publication.py",
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            "tests/test_safe_fs.py",
+            "tests/test_node27_c4_production_acceptance.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -2291,6 +2295,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *READONLY_DB_VALIDATION_TESTS,
             *ISSUE1895_READINESS_C1_C2_C3_TESTS,
         ),
+    ),
+    PathTestRule(
+        "services/production_closure/c4_production_acceptance.py",
+        ("tests/test_node27_c4_production_acceptance.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "services/production_closure/c4_production_acceptance_io.py",
+        ("tests/test_node27_c4_production_acceptance.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "scripts/node27_c4_production_acceptance.py",
+        ("tests/test_node27_c4_production_acceptance.py",),
+        stop_on_match=True,
     ),
     PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
@@ -3520,7 +3539,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # PATH_TEST_RULES.
     PathTestRule(
         "packages/common/evidence_io.py",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, "tests/test_node27_c4_production_acceptance.py"),
     ),
     # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
     # After the readiness suite split that consumer contract lives in
@@ -4279,6 +4298,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_integration.py",
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_c4_production_acceptance.py",
         ),
         stop_on_match=True,
     ),

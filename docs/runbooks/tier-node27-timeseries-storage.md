@@ -698,15 +698,68 @@ The old G7 C1/C2/C3/performance CLIs below are real manual consumers, not an
 exemption from retirement. R1 must transfer any still-required observation,
 identity/content binding and performance producer/validator with schema/tests
 to its actual PGDATA/display/readonly owner and repoint this guidance **before**
-R3 deletes its old exit. No replacement CLI is asserted to exist yet. Independent
-C4's local producer/binder remains, but its outer reviewed-SHA/exact-byte digest
-and file-identity guarantee currently lives in G0/C3. R1.6 must transfer it to the
-existing display owner's **Bringup-C4 production acceptance** seam and deliver
-its real entrypoint, original binding-record provenance and rejection proof
-before deleting that old owner. Missing/mismatched SHA or changed C4 bytes/file
-identity refuse; local C4 CLI PASS cannot replace outer acceptance or C1-C3
-evidence. The C4 closed schema/CLI remains unchanged. This is a required transfer,
-not proof that a successor entrypoint is already deployed.
+R3 deletes its old exit. Independent C4's local producer/binder remains. The
+outer reviewed-SHA/exact-byte digest and file-identity guarantee is owned by
+Bringup-C4 production acceptance:
+
+- Code owner: `services/production_closure/c4_production_acceptance.py`
+  (IO: `services/production_closure/c4_production_acceptance_io.py`).
+- Public CLI: `scripts/node27_c4_production_acceptance.py` freeze / bind /
+  verify. Default bind/verify invoke the unchanged
+  `apps/frontend/scripts/c4-receipt-binder.mjs` through
+  `packages/common/node27_pgdata_command.run_bounded_command`; there is no
+  fake PASS path and no user-supplied binder executable.
+- Provenance: operator-supplied already-approved delivery/C1 record
+  (`status=PASS`, `head_sha`, `reviewed_sha`). Freeze binds those selected
+  fields plus the five C4 inputs and a full-precision UTC timestamp. Do not
+  floor the freeze instant. After freeze, wait across the next whole second
+  (`sleep 1` is sufficient) before recording `C4_CMD_START`, then run the
+  existing live-C4 lane with the current frontend/API origins and C4
+  basin/segment pins, then record `C4_CMD_END` and pass that same named
+  bracket to bind/verify:
+
+```bash
+uv run --no-sync python scripts/node27_c4_production_acceptance.py freeze \
+  --approved-record "$APPROVED_RECORD" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --receipt "$C4_RECEIPT" \
+  --frontend-origin "$FRONTEND_ORIGIN" \
+  --api-origin "$API_ORIGIN" \
+  --basin-id "$PLAYWRIGHT_LIVE_C4_BASIN_ID" \
+  --segment-id "$PLAYWRIGHT_LIVE_C4_SEGMENT_ID" \
+  --output "$C4_FREEZE"
+sleep 1
+C4_CMD_START=$(/usr/bin/date -u +%s)
+test ! -e "$C4_RECEIPT"
+cd "$REPO_ROOT" || { echo "BLOCKED: REPO_ROOT unreachable"; exit 1; }
+set +e
+PLAYWRIGHT_LIVE_BASE_URL="$FRONTEND_ORIGIN" \
+PLAYWRIGHT_LIVE_API_BASE_URL="$API_ORIGIN" \
+PLAYWRIGHT_LIVE_C4_BASIN_ID="${PLAYWRIGHT_LIVE_C4_BASIN_ID:?current C4 basin pin is required}" \
+PLAYWRIGHT_LIVE_C4_SEGMENT_ID="${PLAYWRIGHT_LIVE_C4_SEGMENT_ID:?current C4 segment pin is required}" \
+PLAYWRIGHT_LIVE_C4_RECEIPT_PATH="$C4_RECEIPT" \
+corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-c4-display
+C4_CMD_EXIT=$?; set -e
+C4_CMD_END=$(/usr/bin/date -u +%s)
+test "$C4_CMD_EXIT" = "0"
+uv run --no-sync python scripts/node27_c4_production_acceptance.py bind \
+  --freeze "$C4_FREEZE" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --cmd-start "$C4_CMD_START" \
+  --cmd-end "$C4_CMD_END" \
+  --output "$C4_BINDING"
+uv run --no-sync python scripts/node27_c4_production_acceptance.py verify \
+  --freeze "$C4_FREEZE" \
+  --binding "$C4_BINDING" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --output "$C4_ACCEPTANCE"
+```
+
+- Missing/mismatched SHA, source swap, or changed C4 bytes/file identity
+  refuse. Local C4 CLI PASS cannot replace outer acceptance or independent
+  C1-C3 evidence. The C4 closed schema/CLI remains unchanged.
+- This registers the R1.6 owner only. It does not claim C1-C3, remaining
+  R1.4 SQL/API workload transfer, R1.5, or the epic is done.
 Existing controlled-ingest/natural-tick and pre/post-write rollback obligations
 stay in PGDATA §D, subject to the actual hold owner's separate authorization.
 

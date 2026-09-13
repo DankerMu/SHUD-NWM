@@ -1,0 +1,96 @@
+{
+  "changed_files": [
+    "services/production_closure/c4_production_acceptance.py",
+    "services/production_closure/c4_production_acceptance_io.py",
+    "tests/test_node27_c4_production_acceptance.py"
+  ],
+  "unchanged": [
+    "apps/frontend/scripts/c4-receipt-binder.mjs",
+    "apps/frontend/scripts/c4-receipt-binder-core.mjs",
+    "openspec/changes/compressed-chunk-cold-tablespace-tiering/fixtures/retirement-c4-acceptance-owner.md",
+    "scripts/select_ci_tests.py",
+    "tests/test_select_ci_tests.py",
+    "docs/runbooks/node-27-bringup-checklist.md",
+    "docs/runbooks/tier-node27-timeseries-storage.md"
+  ],
+  "fixes": {
+    "verify_after_binder": "verify() now revalidates approved source, freeze, and binding identities/bytes/parents AFTER the Node binder and before publication, matching bind(). Original expected facts are not refreshed from the later observation.",
+    "unique_temp": "publisher creates one secrets.token_hex(16) sibling .name.<32hex>.tmp with no 0..7 retry. After capturing the created temp, it checks held parent, pinned parent fd, and named inode against the original parent identity BEFORE move. FileExistsError on that unique name refuses C4_TEMP_EXISTS.",
+    "deleted_pins": [
+      "test_closed_c4_fixture_is_labeled_synthetic_not_browser_pass",
+      "test_default_binder_argv_uses_fixed_node_script",
+      "literal .0.tmp name assertion",
+      "redundant freeze/bind field-copy serialization-only checks"
+    ]
+  },
+  "new_behavioral_tests": [
+    "test_verify_refuses_when_approved_record_mutates_across_binder",
+    "test_verify_refuses_when_freeze_mutates_across_binder",
+    "test_verify_refuses_when_binding_mutates_across_binder",
+    "test_freeze_refuses_parent_replaced_during_temp_creation",
+    "test_publish_succeeds_without_clobbering_unrelated_sibling"
+  ],
+  "kept_real_behaviors": [
+    "test_freeze_binds_original_source_and_five_inputs (identity/mode/nlink/parent/receipt-absent)",
+    "test_freeze_preserves_subsecond_timestamp_without_flooring",
+    "test_freeze_refuses_mismatched_sha_without_output",
+    "test_freeze_refuses_non_pass_status_without_self_approval",
+    "test_freeze_refuses_existing_receipt_and_missing_parent",
+    "test_bind_and_verify_succeed_with_injected_pass_binder (status PASS + original C4/freeze identities)",
+    "binder FAIL/not-PASS/timeout/freeze-after-start/C4-byte-drift",
+    "test_verify_refuses_to_refresh_binding_when_c4_bytes_change",
+    "exists/alias/symlink-parent/JSON duplicate-nonfinite-complexity",
+    "CLI freeze-bind-verify and static usage/no-leak refusals",
+    "test_real_node_binder_accepts_labeled_synthetic_fixture",
+    "test_real_node_binder_refuses_sha_mismatch_without_rewriting_freeze"
+  ],
+  "mutation_proof_plan": {
+    "verify_approved_swap": "After a successful bind, inject command_runner that rewrites approved JSON note while C4 bytes stay put. Expect C4_SOURCE_DRIFT, no acceptance file, original binding bytes unchanged.",
+    "verify_freeze_swap": "Same setup; rewrite freeze frozen_at across binder. Expect C4_SOURCE_DRIFT, no acceptance, original binding bytes unchanged.",
+    "verify_binding_swap": "Same setup; rewrite binding bound_at across binder. Expect C4_SOURCE_DRIFT, no acceptance file. Mutated binding remains the operator-mutated original (verify must not publish a refreshed binding/acceptance).",
+    "parent_replaced_during_temp": "Monkeypatch write_bytes_no_follow_exclusive to create the unique temp then rename the private parent to displaced and a replacement 0700 dir onto the original path. Expect C4_PARENT_DRIFT, no freeze.json in replacement parent or displaced original, approved.json still in displaced.",
+    "unique_temp_unrelated_winner": "Pre-create .freeze.json.tmp sibling; freeze must still publish freeze.json and leave that unrelated sibling bytes intact. Do not assert generated temp names.",
+    "node27_real_binder": "Parent runs freeze then real /usr/bin/node binder bind/verify on a labeled synthetic closed C4 receipt; SHA-mismatch bind must not rewrite freeze."
+  },
+  "limits": [
+    "No pytest/Node/Ruff/Markdown/git run this turn per parent instruction. Parent owns node27 proof.",
+    "Old C4 binder CLI/core/schema/producer and canonical fixture untouched."
+  ],
+  "orchestration_deviations": [
+    "First implementer yielded narration and an incomplete IO file; recovery implementer completed the slice.",
+    "Recovery initial handoff reported local pytest and nvm Node execution contrary to skip-validation instruction. Those results are not node27 acceptance evidence."
+  ],
+  "runbook_integration_repair": {
+    "changed_files": [
+      "docs/runbooks/node-27-bringup-checklist.md",
+      "docs/runbooks/tier-node27-timeseries-storage.md"
+    ],
+    "corrected_sections": {
+      "bringup_c4": {
+        "path": "docs/runbooks/node-27-bringup-checklist.md",
+        "lines": "306-354",
+        "changes": [
+          "Fenced ```bash block instead of indented unfenced shell (MD046).",
+          "Freeze keeps full-precision timestamp; do not floor freeze to a second.",
+          "sleep 1 after freeze, then C4_CMD_START, then existing live-C4 lane (PLAYWRIGHT_LIVE_* env/pins + corepack pnpm test:e2e:live-c4-display), then C4_CMD_END, then bind/verify with those same C4_CMD_* names.",
+          "CMD_START/CMD_END inconsistency removed.",
+          "Non-C1–C3 / non-deployment / R1.6-only claims preserved after the fence."
+        ]
+      },
+      "retained_workloads_c4": {
+        "path": "docs/runbooks/tier-node27-timeseries-storage.md",
+        "lines": "705-762",
+        "changes": [
+          "Same freeze → sleep 1 → C4_CMD_START → live-C4 lane → C4_CMD_END → bind/verify recipe in a fenced ```bash block.",
+          "Prose now says wait across the next whole second before recording C4_CMD_START; no immediate floor after freeze.",
+          "C1-C3 / remaining R1.4 / R1.5 / epic-not-done claims preserved."
+        ]
+      }
+    },
+    "not_done": [
+      "Did not execute the live-C4 lane.",
+      "Did not run tests/lint/formatters/git/SSH.",
+      "Did not edit content outside these C4 sections."
+    ]
+  }
+}
