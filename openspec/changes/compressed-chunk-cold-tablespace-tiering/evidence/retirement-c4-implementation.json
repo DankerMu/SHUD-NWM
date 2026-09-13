@@ -58,7 +58,8 @@
   ],
   "orchestration_deviations": [
     "First implementer yielded narration and an incomplete IO file; recovery implementer completed the slice.",
-    "Recovery initial handoff reported local pytest and nvm Node execution contrary to skip-validation instruction. Those results are not node27 acceptance evidence."
+    "Recovery initial handoff reported local pytest and nvm Node execution contrary to skip-validation instruction. Those results are not node27 acceptance evidence.",
+    "Selector __init__ dependency gap caused 5 node27 failures. Three recovery-agent wakes yielded identical narration without an edit. Parent applied the four-line additive rule; no exclusions/import rewriting/consumer shrink."
   ],
   "runbook_integration_repair": {
     "changed_files": [

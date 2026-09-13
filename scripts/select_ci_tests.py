@@ -2297,6 +2297,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "services/production_closure/__init__.py",
+        ("tests/test_node27_c4_production_acceptance.py",),
+    ),
+    PathTestRule(
         "services/production_closure/c4_production_acceptance.py",
         ("tests/test_node27_c4_production_acceptance.py",),
         stop_on_match=True,
