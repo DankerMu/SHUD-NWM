@@ -7558,7 +7558,7 @@ attribution notes). The live callers all sit outside the conversion: the replay
 lane's quiescence checks
 (`node27_timeseries_compression_supervisor.py:1281,1311`,
 `node27_timeseries_compression_capture.py:338-340`) keep the superuser;
-`node27_cold_governance_collection.py:246`, `node27_external_contract_snapshot.py:115`
+`node27_resource_governance_collection.collect_postgres`, `node27_external_contract_snapshot.py:115`
 and `node27_river_identity_backfill.py:289` belong to lanes with no converted
 template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
 TOAST members for classification but never names them in SQL — `_lock_sql` is fed

@@ -17,7 +17,7 @@ from typing import Any
 import psycopg2
 import pytest
 
-from packages.common.node27_cold_governance_collection import collect_postgres
+from packages.common.node27_resource_governance_collection import collect_postgres
 from scripts import node27_resource_governance as governance
 
 pytestmark = pytest.mark.integration

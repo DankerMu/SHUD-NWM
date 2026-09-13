@@ -8,11 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-import jsonschema
 import psycopg2
 import pytest
 
-from packages.common import node27_cold_governance_collection as collection
+from packages.common import node27_resource_governance_collection as collection
 from scripts import node27_resource_governance as governance
 
 GIB = 1024**3
@@ -298,19 +297,24 @@ def test_cli_configured_paths_and_duplicate_device_labels(observations, tmp_path
     assert receipt["filesystem"]["filesystems"]["home"]["device_identity"] == binding["device_identity"]
 
 
-def test_cli_optional_cold_receipt_uses_destination_shape(observations, tmp_path):
+def test_cli_ordinary_receipt_ignores_retired_cold_environment(observations, tmp_path, monkeypatch):
     summary = tmp_path / "audit.json"
     cold = tmp_path / "cold.json"
-    assert governance.main(_argv(tmp_path, summary, ["--cold-governance-receipt-path", str(cold)])) == 0
-    receipt = json.loads(cold.read_text())
-    schema = json.loads(
-        (Path(__file__).resolve().parents[1] / "schemas/node27_cold_governance_receipt.schema.json").read_text()
+    monkeypatch.setenv("NODE27_COLD_GOVERNANCE_RECEIPT_PATH", str(cold))
+    assert governance.main(_argv(tmp_path, summary)) == 0
+    receipt = json.loads(summary.read_text())
+    assert receipt["schema_version"] == "nhms.node27_resource_governance.audit.v1"
+    assert receipt["execution_mode"] == "read_only_audit"
+    assert receipt["status"] == "completed"
+    assert receipt["working_set"]["projected_peak_bytes"] == 750 * GIB
+    assert receipt["working_set"]["working_set_free_bytes"] == 900 * GIB
+    assert receipt["filesystem"]["filesystems"]["cold"]["path"] == "/data/GHDC"
+    assert receipt["postgres"]["maintenance_output"] == {"status": "ok", "summary": {}, "rows": []}
+    assert "cold_tablespace_governance" not in receipt
+    assert {"cold_tablespace", "cold_relation_by_tablespace", "external_pg_tblspc_targets"}.isdisjoint(
+        receipt["postgres"]
     )
-    jsonschema.validate(receipt, schema)
-    working = receipt["working_set"]
-    assert working["working_set_free_bytes"] == 900 * GIB
-    assert working["working_set_filesystem"]["path"] == str(tmp_path.resolve())
-    assert "home_free_bytes" not in working
+    assert not cold.exists()
 
 
 def test_current_comparator_never_falls_back_to_historical_home():
@@ -400,12 +404,11 @@ def test_capacity_stderr_survives_wrapper_and_onfailure_mail(observations, tmp_p
     assert diagnostic in mail.read_text()
 
 
-def test_secret_bearing_target_evidence_is_redacted_at_both_receipt_sinks(observations, tmp_path, capsys):
+def test_secret_bearing_target_evidence_is_redacted_in_summary_and_diagnostics(observations, tmp_path, capsys):
     target = tmp_path / "password=target-secret"
     target.mkdir()
     observations.update(target_path=str(target.resolve()), target=800 * GIB)
     summary = tmp_path / "audit.json"
-    cold = tmp_path / "cold.json"
     assert (
         governance.main(
             _argv(
@@ -414,14 +417,12 @@ def test_secret_bearing_target_evidence_is_redacted_at_both_receipt_sinks(observ
                 [
                     "--pgdata-root",
                     str(target),
-                    "--cold-governance-receipt-path",
-                    str(cold),
                 ],
             )
         )
         == 1
     )
-    for text in (summary.read_text(), cold.read_text(), capsys.readouterr().err):
+    for text in (summary.read_text(), capsys.readouterr().err):
         assert "target-secret" not in text
     binding = json.loads(summary.read_text())["working_set"]["working_set_filesystem"]
     assert "[redacted]" in binding["path"]

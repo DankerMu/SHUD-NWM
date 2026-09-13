@@ -15,9 +15,252 @@ from packages.common.node27_cold_governance import (
     reconcile_filesystems,
     write_cold_governance_receipt,
 )
+from packages.common.node27_cold_governance_collection import cold_governance_sample
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 SHA = "f" * 40
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("status", "unavailable"), ("device_identity", None), ("free_bytes", None))
+)
+def test_cold_governance_sample_refuses_independently_unhealthy_home(field: str, value: object) -> None:
+    filesystem = _ok_cold_filesystem()
+    filesystem["path_sizes"]["pgdata_root"].update(path="/data/GHDC/nhms-pgdata", device_identity="8:12")
+    filesystem["path_sizes"]["object_store_root"].update(path="/data/GHDC/object-store")
+    filesystem["filesystems"]["home"][field] = value
+    home = cold_governance_sample(
+        filesystem,
+        {"status": "ok", "cold_relation_by_tablespace": []},
+        path="/home",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert home["status"] == "unavailable"
+    assert home.get("total_bytes") is None
+    assert home.get("used_bytes") is None
+    assert home.get("free_bytes") is None
+    assert home.get("reserved_bytes") is None
+
+
+def _ok_cold_filesystem() -> dict:
+    return {
+        "filesystems": {
+            "home": {
+                "path": "/home",
+                "status": "ok",
+                "total_bytes": 1000,
+                "free_bytes": 150,
+                "used_bytes": 800,
+                "reserved_bytes": 50,
+                "device_identity": "8:11",
+            },
+            "cold": {
+                "path": "/data/GHDC",
+                "status": "ok",
+                "total_bytes": 1000,
+                "free_bytes": 200,
+                "used_bytes": 700,
+                "reserved_bytes": 100,
+                "device_identity": "8:12",
+            },
+        },
+        "path_sizes": {
+            "pgdata_root": {
+                "path": "/home/nwm/nhms-pgdata",
+                "status": "ok",
+                "bytes": 300,
+                "device_identity": "8:11",
+            },
+            "object_store_root": {"path": "/home/ghdc/nwm/object-store", "status": "ok", "bytes": 200},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("pgdata_path", "device", "expected_home", "expected_cold", "home_residual", "cold_residual"),
+    (
+        ("/home/nwm/nhms-pgdata", "8:11", 300, 0, 300, 700),
+        ("/data/GHDC/nhms-pgdata", "8:12", 0, 300, 600, 400),
+        ("/home/nwm/bind-mounted-pgdata", "8:12", 0, 300, 600, 400),
+    ),
+    ids=("original-home", "relocated-retaining-old-copy", "mount-not-path-prefix"),
+)
+def test_pgdata_is_accounted_once_on_observed_filesystem(
+    pgdata_path: str, device: str, expected_home: int, expected_cold: int, home_residual: int, cold_residual: int
+) -> None:
+    filesystem = _ok_cold_filesystem()
+    filesystem["path_sizes"]["pgdata_root"].update(path=pgdata_path, device_identity=device)
+    samples = [
+        cold_governance_sample(
+            filesystem,
+            {"status": "ok", "cold_relation_by_tablespace": []},
+            path=root,
+            observed_at="2026-08-31T12:00:00Z",
+        )
+        for root in ("/home", "/data/GHDC")
+    ]
+    assert [sample["pgdata_bytes"] for sample in samples] == [expected_home, expected_cold]
+    result = reconcile_filesystems(*samples)
+    assert result.approved is True
+    assert result.filesystems["home"]["residual_bytes"] == home_residual
+    assert result.filesystems["cold"]["residual_bytes"] == cold_residual
+
+
+@pytest.mark.parametrize("placement", ("missing-identity", "other-device", "ambiguous-device", "missing-du"))
+def test_unknown_pgdata_placement_refuses_both_samples(placement: str) -> None:
+    filesystem = _ok_cold_filesystem()
+    pgdata = filesystem["path_sizes"]["pgdata_root"]
+    if placement == "missing-identity":
+        pgdata.pop("device_identity")
+    elif placement == "other-device":
+        pgdata["device_identity"] = "8:99"
+    elif placement == "ambiguous-device":
+        filesystem["filesystems"]["cold"]["device_identity"] = "8:11"
+    else:
+        pgdata["status"] = "unavailable"
+    for root in ("/home", "/data/GHDC"):
+        sample = cold_governance_sample(
+            filesystem,
+            {"status": "ok", "cold_relation_by_tablespace": []},
+            path=root,
+            observed_at="2026-08-31T12:00:00Z",
+        )
+        assert sample["status"] == "unavailable"
+        assert sample["pgdata_bytes"] is None
+        assert sample["used_bytes"] is None
+
+
+@pytest.mark.parametrize(
+    "postgres",
+    (
+        {},
+        {"status": None, "cold_relation_by_tablespace": []},
+        {"status": "skipped", "cold_relation_by_tablespace": []},
+        {"status": "blocked", "cold_relation_by_tablespace": []},
+        {"status": "ok"},
+        {"status": "ok", "cold_relation_by_tablespace": "not-a-list"},
+    ),
+    ids=("missing-status", "none-status", "skipped", "blocked", "missing-field", "malformed-field"),
+)
+def test_cold_governance_sample_refuses_unobserved_postgres_inventory(postgres: dict) -> None:
+    sample = cold_governance_sample(
+        _ok_cold_filesystem(),
+        postgres,
+        path="/data/GHDC",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert sample["status"] == "unavailable"
+    assert sample["nhms_cold_relation_bytes"] is None
+    assert sample["total_bytes"] is None
+    assert sample["used_bytes"] is None
+    assert sample.get("residual_bytes") is None
+
+
+@pytest.mark.parametrize(
+    "rows",
+    (
+        ["not-a-mapping"],
+        [{}],
+        [{"bytes": None}],
+        [{"bytes": "400"}],
+        [{"bytes": -1}],
+        [{"bytes": True}],
+    ),
+    ids=("non-mapping", "missing-bytes", "none-bytes", "string-bytes", "negative-bytes", "bool-bytes"),
+)
+def test_cold_governance_sample_refuses_malformed_relation_rows(rows: list[object]) -> None:
+    sample = cold_governance_sample(
+        _ok_cold_filesystem(),
+        {"status": "ok", "cold_relation_by_tablespace": rows},
+        path="/data/GHDC",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert sample["status"] == "unavailable"
+    assert sample["nhms_cold_relation_bytes"] is None
+    assert sample["total_bytes"] is None
+    assert sample["used_bytes"] is None
+    assert sample.get("residual_bytes") is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    (
+        ([], 0),
+        ([{"bytes": 150}, {"bytes": 250}], 400),
+    ),
+    ids=("empty-list", "positive-list"),
+)
+def test_cold_governance_sample_accounts_observed_ok_relation_inventory(rows: list[object], expected: int) -> None:
+    sample = cold_governance_sample(
+        _ok_cold_filesystem(),
+        {"status": "ok", "cold_relation_by_tablespace": rows},
+        path="/data/GHDC",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert sample["status"] == "ok"
+    assert sample["nhms_cold_relation_bytes"] == expected
+    assert sample["blockers"] == []
+
+
+def test_unavailable_home_sample_publishes_null_bytes_not_fabricated_zero(tmp_path: Path) -> None:
+    home = {
+        "path": "/home",
+        "observed_at": "2026-08-31T12:00:01Z",
+        "identity": None,
+        "status": "unavailable",
+        "blockers": ["home disk observation is unavailable"],
+        "total_bytes": None,
+        "free_bytes": None,
+        "used_bytes": None,
+        "reserved_bytes": None,
+        "pgdata_bytes": None,
+        "nhms_cold_relation_bytes": None,
+        "object_store_bytes": None,
+        "residual_bytes": None,
+    }
+    cold = {
+        "path": "/data/GHDC",
+        "observed_at": "2026-08-31T12:00:02Z",
+        "identity": "8:12",
+        "status": "ok",
+        "total_bytes": 1000,
+        "free_bytes": 200,
+        "used_bytes": 700,
+        "reserved_bytes": 100,
+        "pgdata_bytes": 0,
+        "nhms_cold_relation_bytes": 400,
+        "object_store_bytes": 0,
+        "residual_bytes": 300,
+    }
+    receipt, schema = build_cold_governance_receipt(
+        config=GovernanceConfig(receipt_path=tmp_path / "g.json", head_sha="f" * 40),
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=home,
+        cold=cold,
+        evidence={
+            "health": {
+                "healthy": True,
+                "raid": {"file_identity": {"sha256": "a" * 64}},
+                "smart": [
+                    {"device": "/dev/sdb1", "status": "PASS", "file_identity": {"sha256": "c" * 64}},
+                    {"device": "/dev/sdc1", "status": "PASS", "file_identity": {"sha256": "d" * 64}},
+                ],
+            },
+            "backup": {"complete": True, "file_identity": {"sha256": "b" * 64}, "missing_targets": []},
+            "mount_inventory": {"current": [], "stopped": []},
+            "catalog": {
+                "tablespace": "nhms_cold",
+                "location": "/home/postgres/pgdata/tablespaces/nhms_cold",
+                "relations": [],
+            },
+        },
+    )
+    assert receipt["outcome"] != "healthy"
+    assert receipt["filesystems"]["home"]["status"] == "unavailable"
+    assert receipt["filesystems"]["home"]["total_bytes"] is None
+    assert receipt["filesystems"]["home"]["residual_bytes"] is None
+    jsonschema.validate(receipt, schema)
 
 
 def _sample(
