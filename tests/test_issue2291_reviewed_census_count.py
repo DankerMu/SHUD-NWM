@@ -844,3 +844,61 @@ def test_documented_original_cli_reaches_validation_without_pythonpath(
         assert "CENSUS_KEYS_INVALID" in completed.stderr
         assert "Traceback" not in completed.stderr and "ModuleNotFoundError" not in completed.stderr
         assert completed.stdout == "" and not output.exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["open", "session"])
+@pytest.mark.parametrize("error_kind", ["os", "driver"])
+def test_cutoff_count_closes_post_watermark_driver_failures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure_stage: str,
+    error_kind: str,
+) -> None:
+    cutoff_cli = importlib.import_module("scripts.node27_issue1895_cutoff_count")
+    error_type = OSError if error_kind == "os" else pytest.importorskip("psycopg2").OperationalError
+    dsn = "postgresql://readonly:ISSUE2291-DRIVER-SECRET@127.0.0.1/isolated"
+    failure = error_type(f"observation driver failure for {dsn}")
+    original, frozen = private_json(tmp_path / "private" / "original.json", document(3))
+    watermark_connection = CensusConnection()
+    watermark_succeeded = False
+    opened = []
+
+    class SessionFailureConnection(CensusConnection):
+        def dispatch(self, sql, params):
+            if "transaction_read_only" in sql:
+                raise failure
+            return super().dispatch(sql, params)
+
+    observation_connection = SessionFailureConnection()
+
+    def connect(connection_dsn):
+        assert connection_dsn == dsn
+        opened.append(connection_dsn)
+        if len(opened) == 1:
+            return watermark_connection
+        assert watermark_succeeded
+        if failure_stage == "open":
+            raise failure
+        return observation_connection
+
+    def fetch_watermark(connection_dsn, *, connect):
+        nonlocal watermark_succeeded
+        connection = connect(connection_dsn)
+        connection.close()
+        watermark_succeeded = True
+        return WATERMARK
+
+    result = cutoff_cli.main(
+        ["--original", str(original), "--original-sha256", frozen, "--reviewed-sha", SHA],
+        env={"DATABASE_URL": dsn},
+        connect=connect,
+        watermark_fetcher=fetch_watermark,
+    )
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "CUTOFF_COUNT_REFUSED\n"
+    assert "ISSUE2291-DRIVER-SECRET" not in captured.err and "Traceback" not in captured.err
+    assert len(opened) == 2 and watermark_succeeded and watermark_connection.closed
+    if failure_stage == "session":
+        assert observation_connection.closed

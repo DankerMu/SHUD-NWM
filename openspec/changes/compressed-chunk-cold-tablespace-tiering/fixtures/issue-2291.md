@@ -250,3 +250,10 @@ entrypoints use the existing `python -m scripts.<module>` convention from repo
 cwd. Real subprocess tests extract those documented launches without PYTHONPATH
 and reach original-validation refusal, including both G8 observations. This is
 an invocation cutover, not a sys.path shim or packaging/schema change.
+
+Round1 wrapper closure: G3's residual driver/OS failure after a SUCCESSFUL
+watermark and at the distinct observation opener/session must produce stable
+non-secret refusal with no integer/traceback. Tests must reach that second
+operation; a malformed DSN failing in the already-wrapped watermark is not proof.
+Retain finally cleanup after acquisition. Use the existing census CLI boundary
+pattern at the new G3 entrypoint, not a shared-connection or G8 error-model change.
