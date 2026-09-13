@@ -4570,3 +4570,14 @@ later-round catches core=270、rotated=270、phase=57、skipped=15。
 gap sweep 无新候选，不能据此推断新增轮换收益。
 记录 deferral：keep/cut 仍待维护者决策；本次 #2292 合并及继续 #2291 的授权
 不含审核策略调整。现行 keep、座位上限和 shared OpenSpec active 状态不变。
+
+### Revisit 2026-09-13（post PR #2296 / issue #2291）
+
+追加后实测 647 行、637 merged、10 terminal；212 个多轮样本，
+later-round catches core=270、rotated=270、phase=57、skipped=15。
+本单 high 两轮；唯一 wrapper/P1 由首轮 security-perf 发现并独立确认，
+tests-first red→green 修复后，第二轮与最终 gap sweep 均无新候选。
+本单不增加后轮 catch，不能据此推断新增轮换收益。
+记录 deferral：keep/cut 仍待维护者决策；本次仅授权合并 #2296，
+不含审核策略调整或启动其他 issue。现行 keep、座位上限不变；
+shared OpenSpec 保持 active，4.0C 仅合并后完成，生产 4.1–4.8 未执行。

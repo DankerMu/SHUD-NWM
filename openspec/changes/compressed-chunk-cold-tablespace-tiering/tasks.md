@@ -259,7 +259,7 @@ Seams under test:
   a narrow fixture, actual isolated rename/replacement/legacy-exclusion proof,
   every-owner selector/removal closure, independent review/verifier/Gap Sweep,
   exact-head CI and merged cold-only STOP/runbook. No production execution.
-- [ ] 4.0C After #2290, merge child #2291 reviewed-count/baseline cutover before
+- [x] 4.0C After #2290, merge child #2291 reviewed-count/baseline cutover before
   fresh production G0. Preserve explicit bounded `--require-count` input with no
   default or observation-derived expectation; validate/freeze the original
   count/keys/groups/capacity set and pass its count through all four readiness
