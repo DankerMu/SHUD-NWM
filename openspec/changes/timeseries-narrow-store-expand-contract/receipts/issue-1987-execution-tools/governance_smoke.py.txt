@@ -101,7 +101,11 @@ class Boundary:
         }
         if self.failure == "binding":
             data["working_set"]["working_set_filesystem"]["device_identity"] = "wrong-device"
+        if self.failure == "stale_payload":
+            data["started_at"] = data["finished_at"] = "2000-01-01T00:00:00+00:00"
         Path(self.a.log_root, f"resource-governance-{self.invocation}.json").write_text(json.dumps(data))
+        if self.failure == "multiple_receipts":
+            Path(self.a.log_root, f"resource-governance-{self.invocation}-extra.json").write_text(json.dumps(data))
 
     def systemctl(self, argv):
         g, a = self.g, self.a
@@ -119,7 +123,8 @@ class Boundary:
             self.invocation += 1
             if self.failure == "foreign":
                 self.pin.write_bytes(b"foreign replacement\n")
-            self.receipt()
+            if self.failure not in ("old_receipt_only", "no_receipt"):
+                self.receipt()
             return ""
         if len(argv) >= 3 and argv[0] == "show" and argv[1] in self.units:
             unit = argv[1]
@@ -265,6 +270,10 @@ def scenario(g, root, active, enabled, failure):
     info = Path(a.pgdata_root).stat()
     identity = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
     boundary = Boundary(g, a, active, enabled, failure)
+    if failure == "old_receipt_only":
+        boundary.receipt()  # A real pre-existing name must not count as fresh.
+        old_receipt = Path(a.log_root, "resource-governance-0.json")
+        old_receipt_bytes = old_receipt.read_bytes()
     before = {p: p.read_bytes() for p in (root / "env", root / "hold", *list((root / "units").iterdir()))}
     with (
         patch.object(g, "_PGDATA_IDENTITY", identity),
@@ -288,8 +297,19 @@ def scenario(g, root, active, enabled, failure):
             with patch.object(g, "_PGDATA_IDENTITY", (0, 0, 0, 0, 0)):
                 refuse(g, e.source, "PRIMARY_PGDATA_IDENTITY_MISMATCH")
             if failure:
-                code = "AUDIT_DEVICE_BINDING_FAILED" if failure == "binding" else "REAL_SERVICE_FAILED"
+                code = {
+                    "binding": "AUDIT_DEVICE_BINDING_FAILED",
+                    "service": "REAL_SERVICE_FAILED",
+                    "foreign": "REAL_SERVICE_FAILED",
+                    "old_receipt_only": "FRESH_AUDIT_MISSING_OR_AMBIGUOUS",
+                    "no_receipt": "FRESH_AUDIT_MISSING_OR_AMBIGUOUS",
+                    "multiple_receipts": "FRESH_AUDIT_MISSING_OR_AMBIGUOUS",
+                    "stale_payload": "AUDIT_TIMESTAMP_INVALID",
+                }[failure]
                 refuse(g, e.execute, code)
+                assert "stage_starting" in boundary.phases
+                if failure == "old_receipt_only":
+                    assert old_receipt.read_bytes() == old_receipt_bytes
                 expected = "rollback_required" if failure == "foreign" else "rolled_back"
                 assert e.state["phase"] == expected and e.state["outcome"] == "FAIL", e.state
                 if failure == "foreign":
@@ -303,6 +323,8 @@ def scenario(g, root, active, enabled, failure):
                     assert boundary.active == active
                 assert "rollback_pending" in boundary.phases
             else:
+                # Real newly created receipts retain automatic filesystem
+                # mtimes; no clock patch, utime, or artificial delay is used.
                 e.execute()
                 assert e.state["phase"] == "staged" and e.state["outcome"] == "PASS"
                 assert e.pin.read_bytes() == e.content and boundary.active == active
@@ -359,6 +381,10 @@ def main():
         ("active", "enabled-runtime", "service"),
         ("inactive", "static", "binding"),
         ("active", "enabled", "foreign"),
+        ("active", "enabled", "old_receipt_only"),
+        ("active", "enabled", "no_receipt"),
+        ("active", "enabled", "multiple_receipts"),
+        ("active", "enabled", "stale_payload"),
     ):
         with tempfile.TemporaryDirectory(prefix="issue1987-governance-smoke-", dir=args.private_parent) as directory:
             results.append(scenario(g, Path(directory), active, enabled, failure))

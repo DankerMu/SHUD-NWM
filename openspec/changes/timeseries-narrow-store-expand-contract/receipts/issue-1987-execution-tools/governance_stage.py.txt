@@ -483,10 +483,7 @@ print(json.dumps({key: os.environ.get(key) for key in keys}))
         self.runtime(runtime)
         self.head(self.a.active_root, OLD if label == "stage" else NEW)
         previous = self.show(SERVICE, ["InvocationID", "ExecMainStartTimestampMonotonic"])
-        before = {
-            str(p): (p.stat().st_ino, p.stat().st_mtime_ns)
-            for p in Path(self.a.log_root).glob("resource-governance-*.json")
-        }
+        before = {str(p) for p in Path(self.a.log_root).glob("resource-governance-*.json")}
         # Wrapper names have second resolution; do not reuse a prior receipt name.
         time.sleep(1.1)
         start = time.time_ns()
@@ -515,11 +512,9 @@ print(json.dumps({key: os.environ.get(key) for key in keys}))
             int(s["ExecMainExitTimestampMonotonic"]) >= int(s["ExecMainStartTimestampMonotonic"]),
             "EXECUTION_INCOMPLETE",
         )
-        fresh = [
-            p
-            for p in Path(self.a.log_root).glob("resource-governance-*.json")
-            if str(p) not in before and p.stat().st_mtime_ns >= start
-        ]
+        # Automatic filesystem mtimes can lag time.time_ns() even for a new
+        # file. Freshness uses new names, real execution, and payload times.
+        fresh = [p for p in Path(self.a.log_root).glob("resource-governance-*.json") if str(p) not in before]
         require(len(fresh) == 1, "FRESH_AUDIT_MISSING_OR_AMBIGUOUS")
         receipt = json.loads(safe(fresh[0]).read_text())
         require(
