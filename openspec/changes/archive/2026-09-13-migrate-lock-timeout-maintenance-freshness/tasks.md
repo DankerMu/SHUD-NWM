@@ -98,8 +98,8 @@ Fixture level: expanded; repair intensity: high (see design.md Invariant Matrix)
   isolated scratch database, never production `nhms`), and a read-only governance audit against
   production with the new code → receipt shows `maintenance_output.status == "ok"` and the maintenance
   verdict recorded in `evidence/`.
-- [ ] 3.4 Rewrite the mechanism sections of #1769 and #1770 from "候选/未定" to "已定位" (issue comment
-  or body edit linking the receipt), per #1770 08-23 closing condition 2.
+- [x] 3.4 Rewrite the mechanism sections of #1769 and #1770 from "候选/未定" to "已定位" (issue comment
+  or body edit linking the receipt), per #1770 08-23 closing condition 2. → #1769 comment 5652197648, #1770 comment 5652197783.
 - [x] 3.5 Follow-up issue for met_station churn/bloat regrowth (issue-scribe) → #2300.
 
 ## Evidence floor
