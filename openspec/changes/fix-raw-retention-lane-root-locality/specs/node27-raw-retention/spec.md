@@ -80,9 +80,10 @@ change.
 
 The documented operator check SHALL exit non-zero when `skipped[]` contains
 any entry whose reason ends with `_unsafe` (the `jq` program in
-`infra/env/node27-raw-retention.example`), and SHALL exit zero on a fresh
-`production_execute` summary without such entries and without
-non-`PermissionError` failures.
+`infra/env/node27-raw-retention.example`), and SHALL exit zero on a summary
+the check otherwise accepts that carries no such entry. What the check
+accepts in `failed[]` is not fixed by this requirement: this change leaves
+the shipped clause as it found it, and #2100 owns that dimension.
 
 #### Scenario: a per-source skip is not silently green
 
