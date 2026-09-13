@@ -212,6 +212,45 @@ class Executor:
             self.ctl("start" if original["ActiveState"] == "active" else "stop", TIMER)
         require(self.timer() == original, "TIMER_RESTORE_FAILED")
 
+    def service_environment_files(self, name):
+        text = self.ctl("show", name, "--property=EnvironmentFiles")
+        if text:
+            require(
+                text.startswith("EnvironmentFiles=") and "\n" not in text,
+                "ENVIRONMENT_FILES_UNPARSEABLE",
+            )
+            return text.partition("=")[2]
+        # systemd 249 omits this empty array even with --all. Prove that
+        # particular omission through its typed service property, not a default.
+        resolved = self.run(
+            [
+                "busctl",
+                "--user",
+                "call",
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                "GetUnit",
+                "s",
+                name,
+            ]
+        )
+        match = re.fullmatch(r'o "(/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+)"', resolved)
+        require(match is not None, "SYSTEMD_UNIT_RESOLUTION_INVALID")
+        value = self.run(
+            [
+                "busctl",
+                "--user",
+                "get-property",
+                "org.freedesktop.systemd1",
+                match[1],
+                "org.freedesktop.systemd1.Service",
+                "EnvironmentFiles",
+            ]
+        )
+        require(value == "a(sb) 0", "ENVIRONMENT_FILES_EMPTY_UNPROVEN")
+        return ""
+
     def config(self):
         units = self.ctl("list-unit-files", "nhms-*", "--no-legend", "--no-pager").splitlines()
         names = sorted(
@@ -232,10 +271,10 @@ class Executor:
             require(transient in ("yes", "no"), "UNIT_TRANSIENCE_UNKNOWN")
             if transient == "yes":
                 continue
-            props = self.show(name, ["FragmentPath", "DropInPaths", "EnvironmentFiles"])
+            props = self.show(name, ["FragmentPath", "DropInPaths"])
             paths = [props["FragmentPath"], *props["DropInPaths"].split()]
             # systemd prints EnvironmentFiles as '/path (ignore_errors=yes/no)'.
-            envs = props["EnvironmentFiles"]
+            envs = self.service_environment_files(name) if name.endswith(".service") else ""
             extracted = re.findall(r"(/[^\s;]+) \(ignore_errors=(?:yes|no)\)", envs)
             require(not envs or len(extracted) == envs.count("ignore_errors="), "ENVIRONMENT_FILES_UNPARSEABLE")
             paths += extracted
