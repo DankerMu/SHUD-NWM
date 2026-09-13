@@ -21,22 +21,19 @@ If basic serving restoration is not ready ten minutes after API stop, cease forw
 enter the reviewed rollback process. Never force unknown sessions or skip a failed safety gate.
 
 Current recovery source is `nhms-db`, host `/data/GHDC/nhms-primary/pgdata`, container PGDATA
-`/home/postgres/pgdata/data`. An active primary is not its own independent backup. Never launch a
-second PostgreSQL server on live PGDATA. No backup-policy waiver is inferred from choosing the new
-source. Record a verified recovery artifact and restore evidence before schema mutation; old deleted
-containers/directories cannot satisfy it. D12 reverse preserves facts but is not an independent backup.
+`/home/postgres/pgdata/data`. Never launch a second PostgreSQL server on live PGDATA.
+User subsequently clarified that PG has just been relocated, all original SHUD outputs remain,
+and the database is rebuildable. Accept these user-reported facts; do not re-run a full physical
+backup and whole-cluster restore merely to reconfirm them. The earlier TB-scale backup prerequisite
+is superseded for this reversible expand, not for a future destructive contract.
 
-The user explicitly chose `/home` for the new backup. Use a guarded, rate-limited compressed online
-backup from the current primary; preserve at least 100 GiB available on `/home`, abort rather than
-consume the reserve, and verify restoration in a distinct directory/container. Observed backing
-devices: `/home` on sda, PGDATA md0 on sdc/sdd. This is distinct-disk recovery, not off-host disaster
-recovery. Backup preparation precedes T0 and is not included in the 30-minute API maintenance window.
-Use matching PostgreSQL 15.2 `pg_basebackup` and `pg_verifybackup`, observed available in the
-current primary. Observed source container:
-`5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f`,
-image `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`.
-Recheck identity before backup. Cover the whole live cluster, including any external pg_tblspc
-dependencies, or prove there are none; partial coverage is not backup completion.
+Before schema mutation preserve private schema, run-route metadata and exact runtime/unit/env
+snapshots; bind the current catalogue OIDs and source SHAs to the already-rehearsed D12 recovery.
+Keep legacy facts and original SHUD artifacts. No contract, legacy DROP, sole-copy deletion or
+DROP CASCADE. Newly narrow facts remain recoverable through retained rollback data and actual
+old-parser reparse before any later removal. This is logical rollback/rebuild readiness, not a
+claim of independent physical disaster recovery. Snapshot files may use the approved `/home`
+location; a full physical backup or pg_verifybackup restore exercise is not a window blocker.
 
 No node-22 mutation, physical PGDATA remigration, cold activation, foreign fence release or fixes for
 issues #2282–#2285. Do not use `scripts/ops/start-display-api.sh`: #2282 documents cross-checkout killing.

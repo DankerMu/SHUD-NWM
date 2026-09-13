@@ -208,11 +208,11 @@
   second PR is task 5.2 after the separately authorized live window. Keep #1987 open.
   Current-runtime execution addendum: `fixtures/I8b-1987-live.md`. User confirmed #2162 merged,
   approved the bounded window and assigned governance-unit repair. Actual OLD is a8db554d;
-  recovery uses the current primary, not deleted old PGDATA. No backup waiver or early 5.2 completion.
-  User authorized current-primary compressed online backup to `/home` (100 GiB free floor,
-  PostgreSQL 15.2 pg_basebackup/pg_verifybackup, separate restore directory/container; source
-  `5cfa71472de8`, image `ad39c4fbc5c4`). User then explicitly chose preparation merge before live
-  and cross-day verification. Keep 5.2 and #2280 open until their actual evidence succeeds.
+  recovery uses the current primary, not deleted old PGDATA. User later confirmed fresh relocation,
+  retained SHUD outputs and database rebuildability: the full physical backup/restore prerequisite
+  is superseded by private schema/route/runtime snapshots, preserved legacy facts and rehearsed D12.
+  Preparation was explicitly merged before live/cross-day verification. No independent physical
+  DR claim; keep 5.2 and #2280 open until actual evidence succeeds.
   **5.1 evidence:** `receipts/2026-09-12-i8-rollback/` records actual OLD parser/reader
   `5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c` and NEW runtime
   `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb` on node-27's exact production-image

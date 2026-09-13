@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""Temporary #1987 user-systemd governance pin executor; never deletes runtime.
+
+Run as the owning user, not root. Use a new private state directory per attempt.
+status reports durable evidence, not success inferred from an SSH exit. recover
+rolls back interrupted staging; interrupted unstaging resumes ordinary validation.
+No operation enables, disables, masks, resets failures, or changes another unit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+NEW = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+SERVICE = "nhms-node27-resource-governance.service"
+TIMER = "nhms-node27-resource-governance.timer"
+PIN = "70-issue1987-governance-reviewed-source.conf"
+
+
+class Refusal(Exception):
+    pass
+
+
+def require(ok, code):
+    if not ok:
+        raise Refusal(code)
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def safe(path, *, directory=False, private=False):
+    path = Path(path)
+    require(path.is_absolute() and ".." not in path.parts, "UNSAFE_PATH")
+    for parent in reversed((path, *path.parents)):
+        info = parent.lstat()
+        require(not stat.S_ISLNK(info.st_mode), "SYMLINK_PATH")
+        require(info.st_uid in (0, os.getuid()), "FOREIGN_PATH_OWNER")
+        require(not info.st_mode & 0o022, "WRITABLE_PATH")
+    info = path.stat()
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode), "PATH_TYPE")
+    if private:
+        require(
+            info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == (0o700 if directory else 0o600), "PRIVATE_MODE"
+        )
+    return path
+
+
+def atomic(path, data):
+    safe(path.parent, directory=True)
+    if path.exists() or path.is_symlink():
+        safe(path, private=True)
+    fd, name = tempfile.mkstemp(prefix=".receipt-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        syncdir(path.parent)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def syncdir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+class Executor:
+    def __init__(self, args):
+        self.a = args
+        os.umask(0o077)
+        require(os.getuid() == args.uid and os.getgid() == args.gid, "EXECUTOR_IDENTITY")
+        self.root = Path(args.state_dir)
+        safe(self.root.parent, directory=True)
+        self.root.mkdir(mode=0o700, exist_ok=True)
+        safe(self.root, directory=True, private=True)
+        lock = self.root / "executor.lock"
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        self.lock = os.fdopen(fd, "a+")
+        safe(lock, private=True)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.statepath = self.root / "state.json"
+        self.state = json.loads(safe(self.statepath, private=True).read_text()) if self.statepath.exists() else {}
+        self.logpath = self.root / "commands.log"
+        self.log = os.fdopen(
+            os.open(self.logpath, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600), "ab", buffering=0
+        )
+        safe(self.logpath, private=True)
+        self.pin = Path(args.unit_root) / (SERVICE + ".d") / PIN
+        self.content = (
+            "[Service]\nWorkingDirectory="
+            + args.runtime_root
+            + "\nExecStart=\nExecStart="
+            + args.runtime_root
+            + "/scripts/node27_resource_governance_once.sh\n"
+            + 'Environment="NODE27_RESOURCE_GOVERNANCE_REPO='
+            + args.runtime_root
+            + '"\n'
+            + 'Environment="NODE27_RESOURCE_GOVERNANCE_ENV_FILE='
+            + args.env_file
+            + '"\n'
+            + 'Environment="PYTHONPATH='
+            + args.runtime_root
+            + '"\n'
+        ).encode()
+        self.identity = {k: v for k, v in vars(args).items() if k != "operation"}
+        if self.state:
+            require(self.state.get("identity") == self.identity, "STATE_ARGUMENT_MISMATCH")
+
+    def save(self, phase, **values):
+        self.state.update(
+            values, phase=phase, identity=self.identity, updated_at=dt.datetime.now(dt.timezone.utc).isoformat()
+        )
+        atomic(self.statepath, json.dumps(self.state, sort_keys=True, indent=2).encode())
+
+    def run(self, argv, *, check=True, timeout=60, cwd=None):
+        # Neither the command nor captured private diagnostics are echoed publicly.
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k in ("HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG")
+        }
+        env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd, env=env)
+        self.log.write(b"\nCOMMAND " + str(time.time_ns()).encode() + b"\n" + result.stdout + result.stderr)
+        os.fsync(self.log.fileno())
+        require(not check or result.returncode == 0, "COMMAND_FAILED")
+        return result.stdout.decode("utf-8", "strict").strip()
+
+    def ctl(self, *args, **kw):
+        return self.run(["systemctl", "--user", *args], **kw)
+
+    def show(self, unit, properties):
+        text = self.ctl("show", unit, *["--property=" + p for p in properties])
+        result = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        require(all(p in result for p in properties), "SYSTEMD_PROPERTY_MISSING")
+        return result
+
+    def timer(self):
+        s = self.show(TIMER, ["ActiveState", "UnitFileState", "LoadState"])
+        require(s["LoadState"] == "loaded" and s["ActiveState"] in ("active", "inactive"), "TIMER_STATE_UNKNOWN")
+        require(
+            s["UnitFileState"] in ("enabled", "disabled", "static", "indirect", "enabled-runtime"),
+            "TIMER_ENABLEMENT_UNKNOWN",
+        )
+        return s
+
+    def restore_timer(self):
+        current = self.timer()
+        original = self.state["timer"]
+        require(current["UnitFileState"] == original["UnitFileState"], "TIMER_ENABLEMENT_DRIFT")
+        if original["ActiveState"] != current["ActiveState"]:
+            self.ctl("start" if original["ActiveState"] == "active" else "stop", TIMER)
+        require(self.timer() == original, "TIMER_RESTORE_FAILED")
+
+    def config(self):
+        units = self.ctl("list-unit-files", "nhms-*", "--no-legend", "--no-pager").splitlines()
+        names = sorted(
+            {
+                line.split()[0]
+                for line in units
+                if line.strip()
+                and line.split()[0].endswith((".service", ".timer"))
+                and not line.split()[0].endswith(("@.service", "@.timer"))
+            }
+        )
+        require(
+            SERVICE in names and TIMER in names and "nhms-display-api.service" in names, "UNIT_INVENTORY_INCOMPLETE"
+        )
+        results = {}
+        for name in names:
+            transient = self.show(name, ["Transient"])["Transient"]
+            require(transient in ("yes", "no"), "UNIT_TRANSIENCE_UNKNOWN")
+            if transient == "yes":
+                continue
+            props = self.show(name, ["FragmentPath", "DropInPaths", "EnvironmentFiles"])
+            paths = [props["FragmentPath"], *props["DropInPaths"].split()]
+            # systemd prints EnvironmentFiles as '/path (ignore_errors=yes/no)'.
+            envs = props["EnvironmentFiles"]
+            extracted = re.findall(r"(/[^\s;]+) \(ignore_errors=(?:yes|no)\)", envs)
+            require(not envs or len(extracted) == envs.count("ignore_errors="), "ENVIRONMENT_FILES_UNPARSEABLE")
+            paths += extracted
+            files = {}
+            for raw in paths:
+                if raw == str(self.pin):
+                    continue
+                require(bool(raw), "UNIT_FRAGMENT_MISSING")
+                p = safe(raw)
+                files[raw] = digest(p.read_bytes())
+            results[name] = files
+        require(
+            SERVICE in results and TIMER in results and "nhms-display-api.service" in results,
+            "UNIT_INVENTORY_INCOMPLETE",
+        )
+        return results
+
+    def health(self):
+        result = {}
+        for port in (self.a.display_port, self.a.yd_port):
+            text = self.run(["ss", "-H", "-ltnp", "sport = :" + str(port)])
+            pids = sorted(set(re.findall(r"pid=(\d+)", text)))
+            require(pids, "LISTENER_PID_UNAVAILABLE")
+            identities = {}
+            for pid in pids:
+                # starttime after the final ')' protects against PID reuse.
+                fields = Path("/proc", pid, "stat").read_text().rsplit(")", 1)[1].split()
+                identities[pid] = fields[19]
+            request = urllib.request.Request("http://127.0.0.1:" + str(port) + self.a.health_path)
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10) as response:
+                require(response.status == 200, "HEALTH_FAILED")
+                response.read(1024 * 1024)
+                result[str(port)] = {"pids": identities, "status": response.status}
+        return result
+
+    def hold(self):
+        p = safe(self.a.hold_state, private=True)
+        return digest(p.read_bytes())
+
+    def head(self, root, expected):
+        safe(root, directory=True)
+        require(self.run(["git", "-C", root, "rev-parse", "HEAD"]) == expected, "GIT_HEAD_MISMATCH")
+        require(
+            not self.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"]), "TRACKED_RUNTIME_DIRTY"
+        )
+
+    def runtime(self, root):
+        self.head(root, NEW)
+        venv = safe(Path(root) / ".venv", directory=True)
+        python = venv / "bin/python"
+        require(python.is_file() and os.access(python, os.X_OK), "PRIVATE_PYTHON_MISSING")
+        wrapper = safe(Path(root) / "scripts/node27_resource_governance_once.sh")
+        require(os.access(wrapper, os.X_OK), "WRAPPER_NOT_EXECUTABLE")
+        code = """import pathlib, runpy, subprocess, sys
+root = pathlib.Path.cwd().resolve()
+assert pathlib.Path(sys.prefix).resolve() == root / '.venv'
+sys.path[0] = str(root / 'scripts')
+runpy.run_path(str(root / 'scripts/node27_resource_governance.py'), run_name='governance_origin_probe')
+for name, module in tuple(sys.modules.items()):
+    if name.startswith(('packages.', 'scripts.')) and getattr(module, '__file__', None):
+        path = pathlib.Path(module.__file__).resolve()
+        assert path.is_relative_to(root)
+        relative = str(path.relative_to(root))
+        expected = subprocess.check_output(
+            ['git', '-C', str(root), 'show',
+             '1a32ebb7b536873e6403f3faeb6eb8d83ef24d32:' + relative],
+            stderr=subprocess.DEVNULL,
+        )
+        assert path.read_bytes() == expected
+print('IMPORT_ORIGIN_OK')
+"""
+        require(self.run([str(python), "-c", code], cwd=root) == "IMPORT_ORIGIN_OK", "IMPORT_ORIGIN_FAILED")
+        for relative in ("scripts/node27_resource_governance_once.sh", "scripts/node27_resource_governance.py"):
+            expected = self.run(["git", "-C", root, "show", NEW + ":" + relative])
+            require((Path(root) / relative).read_text().strip() == expected, "SOURCE_BYTES_MISMATCH")
+
+    def environment(self):
+        safe(self.a.env_file, private=True)
+        # The same trusted, private shell environment consumed by the wrapper.
+        # Only non-secret routing values leave this subprocess (to private log).
+        script = """set -eu
+set -a
+. "$1"
+exec /usr/bin/python3 -c '
+import json
+import os
+
+keys = [
+    "NODE27_GOVERNANCE_REPO_ROOT",
+    "NODE27_RESOURCE_GOVERNANCE_REPO_ROOT",
+    "NODE27_GOVERNANCE_PGDATA_ROOT",
+    "NODE27_RESOURCE_GOVERNANCE_LOG_ROOT",
+    "NODE27_RESOURCE_GOVERNANCE_LOCK_PATH",
+    "NODE27_RESOURCE_GOVERNANCE_SUMMARY_PATH",
+    "NODE27_RESOURCE_GOVERNANCE_REPO",
+    "REPO", "ENV_FILE", "PYTHONPATH",
+]
+print(json.dumps({key: os.environ.get(key) for key in keys}))
+'
+"""
+        values = json.loads(self.run(["/bin/bash", "-c", script, "governance-env", self.a.env_file]))
+        ordinary = self.a.operation == "unstage" or self.state.get("direction") == "unstage"
+        intended_root = self.a.active_root if ordinary else self.a.runtime_root
+        require(values["PYTHONPATH"] in (None, intended_root), "ENV_PYTHONPATH_OVERRIDE")
+        # Only the shorter key is consumed by the existing audit CLI. The
+        # longer env-example key is observed privately, not treated as an alias.
+        effective_repo = values["NODE27_GOVERNANCE_REPO_ROOT"]
+        if effective_repo is None:
+            effective_repo = "/home/nwm/NWM"
+        require(effective_repo == self.a.active_root, "AUDITED_REPO_MISMATCH")
+        require(values["NODE27_GOVERNANCE_PGDATA_ROOT"] == self.a.pgdata_root, "AUDITED_PGDATA_MISMATCH")
+        require(
+            not any(values[k] for k in ("REPO", "ENV_FILE", "NODE27_RESOURCE_GOVERNANCE_REPO")),
+            "ENV_OVERRIDES_EXECUTOR",
+        )
+        logroot = values["NODE27_RESOURCE_GOVERNANCE_LOG_ROOT"] or "/home/nwm/node27-resource-governance-logs"
+        require(logroot == self.a.log_root, "LOG_ROOT_MISMATCH")
+        require(not values["NODE27_RESOURCE_GOVERNANCE_SUMMARY_PATH"], "FIXED_SUMMARY_FORBIDDEN")
+        lock = values["NODE27_RESOURCE_GOVERNANCE_LOCK_PATH"] or logroot + "/node27-resource-governance.lock"
+        require(lock == self.a.runner_lock, "RUNNER_LOCK_MISMATCH")
+        safe(logroot, directory=True)
+        safe(Path(lock).parent, directory=True)
+        return digest(Path(self.a.env_file).read_bytes())
+
+    def idle(self):
+        s = self.show(SERVICE, ["ActiveState", "MainPID", "ControlPID"])
+        require(
+            s["ActiveState"] in ("inactive", "failed") and s["MainPID"] == "0" and s["ControlPID"] == "0",
+            "RUNNER_NOT_IDLE",
+        )
+        fd = os.open(self.a.runner_lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            safe(self.a.runner_lock)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    def source(self):
+        fields = "{{json .Id}} {{json .Image}} {{json .State.Running}}"
+        observed = self.run(["docker", "inspect", "--type=container", "--format", fields, self.a.source_name]).split()
+        require(
+            observed == [json.dumps(self.a.source_id), json.dumps(self.a.source_image), "true"],
+            "PRIMARY_IDENTITY_MISMATCH",
+        )
+        mounts = json.loads(
+            self.run(["docker", "inspect", "--type=container", "--format", "{{json .Mounts}}", self.a.source_id])
+        )
+        matched = [m for m in mounts if m.get("Destination") == self.a.container_pgdata]
+        require(
+            len(matched) == 1
+            and matched[0].get("Type") == "bind"
+            and matched[0].get("Source") == self.a.pgdata_root
+            and matched[0].get("RW") is True,
+            "PRIMARY_MOUNT_MISMATCH",
+        )
+
+    def dropins(self, owned=False):
+        p = self.show(SERVICE, ["DropInPaths", "FragmentPath"])
+        expected = [str(self.pin)] if owned else []
+        require(p["DropInPaths"].split() == expected, "UNEXPECTED_GOVERNANCE_DROPINS")
+        fragment = safe(p["FragmentPath"])
+        expected_base = Path(self.a.runtime_root) / "infra/systemd" / SERVICE
+        require(fragment.read_bytes() == expected_base.read_bytes(), "BASE_UNIT_MISMATCH")
+        if self.pin.parent.exists():
+            safe(self.pin.parent, directory=True)
+            require(
+                sorted(p.name for p in self.pin.parent.iterdir()) == ([PIN] if owned else []),
+                "UNEXPECTED_DROPIN_DIRECTORY_CONTENT",
+            )
+        if owned:
+            require(safe(self.pin).read_bytes() == self.content, "OWNED_DROPIN_DRIFT")
+        else:
+            require(not self.pin.exists() and not self.pin.is_symlink(), "DROPIN_ALREADY_EXISTS")
+
+    def preflight(self):
+        safe(self.a.unit_root, directory=True)
+        for value in (self.a.runtime_root, self.a.active_root, self.a.env_file, self.a.unit_root):
+            require(re.fullmatch(r"/[A-Za-z0-9_./-]+", value) is not None, "SYSTEMD_PATH_UNSAFE")
+        require(self.a.runtime_root != self.a.active_root, "SHARED_RUNTIME_FORBIDDEN")
+        self.head(self.a.active_root, OLD)
+        self.runtime(self.a.runtime_root)
+        self.dropins()
+        self.environment()
+        self.idle()
+        self.timer()
+        self.health()
+        self.hold()
+        safe(self.a.pgdata_root, directory=True)
+        self.source()
+
+    def invariants(self):
+        require(self.config() == self.state["configs"], "OTHER_CONFIG_DRIFT")
+        require(self.environment() == self.state["env_digest"], "ENVIRONMENT_DRIFT")
+        require(self.health() == self.state["health"], "SERVING_IDENTITY_DRIFT")
+        self.source()
+        require(self.hold() == self.state["hold_digest"], "HOLD_STATE_DRIFT")
+
+    def install(self):
+        require(not self.pin.exists() and not self.pin.is_symlink(), "PIN_EXISTS")
+        self.source()
+        if not self.pin.parent.exists():
+            self.pin.parent.mkdir(mode=0o700)
+        safe(self.pin.parent, directory=True)
+        # Link publishes complete bytes without replacing an existing destination.
+        fd, name = tempfile.mkstemp(prefix=".issue1987-", dir=self.root)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(self.content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            require(os.stat(self.root).st_dev == os.stat(self.pin.parent).st_dev, "STATE_DROPIN_FILESYSTEM_MISMATCH")
+            os.link(name, self.pin)
+            syncdir(self.pin.parent)
+        finally:
+            os.unlink(name)
+
+    def remove(self):
+        require(
+            safe(self.pin).read_bytes() == self.content and digest(self.content) == self.state["pin_digest"],
+            "PIN_NOT_OWNED",
+        )
+        self.pin.unlink()
+        syncdir(self.pin.parent)
+
+    def audit(self, label):
+        self.idle()
+        runtime = self.a.runtime_root if label == "stage" else self.a.active_root
+        self.runtime(runtime)
+        self.head(self.a.active_root, OLD if label == "stage" else NEW)
+        previous = self.show(SERVICE, ["InvocationID", "ExecMainStartTimestampMonotonic"])
+        before = {
+            str(p): (p.stat().st_ino, p.stat().st_mtime_ns)
+            for p in Path(self.a.log_root).glob("resource-governance-*.json")
+        }
+        # Wrapper names have second resolution; do not reuse a prior receipt name.
+        time.sleep(1.1)
+        start = time.time_ns()
+        self.save(label + "_starting", audit_started_ns=start, previous_execution=previous)
+        self.ctl("start", SERVICE, timeout=self.a.audit_timeout)
+        s = self.show(
+            SERVICE,
+            [
+                "Result",
+                "ExecMainStatus",
+                "ActiveState",
+                "InvocationID",
+                "ExecMainStartTimestampMonotonic",
+                "ExecMainExitTimestampMonotonic",
+            ],
+        )
+        require(
+            s["Result"] == "success" and s["ExecMainStatus"] == "0" and s["ActiveState"] == "inactive",
+            "REAL_SERVICE_FAILED",
+        )
+        require(
+            int(s["ExecMainStartTimestampMonotonic"]) > int(previous["ExecMainStartTimestampMonotonic"] or 0),
+            "EXECUTION_NOT_FRESH",
+        )
+        require(
+            int(s["ExecMainExitTimestampMonotonic"]) >= int(s["ExecMainStartTimestampMonotonic"]),
+            "EXECUTION_INCOMPLETE",
+        )
+        fresh = [
+            p
+            for p in Path(self.a.log_root).glob("resource-governance-*.json")
+            if str(p) not in before and p.stat().st_mtime_ns >= start
+        ]
+        require(len(fresh) == 1, "FRESH_AUDIT_MISSING_OR_AMBIGUOUS")
+        receipt = json.loads(safe(fresh[0]).read_text())
+        require(
+            receipt.get("schema_version") == "nhms.node27_resource_governance.audit.v1"
+            and receipt.get("status") == "completed"
+            and receipt.get("execution_mode") == "read_only_audit",
+            "AUDIT_INCOMPLETE",
+        )
+        require(
+            isinstance(receipt.get("recommendations"), list)
+            and not any(r.get("severity") == "critical" for r in receipt["recommendations"]),
+            "AUDIT_CRITICAL",
+        )
+        for key in ("started_at", "finished_at"):
+            stamp = dt.datetime.fromisoformat(receipt[key].replace("Z", "+00:00")).timestamp()
+            require(stamp >= start / 1e9 - 1 and stamp <= time.time() + 1, "AUDIT_TIMESTAMP_INVALID")
+        require(
+            receipt["paths"]["repo_root"] == self.a.active_root
+            and receipt["paths"]["pgdata_root"] == self.a.pgdata_root,
+            "AUDIT_PATH_MISMATCH",
+        )
+        pg = Path(self.a.pgdata_root)
+        info, fs = pg.stat(), os.statvfs(pg)
+        identity = f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{fs.f_fsid}"
+        binding = receipt["working_set"]["working_set_filesystem"]
+        require(
+            binding.get("status") == "ok"
+            and binding.get("path") == str(pg.resolve())
+            and binding.get("device_identity") == identity
+            and not binding.get("blockers"),
+            "AUDIT_DEVICE_BINDING_FAILED",
+        )
+        require(receipt["safety"]["destructive_actions_enabled"] is False, "AUDIT_NOT_READONLY")
+        atomic(self.root / (label + "-audit.json"), fresh[0].read_bytes())
+        self.invariants()
+        self.runtime(runtime)
+        self.head(self.a.active_root, OLD if label == "stage" else NEW)
+        self.save(label + "_verified", audit_digest=digest(fresh[0].read_bytes()), service_result=s)
+
+    def rollback(self):
+        self.save("rollback_pending")
+        self.ctl("stop", TIMER)
+        self.idle()  # Never kill an in-flight service, even after client timeout.
+        if self.pin.exists() or self.pin.is_symlink():
+            self.remove()
+        self.ctl("daemon-reload")
+        self.dropins()
+        self.restore_timer()
+        self.save("rolled_back", outcome="FAIL")
+
+    def stage(self):
+        require(not self.state, "STATE_ALREADY_USED")
+        self.preflight()
+        configs = self.config()
+        backups = {}
+        for paths in configs.values():
+            for raw in paths:
+                data = Path(raw).read_bytes()
+                key = "backup-" + digest(raw.encode())
+                atomic(self.root / key, data)
+                backups[raw] = key
+        atomic(self.root / "original-environment", Path(self.a.env_file).read_bytes())
+        old = self.show(SERVICE, ["Result", "ExecMainStatus", "ActiveState", "InvocationID"])
+        atomic(
+            self.root / "old-journal.log",
+            self.run(["journalctl", "--user", "-u", SERVICE, "-n", "100", "--no-pager"], check=False).encode(),
+        )
+        self.save(
+            "prepared",
+            configs=configs,
+            backups=backups,
+            timer=self.timer(),
+            env_digest=self.environment(),
+            health=self.health(),
+            hold_digest=self.hold(),
+            old_failure=old,
+            pin_digest=digest(self.content),
+            outcome="PENDING",
+            direction="stage",
+        )
+        try:
+            self.ctl("stop", TIMER)
+            self.save("timer_stopped")
+            self.idle()
+            self.invariants()
+            self.dropins()
+            self.save("install_pending")
+            self.install()
+            self.ctl("daemon-reload")
+            self.dropins(owned=True)
+            self.audit("stage")
+            self.restore_timer()
+            self.save("staged", outcome="PASS")
+        except BaseException:
+            try:
+                self.rollback()
+            except BaseException:
+                self.save("rollback_required", outcome="FAIL")
+            raise
+
+    def unstage(self, recovering=False):
+        require(self.state and (recovering or self.state["phase"] == "staged"), "NOT_STAGED")
+        self.head(self.a.active_root, NEW)
+        self.runtime(self.a.active_root)
+        require(self.config() == self.state["configs"], "OTHER_CONFIG_DRIFT")
+        require(self.environment() == self.state["env_digest"], "ENVIRONMENT_DRIFT")
+        require(self.hold() == self.state["hold_digest"], "HOLD_STATE_DRIFT")
+        self.source()
+        # The authorized cutover restarts serving processes. Freeze its new
+        # healthy baseline, not the obsolete pre-cutover process identities.
+        if not recovering:
+            self.save("unstage_admitted", health=self.health(), direction="unstage", outcome="PENDING")
+        else:
+            self.invariants()
+        if self.pin.exists():
+            self.dropins(owned=True)
+        else:
+            require(recovering and self.state.get("direction") == "unstage", "PIN_MISSING")
+            self.ctl("daemon-reload")
+            self.dropins()
+        self.save("unstage_prepared", direction="unstage", outcome="PENDING")
+        self.ctl("stop", TIMER)
+        self.idle()
+        self.save("unstage_remove_pending")
+        if self.pin.exists():
+            self.remove()
+        self.ctl("daemon-reload")
+        self.dropins()
+        self.audit("unstage")
+        self.restore_timer()
+        self.save("unstaged", outcome="PASS")
+
+    def execute(self):
+        op = self.a.operation
+        if op == "status":
+            return
+        if op == "preflight":
+            require(not self.state, "STATE_ALREADY_USED")
+            self.preflight()
+            return
+        if op == "stage":
+            self.stage()
+        elif op == "unstage":
+            self.unstage()
+        else:
+            require(
+                self.state and self.state["phase"] not in ("staged", "unstaged", "rolled_back"), "NO_RECOVERY_PENDING"
+            )
+            if self.state.get("direction") == "unstage":
+                self.unstage(recovering=True)
+            else:
+                self.rollback()
+
+
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("operation", choices=("preflight", "stage", "unstage", "status", "recover"))
+    p.add_argument(
+        "--state-dir", required=True, help="New private durable directory on same filesystem as user unit root"
+    )
+    p.add_argument("--runtime-root", required=True, help="Immutable exact NEW checkout with private .venv")
+    p.add_argument("--active-root", default="/home/nwm/NWM")
+    p.add_argument("--env-file", default="/home/nwm/NWM/infra/env/node27-resource-governance.env")
+    p.add_argument("--unit-root", default="/home/nwm/.config/systemd/user")
+    p.add_argument("--pgdata-root", default="/data/GHDC/nhms-primary/pgdata")
+    p.add_argument("--source-name", default="nhms-db")
+    p.add_argument("--source-id", default="5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f")
+    p.add_argument("--source-image", default="sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e")
+    p.add_argument("--container-pgdata", default="/home/postgres/pgdata/data")
+    p.add_argument("--log-root", default="/home/nwm/node27-resource-governance-logs")
+    p.add_argument("--runner-lock", default="/home/nwm/node27-resource-governance-logs/node27-resource-governance.lock")
+    p.add_argument("--hold-state", default="/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json")
+    p.add_argument("--uid", type=int, default=1005)
+    p.add_argument("--gid", type=int, default=1005)
+    p.add_argument("--display-port", type=int, default=8080)
+    p.add_argument("--yd-port", type=int, default=8081)
+    p.add_argument("--health-path", default="/health")
+    p.add_argument("--audit-timeout", type=int, default=1800)
+    return p
+
+
+def interrupted(signum, frame):
+    raise Refusal("INTERRUPTED")
+
+
+def main():
+    args = parser().parse_args()
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    executor = None
+    code = 0
+    error = None
+    try:
+        executor = Executor(args)
+        executor.execute()
+    except BaseException as exc:
+        code = 1
+        error = str(exc) if isinstance(exc, Refusal) else "OPERATION_FAILED"
+        if executor is not None:
+            executor.log.write(("\nPRIVATE_FAILURE " + repr(exc) + "\n").encode())
+            os.fsync(executor.log.fileno())
+            if executor.state and executor.state.get("phase") not in ("rolled_back", "staged", "unstaged"):
+                executor.save(executor.state["phase"], outcome="FAIL", failure=error)
+    state = executor.state if executor is not None else {}
+    print(
+        json.dumps(
+            {
+                "schema_version": "issue1987.governance.executor.v1",
+                "operation": args.operation,
+                "outcome": "FAIL"
+                if code
+                else ("PREFLIGHT_OK" if args.operation == "preflight" else state.get("outcome", "NO_STATE")),
+                "phase": state.get("phase", "not_started"),
+                "error": error,
+                "runtime_retained": True,
+            },
+            sort_keys=True,
+        )
+    )
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
