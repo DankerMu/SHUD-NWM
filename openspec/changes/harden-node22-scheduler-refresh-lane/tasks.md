@@ -171,7 +171,7 @@ Evidence floor:
 - [x] 3.3 Add `tests/test_env_templates.py` asserting `compute.scheduler-dbfree.env.example`
       satisfies every entry in that block — key present **and value equal** where pinned,
       so `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast` cannot pass.
-- [ ] 3.4 Post the #2075 gating conclusion on issue #2069: #2072 is a **behaviour-equivalent
+- [x] 3.4 Post the #2075 gating conclusion on issue #2069: #2072 is a **behaviour-equivalent
       move**, not a first activation, because the live node-22 env already sets
       `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc`; cite the 2026-09-12
       read-only capture recorded in this change's design.md and the PR evidence bundle.
