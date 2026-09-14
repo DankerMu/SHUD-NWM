@@ -1,0 +1,23 @@
+import os,json,subprocess,hashlib,importlib.util,io,contextlib
+from pathlib import Path
+os.umask(0o077)
+helper=Path('/home/nwm/.local/state/issue2349-tools/f53181cd46dccfc3b8eed4cc1ede1af8099d8113/prepare_catchup.py')
+assert hashlib.sha256(helper.read_bytes()).hexdigest()=='1c70d8629c6250ce2d2d4300a8e4e2fa88b7e27626338616e43158e57e4c4b12'
+base=Path('/home/nwm/.local/state');existing=base/'issue2349-catchup-exists-smoke-f53181cd'
+existing.mkdir(mode=0o700);sentinel=existing/'sentinel';sentinel.write_bytes(b'preserve-existing')
+result=subprocess.run(['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python','-B',str(helper),'prepare','--root',str(existing)],capture_output=True,text=True,timeout=60)
+payload=json.loads(result.stdout)
+assert result.returncode==1 and payload['error']=='OUTPUT_EXISTS'
+assert sentinel.read_bytes()==b'preserve-existing' and sorted(p.name for p in existing.iterdir())==['sentinel']
+sentinel.unlink();existing.rmdir()
+spec=importlib.util.spec_from_file_location('incident_helper',helper);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+real_git=m.git
+m.git=lambda *args:'0'*40 if args==('rev-parse','HEAD') else real_git(*args)
+wrong=base/'issue2349-catchup-wrong-head-smoke-f53181cd'
+stream=io.StringIO()
+with contextlib.redirect_stdout(stream):rc=m.main(['prepare','--root',str(wrong)])
+wrong_result=json.loads(stream.getvalue())
+assert rc==1 and wrong_result['error']=='GIT_HEAD_MISMATCH' and not wrong.exists()
+timer=base/'issue2349-catchup-timer-smoke-f53181cd'
+assert not timer.exists()
+print(json.dumps({'existing_destination':payload,'wrong_head':wrong_result,'existing_sentinel_preserved':True,'timer_refusal_created_no_root':True,'wrong_head_created_no_root':True,'wrong_head_seam':'only git rev-parse output substituted; production source unchanged','smoke_owned_files_removed':True}))

@@ -56,6 +56,11 @@ COLD_SERVICE_KEY = "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS"
 COLD_WRAPPER_KEY = "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS"
 COLD_STATEMENT_KEY = "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS"
 DATABASE_URL_KEY = "DATABASE_URL"
+PGOPTIONS_KEY = "PGOPTIONS"
+PGOPTIONS_VALUE = "-c timescaledb.enable_compression_indexscan=off"
+PGOPTIONS_ASSIGNMENT = "PGOPTIONS='-c timescaledb.enable_compression_indexscan=off'"
+SCAN_MODE = "off"
+MANIFEST_SCHEMA = "issue2349.catchup.prepare.v2"
 ORIGINAL_ASSEMBLY = "3900,3901,7842,3600000,3600000,4"
 PRIVATE_ASSEMBLY = "6300,3901,10242,6000000,3600000,1"
 STATEMENT_MS = 6000000
@@ -396,6 +401,7 @@ def rewrite_env(text, *, replace, append):
             COMPRESSION_WRAPPER_KEY,
             COMPRESSION_SERVICE_KEY,
             COLD_SERVICE_KEY,
+            PGOPTIONS_KEY,
         ):
             raise Refusal("UNEXPECTED_BUDGET_KEY")
         if key in replace:
@@ -412,6 +418,10 @@ def rewrite_env(text, *, replace, append):
     if out and not out[-1].endswith("\n"):
         out[-1] += "\n"
     for key, value in append.items():
+        if key == PGOPTIONS_KEY:
+            require(value == PGOPTIONS_VALUE, "PGOPTIONS_VALUE_MISMATCH")
+            out.append(f"{PGOPTIONS_ASSIGNMENT}\n")
+            continue
         out.append(f"{key}={value}\n")
     rewritten = "".join(out)
     assignment_keys(rewritten)
@@ -425,6 +435,21 @@ def rewrite_env(text, *, replace, append):
         require(retained == database_url_line, "DATABASE_URL_MUTATED")
     require(rewritten.encode("utf-8") != text.encode("utf-8"), "BUDGET_REWRITE_NOOP")
     return rewritten
+
+
+def require_private_scan_off(text):
+    keys = assignment_keys(text)
+    require(keys.count(PGOPTIONS_KEY) == 1, "PGOPTIONS_ASSIGNMENT_MISSING")
+    found = None
+    for raw in text.splitlines():
+        if raw == PGOPTIONS_ASSIGNMENT:
+            require(found is None, "PGOPTIONS_DUPLICATE")
+            found = raw
+            continue
+        parsed = ASSIGNMENT_RE.fullmatch(raw)
+        if parsed is not None and parsed.group(1) == PGOPTIONS_KEY:
+            raise Refusal("PGOPTIONS_DRIFT")
+    require(found == PGOPTIONS_ASSIGNMENT, "PGOPTIONS_ASSIGNMENT_MISSING")
 
 
 def record_file(path, payload, ident, extra=None):
@@ -572,6 +597,7 @@ def prepare(root):
             COMPRESSION_STATEMENT_KEY: str(STATEMENT_MS),
             COMPRESSION_WRAPPER_KEY: str(WRAPPER_SECONDS),
             COMPRESSION_SERVICE_KEY: str(SERVICE_SECONDS),
+            PGOPTIONS_KEY: PGOPTIONS_VALUE,
         },
     )
     private_cold = rewrite_env(
@@ -581,6 +607,8 @@ def prepare(root):
     )
     require(COLD_WRAPPER_KEY not in assignment_keys(private_cold), "COLD_WRAPPER_MUTATED")
     require(COLD_STATEMENT_KEY not in assignment_keys(private_cold), "COLD_STATEMENT_MUTATED")
+    require(PGOPTIONS_KEY not in assignment_keys(private_cold), "COLD_PGOPTIONS_MUTATED")
+    require(PGOPTIONS_ASSIGNMENT in private_compression.splitlines(), "PGOPTIONS_ASSIGNMENT_MISSING")
     mkdir_private(root)
     compression_path = root / PRIVATE_COMPRESSION_NAME
     cold_path = root / PRIVATE_COLD_NAME
@@ -595,17 +623,25 @@ def prepare(root):
     require(digest(compression_copy) == digest(private_compression.encode("utf-8")), "PRIVATE_ENV_HASH_MISMATCH")
     require(digest(cold_copy) == digest(private_cold.encode("utf-8")), "PRIVATE_ENV_HASH_MISMATCH")
     require(digest(receipt_copy) == SCHEDULED_SHA, "SCHEDULED_RECEIPT_DRIFT", receipt_path)
+    require_private_scan_off(compression_copy.decode("utf-8", "strict"))
     later = protected_snapshot()
     for key in ("compression", "cold", "governance_state", "governance_pin", "retention_receipt", "scheduled_receipt"):
         require(later[key]["sha256"] == snapshot[key]["sha256"], "PROTECTED_HASH_DRIFT", later[key]["path"])
         require(later[key]["identity"] == snapshot[key]["identity"], "PROTECTED_IDENTITY_DRIFT", later[key]["path"])
     manifest = {
-        "schema_version": "issue2349.catchup.prepare.v1",
+        "schema_version": MANIFEST_SCHEMA,
         "issue": 2349,
         "created_at": now(),
         "root": str(root),
         "transient_unit": transient_unit,
         "source": {"repo": str(PRODUCTION), "head": OLD},
+        "scan": {
+            "mode": SCAN_MODE,
+            "guc": "timescaledb.enable_compression_indexscan",
+            "pgoptions": PGOPTIONS_VALUE,
+            "assignment": PGOPTIONS_ASSIGNMENT,
+            "scope": "private_compression_env",
+        },
         "budget": {
             "compression_statement_timeout_ms": STATEMENT_MS,
             "compression_wrapper_wall_seconds": WRAPPER_SECONDS,
@@ -642,10 +678,11 @@ def prepare(root):
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
     exclusive_write(root / MANIFEST_NAME, payload, parent_private=True)
     return {
-        "schema_version": "issue2349.catchup.prepare.v1",
+        "schema_version": MANIFEST_SCHEMA,
         "root": str(root),
         "transient_unit": transient_unit,
         "source_head": OLD,
+        "scan": manifest["scan"],
         "budget": manifest["budget"],
         "paths": manifest["paths"],
         "digests": {
@@ -667,7 +704,7 @@ def load_manifest(root):
     safe(root, directory=True, private=True)
     payload, ident = read_regular(root / MANIFEST_NAME, max_bytes=MAX_RECEIPT_BYTES, private=True)
     manifest = load_json_object(payload, code="MANIFEST_INVALID")
-    require(manifest.get("schema_version") == "issue2349.catchup.prepare.v1", "MANIFEST_SCHEMA")
+    require(manifest.get("schema_version") == MANIFEST_SCHEMA, "MANIFEST_SCHEMA")
     require(manifest.get("root") == str(root), "MANIFEST_ROOT_MISMATCH")
     require(
         isinstance(manifest.get("source"), dict) and manifest["source"].get("head") == OLD, "MANIFEST_SOURCE_MISMATCH"
@@ -677,6 +714,13 @@ def load_manifest(root):
         isinstance(manifest.get("budget"), dict) and manifest["budget"].get("assembly") == PRIVATE_ASSEMBLY,
         "MANIFEST_BUDGET_MISMATCH",
     )
+    scan = manifest.get("scan")
+    require(isinstance(scan, dict), "MANIFEST_SCAN_MISSING")
+    require(scan.get("mode") == SCAN_MODE, "MANIFEST_SCAN_MODE_MISMATCH")
+    require(scan.get("guc") == "timescaledb.enable_compression_indexscan", "MANIFEST_SCAN_GUC_MISMATCH")
+    require(scan.get("pgoptions") == PGOPTIONS_VALUE, "MANIFEST_SCAN_PGOPTIONS_MISMATCH")
+    require(scan.get("assignment") == PGOPTIONS_ASSIGNMENT, "MANIFEST_SCAN_ASSIGNMENT_MISMATCH")
+    require(scan.get("scope") == "private_compression_env", "MANIFEST_SCAN_SCOPE_MISMATCH")
     require(
         isinstance(manifest.get("protected"), dict) and isinstance(manifest.get("private"), dict), "MANIFEST_SCHEMA"
     )
@@ -722,12 +766,13 @@ def verify_prepared(root):
     require(snapshot["retention_receipt"]["sha256"] == RETENTION_SHA, "RETENTION_RECEIPT_DRIFT")
     require(snapshot["scheduled_receipt"]["sha256"] == SCHEDULED_SHA, "SCHEDULED_RECEIPT_DRIFT")
     private = manifest["private"]
-    verify_record(private["compression_env"], private=True)
+    compression_payload, _ident = verify_record(private["compression_env"], private=True)
     verify_record(private["cold_env"], private=True)
     verify_record(private["scheduled_receipt"], private=True, expected_sha=SCHEDULED_SHA)
     require(Path(private["compression_env"]["path"]) == root / PRIVATE_COMPRESSION_NAME, "PRIVATE_PATH_DRIFT")
     require(Path(private["cold_env"]["path"]) == root / PRIVATE_COLD_NAME, "PRIVATE_PATH_DRIFT")
     require(Path(private["scheduled_receipt"]["path"]) == root / PRIVATE_RECEIPT_NAME, "PRIVATE_PATH_DRIFT")
+    require_private_scan_off(compression_payload.decode("utf-8", "strict"))
     require_assembly(private["compression_env"]["path"], private["cold_env"]["path"], PRIVATE_ASSEMBLY)
     require_maintenance_idle()
     require_transient_idle(manifest["transient_unit"])
@@ -741,6 +786,7 @@ def check(root):
         "root": manifest["root"],
         "transient_unit": manifest["transient_unit"],
         "source_head": OLD,
+        "scan": manifest["scan"],
         "budget": manifest["budget"],
         "paths": manifest["paths"],
         "digests": {
@@ -780,6 +826,7 @@ def cleanup(root):
         "schema_version": "issue2349.catchup.cleanup.v1",
         "root": manifest["root"],
         "transient_unit": manifest["transient_unit"],
+        "scan": manifest["scan"],
         "removed": [compression["path"], cold["path"]],
         "retained": [
             str(Path(manifest["root"]) / MANIFEST_NAME),

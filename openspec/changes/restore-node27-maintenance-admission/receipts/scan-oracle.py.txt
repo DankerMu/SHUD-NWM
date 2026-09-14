@@ -1,0 +1,33 @@
+import json,subprocess,time,hashlib
+name='nwm-i8-1987-window-volume-6fb30b552';db='issue2349_scan_f53181cd'
+identity=subprocess.check_output(['docker','inspect','--format','{{.Id}}',name],text=True).strip()
+assert identity=='a3b94458fbf20d57529f47add0d125529358ba7f7b6de603d7b2ce7f1bd512a1'
+def sql(text,database=db,options=None):
+ cmd=['docker','exec']
+ if options is not None:cmd+=['-e','PGOPTIONS=-c timescaledb.enable_compression_indexscan='+options]
+ cmd+=[name,'psql','-X','-U','nhms','-d',database,'-At','-v','ON_ERROR_STOP=1','-c',text]
+ p=subprocess.run(cmd,capture_output=True,text=True,timeout=90)
+ assert p.returncode==0,p.stderr
+ return p.stdout
+assert sql("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname='issue2349_scan_f53181cd');",database='postgres').strip()=='f'
+sql('CREATE DATABASE issue2349_scan_f53181cd;',database='postgres')
+sql("SET statement_timeout=60000; CREATE EXTENSION IF NOT EXISTS timescaledb;\nCREATE TABLE scan_on (run_id text NOT NULL,river_network_version_id text NOT NULL,river_segment_id text NOT NULL,variable text NOT NULL,valid_time timestamptz NOT NULL,value double precision NOT NULL,PRIMARY KEY(run_id,river_network_version_id,river_segment_id,variable,valid_time)); SELECT create_hypertable('scan_on','valid_time',chunk_time_interval=>INTERVAL '7 days'); ALTER TABLE scan_on SET (timescaledb.compress,timescaledb.compress_segmentby='run_id,river_network_version_id,river_segment_id',timescaledb.compress_orderby='variable ASC,valid_time ASC');\nCREATE TABLE scan_off (run_id text NOT NULL,river_network_version_id text NOT NULL,river_segment_id text NOT NULL,variable text NOT NULL,valid_time timestamptz NOT NULL,value double precision NOT NULL,PRIMARY KEY(run_id,river_network_version_id,river_segment_id,variable,valid_time)); SELECT create_hypertable('scan_off','valid_time',chunk_time_interval=>INTERVAL '7 days'); ALTER TABLE scan_off SET (timescaledb.compress,timescaledb.compress_segmentby='run_id,river_network_version_id,river_segment_id',timescaledb.compress_orderby='variable ASC,valid_time ASC');\nINSERT INTO scan_on SELECT 'run-'||(g%17),'network','segment-'||(g%101),CASE WHEN g%2=0 THEN 'q_down' ELSE 'depth' END,TIMESTAMPTZ '2026-09-03T00:00:00Z'+g*INTERVAL '1 second',(g%10000)::double precision/10 FROM generate_series(1,200000) g ORDER BY (g*7919)%200003; INSERT INTO scan_off SELECT * FROM scan_on;\n")
+assert sql("SELECT extversion FROM pg_extension WHERE extname='timescaledb';").strip()=='2.10.2'
+def fp(table):
+ q="SELECT json_build_object('rows',count(*),'sha',md5(string_agg(md5(row_to_json(t)::text),'' ORDER BY run_id,river_network_version_id,river_segment_id,variable,valid_time))) FROM "+table+' t;'
+ return json.loads(sql(q))
+pre={table:fp(table) for table in ('scan_on','scan_off')}
+assert pre['scan_on']==pre['scan_off'] and pre['scan_on']['rows']==200000
+results=[]
+for mode in ('on','off'):
+ table='scan_'+mode;start=time.monotonic()
+ output=sql("SET statement_timeout=60000; SELECT current_setting('timescaledb.enable_compression_indexscan'); SELECT compress_chunk(c) FROM show_chunks('"+table+"') c;",options=mode)
+ elapsed=time.monotonic()-start
+ assert mode in output.splitlines()
+ chunks=json.loads(sql("SELECT json_build_object('total',count(*),'compressed',count(*) FILTER (WHERE is_compressed)) FROM timescaledb_information.chunks WHERE hypertable_schema='public' AND hypertable_name='"+table+"';"))
+ assert chunks=={'total':1,'compressed':1}
+ after=fp(table);assert after==pre[table]
+ results.append({'mode':mode,'elapsed_seconds':elapsed,'before':pre[table],'after':after,'chunks':chunks,'sql_output':output})
+assert sql("SELECT current_setting('timescaledb.enable_compression_indexscan');").strip()=='on'
+sql('DROP DATABASE issue2349_scan_f53181cd;',database='postgres')
+print(json.dumps({'result':'PASS','container':name,'container_id':identity,'database':db,'timescaledb':'2.10.2','rows_per_case':200000,'cases':results,'global_setting_unchanged':True,'owned_database_dropped':True,'primary_touched':False,'timing_scope':'small-data correctness/control only; not representative of billion-row production throughput'}))

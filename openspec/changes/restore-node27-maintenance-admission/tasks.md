@@ -12,8 +12,8 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 
 ## 2. Bounded recovery
 
-- [ ] 2.1 Implement an incident-only private-copy preparation/verification helper; preserve all original files and identity.
-- [ ] 2.2 Verify candidate, regeneration safety, timer/lock/process boundaries and actual budget/outer-wall agreement before one enforce.
+- [x] 2.1 Implement an incident-only private-copy preparation/verification helper; preserve all original files and identity (f53181cd4; real preparation/check and isolated cleanup smoke passed).
+- [x] 2.2 Verify candidate, regeneration safety, timer/lock/process boundaries and actual budget/outer-wall agreement before one enforce (dry receipt selects only river107; actual unit10242s, backend78398 started09:02:51Z).
 - [ ] 2.3 Obtain clean river107 committed receipt and catalog evidence; clean only owned copies and verify protected bytes.
 - [ ] 2.4 Obtain genuine original compression and retention service success with fresh semantic receipts and preserved historical retention receipt; restore captured timer states.
 
@@ -29,3 +29,12 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 - Live: actual paired preflight assembly output, actual transient RuntimeMaxUSec, distinct compression dry and enforce receipts, precise selection and catalog before/after, backend/lock checks, original-unit fresh receipt and status, protected hash comparison, timer restoration.
 - Fresh prepare: existing reviewed child2325 executor and fresh hash-bound input/state; record actual result and never promote old qualification to this pass.
 - Every named issue2349 acceptance criterion maps to tasks1.1–3.2; direct historical lock holder observation is unavailable and remains a clearly labeled source/log inference.
+
+## 4. Separately approved scan comparison
+
+- [x] 4.1 Validate isolated TimescaleDB2.10.2 on/off compression preserves exact row fingerprints (200000 rows each, MD5 75d8bfe99d051fbe7d4881092adc03d5 before/after); do not extrapolate small-data timing.
+- [ ] 4.2 Review the amended fixture and bind private-only PGOPTIONS plus manifest scan mode, leaving original env/DSN/global settings unchanged.
+- [ ] 4.3 Prove the prepared private connection resolves indexscan=off; perform one separately approved comparison with unchanged100-minute ceiling and exact river107 selection.
+- [ ] 4.4 After successful comparison and original compression service success, immediately restore its timer as explicitly directed; on failure retain the pause and do not retry automatically.
+
+The first6000-second attempt failed cleanly before committed mutation; actual owned-copy cleanup passed. Retention service/timer recovered independently with zero drops. Tasks2.3/2.4/3.1 remain incomplete until compression genuinely recovers. A new input bundle exists for tool publication92a5b4350992 with byte-identical executors; its preparation state has not been created or run.

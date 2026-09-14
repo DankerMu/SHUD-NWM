@@ -1,0 +1,12 @@
+{
+  "issue": 2349,
+  "attempt": 2,
+  "user_answers": {
+    "timer": "修复压缩后立刻恢复压缩timer",
+    "experiment": "批准单次策略对照"
+  },
+  "scope": "先小数据验证和方案审查；只对一次river107压缩连接关闭timescaledb.enable_compression_indexscan；statement6000000ms/wrapper6300s/outer10242s/bound1不变；无全局设置/正式env/active/pin/T0变更；失败不自动重试。",
+  "timer_disposition": "Compression timer remains paused until compression is repaired; immediately restore after genuine original compression service success. Retention remains/restores normal schedule.",
+  "prior_attempt": "f53181cd46dccfc3b8eed4cc1ede1af8099d8113: partial/failed_before_mutation after6000s; private env copies cleaned; no committed compression",
+  "prior_retention_recovery": "2026-09-14T10:49:52Z original service success; empty dropped_chunks"
+}
