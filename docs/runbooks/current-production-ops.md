@@ -2528,16 +2528,15 @@ ssh -p 32099 nwm@210.77.77.27 \
 
    - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：多数情况下会自动补，
      手工 backfill 只留给此后再无 pass 的 cycle。
-     吞异常的是 `_copyback_canonical_precip` 自己的 `except Exception`
-     （`publisher.py:1376`）：它不抛，直接返回一份 `status: "failed"` 的 summary，
+     吞异常的是 `_copyback_canonical_precip`（`services/tile_publisher/publisher.py`）
+     自己的 `except Exception`：它不抛，直接返回一份 `status: "failed"` 的 summary，
      `convert` 终态 hook 在该入口的 cycle 状态写入**之后**（#2070）把这份 summary 写成
      receipt，cycle 照常往下走。
-     hook 自己的 `except Exception`（`chain_forecast_execution.py:1083`）根本
-     见不到 copyback 失败——它兜的是 publisher 那个 `try:`（`publisher.py:1275`）
-     **之外**抛出的东西：`format_cycle_time`、`TilePublisher(...)` 构造，以及
-     `finally` 里 `release_copyback_batch_lock` 抛的 `OSError`
-     （`publisher.py:1411-1413` → `packages/common/copyback_guard.py:310-316`），
-     最后这个正是该 `try:` 自己的 `except` 抓不到的（`finally` 在它算完返回值之后才跑）。
+     hook（`_mirror_canonical_precip`）自己的 `except Exception` 根本
+     见不到 copyback 失败——它兜的是 publisher 那个 `try:` **之外**抛出的东西：
+     `format_cycle_time`、`TilePublisher(...)` 构造。publisher `finally` 里的
+     `release_copyback_batch_lock`（`packages/common/copyback_guard.py`）不会抛——
+     unlock 与 close 的 `OSError` 都在函数内记 warning 后吞掉。
      重试靠 `_run_cycle_chain` 出口的 chain-exit recovery（#2076），前提是
      copyback root 已配、本地 `canonical/<S>/<cycle>/prcp_rate_or_amount/` 仍在
      （任一路径分量为 symlink 视为不在，retention 剪掉后不再补也不发 receipt）：

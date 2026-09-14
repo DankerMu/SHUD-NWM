@@ -4216,6 +4216,55 @@ def test_canonical_precip_mirror_downstream_restart_pass_recovers_a_missing_mirr
     assert mirror["file_count"] == len(payloads)
 
 
+def test_canonical_precip_mirror_chain_exit_recovery_probes_the_normalized_ifs_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2076 on IFS: the recovery's local-tree probe must use the normalized
+    `IFS` segment, not the lowercase `ifs` the cycle id carries. On case-sensitive
+    Linux a lowercase probe misses `canonical/IFS/...` and the cycle is never
+    recovered. macOS is case-insensitive, so the probe's argument is recorded and
+    its path parts are asserted directly -- that is what makes this test bite here."""
+
+    from packages.common import safe_fs
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    object_store_root = Path(orchestrator.config.object_store_root)
+    payloads = _seed_canonical_precip_tree(object_store_root, storage_source="IFS", cycle_token="2026050100")
+    probed: list[Path] = []
+
+    def recording_verify_directory_no_follow(path: Any, *args: Any, **kwargs: Any) -> Any:
+        probed.append(Path(path))
+        return safe_fs.verify_directory_no_follow(path, *args, **kwargs)
+
+    monkeypatch.setattr(chain_forecast_execution, "verify_directory_no_follow", recording_verify_directory_no_follow)
+
+    result = orchestrator.orchestrate_cycle("ifs", "2026050100", _downstream_restart_basins("forecast"))
+
+    assert result.status == "succeeded"
+    assert "convert" not in {submission["stage"] for submission in client.submissions}
+    assert probed == [object_store_root / "canonical" / "IFS" / "2026050100" / "prcp_rate_or_amount"]
+    assert "IFS" in probed[0].parts
+    assert "ifs" not in probed[0].parts
+    assert _mirrored_files(copyback_root) == payloads
+    # Entry names, not `Path.exists()`: macOS would answer True for `canonical/ifs`.
+    assert [entry.name for entry in (copyback_root / "canonical").iterdir()] == ["IFS"]
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("ok", _PRECIP_RECOVERY_MESSAGE)]
+    assert events[0]["entity_id"] == "ifs_2026050100"
+    mirror = events[0]["details"]["precip_mirror"]
+    assert mirror["storage_source"] == "IFS"
+    assert mirror["cycle"] == "2026050100"
+    assert sorted(tree["object_key"] for tree in mirror["trees"]) == [
+        "canonical/IFS/2026050100/prcp_rate_or_amount",
+        "canonical/IFS/grid/ifs_0p25",
+    ]
+
+
 def test_canonical_precip_mirror_downstream_restart_pass_skips_an_identical_mirror_without_rewriting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -20115,13 +20164,13 @@ def test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_
 
     The receipt is what the retry keys on. The layer that actually swallows
     this `CopybackLockTimeout` is `_copyback_canonical_precip`'s own
-    `except Exception` (`publisher.py:1376`), which turns it into a
+    `except Exception`, which turns it into a
     `status: "failed"` summary and RETURNS it. `_mirror_canonical_precip`'s
-    outer `except Exception` (`chain_forecast_execution.py:1083`) never sees it;
+    outer `except Exception` never sees it;
     that net is there for what runs *outside* the publisher's own try -- the
-    `format_cycle_time` call, the `TilePublisher(...)` construction, and an
-    `OSError` from the `finally`'s `release_copyback_batch_lock`
-    (`publisher.py:1411-1413`). Either way the cycle proceeds past
+    `format_cycle_time` call and the `TilePublisher(...)` construction. The
+    publisher's `finally` calls `release_copyback_batch_lock`, which logs and
+    swallows its own `OSError`s and never raises. Either way the cycle proceeds past
     `convert`. The retry is the chain-exit recovery (#2076): `_run_cycle_chain`
     re-runs the mirror once at the exit of this same pass (the field recording
     `failed`), and again on every later downstream-restart pass for the cycle.
@@ -20275,13 +20324,13 @@ def test_canonical_precip_mirror_lock_timeout_still_advances_the_cycle_stage(
     Same injected failure, opposite outcome from the run-tree lane above. The
     canonical lane swallows in TWO places, and this exception is stopped by the
     first: `_copyback_canonical_precip`'s own `except Exception`
-    (`publisher.py:1376`) turns every failure -- `CopybackLockTimeout` included
+    turns every failure -- `CopybackLockTimeout` included
     -- into a `status: "failed"` summary and RETURNS it, so
     `_mirror_canonical_precip`'s outer `except Exception`
-    (`chain_forecast_execution.py:1083`) never sees it; that outer net only
+    never sees it; that outer net only
     fires for what runs outside the publisher's try (`format_cycle_time`, the
-    `TilePublisher(...)` construction, an `OSError` from the `finally`'s
-    `release_copyback_batch_lock`). Either way control returns to
+    `TilePublisher(...)` construction; the `finally`'s
+    `release_copyback_batch_lock` never raises). Either way control returns to
     `_after_cycle_stage_terminal` and the `succeeded` branch advances the cycle
     to `convert`'s success status (the mirror now runs after that write, #2070).
     Once that write lands, a downstream-restart pass does not re-enter `convert`;
