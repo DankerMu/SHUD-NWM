@@ -47,7 +47,7 @@ The system SHALL import river reach records from `input_dir/gis/river.shp` as th
 
 The system SHALL NOT use `input_dir/gis/seg.shp` as a geometry source. The system SHALL NOT read `input_dir/<basin>.sp.rivseg` for geometry, vertex, or topology purposes; that file has no coordinate columns (only `Index`, `iRiv`, `iEle`, `Length`) and is only retained as historical cross-check evidence on the segment count.
 
-Each imported reach geometry SHALL be a single-part `MULTILINESTRING` (a `LINESTRING` wrapped via `ST_Multi` at write time) so that `core.river_segment.geom` column type `geometry(MultiLineString, 4490)` is preserved without schema change. This single-part invariant applies to every row written by the `basins-registry-import` ingestion path; no other write path may persist multi-part values into `core.river_segment.geom` (the deprecated `_backfill_output_segment_geometry` path is removed by the same change — see "Deprecated cross-gap fallback paths are removed from the codebase" below).
+Each imported reach geometry SHALL be a single-part `MULTILINESTRING` (a `LINESTRING` wrapped via `ST_Multi` at write time) so that `core.river_segment.geom` column type `geometry(MultiLineString, 4490)` is preserved without schema change. This single-part invariant applies to every row written by the `basins-registry-import` ingestion path; no other write path may persist multi-part values into `core.river_segment.geom` (the retained output-river geometry backfill `_backfill_output_segment_geometry` does not introduce multi-part values: it copies the already single-part `geom` of the matching reach row onto the SHUD output river row through `ST_Multi`, so the invariant holds for those rows too — see "Output-river geometry backfill writes only the target network version" below).
 
 #### Scenario: Reach count matches SHUD `.sp.riv` evidence
 
@@ -199,10 +199,9 @@ The system SHALL validate the presence of `gis/river.shp` (with its `.dbf`, `.sh
 
 ### Requirement: Deprecated cross-gap fallback paths are removed from the codebase
 
-The system SHALL NOT carry "defensive" cross-gap stitching, gap-splitting, or MultiLineString-rebuild logic on the ingestion, write, output-river backfill, or frontend paths once reach-level ingestion is in place. The following code paths SHALL be removed in the same change, not merely deprecated, so that no caller can re-introduce them as a "safety net":
+The system SHALL NOT carry "defensive" cross-gap stitching, gap-splitting, or MultiLineString-rebuild logic on the ingestion, write, output-river backfill, or frontend paths once reach-level ingestion is in place. The SHUD output river family in `workers/model_registry/basins_registry_import.py` — `_ensure_output_river_segments`, `_output_river_segment_rows`, and `_backfill_output_segment_geometry` — is NOT on the removal list below: it shares no stitching path, reads no `gis/seg.shp` geometry, and remains the default-on import and bootstrap path whose write contract is the requirement "Output-river geometry backfill writes only the target network version" and `mvt-tile-contract`. The following code paths SHALL be removed in the same change, not merely deprecated, so that no caller can re-introduce them as a "safety net":
 
-- `workers/model_registry/basins_geometry.py`: `_merge_polyline_parts`, `gap_split_multilinestring_wkt`, `gap_split_positions`, `_nearest_attachment`, `_point_wkt`, `_edge_meters`, `_median_edge`, the module-level constants `RIVER_GAP_ABSOLUTE_M` / `RIVER_GAP_RELATIVE` / `_EARTH_RADIUS_M`, the `seg.shp` branch of `_river_segments_from_layer`, and the `_shud_count_header(sp_rivseg, ...)` cross-check (replaced by the crosswalk count check against `gis/seg.shp` itself)
-- `workers/model_registry/basins_registry_import.py`: `_backfill_output_segment_geometry` and `_ensure_output_river_segments` (whichever helpers exist that share the deprecated stitching path); `qhh_production_bootstrap.py` callers updated to the new ingestion entry point
+- `workers/model_registry/basins_geometry.py`: `_merge_polyline_parts`, `gap_split_multilinestring_wkt`, `gap_split_positions`, `_nearest_attachment`, `_edge_meters`, `_median_edge`, the module-level constants `RIVER_GAP_ABSOLUTE_M` / `RIVER_GAP_RELATIVE` / `_EARTH_RADIUS_M`, and the `seg.shp` branch of `_river_segments_from_layer`; the generic WKT vertex formatter `_point_wkt` and `_shud_count_header` (which still reads the `.sp.riv` / `.sp.rivseg` count headers as import evidence and network-checksum input) are not stitching code and are retained
 - `packages/common/model_registry.py`: `line_or_multiline_to_wkt` and `_multilinestring_to_wkt` (write path reverts to `geometry_to_wkt(..., "LineString")` plus SQL-side `ST_Multi`)
 - `scripts/backfill_river_segment_multilinestring.py`: entire file
 - `tests/test_backfill_river_segment_multilinestring.py`: entire file
@@ -212,12 +211,16 @@ The system SHALL NOT carry "defensive" cross-gap stitching, gap-splitting, or Mu
 #### Scenario: No reachable call site for legacy stitching code
 
 - **WHEN** the change is fully applied
-- **THEN** a repository-wide grep for any of the following tokens returns zero matches outside of the change's own audit log / changelog files: `_merge_polyline_parts`, `gap_split_multilinestring`, `gap_split_positions`, `line_or_multiline_to_wkt`, `_multilinestring_to_wkt`, `gapAwareLineGeometry`, `splitPositionsAtGaps`, `backfill_river_segment_multilinestring`, `_backfill_output_segment_geometry`, `_ensure_output_river_segments`, `_output_river_segment_rows`, `_shud_riv_`, `rebackfill_river_segment`
+- **THEN** a repository-wide grep for any of the following tokens returns zero matches outside of `openspec/**` (spec text and archived change audit logs) and the historical header comment of the already-applied migration `db/migrations/000037_river_segment_multilinestring.sql`: `_merge_polyline_parts`, `gap_split_multilinestring`, `gap_split_positions`, `line_or_multiline_to_wkt`, `_multilinestring_to_wkt`, `gapAwareLineGeometry`, `splitPositionsAtGaps`, `backfill_river_segment_multilinestring`, `rebackfill_river_segment`
+- **AND** the list does not include the live SHUD output river tokens `_backfill_output_segment_geometry`, `_ensure_output_river_segments`, `_output_river_segment_rows`, or the `_shud_riv_` row-id infix (`<model_id>_shud_riv_<N:06d>`)
 
-#### Scenario: Output-river backfill is not re-introduced
+#### Scenario: Output-river geometry comes from the reach row, not seg.shp
 
-- **WHEN** a future change attempts to add a separate backfill path that reads `gis/seg.shp` and writes `core.river_segment.geom` for `shud_output_river=true` rows (mirroring the deleted `_backfill_output_segment_geometry`)
-- **THEN** code review SHALL reject the change with reference to this requirement; reach geometry SHALL come from `gis/river.shp` via the single ingestion path
+- **WHEN** `_backfill_output_segment_geometry(cursor, river_network_version_id, *, only_missing)` fills a SHUD output river row (`shud_output_river='true'`)
+- **THEN** its only geometry source is the sibling SHUD input reach row in `core.river_segment` under the same `river_network_version_id` whose `iRiv` equals the output row's `shud_riv_index` (reach geometry derived from `gis/river.shp`), and it copies that row's `geom`, `length_m`, and source `Type`
+- **AND** with `only_missing` it only touches output rows whose `geom` is NULL or whose `properties_json` lacks `Type`
+- **AND** it increments `core.river_network_version.geometry_generation` once, only when at least one row was updated, as specified by "Output-river geometry backfill writes only the target network version" and `mvt-tile-contract`
+- **AND** a future change that adds a backfill reading `gis/seg.shp` (or other seg-level display geometry) for `shud_output_river=true` rows SHALL be rejected in code review with reference to this requirement
 
 #### Scenario: No silent re-introduction via fallback
 
@@ -315,7 +318,7 @@ The repository SHALL define, in `openspec/glossary.md`, the two row classes `cor
 
 #### Scenario: Import test pins the invariant
 
-- **WHEN** the real-DB import test in `tests/test_basins_registry_import.py` imports a fixture package and reads the resulting rnv
+- **WHEN** the real-DB import test `tests/test_basins_registry_import_qhh.py::test_pr2_contract_reach_rows_single_part_and_crosswalk_count` imports a fixture package and reads the resulting rnv
 - **THEN** it asserts the physical `core.river_segment` row count equals `2 × river_network_version.segment_count`
 - **AND** it asserts the `shud_output_river='true'` row count equals the reach row count
 

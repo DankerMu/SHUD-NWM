@@ -106,7 +106,10 @@ select every test suite in its dependent closure — the tracked test
 files that import the contract directly in either spelling form, plus
 test files that import a `scripts/` module whose scripts-import graph
 reaches the contract (computed to a fixed point, not one hop) —
-instead of falling through to the core-smoke fallback, and a
+instead of falling through to the core-smoke fallback (the core-smoke
+suites it additionally selects are the shared-library baseline retained by
+policy under "Shared-library targeted selection MUST retain its baseline",
+not a fallback leak), and a
 meta-guard SHALL derive that closure from import analysis so that
 closure growth reddens the guard rather than silently unselecting new
 dependents.
@@ -118,7 +121,11 @@ dependents.
 - **THEN** the selected tests are a superset of the contract's
   dependent closure (currently the five node27 timeseries compression
   benchmark/capture/supervisor/live-evidence and decompression-replay
-  suites) and share no member with the core-smoke fallback set
+  suites)
+- **AND** the selected tests also contain every `CORE_SMOKE_TESTS` member,
+  because `packages/common/**` Python sources retain the core-smoke
+  baseline by policy (#1744 path B), and the selector reports
+  `collection_smoke_required=false`
 
 #### Scenario: The transitive dependent is derived, not grepped
 
@@ -153,9 +160,13 @@ under GitHub Actions) while keeping its return-value semantics unchanged.
 The collect-only branch's check name and pass/fail semantics are unchanged
 by this requirement (gate-strength changes are out of scope).
 Additionally, when the final selection collapses to exactly the selector
-meta-guard suite (`meta_guard_only` — a selection-shape property that
-also fires for selector-development PRs whose diff-specific target is
-that suite), the selector SHALL expose the collapse as a
+meta-guard suite (`meta_guard_only` — a property of the final
+selection's shape only: it fires for a PR whose only backend change is
+`tests/test_select_ci_tests.py`, but not for a PR that changes
+`scripts/select_ci_tests.py`, whose supplemental routing selects more
+than the meta-guard suite; that PR keeps the full-tree smoke through
+`collection_smoke_required` under "Selector-development changes MUST
+retain full-tree collection smoke"), the selector SHALL expose the collapse as a
 distinguishable GitHub-output field and the `Unit Tests` job SHALL run
 the targeted selection AND the labeled full-tree collect-only smoke,
 whose labeling on this branch MUST NOT claim zero assertions were
@@ -253,12 +264,22 @@ in the diff.
 #### Scenario: selector-development PRs fire the flag honestly
 
 - **WHEN** the diff's only backend change is
-  `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`, so
-  the diff-specific selection IS exactly the meta-guard suite
+  `tests/test_select_ci_tests.py`, so the diff-specific selection IS
+  exactly the meta-guard suite
 - **THEN** `meta_guard_only=true` and the collect-only smoke also runs
   — accepted by design (one extra collection pass on exactly the PR
   class that changes the gate), and the smoke labeling does not claim
   the run executed zero assertions
+- **AND** when the diff's only backend change is instead
+  `scripts/select_ci_tests.py`, the selection is not collapsed: it
+  also contains the supplemental invariant suites routed from
+  `scripts/**` (the selection includes `tests/test_select_ci_tests.py`
+  plus supplemental invariant suites such as
+  `tests/test_river_segment_write_surface_scan.py` and
+  `tests/test_timescale_write_guard_wire_site_invariant.py`), so
+  `meta_guard_only=false` as "non-collapsed selections suppress the
+  flag" requires, while `collection_smoke_required=true` still runs
+  the collect-only smoke
 
 ### Requirement: Guarded-module selector rules MUST cover their non-gated importer closure
 
