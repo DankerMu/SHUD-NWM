@@ -228,9 +228,8 @@ corepack pnpm run test:e2e:preview
 ### OpenSpec / 生产证据 lane
 
 ```bash
-openspec validate m10-production-closure --strict --no-interactive
-openspec validate m11-overview-basin-drilldown --strict --no-interactive
-openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive
+# m10/m11/m20 milestone changes are archived; their specs are promoted and validated here.
+openspec validate --all --strict --no-interactive
 ```
 
 M20 scheduler dry-run evidence：

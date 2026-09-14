@@ -102,7 +102,7 @@ uv run pytest -q \
 Focused M18 model asset lifecycle checks:
 
 ```bash
-openspec validate m18-model-asset-operations --strict --no-interactive
+openspec validate --all --strict --no-interactive  # m18-model-asset-operations is archived; its specs are promoted
 uv run pytest -q tests/test_model_registration.py tests/test_model_activation_audit_integration.py
 uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py
 uv run pytest -q tests/test_api_contract.py tests/test_auth_policy_matrix.py
@@ -120,7 +120,7 @@ rollback, blocked deactivation, and idempotent repeat without live credentials.
 Focused M19 production-readiness proof checks:
 
 ```bash
-openspec validate m19-production-readiness-proof --strict --no-interactive
+openspec validate --all --strict --no-interactive  # m19-production-readiness-proof is archived; its specs are promoted
 uv run pytest -q tests/test_production_readiness_validation.py
 uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_production_e2e_validation.py tests/test_production_scale_validation.py
 uv run ruff check .
@@ -450,7 +450,7 @@ Focused fast commands for #196 documentation and evidence review:
 ```bash
 uv run pytest -q tests/test_production_scheduler.py tests/test_production_readiness_validation.py
 uv run ruff check .
-openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive
+openspec validate --all --strict --no-interactive  # m20-production-multibasin-continuous-automation is archived; its specs are promoted
 NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
   --evidence-root artifacts/production-closure \
   --run-id local-m20-scheduler-readiness \
@@ -463,8 +463,13 @@ NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
 Local #152 verification uses these fast regression commands:
 
 ```bash
-openspec validate m10-production-closure --strict --no-interactive
-uv run ruff check services/production_closure tests/test_production_ops_validation.py docs/VALIDATION.md docs/runbooks/api-latency.md docs/runbooks/tile-publish-error.md progress.md
+# m10-production-closure is archived (name no longer resolves); validate its promoted capability spec.
+openspec validate production-ops-readiness --type spec --strict --no-interactive
+uv run ruff check services/production_closure tests/test_production_ops_validation.py
+# Ruff does not lint Markdown. docs/VALIDATION.md, docs/runbooks/api-latency.md and
+# docs/runbooks/tile-publish-error.md are covered by the CI Markdown Lint form below;
+# progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
+npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
 uv run pytest -q tests/test_production_ops_validation.py
 uv run pytest -q tests/test_production_ops_validation.py tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_production_slurm_validation.py
 ```
@@ -488,11 +493,12 @@ NHMS_RUN_BASINS_SMOKE=1 uv run pytest -q \
   tests/test_basins_package_publication_toctou.py
 ```
 
-Real registry import smoke also needs a PostgreSQL/PostGIS integration database and is skipped by default:
+Real registry import smoke also needs a PostgreSQL/PostGIS integration database and is skipped by default. The smoke is an `integration` test, so it also needs the same integration gate as Backend Integration below; a bare `DATABASE_URL` is ignored and the smoke skips with exit 0:
 
 ```bash
 export NHMS_RUN_REAL_BASINS_IMPORT=1
-export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
+export NHMS_RUN_INTEGRATION=1
+export NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
 # #1913: the opt-in real-Basins import smoke lives in the DB partition.
 uv run pytest -q tests/test_basins_registry_import_db.py
 ```
@@ -622,9 +628,10 @@ PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH=/absolute/private/nhms-frontend-river-c
 
 ## OpenSpec
 
+The milestone changes `m9-basins-model-assets` and `m10-production-closure` are archived, so validating them by name no longer resolves (`Unknown item`); their specs are promoted and covered by:
+
 ```bash
-openspec validate m9-basins-model-assets --strict --no-interactive
-openspec validate m10-production-closure --strict --no-interactive
+openspec validate --all --strict --no-interactive
 ```
 
 ## M9 Closeout Evidence

@@ -68,7 +68,7 @@
 `nhms-pipeline publish-tiles --cycle-id <cycle_id>` 是 Forecast M3 的 Slurm/local 统一入口。
 本 release 的最小支持 artifact 是洪水重现期 GeoJSON delivery metadata，而不是完整 MVT/PBF 生成：
 
-- 成功条件：指定 cycle 下存在 `hydro.hydro_run.status IN ('frequency_done', 'published')` 的 forecast run，
+- 成功条件：指定 cycle 下存在 `hydro.hydro_run.status = 'published'` 的 forecast run（原 `frequency_done` 已随频率展示管线退役于 `b97c16e2`，不是迁移账本成员，仅残留在 node-27 live 枚举中），
   且 `flood.return_period_result` 存在对应行。
 - 副作用：upsert `map.tile_layer`，确定性 `layer_id=flood_return_period_<run_id>`，
   `tile_format=geojson`，`published_flag=true`，`tile_uri_template` 指向

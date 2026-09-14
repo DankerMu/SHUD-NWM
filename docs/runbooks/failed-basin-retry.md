@@ -336,7 +336,7 @@ plus non-empty `expected_slurm_user`/`expected_slurm_account` may enter the
   candidate with an **empty** comment may pass both comment gates (the cluster
   never stored it); a present-but-different comment remains fatal.
 
-“Unique” means more than one row from this `sacct` query. Exactly one durable
+“Unique” means one durable claimant, not one result in one query. Exactly one durable
 reserved claimant must admit the candidate's Submit instant for that user/account,
 and no other current accepted-submit master may own the same accounting
 incarnation `(bare Slurm id, canonical Submit)`. An active same-id owner always

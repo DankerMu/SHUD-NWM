@@ -60,8 +60,8 @@
 Forecast M3 发布阶段使用 `nhms-pipeline publish-tiles --cycle-id <cycle_id>`。本版本不生成完整全国
 MVT/PBF 金字塔；最小发布产物是洪水重现期 GeoJSON delivery metadata：
 
-- 从 `hydro.hydro_run` + `flood.return_period_result` 中发现指定 cycle 的 `frequency_done` 或
-  `published` forecast run。
+- 从 `hydro.hydro_run` + `flood.return_period_result` 中发现指定 cycle 的 `published`
+  forecast run（原 `frequency_done` 已退役于 `b97c16e2`，不是迁移账本成员，仅残留在 node-27 live 枚举中）。
 - 以确定性 `layer_id=flood_return_period_<run_id>` upsert `map.tile_layer`，`tile_format=geojson`，
   `tile_uri_template=/api/v1/tiles/flood-return-period?run_id=<run_id>&duration={duration}&valid_time={valid_time}`。
 - 重复执行同一 cycle 必须返回相同 logical layer，不产生重复 `map.tile_layer` 或冲突 cache row。
