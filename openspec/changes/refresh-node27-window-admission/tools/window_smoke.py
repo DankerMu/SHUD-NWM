@@ -928,7 +928,6 @@ def historical_ledger_admission(e):
     def invoke_prepare(state_name, executor_cls, *, extra_pending=False, insert_expand=False):
         nonlocal extra_removed
         root = e.root / ("historical-prepare-" + state_name)
-        root.mkdir(mode=0o700)
         instances = []
 
         def factory(cli_args):
