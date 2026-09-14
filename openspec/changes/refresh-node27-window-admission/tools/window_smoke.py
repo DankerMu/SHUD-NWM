@@ -925,7 +925,7 @@ def historical_ledger_admission(e):
 
     saved_env = {key: os.environ.get(key) for key in ("DATABASE_URL", "I8_INGEST_DSN", "I8_DISPLAY_DSN")}
 
-    def invoke_prepare(state_name, executor_cls, *, extra_pending=False, insert_expand=False):
+    def invoke_prepare(state_name, executor_cls, module, *, extra_pending=False, insert_expand=False):
         nonlocal extra_removed
         root = e.root / ("historical-prepare-" + state_name)
         instances = []
@@ -937,11 +937,14 @@ def historical_ledger_admission(e):
             instances.append(instance)
             return instance
 
-        w.Executor = factory
-        w.safe_path = safe_boundary
+        saved_module_executor = module.Executor
+        saved_module_safe_path = module.safe_path
+        saved_module_argv = sys.argv
+        module.Executor = factory
+        module.safe_path = safe_boundary
         os.getuid = lambda: 1005
         sys.argv = [
-            str(Path(w.__file__).resolve()),
+            str(Path(module.__file__).resolve()),
             "prepare",
             "--state",
             str(root),
@@ -957,7 +960,7 @@ def historical_ledger_admission(e):
             if insert_expand:
                 e.sql("INSERT INTO public.schema_migrations (version) VALUES ('" + w.EXPAND + "')")
             with contextlib.redirect_stdout(output):
-                rc = w.main()
+                rc = module.main()
         finally:
             for instance in instances:
                 os.close(instance.lock)
@@ -965,6 +968,10 @@ def historical_ledger_admission(e):
                 restore_extra_row()
             if insert_expand and w.EXPAND in e.ledger():
                 e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
+            module.Executor = saved_module_executor
+            module.safe_path = saved_module_safe_path
+            sys.argv = saved_module_argv
+            os.getuid = original_getuid
             w.Executor, w.safe_path, sys.argv, os.getuid = (
                 original_executor,
                 original_safe_path,
@@ -980,35 +987,37 @@ def historical_ledger_admission(e):
         e.save_file("historical-prepare-" + state_name + ".stdout", output.getvalue().encode())
         return rc, receipt
 
+
     try:
-        rc, receipt = invoke_prepare("extra", ChangedHistoricalPrepareExecutor, extra_pending=True)
+        rc, receipt = invoke_prepare("extra", ChangedHistoricalPrepareExecutor, w, extra_pending=True)
         w.require(
             rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
             "PREPARE_EXTRA_PENDING_ACCEPTED",
         )
         require_unchanged("PREPARE_EXTRA_PENDING_SIDE_EFFECT")
         reports.append({"site": "prepare", "pending": "extra", "returncode": rc, "receipt": receipt})
-        rc, receipt = invoke_prepare("zero", ChangedHistoricalPrepareExecutor, insert_expand=True)
+        rc, receipt = invoke_prepare("zero", ChangedHistoricalPrepareExecutor, w, insert_expand=True)
         w.require(
             rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
             "PREPARE_ZERO_PENDING_ACCEPTED",
         )
         require_unchanged("PREPARE_ZERO_PENDING_SIDE_EFFECT")
         reports.append({"site": "prepare", "pending": "zero", "returncode": rc, "receipt": receipt})
-        rc, receipt = invoke_prepare("f24-historical", F24HistoricalPrepareExecutor)
+        rc, receipt = invoke_prepare("f24-historical", F24HistoricalPrepareExecutor, f24)
         w.require(
             rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
             "F24_PREPARE_SHOULD_REFUSE_HISTORICAL",
         )
         require_unchanged("F24_PREPARE_HISTORICAL_SIDE_EFFECT")
         reports.append({"site": "prepare-f24", "pending": "historical", "returncode": rc, "receipt": receipt})
-        rc, receipt = invoke_prepare("historical", ChangedHistoricalPrepareExecutor)
+        rc, receipt = invoke_prepare("historical", ChangedHistoricalPrepareExecutor, w)
         w.require(
             rc == 1 and receipt.get("check") == "PREPARE_REACHED_POST_PENDING_DUMP",
             "PREPARE_HISTORICAL_NOT_ADMITTED",
         )
         require_unchanged("PREPARE_HISTORICAL_SIDE_EFFECT")
         reports.append({"site": "prepare", "pending": "historical", "returncode": rc, "receipt": receipt})
+
     finally:
         restore_extra_row()
         w.Executor, w.safe_path, sys.argv, os.getuid = (
