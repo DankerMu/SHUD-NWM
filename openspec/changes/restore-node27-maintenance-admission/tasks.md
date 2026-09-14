@@ -33,8 +33,10 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 ## 4. Separately approved scan comparison
 
 - [x] 4.1 Validate isolated TimescaleDB2.10.2 on/off compression preserves exact row fingerprints (200000 rows each, MD5 75d8bfe99d051fbe7d4881092adc03d5 before/after); do not extrapolate small-data timing.
-- [ ] 4.2 Review the amended fixture and bind private-only PGOPTIONS plus manifest scan mode, leaving original env/DSN/global settings unchanged.
-- [ ] 4.3 Prove the prepared private connection resolves indexscan=off; perform one separately approved comparison with unchanged100-minute ceiling and exact river107 selection.
+- [x] 4.2 Review the amended fixture and bind private-only PGOPTIONS plus manifest scan mode, leaving original env/DSN/global settings unchanged (amendment review/strict validation pass; bb2db64c helper rejects v1 and semantic scan drift).
+- [x] 4.3 Prove the prepared private connection resolves indexscan=off and perform one separately approved comparison with unchanged100-minute ceiling and exact river107 selection (completed with partial/failed_before_mutation after6011.332s; NOT a recovery pass).
 - [ ] 4.4 After successful comparison and original compression service success, immediately restore its timer as explicitly directed; on failure retain the pause and do not retry automatically.
 
 The first6000-second attempt failed cleanly before committed mutation; actual owned-copy cleanup passed. Retention service/timer recovered independently with zero drops. Tasks2.3/2.4/3.1 remain incomplete until compression genuinely recovers. A new input bundle exists for tool publication92a5b4350992 with byte-identical executors; its preparation state has not been created or run.
+
+The second comparison also timed out before committed mutation. Its private envs were cleaned and retention scheduling restored; compression scheduling remains paused under the explicit user instruction. No third attempt is authorized. Logged sort temporary files total182.426GiB; this is not a progress percentage or a prediction of completion time. Compression recovery, timer restoration after repair, and fresh prepare remain blocked.
