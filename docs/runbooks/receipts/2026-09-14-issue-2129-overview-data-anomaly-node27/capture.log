@@ -1,0 +1,24 @@
+captured_at=2026-09-14T07:19:37.849Z base=https://test.nwm.ac.cn
+## a-unmodified-default
+url=https://test.nwm.ac.cn/?validTime=2026-09-13T12%3A00%3A00.000Z injected=0
+fallbacks=[]
+header=1 fullscreen-map=1 control-bar=1 canvas=1
+hydro-national tiles: total=6 200=6 other=[]
+data-anomaly=[]
+boundary console.error lines=0
+[b-injected-null-cycle] rewrote cycles in /api/v1/layers/discharge/cycles?source=gfs (default_cycle=2026-09-13T12:00:00Z, cycles=24)
+## b-injected-null-cycle
+url=https://test.nwm.ac.cn/?validTime=2026-09-13T12%3A00%3A00.000Z injected=1
+fallbacks=[]
+header=1 fullscreen-map=1 control-bar=1 canvas=1
+hydro-national tiles: total=6 200=6 other=[]
+data-anomaly=["数据异常：起报时次返回格式不符，已按不可用处理"]
+boundary console.error lines=0
+[c-injected-string-cycles] rewrote cycles in /api/v1/layers/discharge/cycles?source=gfs (default_cycle=2026-09-13T12:00:00Z, cycles=23)
+## c-injected-string-cycles
+url=https://test.nwm.ac.cn/?validTime=2026-09-13T12%3A00%3A00.000Z injected=1
+fallbacks=[]
+header=1 fullscreen-map=1 control-bar=1 canvas=1
+hydro-national tiles: total=6 200=6 other=[]
+data-anomaly=["数据异常：起报时次返回格式不符，已按不可用处理"]
+boundary console.error lines=0

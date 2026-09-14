@@ -88,7 +88,7 @@ Evidence floor:
 
 ### 4. Close-out
 
-- [ ] 4.1 Toolchain E10; node-27 frontend-only deploy and receipt E11.
+- [x] 4.1 Toolchain E10; node-27 frontend-only deploy and receipt E11 (`docs/runbooks/receipts/2026-09-14-issue-2129-overview-data-anomaly-node27/`).
 - [ ] 4.2 PR refs #2129 (does not close it unless every ruling-B item is satisfied); archive after merge.
 
 ## Evidence Mapping
