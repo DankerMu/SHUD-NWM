@@ -1,0 +1,130 @@
+{
+  "scope": "R1.4 assertion-level red proof and guard mutations; no production execution",
+  "source_sha": "06002ce037faeea0cf7e6f1a3bb69023d02f92ba",
+  "baseline_sha": "fd34de13741d7b150066f02350a0649fdedb8b6c",
+  "green_workload_suites": {
+    "passed": 32,
+    "duration_seconds": 0.77
+  },
+  "source_restored": true,
+  "restoration": "Exact original source bytes restored after every case; final git diff HEAD --quiet passed. No stash.",
+  "cases": [
+    {
+      "case": "pre-fix-source",
+      "test": "tests/test_node27_pgdata_workload_io.py",
+      "exit_code": 1,
+      "failed_tests": 9,
+      "observed_output_tail": "code = 'OUTPUT_PUBLISH_INDETERMINATE'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_published_query_parameters_are_typed_canonical_and_digest_recomputable\nFAILED tests/test_node27_pgdata_workload_io.py::test_open_readonly_connection_preserves_typed_dsn_refusals\nFAILED tests/test_node27_pgdata_workload_io.py::test_invalid_utf8_private_dsn_file_is_typed\nFAILED tests/test_node27_pgdata_workload_io.py::test_malformed_api_scalars_use_existing_field_codes\nFAILED tests/test_node27_pgdata_workload_io.py::test_publish_is_mode_0600_from_first_write_and_does_not_clobber\nFAILED tests/test_node27_pgdata_workload_io.py::test_pre_publish_write_failure_leaves_no_partial_final\nFAILED tests/test_node27_pgdata_workload_io.py::test_pre_publish_fsync_failure_leaves_no_partial_final\nFAILED tests/test_node27_pgdata_workload_io.py::test_pre_publish_move_io_failure_unlinks_owned_stage\nFAILED tests/test_node27_pgdata_workload_io.py::test_indeterminate_publication_preserves_foreign_and_staged_objects\n9 failed, 3 passed in 0.77s",
+      "mutation": "Restore the three workload/query/IO source modules from fd34 while retaining the new regression suite."
+    },
+    {
+      "case": "restore-redaction",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_published_query_parameters_are_typed_canonical_and_digest_recomputable",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "            \"model_id\": MODEL,\n            \"river_network_version_id\": RNV,\n            \"river_segment_id\": TS_SEGMENT,\n            \"run_id\": RUN,\n            \"scenario_ids\": {\"sequence\": [\"forecast_gfs_deterministic\"]},\n            \"scenario_tokens\": {\"sequence\": [\"forecast_gfs_deterministic\"]},\n        }\nE       AssertionError: assert {'basin_versi...model-1', ...} == {'basin_versi...model-1', ...}\nE         \nE         Omitting 8 identical items, use -vv to show\nE         Differing items:\nE         {'scenario_tokens': '[redacted]'} != {'scenario_tokens': {'sequence': ['forecast_gfs_deterministic']}}\nE         Use -v to get more diff\n\ntests/test_node27_pgdata_workload_io.py:155: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_published_query_parameters_are_typed_canonical_and_digest_recomputable\n1 failed in 0.49s",
+      "mutation": "Remove restoration of the validated typed parameter block after general redaction."
+    },
+    {
+      "case": "datetime-type-loss",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_published_query_parameters_are_typed_canonical_and_digest_recomputable",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "            \"river_network_version_id\": RNV,\n            \"river_segment_id\": TS_SEGMENT,\n            \"run_id\": RUN,\n            \"scenario_ids\": {\"sequence\": [\"forecast_gfs_deterministic\"]},\n            \"scenario_tokens\": {\"sequence\": [\"forecast_gfs_deterministic\"]},\n        }\nE       AssertionError: assert {'basin_versi...model-1', ...} == {'basin_versi...model-1', ...}\nE         \nE         Omitting 7 identical items, use -vv to show\nE         Differing items:\nE         {'end_time': '2026-08-08T00:00:00Z'} != {'end_time': {'datetime': '2026-08-08T00:00:00Z'}}\nE         {'issue_time': '2026-08-01T00:00:00Z'} != {'issue_time': {'datetime': '2026-08-01T00:00:00Z'}}\nE         Use -v to get more diff\n\ntests/test_node27_pgdata_workload_io.py:155: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_published_query_parameters_are_typed_canonical_and_digest_recomputable\n1 failed in 0.49s",
+      "mutation": "Replace canonical datetime envelope with its bare ISO string."
+    },
+    {
+      "case": "private-first-byte",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_publish_is_mode_0600_from_first_write_and_does_not_clobber",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        original_umask = os.umask(0o022)\n        try:\n            monkeypatch.setattr(\"packages.common.safe_fs_publication.os.write\", observe_write, raising=False)\n            monkeypatch.setattr(\"packages.common.safe_fs.os.write\", observe_write)\n            publish_measurement_output(output, document)\n            first_write_modes = list(modes_during_write)\n        finally:\n            os.umask(original_umask)\n    \n        assert first_write_modes\n>       assert all(mode == 0o600 for mode in first_write_modes)\nE       assert False\nE        +  where False = all(<generator object test_publish_is_mode_0600_from_first_write_and_does_not_clobber.<locals>.<genexpr> at 0x7f3c6298d560>)\n\ntests/test_node27_pgdata_workload_io.py:321: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_publish_is_mode_0600_from_first_write_and_does_not_clobber\n1 failed in 0.43s",
+      "mutation": "Change output mode0600 to0666."
+    },
+    {
+      "case": "direct-partial-final",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_pre_publish_write_failure_leaves_no_partial_final",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "                written = real_write(fd, prefix)\n                written_prefix[\"count\"] = written\n                return written\n            raise OSError(errno.ENOSPC, \"No space left on device\")\n    \n        monkeypatch.setattr(\"packages.common.safe_fs_publication.os.write\", short_then_enospc, raising=False)\n        monkeypatch.setattr(\"packages.common.safe_fs.os.write\", short_then_enospc)\n        _assert_code(lambda: publish_measurement_output(output, document), \"OUTPUT_PUBLISH_INDETERMINATE\")\n        assert written_prefix[\"count\"] > 0\n>       assert not output.exists()\nE       AssertionError: assert not True\nE        +  where True = exists()\nE        +    where exists = PosixPath('/home/nwm/tmp/epic1891-retirement-20260914/repair-red-5d3d51eb105a4080a0ab687c2748980f/pytest-direct-partial-final/test_pre_publish_write_failure0/run/workload.json').exists\n\ntests/test_node27_pgdata_workload_io.py:355: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_pre_publish_write_failure_leaves_no_partial_final\n1 failed in 0.43s",
+      "mutation": "Write the staged payload directly at the final target path."
+    },
+    {
+      "case": "capture-zero",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_zero_and_two_captured_primaries_refuse",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        except ForecastStoreError as error:\n            if error.code != \"RUN_NOT_PUBLISHED\":\n                refuse(\"shipping curve owner refused recording\", code=\"QUERY_RECORD_FAILED\", stage=\"query\")\n        primary = [call for call in cursor.calls if all(marker in call[0] for marker in PRIMARY_SQL_MARKERS)]\n        if len(primary) > 1:\n            refuse(\n                \"shipping curve path did not yield exactly one primary SQL call\",\n                code=\"QUERY_PRIMARY_INVALID\",\n                stage=\"query\",\n            )\n>       query_text, captured_parameters = primary[0]\n                                          ^^^^^^^^^^\nE       IndexError: list index out of range\n\npackages/common/node27_pgdata_workload_query.py:454: IndexError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_zero_and_two_captured_primaries_refuse\n1 failed in 0.46s",
+      "mutation": "Retain only len(primary)>1 rejection, losing the zero-primary refusal."
+    },
+    {
+      "case": "capture-two",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_zero_and_two_captured_primaries_refuse",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "            duplicate_primary,\n        )\n>       _assert_code(lambda: record_explicit_cycle_curve(**kwargs), \"QUERY_PRIMARY_INVALID\")\n\ntests/test_node27_pgdata_workload_io.py:485: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_zero_and_two_captured_primaries_refuse.<locals>.<lambda> at 0x7f8fb44c5800>\ncode = 'QUERY_PRIMARY_INVALID'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_zero_and_two_captured_primaries_refuse\n1 failed in 0.44s",
+      "mutation": "Retain only the empty-primary rejection, allowing multiple valid primary calls."
+    },
+    {
+      "case": "store-tolerance",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_recorded_primary_tolerates_run_not_published_and_refuses_other_store_error",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\ntests/test_node27_pgdata_workload_io.py:513: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \npackages/common/node27_pgdata_workload_query.py:446: in record_explicit_cycle_curve\n    refuse(\"shipping curve owner refused recording\", code=\"QUERY_RECORD_FAILED\", stage=\"query\")\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nmessage = 'shipping curve owner refused recording'\n\n    def refuse(message: str, *, code: str, stage: str) -> None:\n>       raise PgdataWorkloadError(message, code=code, stage=stage)\nE       packages.common.node27_pgdata_workload_types.PgdataWorkloadError: shipping curve owner refused recording\n\npackages/common/node27_pgdata_workload_types.py:21: PgdataWorkloadError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_recorded_primary_tolerates_run_not_published_and_refuses_other_store_error\n1 failed in 0.46s",
+      "mutation": "Reject RUN_NOT_PUBLISHED rather than tolerating it after a recorded primary."
+    },
+    {
+      "case": "store-error-swallow",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_recorded_primary_tolerates_run_not_published_and_refuses_other_store_error",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_recorded_primary_tolerates_run_not_published_and_refuses_other_store_error.<locals>.<lambda> at 0x7fe80e365620>\ncode = 'QUERY_RECORD_FAILED'\n\n    def _assert_code(call: object, code: str) -> None:\n        with pytest.raises(PgdataWorkloadError) as caught:\n            call()  # type: ignore[operator]\n>       assert caught.value.code == code\nE       AssertionError: assert 'QUERY_PRIMARY_INVALID' == 'QUERY_RECORD_FAILED'\nE         \nE         - QUERY_RECORD_FAILED\nE         + QUERY_PRIMARY_INVALID\n\ntests/test_node27_pgdata_workload.py:170: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_recorded_primary_tolerates_run_not_published_and_refuses_other_store_error\n1 failed in 0.45s",
+      "mutation": "Ignore every ForecastStoreError instead of only RUN_NOT_PUBLISHED."
+    },
+    {
+      "case": "identity-cardinality",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        captured = _captured()\n        two_rows = _Connection(_IdentityCursor(rows=[_identity_row(), _identity_row(run_id=\"other\")]))\n>       _assert_code(lambda: prove_authoritative_run_identity(two_rows, captured=captured), \"SQL_IDENTITY_MISSING\")\n\ntests/test_node27_pgdata_workload_io.py:545: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_authoritative_identity_refuses_two_rows_and_distinct_mismatches.<locals>.<lambda> at 0x7fe6d8b76340>\ncode = 'SQL_IDENTITY_MISSING'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches\n1 failed in 0.49s",
+      "mutation": "Remove authoritative row-count rejection."
+    },
+    {
+      "case": "identity-run",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        _assert_code(lambda: prove_authoritative_run_identity(two_rows, captured=captured), \"SQL_IDENTITY_MISSING\")\n        run_mismatch = _Connection(_IdentityCursor(rows=[_identity_row(run_id=\"other-run\")]))\n>       _assert_code(lambda: prove_authoritative_run_identity(run_mismatch, captured=captured), \"SQL_IDENTITY_MISMATCH\")\n\ntests/test_node27_pgdata_workload_io.py:547: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_authoritative_identity_refuses_two_rows_and_distinct_mismatches.<locals>.<lambda> at 0x7ff39a51e200>\ncode = 'SQL_IDENTITY_MISMATCH'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches\n1 failed in 0.48s",
+      "mutation": "Keep model comparison but remove run identity comparison."
+    },
+    {
+      "case": "identity-model",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        _assert_code(lambda: prove_authoritative_run_identity(run_mismatch, captured=captured), \"SQL_IDENTITY_MISMATCH\")\n        model_mismatch = _Connection(_IdentityCursor(rows=[_identity_row(model_id=\"other-model\")]))\n>       _assert_code(lambda: prove_authoritative_run_identity(model_mismatch, captured=captured), \"SQL_IDENTITY_MISMATCH\")\n\ntests/test_node27_pgdata_workload_io.py:549: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_authoritative_identity_refuses_two_rows_and_distinct_mismatches.<locals>.<lambda> at 0x7f1f1049e7a0>\ncode = 'SQL_IDENTITY_MISMATCH'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches\n1 failed in 0.52s",
+      "mutation": "Keep run comparison but remove model identity comparison."
+    },
+    {
+      "case": "identity-source",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "        _assert_code(lambda: prove_authoritative_run_identity(model_mismatch, captured=captured), \"SQL_IDENTITY_MISMATCH\")\n        source_mismatch = _Connection(_IdentityCursor(rows=[_identity_row(source_id=\"IFS\")]))\n>       _assert_code(lambda: prove_authoritative_run_identity(source_mismatch, captured=captured), \"SQL_IDENTITY_MISMATCH\")\n\ntests/test_node27_pgdata_workload_io.py:551: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_authoritative_identity_refuses_two_rows_and_distinct_mismatches.<locals>.<lambda> at 0x7f5a4daf6840>\ncode = 'SQL_IDENTITY_MISMATCH'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches\n1 failed in 0.48s",
+      "mutation": "Remove authoritative source mismatch rejection."
+    },
+    {
+      "case": "identity-scenario",
+      "test": "tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches",
+      "exit_code": 1,
+      "failed_tests": 1,
+      "observed_output_tail": "            lambda: prove_authoritative_run_identity(scenario_mismatch, captured=captured),\n            \"SQL_IDENTITY_MISMATCH\",\n        )\n\ntests/test_node27_pgdata_workload_io.py:555: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ncall = <function test_authoritative_identity_refuses_two_rows_and_distinct_mismatches.<locals>.<lambda> at 0x7fd67b34e8e0>\ncode = 'SQL_IDENTITY_MISMATCH'\n\n    def _assert_code(call: object, code: str) -> None:\n>       with pytest.raises(PgdataWorkloadError) as caught:\nE       Failed: DID NOT RAISE <class 'packages.common.node27_pgdata_workload_types.PgdataWorkloadError'>\n\ntests/test_node27_pgdata_workload.py:168: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_pgdata_workload_io.py::test_authoritative_identity_refuses_two_rows_and_distinct_mismatches\n1 failed in 0.49s",
+      "mutation": "Remove authoritative scenario mismatch rejection."
+    }
+  ],
+  "limits": [
+    "Failure excerpts are retained from node27 isolated pytest, not fabricated outcomes.",
+    "The initial rejected collection-failure attempt is not counted; these runs all reached test assertions.",
+    "Native SQL/API producer proof is recorded separately in receipts/retirement-pgdata-workload-smoke.json."
+  ]
+}

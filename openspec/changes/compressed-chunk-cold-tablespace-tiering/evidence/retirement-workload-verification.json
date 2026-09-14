@@ -1,6 +1,6 @@
 {
   "scope": "R1.4 retained PGDATA workload and corresponding R1.5/R4 owner transfer only",
-  "runtime_source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+  "runtime_source_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
   "fixture": "fixtures/retirement-pgdata-workload.md",
   "entrypoint": "scripts/node27_pgdata_workload.py measure",
   "owners": [
@@ -9,13 +9,15 @@
     "packages/common/node27_pgdata_workload_plan.py",
     "packages/common/node27_pgdata_workload_measure.py",
     "packages/common/node27_pgdata_workload_io.py",
-    "packages/common/node27_pgdata_workload_http.py"
+    "packages/common/node27_pgdata_workload_http.py",
+    "packages/common/node27_pgdata_workload_types.py"
   ],
   "verification": {
     "node27_workload_suites": {
-      "passed": 20,
-      "command": "uv run --all-extras pytest -q tests/test_node27_pgdata_workload.py tests/test_node27_pgdata_workload_plan.py",
-      "source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6"
+      "passed": 32,
+      "duration_seconds": 0.77,
+      "command": "uv run --all-extras pytest -q tests/test_node27_pgdata_workload.py tests/test_node27_pgdata_workload_plan.py tests/test_node27_pgdata_workload_io.py",
+      "source_sha": "06002ce037faeea0cf7e6f1a3bb69023d02f92ba"
     },
     "sparse_plan_red_proof": {
       "source_sha": "f054bc01fe122d27831ed28aee3a47f0acf5ede7",
@@ -25,33 +27,75 @@
       "restoration": "git EXIT trap restored the current source; no stash used"
     },
     "node27_default_full": {
-      "passed": 20259,
+      "status": "PASS",
+      "source_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
+      "passed": 20271,
       "skipped": 335,
       "warnings": 1,
-      "duration_seconds": 3474.72,
-      "source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+      "duration_seconds": 3703.81,
       "command": "uv run --all-extras pytest -q",
-      "boundary": "Default environment skips opt-in/unsupported lanes; not proof of all integration/e2e/grib assertions. ecCodes library unavailable warning is outside this slice."
+      "boundary": "Default environment skips opt-in/unsupported lanes; not proof of all integration/e2e/grib assertions. ecCodes library unavailable warning remains."
     },
     "native_cli": {
       "receipt": "receipts/retirement-pgdata-workload-smoke.json",
       "engine": "PostgreSQL 15.2 / TimescaleDB 2.10.2 disposable pinned image",
       "actual_shipping_api": true,
       "samples_per_sql_and_api": "1 discarded warmup + 20 accepted",
-      "uncompressed_sql_p95_ms": 2.4615260772407055,
-      "compressed_sql_p95_ms": 3.1969603151082993,
-      "uncompressed_api_p95_ms": 72.47297978028655,
-      "compressed_api_p95_ms": 80.47332894057035,
+      "uncompressed_sql_p95_ms": 2.6230509392917156,
+      "compressed_sql_p95_ms": 3.497546073049307,
+      "uncompressed_api_p95_ms": 71.26154098659754,
+      "compressed_api_p95_ms": 75.97174076363444,
       "uncompressed_buffers": 14,
       "compressed_buffers": 28,
       "refusals": [
-        "wrong cycle with existing candidate chunks",
-        "non-loopback origin",
-        "HTTP redirect",
-        "symlink DSN",
-        "existing output no-clobber"
+        {
+          "name": "wrong cycle with existing candidate chunks",
+          "observed_code": "SQL_IDENTITY_MISSING",
+          "exit_status": 1
+        },
+        {
+          "name": "non-loopback origin",
+          "observed_code": "INPUT_ORIGIN_INVALID",
+          "exit_status": 1
+        },
+        {
+          "name": "HTTP redirect",
+          "observed_code": "API_REDIRECT",
+          "exit_status": 1
+        },
+        {
+          "name": "symlink DSN",
+          "observed_code": "DSN_FILE_UNAVAILABLE",
+          "exit_status": 1
+        },
+        {
+          "name": "existing output no-clobber",
+          "observed_code": "OUTPUT_EXISTS",
+          "exit_status": 1
+        },
+        {
+          "name": "loopback wrong API segment_id",
+          "observed_code": "API_SEGMENT_MISMATCH",
+          "exit_status": 1
+        },
+        {
+          "name": "loopback malformed status=[] extra key",
+          "observed_code": "API_BODY_KEYS_INVALID",
+          "exit_status": 1
+        }
       ],
-      "cleanup": "PASS; only owned container IDs and private root removed"
+      "cleanup": "PASS; only owned container IDs and private root removed",
+      "source_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
+      "serialized_identity": {
+        "compressed": {
+          "independent_sha256": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25",
+          "query_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25"
+        },
+        "uncompressed": {
+          "independent_sha256": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65",
+          "query_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65"
+        }
+      }
     },
     "local_frontend": {
       "test_files_passed": 74,
@@ -60,25 +104,43 @@
       "commands": [
         "pnpm test",
         "pnpm typecheck"
-      ]
+      ],
+      "boundary": "Previously executed unchanged frontend/C4 consumer tree; no frontend file changed by this repair."
     },
     "local_ruff": {
       "version": "0.15.12 from locked all-extras environment",
       "result": "PASS",
       "command": "uv run --all-extras ruff check ."
     },
-    "openspec": "Strict active change validation passed; final tracked-tree audit and review/CI are separate delivery gates"
+    "openspec": "Strict active change validation passed; final tracked-tree audit and review/CI are separate delivery gates",
+    "round1_boundary_red_proof": {
+      "source_sha": "06002ce037faeea0cf7e6f1a3bb69023d02f92ba",
+      "baseline_sha": "fd34de13741d7b150066f02350a0649fdedb8b6c",
+      "baseline_failed": 9,
+      "baseline_passed": 3,
+      "mutants_killed": 13,
+      "restoration": "exact source bytes restored and git diff HEAD --quiet passed; no stash",
+      "receipt": "retirement-workload-boundary-proof.json"
+    },
+    "compression_fixture_proof": "retirement-workload-compression-fixture-proof.json"
   },
   "contract_corrections": [
     "Canonical scenario bindings follow actual shipping forecast_series, not obsolete source aliases.",
     "Native PostgreSQL timestamptz and surrogate InitPlan identity are validated semantically.",
     "A nonempty query may probe an empty in-window candidate; root-empty and positive filtered waste still refuse.",
-    "Tests no longer pin incidental SQL spellings, per-OS symlink error labels or absence of safe selector fallback."
+    "Tests no longer pin incidental SQL spellings, per-OS symlink error labels or absence of safe selector fallback.",
+    "Published parameters use the original typed canonical digest preimage; general redaction remains unchanged.",
+    "Typed DSN/UTF8/API malformed-field refusals stay at their actual boundary.",
+    "Private0600 staging and exclusive publication avoid partial final receipts; indeterminate objects are preserved."
   ],
   "deviations": [
     "Raw private PGDATA DSN file replaces retired G7 display.env resolver as approved in fixture.",
     "New PLAN_ROWS_INVALID refuses missing row metrics; not a new production rollout gate.",
-    "One implementer ran an unrequested local bare-Python plan replay. That output was not accepted as required oracle; Main executed node27 tests and real shipping API/DB proof."
+    "One implementer ran an unrequested local bare-Python plan replay. That output was not accepted as required oracle; Main executed node27 tests and real shipping API/DB proof.",
+    "Invalid empty-source test fixture was corrected to a nonempty malformed list; runtime falsy fallback unchanged.",
+    "Implementation-coupled test imports/assertions were removed so old-source red proof reaches assertions rather than collection failure.",
+    "Shared publication helpers classify create-time write/fsync uncertainty as indeterminate; no guessed cleanup of unknown objects.",
+    "Full regression exposed a pre-existing compression fixture relying on non-reused inode/default umask. Independent verifier approved same-byte/new-inode construction using existing sibling pattern; runtime/deadline unchanged; private-mask100-case control passed."
   ],
   "limits": [
     "No effective production deployment, live relocation, privileges or data changed.",

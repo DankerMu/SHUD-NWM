@@ -1,33 +1,33 @@
 {
   "scope": "isolated PGDATA SQL/API workload; not live deployment approval",
-  "source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
-  "command": "ssh -p 32099 -o BatchMode=yes nwm@210.77.77.27 'env TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/epic1891-retirement-20260914/checkout UV_PROJECT_ENVIRONMENT=/home/nwm/tmp/epic1891-retirement-20260914/checkout/.venv NHMS_WORKLOAD_SMOKE_REVIEWED_SHA=47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6 /home/nwm/.local/bin/uv run --directory /home/nwm/tmp/epic1891-retirement-20260914/checkout --all-extras python /home/nwm/tmp/epic1891-retirement-20260914/workload-smoke.py'",
+  "source_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
+  "command": "ssh -p 32099 -o BatchMode=yes nwm@210.77.77.27 'env TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/epic1891-retirement-20260914/checkout UV_PROJECT_ENVIRONMENT=/home/nwm/tmp/epic1891-retirement-20260914/checkout/.venv NHMS_WORKLOAD_SMOKE_REVIEWED_SHA=5431f8ab08a723ef44d6c42cf745ea48c46c2b2b /home/nwm/.local/bin/uv run --directory /home/nwm/tmp/epic1891-retirement-20260914/checkout --all-extras python /home/nwm/tmp/epic1891-retirement-20260914/workload-smoke.py'",
   "result": {
-    "compressed": "/home/nwm/tmp/nhms-pgdata-workload-8d913f8b-zeg53lk6/compressed.json",
+    "compressed": "/home/nwm/tmp/nhms-pgdata-workload-214222fb-wotadwbx/compressed.json",
     "compressed_receipt": {
       "api": {
         "accepted_count": 20,
         "accepted_durations_ms": [
-          76.08993630856276,
-          80.47332894057035,
-          77.27680681273341,
-          80.60641773045063,
-          76.97752304375172,
-          78.17456778138876,
-          77.50611519441009,
-          75.4705760627985,
-          78.15099274739623,
-          77.19600293785334,
-          74.56450304016471,
-          75.80518396571279,
-          75.54879086092114,
-          75.11562015861273,
-          71.31074368953705,
-          73.05307919159532,
-          71.05221785604954,
-          73.40108184143901,
-          74.39395971596241,
-          72.85275496542454
+          82.51666789874434,
+          75.68769808858633,
+          75.40025981143117,
+          74.88057482987642,
+          74.36444377526641,
+          75.97174076363444,
+          75.28538210317492,
+          72.0185786485672,
+          72.0366039313376,
+          71.89985271543264,
+          71.28589181229472,
+          72.6979449391365,
+          70.81180578097701,
+          73.68384161964059,
+          72.92429823428392,
+          73.89112329110503,
+          72.61834107339382,
+          72.39021686837077,
+          73.55386298149824,
+          72.45441619306803
         ],
         "accepted_statuses": [
           200,
@@ -76,7 +76,7 @@
         ],
         "p95_index": 18,
         "p95_limit_ms": 500,
-        "p95_ms": 80.47332894057035,
+        "p95_ms": 75.97174076363444,
         "path": "/api/v1/basin-versions/it126_basin_v1/river-segments/qhh_reach_000042/forecast-series",
         "percentile_method": "nearest-rank",
         "timeout_seconds": 5,
@@ -102,7 +102,7 @@
       },
       "evidence_kind": "isolated",
       "identity": {
-        "api_origin": "http://127.0.0.1:47059",
+        "api_origin": "http://127.0.0.1:58567",
         "api_path": "/api/v1/basin-versions/it126_basin_v1/river-segments/qhh_reach_000042/forecast-series",
         "basin_version_id": "it126_basin_v1",
         "issue_time": "2026-08-01T00:00:00Z",
@@ -119,98 +119,110 @@
       },
       "isolated": true,
       "live": false,
-      "measured_at": "2026-09-14T07:56:41.600199Z",
+      "measured_at": "2026-09-14T15:46:21.503442Z",
       "query": {
         "explain_sql": "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) \n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            ",
         "parameters": {
-          "basin_version_id": "it126_basin_v1",
-          "end_time": "2026-08-08 00:00:00+00:00",
-          "issue_time": "2026-08-01 00:00:00+00:00",
-          "model_id": "it126_model",
-          "river_network_version_id": "it126_rnv_v1",
-          "river_segment_id": "qhh_shud_riv_000042",
-          "run_id": "run-gfs-hot",
-          "scenario_ids": [
-            "forecast_gfs_deterministic"
-          ],
-          "scenario_tokens": "[redacted]"
+          "mapping": {
+            "basin_version_id": "it126_basin_v1",
+            "end_time": {
+              "datetime": "2026-08-08T00:00:00Z"
+            },
+            "issue_time": {
+              "datetime": "2026-08-01T00:00:00Z"
+            },
+            "model_id": "it126_model",
+            "river_network_version_id": "it126_rnv_v1",
+            "river_segment_id": "qhh_shud_riv_000042",
+            "run_id": "run-gfs-hot",
+            "scenario_ids": {
+              "sequence": [
+                "forecast_gfs_deterministic"
+              ]
+            },
+            "scenario_tokens": {
+              "sequence": [
+                "forecast_gfs_deterministic"
+              ]
+            }
+          }
         },
         "query_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25",
         "sql": "\n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            "
       },
-      "reviewed_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+      "reviewed_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
       "samples": {
         "api_accepted_ms": [
-          76.08993630856276,
-          80.47332894057035,
-          77.27680681273341,
-          80.60641773045063,
-          76.97752304375172,
-          78.17456778138876,
-          77.50611519441009,
-          75.4705760627985,
-          78.15099274739623,
-          77.19600293785334,
-          74.56450304016471,
-          75.80518396571279,
-          75.54879086092114,
-          75.11562015861273,
-          71.31074368953705,
-          73.05307919159532,
-          71.05221785604954,
-          73.40108184143901,
-          74.39395971596241,
-          72.85275496542454
+          82.51666789874434,
+          75.68769808858633,
+          75.40025981143117,
+          74.88057482987642,
+          74.36444377526641,
+          75.97174076363444,
+          75.28538210317492,
+          72.0185786485672,
+          72.0366039313376,
+          71.89985271543264,
+          71.28589181229472,
+          72.6979449391365,
+          70.81180578097701,
+          73.68384161964059,
+          72.92429823428392,
+          73.89112329110503,
+          72.61834107339382,
+          72.39021686837077,
+          73.55386298149824,
+          72.45441619306803
         ],
-        "api_warmup_ms": 92.62117417529225,
+        "api_warmup_ms": 76.20684476569295,
         "sql_accepted_ms": [
-          3.1969603151082993,
-          3.1794379465281963,
-          3.190496005117893,
-          3.174280747771263,
-          3.189136739820242,
-          3.201581072062254,
-          3.17495409399271,
-          3.1532649882137775,
-          3.141745924949646,
-          3.153719939291477,
-          3.13895707949996,
-          3.146013244986534,
-          3.139524720609188,
-          3.14912386238575,
-          3.148741088807583,
-          3.1364639289677143,
-          3.1356397084891796,
-          3.133599180728197,
-          3.1269569881260395,
-          3.14504886046052
+          3.3021029084920883,
+          3.331892192363739,
+          3.3050826750695705,
+          3.270232118666172,
+          3.296670038253069,
+          3.3609047532081604,
+          3.3311848528683186,
+          3.3428887836635113,
+          3.3134878613054752,
+          3.366147167980671,
+          3.3865608274936676,
+          3.4027830697596073,
+          3.405478782951832,
+          3.4266281872987747,
+          3.497546073049307,
+          3.4518172033131123,
+          3.437541425228119,
+          3.4581520594656467,
+          3.434094600379467,
+          3.877800889313221
         ],
-        "sql_warmup_ms": 8.5122836753726
+        "sql_warmup_ms": 8.050504140555859
       },
       "schema_version": "1.0",
       "sql": {
         "accepted_count": 20,
         "accepted_durations_ms": [
-          3.1969603151082993,
-          3.1794379465281963,
-          3.190496005117893,
-          3.174280747771263,
-          3.189136739820242,
-          3.201581072062254,
-          3.17495409399271,
-          3.1532649882137775,
-          3.141745924949646,
-          3.153719939291477,
-          3.13895707949996,
-          3.146013244986534,
-          3.139524720609188,
-          3.14912386238575,
-          3.148741088807583,
-          3.1364639289677143,
-          3.1356397084891796,
-          3.133599180728197,
-          3.1269569881260395,
-          3.14504886046052
+          3.3021029084920883,
+          3.331892192363739,
+          3.3050826750695705,
+          3.270232118666172,
+          3.296670038253069,
+          3.3609047532081604,
+          3.3311848528683186,
+          3.3428887836635113,
+          3.3134878613054752,
+          3.366147167980671,
+          3.3865608274936676,
+          3.4027830697596073,
+          3.405478782951832,
+          3.4266281872987747,
+          3.497546073049307,
+          3.4518172033131123,
+          3.437541425228119,
+          3.4581520594656467,
+          3.434094600379467,
+          3.877800889313221
         ],
         "all_chunk_decompression": false,
         "buffer_limit": 5000,
@@ -218,7 +230,7 @@
         "candidate_count": 4,
         "p95_index": 18,
         "p95_limit_ms": 300,
-        "p95_ms": 3.1969603151082993,
+        "p95_ms": 3.497546073049307,
         "percentile_method": "nearest-rank",
         "plan_metrics": [
           {
@@ -446,32 +458,110 @@
       "compress_hyper_7_6_chunk",
       "compress_hyper_7_5_chunk"
     ],
-    "reviewed_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
-    "uncompressed": "/home/nwm/tmp/nhms-pgdata-workload-8d913f8b-zeg53lk6/uncompressed.json",
+    "refusals": [
+      {
+        "exit_status": 1,
+        "name": "wrong cycle with existing candidate chunks",
+        "no_output": true,
+        "observed_code": "SQL_IDENTITY_MISSING",
+        "secret_safe": true,
+        "stderr": "SQL_IDENTITY_MISSING: authoritative run identity is missing or ambiguous\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "non-loopback origin",
+        "no_output": true,
+        "observed_code": "INPUT_ORIGIN_INVALID",
+        "secret_safe": true,
+        "stderr": "INPUT_ORIGIN_INVALID: API origin is not the local loopback contract\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "HTTP redirect",
+        "no_output": true,
+        "observed_code": "API_REDIRECT",
+        "secret_safe": true,
+        "stderr": "API_REDIRECT: API response redirected (302)\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "symlink DSN",
+        "no_output": true,
+        "observed_code": "DSN_FILE_UNAVAILABLE",
+        "secret_safe": true,
+        "stderr": "DSN_FILE_UNAVAILABLE: reader DSN file is unavailable\n",
+        "stdout_empty": true
+      },
+      {
+        "existing_output_digest_after": "64951a6c7f80445c7941f80803a533ce5319261e491405997598846fb02df2dc",
+        "existing_output_digest_before": "64951a6c7f80445c7941f80803a533ce5319261e491405997598846fb02df2dc",
+        "existing_output_unchanged": true,
+        "exit_status": 1,
+        "name": "existing output no-clobber",
+        "no_output": false,
+        "observed_code": "OUTPUT_EXISTS",
+        "secret_safe": true,
+        "stderr": "OUTPUT_EXISTS: target already exists\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "loopback wrong API segment_id",
+        "no_output": true,
+        "observed_code": "API_SEGMENT_MISMATCH",
+        "secret_safe": true,
+        "stderr": "API_SEGMENT_MISMATCH: API segment_id does not match the frozen pin\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "loopback malformed status=[] extra key",
+        "no_output": true,
+        "observed_code": "API_BODY_KEYS_INVALID",
+        "secret_safe": true,
+        "stderr": "API_BODY_KEYS_INVALID: RiverSeriesResponse has extra keys\n",
+        "stdout_empty": true
+      }
+    ],
+    "reviewed_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
+    "serialized_identity": {
+      "compressed": {
+        "independent_sha256": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25",
+        "query_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25"
+      },
+      "uncompressed": {
+        "independent_sha256": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65",
+        "query_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65"
+      }
+    },
+    "uncompressed": "/home/nwm/tmp/nhms-pgdata-workload-214222fb-wotadwbx/uncompressed.json",
     "uncompressed_receipt": {
       "api": {
         "accepted_count": 20,
         "accepted_durations_ms": [
-          69.43975994363427,
-          68.30168003216386,
-          68.68602009490132,
-          69.15515707805753,
-          68.45231493934989,
-          66.52629422023892,
-          69.87802032381296,
-          67.43624713271856,
-          66.52676220983267,
-          66.53599860146642,
-          71.11004227772355,
-          71.27980189397931,
-          75.95616998150945,
-          70.37111790850759,
-          72.47297978028655,
-          67.94210290536284,
-          69.81898285448551,
-          69.64801484718919,
-          69.07234992831945,
-          69.57710441201925
+          73.51275999099016,
+          69.31376177817583,
+          70.07934711873531,
+          68.51095892488956,
+          67.63902492821217,
+          69.82821598649025,
+          71.26154098659754,
+          70.72884030640125,
+          70.48781309276819,
+          69.60983015596867,
+          70.88774302974343,
+          70.12731721624732,
+          68.05979600176215,
+          69.51682502403855,
+          70.18932234495878,
+          69.53074084594846,
+          70.30987786129117,
+          68.06825706735253,
+          68.11898434534669,
+          69.93092084303498
         ],
         "accepted_statuses": [
           200,
@@ -520,7 +610,7 @@
         ],
         "p95_index": 18,
         "p95_limit_ms": 500,
-        "p95_ms": 72.47297978028655,
+        "p95_ms": 71.26154098659754,
         "path": "/api/v1/basin-versions/it126_basin_v1/river-segments/it126_seg_inside/forecast-series",
         "percentile_method": "nearest-rank",
         "timeout_seconds": 5,
@@ -541,7 +631,7 @@
       },
       "evidence_kind": "isolated",
       "identity": {
-        "api_origin": "http://127.0.0.1:47059",
+        "api_origin": "http://127.0.0.1:58567",
         "api_path": "/api/v1/basin-versions/it126_basin_v1/river-segments/it126_seg_inside/forecast-series",
         "basin_version_id": "it126_basin_v1",
         "issue_time": "2026-05-03T00:00:00Z",
@@ -558,98 +648,110 @@
       },
       "isolated": true,
       "live": false,
-      "measured_at": "2026-09-14T07:56:39.584973Z",
+      "measured_at": "2026-09-14T15:46:19.535500Z",
       "query": {
         "explain_sql": "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) \n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            ",
         "parameters": {
-          "basin_version_id": "it126_basin_v1",
-          "end_time": "2026-05-10 00:00:00+00:00",
-          "issue_time": "2026-05-03 00:00:00+00:00",
-          "model_id": "it126_model",
-          "river_network_version_id": "it126_rnv_v1",
-          "river_segment_id": "it126_seg_inside",
-          "run_id": "it126_forecast_run",
-          "scenario_ids": [
-            "forecast_gfs_deterministic"
-          ],
-          "scenario_tokens": "[redacted]"
+          "mapping": {
+            "basin_version_id": "it126_basin_v1",
+            "end_time": {
+              "datetime": "2026-05-10T00:00:00Z"
+            },
+            "issue_time": {
+              "datetime": "2026-05-03T00:00:00Z"
+            },
+            "model_id": "it126_model",
+            "river_network_version_id": "it126_rnv_v1",
+            "river_segment_id": "it126_seg_inside",
+            "run_id": "it126_forecast_run",
+            "scenario_ids": {
+              "sequence": [
+                "forecast_gfs_deterministic"
+              ]
+            },
+            "scenario_tokens": {
+              "sequence": [
+                "forecast_gfs_deterministic"
+              ]
+            }
+          }
         },
         "query_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65",
         "sql": "\n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            "
       },
-      "reviewed_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+      "reviewed_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
       "samples": {
         "api_accepted_ms": [
-          69.43975994363427,
-          68.30168003216386,
-          68.68602009490132,
-          69.15515707805753,
-          68.45231493934989,
-          66.52629422023892,
-          69.87802032381296,
-          67.43624713271856,
-          66.52676220983267,
-          66.53599860146642,
-          71.11004227772355,
-          71.27980189397931,
-          75.95616998150945,
-          70.37111790850759,
-          72.47297978028655,
-          67.94210290536284,
-          69.81898285448551,
-          69.64801484718919,
-          69.07234992831945,
-          69.57710441201925
+          73.51275999099016,
+          69.31376177817583,
+          70.07934711873531,
+          68.51095892488956,
+          67.63902492821217,
+          69.82821598649025,
+          71.26154098659754,
+          70.72884030640125,
+          70.48781309276819,
+          69.60983015596867,
+          70.88774302974343,
+          70.12731721624732,
+          68.05979600176215,
+          69.51682502403855,
+          70.18932234495878,
+          69.53074084594846,
+          70.30987786129117,
+          68.06825706735253,
+          68.11898434534669,
+          69.93092084303498
         ],
-        "api_warmup_ms": 93.48875097930431,
+        "api_warmup_ms": 93.7167159281671,
         "sql_accepted_ms": [
-          2.4615260772407055,
-          2.454667817801237,
-          2.446116879582405,
-          2.4546459317207336,
-          2.455984242260456,
-          2.4455050006508827,
-          2.451587002724409,
-          2.4282908998429775,
-          2.4486188776791096,
-          2.435714937746525,
-          2.437017858028412,
-          2.4142172187566757,
-          2.4310690350830555,
-          2.415359951555729,
-          2.4403207935392857,
-          2.432228997349739,
-          2.447783946990967,
-          2.4210158735513687,
-          2.4209339171648026,
-          2.5911391712725163
+          2.5843060575425625,
+          2.588927745819092,
+          2.6190392673015594,
+          2.506792079657316,
+          2.5623710826039314,
+          2.5127469561994076,
+          2.518309745937586,
+          2.537223044782877,
+          2.7726059779524803,
+          2.5660647079348564,
+          2.549921628087759,
+          2.5931978598237038,
+          2.568970900028944,
+          2.594041172415018,
+          2.599793951958418,
+          2.5834739208221436,
+          2.622696105390787,
+          2.621722873300314,
+          2.6230509392917156,
+          2.6211519725620747
         ],
-        "sql_warmup_ms": 6.354812998324633
+        "sql_warmup_ms": 5.878763273358345
       },
       "schema_version": "1.0",
       "sql": {
         "accepted_count": 20,
         "accepted_durations_ms": [
-          2.4615260772407055,
-          2.454667817801237,
-          2.446116879582405,
-          2.4546459317207336,
-          2.455984242260456,
-          2.4455050006508827,
-          2.451587002724409,
-          2.4282908998429775,
-          2.4486188776791096,
-          2.435714937746525,
-          2.437017858028412,
-          2.4142172187566757,
-          2.4310690350830555,
-          2.415359951555729,
-          2.4403207935392857,
-          2.432228997349739,
-          2.447783946990967,
-          2.4210158735513687,
-          2.4209339171648026,
-          2.5911391712725163
+          2.5843060575425625,
+          2.588927745819092,
+          2.6190392673015594,
+          2.506792079657316,
+          2.5623710826039314,
+          2.5127469561994076,
+          2.518309745937586,
+          2.537223044782877,
+          2.7726059779524803,
+          2.5660647079348564,
+          2.549921628087759,
+          2.5931978598237038,
+          2.568970900028944,
+          2.594041172415018,
+          2.599793951958418,
+          2.5834739208221436,
+          2.622696105390787,
+          2.621722873300314,
+          2.6230509392917156,
+          2.6211519725620747
         ],
         "all_chunk_decompression": false,
         "buffer_limit": 5000,
@@ -657,7 +759,7 @@
         "candidate_count": 2,
         "p95_index": 18,
         "p95_limit_ms": 300,
-        "p95_ms": 2.4615260772407055,
+        "p95_ms": 2.6230509392917156,
         "percentile_method": "nearest-rank",
         "plan_metrics": [
           {
@@ -873,11 +975,12 @@
   "cleanup": {
     "cleanup": "PASS",
     "owned_root_absent": true,
-    "token": "8d913f8b00b047b6a17169bad782ddf7"
+    "token": "214222fb99cf4a3ea567a2e2f432b95f"
   },
   "notes": [
-    "Private disposable file paths in result were removed; embedded producer receipts are the retained evidence.",
+    "Private disposable file paths in result were removed; embedded producer receipts and observed refusal outcomes are retained evidence.",
     "Native planner used representative decoy-segment selectivity and ANALYZE; no enable_seqscan override or weakened scan guard.",
+    "Typed query parameters independently reproduce both recorded native digests.",
     "All production databases, services, source pins and private env files were unchanged."
   ]
 }

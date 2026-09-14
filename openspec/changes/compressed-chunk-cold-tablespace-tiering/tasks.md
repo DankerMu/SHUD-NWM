@@ -86,6 +86,10 @@ budget fields. Real launcher and collection/survivor proofs are required.
   Implementation evidence: `evidence/retirement-workload-verification.json`;
   real isolated SQL/API measurement and owned cleanup receipt:
   `evidence/receipts/retirement-pgdata-workload-smoke.json`.
+  Typed serialization, refusal/publication and capture/identity mutation proof:
+  `evidence/retirement-workload-boundary-proof.json`; surviving compression
+  same-byte/new-inode fixture correction:
+  `evidence/retirement-workload-compression-fixture-proof.json`.
   This is not effective production deployment or global retirement completion.
 - [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,

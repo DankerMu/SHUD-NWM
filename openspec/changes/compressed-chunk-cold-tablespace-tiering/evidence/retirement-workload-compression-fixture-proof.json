@@ -1,0 +1,37 @@
+{
+  "scope": "Surviving compression fixture stabilization only; no compression runtime/protocol/deadline change",
+  "failed_source_sha": "06002ce037faeea0cf7e6f1a3bb69023d02f92ba",
+  "corrected_source_sha": "5431f8ab08a723ef44d6c42cf745ea48c46c2b2b",
+  "original_full_result": {
+    "failed": 1,
+    "passed": 20270,
+    "skipped": 335,
+    "warnings": 1,
+    "duration_seconds": 3558.72,
+    "failure_node": "tests/test_node27_timeseries_compression_live_evidence.py::test_pending_failure_intent_rejects_tampering[same-byte-replacement]"
+  },
+  "actual_failure": "same-byte-replacement expected publish refusal but _publish_terminal_failure returned True; lock deadline warning was setup, not assertion cause",
+  "root_cause": "unlink/write may recycle the original inode. umask077 recreates mode0600, so the complete persisted identity tuple can remain identical. umask022 passed for accidental mode mismatch.",
+  "contract": "same-byte/new-inode rejection; persisted tuple device/inode/bytes/sha256 plus run/verifier and gate binding; no new generation/ABA protocol introduced",
+  "contract_evidence": [
+    "openspec/changes/tier-node27-timeseries-storage/design.md:1204-1212",
+    "openspec/changes/tier-node27-timeseries-storage/tasks.md:1214-1217",
+    "tests/test_node27_timeseries_compression_live_evidence.py::test_cross_process_same_byte_intent_inode_swap_is_rejected"
+  ],
+  "controls": {
+    "private_mask_pre_fix": "exact test fails at iteration0",
+    "actual_reused_inode": {
+      "old": 88346979,
+      "new": 88346979
+    },
+    "held_descriptor_private_mask": "100 distinct-inode replacements rejected",
+    "corrected_fixture_private_mask": "100 exact test invocations passed"
+  },
+  "change": "Create same-byte sibling while original remains linked, chmod0600, assert different inode, then os.replace; original refusal/output/intent assertions unchanged",
+  "independent_verifier": "CompressionFixtureVerifier: CONFIRMED P1 test-evidence, FIX_NOW; no runtime/protocol change required",
+  "limits": [
+    "Private-mask diagnostic loops used only owned isolated temporary directories.",
+    "No production units, env, locks or databases modified.",
+    "Full rerun result is recorded in retirement-workload-verification.json."
+  ]
+}
