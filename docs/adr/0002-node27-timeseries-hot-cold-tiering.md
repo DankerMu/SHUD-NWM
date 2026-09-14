@@ -23,40 +23,36 @@ stands; isolated 2.10.2 probe freezes shell-first movement — see
 
 ## Status
 
-Accepted, as amended below. **Current selective-cold direction: mandatory code
-retirement accepted; implementation and deployment handoff pending (2026-09-13).**
+Accepted, as amended below. **Current selective-cold direction: repository source
+retirement is implemented; survivor verification and effective-deployment handoff
+remain pending (2026-09-14).**
 
-## Amendment (2026-09-13): selective-cold code retirement, not dormant retention
+## Amendment (2026-09-14): selective-cold source retirement, not dormant retention
 
 The current #1891/#1895 contract is
 [`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md).
 Production selective-cold rollout is withdrawn: no fresh G1 retry, cold sample,
-installation/movement or G0–G8 window is planned. Obsolete code **must be removed**
-before retirement closure; keeping it disabled or as future-use stubs is insufficient.
-This accepts a direction, not a claim that code or production references are gone.
+installation/movement or G0–G8 window is planned. R1–R3 removed the cold-only
+package/CLI/config/schema/example/test/selector closure and the source tablespace
+`CREATE` grant/positive audit; R4 corrects current authority without promoting
+withdrawn ADDED cold requirements or rewriting completed history.
 
-The authoritative groups are **R1** minimal PGDATA/governance/shared and manual
-consumer transfer to actual owners; **R2** normal-compression
-decoupling from cold env/paired budgets/launcher with safety intact; **R3** deletion
-of cold-only runtime, old G0–G8 wrappers, schemas/examples/tests/CI and cold SQL
-grant-audit with each actual dependency closure; **R4** active-authority correction without rewriting
-completed history or promoting withdrawn ADDED cold specs; **R5** survivor proof,
-separately authorized effective-deployment handoff and honest closure. Tests/docs
-accompany each source slice. These are summaries, not a parallel implementation plan.
+The surviving PGDATA command/container/evidence guards, ordinary device-bound
+capacity sampling, compression/retention/lifecycle locking, generic readonly
+validation, shipping forecast behavior, and independent C4/river-click producers
+remain under their actual owners. Bringup-C4 production acceptance retains its
+outer reviewed-SHA/exact-byte digest and file-identity guarantee; local C4 CLI
+PASS remains insufficient for production acceptance.
 
-PGDATA command/container/evidence guards, ordinary device-bound capacity sampling,
-compression/retention/lifecycle locking, generic readonly validation and independent
-C4/river-click producers survive. C4's outer reviewed-SHA/exact-byte digest and
-file-identity acceptance guarantee must transfer from G0/C3 to the existing display
-owner's Bringup-C4 production acceptance seam under R1.6, without changing the
-closed C4 protocol or treating local CLI PASS as overall acceptance. R1 must
-deliver the real entrypoint and rejection proof before R3 removes the old owner.
-Actual runbook/CLI consumers must migrate and be repointed before their old
-exits disappear. #1895 is not a new comprehensive
-storage/display acceptance epic. Cold samples, I9, I8, #2162 and #2017 are not
-blanket retirement prerequisites; deployment must still coordinate their actual
-owners and foreign holds. Existing upgrade, capacity and recovery obligations
-remain outside this epic; no new RPO/RTO/storage-construction gates are introduced.
+This is repository source authority only. It does not claim source retirement
+proves effective unit/dropin/env/ExecStartPre disposition, live privilege
+revocation, tablespace/data deletion, or production cleanup. R5 must still prove
+surviving behavior and separately authorize deployment handoff without disabling
+ordinary maintenance. Unexpected deployed cold state requires stop/preserve and a
+dedicated safe disposition. #2293/#2298/#1938 can be disposed as capability
+retired only after affected source and deployed references exit; any transferred
+defect follows its surviving owner.
+
 
 Repository templates are not evidence of the effective unit/dropins/env/ExecStartPre
 or deployed state. No production inspection/cleanup is claimed by this amendment.
@@ -609,9 +605,9 @@ Archive status:
 - status: superseded
 - current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
 - superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-13
+- status_since: 2026-09-14
 - archive_scope: section, including all successor subsections through Lifecycle contract
-- retained_for: historical accepted cold design and isolated engine evidence; rollout withdrawn, code retirement pending
+- retained_for: historical accepted cold design and isolated engine evidence; rollout withdrawn, source retirement complete, effective-deployment handoff pending
 
 The 2026-08-11 revision retired the **product archive / salvage / rebuild**
 lanes after the `/dev/md0` double-disk failure (#1309/#1370). That retirement
@@ -809,9 +805,9 @@ must leave no origin/compressed/index/TOAST catalog or files.
 
 **Current boundary:** this dated PGDATA capability and its real rollback guards
 survive. Its source placement and statement that cold merely “stays inactive”
-are historical: the 2026-09-13 amendment above records current placement and
-mandatory selective-cold code retirement, implementation pending. It neither
-reopens the migration nor changes its separately authorized release/recovery duties.
+are historical: the 2026-09-14 retirement amendment records source retirement
+as implemented and effective-deployment handoff as pending. It neither reopens
+the migration nor changes its separately authorized release/recovery duties.
 
 Issue #2240 adds a separately authorized alternative to selective compressed-chunk
 residency: cleanly stop the existing PostgreSQL cluster, copy its complete physical

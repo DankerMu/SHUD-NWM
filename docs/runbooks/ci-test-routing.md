@@ -16,14 +16,17 @@ tagged and excluded from the pure-CI gate, then run explicitly on node-27.
 
 - `@pytest.mark.e2e` — end-to-end pipeline tests (network / multi-step).
 - `@pytest.mark.grib` — require real GRIB2 decode + eccodes-version-matched fixtures.
+- `@pytest.mark.node27_docker` — dedicated disposable Docker oracle; only the
+  `integration` / `timescaledb_210` / `node27_docker` triple is eligible.
 
-Both are **opt-in** in `tests/conftest.py` (same pattern as `integration`):
+All three are **opt-in** in `tests/conftest.py`:
 default-skip, run only when the matching env flag is set.
 
 | Marker | Opt-in flag |
 |---|---|
 | `e2e`  | `NHMS_RUN_E2E=1`  |
 | `grib` | `NHMS_RUN_GRIB=1` |
+| `node27_docker` | `NHMS_RUN_NODE27_DOCKER=1` for the disposable-Docker triple marker only |
 
 ## CI exclusion
 
@@ -46,26 +49,19 @@ This is the generic SQL lane: ordinary `integration` items run, while
 oracle is node-27. A Docker socket, `/.dockerenv`, or a runnable Docker daemon
 is not authorization to run that marker.
 
-## node-27 TimescaleDB 2.10.2 lane (produce a receipt)
+## Retired selective-cold Docker probe
 
-Run the #1892 isolated probe only explicitly on node-27, outside a production
-window. Do not target `nhms-db`, port `55432`, live PGDATA, production paths, or
-a production/live DSN. The probe creates its own disposable cluster; the
-integration URL only unlocks collection and this isolated probe never connects
-to it. Its safe receipt command is intentionally separate from the generic SQL
-lane and pins the probe node explicitly:
+The former #1892 disposable selective-cold probe was retired with the R3 source
+closure. There is no current node-27 command in this runbook to run that
+withdrawn probe.
 
-```bash
-NHMS_RUN_INTEGRATION=1 \
-NHMS_INTEGRATION_DATABASE_URL=postgresql://unused:unused@127.0.0.1:1/postgres \
-uv run --no-sync pytest -vv -rs -m timescaledb_210 \
-  tests/test_probe_compressed_chunk_cold_tablespace.py::test_isolated_cluster_probe_is_opt_in
-```
-
-Keep the terminal report as the receipt: it must show the explicit marker
-execution and identity-bound owned cleanup. Future `timescaledb_210` tests that
-use database fixtures need their own explicit database/DSN contract; they must
-not silently inherit this non-routable dummy-URL command.
+The generic `node27_docker` triple marker remains a collection boundary for a
+specifically owned disposable Docker oracle: an item must carry
+`integration`, `timescaledb_210`, and `node27_docker`, and
+`NHMS_RUN_NODE27_DOCKER=1` unskips only that triple-marked item. It does not
+unskip ordinary `integration` items or bypass their independent
+`NHMS_RUN_INTEGRATION=1` and database-URL requirements.
+`tests/test_node27_docker_collection_gate.py` pins that distinction.
 
 ## node-27 run convention (produce a receipt)
 

@@ -23,7 +23,7 @@ NODE27_GOVERNANCE_PGDATA_ROOT=/data/GHDC/nhms-primary/pgdata
 # Verify the exact deployed target and approved #2273 receipt before I8; restore
 # the original env value only with the corresponding pre-write PGDATA rollback.
 # No provisioning, physical migration, old-copy cleanup or production setup is
-# authorized here; neither retired archive nor nhms_cold residency is enabled.
+# authorized here.
 NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 
 # Use a node-27-local DB account. Read-only display credentials are enough for

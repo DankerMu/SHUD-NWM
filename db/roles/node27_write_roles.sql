@@ -24,10 +24,10 @@
 --
 -- Phase variables (all boolean, all default `on`):
 --   do_roles      roles, flags, passwords, schema USAGE, DML grants, sequence
---                 USAGE, default privileges, cold-tablespace CREATE grant, the
---                 negative COPY ... FROM PROGRAM probes and the event trigger
---                 that refuses CREATE RULE / CREATE TRIGGER from the write
---                 roles.  Purely additive: nothing here transfers ownership.
+--                 USAGE, default privileges, the negative COPY ... FROM PROGRAM
+--                 probes and the event trigger that refuses CREATE RULE / CREATE
+--                 TRIGGER from the write roles. Purely additive: nothing here
+--                 transfers ownership.
 --   do_ownership  the per-relation ownership transfer loop AND the one
 --                 non-additive privilege statement in this file: the TEMP
 --                 tightening (`REVOKE TEMPORARY ... FROM PUBLIC`, re-granted to
@@ -55,13 +55,12 @@
 --                      somebody SET ROLE into the write set);
 --                   3. relation ownership summary + owner drift;
 --                   4. nhms_display_ro's effective SELECT set;
---                   5. the nhms_cold CREATE grant;
---                   6. the rule/trigger inventory against the four-trigger
+--                   5. the rule/trigger inventory against the four-trigger
 --                      migration allow-list (TimescaleDB's blocker excluded by
 --                      FUNCTION IDENTITY, never by name);
---                   7. those four allow-listed triggers are PRESENT (count = 4)
+--                   6. those four allow-listed triggers are PRESENT (count = 4)
 --                      and ENABLED (tgenabled = 'O');
---                   8. the function-provenance sweep over every stored
+--                   7. the function-provenance sweep over every stored
 --                      expression (column defaults incl. STORED generated
 --                      columns, CHECK constraints, rule actions, trigger
 --                      functions): a referenced function is untrusted when it
@@ -69,9 +68,9 @@
 --                      not executable by nhms_ingest_rw, or is not on the
 --                      migration ALLOW-list (round 4: a deny-list cannot close
 --                      query_to_xml, whose effect is "run this string");
---                   9. the event trigger is present, enabled and
+--                   8. the event trigger is present, enabled and
 --                      superuser-owned;
---                  10. TEMP on the database for each role (verdict is
+--                   9. TEMP on the database for each role (verdict is
 --                      strict-only -- see the block itself).
 --   strict_audit  when on, every leg above raises (psql exits non-zero) instead
 --                 of warning, and the TEMP verdict is checked at all.
@@ -247,14 +246,6 @@ WHERE n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
 ORDER BY n.nspname
 \gexec
 
--- The cold-residency lane issues `ALTER TABLE/INDEX ... SET TABLESPACE
--- nhms_cold` on compressed chunks; moving a relation into a tablespace needs
--- CREATE on it.  Conditional: the tablespace is a one-time superuser install
--- (#1894) and does not exist in a disposable container.
-SELECT format('GRANT CREATE ON TABLESPACE %I TO nhms_ingest_rw', t.spcname)
-FROM pg_tablespace t
-WHERE t.spcname = 'nhms_cold'
-\gexec
 
 \echo '## grants: nhms_download_rw over met only'
 -- The download lane opens no database connection today (measured, design D3).
@@ -281,7 +272,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA met GRANT USAGE ON SEQUENCES TO
 -- allow-list, checks that each allow-listed trigger is still enabled, and
 -- sweeps every stored expression for functions the write role cannot itself
 -- execute -- the `ALTER TABLE ... SET DEFAULT` form, which no event trigger can
--- refuse without breaking cold residency (detection).  The
+-- refuse without breaking valid default-expression management (detection). The
 -- probe runs under SET LOCAL ROLE (COPY checks GetUserId(), so the surrounding
 -- superuser session does not mask the refusal) and touches no application
 -- relation.
@@ -349,12 +340,12 @@ $copy_probe$;
 --
 -- Tag list: `CREATE OR REPLACE RULE` carries the `CREATE RULE` tag, and the
 -- ALTER/DROP tags stop the write roles renaming or removing the four `met`
--- immutability triggers from migration 000043.  `ALTER TABLE` is deliberately
--- NOT in the list: the cold-residency lane needs `ALTER TABLE ... SET
--- TABLESPACE`.  The two `ALTER TABLE` forms of the same gadget -- a planted
--- column DEFAULT / CHECK expression, and `... DISABLE TRIGGER` on an
--- allow-listed guard -- are therefore closed by detection instead: the audit's
--- function-provenance sweep and its presence/`tgenabled` check.
+-- immutability triggers from migration 000043. `ALTER TABLE` remains outside
+-- this event trigger's existing scope; this source retirement does not alter
+-- that allowance. The two escalation forms -- a planted column DEFAULT / CHECK
+-- expression and `... DISABLE TRIGGER` on an allow-listed guard -- are closed
+-- by detection instead: the audit's function-provenance sweep and its
+-- presence/`tgenabled` check.
 CREATE SCHEMA IF NOT EXISTS nhms_guard;
 
 CREATE OR REPLACE FUNCTION nhms_guard.refuse_write_role_rules_and_triggers()
@@ -678,12 +669,12 @@ WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
 ORDER BY 1, 2, 3;
 
 \echo '## audit: function-provenance sweep over stored expressions'
--- The ALTER TABLE form of the same escalation, which the event trigger cannot
--- cover (the cold-residency lane needs ALTER TABLE for SET TABLESPACE): a
--- column DEFAULT or CHECK expression planted by the relation owner is evaluated
--- by whichever role next writes the row -- including the migration superuser --
--- so `DEFAULT length(pg_read_file('/etc/hostname'))` reads server files the
--- owner may not read itself.
+-- The ALTER TABLE form of the same escalation remains outside the event
+-- trigger's existing broad DDL refusal: a column DEFAULT or CHECK expression
+-- planted by the relation owner is evaluated by whichever role next writes the
+-- row -- including the migration superuser -- so `DEFAULT
+-- length(pg_read_file('/etc/hostname'))` reads server files the owner may not
+-- read itself.
 --
 -- The discriminator is PROVENANCE, not executability.  "Can the write role
 -- EXECUTE it" was the first cut and it is a proxy that fails in both obvious
@@ -1244,25 +1235,6 @@ $planted$;
 DROP TABLE pg_temp.nhms_audit_function_refs;
 DROP TABLE pg_temp.nhms_audit_function_sources;
 
-\echo '## audit: CREATE on tablespace nhms_cold for nhms_ingest_rw'
--- The grant itself is a \gexec over pg_tablespace and emits NOTHING when the
--- tablespace is absent, so neither a skipped nor a later-revoked grant shows up
--- anywhere else.  The cold-residency lane would otherwise discover it at its
--- first `ALTER ... SET TABLESPACE nhms_cold`.
-SELECT EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname = 'nhms_cold') AS nhms_cold_present \gset
-\if :nhms_cold_present
-DO $cold_tablespace$
-BEGIN
-  IF NOT has_tablespace_privilege('nhms_ingest_rw', 'nhms_cold', 'CREATE') THEN
-    RAISE WARNING 'cold-residency regression: nhms_ingest_rw lacks CREATE on tablespace nhms_cold -- ALTER ... SET TABLESPACE will be refused';
-  ELSE
-    RAISE NOTICE 'nhms_ingest_rw holds CREATE on tablespace nhms_cold';
-  END IF;
-END
-$cold_tablespace$;
-\else
-\echo '   tablespace nhms_cold absent -- CREATE grant skipped (expected off node-27; on node-27 this means the #1894 install did not run)'
-\endif
 
 \if :strict_audit
 -- Full mode only: owner drift is a hard failure, so the cutover cannot proceed
@@ -1271,11 +1243,6 @@ DO $strict$
 DECLARE
   v_drift int;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname = 'nhms_cold') THEN
-    IF NOT has_tablespace_privilege('nhms_ingest_rw', 'nhms_cold', 'CREATE') THEN
-      RAISE EXCEPTION 'cold-residency regression: nhms_ingest_rw lacks CREATE on tablespace nhms_cold; re-run the provision script';
-    END IF;
-  END IF;
 
   SELECT count(*) INTO v_drift
   FROM pg_class c

@@ -24,6 +24,16 @@ Governing invariant: removing withdrawn selective-cold capability leaves no runn
 | Archive | Apply survivor canonical deltas with source, G7 removal before archive | No cold ADDED promotion; no nonexistent canonical cold capability deletion; final archive separately reviewed only after actual R5 closure |
 
 R3.7 governance env cold block already retired with R1.3: reconcile proof, do not redo. Current role guidance must distinguish source retirement from pending effective privilege disposition. Original receipts/fixtures/reviews/probe history are not rewritten; runtime synthetic schema examples/dead tests are not historical exceptions merely because old.
+
+R4 also closes the retained workload runbook's digest-reconstruction omission:
+normalize captured SQL with `" ".join(sql.split())`, pair it with the published
+typed `query.parameters` envelopes, serialize compact key-sorted JSON with
+`ensure_ascii=False` and `allow_nan=False`, encode UTF-8, then SHA-256.
+Current storage guidance must agree with the surviving `query_digest_preimage`;
+do not alter its tests or immutable history. Verify both committed lane receipts
+independently reproduce their digests using those exact steps, without adding
+source-text pins or a new runtime contract.
+
 Boundary checklist: deleted exported symbols and every caller; non-Python deployable/manual entry; security SQL/audits; shared test/CI closures; survivor identity/error/lock boundaries; canonical capability deletion; historical source vs active authority.
 
 ## Risk packs

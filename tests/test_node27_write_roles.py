@@ -12,9 +12,9 @@ Two families, matching the two halves of the change:
   the ownership retry passes exhaust into a non-zero, audit-visible partial
   transfer, and a change in the display role's SELECT set blocks the cutover.
 
-Live privilege behaviour (compress/decompress/drop_chunks/ANALYZE/SET
-TABLESPACE under the role, COPY ... FROM PROGRAM refused) is measured against a
-real TimescaleDB 2.10.2/PG15 container, not mocked here; the transcript is
+Live privilege behaviour (compress/decompress/drop_chunks/ANALYZE under the
+role, COPY ... FROM PROGRAM refused) is measured against a real TimescaleDB
+2.10.2/PG15 container, not mocked here; the transcript is
 ``openspec/changes/node27-write-path-roles/evidence/local-container-transcript.md``.
 """
 
@@ -782,50 +782,6 @@ def test_audit_rejects_role_membership_in_both_directions(sql_text: str) -> None
     )
 
 
-def test_audit_asserts_the_cold_tablespace_create_grant(sql_text: str) -> None:
-    r"""The cold-tablespace CREATE grant must be audited, not just emitted.
-
-    The grant in ``do_roles`` is a ``\gexec`` that emits NOTHING when the
-    tablespace is absent, so a revoked or never-issued
-    ``GRANT CREATE ON TABLESPACE nhms_cold`` was invisible -- the cold-residency
-    lane would discover it at its first ``SET TABLESPACE`` instead.
-    """
-    section = _psql_section(_sql_code(sql_text), "do_audit")
-    assert "has_tablespace_privilege" in section, (
-        "the audit never checks the cold-tablespace CREATE grant"
-    )
-    assert re.search(
-        rf"has_tablespace_privilege\(\s*'{_INGEST_ROLE}'\s*,\s*'nhms_cold'\s*,\s*'CREATE'\s*\)",
-        section,
-    ), section
-    assert "tablespace nhms_cold absent" in section, (
-        "an absent tablespace must be reported loudly, not silently skipped"
-    )
-    strict = _psql_section(_sql_code(sql_text), "strict_audit")
-    assert "has_tablespace_privilege" in strict, (
-        "a missing CREATE grant must be a hard failure in full mode"
-    )
-    assert re.search(
-        r"RAISE EXCEPTION 'cold-residency regression: nhms_ingest_rw lacks CREATE", strict
-    ), (
-        "the strict leg must RAISE EXCEPTION; a WARNING here would let the "
-        "cutover proceed with the cold-residency lane already broken"
-    )
-    non_strict = section.replace(strict, "\n")
-    assert re.search(
-        rf"has_tablespace_privilege\(\s*'{_INGEST_ROLE}'\s*,\s*'nhms_cold'\s*,\s*'CREATE'\s*\)",
-        non_strict,
-    ), (
-        "--roles-only must still warn about a missing CREATE grant, and it must "
-        "test the grant of nhms_ingest_rw -- the role that runs the "
-        f"cold-residency lane -- not of {_DOWNLOAD_ROLE}"
-    )
-    assert re.search(
-        r"RAISE WARNING 'cold-residency regression: nhms_ingest_rw lacks CREATE", non_strict
-    ), (
-        "--roles-only is the additive pre-merge phase: the missing grant must "
-        "surface as a WARNING naming nhms_ingest_rw, not be silent and not abort"
-    )
 
 
 def test_additive_phase_installs_the_rule_and_trigger_event_trigger(sql_text: str) -> None:
@@ -999,8 +955,7 @@ def test_the_trigger_allow_list_is_exactly_what_the_migrations_create() -> None:
 def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -> None:
     """The `ALTER TABLE` form of the planted-body escalation, judged by PROVENANCE.
 
-    No event trigger can refuse `ALTER TABLE` (the cold-residency lane needs it
-    for `SET TABLESPACE`), so a column `DEFAULT` or `CHECK` is evaluated by
+    No event trigger can refuse `ALTER TABLE`, so a column `DEFAULT` or `CHECK` is evaluated by
     whichever role writes the row -- the migration superuser. "Can the write
     role EXECUTE it" is a proxy and fails in both directions: a function the
     write role AUTHORED in `pg_temp` passes it, and so does a PUBLIC-executable
@@ -1931,12 +1886,6 @@ def test_download_grants_cover_every_scanned_met_dml_target(sql_text: str) -> No
     assert f"GRANT USAGE ON ALL SEQUENCES IN SCHEMA met TO {_DOWNLOAD_ROLE};" in section
 
 
-def test_scanned_set_tablespace_sites_have_a_matching_tablespace_grant(sql_text: str) -> None:
-    sites = _grep_repo(r"SET TABLESPACE", ("packages/common/compressed_chunk_cold_residency.py",))
-    assert sites, "the cold-residency lane no longer issues SET TABLESPACE; re-derive the grant"
-    section = _psql_section(sql_text, "do_roles")
-    assert f"GRANT CREATE ON TABLESPACE %I TO {_INGEST_ROLE}" in section
-    assert "t.spcname = 'nhms_cold'" in section, "the grant must be conditional on the tablespace"
 
 
 def test_migration_class_tooling_stays_inside_the_allow_listed_lane() -> None:
@@ -2297,16 +2246,10 @@ def test_password_alter_is_not_written_to_the_server_log() -> None:
     assert "RESET log_min_duration_statement" in sql
 
 
-# The lanes whose env templates this change switches from the superuser `nhms`
-# to `nhms_ingest_rw` / `nhms_download_rw`.  Not the disposable-cluster probe
-# (`compressed_chunk_cold_probe/*`), which builds and owns its own container and
-# connects as that cluster's own superuser.
+# The recurring entrypoints whose env templates this change switches from the superuser `nhms`
+# to `nhms_ingest_rw` / `nhms_download_rw`.
 _CONVERTED_LANE_SOURCES = _RECURRING_ENTRYPOINTS + (
     "scripts/node27_ingest_run.py",
-    "packages/common/compressed_chunk_cold_residency.py",
-    "packages/common/compressed_chunk_cold_runtime.py",
-    "packages/common/compressed_chunk_cold_tick.py",
-    "packages/common/node27_cold_tablespace_integration.py",
 )
 
 # Surfaces a superuser reads freely and a plain table owner does not.

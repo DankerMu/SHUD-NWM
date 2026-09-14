@@ -105,7 +105,7 @@ describe('C4 evidence construction', () => {
     expect(result.receipt.gfs?.cycle_time).toBe('2026-09-04T00:00:00.000Z')
     expect(result.receipt.ifs?.cycle_time).toBe('2026-09-04T06:00:00.000Z')
     expect(validateC4EvidenceDocument(result.receipt)).toEqual({ ok: true })
-    const bridgeFixture = process.env.C4_ISSUE1895_BRIDGE_FIXTURE
+    const bridgeFixture = process.env.C4_BRIDGE_FIXTURE
     if (bridgeFixture) writeFileSync(bridgeFixture, JSON.stringify(result.receipt))
     expect(validateC4EvidenceDocument(passExample).ok).toBe(true)
   })
