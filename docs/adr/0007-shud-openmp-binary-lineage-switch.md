@@ -44,6 +44,13 @@ golden lineage，与 E 不 bitwise，等于再叠一层数值变更。先上 E�
 求解代价悬崖，从 2.0 挪向率定值 0.004 会让 f_eval 从 843 涨到 386,893（459×），
 且悬崖以下非单调。2.6× 填不上这个量级。见 ADR 0005 与 `GEOL_KSATH` 相关 receipt。
 
+> **2026-09-14 修订（#1904）：本段已过时，`GEOL_KSATH=2.0` 覆盖已退役。** owner 确认该覆盖
+> 并非必须，当时的计算效率问题另有原因，不是这个参数。核对 node-22 生产注册表
+> （`manifest-last.json`，2026-09-14T02:18Z）：六个 HHe 子流域的 12 个活跃包，
+> `cfg.calib` 里的 `GEOL_KSATH` 都是交付率定值（0.00397713437298286），包清单里没有
+> `calibration.overrides`。六条声明已从 `config/calibration_overrides.yaml` 删除；
+> 本 ADR 关于二进制切换的其余决定不变。
+
 ## 一次性效应
 
 切换那一刻，每个流域的下一个 cycle 消费的是**旧二进制写的** `.cfg.ic.update` 作为
