@@ -1,0 +1,52 @@
+{
+  "schema_version": "issue1987.admission.baseline.v1",
+  "baseline_commit": "f24c3fb37be392300052c0d0ebf0ee35366a4599",
+  "deployment_target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "lineage": {
+    "original_comprehensive_rounds": 5,
+    "original_final_review": "approve",
+    "new_children": "explicit user-selected admission split; no reset of parent history"
+  },
+  "tools": [
+    {
+      "name": "window_execute",
+      "original_path": "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/window_execute.py.txt",
+      "original_sha256": "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
+      "bytes": 75277,
+      "new_owner": "tools/window_execute.py",
+      "child": 1
+    },
+    {
+      "name": "window_smoke",
+      "original_path": "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/window_smoke.py.txt",
+      "original_sha256": "d760502a28d508cbb5cab67027625dcfd5f3d3ab62937a86d0959601299f367e",
+      "bytes": 49310,
+      "new_owner": "tools/window_smoke.py",
+      "child": 1
+    },
+    {
+      "name": "governance_stage",
+      "original_path": "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_stage.py.txt",
+      "original_sha256": "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c",
+      "bytes": 33992,
+      "new_owner": "tools/governance_stage.py",
+      "child": 2
+    },
+    {
+      "name": "governance_smoke",
+      "original_path": "openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_smoke.py.txt",
+      "original_sha256": "711d89eecdb449194c9ed217d28c2187e136e8d668c8ffc7da6c6bbbbaba6587",
+      "bytes": 21699,
+      "new_owner": "tools/governance_smoke.py",
+      "child": 2
+    }
+  ],
+  "source_relation": {
+    "status": "diverged",
+    "merge_base": "2e3e8241d4a8f43567b8ac4c0c8b1ea229c1f143",
+    "ahead_by": 98,
+    "behind_by": 12
+  },
+  "original_receipts_modified": false,
+  "production_actions": false
+}

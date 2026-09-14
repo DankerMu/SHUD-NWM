@@ -1,0 +1,18 @@
+{
+  "iteration": 1,
+  "status": "awaiting independent fixture recheck",
+  "prior_review": "fixture-review-1.json",
+  "changes": {
+    "d12-ledger-retention": "Corrected to L before migration commit and L+000059 after committed expand and D12; no ledger deletion.",
+    "prepare-and-worker-historical-oracle": "Seven exact retired versions and real disposable ledger at both actual admission sites; f24 red and changed green.",
+    "child2-old-state-new-active-oracle": "Original f24-produced state; three independent repo identities; pre-cutover/runner/foreign/interrupted-removal/post-removal-audit cases.",
+    "openspec-tools-ci-archive": "D5 defines immutable private bundles, explicit collect-only CI limit and shared-change lifetime.",
+    "child2-selector-expected-output": "Exact request, 168 points and response digest persisted in small-selector-oracle.json."
+  },
+  "syntax_validation": {
+    "openspec": "PASS; 4/4 artifacts complete",
+    "markdownlint": "PASS; 0 issues in 4 files"
+  },
+  "retained_oracle_limit": "f24 late_prepare_admission binds exactly one measured expected-OID constant to the real disposable catalog OID; its existing binding receipt explicitly says control flow is not byte-identical execution. Do not conceal or broaden this substitution.",
+  "production_operations": false
+}

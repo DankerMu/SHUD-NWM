@@ -1,0 +1,95 @@
+{
+  "verdict": "pass",
+  "fixture_review": "pass",
+  "iteration": 1,
+  "summary": "All five previously blocking axes are now written as executable child contracts: phase-dependent D12 ledger retention (L before commit, L+000059 after expand and D12, never DELETE); seven named historical versions seeded into the real disposable catalog at both actual prepare and worker; original f24-produced state consumed by a retargeted tool with independently bound OLD/1a32/415 roots and pre-cutover/runner/foreign/interruption/post-removal-audit cases; D5 immutable bundle publication, CI collect-only limit, and no archive before parent use ends; exact 168-point selector request/digest pinned. No residual acceptance gaps.",
+  "missing_axes": [],
+  "required_additions": [],
+  "invariant_matrix_assessment": {
+    "present": true,
+    "repair_intensity": "high",
+    "governing_invariant": "Admit only the explicitly frozen, recoverable operation; preserve historical data and ownership before any operational mutation. (design.md:170-171)",
+    "source_of_truth": "current SQL filenames, complete applied ledger L, catalog OIDs, immutable runtime/tool hashes, staged governance argument/pin identity (design.md:173-174)",
+    "surfaces_named": [
+      "producers",
+      "validators/entrypoints",
+      "storage/read/write",
+      "downstream",
+      "failure/stale state",
+      "evidence"
+    ],
+    "rows_now_correct": [
+      "historical ledger -> prepare: seven named versions, pending 000059 accept, zero/extra refuse before DDL",
+      "historical ledger -> migration worker: same catalog, three pending-set cases, f24 red / changed green",
+      "expand -> D12: L becomes L+000059; D12 retains that ledger and narrow provenance; pre-commit retains L; no ledger DELETE",
+      "old staged pin -> new active source: original f24 state, retained 1a32 root, independently changed 415 active root",
+      "interrupted unstage -> recovery: pre-cutover, runner, foreign-drift refusals; owned post-removal interruption/audit failure; audit before timer restore",
+      "child readiness -> production: no T0, production migration, live pin removal, or #2280 claims"
+    ],
+    "prior_p0_cleared": "design.md:191 no longer requires removing the 000059 schema_migrations row; matches window_execute.py:1280-1281,1305-1308,1346 and I8-1987.md:86-87,118-121."
+  },
+  "axis_closure": [
+    {
+      "id": "d12-ledger-retention",
+      "status": "closed",
+      "evidence": [
+        "design.md:61-63",
+        "design.md:191",
+        "tasks.md:21-22",
+        "spec.md:15-16,18-22",
+        "receipts/historical-ledger-input.json:22-24"
+      ]
+    },
+    {
+      "id": "prepare-and-worker-historical-oracle",
+      "status": "closed",
+      "evidence": [
+        "design.md:65-76",
+        "tasks.md:18-20,30-32",
+        "spec.md:10-16",
+        "receipts/historical-ledger-input.json:11-19"
+      ]
+    },
+    {
+      "id": "child2-old-state-new-active-oracle",
+      "status": "closed",
+      "evidence": [
+        "design.md:103-109",
+        "design.md:193-194",
+        "tasks.md:63-68,81-83",
+        "spec.md:59-86",
+        "governance_stage.py:657-660 binds NEW to active_root only"
+      ]
+    },
+    {
+      "id": "openspec-tools-ci-archive",
+      "status": "closed",
+      "evidence": [
+        "design.md:141-157 D5",
+        "tasks.md:87-89"
+      ]
+    },
+    {
+      "id": "child2-selector-expected-output",
+      "status": "closed",
+      "evidence": [
+        "tasks.md:77-79",
+        "spec.md:40-42",
+        "receipts/small-selector-oracle.json:7-24 digest 84a95266\u2026"
+      ]
+    }
+  ],
+  "non_gaps": [
+    "Risk-pack selection unchanged and still adequate; Resource limits/discovery remains not-selected with preserve-existing-bounds. D5 is documentation/release evidence for already-selected packs.",
+    "Child 1 remains independently mergeable (D2; old runtime pins; no governance retarget).",
+    "Frozen deployment 415cbd1e vs tool-delivery f24c3fb37 vs OLD a8db vs governance runtime 1a32 still distinct in design.md and receipts/f24-baseline.json.",
+    "Parent #1987 still owns T0, production 000059, owned unstage, task 5.2; #2280 still owns four-route proof. No node-22 work and no production unstage in either child.",
+    "Unstage ordering in D3 matches source: ownership/drift, stop timer, remove owned pin, audit unpinned active==NEW, restore timer. Source facts confirm NEW is bound to active_root, not retained runtime_root.",
+    "Inherited window_smoke bulk (14 CLI, 8 recovery, late-prepare, write-budget) remains retained, not redesigned."
+  ],
+  "residual_risks_not_acceptance_gaps": [
+    "Child 1 implementer must reach Executor.prepare()'s pending-set check in the disposable oracle without weakening production identity/container/OID gates: override those gates only in BoundaryExecutor / oracle-only inputs (design.md:232), not in the production prepare path.",
+    "Zero/extra pending refusals may be folded inside extended happy rather than new --case names; that is implementation, not a missing scenario.",
+    "receipts/small-selector-oracle.json new_runtime_verified=false is the pre-Child-2 pin, not a missing expected output."
+  ]
+}
