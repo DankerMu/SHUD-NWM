@@ -1,0 +1,558 @@
+--- f24/window_smoke.py
++++ tools/window_smoke.py
+@@ -12,7 +12,8 @@
+     --state PRIVATE_ABSOLUTE_NEW_DIR --case happy
+ Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
+ Happy also drives the real main/CLI admission refusals and admitted emergency paths,
+-including window's nested recovery protection; only external boundaries are simulated.
++including window's nested recovery protection and historical-ledger pending-set
++admission at both prepare and the migration worker; only external boundaries are simulated.
+ The harness owns no container lifecycle and never deletes a database/volume.
+ All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
+ systemd, process inspection, git selection and HTTP transport are simulated.
+@@ -45,7 +46,17 @@
+ 
+ IMAGE = "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+ 
++RETIRED_LEDGER_VERSIONS = (
++    "000007_flood.sql",
++    "000015_flood_return_period_identity_indexes.sql",
++    "000017_return_period_max_over_window_identity.sql",
++    "000020_valid_time_discovery_indexes.sql",
++    "000031_search_discovery_return_period_performance.sql",
++    "000034_return_period_run_quality_materialization.sql",
++    "000036_run_product_quality_explicit_source.sql",
++)
+ 
++
+ def load(path, name):
+     loader = importlib.machinery.SourceFileLoader(name, str(path))
+     spec = importlib.util.spec_from_loader(name, loader)
+@@ -279,6 +290,24 @@
+             row = cur.fetchone()
+             w.require(row[:2] == (None, None) and row[2].startswith("15.2"), "FRESH_PG152_REQUIRED")
+     apply_migrations_from_zero(dsn, through="000058")
++    retired = RETIRED_LEDGER_VERSIONS
++    with contextlib.closing(psycopg2.connect(dsn)) as conn:
++        conn.autocommit = True
++        with conn.cursor() as cur:
++            for version in retired:
++                cur.execute(
++                    "INSERT INTO public.schema_migrations (version) VALUES (%s) ON CONFLICT (version) DO NOTHING",
++                    (version,),
++                )
++                w.require(
++                    not (Path(args.new_repo) / "db/migrations" / version).exists()
++                    and not (Path(args.old_repo) / "db/migrations" / version).exists(),
++                    "RETIRED_SQL_FILE_PRESENT",
++                )
++            cur.execute("SELECT version FROM public.schema_migrations ORDER BY version")
++            seeded = [row[0] for row in cur.fetchall()]
++    w.require(all(version in seeded for version in retired), "HISTORICAL_LEDGER_NOT_SEEDED")
++    original_ledger = list(seeded)
+     artifacts = root / "artifacts"
+     artifacts.mkdir()
+     with contextlib.closing(psycopg2.connect(dsn)) as conn:
+@@ -410,6 +439,7 @@
+         forcing_catalog=e.table_metadata("met", "forcing_station_timeseries"),
+     )
+     if args.case == "happy":
++        historical_ledger_admission(e)
+         late_prepare_admission(e)
+     before = e.catalog(), e.ledger()
+     session = psycopg2.connect(dsn) if args.case == "session" else None
+@@ -435,7 +465,28 @@
+             e.sql(statements[0])
+             w.require(e.ledger() == before[1], "DO_INSERTED_LEDGER")
+         else:
+-            e.worker("migrate")
++            migrated = e.worker("migrate")
++            w.require(migrated.get("file") == w.EXPAND, "CHANGED_WORKER_EXPAND_NOT_RECORDED")
++            e.save_file(
++                "historical-ledger-changed-worker-positive.json",
++                json.dumps(
++                    {
++                        "site": "worker",
++                        "pending": "historical",
++                        "result": "accepted-and-committed",
++                        "file": migrated.get("file"),
++                        "ledger_after": e.ledger(),
++                    },
++                    default=str,
++                ).encode(),
++            )
++        if args.case in {"happy", "rename", "source", "restart"}:
++            w.require(
++                e.ledger() == sorted(original_ledger + [w.EXPAND]),
++                "EXPAND_DID_NOT_PRESERVE_HISTORICAL_LEDGER",
++            )
++        else:
++            w.require(e.ledger() == original_ledger, "PRE_COMMIT_LEDGER_NOT_ORIGINAL_L")
+         e.validate_expand()
+         e.sql(
+             "INSERT INTO hydro.hydro_run (run_id,run_type,scenario_id,model_id,basin_version_id,"
+@@ -478,7 +529,14 @@
+             e.start_runtime()
+             e.ingress_audit()
+             cache_boundary(e)
++    expected_ledger = (
++        sorted(original_ledger + [w.EXPAND])
++        if args.case in {"happy", "rename", "source", "restart"}
++        else list(original_ledger)
++    )
++    w.require(e.ledger() == expected_ledger, "PRE_RECOVERY_LEDGER_NOT_TRANSITION")
+     ledger = e.ledger()
++    w.require(ledger == expected_ledger, "CAPTURED_LEDGER_NOT_EXPECTED")
+     narrow_oid = e.s.get("narrow_oid")
+     retained = (
+         e.rows("SELECT * FROM hydro.river_timeseries ORDER BY valid_time,river_segment_key") if narrow_oid else None
+@@ -500,6 +558,7 @@
+     else:
+         e.recover()
+     for _ in range(2):
++        w.require(e.ledger() == expected_ledger, "D12_DELETED_HISTORICAL_OR_EXPAND_LEDGER")
+         prior_epochs = json.loads(json.dumps(e.s["fence_epochs"]))
+         e = reopen(e)
+         e.recover()
+@@ -560,6 +619,441 @@
+             default=str,
+         )
+     )
++
++
++def historical_ledger_admission(e):
++    """Actual prepare and migrate admission against a ledger-only retired catalog."""
++    original_executor, original_safe_path, original_argv, original_getuid = (
++        w.Executor,
++        w.safe_path,
++        sys.argv,
++        os.getuid,
++    )
++    f24_execute = Path(__file__).resolve().parents[2] / (
++        "timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/window_execute.py.txt"
++    )
++    if f24_execute.is_file():
++        f24_bytes = f24_execute.read_bytes()
++    else:
++        f24_bytes = subprocess.check_output(
++            [
++                "git",
++                "show",
++                "f24c3fb37be392300052c0d0ebf0ee35366a4599:openspec/changes/"
++                "timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/"
++                "window_execute.py.txt",
++            ]
++        )
++        f24_execute = e.root / "f24-window_execute.py"
++        w.private_write(f24_execute, f24_bytes)
++    w.require(
++        w.digest(f24_bytes) == "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
++        "F24_EXECUTE_HASH_MISMATCH",
++    )
++    f24 = load(f24_execute, "window_executor_f24")
++    changed = Path(w.__file__).read_bytes()
++    w.require(w.digest(changed) != w.digest(f24_bytes), "CHANGED_EXECUTE_STILL_F24")
++    before_catalog, before_ledger = e.catalog(), e.ledger()
++    w.require(
++        all(version in before_ledger for version in RETIRED_LEDGER_VERSIONS) and w.EXPAND not in before_ledger,
++        "HISTORICAL_LEDGER_NOT_VISIBLE",
++    )
++    extra_current = "000058_hot_timeseries_chunk_interval_3d.sql"
++    w.require(
++        extra_current in before_ledger and extra_current not in RETIRED_LEDGER_VERSIONS, "EXTRA_CURRENT_NOT_APPLIED"
++    )
++    extra_row = e.rows("SELECT version, applied_at FROM public.schema_migrations WHERE version='" + extra_current + "'")
++    w.require(len(extra_row) == 1, "EXTRA_CURRENT_ROW_MISSING")
++    reports = []
++    extra_removed = False
++
++    def restore_extra_row():
++        nonlocal extra_removed
++        applied_at = str(extra_row[0]["applied_at"])
++        current = e.rows(
++            "SELECT version, applied_at FROM public.schema_migrations WHERE version='" + extra_current + "'"
++        )
++        if current != extra_row:
++            e.sql("DELETE FROM public.schema_migrations WHERE version='" + extra_current + "'")
++            e.sql(
++                "INSERT INTO public.schema_migrations (version, applied_at) VALUES ('"
++                + extra_current
++                + "', TIMESTAMPTZ '"
++                + applied_at
++                + "')"
++            )
++        extra_removed = False
++        w.require(
++            e.rows("SELECT version, applied_at FROM public.schema_migrations WHERE version='" + extra_current + "'")
++            == extra_row,
++            "EXTRA_CURRENT_ROW_NOT_RESTORED",
++        )
++
++    def worker_migrate(module):
++        saved_worker_db = (
++            module._WORKER_DATABASE,
++            module._WORKER_PORT,
++            dict(module._WORKER_USERS),
++        )
++        from psycopg2.extensions import parse_dsn
++
++        identity = parse_dsn(e.dsn)
++        module._WORKER_DATABASE = identity["dbname"]
++        module._WORKER_PORT = identity["port"]
++        module._WORKER_USERS = dict.fromkeys(("parse", "read", "admin"), identity["user"])
++        argv = [
++            str(Path(module.__file__).resolve()),
++            "worker",
++            "--state",
++            str(e.root),
++            "--action",
++            "migrate",
++            "--repo",
++            e.fixture.new_repo,
++            "--sha",
++            w.NEW,
++        ]
++        output = io.StringIO()
++        errors = io.StringIO()
++        try:
++            saved_argv = sys.argv
++            sys.argv = argv
++            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
++                rc = module.main()
++        finally:
++            sys.argv = saved_argv
++            module._WORKER_DATABASE, module._WORKER_PORT, module._WORKER_USERS = saved_worker_db
++        stdout = output.getvalue()
++        stderr = errors.getvalue()
++        e.seq += 1
++        e.save()
++        e.save_file(f"historical-worker-{e.seq}.stdout", stdout.encode())
++        e.save_file(f"historical-worker-{e.seq}.stderr", stderr.encode())
++        payload = json.loads(stdout) if stdout.strip() else {}
++        return rc, payload, stderr
++
++    def require_unchanged(code):
++        w.require(e.catalog() == before_catalog and e.ledger() == before_ledger, code)
++
++    def require_worker_pending_refusal(rc, payload, stderr, code):
++        w.require(
++            rc == 1
++            and payload.get("error_type") == "Refusal"
++            and "PENDING_NOT_EXACT_000059" in stderr
++            and "DSN_DESTINATION_MISMATCH" not in stderr
++            and "LIVE_DB_IDENTITY" not in stderr
++            and "MODULE_ORIGIN_MISMATCH" not in stderr
++            and "WORKER_SHA" not in stderr
++            and "CREDENTIAL_ROLE_MISMATCH" not in stderr,
++            code,
++        )
++
++    try:
++        e.sql("DELETE FROM public.schema_migrations WHERE version='" + extra_current + "'")
++        extra_removed = True
++        extra_ledger = e.ledger()
++        w.require(extra_current not in extra_ledger and w.EXPAND not in extra_ledger, "EXTRA_PENDING_NOT_CREATED")
++        rc, payload, stderr = worker_migrate(w)
++        require_worker_pending_refusal(rc, payload, stderr, "WORKER_EXTRA_PENDING_ACCEPTED")
++        w.require(e.catalog() == before_catalog and e.ledger() == extra_ledger, "WORKER_EXTRA_PENDING_SIDE_EFFECT")
++        reports.append({"site": "worker", "pending": "extra", "returncode": rc, "payload": payload})
++        restore_extra_row()
++        e.sql("INSERT INTO public.schema_migrations (version) VALUES ('" + w.EXPAND + "')")
++        rc, payload, stderr = worker_migrate(w)
++        require_worker_pending_refusal(rc, payload, stderr, "WORKER_ZERO_PENDING_ACCEPTED")
++        w.require(
++            e.catalog() == before_catalog and e.ledger() == sorted(before_ledger + [w.EXPAND]),
++            "WORKER_ZERO_PENDING_SIDE_EFFECT",
++        )
++        reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload})
++        e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
++        w.require(e.ledger() == before_ledger, "ZERO_PENDING_LEDGER_NOT_RESTORED")
++        rc, payload, stderr = worker_migrate(f24)
++        require_worker_pending_refusal(rc, payload, stderr, "F24_WORKER_SHOULD_REFUSE_HISTORICAL")
++        require_unchanged("F24_WORKER_HISTORICAL_SIDE_EFFECT")
++        reports.append({"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload})
++    finally:
++        restore_extra_row()
++        if w.EXPAND in e.ledger() and e.catalog() == before_catalog:
++            e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
++
++    assets = e.root / "historical-prepare-assets"
++    assets.mkdir(mode=0o700)
++    hold = "/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json"
++    paths = {hold: assets / "state.json", str(Path(hold).parent / "resume-approved"): assets / "resume-approved"}
++    w.private_write(paths[hold], b'{"phase":"lifted-and-fences-removed"}')
++    w.private_write(paths[str(Path(hold).parent / "resume-approved")], b"fixture approval\n")
++    config = json.loads(json.dumps(e.c))
++    config.update(
++        repo="/home/nwm/NWM",
++        restore_branch="new",
++        restore_ref="refs/remotes/fixture/new",
++        env_files=[str(assets / "fixture.env")],
++        protected_files=list(paths),
++        lock_files=sorted(w.LOCKS),
++        admission={},
++    )
++    w.private_write(assets / "fixture.env", b"# fixture-only installed environment\n")
++    for key in ("go", "d12", "capacity", "artifacts", "governance"):
++        path = assets / (key + ".evidence")
++        data = ("fixture boundary evidence: " + key).encode()
++        w.private_write(path, data)
++        config["admission"][key] = {"path": str(path), "sha256": w.digest(data)}
++    config_path = e.root / "historical-prepare-config.json"
++    w.private_write(config_path, json.dumps(config).encode())
++    external_units = {}
++    for name in w.TIMERS + w.SERVICES:
++        fragment = assets / name
++        w.private_write(fragment, ("# fixture installed unit: " + name + "\n").encode())
++        unit = dict.fromkeys(w.PROPS, "")
++        unit.update(
++            LoadState="loaded",
++            ActiveState="active",
++            SubState="running",
++            Result="success",
++            MainPID="1",
++            UnitFileState="enabled",
++            FragmentPath=str(fragment),
++            WorkingDirectory=config["repo"],
++            ExecStart=config["repo"] + "/fixture-command",
++            ExecMainStatus="0",
++            ExecMainStartTimestampMonotonic="0",
++        )
++        if name == "nhms-node27-timeseries-compression.service":
++            unit["TimeoutStartUSec"] = "1h 5min 40s"
++        external_units[name] = unit
++    fixture_oid = int(e.sql("SELECT 'hydro.river_timeseries'::regclass::oid"))
++    prepare = original_executor.prepare
++    replacements = sum(type(value) is int and value == 24541 for value in prepare.__code__.co_consts)
++    w.require(replacements == 1, "FROZEN_PREPARE_OID_BINDING_CHANGED")
++    constants = tuple(
++        fixture_oid if type(value) is int and value == 24541 else value for value in prepare.__code__.co_consts
++    )
++    bound_prepare = FunctionType(
++        prepare.__code__.replace(co_consts=constants),
++        prepare.__globals__,
++        prepare.__name__,
++        prepare.__defaults__,
++        prepare.__closure__,
++    )
++    f24_prepare = f24.Executor.prepare
++    f24_replacements = sum(type(value) is int and value == 24541 for value in f24_prepare.__code__.co_consts)
++    w.require(f24_replacements == 1, "F24_PREPARE_OID_BINDING_CHANGED")
++    f24_bound_prepare = FunctionType(
++        f24_prepare.__code__.replace(
++            co_consts=tuple(
++                fixture_oid if type(value) is int and value == 24541 else value
++                for value in f24_prepare.__code__.co_consts
++            )
++        ),
++        f24_prepare.__globals__,
++        f24_prepare.__name__,
++        f24_prepare.__defaults__,
++        f24_prepare.__closure__,
++    )
++    lock_paths = {path: str(assets / ("lock-" + str(index))) for index, path in enumerate(sorted(w.LOCKS))}
++
++    class HistoricalPrepareExecutor(BoundaryExecutor):
++        def run(self, argv, **kwargs):
++            if argv == ["docker", "inspect", "nhms-db"]:
++                return json.dumps(
++                    [
++                        {
++                            "Id": "5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f",
++                            "State": {"Running": True},
++                            "Image": IMAGE,
++                            "Mounts": [
++                                {
++                                    "Source": "/data/GHDC/nhms-primary/pgdata",
++                                    "Destination": "/home/postgres/pgdata/data",
++                                }
++                            ],
++                        }
++                    ]
++                ).encode()
++            if argv in (
++                ["systemctl", "--user", "list-unit-files", "--no-pager", "--no-legend"],
++                ["systemctl", "--user", "list-units", "--all", "--no-pager", "--no-legend"],
++                ["systemctl", "--user", "list-timers", "--all", "--no-pager"],
++            ):
++                return b""
++            if argv == ["docker", "exec", "nhms-db", "pg_dump", "-U", "nhms", "-d", "nhms", "--schema-only"]:
++                raise w.Refusal("PREPARE_REACHED_POST_PENDING_DUMP")
++            return super().run(argv, **kwargs)
++
++        def git(self, *args, repo=None):
++            if repo is not None:
++                w.require(str(repo) == self.fixture.new_repo, "UNKNOWN_STAGED_GIT_BOUNDARY")
++                if args == ("rev-parse", "HEAD"):
++                    return w.NEW
++                if args == ("status", "--porcelain=v1", "--untracked-files=all"):
++                    return ""
++                raise w.Refusal("UNKNOWN_STAGED_GIT_BOUNDARY")
++            if args == ("symbolic-ref", "--short", "HEAD"):
++                return "old"
++            if args in (
++                ("rev-parse", "--verify", "refs/heads/new^{commit}"),
++                ("rev-parse", "--verify", "refs/remotes/fixture/new^{commit}"),
++            ):
++                return w.NEW
++            return super().git(*args, repo=repo)
++
++        def drain(self):
++            original = self.c["lock_files"]
++            self.c["lock_files"] = [lock_paths[path] for path in original]
++            try:
++                return super().drain()
++            finally:
++                self.c["lock_files"] = original
++
++        def audit_roles(self):
++            original = self.repo
++            self.repo = Path(self.fixture.old_repo)
++            try:
++                return super().audit_roles()
++            finally:
++                self.repo = original
++
++        def public_probe(self, stopped=False):
++            self.save(public_probe={"status": 200, "at": w.now()})
++
++        def proxy_binding(self):
++            return {"boundary": "isolated-no-proxy"}
++
++    class ChangedHistoricalPrepareExecutor(HistoricalPrepareExecutor):
++        prepare = bound_prepare
++
++    class F24HistoricalPrepareExecutor(HistoricalPrepareExecutor):
++        prepare = f24_bound_prepare
++
++    def safe_boundary(path, private=False):
++        return original_safe_path(paths.get(str(path), path), private)
++
++    saved_env = {key: os.environ.get(key) for key in ("DATABASE_URL", "I8_INGEST_DSN", "I8_DISPLAY_DSN")}
++
++    def invoke_prepare(state_name, executor_cls, module, *, extra_pending=False, insert_expand=False):
++        nonlocal extra_removed
++        root = e.root / ("historical-prepare-" + state_name)
++        instances = []
++
++        def factory(cli_args):
++            fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
++            instance = executor_cls(fixture, e.dsn, cli_args=cli_args)
++            instance.units = json.loads(json.dumps(external_units))
++            instances.append(instance)
++            return instance
++
++        saved_module_executor = module.Executor
++        saved_module_safe_path = module.safe_path
++        saved_module_argv = sys.argv
++        module.Executor = factory
++        module.safe_path = safe_boundary
++        os.getuid = lambda: 1005
++        sys.argv = [
++            str(Path(module.__file__).resolve()),
++            "prepare",
++            "--state",
++            str(root),
++            "--config",
++            str(config_path),
++        ]
++        os.environ.update({key: e.dsn for key in saved_env})
++        output = io.StringIO()
++        try:
++            if extra_pending:
++                e.sql("DELETE FROM public.schema_migrations WHERE version='" + extra_current + "'")
++                extra_removed = True
++            if insert_expand:
++                e.sql("INSERT INTO public.schema_migrations (version) VALUES ('" + w.EXPAND + "')")
++            with contextlib.redirect_stdout(output):
++                rc = module.main()
++        finally:
++            for instance in instances:
++                os.close(instance.lock)
++            if extra_pending:
++                restore_extra_row()
++            if insert_expand and w.EXPAND in e.ledger():
++                e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
++            module.Executor = saved_module_executor
++            module.safe_path = saved_module_safe_path
++            sys.argv = saved_module_argv
++            os.getuid = original_getuid
++            w.Executor, w.safe_path, sys.argv, os.getuid = (
++                original_executor,
++                original_safe_path,
++                original_argv,
++                original_getuid,
++            )
++            for key, value in saved_env.items():
++                if value is None:
++                    os.environ.pop(key, None)
++                else:
++                    os.environ[key] = value
++        receipt = json.loads(output.getvalue()) if output.getvalue().strip() else {}
++        e.save_file("historical-prepare-" + state_name + ".stdout", output.getvalue().encode())
++        return rc, receipt
++
++    try:
++        rc, receipt = invoke_prepare("extra", ChangedHistoricalPrepareExecutor, w, extra_pending=True)
++        w.require(
++            rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
++            "PREPARE_EXTRA_PENDING_ACCEPTED",
++        )
++        require_unchanged("PREPARE_EXTRA_PENDING_SIDE_EFFECT")
++        reports.append({"site": "prepare", "pending": "extra", "returncode": rc, "receipt": receipt})
++        rc, receipt = invoke_prepare("zero", ChangedHistoricalPrepareExecutor, w, insert_expand=True)
++        w.require(
++            rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
++            "PREPARE_ZERO_PENDING_ACCEPTED",
++        )
++        require_unchanged("PREPARE_ZERO_PENDING_SIDE_EFFECT")
++        reports.append({"site": "prepare", "pending": "zero", "returncode": rc, "receipt": receipt})
++        rc, receipt = invoke_prepare("f24-historical", F24HistoricalPrepareExecutor, f24)
++        w.require(
++            rc == 1 and receipt.get("check") == "PENDING_MIGRATIONS_NOT_EXACT",
++            "F24_PREPARE_SHOULD_REFUSE_HISTORICAL",
++        )
++        require_unchanged("F24_PREPARE_HISTORICAL_SIDE_EFFECT")
++        reports.append({"site": "prepare-f24", "pending": "historical", "returncode": rc, "receipt": receipt})
++        rc, receipt = invoke_prepare("historical", ChangedHistoricalPrepareExecutor, w)
++        w.require(
++            rc == 1 and receipt.get("check") == "PREPARE_REACHED_POST_PENDING_DUMP",
++            "PREPARE_HISTORICAL_NOT_ADMITTED",
++        )
++        require_unchanged("PREPARE_HISTORICAL_SIDE_EFFECT")
++        reports.append({"site": "prepare", "pending": "historical", "returncode": rc, "receipt": receipt})
++
++    finally:
++        restore_extra_row()
++        w.Executor, w.safe_path, sys.argv, os.getuid = (
++            original_executor,
++            original_safe_path,
++            original_argv,
++            original_getuid,
++        )
++
++    e.save_file(
++        "historical-ledger-admission.json",
++        json.dumps(
++            {
++                "retired": list(RETIRED_LEDGER_VERSIONS),
++                "ledger_before": before_ledger,
++                "f24_execute_sha256": w.digest(f24_bytes),
++                "changed_execute_sha256": w.digest(changed),
++                "changed_worker_positive": "deferred-to-happy-path-real-e.worker(migrate)",
++                "cases": reports,
++                "limitation": (
++                    "Actual prepare control flow with fixture expected-OID substitution, "
++                    "not byte-identical execution. Worker identity gates remain production constants. "
++                    "Changed-worker historical accept is the later real committed expand on this catalog, "
++                    "not an apply_migration interceptor."
++                ),
++            },
++            default=str,
++        ).encode(),
++    )
++
++    w.require(e.catalog() == before_catalog and e.ledger() == before_ledger, "HISTORICAL_ORACLE_LEFT_RESIDUE")
+ 
+ 
+ def late_prepare_admission(e):

@@ -1,7 +1,11 @@
 ## 1. Historical-ledger admission compatibility
 
-- [ ] 1.1 Update prepare and migration-worker admission together, preserve all historical ledger entries through
+- [x] 1.1 Update prepare and migration-worker admission together, preserve all historical ledger entries through
       expand/D12, and prove the contract using the existing window oracle plus the captured live pending-set input.
+
+Evidence: `receipts/child2324-verification.json` records all eight node-27 isolated scenarios PASS on tool commit
+`fe4c308977da7b013e621772cac9ddbc54691940`, including both original-f24 refusals, real changed-worker expand,
+phase-dependent D12 ledger retention, fourteen CLI cases and four late-prepare cases. Production is not switched.
 
 Scope: this change's `tools/window_execute.py` and `tools/window_smoke.py`, adopted from immutable f24 `.py.txt`
 receipts with hashes and semantic delta. Historical receipts stay unchanged. No runtime re-pin or governance change in
