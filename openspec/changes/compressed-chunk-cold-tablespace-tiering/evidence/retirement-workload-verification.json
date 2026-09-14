@@ -1,0 +1,88 @@
+{
+  "scope": "R1.4 retained PGDATA workload and corresponding R1.5/R4 owner transfer only",
+  "runtime_source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+  "fixture": "fixtures/retirement-pgdata-workload.md",
+  "entrypoint": "scripts/node27_pgdata_workload.py measure",
+  "owners": [
+    "packages/common/node27_pgdata_workload.py",
+    "packages/common/node27_pgdata_workload_query.py",
+    "packages/common/node27_pgdata_workload_plan.py",
+    "packages/common/node27_pgdata_workload_measure.py",
+    "packages/common/node27_pgdata_workload_io.py",
+    "packages/common/node27_pgdata_workload_http.py"
+  ],
+  "verification": {
+    "node27_workload_suites": {
+      "passed": 20,
+      "command": "uv run --all-extras pytest -q tests/test_node27_pgdata_workload.py tests/test_node27_pgdata_workload_plan.py",
+      "source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6"
+    },
+    "sparse_plan_red_proof": {
+      "source_sha": "f054bc01fe122d27831ed28aee3a47f0acf5ede7",
+      "test_source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+      "failed": 3,
+      "passed": 4,
+      "restoration": "git EXIT trap restored the current source; no stash used"
+    },
+    "node27_default_full": {
+      "passed": 20259,
+      "skipped": 335,
+      "warnings": 1,
+      "duration_seconds": 3474.72,
+      "source_sha": "47dbf3b8fdbef24ff6f2ef7f08dc2233ea9201c6",
+      "command": "uv run --all-extras pytest -q",
+      "boundary": "Default environment skips opt-in/unsupported lanes; not proof of all integration/e2e/grib assertions. ecCodes library unavailable warning is outside this slice."
+    },
+    "native_cli": {
+      "receipt": "receipts/retirement-pgdata-workload-smoke.json",
+      "engine": "PostgreSQL 15.2 / TimescaleDB 2.10.2 disposable pinned image",
+      "actual_shipping_api": true,
+      "samples_per_sql_and_api": "1 discarded warmup + 20 accepted",
+      "uncompressed_sql_p95_ms": 2.4615260772407055,
+      "compressed_sql_p95_ms": 3.1969603151082993,
+      "uncompressed_api_p95_ms": 72.47297978028655,
+      "compressed_api_p95_ms": 80.47332894057035,
+      "uncompressed_buffers": 14,
+      "compressed_buffers": 28,
+      "refusals": [
+        "wrong cycle with existing candidate chunks",
+        "non-loopback origin",
+        "HTTP redirect",
+        "symlink DSN",
+        "existing output no-clobber"
+      ],
+      "cleanup": "PASS; only owned container IDs and private root removed"
+    },
+    "local_frontend": {
+      "test_files_passed": 74,
+      "tests_passed": 975,
+      "typecheck": "PASS",
+      "commands": [
+        "pnpm test",
+        "pnpm typecheck"
+      ]
+    },
+    "local_ruff": {
+      "version": "0.15.12 from locked all-extras environment",
+      "result": "PASS",
+      "command": "uv run --all-extras ruff check ."
+    },
+    "openspec": "Strict active change validation passed; final tracked-tree audit and review/CI are separate delivery gates"
+  },
+  "contract_corrections": [
+    "Canonical scenario bindings follow actual shipping forecast_series, not obsolete source aliases.",
+    "Native PostgreSQL timestamptz and surrogate InitPlan identity are validated semantically.",
+    "A nonempty query may probe an empty in-window candidate; root-empty and positive filtered waste still refuse.",
+    "Tests no longer pin incidental SQL spellings, per-OS symlink error labels or absence of safe selector fallback."
+  ],
+  "deviations": [
+    "Raw private PGDATA DSN file replaces retired G7 display.env resolver as approved in fixture.",
+    "New PLAN_ROWS_INVALID refuses missing row metrics; not a new production rollout gate.",
+    "One implementer ran an unrequested local bare-Python plan replay. That output was not accepted as required oracle; Main executed node27 tests and real shipping API/DB proof."
+  ],
+  "limits": [
+    "No effective production deployment, live relocation, privileges or data changed.",
+    "Old G7 copies remain only until the separate R3 deletion closure; no new owner imports or re-exports from them.",
+    "R2, remaining R3/R4, R5 deployment handoff and epic closure are not completed by this receipt."
+  ]
+}

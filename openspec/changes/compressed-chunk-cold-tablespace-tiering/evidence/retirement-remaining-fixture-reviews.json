@@ -7,7 +7,7 @@
     "repair_iterations": 2,
     "verdict": "pass",
     "resolved_axes": ["retained full SQL/API measurement", "concrete owner and CLI", "independent error type and old caller disposition", "selector producer edges", "matrix and evidence floor consistency", "sorted nearest-rank P95"],
-    "limits": "Read-only fixture review; implementation and node-27 full producer proof pending"
+    "limits": "Read-only fixture approval only; subsequent implementation proof is recorded separately in retirement-workload-verification.json"
   },
   "remaining_deletion": {
     "fixture": "fixtures/retirement-cold-family-deletion.md",

@@ -1,6 +1,7 @@
-# Proposed survivor delta
+# PGDATA survivor delta
 
-Target contract only; canonical implementation is unchanged by this revision.
+Applied to canonical alongside the matching R1 owner transfers. Production
+relocation and effective deployment remain separately authorized gates.
 
 ## MODIFIED Requirements
 

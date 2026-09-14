@@ -1,8 +1,9 @@
 ## Context and status
 
 Selective-cold storage is withdrawn in favor of mandatory code retirement under
-issues #1891/#1895. This is proposed design, not implemented state. The repository still
-contains the runtime and old rollout machinery. [tasks.md](tasks.md) is the sole
+issues #1891/#1895. Retirement implementation is in progress: delivered owner
+transfers and remaining runtime/deployment closures are recorded in
+[tasks.md](tasks.md), the sole
 executable R1-R5 contract and concrete path/evidence map; this document explains
 its ownership and safety decisions, not a second plan.
 

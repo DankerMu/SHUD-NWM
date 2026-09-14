@@ -66,7 +66,7 @@ budget fields. Real launcher and collection/survivor proofs are required.
   `fixtures/retirement-governance-owner-transfer.md`. The R3.7 cold governance
   env-template block also retires here; ordinary readonly live audit is not
   effective service-source handoff.
-- [ ] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
+- [x] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
   procedure in `docs/runbooks/tier-node27-timeseries-storage.md` must own its
   generic SQL/API/browser/ingest workload and evidence instructions rather than
   refer to old C1-C4/G0-G8 sections or `node27_issue1895_*` exits. Retain genuinely
@@ -83,7 +83,10 @@ budget fields. Real launcher and collection/survivor proofs are required.
   not the replacement performance recorder or its identity validation.
   Fresh implementation fixture: `fixtures/retirement-pgdata-workload.md`;
   approved full SQL/API measurement, named binding, plan and identity behavior.
-  Fixture approval is not implementation or deployment proof.
+  Implementation evidence: `evidence/retirement-workload-verification.json`;
+  real isolated SQL/API measurement and owned cleanup receipt:
+  `evidence/receipts/retirement-pgdata-workload-smoke.json`.
+  This is not effective production deployment or global retirement completion.
 - [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,
   pre-write restoration, no stale post-write rollback, bounded commands and
@@ -96,7 +99,8 @@ budget fields. Real launcher and collection/survivor proofs are required.
   consumes C4, not the reverse. Generic readonly survives old C2's removal.
   C4 extraction evidence: `evidence/retirement-c4-verification.json`; targeted
   owner/selector, real Node binder, CLI refusal and post-binder mutation proof.
-  Remaining workload/compression/deletion test transfers are still pending.
+  Workload capture/native-plan/CLI and producer-selector tests now follow their
+  PGDATA owner. Remaining compression/deletion test transfers are still pending.
 - [x] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
   SHA-256/file-identity recheck from G0/C3 to the existing display deployment
   owner's **Bringup-C4 production acceptance** seam. R1 must ship and record its
