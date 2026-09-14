@@ -1,0 +1,71 @@
+{
+  "verification_source": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+  "method": "whitespace-fold SQL; published typed parameters; compact sorted JSON ensure_ascii=False allow_nan=False; UTF8; SHA256",
+  "records": [
+    {
+      "lane": "uncompressed",
+      "source_receipt_head": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+      "sql": "\n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            ",
+      "parameters": {
+        "mapping": {
+          "basin_version_id": "it126_basin_v1",
+          "end_time": {
+            "datetime": "2026-05-10T00:00:00Z"
+          },
+          "issue_time": {
+            "datetime": "2026-05-03T00:00:00Z"
+          },
+          "model_id": "it126_model",
+          "river_network_version_id": "it126_rnv_v1",
+          "river_segment_id": "it126_seg_inside",
+          "run_id": "it126_forecast_run",
+          "scenario_ids": {
+            "sequence": [
+              "forecast_gfs_deterministic"
+            ]
+          },
+          "scenario_tokens": {
+            "sequence": [
+              "forecast_gfs_deterministic"
+            ]
+          }
+        }
+      },
+      "published_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65",
+      "independent_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65"
+    },
+    {
+      "lane": "compressed",
+      "source_receipt_head": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+      "sql": "\n            SELECT\n                h.scenario_id,\n                h.model_id,\n                h.source_id,\n                h.cycle_time,\n                h.end_time AS run_end_time,\n                h.forcing_version_id,\n                rnv.river_network_version_id,\n                rt.valid_time,\n                rt.value,\n                rt.unit_e::text AS unit\n            FROM (\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries_legacy rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'legacy'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_segment_id = %(river_segment_id)s\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.river_network_version_id = %(river_network_version_id)s\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  -- transitional compressed-chunk pushdown aid, remove with #1342\n  AND rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n\nUNION ALL\n\nSELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\nFROM hydro.river_timeseries rt\nJOIN hydro.hydro_run h ON h.run_key = rt.run_key\nWHERE h.timeseries_store = 'narrow'\n  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n      WHERE basin_version_id = %(basin_version_id)s\n  )\n  AND rt.river_segment_key = (\n      SELECT river_segment_key FROM core.river_segment\n      WHERE river_segment_id = %(river_segment_id)s\n        AND river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.river_network_version_key = (\n      SELECT river_network_version_key FROM core.river_network_version\n      WHERE river_network_version_id = %(river_network_version_id)s\n  )\n  AND rt.variable_e = 'q_down'::hydro.river_variable\n) rt\n            JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n            JOIN core.river_network_version rnv\n              ON rnv.river_network_version_key = rt.river_network_version_key\n            WHERE h.run_type = 'forecast'\n              AND h.cycle_time = %(issue_time)s\n              AND rt.valid_time >= %(issue_time)s\n              AND rt.valid_time <= %(end_time)s\n              AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))\n              AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s\n            ORDER BY h.scenario_id, rt.valid_time\n            ",
+      "parameters": {
+        "mapping": {
+          "basin_version_id": "it126_basin_v1",
+          "end_time": {
+            "datetime": "2026-08-08T00:00:00Z"
+          },
+          "issue_time": {
+            "datetime": "2026-08-01T00:00:00Z"
+          },
+          "model_id": "it126_model",
+          "river_network_version_id": "it126_rnv_v1",
+          "river_segment_id": "qhh_shud_riv_000042",
+          "run_id": "run-gfs-hot",
+          "scenario_ids": {
+            "sequence": [
+              "forecast_gfs_deterministic"
+            ]
+          },
+          "scenario_tokens": {
+            "sequence": [
+              "forecast_gfs_deterministic"
+            ]
+          }
+        }
+      },
+      "published_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25",
+      "independent_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25"
+    }
+  ],
+  "production_mutation": false
+}
