@@ -630,12 +630,53 @@ def handoff(original, changed, root, case):
 
     if case == "active_runner":
         boundary.runner_busy = True
+        commands_before = len(boundary.commands)
         state, error = consume(changed, a, boundary, identity, "unstage")
         assert isinstance(error, changed.Refusal) and str(error) == "RUNNER_NOT_IDLE"
-        assert Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).read_bytes() == before
+        pin_path = Path(a.unit_root, changed.SERVICE + ".d", changed.PIN)
+        assert pin_path.read_bytes() == before
         current = json.loads((Path(a.state_dir) / "state.json").read_text())
-        assert current["phase"] == "staged" and current["identity"] == identity_before
-        result.update(refusal="RUNNER_NOT_IDLE", phase=current["phase"])
+        assert current["phase"] == "unstage_prepared"
+        assert current["direction"] == "unstage"
+        assert current["outcome"] == "FAIL"
+        assert current["identity"] == identity_before
+        assert current["pin_digest"] == pin_digest
+        assert "unstage_admitted" in boundary.phases
+        assert "unstage_prepared" in boundary.phases
+        assert "unstage_remove_pending" not in boundary.phases
+        assert "unstage_starting" not in boundary.phases
+        assert "unstage_verified" not in boundary.phases
+        assert "unstaged" not in boundary.phases
+        refused_actions = systemctl_user(boundary.commands[commands_before:])
+        assert ["stop", changed.TIMER] in refused_actions
+        assert ["start", changed.SERVICE] not in refused_actions
+        assert ["start", changed.TIMER] not in refused_actions
+        assert boundary.active == "inactive"
+        assert pin_path.exists()
+        boundary.runner_busy = False
+        recovered, recovered_error = consume(changed, a, boundary, identity, "recover")
+        assert recovered_error is None
+        assert recovered["phase"] == "unstaged" and recovered["outcome"] == "PASS"
+        assert recovered["identity"] == identity_before
+        assert recovered["pin_digest"] == pin_digest
+        assert not pin_path.exists()
+        assert boundary.heads[a.active_root] == TARGET
+        assert boundary.heads[a.runtime_root] == RETAINED
+        recover_actions = systemctl_user(boundary.commands)
+        last_stop = max(i for i, item in enumerate(recover_actions) if item == ["stop", changed.TIMER])
+        starts_service = [i for i, item in enumerate(recover_actions) if item == ["start", changed.SERVICE]]
+        starts_timer = [i for i, item in enumerate(recover_actions) if item == ["start", changed.TIMER]]
+        assert starts_service and starts_timer
+        assert last_stop < starts_service[-1] < starts_timer[-1]
+        assert "unstage_remove_pending" in boundary.phases
+        assert "unstage_verified" in boundary.phases
+        assert boundary.phases.index("unstage_verified") < boundary.phases.index("unstaged")
+        result.update(
+            refusal="RUNNER_NOT_IDLE",
+            failed_phase="unstage_prepared",
+            recovered_phase="unstaged",
+            audit_root="active_415",
+        )
         return result
 
     if case == "foreign_pin":
