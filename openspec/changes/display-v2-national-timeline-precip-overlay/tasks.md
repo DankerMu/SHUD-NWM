@@ -181,6 +181,7 @@ Boundary-surface checklist（4.1–4.3）:
 - fail-open 语义不变：镜像或回执写入抛任何异常 -> convert stage 结果不变、不抛出
 - `context.restart_stage` 落在 convert **下游**（`DOWNSTREAM_RESTART_STAGES`，`scheduler_state_types.py:61`）-> 该 pass 在 `_run_cycle_chain` 的 `stage_index < start_stage_index`（`chain_forecast_execution.py:157,166-168`）整段跳过 convert，**不进 hook、不镜像**；恢复靠后续全链重规划的 `resume_cycle_stage` 再入或 Requirement 2 回填脚本
 - 镜像记 `failed` 后 -> 本门**没有**阶段内重试；旧门挂链尾时任何下游重启都会再入 hook 重试，新门下不会（这是相对旧门的**收窄**，非本单修复项，随 F1 立单跟踪）
+  > Supersession（追加指针）：上两行的缺口由 #2076 的 chain-exit recovery 关闭，见下方 `### #2076 / #2070 / #2061` 节 4.24 与 spec Requirement 1「Chain-exit recovery」段。
 - 墙钟暴露面**扩大**（相对旧门）：镜像同步执行，卡住时挡的不再是链尾一次状态写，而是该周期后续全部 stage 与所在 scheduler pass -> #2070 的 blast radius 由本单扩大，需回写该 issue
 
 Evidence Floor（#2069）：本地 `uv run pytest tests/test_orchestration_chain.py -q` + `uv run ruff check .` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；node-27 跑 `tests/test_orchestration_chain.py`（`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`）。node-22 实机 receipt 不在本单——4.11 / #2016 的「新周期镜像」触发点按本单口径读作 convert。
@@ -249,6 +250,73 @@ Boundary-surface checklist（4.17–4.22）:
 Evidence Floor（#2068）：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_orchestration_chain.py tests/test_entropy_audit_script.py -q` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；4.20 移除 oracle 的红证据（改前源码上跑红的输出）；`grep -n "_copyback_canonical_precip" services/tile_publisher/publisher.py` 与 `grep -rn "precip_mirror" --include='*.py'`（排除 tests/）的输出作为「零消费者」证据。node-27 定向 pytest（`CLAUDE.md` 验证 oracle 路由把「后端单测」无条件路由到 node-27，兄弟 `Evidence Floor（#2069）` 同此）：在**一次性 worktree** 上跑（**不得**在 `/home/nwm/NWM` 活动树上 checkout PR 分支——该树正被 retention timer 与 display API 使用，见 #2011 Evidence Floor）：`cd /home/nwm/NWM && git fetch origin && git worktree add /home/nwm/tmp/wt-2068 origin/feat/issue-2068-remove-dead-qdown-precip-mirror-call-site && cd /home/nwm/tmp/wt-2068 && mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp && export PATH=$HOME/.local/bin:$PATH && uv run pytest tests/test_tile_publisher.py tests/test_orchestration_chain.py -q`，跑完 `git worktree remove /home/nwm/tmp/wt-2068`——**不是形式主义**：改指后的 742 行里有 symlink 拒绝、`O_NOFOLLOW` 与 `IFS` 大小写目录名断言，本地 macOS 大小写不敏感文件系统上的绿是弱证据（`tests/test_tile_publisher.py:2983-2985` 自己记着这条）。**无需 display live receipt**：本单不触碰 display 面，生产行为零变化。
 
 计算面 receipt：不需要（前置条件的实机证据已由 #2016/#2010 的既有 receipt 提供，本单不改 Slurm、SHUD 或调度任何面）。
+
+### #2076 / #2070 / #2061 镜像恢复通道 + 状态写入先于镜像 + 回填/publisher 测试补强（NFS 镜像链路批次）
+
+风险分级（Phase 0.5）:
+- Issue type: bugfix + test · Blast radius: medium（orchestrator chain 出口与终态 hook 排序；NFS 写路径复用、不改）· Fixture level: **expanded**（无上游 `Suggested fixture level`；命中 `orchestrator`/state machine、`publish`/`rollback`、persisted state ordering 触发词）· Repair intensity: **high**（chain 出口是每个 cycle pass 必经的共享面；镜像是 NFS 写 + batch 锁）。
+- #2042（canonical readiness reason）同 PR 但另立 compact change `fix-zero-row-canonical-readiness-reason`，与本节写集不相交。
+- 与 forcing 窄表（DB 面）无交集：本节全部是 DB-free 编排 + NFS 文件面。
+- 风险包 selected：Concurrency / shared state / ordering（hook 内状态写 vs 镜像排序；chain 出口 finally 语义）；Error handling / rollback / partial outputs（恢复通道 fail-open，异常透传不变）；Resource limits（恢复通道只搭已有 pass，不新增发现窗口扫描；墙钟 known limit 保留并记理由）；File IO / path safety（恢复前置判据对本地 prcp 目录做 ancestor-no-follow 目录判定、无 prefix；写路径复用 publisher 不改）；Documentation（spec Requirement 1 残留段改写 + plan 文档 supersession 指针 + 本文件 :182-183 指针 + 4.27 两份运维 runbook 与陈旧测试 docstring）；Test evidence（#2061 变异存活体逐条补断言）。not selected：Public API / CLI（publisher 公开入口与回填 CLI 签名不变）、Config（无新 env）、Schema（receipt `details` 形状不变，只 `message` 区分）、Auth（无）、Legacy compatibility（旧 receipt 读者不受影响）、Release（无依赖）、Domain packs（不触碰 forcing 窗口/CRS/SHUD 数值/Slurm 调度语义）。
+
+**#2076 判定（AC1，实现前已查实）**：convert 已终态且镜像 `failed`（或 pass 从下游 restart 起步）的周期，**不存在**常规自动再入 hook 的后续 pass。证据：`_run_cycle_chain` 的 `stage_index < start_stage_index` 整段跳过 convert（`chain_forecast_execution.py:166-168`）；scheduler 对已 convert 周期发的 restart_stage 是 `forcing`（`scheduler_candidates.py:1792/1810`）/`forecast`（`:902/2418/2454/2486/2588/2611/2631`，以及 `:2558` 的 `_STRICT_WARM_START_TERMINAL_RESTART_STAGE`（`:77`，= `forecast`））/`state_save_qc`（`:2662`）；`restart_stage="convert"`（`:1960`）条件是 canonical **不存在**；`restart_stage=None` 全链候选（`scheduler_candidate_manifest.py:235-239` 对 fresh full chain 抑制 restart_stage）对已 convert 周期只由 raw-manifest-missing 修复（`scheduler_state_failure.py:1740-1808`）铸造；node-22 receipt `docs/runbooks/receipts/2026-09-06-precip-copyback-backfill.md` §6.1 每源仅 1 条镜像事件（convert 后约 5h 观测），与「无常规再入」一致。**对 #2070 owner 评论（「每个 pass 经 `_resume_cycle_stage` 再入」）的收窄**：cohort 的 restart 取自 `_restart_stage_from_basins`（`chain_runtime_utils.py:319-336`，忽略无 restart 的 basin、取其余最小值），只有当 cohort 内**没有任何** basin 携带 restart stage 时才以全链进入并经 `resume_cycle_stage` 再入 hook——这条路径确实存在且本就重试镜像（本批不改），但对已 convert 周期不是常规形态（上面的 receipt 实测）；其余 pass 都带下游 restart，不再入。结论 = 走 AC「不存在（常规路径）」分支：落补漏通道。
+
+- [ ] 4.23 (#2070) `_after_cycle_stage_terminal`（`chain_forecast_execution.py`）：镜像改为在该入口的 `update_forecast_cycle_status` 写入**之后**运行，三臂（`succeeded` / `partially_failed` / 失败尾）一致；状态写抛异常时镜像仍跑、异常原样透传（`try/finally` 或等价结构）。`reconcile_unverified` 早退不变；非 convert stage 不镜像不变；`_copyback_stage_run_trees` 仍在 `succeeded` 状态写之前（其 gate 只认 `parse`/`state_save_qc`，与 convert 不重合，#2070 的 raise 陷阱不适用——实现报告需复核并写明）。墙钟上限**不加**（理由见 spec Requirement 1「Ordering (#2070)」段），known limit 保留。调用序测试必须用**共享调用序记录器**（`FakeCycleRepository` 的 `events` 与 `cycle_statuses` 是两条独立 list，不能从两者推断先后）。
+  - #2070 处置（关闭 issue 时逐条写入）：①「排在持久化周期状态写入之前」→ 4.23 关闭；②「无墙钟上限」→ 记录为接受的 known limit（同步 IO + batch 锁下中途放弃更糟），不另立单；③ owner 评论的 resume 路径每 pass 放大 → 已收窄为「仅全 cohort 无 restart 的全链 pass」，非常规形态，不另立单；④ `convert` 的 `python_time_ms` 吸收 NFS 墙钟 → 4.23 后镜像仍在 convert `stage_span` 内，报表口径漂移，`scheduler_timing.py` 无以 convert 时长为 key 的阈值，接受并记录。
+- [ ] 4.24 (#2076) chain-exit recovery：`CycleOrchestrationContext`（`chain_types.py`）新增 invocation-local 字段记录本次调用内镜像最后一次回执状态（`None` = 未跑）；`_mirror_canonical_precip` 写该字段（含吞异常的 `failed`）。`_run_cycle_chain` 所有出口（正常 return 与抛异常）执行一次恢复判据：copyback root 已配 **且** 本地 `canonical/<S>/<cycle>/prcp_rate_or_amount` 为目录（ancestor-no-follow 目录判定、无 prefix，精确口径见下方子条）**且**（本 pass 的 restart index 跳过了 convert **或** 字段 == `failed`）→ 调同一镜像函数，receipt `message` 为 "Canonical precipitation mirror recovered at chain exit."，`details` 形状不变。stages 里没有 convert 时不恢复。恢复自身任何异常吞掉；链上已抛的异常原样透传；返回值不变。
+  - 本地目录判据的精确口径：`Path(self.config.object_store_root) / "canonical" / context.source_id / format_cycle_time(context.cycle_time) / "prcp_rate_or_amount"`（**无** object_store_prefix——publisher 的树路径不加 prefix，`publisher.py:2000-2005`；source 用 context 已 normalize 的 `IFS`/`ERA5` 拼写），且判定须拒绝**任一路径分量**为 symlink（与 publisher `_collect_copyback_source_tree` 一致，用 `stat_no_follow`/`LocalObjectStore.object_kind` 这类 ancestor-no-follow 助手，不是只 `lstat` 叶子），判定自身抛错视为「不存在」、不发回执。
+  - 字段语义：记录镜像 summary 的 `status`（吞异常时为 `failed`），在 `insert_pipeline_event` **之前**写入——回执写失败不影响字段。
+  - 每 pass 成本（接受，理由：判据不得读 NFS/历史）：NFS 树已一致时，一个下游 restart pass 仍会做一次 batch 锁获取、一次两树列举与一条 `skipped`（`trees_already_mirrored`）回执；下游 restart pass 对单一周期受 scheduler retry 上限约束，不是发现窗口级放大。并发 pass（如 `skipped_duplicate_submission`）的恢复与持锁者竞争时可能以 `CopybackLockTimeout` 记一条 `failed` 回执，下个 pass 自愈。
+- [ ] 4.25 (#2061) 测试补强（**只补测试，不改产品代码**），每条附「删掉/变异对应生产分支 → 该测试 FAIL」的变异红证据（issue 的红证据按变异给，不是按改前源码）：
+  - `tests/test_canonical_precip_copyback_backfill.py`：嵌套树 fixture（`prcp_rate_or_amount/<sub>/<file>`）→ 嵌套文件落到目的地对应路径，summary `copied` 含嵌套文件、`failed == 0`；删 `_mirror_directory` 的递归调用（`scripts/canonical_precip_copyback_backfill.py:362`）后 FAIL。嵌套树 rerun 全 `skipped`。
+  - `--source-root` / `--copyback-root` 各自为**普通文件**时 exit 2（两条独立断言）。
+  - `_mirror_file` 的 `S_ISREG` 与目的地 `lstat`（`:380/:388`）：落在模块 docstring 已接受的「copyback-root 下路径分量不 no-follow」缺口 → 若可低成本构造「目的地叶子为目录/非常规文件时记 failed」则补断言，否则在本 issue 关闭评论写明「确认无需覆盖」理由。
+  - `_is_cycle_token`（`:306`）：补「非 10 位数字的 cycle 目录名被忽略」断言（如 `20260905` / `abcdefghij` 目录不进 summary）。
+  - `tests/test_tile_publisher.py`：canonical 树 label 文案 `Canonical precipitation product` 经真实错误路径（如超 `_COPYBACK_MAX_DEPTH` 或 symlink 拒绝的错误消息）至少一处断言钉住。
+  - inode 同一性：`_copyback_canonical_precip` 的 `directory_identity_no_follow` 比较——两个不同路径字符串经探针注入为同一 identity 时返回 `status == "skipped"`、`reason == "copyback_root_matches_object_store_root"`（参照 `tests/test_forcing_copyback_backfill.py:1142` `_inject_alias_identity` 写法）；把 `==` 换成路径字符串比较的变异应 FAIL。
+  - `_CANONICAL_CYCLE_DIR_RE`（`publisher.py:50`）：`copyback_canonical_precip("gfs", "20260905")` 这类非 10 位 token 返回 `failed`（`error_type == "ValueError"`）。
+  - `_discover_canonical_grid_keys` 非目录条目跳过（`publisher.py:1449-1450`）：若既有 `A non-directory beside the grid directories is ignored` 场景已有 publisher 侧测试则引用其名，否则补一条。
+  - `_is_canonical_precip_tree_key` 的 `_SAFE_ID_RE` 分支（`publisher.py:2030-2052`）：caller 全为本进程拼接 → 允许「确认无需覆盖」并写理由；脚本侧无深度上限 vs publisher `_COPYBACK_MAX_DEPTH` 的不对称属行为变更，出范围，在 issue 关闭评论记录。
+- [ ] 4.26 文档：`docs/plans/2026-09-03-display-v2-header-river-precip-timeline.md:94` 之后**追加**一行 supersession 指针（不改写原行），指向 spec Requirement 1 与本文件 `### #2069` 节及本节；spec Requirement 1 已由编排者随 fixture 改写（「Ordering (#2070)」「Chain-exit recovery (#2076)」两段 + 5 个 Scenario），实现者复核与实现一致，不一致以实现报告偏离记录。
+- [ ] 4.27 运维文档与陈旧注释同步（Documentation pack）：`docs/runbooks/current-production-ops.md` 「`canonical_precip_mirror` 记了 `failed` receipt 怎么补：没有任何东西会重试它」段改为：后续经过该周期的下游 restart pass 由 chain-exit recovery 自动重试（同 pass 内也重试一次），手工 backfill 只用于此后再无 pass 的周期；`docs/runbooks/two-node-deployment-overview.md` §7.4 追加恢复回执 `message` 的判读（"Canonical precipitation mirror recovered at chain exit." = 链出口补漏，`skipped` = 已一致无重写）与并发 pass 锁超时的 `failed` 可自愈说明；`tests/test_orchestration_chain.py` `test_canonical_precip_mirror_lock_timeout_still_advances_the_cycle_stage` docstring 中「no later pass re-enters `convert` … only recovery … manual backfill CLI」改为对新行为为真（该测试断言不动）。
+
+### Invariant Matrix delta（4.23–4.27）
+
+- Governing invariant: 一个在本地已有 canonical 降水产物、且有 scheduler pass 经过的周期，其 NFS 镜像最终与源一致；镜像的成败与耗时绝不改变 stage/pass 结果，也不再先于该终态入口的周期状态写入。
+- Source-of-truth identity/contract: `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` + `canonical/<storage_source>/grid/<grid_id>/`（本地 object-store 根 → `NHMS_OBJECT_STORE_COPYBACK_ROOT` 同 keyspace）；receipt `canonical_precip_mirror` 的 `details == {"precip_mirror": ...}`。
+- Producers: `chain_forecast_execution.py::_mirror_canonical_precip`（hook + recovery 共用）；`TilePublisher.copyback_canonical_precip`（不改）；`scripts/canonical_precip_copyback_backfill.py`（不改，只补测）。
+- Validators/preflight: 恢复判据（copyback root、本地 prcp 目录 ancestor-no-follow 判定（无 prefix）、skip-convert/failed）；publisher 的 root identity/overlap/safe-id/limits（不改）。
+- Storage/cache/query: `CycleOrchestrationContext` invocation-local 字段（非全局、非持久，并发 cohort worker 各自一份）；file journal pipeline_event 追加。
+- Public routes/entrypoints: `_run_cycle_chain` / `orchestrate_cycle`（返回值不变）；回填 CLI（不改）。
+- Frontend/downstream consumers: node-27 precip 读侧只看 NFS 树存在性（不改）；运维按 journal `canonical_precip_mirror` 分诊（`message` 新增一种文案）。
+- Failure paths/rollback/stale state: 镜像/回执抛异常吞掉；chain 抛异常原样透传；状态写抛异常原样透传；retention 已剪掉本地树 → 无恢复、无回执。
+- Evidence/audit/readiness: receipt `status_to`/`details` 不变；恢复 receipt 以 `message` 区分。
+- Regression rows:
+  - `restart_stage="forecast"` pass + 本地 prcp 存在 + NFS 树已一致 → 恰 1 条 `status_to == "skipped"`（`reason == "trees_already_mirrored"`）恢复回执，目的地文件 mtime/inode 不变（无重写）
+  - `restart_stage="forecast"` pass + 本地 prcp 目录的**祖先分量**为 symlink → 无恢复、无回执
+  - `restart_stage="forecast"` pass + 本地 prcp 存在 + NFS 缺 → pass 结束后 NFS 树与源一致，恰 1 条恢复 receipt；convert 未被提交/resume（驱动 `_run_cycle_chain`，不直接调 `_mirror_canonical_precip`）
+  - pass1 全链、convert 终态镜像注入失败（chain-exit 重试同样失败）→ pass2 `restart_stage="forecast"`、故障解除 → NFS 一致、receipt 非 failed
+  - 全链 pass、hook 记 `ok` → 无恢复、receipt 数不变
+  - 本地 prcp 目录缺失 / 为 symlink / copyback root 未配 → 无恢复、无回执
+  - 恢复镜像抛异常 / 回执写抛异常 → `_run_cycle_chain` 返回值与无恢复时一致、不抛
+  - chain 内某 stage 抛 `OrchestratorError` + 下游 restart → 恢复仍跑，原异常透传
+  - convert `succeeded` 与失败尾各一：`update_forecast_cycle_status` 调用先于镜像（调用序断言）；状态写抛异常 → 镜像仍跑、该异常透传
+  - 未改兄弟面：`test_canonical_precip_mirror_*`（`tests/test_orchestration_chain.py:3446-4089, 19621-19777`）全绿；`reconcile_unverified` 仍不镜像；非 convert stage 仍不镜像；`_copyback_stage_run_trees` 失败仍 raise
+  - #2061 各变异（删递归 / `==`→字符串比较 / 去 `isdigit` 等）→ 对应新测试 FAIL
+
+Boundary-surface checklist（4.23–4.27）:
+- 共享 helper 根：publisher copyback 族、`copyback_guard` batch 锁**一字不改**
+- 公开入口：`_run_cycle_chain` 返回类型/值、`copyback_canonical_precip` 签名不变
+- 读面：恢复判据只对本地 object-store 根下一个目录做 ancestor-no-follow 判定（无 prefix），不读 NFS（NFS 读写全在复用的 publisher 内）
+- 写/覆盖面：无新增写路径；恢复复用同一镜像
+- stale-state/幂等：recovery 对已一致树 plan skip；字段 invocation-local，不跨 pass 残留
+- 未改下游：scheduler 候选/restart 决策、`scheduler_timing`、node-27 读侧
+
+Evidence Floor（#2076/#2070/#2061）：本地 `uv run ruff check .`、`uv run pytest -q tests/test_orchestration_chain.py tests/test_canonical_precip_copyback_backfill.py tests/test_tile_publisher.py`、`grep -n "没有任何东西会重试" docs/runbooks/current-production-ops.md` 零命中、`grep -n "recovered at chain exit" docs/runbooks/two-node-deployment-overview.md` 有命中、`openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；新行为测试的红证据（4.23/4.24 对改前源码红，4.25 对变异红）；node-27 一次性 worktree 跑同一 pytest 集（`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`，不在 `/home/nwm/NWM` 活动树 checkout PR 分支）。node-22 实机 receipt 不在本批（不改 Slurm/sbatch；生产首次恢复事件属运维观测）。
+
+已知残留（PR `偏离记录` 必列）：hook 镜像与同 pass chain-exit 重试都失败、且此后该周期再无任何 pass 的周期，仍只能手工 backfill——偏离 issue 推荐的「调度器 pass 级检查」，理由是 pass 级扫描会制造 #2070 所述放大且需读 NFS/历史。
+
+Non-goals：墙钟硬上限（known limit 保留）；discovery 窗口级 per-pass 扫描；改 scheduler restart 决策；改回填脚本行为（含深度上限不对称）；改写 node-22 已有 journal/forecast_index。
 
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 
