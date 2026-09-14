@@ -2582,6 +2582,42 @@ ssh -p 32099 nwm@210.77.77.27 \
 
      同日全量扫描：带 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 的活文件只有
      `compute.host.env`、`compute.replay.env`、`compute.scheduler-dbfree.env` 三个。
+   - **run-tree copyback 留下了 backup（`OBJECT_STORE_COPYBACK_BACKUP_RETAINED`，#2237）**：
+     `services/orchestrator/run_tree_copyback.py` 的 `_replace_tree` / `_replace_file` 先把旧
+     target rename 成同目录下隐藏的 `.<name>.copyback-<hex>.backup`，promote 失败且没能
+     rename 回去时（`_raise_if_backup_retained`）保留它并抛这个 code。
+     - **识别**：两种载体、字段层级不同。`object_store_copyback` 的 `failed` pipeline event
+       （node-22 journal）里是 `details.error_code` 为上述 code、字段在 `details.details.*`；
+       stage 抛出的 `OrchestratorError` 里是 `.code`、字段在 `.details.*`（浅一层）。字段为
+       `target`、`backup_path`、`error`（promote 失败）、`restore_error`（回滚失败；未尝试回滚
+       时为 `null`）。target 可能是 `runs/<run_id>`、run 引用的对象树，或一个 extra object 文件。
+     - **含义**：`backup_path` 里是 target 的**旧内容**，而且很可能是唯一一份。target 要么
+       不存在（回滚 rename 失败），要么已被别的东西占住（没有尝试回滚）。
+     - **没有任何东西会回收它**：node-22 retention 把 `runs/` 下点开头的名字记成 `unparseable_run_cycle`
+       跳过（`runs/` 之外的 backup 根本不枚举），下一次 copyback 直接 promote、不看它。
+     - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
+       `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
+       batch mutex，期间不在这个 copyback root 下做别的。锁文件此时必然已存在（留下 backup
+       的那次 copyback 就是持锁跑的），`flock(1)` 不会以 umask 模式新建它。两条命令都在锁内
+       复核 target 状态，状态不符就什么都不做：
+
+       ```bash
+       ssh -p 32099 frd_muziyao@210.77.77.22
+       L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock
+       T='<target>'; B='<backup_path>'   # 取自事件 details.details.* 或 OrchestratorError .details.*
+       # target 不存在：把 backup 放回原名（mv -T 防止 target 期间出现时被搬进去）
+       flock -w 900 "$L" sh -c 'test ! -e "$1" && mv -T "$2" "$1"' _ "$T" "$B" \
+         || echo "lock timeout or target present, nothing done"
+       # target 已存在且已确认是更新的成功 copyback（见下）：删 backup
+       flock -w 900 "$L" sh -c 'test -e "$1" && rm -rf -- "$2"' _ "$T" "$B" \
+         || echo "lock timeout or target absent, nothing done"
+       ```
+
+       删之前先确认 target 是一次**更新的、成功的** copyback 写出的（同一 run 之后有
+       `status_to` 为 `copied` 的 `object_store_copyback` 事件）且内容完整；确认不了就保留
+       backup、别动。放回或删除之后，如该 run 仍需要 copyback，再按该 cycle 的正常重跑路径
+       重做（这条 lane 没有单独的 CLI）。
+     - **target 不存在时绝不删 backup**——那等于删掉这棵树唯一的一份。
    - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
      不枚举 root 级文件，所以这把锁对保留策略不可见。
 2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——

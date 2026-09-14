@@ -84,8 +84,8 @@ design.md must return nothing over this change directory.
 - [x] T11 `scripts/select_ci_tests.py` selects the new test files for diffs
       touching `copyback_guard`, `node27_raw_retention`, `run_tree_copyback`,
       `forcing_copyback_backfill`, `retention` (extend the routing only if not).
-- [ ] T12 Follow-up issues: node-27 unit identity (D5); #2262 body mismatch
-      comment.
+- [x] T12 Follow-up issues: node-27 unit identity (D5) → #2360; #2262 body
+      mismatch comment posted.
 
 ## Evidence Floor
 
@@ -124,14 +124,16 @@ Each item names input → expected output. "Red" = fails on the pre-change sourc
       `checksum_mismatch` package takes zero. Red.
 - [x] EF-8 backfill plan mode: zero acquisitions, no lock file, every package
       record `observed_under_lock: false`; `--apply` records `true`.
-- [ ] EF-9 lock overhead, measured where the backfill runs: on node-22, read-only,
+- [x] EF-9 lock overhead, measured where the backfill runs: on node-22, read-only,
       with `/scratch/frd_muziyao/NWM/.venv/bin/python` (never `uv sync` or a bare
       `uv run`), time the per-package new hold — destination tree read + SHA-256
       over `/ghdc/data/nwm/object-store/forcing/**`, plus source tree SHA-256 for
       the same keys in node-22's object store — and report package count, p50,
       max seconds and the total against the 900 s deadline. If node-22 cannot be
       measured, bound it as bytes ÷ the measured ~62 MB/s and record that as a
-      deviation.
+      deviation. Done: `evidence/backfill-lock-hold-20260914.md` (whole-tree
+      read + SHA-256 as the hold proxy, 40-tree seeded sample, largest package
+      extrapolated at the measured rate; real refs need the DB node-22 lacks).
 - [x] EF-10 node-27 raw retention (lock holders and probes in subprocesses):
       N aged canonical cycles, lock free → N
       `posix` acquisitions and N releases, each spanning only its own `rmtree`;
@@ -157,17 +159,22 @@ Each item names input → expected output. "Red" = fails on the pre-change sourc
       `tests/test_retention_copyback_lock_signal.py`; node-27 canonical in
       `tests/test_node27_raw_retention_copyback_mutex.py`): pass plans tree T; a
       writer acquires, replaces T with new content, commits, releases; the pass
-      then removes T and the planned/deleted sets are unchanged. (Pins existing
-      behaviour; not red by design.)
+      then removes T and the planned/deleted sets are unchanged. The orchestrator
+      lane pins existing behaviour and is green before the change by design;
+      the node-27 lane is red before the change, because that lane never
+      acquired the mutex.
 - [x] EF-16 existing suites green: `tests/test_copyback_guard.py`,
       `tests/test_run_tree_copyback.py`, `tests/test_forcing_copyback_backfill.py`,
       `tests/test_node27_raw_retention.py`, `tests/test_retention_copyback_mutex.py`,
       `tests/test_orchestration_chain.py`, scheduler evidence payload tests.
-- [ ] EF-17 node-27 oracle at the PR head:
+- [x] EF-17 node-27 oracle at the PR head:
       `export TMPDIR=/home/nwm/tmp PATH=$HOME/.local/bin:$PATH` then
       `uv run pytest -q` over EF-16 plus the new files, and
       `uv run ruff check .` locally.
-- [ ] EF-18 node-27 live receipt: one real `production_execute` pass of the
+      Done at `75556204f`: 12 files 1643 passed / 1 skipped; new files plus
+      `test_retention*`, `test_scheduler_evidence*`, `test_production_scheduler*`,
+      `test_cli_cleanup*` 2279 passed / 0 skipped.
+- [x] EF-18 node-27 live receipt: one real `production_execute` pass of the
       branch code as `nwm` through `scripts/node27_raw_retention_once.sh` with
       `NODE27_RAW_RETENTION_REPO` pointing at an isolated checkout (so the
       wrapper's `flock -n` on `NODE27_RAW_RETENTION_LOCK_PATH` still serialises it
@@ -178,6 +185,8 @@ Each item names input → expected output. "Red" = fails on the pre-change sourc
       unaffected and every aged canonical target in `failed[]` with
       `lock_failure: lock_unsafe`, or `canonical` not aged that day (recorded).
       Database URL is never copied into the receipt.
+      Done: `evidence/node27-live-pass-20260914.md` (rc 1, raw deleted 2,
+      canonical 2 × `lock_unsafe`, lock file inode/mode/owner unchanged).
 - [x] EF-19 cross-host receipt: `evidence/lock-interop-20260914.md` (done before
       implementation).
 - [x] EF-20 `openspec validate harden-copyback-mutex-residuals --strict

@@ -87,6 +87,7 @@ AutoSHUD/
 # promoting new project skill files requires intentional force-add / PR review.
 .claude/
 .agents/skills/
+.omp/
 
 # Design artifacts (tracked separately)
 设计图/

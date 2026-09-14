@@ -289,7 +289,10 @@ Regression rows:
 ## Known limits
 
 - The cross-host exclusion is proven by receipt only; CI and node-27 tests
-  exercise `posix` vs `posix` on one host.
+  exercise `posix` vs `posix` on one host. The receipt holds for node-22's
+  current NFS mount options (`vers=4.2`, `local_lock=none`); a mount that
+  changes `local_lock` makes client locks local and silently removes the
+  exclusion.
 - node-27 canonical pruning is paused until the unit identity follow-up lands
   (D5).
 - Retention waiter count remains unbounded in operator `cleanup` concurrency
