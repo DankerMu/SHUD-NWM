@@ -37,6 +37,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Published artifact identity across DB rows, object URIs, and frontend display
 - SHUD required-file content integrity before package source identity/publication: bounded verified reads and zero partial object-store output
 - Whole-cluster physical relocation: clean stop, complete-copy proof, exact container rebind, and stale rollback after write release
+- Frontend API consumers: a new `unwrapApiData` / `getApi` consumer ships with a malformed-payload test (wrong container, null element, wrong element type).
 
 ## Typical evidence
 
