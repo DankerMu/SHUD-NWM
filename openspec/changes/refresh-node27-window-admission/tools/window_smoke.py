@@ -1237,14 +1237,9 @@ def display_ready_oracle(args):
 
             def urlopen(url, timeout=15):
                 request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
-                rewritten = urllib.request.Request(
-                    request.full_url.replace(":8080", ":" + str(server.port), 1),
-                    data=request.data,
-                    headers=dict(request.header_items()),
-                    method=request.get_method(),
-                )
+                request.full_url = request.full_url.replace(":8080", ":" + str(server.port), 1)
                 server.observe()
-                return original_urlopen(rewritten, timeout=timeout)
+                return original_urlopen(request, timeout=timeout)
 
             urllib.request.urlopen = urlopen
             try:
@@ -1549,13 +1544,8 @@ def display_ready_oracle(args):
 
             def urlopen(url, timeout=15):
                 request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
-                rewritten = urllib.request.Request(
-                    request.full_url.replace(":8080", ":" + str(server.port), 1),
-                    data=request.data,
-                    headers=dict(request.header_items()),
-                    method=request.get_method(),
-                )
-                return original_urlopen(rewritten, timeout=timeout)
+                request.full_url = request.full_url.replace(":8080", ":" + str(server.port), 1)
+                return original_urlopen(request, timeout=timeout)
 
             urllib.request.urlopen = urlopen
             try:
