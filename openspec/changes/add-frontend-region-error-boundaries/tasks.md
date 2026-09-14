@@ -90,7 +90,7 @@ Evidence floor:
 
 ### 4. Close-out
 
-- [ ] 4.1 Toolchain E7; node-27 frontend-only deploy and receipt E8.
+- [x] 4.1 Toolchain E7; node-27 frontend-only deploy and receipt E8 (`docs/runbooks/receipts/2026-09-14-issue-2347-region-error-boundaries-node27/`).
 - [ ] 4.2 PR closes #2347; archive after merge.
 
 ## Evidence Mapping
