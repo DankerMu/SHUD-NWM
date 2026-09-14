@@ -1672,6 +1672,28 @@ def test_unified_identity_emits_the_producing_cycle(monkeypatch: Any) -> None:
     assert len(emitted) == 1
 
 
+def test_unified_identity_for_ifs_with_24h_lead_emits_previous_day_cycle(
+    monkeypatch: Any,
+) -> None:
+    """Boundary: ifs, lead 24 → valid_time 2026-07-06T12Z names cycle 2026-07-05T12Z."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "ifs",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "cycle_id": "ifs_2026070512",
+            "lead_hours": 24,
+        },
+        source_id="ifs",
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-05T12:00:00Z")]
+    assert candidates[0].cycle_id == "ifs_2026070512"
+    assert candidates[0].source_id == "ifs"
+    assert [entry.candidate_id for entry in blocked] == ["cand_ifs_2026070612_model_a"]
+    assert [record["status"] for record in evidence] == ["emitted"]
+
+
 def test_identity_with_disagreeing_cycle_id_is_not_emitted(monkeypatch: Any) -> None:
     """A cycle_id naming a cycle other than valid_time - lead_hours is malformed."""
     _wire_manifest_ready(monkeypatch)

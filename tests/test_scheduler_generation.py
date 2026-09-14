@@ -505,6 +505,41 @@ def test_transition_blocks_predecessor_pending_within_current_generation() -> No
     )
 
 
+def test_transition_predecessor_identity_for_ifs_with_24h_lead() -> None:
+    """#1720 boundary: non-gfs source, non-12h lead.
+
+    IFS cycles on 00/06/12/18Z (``IFS_DEFAULT_CYCLE_HOURS_UTC``), so the 24h
+    predecessor of T=2026-07-06T12Z is the 2026-07-05T12Z cycle.
+    """
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="ifs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=24,
+        history=_signal(
+            exists_any=True,
+            exists_current=True,
+            has_exact_predecessor=False,
+            predecessor_cycle_id="ifs_2026070512",
+            predecessor_lead_hours=24,
+            predecessor_valid_time="2026-07-06T12:00:00Z",
+            latest_any_checksum=NEW_CHECKSUM,
+        ),
+        declaration=None,
+    )
+    assert evaluation.decision == generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING
+    _assert_selected_predecessor_is_matcher_key(
+        evaluation.selected_predecessor,
+        model_id="model_a",
+        source_id="ifs",
+        candidate_cycle_time="2026-07-06T12:00:00Z",
+        lead_hours=24,
+        expected_valid_time="2026-07-06T12:00:00Z",
+        expected_cycle_id="ifs_2026070512",
+    )
+
+
 def test_transition_typed_reason_mapping_is_1_to_1() -> None:
     """D8.8: every block enum value maps to exactly one typed reason."""
     assert set(generation.TRANSITION_DECISION_REASONS.keys()) == generation.TransitionDecision.BLOCK

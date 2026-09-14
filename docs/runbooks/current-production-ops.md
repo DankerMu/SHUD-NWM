@@ -934,8 +934,15 @@ publish 绑定的那个值，**不要从 dry-run 拷**。
 >
 > - **retire** entry 匹配不到任何 removal，按 rule 1（retire 的 `model_id` 必须在
 >   `removed` 集合里）判无效——**下一次** refresh 就以 outcome=`failed`、reason=
->   `registry_cutover_declaration_invalid` 拒跑，不是等过期之后才拒。`--dry-run`
->   预览看不到这条拒绝（refusal 只在真实 publish 上评估），不能用它"先试一下"。
+>   `registry_cutover_declaration_invalid` 拒跑，不是等过期之后才拒。这条
+>   **entry 级**拒绝（retire 不在 `removed` 里）只在真实 publish 上评估——
+>   `_classify_registry()` 的 dry_run 分支走 id-only 分类后直接返回、不评估
+>   removal——所以 `--dry-run` 预览看不到它，不能用它"先试一下"。反过来，
+>   **文件级** declaration 加载失败（文件缺失 / 不可读 / 过期 / schema 不符）
+>   在 `--dry-run` 下**照样拒**：`_registry_precommit_gate()` 无条件先加载
+>   declaration、加载失败即按 `registry_cutover_declaration_invalid` 拒
+>   （`scripts/scheduler_file_provider_refresh.py:3481-3508`），而 direct-grid 分支
+>   在 dry-run return 之前就调用了 precommit（`:901-902`）。
 > - **replace** entry 没有 `package_changed` 可覆盖，永远不生效；它的 `generation`
 >   一旦与 renewal 的 prospective 不符、或 declaration 过期 / 文件不可读，同样拖停
 >   每日管线。
@@ -943,7 +950,21 @@ publish 绑定的那个值，**不要从 dry-run 拷**。
 > direct-grid 生产上的换包 / 退役不走 declaration：率定切换按 §5.7.1（provision
 > `M1′` + 直接发布合并 manifest），退役按 §7.2（手工删 manifest 行 + 后续 DB 侧
 > deactivate）。direct-grid 生产上 `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 必须保持
-> 未设置（删掉整行，不留空值）。
+> 未设置（删掉整行，不留空值），拒跑机制在 refresh 进程，要查的是 refresh 读 env 的
+> 两个入口：
+>
+> - systemd timer 路径：`nhms-scheduler-file-provider-refresh.service` 的
+>   EnvironmentFile `infra/env/compute.scheduler-provider-refresh.env`（wrapper
+>   `scripts/scheduler_file_provider_refresh_once.sh` 按 allowlist 解析，模板
+>   `infra/env/compute.scheduler-provider-refresh.env.example`）里不能有这一行；
+> - 手动 CLI 路径：跑 refresh 的 shell 里不能 `export` 它。
+>
+> scheduler 侧 `infra/env/compute.scheduler-dbfree.env`（见下方 Consumer-side note）
+> 在 direct-grid 生产上同样不设：§5.7.1 的克隆行让 §8 走 `warm_continue`，用不到
+> declaration；而一旦设了、文件加载失败（缺失 / 过期 / 不合法），
+> `services/orchestrator/scheduler_generation.py` 的 `evaluate_transition_decision()` 分支 (b) 在
+> `warm_continue` 判定**之前**就把每个候选 block 为 `block_declaration_missing` /
+> `block_declaration_stale`。
 
 操作流程（手动 CLI 路径）：先看被拒 receipt -> 拷 generation / old/new checksum 到
 declaration -> 提交 declaration 到 mode-0600 路径 ->
@@ -1049,10 +1070,14 @@ cutover_declaration`) 读取，用于生成 §8 transition decision（warm_conti
 cold_new_model / cold_declared_cutover / 5 个 block_* reasons）。scheduler 在
 每次 pass 开始时读一次（D8.1: read-once-per-pass, cached per ProductionScheduler
 lifetime），中途修改 declaration 文件不会被生效，直到下一次 scheduler 重启或
-下一次 pass 时才重新加载。node-22 systemd EnvironmentFile
-`compute.scheduler-dbfree.env` 里必须显式设置这个 env 才能 §8 gating 生效；
-未设置 = declaration 缺席 -> 每个 declared-cutover 候选会 block 为
-`registry_cutover_declaration_missing`。
+下一次 pass 时才重新加载。**仅在非 direct-grid 拓扑**（`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID`
+不为 true）上：node-22 systemd EnvironmentFile
+`compute.scheduler-dbfree.env` 里必须在 declared cutover 期间显式设置这个 env，
+declared-cutover 候选的 §8 gating 才能放行；未设置 = declaration 缺席 -> 每个
+declared-cutover 候选会 block 为 `registry_cutover_declaration_missing`。
+direct-grid 生产（当前）不用 declaration：换包走 §5.7.1，克隆行让 §8 走
+`warm_continue`，该分支不读 declaration；scheduler 与 refresh 两侧 env 都保持未设置，
+理由见 §3.1.2 的拓扑围栏（#1720）。
 
 **手动 publisher CLI**（`scripts/publish_scheduler_file_registry.py`）：为兼容 #1080 gate，
 manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就

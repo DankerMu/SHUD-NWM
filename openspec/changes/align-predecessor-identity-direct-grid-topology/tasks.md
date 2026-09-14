@@ -37,9 +37,9 @@ Minimal mergeable slice: atomic for Part 2 — producer and §8.6 consumer must 
 
 ## 4. Live ops (outside diff, receipts on issues)
 
-- [ ] 4.1 jialingjiang registry rows `resource_profile.source_path` moved off scratch staging (owner-authorized republish), receipt on #1698.
-- [ ] 4.2 `Basins-retired/forcing-cleanup-20260825/README.md` and `Basins-retired/issue-1701-20260825/README.md` created (source issue + 90-day deletable date), receipt on #1702.
-- [ ] 4.3 Follow-ups filed: ACL regression (862 non-writable), Huai-MAIN #1816 hop-3 repackage receipt gap (`dg_5bd9935f…`/`dg_67210bfe…`) — filed #2364 (ACL) and #2365 (Huai-MAIN).
+- [x] 4.1 jialingjiang registry rows `resource_profile.source_path` moved off scratch staging (owner-authorized republish), receipt on #1698.
+- [x] 4.2 `Basins-retired/forcing-cleanup-20260825/README.md` and `Basins-retired/issue-1701-20260825/README.md` created (source issue + 90-day deletable date), receipt on #1702.
+- [x] 4.3 Follow-ups filed: ACL regression (862 non-writable), Huai-MAIN #1816 hop-3 repackage receipt gap (`dg_5bd9935f…`/`dg_67210bfe…`) — filed #2364 (ACL) and #2365 (Huai-MAIN).
 
 ## Non-goals
 
