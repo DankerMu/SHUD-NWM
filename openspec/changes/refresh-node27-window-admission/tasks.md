@@ -41,24 +41,24 @@ local Mac.
 
 ## 2. Frozen runtime and owned governance handoff
 
-- [ ] 2.1 Bind and qualify target `415cbd1e9d0eee39ba0dfb623a586b02cbb340f2` across window execution and owned
+- [x] 2.1 Bind and qualify target `415cbd1e9d0eee39ba0dfb623a586b02cbb340f2` across window execution and owned
       governance handoff, preserving the existing staged ownership state and proving fresh pre-T0 readiness.
 
-Current qualification status (2026-09-14): **BLOCKED**, not complete. Tool commit
+Current qualification status (2026-09-14): **PASS, pre-T0 only**. Tool commit
 `b55c7ef9b43eceeae439915629383dfaf0b36a3e` passed the frozen-415 eight-case window matrix; source-identical governance
 tools have ten same-tool and eight original-state handoff cases. Actual 415 read-only audit returned no critical
 recommendations, and the retained exact selector returned the required 168 points/digest.
 
-Actual fresh prepare was attempted with new hash-bound inputs and refused `REQUIRED_UNIT_NOT_ADMITTED`: compression was
-`failed`/124 and retention was `failed`/1 (`RETENTION_CONCURRENT_INVOCATION`). Original staged identity/pin and active
-a8db remained unchanged. No reset-failed, retention rerun, window, recover or unstage was executed. Preserve the failed
-state; separately authorized maintenance recovery and a new fresh prepare are required. Evidence and remaining gates are
-in `receipts/child2325-verification.json`; do not treat partial qualification as task 2.1 completion or parent T0
-authority.
+Historical fresh prepare refused `REQUIRED_UNIT_NOT_ADMITTED`; its state remains preserved. Separately authorized
+maintenance recovery #2349 completed and merged in PR2367: river107 compressed, original maintenance services
+genuinely successful, both timers restored. A new hash-bound prepare with byte-identical tool publication92a5b4350992
+passed at17:35:34Z, state `issue2325-window-92a5b4350992-auth-refresh2-prepare`, phase PREPARED.
+See `receipts/child2325-post-recovery-prepare.json`. Original staged identity/pin and active a8db remain unchanged;
+T0/window/recover/unstage were not executed. This completes child admission, not parent deployment.
 
-Maintenance recovery requires separate authorization and is tracked in
-[#2349](https://github.com/DankerMu/SHUD-NWM/issues/2349). Its resolution is not a waiver of the fresh-prepare criterion
-or the existing failed-unit gate.
+Operational deviations: the launcher uses the existing verified replay.env nhms credential instead of the stale
+container initialization password; no DB password or formal env was changed. An earlier corrected-auth prepare hit
+a baseline tile timeout; unchanged route probes returned200 and the new-state retry passed without weakening checks.
 
 Depends on task 1.1. Scope: the four executables in this change's `tools/`, their target/qualification evidence and
 fixture; adopt the two governance tools from f24 with provenance. No application/library changes or historical receipt
