@@ -1,8 +1,8 @@
 {
   "schema_version": "issue2325.frozen-runtime-qualification.v1",
   "issue": 2325,
-  "status": "BLOCKED",
-  "task_2_1_complete": false,
+  "status": "QUALIFIED_PRE_T0",
+  "task_2_1_complete": true,
   "deployment_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
   "tool_commit": "b55c7ef9b43eceeae439915629383dfaf0b36a3e",
   "tool_hashes": {
@@ -11,7 +11,7 @@
     "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
     "window_smoke.py": "1336af63bc3549a295586b70d972446625258353bb62616d25c70ca1b59afc56"
   },
-  "effective_fixture_tier": "high",
+  "effective_fixture_tier": "expanded",
   "previous_pr_three_seat_exception_inherited": false,
   "proofs": {
     "window": {
@@ -57,6 +57,26 @@
       "receipt": "child2325-selector.json"
     },
     "actual_fresh_prepare": {
+      "status": "PREPARED",
+      "exit": 0,
+      "receipt": "child2325-post-recovery-prepare.json",
+      "tool_publication": "92a5b4350992e130e6191d35162817d73c1e6454",
+      "same_tool_bytes_as": "b55c7ef9b43eceeae439915629383dfaf0b36a3e",
+      "tool_hashes": {
+        "window_execute.py": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+        "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+        "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+        "window_smoke.py": "1336af63bc3549a295586b70d972446625258353bb62616d25c70ca1b59afc56"
+      },
+      "input_publication": "child2325-post-recovery-input-publication.json",
+      "drivers": [
+        "child2325-post-recovery-prepare-launch.py.txt",
+        "child2325-post-recovery-prepare-inputs.py.txt"
+      ],
+      "maintenance_recovery_pr": 2367,
+      "no_T0": true
+    },
+    "historical_refused_prepare": {
       "status": "REFUSED",
       "exit": 1,
       "check": "REQUIRED_UNIT_NOT_ADMITTED",
@@ -65,7 +85,7 @@
     }
   },
   "source_interfaces": "child2325-source-evidence.json",
-  "input_publication": "child2325-input-publication.json",
+  "input_publication": "child2325-post-recovery-input-publication.json",
   "drivers": {
     "window-oracle-launch": {
       "receipt": "child2325-window-oracle-launch.py.txt",
@@ -81,11 +101,23 @@
     },
     "prepare-inputs": {
       "receipt": "child2325-prepare-inputs.py.txt",
-      "sha256": "07fe96d80102afa37be57986c8b2bb008ea0808c5691752bd2b555aab646e5d0"
+      "sha256": "07fe96d80102afa37be57986c8b2bb008ea0808c5691752bd2b555aab646e5d0",
+      "attempt": "historical first-generation refused prepare; preserved unchanged"
     },
     "prepare-launch": {
       "receipt": "child2325-prepare-launch.py.txt",
-      "sha256": "163c453a275a637db6c9e4440342f13af5cbbfc86c426d4b0ea3344dc191c316"
+      "sha256": "163c453a275a637db6c9e4440342f13af5cbbfc86c426d4b0ea3344dc191c316",
+      "attempt": "historical first-generation refused prepare; preserved unchanged"
+    },
+    "child2325-post-recovery-prepare-launch": {
+      "receipt": "child2325-post-recovery-prepare-launch.py.txt",
+      "sha256": "75e5dc54108290d0d8cf2f83c2194b580f083026154e54d329eec120f38c7da1",
+      "attempt": "passing auth-refresh2"
+    },
+    "child2325-post-recovery-prepare-inputs": {
+      "receipt": "child2325-post-recovery-prepare-inputs.py.txt",
+      "sha256": "50aa638aae8cb5f9b319d7d42315e0ba08381a9ec2b83432eada5c40e0823a1e",
+      "attempt": "passing auth-refresh2"
     }
   },
   "diagnostics": "child2325-diagnostics.json",
@@ -97,10 +129,11 @@
   },
   "review": {
     "shared_fixture_review": "fixture-review-2.json PASS covers both children; issue-alignment.json CLEAN",
-    "comprehensive_rounds": 0,
-    "final_review_completed": false,
+    "comprehensive_rounds": 1,
+    "round1": "two confirmed evidence-only gaps corrected; tool code unchanged",
+    "workflow": "User-supplied current workflow: expanded3 seats; one fix re-review; no separate final-review phase",
     "merge_eligible": false,
-    "reason": "Mandatory Phase2 actual prepare criterion is blocked, not silently deferred."
+    "reason": "Await focused re-review and final CI."
   },
   "scope_limits": [
     "Governance system/Git/import/network boundaries simulated; actual415 audit is separate, not production unstage.",
@@ -118,10 +151,8 @@
     "cleanup_trigger": "Retain for authorized maintenance recovery and new qualification; shared change/archive only after parent window/handoff ends."
   },
   "remaining": [
-    "Resolve2349 with separately authorized operations; do not mask unit failure or remove locks.",
-    "Use a NEW state and hash-bound inputs for a successful fresh prepare; preserve failed state and original ownership.",
-    "Then complete task2.1, standard high-tier four-seat review, independent final review, CI and merge gates.",
-    "Accountability PR2341 gets its own log entry alongside next implementation merge.",
-    "Parent1987/2280 execution gates remain separate; no T0/window/recover/unstage performed."
-  ]
+    "Focused re-review of evidence-only correction and final CI/merge gates.",
+    "Parent1987/2280 production execution and acceptance remain separate; no T0/window/recover/unstage performed."
+  ],
+  "historical_input_publication": "child2325-input-publication.json"
 }
