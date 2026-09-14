@@ -56,7 +56,8 @@ backfill 的目标是修复 shared mirror，same-root 属于配置错误。
 所有会在 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 下 **promote 目录树** 的写者——publisher 的
 q_down / run-products / canonical-precip 三条 lane、orchestrator 的 run-tree copyback、
 本工具（每个 package）、以及 `scripts/canonical_precip_copyback_backfill.py`（每棵树）——
-在临界区开始前先取一把跨进程排他 `flock`：
+在临界区开始前先取一把跨进程排他锁（NFS client 侧与本地 root 用 `flock`，导出该 root 的
+node-27 用 POSIX 记录锁，见 ADR 0008）：
 
 ```
 $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
@@ -90,6 +91,10 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
     `frd_muziyao`(1103):`huser`(1078)，整条链上没有 sticky bit，所以 gid 1078 的
     任何成员都能删。若 `ls -ld` 看到 `t`，退回 `sudo chown`。
 - 互斥**覆盖整个 batch**：plan → copy → 每次 promote → commit 或 rollback 返回之后才释放。
+  本工具在 `--apply` 下每个 package 取一次锁，且（#2236 起）这一次持锁覆盖**目标端读取**：
+  目标检查、`already_present` 判定、源端校验、复制、commit/rollback 都在同一次持锁内完成；
+  checksum 分组阶段就被拒的 package 不读目标、不取锁。两个 package 之间让出一个轮询间隔，
+  降低（但不保证消除）等锁写者被连续抢占的概率。
   per-tree 粒度不够：batch rollback 中 `backup_dir is None` 的分支会删掉「此刻位于目标位置的
   东西」，那只有在期间没有别的写者提交过才等于恢复。
 - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`（可选，**默认 900 秒**）限制等待上限。
@@ -100,7 +105,9 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
 - 所有 copyback 写者必须是同一个 uid（node-22 上是 `frd_muziyao`）。`0o600` + 属主断言让
   跑在别的账号下的写者 fail closed，而不是静默地不加锁运行；属主同时比对当前 euid 与
   copyback root 的属主，且外来 uid 在 `O_CREAT` 之前就被拒，所以锁文件不会被别的账号毒化。
-  互斥只在**单机**内成立。
+  跨主机时互斥靠原语选择成立：node-22（NFS client）`flock` 与 node-27（NFS server 本地）
+  POSIX 记录锁双向互斥；node-27 本地 `flock` 与 node-22 `flock` **不**互斥（2026-09-14 实测，
+  ADR 0008）。
 - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。** 条件是
   **uid 相等**，不是「写者能写这个 root」：属主是别的账号、只靠组位开放写的 root
   （例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在 root 的属主上。
@@ -132,6 +139,10 @@ uv run python -m services.tile_publisher.forcing_copyback_backfill \
 扫描只读，不写数据库；查询从符合状态的 `hydro.hydro_run` 出发，用 `EXISTS` 验证 q_down 覆盖，
 避免为发现候选而 materialize 全量 q_down run 集合。历史包很多时 stdout JSON 仍可能很大，建议始终重定向保存。
 
+dry-run **不取锁**（建锁文件本身就是一次写），所以它读到的目标状态只是参考：报告顶层和
+每个 `packages[]` 记录都带 `observed_under_lock: false`。并发写者可能在 dry-run 读完之后
+promote 或 rollback 同一个目标。
+
 报告重点看：
 
 - `copyable_package_count`
@@ -159,6 +170,11 @@ identity、manifest SHA-256、lineage manifest checksum 和 source tree 都必�
 
 目标端如果已经存在且 `forcing_package.json` checksum 与 `met.forcing_version.checksum` 一致，
 报告为 `already_present`，不会重复计为 copied。
+
+**收口判据只读 `--apply` 报告**（顶层 `observed_under_lock: true`）：apply 下 `already_present`
+与 `copied` 一样是在持锁时观察到的，competitor 在锁内 promote 又 rollback 的目标不会被记成
+`already_present`。dry-run 报告（`observed_under_lock: false`）只能用来做计划，不能用来宣布
+「已补齐」。拿不到锁的 package 记 `category: copyback_lock_unavailable`，不中断本次 apply。
 
 ## 重跑
 

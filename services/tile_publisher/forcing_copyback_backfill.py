@@ -4,8 +4,8 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Sequence
-from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -14,7 +14,12 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from packages.common.copyback_guard import CopybackLockError, copyback_batch_lock
+from packages.common.copyback_guard import (
+    COPYBACK_LOCK_POLL_SECONDS,
+    CopybackLockError,
+    acquire_copyback_batch_lock,
+    release_copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
 from packages.common.river_ts_render import render_river_ts_sql
@@ -529,6 +534,9 @@ def _empty_report(
         "status": "completed",
         "mode": "apply" if apply else "dry_run",
         "apply": apply,
+        # Destination observations (`already_present`, target failures) are
+        # authoritative only in `--apply`, where they are made under the mutex.
+        "observed_under_lock": apply,
         "object_store_root": str(object_store_root),
         "copyback_root": str(copyback_root),
         "packages": [],
@@ -572,11 +580,12 @@ def _plan_or_apply_packages(
             continue
         groups.setdefault(ref.object_key, []).append(_Candidate(row=row, ref=ref))
 
+    acquired_before = False
     for object_key in sorted(groups):
         candidates = groups[object_key]
         refs = [candidate.ref for candidate in candidates]
         rows = [candidate.row for candidate in candidates]
-        package = _package_record(object_key, rows)
+        package = _package_record(object_key, rows, observed_under_lock=apply)
         report["packages"].append(package)
 
         checksums = {ref.checksum for ref in refs}
@@ -590,88 +599,114 @@ def _plan_or_apply_packages(
             )
             continue
 
-        target_state = _inspect_existing_target(
-            publisher=publisher,
-            refs=refs,
-            object_key=object_key,
-            target_store=target_store,
-        )
-        if target_state["status"] == "already_present":
-            package.update(
-                {
-                    "status": "already_present",
-                    "file_count": target_state["file_count"],
-                    "byte_count": target_state["byte_count"],
-                }
-            )
-            report["already_present_checksum_consistent_count"] += 1
-            continue
-        if target_state["status"] == "failed":
-            _fail_package(
-                report,
-                package,
+        # #2236: in `--apply` one acquisition per package spans the destination
+        # read, the `already_present` decision, source validation, copy and
+        # commit or rollback, so a skip is observed under the mutex exactly as a
+        # copy is. Plan mode never acquires: creating the lock file is a write.
+        # The mutex is a non-fair poll, so yield one poll interval to a waiting
+        # writer before re-acquiring.
+        lock_fd: int | None = None
+        if apply:
+            if acquired_before:
+                time.sleep(COPYBACK_LOCK_POLL_SECONDS)
+            acquired_before = True
+            try:
+                lock_fd = acquire_copyback_batch_lock(copyback_root)
+            except CopybackLockError as error:
+                category = _classify_tree_error(error, context="target")
+                _fail_package(report, package, rows=rows, reason=str(error), category=category)
+                continue
+        try:
+            _plan_or_apply_package(
+                publisher=publisher,
+                refs=refs,
                 rows=rows,
-                reason=target_state["reason"],
-                category=target_state["category"],
+                package=package,
+                target_store=target_store,
+                copyback_root=copyback_root,
+                apply=apply,
+                report=report,
             )
-            continue
+        finally:
+            if lock_fd is not None:
+                release_copyback_batch_lock(lock_fd)
 
-        source_state = _validate_source_package(publisher, refs, object_key)
-        if source_state["status"] == "failed":
-            _fail_package(
-                report,
-                package,
-                rows=rows,
-                reason=source_state["reason"],
-                category=source_state["category"],
-            )
-            continue
 
-        report["copyable_package_count"] += 1
+def _plan_or_apply_package(
+    *,
+    publisher: TilePublisher,
+    refs: list[_ForcingPackageRef],
+    rows: list[dict[str, Any]],
+    package: dict[str, Any],
+    target_store: LocalObjectStore | None,
+    copyback_root: Path,
+    apply: bool,
+    report: dict[str, Any],
+) -> None:
+    """One package after checksum grouping; in `--apply` the caller holds the mutex."""
+
+    object_key = package["object_key"]
+    target_state = _inspect_existing_target(
+        publisher=publisher, refs=refs, object_key=object_key, target_store=target_store
+    )
+    if target_state["status"] == "already_present":
         package.update(
             {
-                "source_file_count": len(source_state["tree"].files),
-                "source_byte_count": sum(size for _key, size in source_state["tree"].file_sizes),
+                "status": "already_present",
+                "file_count": target_state["file_count"],
+                "byte_count": target_state["byte_count"],
             }
         )
-        if not apply:
-            package["status"] = "copyable"
-            continue
+        report["already_present_checksum_consistent_count"] += 1
+        return
+    if target_state["status"] == "failed":
+        _fail_package(report, package, rows=rows, reason=target_state["reason"], category=target_state["category"])
+        return
 
-        if target_store is None:
-            _fail_package(
-                report,
-                package,
-                rows=rows,
-                reason="NHMS_OBJECT_STORE_COPYBACK_ROOT is not available for apply.",
-                category="target_unsafe",
-            )
-            continue
+    source_state = _validate_source_package(publisher, refs, object_key)
+    if source_state["status"] == "failed":
+        _fail_package(report, package, rows=rows, reason=source_state["reason"], category=source_state["category"])
+        return
 
-        copy_state = _copy_package(
-            publisher=publisher,
-            refs=refs,
-            object_key=object_key,
-            target_store=target_store,
-            copyback_root=copyback_root,
+    report["copyable_package_count"] += 1
+    package.update(
+        {
+            "source_file_count": len(source_state["tree"].files),
+            "source_byte_count": sum(size for _key, size in source_state["tree"].file_sizes),
+        }
+    )
+    if not apply:
+        package["status"] = "copyable"
+        return
+
+    if target_store is None:
+        _fail_package(
+            report,
+            package,
+            rows=rows,
+            reason="NHMS_OBJECT_STORE_COPYBACK_ROOT is not available for apply.",
+            category="target_unsafe",
         )
-        if copy_state["status"] == "failed":
-            _fail_package(
-                report,
-                package,
-                rows=rows,
-                reason=copy_state["reason"],
-                category=copy_state["category"],
-            )
-            continue
-        package.update(
-            {
-                "status": "copied",
-                "file_count": copy_state["file_count"],
-                "byte_count": copy_state["byte_count"],
-            }
-        )
-        report["copied_count"] += 1
+        return
+
+    copy_state = _copy_package(
+        publisher=publisher,
+        refs=refs,
+        object_key=object_key,
+        target_store=target_store,
+        copyback_root=copyback_root,
+    )
+    if copy_state["status"] == "failed":
+        _fail_package(report, package, rows=rows, reason=copy_state["reason"], category=copy_state["category"])
+        return
+    package.update(
+        {
+            "status": "copied",
+            "file_count": copy_state["file_count"],
+            "byte_count": copy_state["byte_count"],
+        }
+    )
+    report["copied_count"] += 1
 
 
 def _inspect_existing_target(
@@ -742,56 +777,48 @@ def _copy_package(
     copyback_root: Path,
 ) -> dict[str, Any]:
     rollback_log: list[_CopybackRollbackEntry] = []
-    # #2035 Weakness A: the mutex is held per package, over the WHOLE
-    # `rollback_log` lifetime -- releasing it after the copy but before the
-    # commit or the rollback is exactly the defect shape this change removes.
-    # `ExitStack` rather than a plain `with`, because the lock must still be held
-    # when the `except` handler's `_rollback_qdown_copyback_batch` returns, and a
-    # `with` inside the `try` would have released it first. It is entered inside
-    # the `try` so a lock failure is recorded as a failed package like every other
-    # copy failure, instead of aborting the whole `--apply` run; `rollback_log` is
-    # still empty then, so the rollback is a no-op.
-    #
-    # Never inside `publisher._copyback_object_tree_with_rollback`: `flock` is per
-    # open file description, so an acquisition down there would deadlock against
-    # this one until the deadline.
-    with ExitStack() as lock_stack:
+    # #2035 Weakness A: the caller `_plan_or_apply_packages` holds the batch mutex
+    # for this whole call, so the commit and the `except` handler's rollback both
+    # return before it is released. Never acquired here or inside
+    # `publisher._copyback_object_tree_with_rollback`: the guard is not
+    # reentrant, so a nested acquisition would contend with the caller's until
+    # the deadline.
+    try:
+        summary = publisher._copyback_object_tree_with_rollback(
+            object_key,
+            target_store,
+            validate_source_tree=lambda source_tree: publisher._validate_forcing_source_tree_for_refs(
+                refs, source_tree, publisher.object_store
+            ),
+            validate_target_tree=lambda target_tree: publisher._validate_forcing_source_tree_for_refs(
+                refs, target_tree, target_store
+            ),
+            rollback_log=rollback_log,
+        )
+        _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+    except Exception as error:
         try:
-            lock_stack.enter_context(copyback_batch_lock(copyback_root))
-            summary = publisher._copyback_object_tree_with_rollback(
-                object_key,
-                target_store,
-                validate_source_tree=lambda source_tree: publisher._validate_forcing_source_tree_for_refs(
-                    refs, source_tree, publisher.object_store
-                ),
-                validate_target_tree=lambda target_tree: publisher._validate_forcing_source_tree_for_refs(
-                    refs, target_tree, target_store
-                ),
-                rollback_log=rollback_log,
-            )
-            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-        except Exception as error:
-            try:
-                _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-            except SafeFilesystemError as rollback_error:
-                return {
-                    "status": "failed",
-                    "reason": f"{error}; rollback failed: {rollback_error}",
-                    "category": _classify_tree_error(error, context="target"),
-                }
-            original = error.original_error if isinstance(error, _ForcingPackageValidationError) else error
+            _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+        except SafeFilesystemError as rollback_error:
             return {
                 "status": "failed",
-                "reason": str(original),
-                "category": _classify_tree_error(original, context="target"),
+                "reason": f"{error}; rollback failed: {rollback_error}",
+                "category": _classify_tree_error(error, context="target"),
             }
+        original = error.original_error if isinstance(error, _ForcingPackageValidationError) else error
+        return {
+            "status": "failed",
+            "reason": str(original),
+            "category": _classify_tree_error(original, context="target"),
+        }
     return {"status": "copied", **summary}
 
 
-def _package_record(object_key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _package_record(object_key: str, rows: list[dict[str, Any]], *, observed_under_lock: bool) -> dict[str, Any]:
     return {
         "object_key": object_key,
         "status": "planned",
+        "observed_under_lock": observed_under_lock,
         "run_ids": sorted({str(row.get("run_id")) for row in rows if row.get("run_id") not in (None, "")}),
         "forcing_version_ids": sorted(
             {

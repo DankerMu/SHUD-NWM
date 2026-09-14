@@ -1994,6 +1994,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # above. DB-free, local, 25 tests in 5.27s, so a rule rather than a
             # rule-gap exclusion.
             "tests/test_retention_copyback_mutex.py",
+            # #2262: retention.py's typed lock-failure signal and the
+            # compaction that must keep it (scheduler_evidence_payload.py rides
+            # this rule too). DB-free, local, sub-second.
+            "tests/test_retention_copyback_lock_signal.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
@@ -2002,6 +2006,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retry_cancel_consistency.py",
             "tests/test_run_identity.py",
             "tests/test_run_tree_copyback.py",
+            # #2237: run_tree_copyback.py's backup lifecycle oracle. Sub-second.
+            "tests/test_run_tree_copyback_backup_lifecycle.py",
             "tests/test_scheduler_backfill_predecessor.py",
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_scheduler_generation.py",
@@ -2132,6 +2138,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_tile_publisher.py",
             "tests/test_forcing_copyback_backfill.py",
+            # #2236: forcing_copyback_backfill.py's `--apply` lock-scope oracle.
+            "tests/test_forcing_copyback_backfill_lock_scope.py",
             "tests/test_static_serving.py",
             "tests/test_cli_publish_qdown.py",
             # #1442: publisher.py (B) and forcing_copyback_backfill.py (C) are
@@ -2449,7 +2457,26 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # mutex suite. Path-exact with neither flag: no stop rule matches this
         # path, so the existing selections accumulate unchanged beside it.
         "packages/common/copyback_guard.py",
-        ("tests/test_retention_copyback_mutex.py",),
+        (
+            "tests/test_retention_copyback_mutex.py",
+            # #2252/#2262 (harden-copyback-mutex-residuals): the guard gained the
+            # `posix` primitive, the non-finite timeout refusal, the budget
+            # constant and the lock-failure classifier. Its own primitive suite
+            # and every lane suite whose contract reads those names ride here, so
+            # a guard-only diff reaches each lane's requirement oracle.
+            "tests/test_copyback_guard_primitive.py",
+            "tests/test_forcing_copyback_backfill_lock_scope.py",
+            "tests/test_node27_raw_retention_copyback_mutex.py",
+            "tests/test_retention_copyback_lock_signal.py",
+            "tests/test_run_tree_copyback_backup_lifecycle.py",
+        ),
+    ),
+    PathTestRule(
+        # #2252: the node-27 canonical lane's copyback-mutex oracle. Not a
+        # same-name suite, so derivation never reaches it. Path-exact with
+        # neither flag, so the same-name suite still accumulates beside it.
+        "scripts/node27_raw_retention.py",
+        ("tests/test_node27_raw_retention_copyback_mutex.py",),
     ),
     PathTestRule(
         # I1 #1980 river_ts_render: the shared per-store renderer. It owns the

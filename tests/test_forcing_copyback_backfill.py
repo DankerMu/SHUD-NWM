@@ -1395,10 +1395,12 @@ def test_backfill_lenient_pre_check_returns_silently_when_the_probe_fails(
 # --------------------------------------------------------------------------- #
 # #2035: this tool promotes directory trees under the same shared copyback root
 # as the publisher, so it takes the same batch mutex -- per package, held over
-# the whole `rollback_log` lifetime. `_copy_package` calls
-# `publisher._copyback_object_tree_with_rollback` directly while already holding
-# the lock, which is why `copyback_batch_lock` is never acquired inside that
-# helper (`flock` is per open file description and would deadlock).
+# the whole `rollback_log` lifetime. Since #2236 the acquisition sits in
+# `_plan_or_apply_packages`, around the destination read as well; `_copy_package`
+# calls `publisher._copyback_object_tree_with_rollback` while its caller holds
+# the lock, which is why neither of them acquires (`flock` is per open file
+# description and would deadlock). The wider scope is pinned in
+# `tests/test_forcing_copyback_backfill_lock_scope.py`.
 # --------------------------------------------------------------------------- #
 def test_apply_holds_the_batch_mutex_across_the_whole_rollback_log_lifetime(
     tmp_path: Path,
@@ -1459,14 +1461,14 @@ def test_apply_holds_the_batch_mutex_while_the_rollback_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """E19, forcing lane x "held through rollback": the reason the `ExitStack` exists.
+    """E19, forcing lane x "held through rollback".
 
-    `_copy_package` wraps the lock in an `ExitStack` entered inside the `try:`
-    precisely so the lock outlives `_rollback_qdown_copyback_batch` in the
-    `except` handler. A plain `with copyback_batch_lock(...)` inside that `try:`
-    would release on the way out of the body and the rollback -- which for a
-    `backup_dir is None` entry `rmtree`s whatever now sits at the target -- would
-    run unlocked, which is the exact defect shape this change removes.
+    The lock is held by `_plan_or_apply_packages` around the whole
+    `_copy_package` call, so it outlives `_rollback_qdown_copyback_batch` in
+    `_copy_package`'s `except` handler. A lock released on the way out of the
+    copy body would let the rollback -- which for a `backup_dir is None` entry
+    `rmtree`s whatever now sits at the target -- run unlocked, which is the exact
+    defect shape #2035 removed.
 
     The failure is injected at the commit, not inside the copy loop: a raise
     inside `_copyback_collected_object_tree`'s file loop happens *before* the
@@ -1610,15 +1612,23 @@ def test_apply_leaves_every_level_it_created_traversable_under_umask_027(
 
 
 def test_the_batch_mutex_is_never_acquired_inside_the_shared_copy_helper() -> None:
-    """T1: acquire at batch-owner level only, because `flock` is not reentrant."""
+    """T1: acquire at batch-owner level only, because `flock` is not reentrant.
+
+    Since #2236 the batch owner is `_plan_or_apply_packages`, so `_copy_package`
+    joins the helpers that must not acquire.
+    """
 
     from services.tile_publisher import publisher as publisher_module
 
-    for name in (
-        "_copyback_object_tree_with_rollback",
-        "_copyback_object_tree",
-        "_copyback_collected_object_tree",
-    ):
-        source = inspect.getsource(getattr(publisher_module.TilePublisher, name))
+    sources = {
+        name: inspect.getsource(getattr(publisher_module.TilePublisher, name))
+        for name in (
+            "_copyback_object_tree_with_rollback",
+            "_copyback_object_tree",
+            "_copyback_collected_object_tree",
+        )
+    }
+    sources["_copy_package"] = inspect.getsource(backfill_module._copy_package)
+    for name, source in sources.items():
         assert "copyback_batch_lock" not in source, name
         assert "acquire_copyback_batch_lock" not in source, name

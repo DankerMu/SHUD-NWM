@@ -788,6 +788,10 @@ def _compact_retention(value: Any) -> Any:
             # the additional roots -- and compaction is triggered by exactly the
             # large additional-root sweeps that most need to be read.
             "extra_roots",
+            # Three scalar counts (lock_timeout / lock_unsafe /
+            # lock_budget_exhausted): the only lock-failure signal left once the
+            # per-entry `failed` detail is compacted away.
+            "copyback_lock_failures",
         ),
     )
     counts = value.get("counts")

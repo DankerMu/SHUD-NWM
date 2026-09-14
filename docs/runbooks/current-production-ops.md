@@ -2465,7 +2465,9 @@ ssh -p 32099 nwm@210.77.77.27 \
    （publisher 的 q_down / run-products / canonical-precip 三条 lane、orchestrator 的
    run-tree copyback、以及两个 backfill CLI）都先取
    `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock` 上的排他 `flock`，
-   一直持有到本 batch 的 commit 或 rollback 返回。路径固定、**没有环境变量覆盖**：
+   一直持有到本 batch 的 commit 或 rollback 返回。删侧同样持这把锁：node-22 retention
+   在 copyback root 上逐棵删树（#2238），node-27 raw retention 逐棵删
+   `canonical/<S>/<cycle>`（#2252，用 POSIX 记录锁，见下文「node-27 canonical 删除持锁」）。路径固定、**没有环境变量覆盖**：
    放 `/tmp` 会被 systemd `PrivateTmp=true` / Slurm `job_container/tmpfs` 的私有
    `/tmp` 拆成两个 inode，互斥静默失效。
    - 锁文件 `0o600`、代码**从不 unlink**——这两条由代码直接强制
@@ -2488,7 +2490,10 @@ ssh -p 32099 nwm@210.77.77.27 \
    - 所有写者必须同 uid（node-22 上是 `frd_muziyao`）；别的账号会 fail closed。
      属主断言同时比对**当前 euid** 与 **copyback root 的属主**，并且外来 uid 在
      `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
-     互斥只在单机内成立（跨主机不在本机制范围内）。
+     跨主机的互斥靠**锁原语**成立（2026-09-14 实测，ADR 0008）：node-22 NFS client 的
+     `flock` 与 node-27（NFS server 本地文件系统）的 POSIX 记录锁双向互斥；node-27 本地
+     `flock` 与 node-22 `flock` **不**互斥。因此 node-27 上任何取这把锁的进程都必须用
+     `primitive="posix"`，node-22 写者保持默认 `flock`。
    - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。**
      条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
      的 root（例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在
@@ -2577,6 +2582,51 @@ ssh -p 32099 nwm@210.77.77.27 \
 
      同日全量扫描：带 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 的活文件只有
      `compute.host.env`、`compute.replay.env`、`compute.scheduler-dbfree.env` 三个。
+   - **run-tree copyback 留下了 backup（`OBJECT_STORE_COPYBACK_BACKUP_RETAINED`，#2237）**：
+     `services/orchestrator/run_tree_copyback.py` 的 `_replace_tree` / `_replace_file` 先把旧
+     target rename 成同目录下隐藏的 `.<name>.copyback-<hex>.backup`，promote 失败且没能
+     rename 回去时（`_raise_if_backup_retained`）保留它并抛这个 code。
+     - **识别**：两种载体、字段层级不同。`object_store_copyback` 的 `failed` pipeline event
+       （node-22 journal）里是 `details.error_code` 为上述 code、字段在 `details.details.*`；
+       stage 抛出的 `OrchestratorError` 里是 `.code`、字段在 `.details.*`（浅一层）。字段为
+       `target`、`backup_path`、`error`（promote 失败）、`restore_error`（回滚失败；未尝试回滚
+       时为 `null`）。target 可能是 `runs/<run_id>`、run 引用的对象树，或一个 extra object 文件。
+     - **含义**：`backup_path` 里是 target 的**旧内容**，而且很可能是唯一一份。target 要么
+       不存在（回滚 rename 失败），要么已被别的东西占住（没有尝试回滚）。
+     - **没有任何东西会回收它**，两条 lane 分开看：`runs/` 下的 backup 是点开头的名字，node-22
+       retention 记成 `unparseable_run_cycle` 跳过；`forcing/**` 引用树与 extra object 旁的
+       backup 不在任何 retention 目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫
+       `runs/`（`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
+       node-27 `scripts/node27_raw_retention.py` 明确不碰 `forcing`、`runs`。下一次 copyback 直接 promote、不看它。
+     - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
+       `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
+       batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
+       处置删掉；锁文件不存在时 `flock(1)` 会以 `0666 & umask` 新建它，之后每个 copyback 写者都
+       fail closed（`copyback batch lock must have mode 0600`）。所以两条命令都先核对锁文件存在、
+       不是符号链接（`! -L`；`-f` 与 `stat` 都跟随符号链接）、是普通文件（`-f`）且为 `600` + uid 1103，
+       不符就拒绝执行、绝不新建；再在锁内复核 target 状态，状态不符就什么都不做。不用 `stat -c %F`
+       判类型：锁文件是 0 字节，GNU stat 对它报 `regular empty file` 而非 `regular file`（2026-09-14
+       node-22 实测 `stat -c '%F %a %u' "$L"` -> `regular empty file 600 1103`）：
+
+       ```bash
+       ssh -p 32099 frd_muziyao@210.77.77.22
+       L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock
+       T='<target>'; B='<backup_path>'   # 取自事件 details.details.* 或 OrchestratorError .details.*
+       # target 不存在：把 backup 放回原名（mv -T 防止 target 期间出现时被搬进去）
+       [ ! -L "$L" ] && [ -f "$L" ] && [ "$(stat -c '%a %u' "$L")" = "600 1103" ] \
+         && flock -w 900 "$L" sh -c 'test ! -e "$1" && mv -T "$2" "$1"' _ "$T" "$B" \
+         || echo "lock file missing/wrong identity, lock timeout, or target present; nothing done"
+       # target 已存在且已确认是更新的成功 copyback（见下）：删 backup
+       [ ! -L "$L" ] && [ -f "$L" ] && [ "$(stat -c '%a %u' "$L")" = "600 1103" ] \
+         && flock -w 900 "$L" sh -c 'test -e "$1" && rm -rf -- "$2"' _ "$T" "$B" \
+         || echo "lock file missing/wrong identity, lock timeout, or target absent; nothing done"
+       ```
+
+       删之前先确认 target 是一次**更新的、成功的** copyback 写出的（同一 run 之后有
+       `status_to` 为 `copied` 的 `object_store_copyback` 事件）且内容完整；确认不了就保留
+       backup、别动。放回或删除之后，如该 run 仍需要 copyback，再按该 cycle 的正常重跑路径
+       重做（这条 lane 没有单独的 CLI）。
+     - **target 不存在时绝不删 backup**——那等于删掉这棵树唯一的一份。
    - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
      不枚举 root 级文件，所以这把锁对保留策略不可见。
 2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——
@@ -2681,6 +2731,52 @@ GNU coreutils 与 BSD 的实现都只在 `FTS_DP` 上动手），所以收权过
 `nwm` 与 `frd_muziyao`，node-22 上是包括 `frd_muziyao` 在内的七个人类账号。授权范围仅限
 `canonical/gfs`、`canonical/IFS` 两棵树的目录位；`canonical/` 本身、`runs/`、`forcing/`
 以及所有文件位都不动。
+
+#### node-27 canonical 删除持锁（#2252 / #2239 / #2262）
+
+node-27 上 `/home/ghdc/nwm/object-store` **就是** node-22 写者 promote `canonical/` 的那个
+共享 copyback root，所以 `scripts/node27_raw_retention.py` 删每个
+`canonical/<S>/<cycle>` 前都取 `.nhms-copyback-batch.lock`：POSIX 记录锁（`fcntl.lockf`），
+逐棵取、只罩住那一次 `rmtree`，整个 pass 共用 300 s 等锁预算；规划遍历不持锁。
+`raw/` 与 precip PNG 缓存**不取锁**——没有任何持锁写者往里 promote。disabled、plan-only、
+preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema 升到
+`nhms.node27_raw_retention.production.v5`。
+
+`failed[]` 里锁失败的条目带 `error`、`error_type` 和 `lock_failure`，summary 顶层带
+`copyback_lock_failures`（三个计数，恒有、没有失败时全 0）。node-22 scheduler pass receipt 的
+`retention` 块同样带这两样，且 `copyback_lock_failures` 在 receipt 压缩后仍保留：
+
+| `lock_failure` | 含义 | 处置 |
+|---|---|---|
+| `lock_timeout` | 别的进程持锁超过本 pass 剩余预算 | 树保留，下个 tick 重试；持续出现就去查 node-22 哪个写者卡住（上文「锁文件卡住时怎么处置」） |
+| `lock_budget_exhausted` | 本 pass 预算已被前面的等待耗尽，这一条没有尝试取锁 | 同上，跟着 `lock_timeout` 一起看 |
+| `lock_unsafe` | 锁文件不安全、打不开或配置被拒（属主/模式/硬链接/符号链接不对，或本账号无权打开） | 不是 busy；**不要删锁文件**（会把互斥拆成两个 inode），按下面的身份现状处理 |
+
+**身份现状（owner 2026-09-14 裁定，接受）**：锁文件 `0600`、属主 copyback root 属主
+`frd_muziyao`(1103)；node-27 retention unit 以 `nwm`(1005) 运行，打不开它。锁身份契约**不放宽**
+（组共享 `0660` 会被 node-22 在 #1831 前的现网代码拒掉，打断所有写者）。所以在 unit 改为以
+copyback root 属主运行之前（后续 ops issue 跟踪）：
+
+- 每个到龄的 canonical cycle 都记一条 `lock_failure: lock_unsafe`、**一个字节都不删**；
+  raw 与 PNG 缓存照常剪；
+- 有到龄 canonical cycle 的 tick 退出码为 1，unit `Result=failed`、出现在
+  `systemctl --user --failed`；unit 没有 `OnFailure=`，不会告警；
+- `infra/env/node27-raw-retention.example` 里 `counts.failed == 0` 的判据**暂停**，文档化的
+  `jq` 检查在这些 tick 上按设计退 1；
+- 容量：canonical 镜像 14 天两个源实测 3.7 GiB，对 `/home` 1.1 TiB 余量无压力——判定时仍以
+  `df -h` 实测为准。
+
+核查一次 tick 是否是这个形态：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 \
+  'f=$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1);
+   jq "{schema_version, copyback_lock_failures, failed: [.failed[] | {key, lock_failure, error_type}]}" "$f"'
+```
+
+已知限制：跨主机互斥只有 receipt 证明（CI 与本机测试只覆盖同机 `posix` 对 `posix`）；node-27
+自身上 `posix` 持有者不排斥本机 `flock` 取锁者，所以 node-27 以后新增的取锁方都必须用
+`posix`；NFS server 重启后的 grace period 不约束 node-27 本地 `lockf`，低概率、未缓解。
 
 ### 5.4 Published artifacts
 

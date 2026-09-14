@@ -30,12 +30,14 @@ from __future__ import annotations
 import errno
 import fcntl
 import logging
+import math
 import os
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Literal
 
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow
 
@@ -61,24 +63,27 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # steady state. Left unretuned, conservative in the safe direction.
 #
 # Retention (#2238) is the first acquirer on this lock that is not a writer:
-# it acquires once per run tree it removes on the copyback root -- 48-54 per
+# it acquires once per tree it removes on the copyback root -- 48-54 per
 # pass on the node-22 config, not once per cycle. That count does not
 # multiply the ~24 queued acquisitions above, because *within one pass* those
 # acquisitions are strictly sequential (one removal's release precedes the next
-# one's acquire, `retention._remove_tree_under_copyback_mutex`), so one
-# retention pass contributes at most ONE concurrent waiter no matter how many
-# trees it removes. How many waiters the retention LANE contributes is a count
-# per concurrent `run_retention`, and nothing bounds that count: there are two
-# production entry points -- `scheduler_runtime._run_retention` inside the
-# scheduler pass, and `cli._run_cleanup` behind the operator `cleanup` command,
-# which takes no scheduler lease and no cross-process guard of its own, so
-# nothing serialises two operator cleanups against each other or against the
-# pass. TWO is therefore an ASSUMPTION, not a ceiling: assuming at most one
-# concurrent operator cleanup, an overlap with a scheduler pass queues two
-# retention waiters on this lock, and every further concurrent cleanup adds one
-# more. The ~24 figure above is spent against that assumption and is conditional
-# on it. Its holds are `rmtree`s, not copies, and each pass carries its own
-# pass-level wait budget (`retention.DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
+# one's acquire), so one retention pass contributes at most ONE concurrent
+# waiter no matter how many trees it removes. How many waiters retention
+# contributes is therefore the number of concurrent passes, and there are three
+# sources of them:
+#   - the node-22 scheduler pass (`scheduler_runtime._run_retention`), one at a
+#     time under the scheduler lease;
+#   - each concurrent operator `cleanup` on node-22 (`cli._run_cleanup`), which
+#     takes no scheduler lease and no cross-process guard of its own;
+#   - node-27 raw retention (`scripts/node27_raw_retention.py`, canonical lane),
+#     at most one per checkout when started through its wrapper, whose
+#     `flock -n` on `NODE27_RAW_RETENTION_LOCK_PATH` serialises it; a direct
+#     CLI call bypasses that.
+# The operator-cleanup term is the unbounded one: nothing serialises two
+# cleanups against each other or against the pass. THREE is therefore an
+# ASSUMPTION, not a ceiling -- one of each source -- and the ~24 figure above is
+# spent against it. Those holds are `rmtree`s, not copies, and each pass carries
+# its own pass-level wait budget (`DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
 # 300 s) that caps the total time that sweep can queue behind this deadline.
 #
 # What protects a writer here is that shape -- at most one waiter per retention
@@ -97,10 +102,28 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # deadline is a bounded, loud failure -- never a hang, never an unlocked
 # promote. See `design.md` "Cost accepted, deliberately".
 DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS = 900.0
+# Total time ONE retention pass may spend acquiring this mutex across all of its
+# removals. Shared by `services/orchestrator/retention` (re-exported there under
+# its historical name) and `scripts/node27_raw_retention.py`.
+DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = 300.0
 COPYBACK_DIRECTORY_MODE = 0o755
+# The acquisition poll interval. Public so a caller that re-acquires in a loop
+# can yield one interval to a waiting writer between its holds.
+COPYBACK_LOCK_POLL_SECONDS = 0.01
+
+# `flock` for an acquirer reaching the copyback root over an NFS client mount
+# (and for local roots); `posix` (`fcntl.lockf`) for the host that exports the
+# root from its local filesystem. See `acquire_copyback_batch_lock`.
+CopybackLockPrimitive = Literal["flock", "posix"]
+COPYBACK_LOCK_PRIMITIVES: frozenset[str] = frozenset({"flock", "posix"})
+
+LOCK_FAILURE_TIMEOUT = "lock_timeout"
+LOCK_FAILURE_UNSAFE = "lock_unsafe"
+LOCK_FAILURE_BUDGET_EXHAUSTED = "lock_budget_exhausted"
+LOCK_FAILURE_KINDS = (LOCK_FAILURE_TIMEOUT, LOCK_FAILURE_UNSAFE, LOCK_FAILURE_BUDGET_EXHAUSTED)
 
 _LOCK_MODE = 0o600
-_POLL_SECONDS = 0.01
+_POSIX_BUSY_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
 
 
 class CopybackLockError(RuntimeError):
@@ -113,6 +136,39 @@ class CopybackLockTimeout(CopybackLockError):
     Distinct from every other lock failure so each lane can map it onto its own
     error type without swallowing a genuine tamper refusal.
     """
+
+
+class CopybackLockBudgetExhausted(CopybackLockError):
+    """A retention pass spent its whole acquisition budget; no attempt was made.
+
+    A `CopybackLockError` subclass so every existing `except CopybackLockError`
+    still records it as that entry's failure.
+    """
+
+
+def copyback_lock_failure_kind(error: CopybackLockError) -> str:
+    """The typed failure shape retention lanes record for a lock error.
+
+    `lock_unsafe` covers every non-timeout refusal: a tampered or foreign-owned
+    lock file, one that cannot be opened, and configuration refusals.
+    """
+
+    if isinstance(error, CopybackLockBudgetExhausted):
+        return LOCK_FAILURE_BUDGET_EXHAUSTED
+    if isinstance(error, CopybackLockTimeout):
+        return LOCK_FAILURE_TIMEOUT
+    return LOCK_FAILURE_UNSAFE
+
+
+def count_copyback_lock_failures(failed: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Per-shape counts over `failed[]` entries, all three keys always present."""
+
+    counts = dict.fromkeys(LOCK_FAILURE_KINDS, 0)
+    for entry in failed:
+        kind = entry.get("lock_failure")
+        if kind in counts:
+            counts[kind] += 1
+    return counts
 
 
 def copyback_batch_lock_path(copyback_root: Path | str) -> Path:
@@ -137,8 +193,8 @@ def resolve_copyback_lock_timeout_seconds(
 
     if timeout_seconds is not None:
         value = float(timeout_seconds)
-        if value <= 0:
-            raise CopybackLockError("copyback batch lock timeout must be positive")
+        if not math.isfinite(value) or value <= 0:
+            raise CopybackLockError(f"copyback batch lock timeout must be a positive finite number, got {value!r}")
         return value
     mapping = os.environ if env is None else env
     raw = str(mapping.get(COPYBACK_LOCK_TIMEOUT_ENV, "") or "").strip()
@@ -150,7 +206,7 @@ def resolve_copyback_lock_timeout_seconds(
         raise CopybackLockError(
             f"{COPYBACK_LOCK_TIMEOUT_ENV} must be a positive number of seconds, got {raw!r}"
         ) from error
-    if value <= 0 or value != value or value == float("inf"):
+    if not math.isfinite(value) or value <= 0:
         raise CopybackLockError(f"{COPYBACK_LOCK_TIMEOUT_ENV} must be a positive number of seconds, got {raw!r}")
     return value
 
@@ -224,12 +280,18 @@ def _require_lock_identity(path: Path, fd: int, *, root_uid: int) -> None:
         raise CopybackLockError("copyback batch lock path/fd identity drifted")
 
 
+def _require_primitive(primitive: str) -> None:
+    if primitive not in COPYBACK_LOCK_PRIMITIVES:
+        raise CopybackLockError(f"unknown copyback batch lock primitive {primitive!r}")
+
+
 def acquire_copyback_batch_lock(
     copyback_root: Path | str,
     *,
     timeout_seconds: float | None = None,
+    primitive: CopybackLockPrimitive = "flock",
 ) -> int:
-    """Block up to the deadline for the copyback root's exclusive batch flock.
+    """Block up to the deadline for the copyback root's exclusive batch lock.
 
     Returns the held descriptor. Contention **waits**: refusing outright would
     turn a race into a dropped mirror. The wait is a bounded ``LOCK_EX|LOCK_NB``
@@ -254,8 +316,26 @@ def acquire_copyback_batch_lock(
     acquisition against the same root from the same process contends with the
     first and blocks itself until the deadline. Acquire at batch-owner level
     only.
+
+    ``primitive`` picks the lock call; identity checks, the refuse-before-create
+    rule, the deadline and the error types are identical for both.
+
+    - ``"flock"`` (default): every acquirer that reaches the root over an NFS
+      client mount, and local roots.
+    - ``"posix"``: ``fcntl.lockf``, for the host that exports the root from its
+      local filesystem. Measured 2026-09-14 between the exporting host and an
+      NFSv4.2 client (``local_lock=none``): a local ``flock`` on the server does
+      NOT exclude a client ``flock`` in either direction, while a local POSIX
+      record lock does, in both. On the exporting host itself a ``posix`` holder
+      does not exclude a local ``flock`` acquirer, so every acquirer there must
+      use ``posix``. A busy ``lockf`` is ``EAGAIN`` or ``EACCES``; both mean
+      held. POSIX record locks are per *process*: threads of one process do not
+      contend, and closing ANY descriptor on the lock file drops the lock. Use
+      it only from a single-threaded acquirer that opens the lock file nowhere
+      else while holding it.
     """
 
+    _require_primitive(primitive)
     deadline = time.monotonic() + resolve_copyback_lock_timeout_seconds(timeout_seconds)
     path = copyback_batch_lock_path(copyback_root)
     if not path.is_absolute():
@@ -298,7 +378,7 @@ def acquire_copyback_batch_lock(
         _require_lock_identity(path, fd, root_uid=root_uid)
         os.fchmod(fd, _LOCK_MODE)
         _require_lock_identity(path, fd, root_uid=root_uid)
-        _flock_until_deadline(fd, deadline=deadline, path=path)
+        _lock_until_deadline(fd, deadline=deadline, path=path, primitive=primitive)
         _require_lock_identity(path, fd, root_uid=root_uid)
         held = fd
         fd = None
@@ -315,25 +395,40 @@ def acquire_copyback_batch_lock(
         raise CopybackLockError(f"cannot acquire copyback batch lock {path}: {error}") from error
 
 
-def _flock_until_deadline(fd: int, *, deadline: float, path: Path) -> None:
-    while True:
+def _try_lock(fd: int, primitive: str) -> bool:
+    """One non-blocking attempt: True when acquired, False when held elsewhere."""
+
+    if primitive == "posix":
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError as error:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CopybackLockTimeout(
-                    f"copyback batch lock {path} was still held after the configured deadline"
-                ) from error
-            time.sleep(min(_POLL_SECONDS, remaining))
+            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in _POSIX_BUSY_ERRNOS:
+                return False
+            raise
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
 
 
-def release_copyback_batch_lock(fd: int) -> None:
-    """Drop the flock and close the fd, both attempted and neither raising. The lock file is never unlinked."""
+def _lock_until_deadline(fd: int, *, deadline: float, path: Path, primitive: str) -> None:
+    while not _try_lock(fd, primitive):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CopybackLockTimeout(f"copyback batch lock {path} was still held after the configured deadline")
+        time.sleep(min(COPYBACK_LOCK_POLL_SECONDS, remaining))
+
+
+def release_copyback_batch_lock(fd: int, *, primitive: CopybackLockPrimitive = "flock") -> None:
+    """Drop the lock and close the fd, both attempted and neither raising. The lock file is never unlinked."""
 
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if primitive == "posix":
+            fcntl.lockf(fd, fcntl.LOCK_UN)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError as error:
         _LOGGER.warning("copyback batch lock unlock failed for fd %s: %s", fd, error)
     try:
@@ -347,6 +442,7 @@ def copyback_batch_lock(
     copyback_root: Path | str,
     *,
     timeout_seconds: float | None = None,
+    primitive: CopybackLockPrimitive = "flock",
 ) -> Iterator[int]:
     """Hold the copyback root's batch mutex for the whole of the ``with`` body.
 
@@ -356,11 +452,11 @@ def copyback_batch_lock(
     returned.
     """
 
-    fd = acquire_copyback_batch_lock(copyback_root, timeout_seconds=timeout_seconds)
+    fd = acquire_copyback_batch_lock(copyback_root, timeout_seconds=timeout_seconds, primitive=primitive)
     try:
         yield fd
     finally:
-        release_copyback_batch_lock(fd)
+        release_copyback_batch_lock(fd, primitive=primitive)
 
 
 def ensure_traversable_copyback_directory(

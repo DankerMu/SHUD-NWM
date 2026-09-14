@@ -63,8 +63,34 @@ NODE27_RAW_RETENTION_DAYS=14
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
 # HOW TO READ THIS UNIT (issue #2011; node-27 observations 2026-09-06, local
-# reproductions marked as such; the canonical lane's permission model is #2100).
-# Steady state since #2100: every canonical mirror directory this runner has to
+# reproductions marked as such; the canonical lane's permission model is #2100;
+# the canonical lane's copyback lock is #2252).
+#
+# CANONICAL LANE UNDER THE COPYBACK MUTEX (#2252, owner decision 2026-09-14).
+# On node-27 NODE27_RAW_RETENTION_OBJECT_STORE_ROOT is the shared copyback root
+# node-22 writers promote canonical/ trees into, so every canonical/<S>/<cycle>
+# removal holds `<root>/.nhms-copyback-batch.lock` (POSIX record lock, one
+# acquisition per tree, 300 s pass-level wait budget). raw/ and the precip
+# cache are never locked. That lock file is `0600` and owned by the copyback
+# root's owner (frd_muziyao, uid 1103); this unit runs as nwm (uid 1005), which
+# cannot open it, and the lock identity contract is deliberately not relaxed.
+# Until this unit runs as the copyback root's owner (follow-up ops issue):
+#   - every aged canonical cycle is recorded in `failed[]` with
+#     `lock_failure: "lock_unsafe"` and is NOT removed; raw and precip-cache
+#     pruning are unaffected; `copyback_lock_failures.lock_unsafe` counts them;
+#   - on every tick that has an aged canonical cycle the runner returns rc=1, so
+#     the unit ends `Result=failed` and shows in `systemctl --user --failed`;
+#     it carries no `OnFailure=`, so nothing pages;
+#   - the `counts.failed == 0` criterion below is SUSPENDED for that period, and
+#     the `jq` check below exits 1 on those ticks by design.
+# `lock_failure` meanings: `lock_timeout` -- another process held the mutex past
+# the remaining wait budget; `lock_budget_exhausted` -- the pass budget was
+# already spent, no attempt was made; `lock_unsafe` -- the lock file is unsafe,
+# unopenable (the uid state above) or the configuration was refused. None of
+# them is fixed by deleting the lock file: that splits the mutex.
+#
+# Steady state since #2100 (and, for canonical, once the unit runs as the
+# copyback root's owner): every canonical mirror directory this runner has to
 # remove (`<cycle>/` and its `prcp_rate_or_amount/`) or unlink from (their
 # parent `canonical/<S>/`, which needs `w+x` for the `rmdir` and is never
 # removed itself) is `2775` with group `nwmuser` (gid 1107), which `nwm` is a
@@ -84,10 +110,11 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #     whole point: the first `unlink` is denied and ZERO bytes are removed, so
 #     the remedy is the sweep -- or a producer fix -- and never a manual delete.
 #   - The historical ops criterion `counts.failed == 0`
-#     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md) is
-#     back in force; #2100 is what restored it. It was suspended only while the
-#     canonical tree was `755 frd_muziyao nfsdata` and every canonical target
-#     failed on every tick.
+#     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md) was
+#     restored by #2100 after being suspended while the canonical tree was
+#     `755 frd_muziyao nfsdata`. It is suspended again while this unit is not the
+#     copyback root's owner (see the copyback mutex block above): each aged
+#     canonical target then fails with `lock_unsafe` on every tick.
 #   - This unit carries no `OnFailure=` (unlike nhms-node27-timeseries-retention
 #     and nhms-node27-resource-governance), so a red tick pages nobody. It is
 #     read from `systemctl --user --failed` or from the check below.
