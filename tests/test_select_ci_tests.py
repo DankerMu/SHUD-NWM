@@ -12724,7 +12724,8 @@ def test_canonical_readonly_validator_rule_reds_when_removed(monkeypatch: pytest
     from scripts import select_ci_tests
 
     producer = "services/production_closure/readonly_db_validation.py"
-    omitted = READONLY_DB_VALIDATION_TESTS[0]
+    # The same-name suite is selected independently; mutate an actual routed consumer.
+    omitted = "tests/test_readonly_db_validation_probes.py"
     patched = tuple(
         PathTestRule(
             rule.pattern,
