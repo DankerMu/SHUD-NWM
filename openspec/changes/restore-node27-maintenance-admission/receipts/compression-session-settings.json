@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "{\"role\": \"nhms_ingest_rw\", \"transaction_read_only\": \"on\", \"compression_indexscan\": \"on\", \"maintenance_work_mem\": \"2047MB\", \"work_mem\": \"64MB\", \"shared_buffers\": \"32197MB\", \"temp_tablespaces\": \"\", \"manager_pg_variable_names\": [], \"own_pg_variable_names\": [], \"dsn_printed\": false, \"compression_invoked\": false}\n",
+  "stderr": ""
+}

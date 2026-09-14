@@ -20,7 +20,7 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 ## 3. Admission and evidence
 
 - [x] 3.1 Pass a new hash-bound prepare at target415 with never-created state and active/pin unchanged; no T0/window/recover/unstage (auth-refresh2 state PREPARED at17:35:34Z; receipts/post-recovery-fresh-prepare.json).
-- [ ] 3.2 Publish incident conclusion, two-lock guidance, authorization/deviation, reviews and exact verification limits.
+- [x] 3.2 Publish incident conclusion, two-lock guidance, authorization/deviation, reviews and exact verification limits (issue2349 comment5668118348; PR2350 comment5668118763; PR2367 correctness/evidence/invariant review: no findings, referenced source evidence included).
 
 ## Evidence Floor
 

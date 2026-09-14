@@ -1,0 +1,183 @@
+{
+  "catchup_receipt": {
+    "budget": {
+      "cleanup_margin_seconds": 300,
+      "compress_timeout_ms": 21600000,
+      "systemd_wall_seconds": 25842,
+      "wrapper_wall_seconds": 21900
+    },
+    "deferred": [],
+    "generated_at": "2026-09-14T17:18:45.984509Z",
+    "head_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "lag_seconds": 172800,
+    "mode": "enforce",
+    "now_utc": "2026-09-13T12:00:00Z",
+    "outcome": "clean",
+    "per_table_totals": {
+      "hydro.river_timeseries": {
+        "after_bytes": 29959569408,
+        "before_bytes": 643948429312,
+        "chunks_compressed": 1
+      },
+      "met.forcing_station_timeseries": {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunks_compressed": 0
+      }
+    },
+    "per_tick_bound": 1,
+    "schema_version": "2.1",
+    "selected": [
+      {
+        "after_bytes": 29959569408,
+        "before_bytes": 643948429312,
+        "chunk_name": "_hyper_3_107_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "mutation_state": "committed",
+        "range_end": "2026-09-10T00:00:00Z",
+        "range_start": "2026-09-03T00:00:00Z"
+      }
+    ],
+    "skipped": [
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_110_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_113_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_109_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_112_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      }
+    ]
+  },
+  "original_compression_receipt": {
+    "budget": {
+      "cleanup_margin_seconds": 300,
+      "compress_timeout_ms": 3600000,
+      "systemd_wall_seconds": 7842,
+      "wrapper_wall_seconds": 3900
+    },
+    "deferred": [],
+    "generated_at": "2026-09-14T17:24:14.473882Z",
+    "head_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "lag_seconds": 172800,
+    "mode": "enforce",
+    "now_utc": "2026-09-13T12:00:00Z",
+    "outcome": "clean",
+    "per_table_totals": {
+      "hydro.river_timeseries": {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunks_compressed": 0
+      },
+      "met.forcing_station_timeseries": {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunks_compressed": 0
+      }
+    },
+    "per_tick_bound": 4,
+    "schema_version": "2.1",
+    "selected": [],
+    "skipped": [
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_110_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_113_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_109_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_112_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      }
+    ]
+  },
+  "original_retention_receipt": {
+    "archive_gate": {
+      "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+      "mode": "disabled"
+    },
+    "cutoff": "2026-08-23T12:00:00Z",
+    "deferred_remainder": [],
+    "dropped_chunks": [],
+    "generated_at": "2026-09-14T10:49:52.388620Z",
+    "mode": "enforce",
+    "outcome": "enforced",
+    "reference_time": "2026-09-13T12:00:00Z",
+    "salvage_backed_windows": [],
+    "schema_version": "1.1",
+    "window_days": 21
+  },
+  "units": "MainPID=0\nResult=success\nExecMainStatus=0\nId=nhms-node27-timeseries-compression.service\nActiveState=inactive\nSubState=dead\n\nMainPID=0\nResult=success\nExecMainStatus=0\nId=nhms-node27-timeseries-retention.service\nActiveState=inactive\nSubState=dead\n\nNextElapseUSecRealtime=Tue 2026-09-15 12:25:00 CST\nResult=success\nId=nhms-node27-timeseries-compression.timer\nActiveState=active\nSubState=waiting\n\nNextElapseUSecRealtime=Tue 2026-09-15 13:15:00 CST\nResult=success\nId=nhms-node27-timeseries-retention.timer\nActiveState=active\nSubState=waiting\n"
+}

@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 20, in <module>\n  File \"/home/nwm/.local/state/issue2349-tools/f53181cd46dccfc3b8eed4cc1ede1af8099d8113/prepare_catchup.py\", line 562, in prepare\n    require_maintenance_idle()\n  File \"/home/nwm/.local/state/issue2349-tools/f53181cd46dccfc3b8eed4cc1ede1af8099d8113/prepare_catchup.py\", line 490, in require_maintenance_idle\n    require_timer_inactive(unit)\n  File \"/home/nwm/.local/state/issue2349-tools/f53181cd46dccfc3b8eed4cc1ede1af8099d8113/prepare_catchup.py\", line 324, in require_timer_inactive\n    props = systemctl_show(unit, SHOW_COMMON_PROPS)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: show() takes 1 positional argument but 2 were given\n"
+}

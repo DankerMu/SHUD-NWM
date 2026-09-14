@@ -1,0 +1,9 @@
+{
+  "observed_at": "2026-09-14T13:44:43+00:00",
+  "outer_seconds": 25842,
+  "outer_end_if_started_now": "2026-09-14T20:55:25+00:00",
+  "next_compression": "2026-09-15T04:25:00+00:00",
+  "next_retention": "2026-09-15T05:15:00+00:00",
+  "fits_with_5minute_post_window_margin": true,
+  "must_recheck_before_launch": true
+}

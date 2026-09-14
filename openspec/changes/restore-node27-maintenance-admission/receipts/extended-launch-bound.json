@@ -1,0 +1,101 @@
+{
+  "command": [
+    "systemd-run",
+    "--user",
+    "--unit=nhms-issue2349-catchup-5f51312f-extended-20260914.service",
+    "--property=Type=exec",
+    "--property=RuntimeMaxSec=25842",
+    "--property=TimeoutStartSec=25842",
+    "--property=KillMode=control-group",
+    "--property=RemainAfterExit=yes",
+    "--property=UMask=0077",
+    "--setenv=NODE27_TIMESERIES_COMPRESSION_ENV_FILE=/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/node27-timeseries-compression.env",
+    "--setenv=NODE27_COLD_RESIDENCY_ENV_FILE=/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/node27-cold-residency.env",
+    "/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh",
+    "--enforce",
+    "--receipt-path",
+    "/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/enforce.json"
+  ],
+  "clock": "2026-09-14T14:01:00+00:00",
+  "dry": {
+    "schema_version": "2.1",
+    "head_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "generated_at": "2026-09-14T14:00:36.927740Z",
+    "now_utc": "2026-09-13T12:00:00Z",
+    "mode": "dry-run",
+    "outcome": "clean",
+    "budget": {
+      "cleanup_margin_seconds": 300,
+      "compress_timeout_ms": 21600000,
+      "systemd_wall_seconds": 25842,
+      "wrapper_wall_seconds": 21900
+    },
+    "per_tick_bound": 1,
+    "selected": [
+      {
+        "after_bytes": null,
+        "before_bytes": 643948429312,
+        "chunk_name": "_hyper_3_107_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "mutation_state": "not_applicable",
+        "range_end": "2026-09-10T00:00:00Z",
+        "range_start": "2026-09-03T00:00:00Z"
+      }
+    ],
+    "deferred": [],
+    "skipped": [
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_110_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_113_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_109_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_112_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      }
+    ]
+  },
+  "check": {
+    "exit": 0,
+    "stdout": "{\"budget\": {\"assembly\": \"21900,3901,25842,21600000,3600000,1\", \"cold_wrapper_wall_seconds\": 3901, \"compression_per_tick_bound\": 1, \"compression_statement_timeout_ms\": 21600000, \"compression_wrapper_wall_seconds\": 21900, \"service_wall_seconds\": 25842}, \"digests\": {\"governance_pin\": \"da33e7315a4a5415ed02bef5bf1bddfb8cd1a2b79d2939651075eadb93d1cb5f\", \"governance_state\": \"b8008c874a450c6b20607c044dd9f99e68be18547266ecf85cad5d2e953b7d04\", \"manifest\": \"a0e63aa442133cb3c4fec72364e6e01c64d4b9a42bf13ed5274760c0de97c8d4\", \"original_cold_env\": \"1e2088cd1ab851ff56973950b6d00e36cfbb74fbf5d498978f0c747872bb795a\", \"original_compression_env\": \"3add1339c62fb9243c307e0da1cf0f5e4db1884a6c298788f5a9d291b4673354\", \"private_cold_env\": \"e1f1e992de9797fce13abc0c66f298cd0480758a56e00849d142004cb87f7ead\", \"private_compression_env\": \"0571658fa5de0e1ea3d3b55201fc94104fc36c190c1b1d164358f74b9c77fbc1\", \"private_scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\", \"retention_receipt\": \"8d4db2890731c666afa462e39ab080e87c6cb52acd4965112d94518dd77fb9e2\", \"scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\"}, \"error\": null, \"error_path\": null, \"operation\": \"check\", \"outcome\": \"CHECK_OK\", \"paths\": {\"governance_pin\": \"/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/70-issue1987-governance-reviewed-source.conf\", \"governance_state\": \"/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json\", \"original_cold_env\": \"/home/nwm/NWM/infra/env/node27-cold-residency.env\", \"original_compression_env\": \"/home/nwm/NWM/infra/env/node27-timeseries-compression.env\", \"private_cold_env\": \"/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/node27-cold-residency.env\", \"private_compression_env\": \"/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/node27-timeseries-compression.env\", \"private_scheduled_receipt\": \"/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914/scheduled-receipt.json\", \"retention_receipt\": \"/home/nwm/node27-timeseries-retention-logs/retention-20260913T051532Z.json\", \"scheduled_receipt\": \"/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json\"}, \"root\": \"/home/nwm/.local/state/issue2349-catchup-5f51312f-extended-20260914\", \"scan\": {\"assignment\": \"PGOPTIONS='-c timescaledb.enable_compression_indexscan=off'\", \"guc\": \"timescaledb.enable_compression_indexscan\", \"mode\": \"off\", \"pgoptions\": \"-c timescaledb.enable_compression_indexscan=off\", \"scope\": \"private_compression_env\"}, \"schema_version\": \"issue2349.catchup.check.v1\", \"source_head\": \"a8db554d6402bec642e9a05627eae64b2b79aec3\", \"transient_unit\": \"nhms-issue2349-catchup-5f51312f-extended-20260914.service\"}\n",
+    "stderr": ""
+  },
+  "single_attempt": 3
+}
