@@ -39,4 +39,10 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 
 The first6000-second attempt failed cleanly before committed mutation; actual owned-copy cleanup passed. Retention service/timer recovered independently with zero drops. Tasks2.3/2.4/3.1 remain incomplete until compression genuinely recovers. A new input bundle exists for tool publication92a5b4350992 with byte-identical executors; its preparation state has not been created or run.
 
-The second comparison also timed out before committed mutation. Its private envs were cleaned and retention scheduling restored; compression scheduling remains paused under the explicit user instruction. No third attempt is authorized. Logged sort temporary files total182.426GiB; this is not a progress percentage or a prediction of completion time. Compression recovery, timer restoration after repair, and fresh prepare remain blocked.
+The second comparison also timed out before committed mutation. Its private envs were cleaned and retention scheduling restored; compression scheduling remains paused under the explicit user instruction. There was no implicit retry authorization; the subsequent explicit six-hour approval is recorded below. Logged sort temporary files total182.426GiB; this is not a progress percentage or a prediction of completion time. Compression recovery, timer restoration after repair, and fresh prepare remain incomplete.
+
+## 5. Explicitly approved six-hour window
+
+- [ ] 5.1 Review the new authorization and update only the private time budget to21600000/21900/25842, retaining scan-off, bound1 and all memory/authority protections.
+- [ ] 5.2 Recheck full outer-envelope schedule and capacity, private connection setting and exact dry selection; execute at most one newly approved attempt.
+- [ ] 5.3 Preserve actual terminal outcome and cleanup; on success complete original-service proof, immediate compression-timer restoration and fresh prepare; on failure restore retention scheduling and do not attempt a fourth run.

@@ -1,0 +1,13 @@
+{
+  "issue": 2349,
+  "attempt": 3,
+  "user_decision": "批准一次 6 小时窗口",
+  "statement_timeout_ms": 21600000,
+  "wrapper_wall_seconds": 21900,
+  "outer_wall_seconds": 25842,
+  "cold_wrapper_seconds": 3901,
+  "per_tick_bound": 1,
+  "scan_mode": "off",
+  "scope": "Only river107; no new memory tuning, global/role GUC, formal env, active/pin, cold activation or T0 changes. Recheck capacity and schedule before launch. Restore retention scheduling on either outcome. Immediately restore compression timer after genuine repair. No automatic fourth attempt.",
+  "budget_is_upper_limit_not_duration_prediction": true
+}
