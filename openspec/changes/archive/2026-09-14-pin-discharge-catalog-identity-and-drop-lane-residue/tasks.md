@@ -82,8 +82,8 @@ Evidence floor:
 
 ### 4. Close-out
 
-- [ ] 4.1 PR closes #2140 and #2332.
-- [ ] 4.2 After merge: archive this change.
+- [x] 4.1 PR closes #2140 and #2332 (PR #2338 merged as accb65819).
+- [x] 4.2 After merge: archive this change.
 
 ## Evidence Mapping
 
