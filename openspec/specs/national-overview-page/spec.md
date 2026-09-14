@@ -62,11 +62,11 @@ The system SHALL display the national extent with basin boundaries, basin labels
 - **AND** changing the related layer toggle MUST update or hide the corresponding map layer
 - **AND** unavailable river/risk data MUST show a scoped unavailable state rather than fake geometry or values
 
-#### Scenario: Basin click opens basin information popup
-- **WHEN** an operator clicks a basin on the overview map
-- **THEN** a basin popup MUST show basin name, area when available, model river segment count, active model/version count, and latest forecast time when available
-- **AND** the popup MUST provide a "查看详情" handoff to the model asset destination or placeholder
-- **AND** the popup MUST provide an "进入分析" action that navigates to the basin drill-down route for that basin
+#### Scenario: Basin click fits the camera and stays on the overview
+- **WHEN** an operator clicks a visible basin on the overview map
+- **THEN** the map camera MUST fit that basin's bounding box
+- **AND** the page MUST stay on the national overview: no basin drill-down mode, no route change, and no `basinId` written to the URL
+- **AND** every other basin MUST remain rendered and clickable
 
 ### Requirement: Right-side summaries provide operational links
 
@@ -94,7 +94,6 @@ The system SHALL render useful degraded states when backend data is missing or p
 #### Scenario: Basin has no published version
 - **WHEN** a basin exists but has no published or active basin version
 - **THEN** the basin row and popup MUST show a version-unavailable state
-- **AND** the "进入分析" action MUST be disabled or route to a basin detail empty state that explains the missing version
 
 #### Scenario: Partial summary failure
 - **WHEN** one summary request fails but basin inventory or map data succeeds
@@ -105,3 +104,4 @@ The system SHALL render useful degraded states when backend data is missing or p
 - **WHEN** a map source or layer request fails
 - **THEN** the affected layer MUST show an inline map or panel error with retry affordance when possible
 - **AND** other successful layers and controls MUST remain usable
+

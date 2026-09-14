@@ -35,9 +35,9 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 - **WHEN** 源为 best 且尚未解析为具体 GFS/IFS
 - **THEN** 代站图层不发起以 `best` 为源的取数，等待 `resolvedSource`
 
-#### Scenario: 全国总览（无 basinId）开启代站图层的 honest 空态
-- **WHEN** 处于全国总览（`basinId` 为空）且用户开启"气象代站"图层（如经 `/meteorology`→`/?layer=met-stations` 进入）
-- **THEN** MUST NOT 以无流域身份误打接口或拉全量，显示"请选择流域以加载气象代站"类 honest 空态；选中某流域后再按该流域身份加载
+#### Scenario: 全国总览无可用流域版本时开启代站图层的 honest 空态
+- **WHEN** 处于全国总览、没有任何可解析的流域版本上下文，且用户开启"气象代站"图层（如经 `/meteorology`→`/?layer=met-stations` 进入）
+- **THEN** MUST NOT 以无流域身份误打接口或拉全量，显示"暂无可用流域版本以加载气象代站"类 honest 空态；该判定不依赖任何 `basinId` URL 键（流域详情模式已退役，#2109 裁决 B）
 
 ### Requirement: 代站图层为未来 station-MVT 预留切换抽象
 
