@@ -20,7 +20,7 @@ import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydro
 
 type ForecastSeries = ForecastData['series'][number]
 
-/** 选中河段（来自地图 feature.properties / basinSegments）的必要身份字段。 */
+/** 选中河段（来自地图 feature.properties）的必要身份字段。 */
 export interface M11RiverPopupSegment {
   river_segment_id: string
   segment_id: string

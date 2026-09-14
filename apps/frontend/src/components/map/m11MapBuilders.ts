@@ -61,7 +61,7 @@ export interface BasinFeatureCollection {
   features: BasinFeature[]
 }
 
-// 产品口径：全国/流域详情地图不展示流域边界，也不展示依附该边界的流域名称标记。
+// 产品口径：全国地图不展示流域边界，也不展示依附该边界的流域名称标记。
 // bbox 仍由 overview 数据保留，用于相机定位，不参与此 GeoJSON collection。
 export const m11BasinBoundaryOverlayEnabled = false
 
@@ -199,7 +199,7 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
  * MapLibre source 身份：必须随 source / cycle / validTime **任一**变化而变化，否则切周期时
  * MapLibre 会复用旧 source，地图静默显示上一周期的数据（spec mvt-tile-contract 的 fixture
  * scenario「the `m11VectorSourceKey` case MUST assert a key that distinguishes (source, cycle,
- * valid_time) rather than run_id」）。`run_id` 保留给流域详情的单 run 路径，全国路径传 null。
+ * valid_time) rather than run_id」）。`run_id` 保留给 run-scoped 图层的单 run 路径，全国路径传 null。
  */
 export function m11VectorSourceKey({
   layerId,

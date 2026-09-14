@@ -39,6 +39,8 @@ The required loaded routes are captured at `1920x1080`, `1440x900`, and `1280x90
 
 - `/overview`
 - `/basins/basin-demo?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009`
+  (retired historical evidence, #2109 decision B: the basin-detail lane was deleted and this route is
+  now only a legacy redirect to `/`; kept for provenance, not a current capture target)
 - `/monitoring`
 
 The same command also captures deterministic extended routes:
@@ -51,7 +53,8 @@ State evidence is captured once at the canonical `1440x900` review viewport. Loa
 retain the full three-viewport coverage above. The canonical state matrix covers:
 
 - overview loading, partial data, and API error.
-- basin detail empty segments, partial/unavailable data, and API error.
+- basin detail empty segments, partial/unavailable data, and API error (retired historical evidence,
+  #2109 decision B).
 - discharge detail empty states, unavailable data, and API error.
 - monitoring empty jobs, failed job/error, and RBAC denied/restricted.
 - segment detail missing segment and chart/error state.

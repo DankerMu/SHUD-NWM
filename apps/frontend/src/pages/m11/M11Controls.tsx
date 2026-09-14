@@ -12,62 +12,24 @@ import {
   Trees,
 } from 'lucide-react'
 
-import type { components } from '@/api/types'
-import {
-  M11MapLibreSurface,
-  m11MapStyleUrls,
-  type M11MapCameraFit,
-  type M11MapCameraFlyTo,
-  type M11MapOverlayInteraction,
-  type M11MapPopupSlot,
-  type M11StationFeatureCollection,
-} from '@/components/map/M11MapLibreSurface'
+import { m11MapStyleUrls } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
 import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
   getM11LayerLegend,
   isM11ActiveCycleValidTimesUnresolved,
-  type BasinSegmentRow,
   type LayerState,
-  type OverviewBasin,
   type SourceScenarioSelectionState,
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
 
 type QueryChangeHandler = (patch: M11QueryPatch) => void
 
-export interface M11TimelineDerivedTimes {
-  validTimes: string[]
-  label: string
-}
-
 interface SharedControlProps {
   state: M11QueryState
   layers?: LayerState[]
   sourceSelection?: SourceScenarioSelectionState | null
   onQueryChange?: QueryChangeHandler
-}
-
-interface M11MapSurfaceProps extends SharedControlProps {
-  basins?: OverviewBasin[]
-  visibleBasinIds?: string[]
-  basinSegments?: BasinSegmentRow[]
-  nationalRiverGeo?: import('geojson').FeatureCollection | null
-  meshRiverBasinIds?: string[]
-  selectedSegmentId?: string | null
-  selectedSegmentGeometry?:
-    | components['schemas']['GeoJsonLineString']
-    | components['schemas']['GeoJsonMultiLineString']
-    | null
-  selectedStationId?: string | null
-  stationFeatureCollection?: M11StationFeatureCollection | null
-  popup?: M11MapPopupSlot | null
-  loading?: boolean
-  boundaryLoading?: boolean
-  fitTo?: M11MapCameraFit | null
-  flyTo?: M11MapCameraFlyTo | null
-  onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
-  onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
 }
 
 const basemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof MapIcon; styleUrl: string }> = [
@@ -96,75 +58,6 @@ const basePlaceholders = [
 const dischargeFallbackLegend = getM11LayerLegend('discharge')
 const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   discharge: dischargeFallbackLegend,
-}
-
-export function M11MapSurface({
-  state,
-  layers = [],
-  basins = [],
-  visibleBasinIds,
-  basinSegments = [],
-  nationalRiverGeo = null,
-  meshRiverBasinIds = [],
-  selectedSegmentId = null,
-  selectedSegmentGeometry = null,
-  selectedStationId = null,
-  stationFeatureCollection = null,
-  popup = null,
-  loading = false,
-  boundaryLoading = false,
-  onQueryChange,
-  fitTo,
-  flyTo,
-  onOverlayHover,
-  onOverlayClick,
-}: M11MapSurfaceProps) {
-  return (
-    <>
-      <M11MapLibreSurface
-        state={state}
-        layers={layers}
-        basins={basins}
-        visibleBasinIds={visibleBasinIds}
-        basinSegments={basinSegments}
-        nationalRiverGeo={nationalRiverGeo}
-        meshRiverBasinIds={meshRiverBasinIds}
-        selectedSegmentId={selectedSegmentId}
-        selectedSegmentGeometry={selectedSegmentGeometry}
-        selectedStationId={selectedStationId}
-        stationFeatureCollection={stationFeatureCollection}
-        popup={popup}
-        loading={loading}
-        boundaryLoading={boundaryLoading}
-        fitTo={fitTo}
-        flyTo={flyTo}
-        onOverlayHover={onOverlayHover}
-        onOverlayClick={onOverlayClick}
-      />
-      <div className="absolute right-5 top-5 z-[100] flex rounded-md border border-neutral-300 bg-white/95 p-1 shadow-md">
-        {basemapOptions.map((option) => {
-          const Icon = option.icon
-          return (
-            <button
-              key={option.value}
-              type="button"
-              className={cn(
-                'flex h-8 cursor-pointer items-center gap-1 rounded px-2 text-xs font-medium transition-colors',
-                state.basemap === option.value ? 'bg-primary-600 text-white' : 'text-neutral-700 hover:bg-neutral-100',
-              )}
-              title={`${option.label}底图`}
-              aria-label={`${option.label}底图`}
-              aria-pressed={state.basemap === option.value}
-              onClick={() => onQueryChange?.({ basemap: option.value })}
-            >
-              <Icon className="h-4 w-4" aria-hidden="true" />
-              {option.label}
-            </button>
-          )
-        })}
-      </div>
-    </>
-  )
 }
 
 export function SourceScenarioControls({ state, sourceSelection, onQueryChange }: SharedControlProps) {
@@ -334,20 +227,18 @@ export function M11Timeline({
   state,
   layers = [],
   sourceSelection,
-  derivedTimes,
   className,
   cycle,
   onQueryChange,
 }: SharedControlProps & {
-  derivedTimes?: M11TimelineDerivedTimes | null
   className?: string
   cycle?: string | null
 }) {
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
   const model = useMemo(
-    () => buildM11TimelineViewModel(state, layers, derivedTimes ?? null, sourceSelection ?? null, cycle ?? null),
-    [cycle, derivedTimes, layers, sourceSelection, state],
+    () => buildM11TimelineViewModel(state, layers, sourceSelection ?? null, cycle ?? null),
+    [cycle, layers, sourceSelection, state],
   )
   // 刻度行只在调用方显式传入有效 cycle 时渲染：不传 cycle 的默认路径 DOM 与今天逐字相同。
   const ticks = useMemo(
@@ -552,22 +443,14 @@ function formatLegendRange(min: number | null | undefined, max: number | null | 
 export function resolveM11ValidTimeCorrection(
   state: Pick<M11QueryState, 'layer' | 'validTime'>,
   layers: LayerState[],
-  derivedTimes?: M11TimelineDerivedTimes | null,
 ): string | null | undefined {
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
-  if (activeLayer) {
-    if (activeLayer.validTimes.length === 0) return state.validTime ? null : undefined
-    const current = normalizeIso(state.validTime)
-    if (current && activeLayer.validTimes.includes(current)) return undefined
-    const nextValidTime = activeLayer.currentValidTime ?? activeLayer.validTimes[activeLayer.validTimes.length - 1] ?? null
-    return current === nextValidTime ? undefined : nextValidTime
-  }
-
-  const validTimes = normalizeValidTimes(derivedTimes?.validTimes)
-  if (validTimes.length === 0) return undefined
+  if (!activeLayer) return undefined
+  if (activeLayer.validTimes.length === 0) return state.validTime ? null : undefined
   const current = normalizeIso(state.validTime)
-  if (current && validTimes.includes(current)) return undefined
-  return validTimes[validTimes.length - 1]
+  if (current && activeLayer.validTimes.includes(current)) return undefined
+  const nextValidTime = activeLayer.currentValidTime ?? activeLayer.validTimes[activeLayer.validTimes.length - 1] ?? null
+  return current === nextValidTime ? undefined : nextValidTime
 }
 
 /**
@@ -575,24 +458,21 @@ export function resolveM11ValidTimeCorrection(
  * （pending / error）时**不校正**。裸 `resolveM11ValidTimeCorrection` 对空列表返回 `null`
  * （= 清空 `validTime`），在 `?cycle=<非默认>&validTime=T` 下会在 per-cycle 列表落地前就把
  * `T` 从 URL 里抹掉。未定期间的正确表现是诚实禁用 + 保住 URL 状态；列表落地后本函数照常校正。
- * 全国总览（`OverviewPage`）与流域详情（`BasinDetailPanels`）**都**用本包装：详情页的 discharge
- * 也是全国 `{source}/{cycle}` 模板，非默认对同样会落进未定态，而且它永不取 per-cycle 列表，
- * 未定即终态 —— 用裸函数丢的 `validTime` 不会再被任何后续落地补回来。
+ * 全国总览（`OverviewPage`）的校正 effect 必须用本包装。
  */
 export function resolveM11NationalValidTimeCorrection(
   state: Pick<M11QueryState, 'layer' | 'validTime'>,
   layers: LayerState[],
-  derivedTimes?: M11TimelineDerivedTimes | null,
 ): string | null | undefined {
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
   if (isM11ActiveCycleValidTimesUnresolved(activeLayer)) return undefined
-  return resolveM11ValidTimeCorrection(state, layers, derivedTimes)
+  return resolveM11ValidTimeCorrection(state, layers)
 }
 
 /**
  * 时间轴视图模型。
  *
- * `effectiveCycle`（第 5 个可选形参，#2014）：调用方显式传入的有效 cycle，用于 lead 与
+ * `effectiveCycle`（第 4 个可选形参，#2014）：调用方显式传入的有效 cycle，用于 lead 与
  * Analysis/Forecast 分界。全国默认态 `defaultM11QueryState.cycle === null` 且
  * `sourceSelection` 可能为 null，不显式传就既没有 lead 也没有分界。不传时表达式退化为
  * `sourceSelection?.cycleTime ?? state.cycle`，既有调用点行为逐字不变。
@@ -600,34 +480,30 @@ export function resolveM11NationalValidTimeCorrection(
 export function buildM11TimelineViewModel(
   state: Pick<M11QueryState, 'layer' | 'validTime' | 'cycle'>,
   layers: LayerState[],
-  derivedTimes: M11TimelineDerivedTimes | null,
   sourceSelection: SourceScenarioSelectionState | null,
   effectiveCycle?: string | null,
 ) {
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
-  const usesLayer = Boolean(activeLayer)
-  const validTimes = usesLayer ? activeLayer?.validTimes ?? [] : normalizeValidTimes(derivedTimes?.validTimes)
+  const validTimes = activeLayer?.validTimes ?? []
   const normalizedCurrent = normalizeIso(state.validTime)
   const currentValidTime =
     normalizedCurrent && validTimes.includes(normalizedCurrent)
       ? normalizedCurrent
-      : usesLayer
-        ? activeLayer?.currentValidTime ?? validTimes[validTimes.length - 1] ?? null
-        : validTimes[validTimes.length - 1] ?? null
+      : activeLayer
+        ? activeLayer.currentValidTime ?? validTimes[validTimes.length - 1] ?? null
+        : null
   const currentIndex = currentValidTime ? validTimes.indexOf(currentValidTime) : -1
   const cycle = normalizeIso(effectiveCycle ?? sourceSelection?.cycleTime ?? state.cycle)
   const dividerIndex = cycle ? validTimes.findIndex((validTime) => Date.parse(validTime) > Date.parse(cycle)) : -1
   const dividerPercent =
     dividerIndex > 0 && validTimes.length > 1 ? Math.round((dividerIndex / (validTimes.length - 1)) * 100) : null
   const nativeResolutionLabel = validTimes.length > 1 ? `${formatDuration(Date.parse(validTimes[1]) - Date.parse(validTimes[0]))} native` : 'native ticks'
-  const sourceKind = usesLayer ? activeLayer?.validTimeSource ?? 'none' : validTimes.length > 0 ? 'derived' : 'none'
-  const sourceLabel = usesLayer
-    ? `${activeLayer?.displayName ?? state.layer} / ${validTimeSourceLabel(sourceKind)} / ${
-        activeLayer?.freshness.source ?? sourceSelection?.resolvedSource ?? 'Unknown'
+  const sourceKind = activeLayer?.validTimeSource ?? 'none'
+  const sourceLabel = activeLayer
+    ? `${activeLayer.displayName ?? state.layer} / ${validTimeSourceLabel(sourceKind)} / ${
+        activeLayer.freshness.source ?? sourceSelection?.resolvedSource ?? 'Unknown'
       }`
-    : validTimes.length > 0
-      ? `${derivedTimes?.label ?? 'payload-derived'} / derived`
-      : 'no valid-time data'
+    : 'no valid-time data'
 
   return {
     validTimes,
@@ -688,14 +564,7 @@ function buildM11TimelineTicks(
 
 function validTimeSourceLabel(source: string) {
   if (source === 'api') return '/api/v1/layers/{layer_id}/valid-times'
-  if (source === 'derived') return 'payload-derived'
   return 'unavailable'
-}
-
-function normalizeValidTimes(values: string[] | undefined): string[] {
-  return [...new Set((values ?? []).map(normalizeIso).filter((value): value is string => Boolean(value)))].sort(
-    (a, b) => Date.parse(a) - Date.parse(b),
-  )
 }
 
 function normalizeIso(value: string | null | undefined) {

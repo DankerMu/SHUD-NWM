@@ -1,57 +1,14 @@
 import type { components } from '@/api/types'
-import { defaultM11QueryState, m11QueryHref } from '@/lib/m11/queryState'
 import type { M11Layer, M11QueryState, M11Source } from '@/lib/m11/queryState'
 
 export type ApiBasin = components['schemas']['Basin']
 export type ApiBasinVersion = components['schemas']['BasinVersion']
 export type ApiModelInstance = components['schemas']['ModelInstance']
-export type ApiRiverSegment = components['schemas']['RiverSegment']
-export type ApiRiverFeatureCollection = components['schemas']['RiverSegmentFeatureCollection']
-export type ApiRiverFeature = components['schemas']['RiverSegmentFeature']
 export type ApiHydroRun = components['schemas']['HydroRun']
 export type ApiHydroRunPage = components['schemas']['HydroRunPage']
 export type ApiLayer = components['schemas']['Layer']
 export type ApiPipelineStatus = components['schemas']['PipelineStatus']
 export type ApiQueueDepth = components['schemas']['QueueDepth']
-// `/api/v1/lineage/river-point` 后端从未实现（生产恒 404，overviewData.ts 的 try/catch 把它降级成
-// '河段追溯暂不可用' partialError）。没有路由就不可能有 OpenAPI schema，故这三个形状在前端就地声明，
-// 逐字段沿用 b97c16e2^ 时期 types.ts 里的旧定义。
-export interface ApiForcingVersion {
-  forcing_version_id: string
-  model_id: string
-  source_id: string
-  cycle_time?: string | null
-  start_time: string
-  end_time: string
-  station_count: number
-  forcing_package_uri: string
-  checksum?: string | null
-  lineage_json?: { [key: string]: unknown } | null
-  created_at: string
-}
-
-export interface ApiQcResult {
-  qc_id: number
-  qc_checkpoint: string
-  target_type: string
-  target_id: string
-  run_id?: string | null
-  passed: boolean
-  severity: string
-  checks_json: { [key: string]: unknown }
-  message?: string | null
-  created_at: string
-}
-
-export interface ApiLineageResponse {
-  target_type: string
-  target_id: string
-  nodes: { [key: string]: unknown }[]
-  edges: { [key: string]: unknown }[]
-  forcing_versions?: ApiForcingVersion[]
-  qc_results?: ApiQcResult[]
-}
-export type ApiForecastPayload = components['schemas']['RiverSeriesResponse'] | components['schemas']['SplicedForecastResponse']
 
 export type M11ResolvedSource = 'GFS' | 'IFS' | 'GFS+IFS' | 'Unknown'
 
@@ -212,22 +169,6 @@ export interface LayerState {
   legend: LayerLegendEntry[]
 }
 
-export interface BasinDetail {
-  basinId: string
-  displayName: string
-  basinGroup: string | null
-  selectedBasinVersionId: string | null
-  basinVersions: BasinVersionOption[]
-  boundary: components['schemas']['GeoJsonMultiPolygon'] | null
-  bbox: M11Bbox | null
-  segmentCount: number | null
-  activeModelCount: number
-  latestRun: FreshnessMetadata
-  sourceSelection: SourceScenarioSelectionState
-  unavailableReason: string | null
-  partialErrors: string[]
-}
-
 export interface BasinSegmentRow {
   riverSegmentId: string
   riverNetworkVersionId: string
@@ -246,40 +187,6 @@ export interface BasinSegmentRow {
     | components['schemas']['GeoJsonLineString']
     | components['schemas']['GeoJsonMultiLineString']
     | null
-  unavailableReason: string | null
-}
-
-export interface TrendPoint {
-  validTime: string
-  value: number | null
-  source: M11ResolvedSource | null
-  scenarioId: string
-  role: string | null
-  isAnalysis: boolean
-}
-
-export interface SelectedSegmentDetail {
-  basinId: string | null
-  basinName: string | null
-  basinVersionId: string
-  riverSegmentId: string
-  segmentId: string
-  displayName: string
-  modelId: string | null
-  riverNetworkVersionId: string | null
-  currentQ: number | null
-  qUnit: string
-  sourceSelection: SourceScenarioSelectionState
-  trendPoints: TrendPoint[]
-  comparisonAvailable: boolean
-  lineageStatus: 'available' | 'unavailable' | 'failed'
-  lineageUnavailableReason: string | null
-  handoffUrl: string
-  geometry:
-    | components['schemas']['GeoJsonLineString']
-    | components['schemas']['GeoJsonMultiLineString']
-    | null
-  freshness: FreshnessMetadata
   unavailableReason: string | null
 }
 
@@ -311,7 +218,7 @@ const layerLabels: Record<M11Layer, string> = {
  *
  * 只在 selection 层的**全国调用点**生效，绝不在 `parseM11QueryState` 里做：
  * `parseM11QueryState('source=best').source` 必须仍是 `'best'`，否则 serialize 往返会把
- * 用户 URL 里的 `best` 改写掉；流域详情共用的 `createSourceScenarioSelection` 也不得无条件归一，
+ * 用户 URL 里的 `best` 改写掉；`createSourceScenarioSelection` 的默认臂也不得无条件归一，
  * 否则会静默吃掉 "Best Available exposes provenance"。
  */
 export function resolveNationalScaleSource(source: M11Source): M11Source {
@@ -321,8 +228,8 @@ export function resolveNationalScaleSource(source: M11Source): M11Source {
 export function createSourceScenarioSelection(
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
   availableSources: M11ResolvedSource[] = [],
-  // 默认 `'basin'`：流域详情语义（`best` 保留 Best Available 的 provenance）。
-  // 只有全国尺度调用点显式传 `'national'`，把 `best` 归一为 `gfs`。
+  // 默认不归一（`best` 保留 Best Available provenance；`normalizeLayerStates` 的图层 freshness
+  // 走此臂），只有全国 summary 调用点显式传 `'national'`，把 `best` 归一为 `gfs`。
   options: { scale?: 'national' | 'basin' } = {},
 ): SourceScenarioSelectionState {
   const scopedSource = options.scale === 'national' ? resolveNationalScaleSource(query.source) : query.source
@@ -383,28 +290,6 @@ export function createEmptyOverviewSummary(query: Pick<M11QueryState, 'source' |
     sourceSelection,
     freshness: createFreshnessMetadata({ source: sourceSelection.resolvedSource, unavailableReason: 'No overview data loaded.' }),
     qualityNotes: ['No overview data loaded.'],
-    partialErrors: [],
-  }
-}
-
-export function createEmptyBasinDetail(
-  basinId: string,
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
-): BasinDetail {
-  const sourceSelection = createSourceScenarioSelection(query)
-  return {
-    basinId,
-    displayName: basinId,
-    basinGroup: null,
-    selectedBasinVersionId: null,
-    basinVersions: [],
-    boundary: null,
-    bbox: null,
-    segmentCount: null,
-    activeModelCount: 0,
-    latestRun: createFreshnessMetadata({ source: sourceSelection.resolvedSource, unavailableReason: 'No basin data loaded.' }),
-    sourceSelection,
-    unavailableReason: 'No basin data loaded.',
     partialErrors: [],
   }
 }
@@ -768,186 +653,6 @@ export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {
   return layerLegend(layerId)
 }
 
-export function normalizeBasinDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'basinVersionId'>
-  basin: ApiBasin | null
-  basinLookupAvailable?: boolean
-  versions: ApiBasinVersion[]
-  models?: ApiModelInstance[]
-  segments?: ApiRiverFeatureCollection | null
-  latestRun?: ApiHydroRun | null
-  runs?: ApiHydroRun[]
-  partialErrors?: string[]
-}): BasinDetail {
-  const basinId = input.basin?.basin_id ?? ''
-  const versions = normalizeBasinVersions(input.versions)
-  const selectedVersion =
-    versions.find((version) => version.basinVersionId === input.query.basinVersionId) ??
-    versions.find((version) => version.active) ??
-    versions[0] ??
-    null
-  const selectedVersionId = selectedVersion?.basinVersionId ?? null
-  const models = (input.models ?? []).filter((model) => !selectedVersionId || model.basin_version_id === selectedVersionId)
-  const sourceSelection = createSourceScenarioSelection(input.query, sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : [])))
-
-  return {
-    basinId,
-    displayName: normalizeString(input.basin?.basin_name) ?? basinId,
-    basinGroup: normalizeString(input.basin?.basin_group),
-    selectedBasinVersionId: selectedVersionId,
-    basinVersions: versions,
-    boundary: selectedVersion?.boundary ?? null,
-    bbox: selectedVersion?.bbox ?? null,
-    segmentCount: input.segments?.total ?? input.segments?.features.length ?? null,
-    activeModelCount: models.filter((model) => model.active_flag).length,
-    latestRun: createFreshnessMetadata({
-      updatedAt: input.latestRun?.updated_at ?? null,
-      cycleTime: input.latestRun?.cycle_time ?? input.query.cycle,
-      validTime: input.query.validTime,
-      runId: input.latestRun?.run_id ?? null,
-      basinVersionId: input.latestRun?.basin_version_id ?? null,
-      riverNetworkVersionId: input.latestRun?.river_network_version_id ?? null,
-      source: sourceSelection.resolvedSource,
-      unavailableReason: input.latestRun ? null : 'No latest run is available for this basin/source.',
-    }),
-    sourceSelection,
-    unavailableReason: !input.basin && input.basinLookupAvailable !== false
-      ? 'Basin was not found.'
-      : versions.length === 0
-        ? 'No published basin version is available.'
-        : input.segments && input.segments.features.length === 0
-          ? 'Selected basin version has no river segment data.'
-          : null,
-    partialErrors: input.partialErrors ?? [],
-  }
-}
-
-export function normalizeBasinSegmentRows(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>
-  featureCollection: ApiRiverFeatureCollection | null
-}): BasinSegmentRow[] {
-  const features = input.featureCollection?.features ?? []
-
-  const budgetState = createBasinRiverGeometryBudgetState()
-  return features.map((feature) => segmentRowFromFeature(feature, input.query, budgetState))
-}
-
-export function filterBasinSegmentRows(
-  rows: BasinSegmentRow[],
-  query: Pick<M11QueryState, 'q'>,
-): BasinSegmentRow[] {
-  const search = query.q?.toLowerCase() ?? null
-
-  return rows.filter((row) => {
-    if (!search) return true
-    return `${row.displayName} ${row.riverSegmentId} ${row.segmentId}`.toLowerCase().includes(search)
-  })
-}
-
-export function normalizeSelectedSegmentDetail(input: {
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime' | 'layer' | 'metStations' | 'basemap' | 'q'>
-  basin?: ApiBasin | null
-  basinVersionId: string
-  segmentId: string
-  segment?: ApiRiverSegment | null
-  feature?: ApiRiverFeature | null
-  model?: ApiModelInstance | null
-  forecast?: ApiForecastPayload | null
-  lineage?: ApiLineageResponse | null
-  lineageError?: string | null
-  lineageUnavailableReason?: string | null
-  resolvedRun?: ApiHydroRun | null
-  resolvedQuery?: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'> | null
-}): SelectedSegmentDetail {
-  const forecastSeries = normalizeForecastSeries(input.forecast)
-  const availableSources = [
-    ...new Set([
-      ...forecastSeries.map((point) => point.source).filter(Boolean),
-      ...sourcesFromRuns(input.resolvedRun ? [input.resolvedRun] : []),
-    ]),
-  ] as M11ResolvedSource[]
-  // 同上：默认源翻成 gfs 后，周期回退必须覆盖所有非 compare 源，否则默认流域详情的
-  // provenance 与 handoff URL 会丢掉具体周期。非 best 仍以解析出的具体源 query 为基。
-  const selectionBase = input.query.source === 'best' ? input.query : input.resolvedQuery ?? input.query
-  const selectionQuery =
-    input.query.source === 'compare'
-      ? selectionBase
-      : {
-          ...selectionBase,
-          cycle: selectionBase.cycle ?? input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? null,
-        }
-  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
-  const handoffSource =
-    input.query.source === 'best' && (sourceSelection.resolvedSource === 'GFS' || sourceSelection.resolvedSource === 'IFS')
-      ? (sourceSelection.resolvedSource.toLowerCase() as M11Source)
-      : input.query.source
-  const currentPoint = pickCurrentTrendPoint(forecastSeries, input.query.validTime, sourceSelection)
-  const effectiveValidTime = currentPoint?.validTime ?? normalizeIsoString(input.query.validTime)
-  const lineageStatus = input.lineage ? 'available' : input.lineageError ? 'failed' : 'unavailable'
-  const riverSegmentId =
-    input.segment?.river_segment_id ??
-    input.feature?.properties.river_segment_id ??
-    input.segmentId
-  const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(input.segment?.geom ?? input.feature?.geometry ?? null)
-
-  return {
-    basinId: input.basin?.basin_id ?? input.model?.basin_id ?? null,
-    basinName: input.basin?.basin_name ?? input.model?.basin_name ?? null,
-    basinVersionId: input.basinVersionId,
-    riverSegmentId,
-    segmentId: input.feature?.properties.segment_id ?? input.segmentId,
-    displayName:
-      normalizeString(input.feature?.properties.name) ??
-      riverSegmentId,
-    modelId: input.model?.model_id ?? null,
-    riverNetworkVersionId:
-      input.segment?.river_network_version_id ??
-      input.feature?.properties.river_network_version_id ??
-      null,
-    currentQ: currentPoint?.value ?? null,
-    qUnit: normalizeUnit(forecastUnit(input.forecast)),
-    sourceSelection,
-    trendPoints: forecastSeries,
-    comparisonAvailable: sourceSelection.comparisonAvailable,
-    lineageStatus,
-    lineageUnavailableReason:
-      lineageStatus === 'available'
-        ? null
-        : normalizeString(input.lineageError) ??
-          normalizeString(input.lineageUnavailableReason) ??
-          'Lineage is unavailable for this segment/time.',
-    handoffUrl: m11QueryHref('/', {
-      ...defaultM11QueryState,
-      source: handoffSource,
-      cycle: selectionQuery.cycle,
-      validTime: effectiveValidTime,
-      layer: input.query.layer,
-      metStations: input.query.metStations,
-      basemap: input.query.basemap,
-      basinVersionId: input.basinVersionId,
-      riverNetworkVersionId:
-        input.segment?.river_network_version_id ??
-        input.feature?.properties.river_network_version_id ??
-        null,
-      segmentId: riverSegmentId,
-      q: input.query.q,
-    }),
-    geometry: geometryStatus.sanitizedGeometry,
-    freshness: createFreshnessMetadata({
-      updatedAt: input.forecast && 'issue_time' in input.forecast ? input.forecast.issue_time : input.resolvedRun?.updated_at ?? null,
-      cycleTime: input.resolvedRun?.cycle_time ?? selectionQuery.cycle,
-      validTime: effectiveValidTime,
-      runId: input.resolvedRun?.run_id ?? null,
-      basinVersionId: input.resolvedRun?.basin_version_id ?? null,
-      riverNetworkVersionId: input.resolvedRun?.river_network_version_id ?? null,
-      source: sourceSelection.resolvedSource,
-      unavailableReason: forecastSeries.length > 0 ? null : 'No forecast values are available.',
-    }),
-    unavailableReason:
-      (!input.segment && !input.feature ? 'Segment geometry/detail is unavailable.' : null) ?? geometryStatus.reason,
-  }
-}
-
 function normalizeRequestedSource(source: M11Source): M11Source {
   return source === 'ifs' || source === 'compare' || source === 'best' ? source : 'gfs'
 }
@@ -1022,20 +727,6 @@ function isStale(value: unknown, staleAfterHours: number): boolean {
   const normalized = normalizeIsoString(value)
   if (!normalized) return false
   return Date.now() - Date.parse(normalized) > staleAfterHours * 3_600_000
-}
-
-// Canonicalises a unit to the ASCII spelling the API and `hydro.river_unit`
-// use, so `qUnit` stays comparable to what the backend sent. The superscript
-// belongs to the display layer only — render it with `formatUnitForDisplay`
-// at the point it goes on screen, do not canonicalise the other way here.
-function normalizeUnit(value: unknown): string {
-  const unit = normalizeString(value)
-  if (!unit) return 'm3/s'
-  return unit === 'm³/s' ? 'm3/s' : unit
-}
-
-function forecastUnit(forecast: ApiForecastPayload | null | undefined): string | null {
-  return forecast && 'unit' in forecast ? forecast.unit : null
 }
 
 function normalizeBasinVersions(versions: ApiBasinVersion[]): BasinVersionOption[] {
@@ -1407,123 +1098,11 @@ export function m11DischargeColor(value: number | null) {
   return '#7FB8DC'
 }
 
-interface BasinRiverGeometryBudgetState {
-  featureCount: number
-  coordinateCount: number
-  serializedBytes: number
-}
-
-function createBasinRiverGeometryBudgetState(): BasinRiverGeometryBudgetState {
-  return {
-    featureCount: 0,
-    coordinateCount: 0,
-    serializedBytes: serializedByteLength({ type: 'FeatureCollection', features: [] }),
-  }
-}
-
-function retainBasinRiverGeometryWithinBudget(
-  geometryStatus: M11SelectedSegmentGeometryBudgetStatus,
-  state: BasinRiverGeometryBudgetState,
-): M11SelectedSegmentGeometryBudgetStatus {
-  if (!geometryStatus.sanitizedGeometry) return geometryStatus
-
-  const geometryBytes = serializedByteLength(geometryStatus.sanitizedGeometry)
-  const nextFeatureCount = state.featureCount + 1
-  const nextCoordinateCount = state.coordinateCount + geometryStatus.coordinateCount
-  const nextSerializedBytes = state.serializedBytes + geometryBytes + (state.featureCount > 0 ? 1 : 0)
-
-  if (
-    nextFeatureCount > m11BasinRiverCollectionBudget.maxFeatures ||
-    nextCoordinateCount > m11BasinRiverCollectionBudget.maxCoordinates ||
-    nextSerializedBytes > m11BasinRiverCollectionBudget.maxSerializedBytes
-  ) {
-    return selectedSegmentGeometryStatus(
-      false,
-      `Basin river geometry exceeds aggregate client rendering budget (${nextFeatureCount}/${m11BasinRiverCollectionBudget.maxFeatures} features, ${nextCoordinateCount}/${m11BasinRiverCollectionBudget.maxCoordinates} coordinates, ${nextSerializedBytes}/${m11BasinRiverCollectionBudget.maxSerializedBytes} bytes).`,
-      geometryStatus.coordinateCount,
-      geometryStatus.serializedBytes,
-      null,
-    )
-  }
-
-  state.featureCount = nextFeatureCount
-  state.coordinateCount = nextCoordinateCount
-  state.serializedBytes = nextSerializedBytes
-  return geometryStatus
-}
-
-function segmentRowFromFeature(
-  feature: ApiRiverFeature,
-  query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
-  budgetState: BasinRiverGeometryBudgetState,
-): BasinSegmentRow {
-  const props = feature.properties
-  const currentQ = numberOrNull(props.q_down) ?? numberOrNull(props.value)
-  const sourceSelection = createSourceScenarioSelection(query, currentQ !== null ? [sourceFromQuery(query.source)] : [])
-  const geometryStatus = retainBasinRiverGeometryWithinBudget(getM11SelectedSegmentGeometryBudgetStatus(feature.geometry), budgetState)
-  return {
-    riverSegmentId: props.river_segment_id,
-    riverNetworkVersionId: props.river_network_version_id,
-    segmentId: props.segment_id,
-    displayName: normalizeString(props.name) ?? props.river_segment_id,
-    basinVersionId: props.basin_version_id,
-    streamOrder: numberOrNull(props.stream_order),
-    lengthM: numberOrNull(props.length_m),
-    currentQ,
-    qUnit: normalizeUnit(props.unit),
-    source: sourceSelection.resolvedSource,
-    cycleTime: query.cycle,
-    validTime: normalizeIsoString(props.valid_time) ?? query.validTime,
-    hasGeometry: Boolean(geometryStatus.sanitizedGeometry),
-    geometry: geometryStatus.sanitizedGeometry,
-    unavailableReason: geometryStatus.reason,
-  }
-}
-
-function normalizeForecastSeries(forecast: ApiForecastPayload | null | undefined): TrendPoint[] {
-  if (!forecast) return []
-  if ('segments' in forecast) {
-    return forecast.segments.flatMap((segment) => {
-      const scenarioId = segment.scenario_id ?? segment.scenario
-      const source = sourceFromScenario(scenarioId, segment.source_id ?? segment.source)
-      return segment.data.map((point) => ({
-        validTime: normalizeIsoString(point.valid_time) ?? point.valid_time,
-        value: numberOrNull(point.value),
-        source,
-        scenarioId,
-        role: segment.segment_role,
-        isAnalysis: segment.segment_role === 'past_3_days' || scenarioId.includes('analysis'),
-      }))
-    })
-  }
-
-  return forecast.series.flatMap((segment) => {
-    const source = sourceFromScenario(segment.scenario_id, segment.source_id)
-    return segment.points
-      .filter((point) => point.length >= 2)
-      .map((point) => ({
-        validTime: normalizeIsoString(point[0]) ?? String(point[0]),
-        value: numberOrNull(point[1]),
-        source,
-        scenarioId: segment.scenario_id,
-        role: segment.segment_role,
-        isAnalysis: segment.segment_role === 'past_3_days' || segment.scenario_id.includes('analysis'),
-      }))
-  })
-}
-
 function sourceFromScenario(scenarioId: string, explicitSource?: string | null): M11ResolvedSource {
   const value = `${explicitSource ?? ''} ${scenarioId}`.toLowerCase()
   if (value.includes('ifs')) return 'IFS'
   if (value.includes('gfs')) return 'GFS'
   return 'Unknown'
-}
-
-function sourceFromQuery(source: M11Source): M11ResolvedSource {
-  if (source === 'ifs') return 'IFS'
-  if (source === 'compare') return 'GFS+IFS'
-  if (source === 'best') return 'Unknown'
-  return 'GFS'
 }
 
 function sourcesFromRuns(runs: ApiHydroRun[]): M11ResolvedSource[] {
@@ -1534,22 +1113,4 @@ function sourcesFromRuns(runs: ApiHydroRun[]): M11ResolvedSource[] {
         .filter((source): source is M11ResolvedSource => source !== 'Unknown'),
     ),
   ]
-}
-
-function pickCurrentTrendPoint(
-  points: TrendPoint[],
-  validTime: string | null,
-  sourceSelection: SourceScenarioSelectionState,
-): TrendPoint | null {
-  const usable = points.filter((point) => {
-    if (sourceSelection.resolvedSource === 'GFS+IFS') return true
-    return point.source === sourceSelection.resolvedSource || point.isAnalysis
-  })
-  if (usable.length === 0) return null
-  const normalizedValidTime = normalizeIsoString(validTime)
-  return (
-    (normalizedValidTime ? usable.find((point) => point.validTime === normalizedValidTime) : null) ??
-    [...usable].sort((a, b) => Date.parse(b.validTime) - Date.parse(a.validTime))[0] ??
-    null
-  )
 }

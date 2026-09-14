@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
+import { CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import type { components } from '@/api/types'
@@ -58,11 +58,10 @@ export type M11PrecipAvailability = 'unknown' | 'available' | 'absent'
  * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角，按「水文」/「气象」两组呈现
  * （spec map-layer-timeline-controls「Layer groups render」；base 组本单不交付，故不伪造）。
  *
- * `precipAvailability` 可选、默认 `'absent'`（「没告诉我」= 终态没有，供流域详情省略，直到
- * #2109 裁决）：`'absent'` 时降水开关禁用并标「未实现」（spec「Unimplemented meteorology
- * layers are disabled」的诚实面）；`'unknown'`（= 调用方手上的目录数组为空：目录在途、或快照属
- * 上一 query）同样禁用，但只说「目录未就绪」：不说「加载中」——`bootstrapError` 且没有阶段 2 快照
- * 时目录数组恒为空，`'unknown'` 就是**终态**，「加载中」会把终态谎报成在途；「未就绪」在途与终态
+ * `precipAvailability` 可选、默认 `'absent'`（「没告诉我」= 终态没有）：`'absent'` 时降水开关禁用
+ * 并标「未实现」（spec「Unimplemented meteorology layers are disabled」的诚实面）；`'unknown'`
+ * （= 调用方手上的目录数组为空：目录在途、或快照属上一 query）同样禁用，但只说「目录未就绪」：
+ * 不说「加载中」——`bootstrapError` 且没有阶段 2 快照时目录数组恒为空，`'unknown'` 就是**终态**，「加载中」会把终态谎报成在途；「未就绪」在途与终态
  * 都为真，而硬失败本身由别处呈现。也不说「未实现」——那要正向证据（一份到手且不含 `precip` 条目
  * 的目录）。这个判定由调用方**一处**从目录推出并**显式**传入（`OverviewMode` 的 `precipCatalog`），
  * 组件内不重复 find。
@@ -232,7 +231,7 @@ const M11_PRECIP_LEGEND_TITLE = '过去 24h 累积降水（mm/24h）'
  *
  * `precipLegend` 可选、默认无：**唯一**来源是目录 `precip` 条目的 `metadata.legend`
  * （fixture 决策 7），由 `OverviewMode` 一处推出并传入；组件内零硬编码调色板与阈值，
- * 否则图例的六个 hex 会与 PNG 的 PLTE 漂移。流域详情不传 → 无降水图例段（blocked by #2109）。
+ * 否则图例的六个 hex 会与 PNG 的 PLTE 漂移。不传 → 无降水图例段。
  */
 export function M11FloatingLegend({
   layer,
@@ -315,25 +314,6 @@ export function M11FloatingLegend({
   )
 }
 
-/** 玻璃质感的返回总览按钮（详情模式浮在地图左下角）。 */
-export function M11BackToOverviewButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        // bottom-24：与右下图例同因——底部控制条占 16–80px，96px = 条顶 + 16px 间隙。
-        'absolute bottom-24 left-4 z-[120] flex items-center gap-2 px-3 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-white/70',
-        GLASS_PANEL,
-      )}
-      onClick={onClick}
-      data-testid="m11-back-to-overview"
-    >
-      <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-      返回总览
-    </button>
-  )
-}
-
 /** 低调运维直链（operator+ 可见），浮在地图右上角缩放控件下方。 */
 export function M11OpsLink({ visible }: { visible: boolean }) {
   if (!visible) return null
@@ -367,8 +347,8 @@ export function M11FloatingNotice({ children, testId }: { children: ReactNode; t
   return (
     <div
       className={cn(
-        // bottom-40：与图例/返回按钮同因抬过 16–80px 的控制条，并保持提示条原先就比
-        // 那两张卡片再高一层的相对关系（bottom-20 之于 bottom-12/bottom-4）。
+        // bottom-40：与图例同因抬过 16–80px 的控制条，并保持提示条原先就比
+        // 图例卡片再高一层的相对关系（bottom-20 之于 bottom-12）。
         // 注意本值只保证越过控制条：卡片高度不定，居中提示与右下图例的水平交叠归 I15 的实机 receipt。
         'absolute left-1/2 bottom-40 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
         GLASS_PANEL,

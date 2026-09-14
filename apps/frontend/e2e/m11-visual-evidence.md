@@ -29,27 +29,34 @@ Successful issue #165 evidence matrix:
 | `/overview` | 1920x1080 | `.codex/screenshots/issue-165/m11-overview-1920x1080.png` | yes | inspected for navigation, panels, map area, controls, and timeline overlap |
 | `/overview` | 1440x900 | `.codex/screenshots/issue-165/m11-overview-1440x900.png` | yes | inspected for navigation, panels, map area, controls, and timeline overlap |
 | `/overview` | 1280x900 | `.codex/screenshots/issue-165/m11-overview-1280x900.png` | yes | inspected for compact-panel fit, map area, and timeline overlap |
-| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` | 1920x1080 | `.codex/screenshots/issue-165/m11-basin-1920x1080.png` | yes | inspected for basin route panels, river drilldown map area, selected segment panel, and timeline overlap |
-| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` | 1440x900 | `.codex/screenshots/issue-165/m11-basin-1440x900.png` | yes | inspected for basin route panels, river drilldown map area, selected segment panel, and timeline overlap |
-| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` | 1280x900 | `.codex/screenshots/issue-165/m11-basin-1280x900.png` | yes | inspected for compact-panel fit, selected segment panel, and timeline overlap |
+| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` (retired, #2109) | 1920x1080 | `.codex/screenshots/issue-165/m11-basin-1920x1080.png` | yes | historical only: inspected for basin route panels, river drilldown map area, selected segment panel, and timeline overlap; the basin-detail lane is retired and this route now redirects to `/` |
+| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` (retired, #2109) | 1440x900 | `.codex/screenshots/issue-165/m11-basin-1440x900.png` | yes | historical only: inspected for basin route panels, river drilldown map area, selected segment panel, and timeline overlap; the basin-detail lane is retired and this route now redirects to `/` |
+| `/basins/basin-demo?source=gfs&basinVersionId=bv-001&segmentId=seg-009` (retired, #2109) | 1280x900 | `.codex/screenshots/issue-165/m11-basin-1280x900.png` | yes | historical only: inspected for compact-panel fit, selected segment panel, and timeline overlap; the basin-detail lane is retired and this route now redirects to `/` |
+
+The three `/basins/...` rows are retired historical evidence (#2109 decision B, 2026-09-13): the
+basin-detail lane was deleted, and `/basins/:basinId` is kept only as a legacy redirect to the
+national overview `/` that drops the path parameter and keeps the other query keys. The rows and
+their screenshot paths are kept for provenance; do not recapture them.
 
 Traceability:
 - Command transcript and early CDP timeout attempts are recorded in
   `.codex/visual-evidence/issue-165/browser-attempts.md`.
 - A parent retry captured the matrix above and copied the generated PNGs into
   `.codex/screenshots/issue-165/`.
-- The required overview and basin-detail viewports at 1920x1080, 1440x900, and 1280x900 are all
-  present locally.
+- The required overview and (now retired, #2109) basin-detail viewports at 1920x1080, 1440x900,
+  and 1280x900 are all present locally.
 
 ## Issue #165 developer notes
 
 Routes:
 - `/` and `/overview` render the national overview workflow.
-- `/basins/:basinId` renders the basin drill-down workflow and restores `source`, `cycle`,
-  `validTime`, `layer`, `basemap`, `basinVersionId`, `segmentId`, and `q`.
+- Historical (retired by #2109 decision B): `/basins/:basinId` rendered the basin drill-down
+  workflow and restored `source`, `cycle`, `validTime`, `layer`, `basemap`, `basinVersionId`,
+  `segmentId`, and `q`. It is now only a legacy redirect to `/`.
 - `/forecast` and `/monitoring` remain the implemented handoff destinations.
 
-Data contracts:
+Data contracts (the basin-page, `BasinSegmentRow` basin-map and `SelectedSegmentDetail` notes below
+are historical: that lane and `SelectedSegmentDetail` were removed by #2109 decision B):
 - Overview and basin pages consume typed view models from
   `src/lib/m11/overviewDataContracts.ts` and `src/stores/overviewData.ts`.
 - Basin maps use normalized `BasinSegmentRow.geometry` only when it passes the selected

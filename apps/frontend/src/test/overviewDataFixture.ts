@@ -1,4 +1,4 @@
-// 共享 fixture：`src/stores/__tests__/overviewData*.test.ts` 三个分片共用的 mock api client、
+// 共享 fixture：`src/stores/__tests__/overviewData*.test.ts` 各分片共用的 mock api client、
 // 目录/周期常量与 store 重置。`vi.mock('@/api/client')` 必须留在各测试文件里（vitest 只在被
 // 转换的测试文件内提升 mock 注册），本模块只消费被 mock 后的 `client`。
 import { vi } from 'vitest'
@@ -190,32 +190,6 @@ export function apiError(code: string) {
   return { data: undefined, error: { request_id: 'req-1', status: 'error', error: { code, message: code } } }
 }
 
-export const riverSegments = {
-  type: 'FeatureCollection',
-  features: [
-    {
-      type: 'Feature',
-      properties: {
-        segment_id: 'seg-001',
-        river_segment_id: 'river-001',
-        basin_version_id: 'bv-001',
-        river_network_version_id: 'rn-001',
-        name: 'Demo River',
-        stream_order: 2,
-        length_m: 1000,
-        value: 12,
-        unit: 'm3/s',
-        valid_time: '2026-05-18T06:00:00Z',
-      },
-      geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
-    },
-  ],
-  total: 1,
-  feature_total: 1,
-  limit: 1,
-  offset: 0,
-}
-
 export type MockOptions = { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
 export type MockCall = {
   path: string
@@ -250,7 +224,6 @@ export function mockApi(overrides: Record<string, (options: MockOptions) => unkn
     if (path === '/api/v1/basins') return success([basin])
     if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion])
     if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 })
-    if (path === '/api/v1/models/{model_id}') return success(model)
     if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: options?.params?.query?.offset ?? 0 })
     if (path === '/api/v1/layers') return success([layer])
     if (path === VALID_TIMES_PATH) {
@@ -267,35 +240,6 @@ export function mockApi(overrides: Record<string, (options: MockOptions) => unkn
         job_counts: { succeeded: 1, running: 0, failed: 0, pending: 0 },
       })
     }
-    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success(riverSegments)
-    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}') {
-      return success({
-        river_segment_id: 'river-001',
-        river_network_version_id: 'rn-001',
-        segment_order: 1,
-        downstream_segment_id: null,
-        length_m: 1000,
-        geom: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
-        properties_json: {},
-        created_at: '2026-05-01T00:00:00Z',
-      })
-    }
-    if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
-      return success({
-        segment_id: 'river-001',
-        issue_time: '2026-05-18T00:00:00Z',
-        unit: 'm3/s',
-        series: [
-          {
-            scenario_id: 'forecast_gfs_deterministic',
-            source_id: 'GFS',
-            segment_role: 'future_7_days',
-            points: [['2026-05-18T06:00:00Z', 12]],
-          },
-        ],
-      })
-    }
-    if (path === '/api/v1/lineage/river-point') return success({ status: 'available', records: [] })
     throw new Error(`Unexpected GET ${path}`)
   }) as never)
   return calls
@@ -327,13 +271,10 @@ export function resetOverviewDataTestState() {
   clearOverviewDataCache()
   useOverviewDataStore.setState({
     overview: null,
-    basinDetail: null,
     mapBootstrapLoading: false,
     enrichmentLoading: false,
-    basinLoading: false,
     bootstrapError: null,
     error: null,
-    basinError: null,
     cyclesBySource: {},
     validTimesByCycle: {},
     precipIndexByCycle: {},

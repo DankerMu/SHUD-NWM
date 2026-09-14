@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import type { MapRef, MapStyle } from 'react-map-gl/maplibre'
 
+import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap } from '@/lib/m11/queryState'
 
 export interface M11MapCameraFit {
@@ -11,6 +12,18 @@ export interface M11MapCameraFit {
 export interface M11MapCameraFlyTo {
   center: [number, number]
   zoom?: number
+}
+
+/** 流域 bbox → 相机 fit（留 36px 内边距）；bbox 缺失时不 fit。 */
+export function bboxToMapFit(bbox: M11Bbox | null | undefined): M11MapCameraFit | null {
+  if (!bbox) return null
+  return {
+    bounds: [
+      [bbox.minLon, bbox.minLat],
+      [bbox.maxLon, bbox.maxLat],
+    ],
+    padding: 36,
+  }
 }
 
 type M11InitialViewState =
@@ -54,9 +67,9 @@ export function useM11MapCamera({
 }): M11InitialViewState {
   const lastFitKeyRef = useRef<string | null>(null)
   const lastFlyKeyRef = useRef<string | null>(null)
-  // 总览↔详情切换会 remount 整棵地图子树，相机重置回 initialViewState。挂载时若已知 fitTo
-  // （从总览点入，静态 bbox 已缓存同步可得），直接用该 bounds 初始化，避免「先闪回全国再飞入」
-  // 的强制回初始视角（#1）；mount 后到达的 fitTo 仍由下方 effect 兜底。
+  // 地图子树 remount 时相机会重置回 initialViewState。首挂载时若已知 fitTo（静态 bbox 已缓存
+  // 同步可得），直接用该 bounds 初始化，避免「先闪回全国再飞入」的强制回初始视角（#1）；
+  // mount 后到达的 fitTo 仍由下方 effect 兜底。
   const [initialViewState] = useState<M11InitialViewState>(() =>
     fitTo ? { bounds: fitTo.bounds, fitBoundsOptions: { padding: fitTo.padding ?? 32 } } : CHINA_VIEW_STATE,
   )

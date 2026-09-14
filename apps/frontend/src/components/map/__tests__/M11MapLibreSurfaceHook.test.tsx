@@ -34,7 +34,6 @@ const state: M11QueryState = {
   basemap: 'vector',
   basinVersionId: null,
   riverNetworkVersionId: null,
-  basinId: null,
   segmentId: null,
   q: null,
 }
