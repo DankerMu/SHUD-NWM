@@ -1,4 +1,4 @@
-"""Systemd-facts / group-reconcile / publication discriminators. Helpers imported from the storage core suite."""
+"""Group-reconcile / publication discriminators. Helpers imported from the storage core suite."""
 
 from __future__ import annotations
 
@@ -13,12 +13,9 @@ from packages.common.node27_issue1895_receipt import durable_key
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.node27_issue1895_watermark import (
     assert_independent_receipt_horizon,
-    assert_systemd_invocation_facts,
     observe_current_cutoff,
-    parse_systemctl_show,
 )
 from scripts import node27_issue1895_group_reconcile as group_reconcile_cli
-from scripts import node27_issue1895_systemd_facts as systemd_facts_cli
 from tests.test_issue1895_readiness_storage import (
     _ORIGINAL_HASH,
     SHA,
@@ -30,223 +27,7 @@ from tests.test_issue1895_readiness_storage import (
 from tests.test_issue1895_runbook_contract import _gate, _gate_bash, _gate_lines
 
 
-def _canonical_systemd_facts() -> tuple[dict[str, str], dict[str, str]]:
-    timer = parse_systemctl_show(
-        "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.timer",
-                "Unit=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
-                "",
-            )
-        )
-    )
-    service = parse_systemctl_show(
-        "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce }",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_cold_residency_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce }",
-                "InvocationID=abc123",
-                "ExecMainStartTimestamp=Fri 2026-09-04 04:25:00 UTC",
-                "ExecMainExitTimestamp=Fri 2026-09-04 04:26:00 UTC",
-                "Result=success",
-                "",
-            )
-        )
-    )
-    return timer, service
-
-
-@pytest.mark.parametrize(
-    ("mutate", "expected_code"),
-    (
-        (lambda timer, _service: timer.__setitem__("Id", "other.timer"), "SYSTEMD_TIMER_ID"),
-        (lambda _timer, service: service.__setitem__("Id", "other.service"), "SYSTEMD_SERVICE_ID"),
-        (lambda _timer, service: service.pop("InvocationID"), "SYSTEMD_FACT_MISSING"),
-        (
-            lambda _timer, service: service.__setitem__(
-                "ExecStart", "\n".join(reversed(str(service["ExecStart"]).splitlines()))
-            ),
-            "SYSTEMD_EXEC_ORDER",
-        ),
-        (lambda _timer, service: service.__setitem__("Result", "failed"), "SYSTEMD_RESULT"),
-    ),
-)
-def test_systemd_facts_refuse_minimal_canonical_negative_matrix(
-    mutate,
-    expected_code: str,
-) -> None:
-    timer, service = _canonical_systemd_facts()
-    mutate(timer, service)
-
-    with pytest.raises(Issue1895ReadinessError) as raised:
-        assert_systemd_invocation_facts(timer=timer, service=service)
-
-    assert raised.value.code == expected_code
-
-
-def test_systemd_facts_publication_is_exclusive_private_and_preserves_existing_bytes(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    private = tmp_path / "private"
-    private.mkdir()
-    os.chmod(private, 0o700)
-    timer_show = private / "timer-show.txt"
-    service_show = private / "service-show.txt"
-    output = private / "systemd-facts.json"
-    target = private / "symlink-target.json"
-    timer_show.write_text(
-        "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.timer",
-                "Unit=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
-    service_show.write_text(
-        "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce }",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_cold_residency_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce }",
-                "InvocationID=abc123",
-                "ExecMainStartTimestamp=Fri 2026-09-04 04:25:00 UTC",
-                "ExecMainExitTimestamp=Fri 2026-09-04 04:26:00 UTC",
-                "Result=success",
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
-    os.chmod(timer_show, 0o600)
-    os.chmod(service_show, 0o600)
-    argv = ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
-
-    assert systemd_facts_cli.main(argv) == 0
-    assert output.stat().st_mode & 0o777 == 0o600
-    first = output.read_bytes()
-    assert systemd_facts_cli.main(argv) == 1
-    assert capsys.readouterr().err.strip() == "SYSTEMD_FACTS_REFUSED"
-    assert output.read_bytes() == first
-
-    output.unlink()
-    target.write_bytes(b"old target bytes\n")
-    output.symlink_to(target)
-    assert systemd_facts_cli.main(argv) == 1
-    assert capsys.readouterr().err.strip() == "SYSTEMD_FACTS_REFUSED"
-    assert output.is_symlink()
-    assert target.read_bytes() == b"old target bytes\n"
-
-
-def test_systemd_facts_closes_unreadable_inputs_without_path_or_traceback(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    secret_path = tmp_path / "synthetic-secret-timer-show.txt"
-    rc = systemd_facts_cli.main(
-        [
-            "--timer-show",
-            str(secret_path),
-            "--service-show",
-            str(tmp_path / "missing-service-show.txt"),
-            "--output",
-            str(tmp_path / "systemd-facts.json"),
-        ]
-    )
-    assert rc == 1
-    captured = capsys.readouterr()
-    assert captured.err.strip() == "SYSTEMD_FACTS_UNAVAILABLE"
-    assert str(secret_path) not in captured.err
-    assert "Traceback" not in captured.err
-
-
-def _write_systemd_show(path: Path, *, service: bool) -> Path:
-    if service:
-        text = "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce }",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_cold_residency_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce }",
-                "InvocationID=abc123",
-                "ExecMainStartTimestamp=Fri 2026-09-04 04:25:00 UTC",
-                "ExecMainExitTimestamp=Fri 2026-09-04 04:26:00 UTC",
-                "Result=success",
-                "",
-            )
-        )
-    else:
-        text = "\n".join(
-            (
-                "Id=nhms-node27-timeseries-compression.timer",
-                "Unit=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
-                "",
-            )
-        )
-    path.write_text(text, encoding="utf-8")
-    os.chmod(path, 0o600)
-    return path
-
-
-def test_systemd_facts_refuses_symlink_and_parent_0755_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    private = tmp_path / "private"
-    private.mkdir()
-    os.chmod(private, 0o700)
-    timer_show = _write_systemd_show(private / "timer-show.txt", service=False)
-    service_show = _write_systemd_show(private / "service-show.txt", service=True)
-    output = private / "systemd-facts.json"
-    called = {"n": 0}
-
-    def refuse_assert(*_args: object, **_kwargs: object) -> dict[str, str]:
-        called["n"] += 1
-        raise AssertionError("assert_systemd_invocation_facts must not run on unsafe inputs")
-
-    monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", refuse_assert)
-    linked = tmp_path / "timer-link.txt"
-    linked.symlink_to(timer_show)
-    rc = systemd_facts_cli.main(
-        ["--timer-show", str(linked), "--service-show", str(service_show), "--output", str(output)]
-    )
-    assert rc == 1
-    assert called["n"] == 0
-    assert not output.exists()
-    captured = capsys.readouterr()
-    assert "SYSTEMD_FACTS_UNAVAILABLE" in captured.err or "READINESS_INPUT" in captured.err
-    os.chmod(private, 0o755)
-    rc = systemd_facts_cli.main(
-        ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
-    )
-    assert rc == 1
-    assert called["n"] == 0
-    assert not output.exists()
-    os.chmod(private, 0o700)
-    monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", assert_systemd_invocation_facts)
-    assert (
-        systemd_facts_cli.main(
-            ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
-        )
-        == 0
-    )
-    assert output.exists()
-
-
-def test_independent_w8_and_systemd_facts_refuse_self_bind() -> None:
+def test_independent_w8_horizon_refuses_self_bind() -> None:
     pre_tick_watermark = datetime(2026, 9, 4, 12, tzinfo=UTC)
     post_tick_watermark = datetime(2026, 9, 5, 12, tzinfo=UTC)
 
@@ -305,39 +86,9 @@ def test_independent_w8_and_systemd_facts_refuse_self_bind() -> None:
             expected_lag_seconds=172800,
         )
     assert mismatch.value.code == "TICK_WATERMARK_MISMATCH"
-    timer = parse_systemctl_show(
-        "\n".join(
-            [
-                "Id=nhms-node27-timeseries-compression.timer",
-                "Unit=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
-                "",
-            ]
-        )
-    )
-    service = parse_systemctl_show(
-        "\n".join(
-            [
-                "Id=nhms-node27-timeseries-compression.service",
-                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce }",
-                "ExecStart={ path=/home/nwm/NWM/scripts/node27_cold_residency_once.sh ; "
-                "argv[]=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce }",
-                "InvocationID=abc123",
-                "ExecMainStartTimestamp=Fri 2026-09-04 04:25:00 UTC",
-                "ExecMainExitTimestamp=Fri 2026-09-04 04:26:00 UTC",
-                "Result=success",
-                "",
-            ]
-        )
-    )
-    proven = assert_systemd_invocation_facts(timer=timer, service=service)
-    assert proven["invocation_id"] == "abc123"
     g8 = " ".join(_gate_lines("G8"))
     assert 'test ! -e "$W8_PATH"' in g8
     assert "scripts/node27_issue1895_watermark.py" in g8
-    assert "scripts/node27_issue1895_systemd_facts.py" in g8
     assert "post-tick external independent horizon" in _gate("G8")
     assert 'expected_cutoff=receipt["cutoff"]' not in g8
     assert 'expected_watermark=receipt["watermark"]' not in g8

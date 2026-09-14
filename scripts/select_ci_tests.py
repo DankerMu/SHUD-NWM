@@ -850,8 +850,6 @@ NODE27_PGDATA_WORKLOAD_TESTS: tuple[str, ...] = (
 ORIGIN_CHUNK_PARITY_TESTS: tuple[str, ...] = (
     "tests/test_compressed_chunk_cold_runtime.py",
     "tests/test_compressed_chunk_cold_runtime_proof.py",
-    "tests/test_node27_cold_residency.py",
-    "tests/test_node27_cold_residency_phase2.py",
     "tests/test_node27_cold_residency_census.py",
     "tests/test_compressed_chunk_cold_runtime_integration.py",
     "tests/test_issue1895_readiness_storage.py",
@@ -888,7 +886,6 @@ ISSUE1895_READINESS_STORAGE_TESTS: tuple[str, ...] = (
 ISSUE1895_READINESS_TESTS: tuple[str, ...] = (
     *ISSUE1895_READINESS_C1_C2_C3_TESTS,
     "tests/test_issue1895_readiness_gates.py",
-    "tests/test_issue1895_readiness_env.py",
     "tests/test_issue1895_readiness_performance.py",
     *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
     "tests/test_issue1895_readiness_performance_publication.py",
@@ -904,8 +901,6 @@ ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_node27_cold_tablespace_host.py",
     "tests/test_compressed_chunk_cold_target.py",
     "tests/test_compressed_chunk_cold_runtime.py",
-    "tests/test_node27_cold_residency.py",
-    "tests/test_node27_cold_residency_runtime_identity.py",
     "tests/test_probe_compressed_chunk_cold_tablespace.py",
     "tests/test_timeseries_storage_schemas.py",
     "tests/test_issue2224_origin_parity_runbook_contract.py",
@@ -979,11 +974,6 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_issue1895_readiness_gates.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_env.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
         stop_on_match=True,
     ),
@@ -1258,14 +1248,6 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # so a fakes-only PR must still run it (its own tests skip without
             # the oracle, but collection is the contract check).
             "tests/test_compressed_chunk_cold_runtime_integration.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_publication.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            # #1929 Round 1: the schema-compat suite also imports the shared fakes
-            # at file scope (`FakeConnection`), so a fakes-only edit must run it —
-            # its 1.0/1.1 target-shape rows are asserted against these fixtures.
-            "tests/test_node27_cold_residency_schema_compat.py",
             # #1895 task 4.0 structural split: both census halves import the
             # shared fakes at module scope (the publication half imports the
             # core half, which imports the fakes). A fakes-only edit must run
@@ -1290,7 +1272,6 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_issue2224_origin_chunk_parity.py",
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",
         ),
     ),
@@ -3108,8 +3089,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_node27_timeseries_compression_supervisor.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_wrapper_pythonpath.py",
         ),
     ),
@@ -3127,7 +3111,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/node27_timeseries_compression.py",
         (
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
             # #1647: `_CHUNK_IDENT_RE` is pinned byte-equal to the autopipeline
             # `_STATS_GUARD_IDENT_RE` from that suite, so loosening the pattern
             # here reds there — mirror of the autopipeline row above.
@@ -3147,49 +3134,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_timeseries_discovery.py",),
     ),
     PathTestRule(
-        "scripts/node27_cold_residency.py",
-        (
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_publication.py",
-            # #1929 producers reach the whole identity contract, so the CLI
-            # module must select the target/runtime/schema surfaces too.
-            "tests/test_compressed_chunk_cold_target.py",
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
-            "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_connection_attribution.py",
-            "tests/test_node27_connection_attribution_delegated.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            # #1774: this lane runs as a non-superuser; a superuser-gated
-            # READ added here would fail SILENTLY.
-            "tests/test_node27_write_roles.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_cold_residency_once.sh",
-        (
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
-            "tests/test_node27_wrapper_pythonpath.py",
-        ),
-    ),
-    PathTestRule(
         "infra/systemd/nhms-node27-timeseries-compression.service",
         (
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_retention.py",
         ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node27-timeseries-retention.timer",
         (
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_retention.py",
         ),
     ),
@@ -3214,8 +3171,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # `OnFailure=` alert wiring, both pinned by unit-file tests. Without an
         # explicit row it is infra/** non-python, matches nothing, and a
         # unit-only PR selected zero tests. Narrow on purpose — the `.timer`
-        # sibling's cold_residency target is timer-schedule coverage, not
-        # something the unit body can break.
+        # sibling is timer-schedule coverage, not something the unit body can break.
         "infra/systemd/nhms-node27-timeseries-retention.service",
         ("tests/test_node27_timeseries_retention.py",),
     ),
@@ -3335,20 +3291,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_download_cycles.py",),
     ),
     PathTestRule(
-        # #2180: two suites read this timer by path and assert its schedule --
-        # `tests/test_node27_cold_residency.py:118-119` and
-        # `tests/test_node27_timeseries_compression.py:1982-1985` both pin
-        # `OnCalendar=*-*-* 04:25:00 UTC`, and the latter also pins
-        # `Unit=nhms-node27-timeseries-compression.service`. Both are targets so
-        # the schedule cannot drift past either reader.
-        # `tests/test_node27_timeseries_compression_live_evidence.py:712-716`
-        # and `..._capture.py:134-139` only `read_bytes` this timer to copy it
-        # into a fixture and assert nothing about its content -- not targets.
-        # The `#2173` pin glob is `*.service`, so this row is the whole
-        # selection for a timer-only diff.
+        # #2180: the compression suite reads this timer by path and asserts
+        # `OnCalendar=*-*-* 04:25:00 UTC` plus
+        # `Unit=nhms-node27-timeseries-compression.service`. Compression.timer
+        # never selects the retention suite. Live-evidence/capture only
+        # `read_bytes` this timer into a fixture and assert nothing about its
+        # content -- not targets. The `#2173` pin glob is `*.service`, so this
+        # row is the whole selection for a timer-only diff.
         "infra/systemd/nhms-node27-timeseries-compression.timer",
         (
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
         ),
     ),
@@ -3382,7 +3333,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "schemas/examples/timeseries_compression_receipt.example.json",
         (
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_compression_budget.py",
             "tests/test_node27_lifecycle_contract.py",
         ),
     ),
@@ -3424,20 +3375,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node27-timeseries-compression.example",
         (
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_lifecycle_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "infra/env/node27-cold-residency.example",
-        (
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
         ),
     ),
     PathTestRule(
@@ -3445,11 +3388,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *ORIGIN_CHUNK_PARITY_TESTS,
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
             "tests/test_node27_lifecycle_contract.py",
             # #1895 task 4.0 second leg: the live-rollout section is the review
             # gate for the two new read-only CLIs and the installer/runner
@@ -3459,14 +3401,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *ISSUE1895_READINESS_TESTS,
             "tests/test_issue2290_cold_parent_admission.py",
             "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_env_rewrite.py",
-        (
-            "tests/test_issue1895_readiness_env.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
         ),
     ),
     PathTestRule(
@@ -3565,11 +3499,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_env.py",
-        (
-            "tests/test_issue1895_readiness_env.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_performance.py",
@@ -3863,10 +3793,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
-        "scripts/node27_issue1895_systemd_facts.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
         "packages/common/node27_issue1895_percentiles.py",
         (
             "tests/test_issue1895_readiness_performance.py",
@@ -3879,7 +3805,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/node27_issue1895_types.py",
         (
             "tests/test_issue1895_readiness_gates.py",
-            "tests/test_issue1895_readiness_env.py",
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -3974,70 +3899,59 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "schemas/timeseries_cold_residency_receipt.schema.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
         ),
     ),
     PathTestRule(
         "schemas/examples/timeseries_cold_residency_receipt.example.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
-            # #1929: the terminal example is the downgrade source for the
-            # historical-1.0 fixtures AND the tombstone base document.
-            "tests/test_node27_cold_residency_runtime_identity.py",
         ),
     ),
     PathTestRule(
         "schemas/examples/timeseries_cold_residency_receipt.noop.example.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
         "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
         "schemas/examples/timeseries_cold_residency_receipt.partial.example.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
         "schemas/examples/timeseries_cold_residency_receipt.error.example.json",
         (
             "tests/test_timeseries_storage_schemas.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
-        "packages/common/node27_timeseries_sequential_budget.py",
+        "packages/common/node27_timeseries_compression_budget.py",
         (
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_wrapper_pythonpath.py",
         ),
     ),
     PathTestRule(
         "scripts/node27_timeseries_budget_preflight.py",
         (
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_wrapper_pythonpath.py",
         ),
     ),
@@ -4045,7 +3959,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/node27_timeseries_lifecycle_lock.py",
         (
             "tests/test_node27_timeseries_lifecycle_lock.py",
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_timeseries_decompression_replay.py",
@@ -4061,10 +3974,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_runtime_proof.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency_publication.py",
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
@@ -4090,10 +3999,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_runtime_proof.py",
             "tests/test_compressed_chunk_cold_runtime_integration.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency_publication.py",
             # #2224: focused origin-chunk parity imports the movement owner,
             # which re-exports this target-preflight surface; one-hop derivation
             # therefore requires this suite on a target-only PR.
@@ -4111,11 +4016,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/compressed_chunk_cold_receipt.py",
         (
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_publication.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_timeseries_storage_schemas.py",
             *ORIGIN_CHUNK_PARITY_TESTS,
         ),
@@ -4126,20 +4026,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_compressed_chunk_cold_target.py",
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_runtime_proof.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_publication.py",
         ),
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_tick.py",
         (
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-            "tests/test_node27_cold_residency_publication.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_target.py",
             # #1774: this lane runs as a non-superuser; a superuser-gated
@@ -4152,8 +4043,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/compressed_chunk_cold_runtime_timing.py",
         (
             "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
         ),
     ),
     PathTestRule(

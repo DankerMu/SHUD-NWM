@@ -55,8 +55,8 @@ def _runtime_env(case: str, tmp_path: Path, zstd: Path) -> str:
 
 # #1370: the product-archive, storage-inventory-audit, db-export-salvage and
 # archive-rebuild-drill wrappers were deleted with the archive lane
-# (ADR 0002 Revision 2026-08-11). Sequential compression/cold wrapper coverage
-# lives in test_node27_timeseries_sequential_wrappers.py.
+# (ADR 0002 Revision 2026-08-11). Compression wrapper coverage lives in
+# test_node27_timeseries_compression_wrappers.py.
 _WRAPPER_CASES = [
     (
         "timeseries_retention",

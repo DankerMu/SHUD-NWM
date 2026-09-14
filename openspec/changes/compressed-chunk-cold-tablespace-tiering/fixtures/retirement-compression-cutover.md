@@ -47,6 +47,29 @@ Mixed-import closure in this merge:
   parse_exec_start/COLD_WRAPPER used only by retired systemd facts. Keep
   observe_current_cutoff/assert_independent_receipt_horizon/parse_systemctl_show
   and their remaining consumers. Remove obsolete G8 runbook source-text pins.
+- `test_node27_write_roles.py` removes the deleted
+  `scripts/node27_cold_residency.py` entry from `_RECURRING_ENTRYPOINTS` and
+  therefore its derived `_CONVERTED_LANE_SOURCES` in this merge. Preserve the
+  remaining cold-package/grant/SET TABLESPACE rows until the remaining-deletion
+  fixture owns their removal. Execute the existing role suite and audit active
+  references; do not add an incidental source-text absence test.
+- Deleting the cold env template also retires its G4/G5 rewrite consumer
+  closure: `scripts/node27_issue1895_env_rewrite.py`,
+  `tests/test_issue1895_readiness_env.py`, and only rewrite-specific cases in
+  mixed `test_issue1895_readiness_storage.py`. Remove their selector edges and
+  current executable runbook references; never restore the template or copy
+  it into a new fixture to keep the retired capability alive.
+  In `packages/common/node27_issue1895_env.py`, remove rewrite-only APIs and
+  constants after caller census; retain `validate_canonical_positive_decimal`
+  for unretired watermark/post-target consumers until their R3 closure.
+  Preserve unrelated storage/lag-validation assertions and historical records.
+  Specifically, retain the direct `validate_canonical_positive_decimal`
+  invalid/missing-value assertions from
+  `test_live_compression_lag_rejects_noncanonical_and_missing_values` as a
+  validator-only storage test; remove only its template/rewrite/CLI portion.
+  Retire `test_g4_then_g5_env_rewrite_passes_through_live_compression_lag`
+  wholly. The retained env validator's selector maps to the surviving storage
+  suite, not the deleted readiness-env suite.
 
 New budget owner: `packages/common/node27_timeseries_compression_budget.py`;
 all consumers migrate, old sequential-budget module disappears with no aliases.

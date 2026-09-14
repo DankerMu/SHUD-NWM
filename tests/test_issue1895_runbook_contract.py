@@ -39,9 +39,6 @@ GATE_ORDER = ("G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8")
 # fresh numeric Config.User observation must spell it verbatim.
 INSPECT_FORMAT = '{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}'
 
-# The committed sequential-budget assembly contract (assembly_values order).
-ASSEMBLY_LINE = "3900,3901,7842,3600000,3600000,4"
-
 # Exact intent sidecar naming (intent_path_for), no with_name and no guess.
 INTENT_EXPR = "${RECEIPT%/*}/.${RECEIPT##*/}.intent"
 
@@ -863,21 +860,6 @@ def test_g8_binds_a_post_tick_external_horizon_before_receipt_or_group_validatio
     assert '--expected-watermark "$(/home/nwm/NWM/.venv/bin/python -c' in g8
 
 
-def test_g8_systemd_facts_output_is_exclusive_private_and_checked() -> None:
-    g8 = _gate("G8")
-    timer_show = g8.index('TIMER_SHOW="$RUN_ROOT/receipts/timer-show-$RUN_STAMP.txt"')
-    service_show = g8.index('SERVICE_SHOW="$RUN_ROOT/receipts/service-show-$RUN_STAMP.txt"')
-    output = g8.index('SYSTEMD_FACTS="$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"')
-    absent = g8.index('test ! -e "$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"')
-    owner = g8.index("scripts/node27_issue1895_systemd_facts.py")
-    regular = g8.index('test -f "$SYSTEMD_FACTS" && test ! -L "$SYSTEMD_FACTS"')
-    mode = g8.index('stat -c \'%a\' "$SYSTEMD_FACTS")" = "600"')
-    nlink = g8.index('stat -c \'%h\' "$SYSTEMD_FACTS")" = "1"')
-
-    assert timer_show < service_show < output < absent < owner < regular < mode < nlink
-    assert 'test ! -e "$TIMER_SHOW"' in g8
-    assert 'test ! -e "$SERVICE_SHOW"' in g8
-
 
 # Closure order
 
@@ -932,21 +914,6 @@ def test_rollback_table_matches_three_state_contract() -> None:
 
 # Existing contract must not regress
 
-
-def test_runbook_keeps_timeout_budget_and_env_contract() -> None:
-    text = RUNBOOK.read_text(encoding="utf-8")
-    assert "TimeoutStartSec=7842" in text
-    assert '"systemd_wall_seconds": 7842' in text
-    assert "06:36 UTC" in text
-    assert "node27-cold-residency.env" in text
-    assert "node27_timeseries_budget_preflight.py" in text
-    assert "OnCalendar=*-*-* 05:15:00 UTC" not in text
-
-
-def test_budget_assembly_matches_the_committed_sequential_contract() -> None:
-    g4 = _gate("G4")
-    assert ASSEMBLY_LINE in g4
-    assert "TimeoutStartSec" in g4
 
 
 def test_repo_python_runs_via_no_sync_uv_or_pinned_interpreter_only() -> None:

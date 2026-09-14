@@ -1,0 +1,39 @@
+{
+  "source_sha": "1a9fa37b48a5bf1ea04f739ddfaef6d5dd51a3ce",
+  "wrapper_wall_seconds": 301,
+  "kill_after_seconds": 30,
+  "service_wall_seconds": 342,
+  "elapsed_seconds": 331.1117412657477,
+  "returncode": -9,
+  "events": [
+    {
+      "pid": 509495,
+      "pgid": 509490,
+      "kind": "ready-parent",
+      "at": 2273688.142857231
+    },
+    {
+      "pid": 509498,
+      "pgid": 509490,
+      "kind": "ready-child",
+      "at": 2273688.143999427
+    },
+    {
+      "pid": 509495,
+      "pgid": 509490,
+      "kind": "TERM",
+      "at": 2273989.107033892
+    },
+    {
+      "pid": 509498,
+      "pgid": 509490,
+      "kind": "TERM",
+      "at": 2273989.107050854
+    }
+  ],
+  "live_descendants": [],
+  "stdout": "",
+  "stderr": "",
+  "scope": "shipping wrapper/preflight and real GNU timeout; supported caller script override supplies TERM-resistant parent+child, not a fake successful compression result",
+  "evidence_root": "/home/nwm/tmp/epic1891-retirement-20260914/compression-timeout-ygole5az"
+}

@@ -1,0 +1,28 @@
+{
+  "issue": 2370,
+  "status": "QUALIFIED_PRE_T0",
+  "tool_commit": "1b8b2b5b447d07091af98eb1e4ccbd1884e5b899",
+  "tool_hashes": {
+    "window_execute.py": "70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513"
+  },
+  "focused": "child2370-focused-unit-config.json",
+  "eight_case_matrix": "child2370-window-matrix.json",
+  "live_comparison": "child2370-live-stable-comparison.json",
+  "fresh_prepare": "child2370-fresh-prepare.json",
+  "input_publication": "child2370-input-publication.json",
+  "drivers": {
+    "child2370-prepare-inputs.py.txt": "022e1b64767207028cdffdb39c4abb1789849040097cd060c451bb93fd64aa63",
+    "child2370-prepare-launch.py.txt": "75e5dc54108290d0d8cf2f83c2194b580f083026154e54d329eec120f38c7da1",
+    "child2370-matrix-runner.py.txt": "d530f14861afc1f86286c35b1526f78c6aab4f70db56903ccbe3a3ab287f760d"
+  },
+  "governance_tools_unchanged": true,
+  "deviations": [
+    "Smoke adapter tuple/list shape fixed before finalverification.",
+    "GetUnit cannot resolve installed unloaded replayunit; use LoadUnit configuration-only, noStartUnit; finalfocused/matrix/freshprepare allreverified.",
+    "BaselineHTTP timedout15s; failedstatepreserved, exactendpoints later200, newstatepreparepassed withouttimeoutchange."
+  ],
+  "scope": "No productionT0/window/unstage; failed parentstate preserved."
+}

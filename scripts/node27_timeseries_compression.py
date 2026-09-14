@@ -41,6 +41,12 @@ from packages.common.evidence_io import (
     inspect_bounded_file_no_follow,
     normalized_absolute_path,
 )
+from packages.common.node27_timeseries_compression_budget import (
+    COMPRESSION_CLEANUP_MARGIN_SECONDS,
+    CompressionBudgetError,
+    compression_service_budget,
+    resolve_runner_budget,
+)
 from packages.common.node27_timeseries_discovery import (
     CANONICAL_HYPERTABLES,
     RUNTIME_HYPERTABLES_SQL,
@@ -50,12 +56,6 @@ from packages.common.node27_timeseries_lifecycle_lock import (
     acquire_timeseries_lifecycle_lock,
     refuse_lifecycle_lock_env_override,
     release_timeseries_lifecycle_lock,
-)
-from packages.common.node27_timeseries_sequential_budget import (
-    COMPRESSION_CLEANUP_MARGIN_SECONDS,
-    SequentialBudgetError,
-    resolve_runner_budget,
-    sequential_service_budget,
 )
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -104,17 +104,17 @@ HYPERTABLES = CANONICAL_HYPERTABLES
 #          — the wrapper wall must outlast the statement plus reconciliation,
 #            receipt publication and process cleanup.
 #   leg 2: wrapper_wall_seconds + _SYSTEMD_MARGIN_SECONDS
-#          <= systemd_wall_seconds
+#          < systemd_wall_seconds
 #          — ``timeout --signal=TERM --kill-after=30s`` may need a further
-#            30 s to escalate to KILL, so the systemd wall must sit above the
-#            wrapper wall by that plus a 10 s epsilon.
+#            30 s to escalate to KILL, so the systemd wall must sit strictly
+#            above the wrapper wall by that plus a 10 s epsilon.
 #   leg 3: compress_timeout_ms > _DEFAULT_COMPRESS_TIMEOUT_MS
 #          implies per_tick_bound == 1
 #          — raising the per-chunk ceiling is the runbook §4.5 catch-up
 #            manoeuvre, which is only sound one chunk at a time (issue #1351).
 # The defaults clear leg 1 with the 300 s of non-compress budget a real tick
-# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor). The sequential
-# compression-then-cold oneshot wall is 7842 (3900 + 3901 + 40 + 1).
+# needs (3600 + 300 = 3900). The compression-only oneshot wall is 3941
+# (3900 + 40 + 1).
 #
 # The invariant bounds ONE chunk's budget, not a whole tick: a tick may
 # compress up to ``per_tick_bound`` chunks under the same wrapper wall, so a
@@ -129,8 +129,8 @@ HYPERTABLES = CANONICAL_HYPERTABLES
 _QUERY_TIMEOUT_MS = 60_000
 _DEFAULT_COMPRESS_TIMEOUT_MS = 3_600_000
 _MIN_COMPRESS_TIMEOUT_MS = 1_000
-_AUTHORITATIVE_BUDGET = sequential_service_budget()
-_DEFAULT_WRAPPER_WALL_SECONDS = _AUTHORITATIVE_BUDGET.compression_wrapper_wall_seconds
+_AUTHORITATIVE_BUDGET = compression_service_budget()
+_DEFAULT_WRAPPER_WALL_SECONDS = _AUTHORITATIVE_BUDGET.wrapper_wall_seconds
 _DEFAULT_SYSTEMD_WALL_SECONDS = _AUTHORITATIVE_BUDGET.service_wall_seconds
 # Stable runner seam, bound to the shared admission and receipt authority.
 _CLEANUP_MARGIN_SECONDS = COMPRESSION_CLEANUP_MARGIN_SECONDS
@@ -335,26 +335,13 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         minimum=1,
     )
     try:
-        resolved_budget = resolve_runner_budget(env, lane="compression")
-    except SequentialBudgetError as error:
+        resolved_budget = resolve_runner_budget(env)
+    except CompressionBudgetError as error:
         raise CompressionConfigError(str(error)) from error
-    per_tick_raw = env.get("NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND")
-    per_tick_bound = (
-        resolved_budget.compression_per_tick_bound
-        if per_tick_raw is None or per_tick_raw == ""
-        else _parse_positive_int(
-            per_tick_raw,
-            name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
-            minimum=1,
-        )
-    )
+    per_tick_bound = resolved_budget.compression_per_tick_bound
     compress_timeout_ms = resolved_budget.compression_statement_timeout_ms
-    wrapper_wall_seconds = resolved_budget.budget.compression_wrapper_wall_seconds
+    wrapper_wall_seconds = resolved_budget.budget.wrapper_wall_seconds
     systemd_wall_seconds = resolved_budget.budget.service_wall_seconds
-    if per_tick_bound != resolved_budget.compression_per_tick_bound:
-        raise CompressionConfigError(
-            "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND disagrees with the resolved sequential budget"
-        )
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise CompressionConfigError("DATABASE_URL must be set")

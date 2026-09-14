@@ -41,3 +41,10 @@ Node-27 hosts the isolated and read-only live qualification. There are no node-2
 retention executions, migration-ledger deletions, new environment keys, or general-purpose deployment framework changes.
 Actual T0, migration, production pin removal, #2280 response validation, and the remainder of #1987 task 5.2 follow only
 after qualification and the merge gate.
+
+## Follow-on #2370: stable unit configuration comparison
+
+The first authorized parent window refused before T0 because normal service execution and timer rescheduling changed
+display-only fields inside ExecStart/TimersCalendar. Compare typed stable configuration instead; preserve every real
+command, environment, file and timer-expression drift check. This focused child changes only window executor and oracle,
+requires fresh state, and does not itself execute production window or governance unstage.

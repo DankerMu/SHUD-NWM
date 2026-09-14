@@ -1,0 +1,83 @@
+{
+  "source_sha": "1a9fa37b48a5bf1ea04f739ddfaef6d5dd51a3ce",
+  "namespace_observations": {
+    "host_namespace": "mnt:[4026531841]",
+    "host_tmp": "64768:4063233",
+    "owned_tmp": "64769:85734642",
+    "child_namespace": "mnt:[4026534788]",
+    "child_tmp": "64769:85734642",
+    "host_tmp_after": "64768:4063233"
+  },
+  "native_smoke": {
+    "actual": {
+      "case": "actual-enforce",
+      "cleanup": "owned cluster and work root removed before case return",
+      "container": "nhms-1895-comp-030f4271a12b",
+      "head_sha": "1a9fa37b48a5bf1ea04f739ddfaef6d5dd51a3ce",
+      "producer_receipt": {
+        "budget": {
+          "cleanup_margin_seconds": 300,
+          "compress_timeout_ms": 3600000,
+          "systemd_wall_seconds": 3941,
+          "wrapper_wall_seconds": 3900
+        },
+        "deferred": [],
+        "generated_at": "2026-09-14T20:04:05.868189Z",
+        "head_sha": "1a9fa37b48a5bf1ea04f739ddfaef6d5dd51a3ce",
+        "lag_seconds": 86400,
+        "mode": "enforce",
+        "now_utc": "2026-07-11T12:00:00Z",
+        "outcome": "clean",
+        "per_table_totals": {
+          "hydro.river_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          },
+          "met.forcing_station_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          }
+        },
+        "per_tick_bound": 4,
+        "schema_version": "2.1",
+        "selected": [
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_1_1_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "river_timeseries",
+            "hypertable_schema": "hydro",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          },
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_2_2_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "forcing_station_timeseries",
+            "hypertable_schema": "met",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          }
+        ],
+        "skipped": []
+      },
+      "receipt": "/home/nwm/tmp/nhms-1895-comp-030f4271a12b-up4ha6d3/private/node27_timeseries_compression.json",
+      "returncode": 0
+    },
+    "refused": {
+      "case": "unsafe-env-refusal",
+      "returncode": 1,
+      "stderr": "{\"status\":\"failed\",\"reason\":\"compression budget preflight failed\"}"
+    },
+    "status": "ok"
+  },
+  "command": "set -euo pipefail\numask 077\nwork=$(mktemp -d /home/nwm/tmp/epic1891-retirement-20260914/namespace-proof-XXXXXX)\nexport COMP_SMOKE_TMP=\"$work\" TMPDIR=/home/nwm/tmp NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/tmp/epic1891-retirement-20260914/checkout NHMS_COMPRESSION_SMOKE_REVIEWED_SHA=1a9fa37b48a5bf1ea04f739ddfaef6d5dd51a3ce UV_PROJECT_ENVIRONMENT=/home/nwm/tmp/epic1891-retirement-20260914/checkout/.venv\nprintf 'host_namespace=%s\\n' \"$(readlink /proc/self/ns/mnt)\"\nprintf 'host_tmp=%s\\n' \"$(stat -c '%d:%i' /tmp)\"\nprintf 'owned_tmp=%s\\n' \"$(stat -c '%d:%i' \"$work\")\"\nunshare --user --map-root-user --mount bash -c 'set -euo pipefail; mount --make-rprivate /; mount --bind \"$COMP_SMOKE_TMP\" /tmp; printf \"child_namespace=%s\\n\" \"$(readlink /proc/self/ns/mnt)\"; printf \"child_tmp=%s\\n\" \"$(stat -c \"%d:%i\" /tmp)\"; cd \"$NODE27_TIMESERIES_COMPRESSION_REPO_ROOT\"; /home/nwm/.local/bin/uv run --all-extras python .workplans/epic-1891/compression-smoke.py'\nprintf 'host_tmp_after=%s\\n' \"$(stat -c '%d:%i' /tmp)\"\n",
+  "production_namespace_changed": false
+}

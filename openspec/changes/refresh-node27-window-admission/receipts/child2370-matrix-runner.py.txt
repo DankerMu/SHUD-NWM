@@ -1,0 +1,16 @@
+import os,json,subprocess,sys
+from pathlib import Path
+os.umask(0o077)
+bundle=Path('/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899');repo='/home/nwm/NWM-governance-reviewed-1a32ebb7'
+data=subprocess.check_output(['git','-C',repo,'show','1b8b2b5b447d07091af98eb1e4ccbd1884e5b899:openspec/changes/refresh-node27-window-admission/receipts/child2325-window-oracle-launch.py.txt'])
+driver=bundle/'matrix-driver.py'
+with driver.open('xb') as f:f.write(data)
+results=[]
+for case in ('happy','stop','session','fence','do-before-ledger','rename','source','restart'):
+ r=subprocess.run([sys.executable,str(driver),'--manifest',str(bundle/'manifest.json'),'--case',case],capture_output=True,text=True,timeout=1900)
+ record={'case':case,'exit':r.returncode,'stdout':r.stdout,'stderr':r.stderr}
+ with (bundle/'matrix.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+ results.append(record)
+ if r.returncode:break
+with (bundle/'matrix-result.json').open('x') as f:json.dump({'all_eight_pass':len(results)==8 and all(x['exit']==0 for x in results),'results':results},f,indent=2)
+raise SystemExit(0 if len(results)==8 and all(x['exit']==0 for x in results) else 1)

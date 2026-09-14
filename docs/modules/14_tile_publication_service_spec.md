@@ -66,17 +66,26 @@
 ### 6.1 Issue #122 已实现发布契约
 
 `nhms-pipeline publish-tiles --cycle-id <cycle_id>` 是 Forecast M3 的 Slurm/local 统一入口。
-本 release 的最小支持 artifact 是洪水重现期 GeoJSON delivery metadata，而不是完整 MVT/PBF 生成：
+当前唯一发布产物是 q_down 河段时序 display manifest，而不是完整 MVT/PBF 生成；原洪水重现期
+GeoJSON delivery metadata（`flood.return_period_result` → `layer_id=flood_return_period_<run_id>` →
+`/api/v1/tiles/flood-return-period`）已随频率展示管线退役于 `b97c16e2`，本节及 §3 输入、§5 中的
+`return_period_result` 条目仅为历史记录。现行契约以 `services/tile_publisher/publisher.py` 为准
+（`TilePublisher.publish_cycle` → `publish_qdown_cycle` → `_discover_qdown_runs` / `_upsert_qdown_layer`）：
 
-- 成功条件：指定 cycle 下存在 `hydro.hydro_run.status IN ('frequency_done', 'published')` 的 forecast run，
-  且 `flood.return_period_result` 存在对应行。
-- 副作用：upsert `map.tile_layer`，确定性 `layer_id=flood_return_period_<run_id>`，
-  `tile_format=geojson`，`published_flag=true`，`tile_uri_template` 指向
-  `/api/v1/tiles/flood-return-period`。
+- 成功条件：指定 cycle（canonical `<source>_YYYYMMDDHH`）下存在 `hydro.hydro_run.status IN ('succeeded', 'parsed', 'published')`
+  的 forecast run，且 `hydro.river_timeseries` 存在该 run 的 `q_down` 行（与
+  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 不是迁移账本成员，
+  仅残留在 node-27 live 枚举中）。
+- 副作用：写 `tiles/hydro/<cycle_id>/q-down/<run_id>/<river_network_version_id>/manifest.json` 与 cycle 级
+  `tiles/hydro/<cycle_id>/q-down/manifest.json`；upsert `map.tile_layer`，确定性
+  `layer_id=q_down_<run_id>_<river_network_version_id>`，`layer_type=q_down_timeseries`，
+  `tile_format=geojson_timeseries`，`published_flag=true`，`tile_uri_template` 指向该 run 的 manifest URI。
 - 幂等性：同一 cycle 重复发布返回同一 logical layer，不新增重复 layer，也不写冲突 cache row。
-- 失败：缺少环境/数据库 schema/产品或对象存储 artifact 时输出 JSON `status=failed_publish`，
-  带稳定 `error_code` 和 `error_message`，并以非 0 退出；编排器将 publish 失败映射为
-  `failed_publish`。
+- 失败：找不到可发布 q_down 产品（`NO_PUBLISHABLE_QDOWN_PRODUCTS`）、delivery schema 缺失
+  （`DELIVERY_SCHEMA_MISSING`）或全部 run identity 不完整（`PUBLISH_IDENTITY_INCOMPLETE`）时输出 JSON
+  `status=failed_publish`，带稳定 `error_code` 和 `error_message`，并以非 0 退出；编排器将 publish 失败映射为
+  `failed_publish`。例外：CLI 缺少 `DATABASE_URL` 时返回 `status=deferred_to_node27_ingest` 并退出 0
+  （`services/orchestrator/cli.py` `_publish_tiles`）。
 
 ## 7. 配置项
 
