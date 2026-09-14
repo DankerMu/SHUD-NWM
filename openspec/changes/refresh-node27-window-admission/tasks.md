@@ -128,7 +128,8 @@ separate authority.
 - [x] 4.4 Prove focused original-red/changed-green isolated admission and real node27 readonly semantic comparison;
       run fresh prepare, without child T0 (1b8b2b5b final tools, focused PASS, 8/8 matrix PASS, PREPARED20:01:20Z;
       `receipts/child2370-verification.json`).
-- [ ] 4.5 Confirm governance tool hashes unchanged, complete expanded review/CI and publish immutable parent handoff.
+- [x] 4.5 Confirm governance tool hashes unchanged, complete expanded review/CI and publish immutable parent handoff
+      (PR2372 three seats: no findings; code1b8b2b5b/hash70598ef0; CI34890555569 PASS; shared change stays active).
 
 Evidence Floor: actual typed payload and drift records from the failed parent attempt; focused real-comparator smoke
 with volatile success plus path/argv/ignore_errors/calendar and existing config/file refusal; malformed signatures/rows;
