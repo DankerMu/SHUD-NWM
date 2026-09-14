@@ -88,9 +88,9 @@ Implementation order: 2 (#2139) → 3 (#2131) → 4 (#2127). Reference by symbol
 
 ### 5. Close-out
 
-- [ ] 5.1 PR closes #2127, #2131, #2139, #2103; #2103 closing note per design D5 (AC4 superseded by #2014 decision 13, sub-case → #2140).
+- [x] 5.1 PR #2334 (merge 7785f23d6) closes #2127, #2131, #2139, #2103; #2103 closing note per design D5 (AC4 superseded by #2014 decision 13, sub-case → #2140).
 - [x] 5.2 E12 pre-deploy attempt recorded (no timeline on the deployed bundle); post-deploy capture tracked by #2336.
-- [ ] 5.3 After merge: archive this change.
+- [x] 5.3 After merge: archive this change.
 
 ## Evidence Mapping
 
