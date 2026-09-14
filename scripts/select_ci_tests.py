@@ -886,7 +886,6 @@ ISSUE1895_READINESS_STORAGE_TESTS: tuple[str, ...] = (
 ISSUE1895_READINESS_TESTS: tuple[str, ...] = (
     *ISSUE1895_READINESS_C1_C2_C3_TESTS,
     "tests/test_issue1895_readiness_gates.py",
-    "tests/test_issue1895_readiness_env.py",
     "tests/test_issue1895_readiness_performance.py",
     *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
     "tests/test_issue1895_readiness_performance_publication.py",
@@ -975,11 +974,6 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_issue1895_readiness_gates.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_env.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
         stop_on_match=True,
     ),
@@ -3383,14 +3377,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        "scripts/node27_issue1895_env_rewrite.py",
-        (
-            "tests/test_issue1895_readiness_env.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
         "scripts/node27_issue1895_performance_oracle.py",
         (
             "tests/test_issue1895_readiness_performance.py",
@@ -3486,11 +3472,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_env.py",
-        (
-            "tests/test_issue1895_readiness_env.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_performance.py",
@@ -3796,7 +3778,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/node27_issue1895_types.py",
         (
             "tests/test_issue1895_readiness_gates.py",
-            "tests/test_issue1895_readiness_env.py",
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",

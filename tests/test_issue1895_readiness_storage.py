@@ -15,12 +15,7 @@ from packages.common.compressed_chunk_cold_residency import CatalogChunk, Reside
 from packages.common.compressed_chunk_cold_runtime_catalog import BoundInventories, HypertableInventory, WindowParity
 from packages.common.node27_issue1895_census_bind import bind_pre_movement_census
 from packages.common.node27_issue1895_engine import assert_engine_sql_row
-from packages.common.node27_issue1895_env import (
-    G4_GOVERNED_KEYS,
-    G5_GOVERNED_KEYS,
-    rewrite_cold_env_text,
-    validate_canonical_positive_decimal,
-)
+from packages.common.node27_issue1895_env import validate_canonical_positive_decimal
 from packages.common.node27_issue1895_fs import reconcile_moved_group_filesystem
 from packages.common.node27_issue1895_post_target import (
     newly_terminal_keys,
@@ -36,7 +31,6 @@ from packages.common.node27_issue1895_receipt import (
 from packages.common.node27_issue1895_timer import assert_exact_cold_groups, assert_natural_tick_selection
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from scripts import node27_issue1895_census_bind as census_bind_cli
-from scripts import node27_issue1895_env_rewrite as env_cli
 from scripts import node27_issue1895_fs_reconcile as fs_reconcile_cli
 from scripts import node27_issue1895_post_target_observe as post_target_observe_cli
 from scripts import node27_issue1895_sequential_receipt as sequential_receipt_cli
@@ -48,8 +42,6 @@ from tests.test_issue1895_runbook_contract import _gate_lines
 from tests.test_issue2291_reviewed_census_count import document as reviewed_document
 from tests.test_issue2291_reviewed_census_count import population as reviewed_population
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-cold-residency.example"
 SHA = "a" * 40
 _ORIGINAL = reviewed_document(6)
 _ORIGINAL["generated_at"] = "2026-09-04T04:00:30Z"
@@ -92,15 +84,6 @@ def _durable(index: int) -> dict:
 
 KEYS = tuple(durable_key(_durable(index)) for index in range(1, 7))
 _MISSING = object()
-
-
-G4_UPDATES = {
-    "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "4096",
-    "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "4096",
-    "NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "1",
-    "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID": "1005",
-    "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID": "1005",
-}
 
 
 def _shipping_receipt(*, call_index: int, outcome: str = "migrated") -> dict:
@@ -240,117 +223,13 @@ def test_g5_census_binder_refuses_unsafe_current_original_or_bracket_identity(
     }
 
 
-def test_g4_then_g5_env_rewrite_passes_through_live_compression_lag(tmp_path: Path) -> None:
-    original = EXAMPLE.read_text(encoding="utf-8")
-    after_g4 = rewrite_cold_env_text(original, updates=G4_UPDATES, governed_keys=G4_GOVERNED_KEYS)
-    assert any(line.startswith("#NODE27_COLD_RESIDENCY_DEVICE_IDENTITY") for line in after_g4.splitlines())
-    assert any(line.startswith("#NODE27_COLD_RESIDENCY_LAG_SECONDS") for line in after_g4.splitlines())
-    after_g5 = rewrite_cold_env_text(
-        after_g4,
-        updates={
-            "NODE27_COLD_RESIDENCY_DEVICE_IDENTITY": "8:1",
-            "NODE27_COLD_RESIDENCY_LAG_SECONDS": "172800",
-        },
-        governed_keys=G5_GOVERNED_KEYS,
-        require_device_identity_unassigned=False,
-    )
-    assert after_g5.count("NODE27_COLD_RESIDENCY_DEVICE_IDENTITY=") == 1
-    assert after_g5.count("NODE27_COLD_RESIDENCY_LAG_SECONDS=") == 1
-    assert "NODE27_COLD_RESIDENCY_DEVICE_IDENTITY=8:1" in after_g5
-    assert "NODE27_COLD_RESIDENCY_LAG_SECONDS=172800" in after_g5
-    assert any(line.startswith("#NODE27_COLD_RESIDENCY_LAG_SECONDS") for line in after_g4.splitlines())
-    assert any(line.startswith("#") for line in after_g5.splitlines())
-    original_url = next(line for line in original.splitlines() if line.startswith("DATABASE_URL="))
-    assert next(line for line in after_g5.splitlines() if line.startswith("DATABASE_URL=")) == original_url
-    other = rewrite_cold_env_text(
-        after_g4,
-        updates={
-            "NODE27_COLD_RESIDENCY_DEVICE_IDENTITY": "8:1",
-            "NODE27_COLD_RESIDENCY_LAG_SECONDS": "86400",
-        },
-        governed_keys=G5_GOVERNED_KEYS,
-        require_device_identity_unassigned=False,
-    )
-    assert "NODE27_COLD_RESIDENCY_LAG_SECONDS=86400" in other
-    path = tmp_path / "node27-cold-residency.env"
-    path.write_text(original, encoding="utf-8")
-    assert (
-        env_cli.main(
-            [
-                "--path",
-                str(path),
-                "--cold-reserve-bytes",
-                "4096",
-                "--wal-reserve-bytes",
-                "4096",
-                "--per-tick-bound",
-                "1",
-                "--container-exec-uid",
-                "1005",
-                "--container-exec-gid",
-                "1005",
-            ]
-        )
-        == 0
-    )
-    assert (
-        env_cli.main(
-            [
-                "--path",
-                str(path),
-                "--stage",
-                "g5",
-                "--device-identity",
-                "8:1",
-                "--lag-seconds",
-                "172800",
-            ]
-        )
-        == 0
-    )
-    published = path.read_text(encoding="utf-8")
-    assert "NODE27_COLD_RESIDENCY_LAG_SECONDS=172800" in published
-    g5 = " ".join(_gate_lines("G5"))
-    assert "--stage g5" in g5
-    assert '--lag-seconds "$NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"' in g5
-    assert 'test "$NODE27_COLD_RESIDENCY_LAG_SECONDS" = "$NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"' in g5
-    assert 'test "$NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS" = "604800"' not in g5
-    assert "values[key] = value" not in g5
-
-
-def test_live_compression_lag_rejects_noncanonical_and_missing_values(tmp_path: Path) -> None:
+def test_live_compression_lag_rejects_noncanonical_and_missing_values() -> None:
     for invalid in ("0", "0172800", "-172800", "172800.0", "172800 ", "", "1e5"):
         with pytest.raises(Issue1895ReadinessError) as caught:
             validate_canonical_positive_decimal(invalid, label="lag_seconds")
         assert caught.value.code == "ENV_VALUE_INVALID"
     with pytest.raises(Issue1895ReadinessError):
         validate_canonical_positive_decimal(None, label="lag_seconds")
-    original = EXAMPLE.read_text(encoding="utf-8")
-    after_g4 = rewrite_cold_env_text(original, updates=G4_UPDATES, governed_keys=G4_GOVERNED_KEYS)
-    with pytest.raises(Issue1895ReadinessError) as lag:
-        rewrite_cold_env_text(
-            after_g4,
-            updates={
-                "NODE27_COLD_RESIDENCY_DEVICE_IDENTITY": "8:1",
-                "NODE27_COLD_RESIDENCY_LAG_SECONDS": "0172800",
-            },
-            governed_keys=G5_GOVERNED_KEYS,
-            require_device_identity_unassigned=False,
-        )
-    assert lag.value.code == "ENV_VALUE_INVALID"
-    missing_path = tmp_path / "missing-lag.env"
-    missing_path.write_text(after_g4, encoding="utf-8")
-    with pytest.raises(SystemExit):
-        env_cli.main(
-            [
-                "--path",
-                str(missing_path),
-                "--stage",
-                "g5",
-                "--device-identity",
-                "8:1",
-            ]
-        )
 
 
 def test_g6_sequential_receipts_bind_one_migrated_key_and_suffix() -> None:

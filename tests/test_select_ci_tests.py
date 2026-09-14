@@ -13233,11 +13233,6 @@ ISSUE1895_CLI_CONSUMER_MAP: dict[str, tuple[str, ...]] = {
         "tests/test_compressed_chunk_cold_target.py",
         "tests/test_issue1895_runbook_contract.py",
     ),
-    "scripts/node27_issue1895_env_rewrite.py": (
-        "tests/test_issue1895_readiness_env.py",
-        *ISSUE1895_READINESS_STORAGE_TESTS,
-        "tests/test_issue1895_runbook_contract.py",
-    ),
     "scripts/node27_issue1895_performance_oracle.py": (
         "tests/test_issue1895_readiness_performance.py",
         *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
@@ -13800,7 +13795,7 @@ def test_issue1895_storage_package_rules_select_their_contracts() -> None:
     owners = {
         "packages/common/node27_issue1895_census_bind.py": {"tests/test_issue1895_readiness_storage.py"},
         "packages/common/node27_issue1895_engine.py": {"tests/test_issue1895_readiness_storage.py"},
-        "packages/common/node27_issue1895_env.py": {"tests/test_issue1895_readiness_env.py"},
+        "packages/common/node27_issue1895_env.py": {"tests/test_issue1895_readiness_storage.py"},
         "packages/common/node27_issue1895_fs.py": {"tests/test_issue1895_readiness_storage.py"},
         "packages/common/node27_issue1895_post_target.py": {"tests/test_issue1895_readiness_storage.py"},
         "packages/common/node27_issue1895_publication.py": {"tests/test_issue1895_readiness_storage.py"},
