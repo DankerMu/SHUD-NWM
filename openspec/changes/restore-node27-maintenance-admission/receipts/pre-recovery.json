@@ -1,0 +1,77 @@
+{
+  "issue": 2349,
+  "authorization": {
+    "user_text": "直接处理修复",
+    "interpreted_scope": "diagnose and bounded maintenance recovery; no T0, active checkout or governance pin changes"
+  },
+  "proven": {
+    "statement_timeout": {
+      "backend": 72490,
+      "chunk": "_timescaledb_internal._hyper_3_107_chunk",
+      "time": "2026-09-14T05:25:32.679Z",
+      "timeout_ms": 3600000
+    },
+    "wrapper_exit": 124,
+    "wrapper_seconds": 3900,
+    "current_river107_bytes": 643948429312,
+    "current_river107_status": 0,
+    "current_river107_compressed": false,
+    "scheduled_receipt_generated_at": "2026-09-13T04:25:32.630301Z",
+    "current_nhms_file_lock_holders": [],
+    "current_maintenance_db_backends": [],
+    "precompression_declines": 0,
+    "overlapping_run_status_counts": {
+      "published": 2052
+    }
+  },
+  "inferences": {
+    "retention_lock": "Shared lifecycle carrier: known compression DB work spans retention tick; source holds shared lock before DB work through finally and retention checks it first. Not a historical kernel-holder snapshot.",
+    "second_chunk": "met106 is now compressed whereas previous receipt listed it uncompressed; backend75044 followed river timeout. Exact successful statement was not logged, so commit attribution remains inference."
+  },
+  "unexpected_operation": {
+    "intended": "retention wrapper --dry-run",
+    "observed": "enforced",
+    "dropped_chunks": [],
+    "deferred_remainder": [],
+    "receipt": "/home/nwm/node27-timeseries-retention-logs/retention-20260914T072319Z.json",
+    "cause": "config_from_args ignores parsed dry_run field; enforcing env still wins",
+    "user_notified": true,
+    "service_recovery_claimed": false
+  },
+  "recovery_constraint": "Current paired preflight cannot extend compression wall beyond3900 without both lane service-wall declarations. Current runbook §4.5 marks paired cold-env override recipe superseded; R2 cutover pending. Need explicit incident exception or wait for R2, not silent bypass.",
+  "production_cutover_executed": false,
+  "maintenance_enforce_retry_executed": false,
+  "note": "The unintended retention enforcing invocation is separately recorded above; no planned recovery enforce has run.",
+  "authorization_exception": {
+    "decision": "批准临时兼容窗口",
+    "budget": {
+      "statement_ms": 6000000,
+      "wrapper_seconds": 6300,
+      "outer_seconds": 10242,
+      "bound": 1
+    },
+    "no_formal_env_mutation": true,
+    "no_cold_launch": true,
+    "no_T0": true
+  },
+  "fixture_review": {
+    "reviewer": "RecoveryFixtureReview",
+    "verdict": "pass",
+    "strict_openspec": "valid"
+  },
+  "dry_run_safety_followup": "https://github.com/DankerMu/SHUD-NWM/issues/2355",
+  "published_diagnosis": "https://github.com/DankerMu/SHUD-NWM/issues/2349#issuecomment-5661044541",
+  "business_watermark": "2026-09-13T12:00:00Z",
+  "candidate_product_observation": {
+    "window": [
+      "2026-09-03T00:00:00Z",
+      "2026-09-10T00:00:00Z"
+    ],
+    "run_count": 2052,
+    "product_count": 2052,
+    "missing": 0,
+    "newer_than_parsed": 0,
+    "latest_product_write": "2026-09-11T02:26:56.994747Z",
+    "not_global_latest_cycle": true
+  }
+}
