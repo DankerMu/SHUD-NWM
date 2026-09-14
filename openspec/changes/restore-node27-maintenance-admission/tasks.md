@@ -43,6 +43,6 @@ The second comparison also timed out before committed mutation. Its private envs
 
 ## 5. Explicitly approved six-hour window
 
-- [ ] 5.1 Review the new authorization and update only the private time budget to21600000/21900/25842, retaining scan-off, bound1 and all memory/authority protections.
+- [x] 5.1 Review the new authorization and update only the private time budget to21600000/21900/25842, retaining scan-off, bound1 and all memory/authority protections (focused fixture PASS; strict OpenSpec and Ruff PASS; helper5f51312f; node27 smoke rejects old schema/budget, scan drift and unsafe cleanup).
 - [ ] 5.2 Recheck full outer-envelope schedule and capacity, private connection setting and exact dry selection; execute at most one newly approved attempt.
 - [ ] 5.3 Preserve actual terminal outcome and cleanup; on success complete original-service proof, immediate compression-timer restoration and fresh prepare; on failure restore retention scheduling and do not attempt a fourth run.

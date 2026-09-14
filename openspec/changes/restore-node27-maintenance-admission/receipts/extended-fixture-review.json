@@ -1,0 +1,27 @@
+{
+  "text": "{\n  \"correction\": \"Timer cadence citation corrected per Main's deployed-unit read; no fixture decision or verdict change.\",\n  \"superseded_clause\": \"Round-3 'Envelope and schedule fit' evidence and the round-1 timer citation referenced 'retention 06:36 UTC daily' — that is the repository template value (infra/systemd/nhms-node27-timeseries-retention.timer), not the deployed cadence.\",\n  \"corrected_clause\": \"Deployed retention.timer is OnCalendar=*-*-* 05:15:00 UTC (/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.timer, read by Main on node-27); compression actual 04:25 UTC remains the earlier bound and matches its template. The 05:15 deployed cadence is independently corroborated by the #2349 journal evidence (retention tick start 2026-09-14T05:15:08Z).\",\n  \"envelope_check\": \"With 04:25/05:15 and the whole 25842s envelope + 5min margin (26142s ~ 7.26h): the 04:25->05:15 gap (50 min) cannot host the envelope — precisely the original incident's collision shape (compression 04:25:32Z still running when retention refused at 05:15:08Z) — while the 05:15->next-04:25 gap (~23.2h) accommodates it. The fixture's guard (next scheduled ticks must lie beyond the bounded window; task 5.2 full-envelope schedule recheck; both timers stopped during the window with retention restored on either outcome) is clock-time-agnostic and already satisfied by Main's schedule proof using the deployed values.\",\n  \"verdict\": \"pass (unchanged from round 3); no fixture decision affected; correction delivered to Main via hub.\"\n}",
+  "details": {
+    "resolvedPath": "/Users/danker/.omp/agent/sessions/-Desktop-Hydro-SHUD-NWM/2026-09-09T14-51-57-813Z_01a086a7-79f5-7089-8843-d846e8ec6f02/RecoveryFixtureReview.md",
+    "contentType": "text/markdown",
+    "totalLines": 7,
+    "displayContent": {
+      "text": "{\n  \"correction\": \"Timer cadence citation corrected per Main's deployed-unit read; no fixture decision or verdict change.\",\n  \"superseded_clause\": \"Round-3 'Envelope and schedule fit' evidence and the round-1 timer citation referenced 'retention 06:36 UTC daily' — that is the repository template value (infra/systemd/nhms-node27-timeseries-retention.timer), not the deployed cadence.\",\n  \"corrected_clause\": \"Deployed retention.timer is OnCalendar=*-*-* 05:15:00 UTC (/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.timer, read by Main on node-27); compression actual 04:25 UTC remains the earlier bound and matches its template. The 05:15 deployed cadence is independently corroborated by the #2349 journal evidence (retention tick start 2026-09-14T05:15:08Z).\",\n  \"envelope_check\": \"With 04:25/05:15 and the whole 25842s envelope + 5min margin (26142s ~ 7.26h): the 04:25->05:15 gap (50 min) cannot host the envelope — precisely the original incident's collision shape (compression 04:25:32Z still running when retention refused at 05:15:08Z) — while the 05:15->next-04:25 gap (~23.2h) accommodates it. The fixture's guard (next scheduled ticks must lie beyond the bounded window; task 5.2 full-envelope schedule recheck; both timers stopped during the window with retention restored on either outcome) is clock-time-agnostic and already satisfied by Main's schedule proof using the deployed values.\",\n  \"verdict\": \"pass (unchanged from round 3); no fixture decision affected; correction delivered to Main via hub.\"\n}",
+      "startLine": 1,
+      "lineNumbers": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "meta": {
+      "source": {
+        "type": "internal",
+        "value": "agent://RecoveryFixtureReview"
+      }
+    }
+  }
+}
