@@ -12,6 +12,12 @@ A cycle's canonical mirror directory and its PNG cache directory therefore live
 and die together (issue #2011): the display API cannot keep serving rendered
 precipitation for a cycle whose mirror is gone.
 
+Each canonical cycle is removed while holding the object-store copyback batch
+mutex (`packages.common.copyback_guard`), because on node-27 the object-store
+root IS the shared copyback root that node-22 writers promote `canonical/` trees
+into. The raw and PNG-cache lanes are not locked: no mutex writer promotes into
+them.
+
 It deliberately does not touch `canonical/<storage-source>/grid/**` (grid
 definitions cannot be regenerated on node-27), anything under the precipitation
 cache root outside `precip/` (the MVT tile cache is a sibling there), forcing,
@@ -31,11 +37,21 @@ import argparse
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from packages.common.copyback_guard import (
+    DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
+    CopybackLockBudgetExhausted,
+    CopybackLockError,
+    acquire_copyback_batch_lock,
+    copyback_lock_failure_kind,
+    count_copyback_lock_failures,
+    release_copyback_batch_lock,
+)
 from packages.common.display_watermark import fetch_display_watermark
 from packages.common.source_identity import normalize_source_id
 
@@ -43,7 +59,7 @@ from packages.common.source_identity import normalize_source_id
 # pins that), so naming the cache env here costs no numpy/netCDF4 import.
 from services.precip.constants import FILE_CACHE_DIR_ENV
 
-SCHEMA_VERSION = "nhms.node27_raw_retention.production.v4"
+SCHEMA_VERSION = "nhms.node27_raw_retention.production.v5"
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_SOURCES = ("gfs", "ifs")
 CYCLE_NAME_LENGTH = 10
@@ -589,12 +605,57 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
     }
 
 
+@dataclass
+class _CanonicalLockBudget:
+    """The pass-level acquisition budget every canonical removal draws on."""
+
+    budget_seconds: float
+    remaining_seconds: float
+
+
+def _remove_canonical_under_copyback_mutex(
+    target: Path, *, copyback_root: Path, budget: _CanonicalLockBudget
+) -> None:
+    """Hold the copyback batch mutex for exactly this one canonical `rmtree`.
+
+    `posix`, not `flock`: this process runs on the host that exports the
+    copyback root, where a local `flock` does not exclude the NFS clients'
+    `flock` writers but a POSIX record lock does. This CLI is single-threaded
+    and never opens the lock file elsewhere, which that primitive requires.
+
+    Only the acquisition is charged against the pass budget, never the removal;
+    once the budget is spent the entry is refused before any attempt.
+    """
+    if budget.remaining_seconds <= 0:
+        raise CopybackLockBudgetExhausted(
+            f"copyback batch lock wait budget of {budget.budget_seconds}s "
+            f"is exhausted for this retention pass; {target} was not removed"
+        )
+    started = time.monotonic()
+    try:
+        fd = acquire_copyback_batch_lock(
+            copyback_root, timeout_seconds=budget.remaining_seconds, primitive="posix"
+        )
+    finally:
+        budget.remaining_seconds -= time.monotonic() - started
+    try:
+        shutil.rmtree(target)
+    finally:
+        release_copyback_batch_lock(fd, primitive="posix")
+
+
 def run_retention(
     config: RawRetentionConfig,
     *,
     now: datetime,
     reference_time: datetime | None = None,
+    copyback_lock_wait_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
+    """Plan and, unless gated off, execute one retention pass.
+
+    ``copyback_lock_wait_budget_seconds`` exists for tests; ``None`` reads the
+    shared module default at call time.
+    """
     started_at = now.astimezone(UTC)
     reference_time = (reference_time or started_at).astimezone(UTC)
     cutoff = reference_time - timedelta(days=config.retention_days)
@@ -626,6 +687,7 @@ def run_retention(
             "deleted": [],
             "skipped": [],
             "failed": [],
+            "copyback_lock_failures": count_copyback_lock_failures([]),
             "freed_bytes": 0,
         }
     targets, skipped = collect_targets(config, now=reference_time)
@@ -634,9 +696,34 @@ def run_retention(
     failed: list[dict[str, Any]] = []
     freed_bytes = 0
     if not config.dry_run:
+        budget_seconds = float(
+            DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS
+            if copyback_lock_wait_budget_seconds is None
+            else copyback_lock_wait_budget_seconds
+        )
+        lock_budget = _CanonicalLockBudget(budget_seconds=budget_seconds, remaining_seconds=budget_seconds)
         for target, payload in zip(targets, planned, strict=True):
             try:
-                shutil.rmtree(target.path)
+                if target.reason == CANONICAL_LANE_REASON:
+                    _remove_canonical_under_copyback_mutex(
+                        target.path, copyback_root=config.object_store_root, budget=lock_budget
+                    )
+                else:
+                    shutil.rmtree(target.path)
+            except CopybackLockError as error:
+                # Timeout, unsafe/unopenable lock file, or a spent pass budget:
+                # the tree is kept for the next tick. `lock_unsafe` is the
+                # steady state while this unit does not run as the copyback
+                # root's owner, because the lock file is `0600` owned by it.
+                failed.append(
+                    {
+                        **payload,
+                        "error": str(error),
+                        "error_type": type(error).__name__,
+                        "lock_failure": copyback_lock_failure_kind(error),
+                    }
+                )
+                continue
             except OSError as error:
                 # `error_type` keeps a permission denial distinguishable from
                 # other IO failures in the receipt, and since #2100 that
@@ -671,6 +758,7 @@ def run_retention(
         "deleted": deleted,
         "skipped": skipped,
         "failed": failed,
+        "copyback_lock_failures": count_copyback_lock_failures(failed),
         "freed_bytes": freed_bytes,
     }
 
@@ -700,6 +788,7 @@ def _blocked_payload(blockers: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "deleted": [],
         "skipped": [],
         "failed": [],
+        "copyback_lock_failures": count_copyback_lock_failures([]),
         "freed_bytes": 0,
     }
 

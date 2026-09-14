@@ -6,7 +6,7 @@ import re
 import shutil
 import stat
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 from urllib.parse import urlparse
@@ -457,18 +457,23 @@ def _reuse_immutable_model_tree(*, source: Path, target: Path, object_key: str) 
 def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
     """Promote one run tree, under the caller's batch mutex.
 
-    #2035 record, so a future reader does not go hunting for a lost update that
-    never existed here: this function has the same lock-free
-    `exists -> rename-to-backup -> promote` window as the publisher's
-    `_replace_directory_tree_for_qdown_batch`, but its recovery is guarded --
-    `if backup.exists() and not target.exists()` below. With a competitor's tree
-    already in place that predicate is false, so it neither restores its own
-    stale backup over the competitor nor `rmtree`s the competitor's tree. Its
-    terminal state was always the benign one: the loser got a spurious failure
-    and no data was lost. It is brought under `copyback_batch_lock` anyway
-    (`copyback_run_trees`), because it writes under the same shared copyback
-    root and one lock-free writer there would leave the publisher's genuinely
-    destructive window open regardless.
+    #2035 record: this function has the same `exists -> rename-to-backup ->
+    promote` window as the publisher's `_replace_directory_tree_for_qdown_batch`,
+    but its recovery is guarded -- `if backup.exists() and not target.exists()`
+    below. With a competitor's tree already in place that predicate is false, so
+    it neither restores its own stale backup over the competitor nor `rmtree`s
+    the competitor's tree; the loser gets a spurious failure. It is brought under
+    `copyback_batch_lock` anyway (`copyback_run_trees`), because it writes under
+    the same shared copyback root.
+
+    That terminal state was NOT always benign (#2237): the backup used to be
+    removed in `finally` even when the restore failed or was never attempted,
+    destroying the only copy of the old tree. The backup is now removed only
+    once the target is known to be in place -- after a successful promote, or
+    implicitly by a successful restore. The restore is attempted before the temp
+    cleanup, whose own failure is suppressed, and a backup that could not be put
+    back is kept and named in the raised `RunTreeCopybackError`
+    (`_raise_if_backup_retained`).
     """
 
     parent = ensure_traversable_copyback_directory(target.parent, containment_root=containment_root)
@@ -479,19 +484,26 @@ def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict
         if target.exists():
             os.replace(target, backup)
         os.replace(temp, target)
-        if backup.exists():
-            rmtree_no_follow(backup, containment_root=containment_root, missing_ok=True)
-        return summary
-    except Exception:
-        rmtree_no_follow(temp, containment_root=containment_root, missing_ok=True)
+    except Exception as error:
+        restored = False
+        restore_error: OSError | None = None
         if backup.exists() and not target.exists():
-            os.replace(backup, target)
+            try:
+                os.replace(backup, target)
+                restored = True
+            except OSError as caught:
+                restore_error = caught
+        with suppress(OSError, SafeFilesystemError):
+            rmtree_no_follow(temp, containment_root=containment_root, missing_ok=True)
+        _raise_if_backup_retained(error, target=target, backup=backup, restored=restored, restore_error=restore_error)
         raise
-    finally:
-        rmtree_no_follow(backup, containment_root=containment_root, missing_ok=True)
+    rmtree_no_follow(backup, containment_root=containment_root, missing_ok=True)
+    return summary
 
 
 def _replace_file(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
+    """Promote one file under the caller's batch mutex; same backup lifecycle as `_replace_tree`."""
+
     parent = ensure_traversable_copyback_directory(target.parent, containment_root=containment_root)
     temp = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.tmp"
     backup = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.backup"
@@ -501,18 +513,50 @@ def _replace_file(*, source: Path, target: Path, containment_root: Path) -> dict
         if target.exists():
             os.replace(target, backup)
         os.replace(temp, target)
-        if backup.exists():
-            backup.unlink()
-        return {"file_count": 1, "byte_count": int(info.st_size)}
-    except Exception:
-        if temp.exists():
-            temp.unlink()
+    except Exception as error:
+        restored = False
+        restore_error: OSError | None = None
         if backup.exists() and not target.exists():
-            os.replace(backup, target)
+            try:
+                os.replace(backup, target)
+                restored = True
+            except OSError as caught:
+                restore_error = caught
+        with suppress(OSError):
+            temp.unlink(missing_ok=True)
+        _raise_if_backup_retained(error, target=target, backup=backup, restored=restored, restore_error=restore_error)
         raise
-    finally:
-        if backup.exists():
-            backup.unlink()
+    backup.unlink(missing_ok=True)
+    return {"file_count": 1, "byte_count": int(info.st_size)}
+
+
+def _raise_if_backup_retained(
+    error: Exception,
+    *,
+    target: Path,
+    backup: Path,
+    restored: bool,
+    restore_error: OSError | None,
+) -> None:
+    """Name a backup that was neither promoted over nor restored, and keep it.
+
+    Only reachable after the rename-to-backup, so `error` is a promote failure,
+    never a copy failure (the copy runs before any backup exists). A restore
+    that succeeded leaves no backup and re-raises the original error unchanged.
+    """
+
+    if restored or not backup.exists():
+        return
+    raise RunTreeCopybackError(
+        "OBJECT_STORE_COPYBACK_BACKUP_RETAINED",
+        "Run-tree copyback failed and the replaced target's backup could not be restored; it was kept.",
+        {
+            "target": str(target),
+            "backup_path": str(backup),
+            "error": str(error),
+            "restore_error": None if restore_error is None else str(restore_error),
+        },
+    ) from error
 
 
 def _copy_tree_no_symlinks(source: Path, target: Path) -> dict[str, Any]:

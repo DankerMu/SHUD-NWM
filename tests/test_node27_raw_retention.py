@@ -290,9 +290,9 @@ def test_disabled_summary_also_discloses_the_anchor(tmp_path: Path) -> None:
     assert result["anchor"]["decision"] == "issue-1407-keep-watermark-anchor"
 
 
-def test_schema_version_is_v4_and_summary_discloses_both_new_roots(tmp_path: Path) -> None:
-    """v3 -> v4: `deleted[]` may now hold canonical and PNG-cache directories."""
-    assert node27_raw_retention.SCHEMA_VERSION == "nhms.node27_raw_retention.production.v4"
+def test_schema_version_is_v5_and_summary_discloses_both_new_roots(tmp_path: Path) -> None:
+    """v4: `deleted[]` may hold canonical/PNG-cache dirs; v5: typed `lock_failure` entries."""
+    assert node27_raw_retention.SCHEMA_VERSION == "nhms.node27_raw_retention.production.v5"
 
     (tmp_path / "raw").mkdir()
     unconfigured = node27_raw_retention.run_retention(
@@ -304,7 +304,7 @@ def test_schema_version_is_v4_and_summary_discloses_both_new_roots(tmp_path: Pat
         now=datetime(2026, 6, 27, 12, tzinfo=UTC),
     )
 
-    assert unconfigured["schema_version"] == "nhms.node27_raw_retention.production.v4"
+    assert unconfigured["schema_version"] == "nhms.node27_raw_retention.production.v5"
     assert unconfigured["canonical_root"] == str(tmp_path / "canonical")
     assert unconfigured["precip_cache_root"] is None
     assert configured["precip_cache_root"] == str(tmp_path / "cache")

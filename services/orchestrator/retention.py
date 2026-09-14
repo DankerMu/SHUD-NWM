@@ -56,8 +56,12 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.copyback_guard import (
+    DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
+    CopybackLockBudgetExhausted,
     CopybackLockError,
     acquire_copyback_batch_lock,
+    copyback_lock_failure_kind,
+    count_copyback_lock_failures,
     release_copyback_batch_lock,
 )
 from packages.common.safe_fs import SafeFilesystemError, remove_tree_allow_symlinks
@@ -156,7 +160,10 @@ ROOT_OVERLAP_REASON = "root_overlap"
 # trees as `failed` (the first waited out the budget, the rest refused before
 # acquiring), removes nothing on that root, and the next pass retries: deferred
 # reclamation, not lost reclamation. That is the cost taken here.
-DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = 300.0
+#
+# The value lives in `copyback_guard` because node-27 raw retention charges the
+# same budget; this name stays importable for existing callers.
+DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS
 
 
 @dataclass
@@ -272,6 +279,10 @@ class RetentionResult:
             "deleted": self.deleted,
             "skipped": self.skipped,
             "failed": self.failed,
+            # Per-shape lock-failure counts derived from `failed`, zeros
+            # included, so the signal survives receipt compaction that drops
+            # the per-entry detail.
+            "copyback_lock_failures": count_copyback_lock_failures(self.failed),
             "freed_bytes": self.freed_bytes,
         }
 
@@ -1010,7 +1021,8 @@ def _delete_entry(
     (scheduler_runtime) and abort the ``cleanup`` CLI mid-sweep (cli.py wraps
     nothing), both violating this module's "failures never abort the pass"
     contract. An unavailable mutex is therefore one ``failed`` entry carrying
-    the error text -- never a removal, and never an interrupted sweep.
+    the error text, its class name and its typed ``lock_failure`` shape --
+    never a removal, and never an interrupted sweep.
     """
     path = Path(entry["path"])
     try:
@@ -1030,8 +1042,18 @@ def _delete_entry(
                 )
         else:
             shutil.rmtree(path)
-    except (OSError, SafeFilesystemError, CopybackLockError) as error:
-        result.failed.append({**entry, "error": str(error)})
+    except CopybackLockError as error:
+        result.failed.append(
+            {
+                **entry,
+                "error": str(error),
+                "error_type": type(error).__name__,
+                "lock_failure": copyback_lock_failure_kind(error),
+            }
+        )
+        return
+    except (OSError, SafeFilesystemError) as error:
+        result.failed.append({**entry, "error": str(error), "error_type": type(error).__name__})
         return
     result.deleted.append(entry)
     result.freed_bytes += int(entry.get("size_bytes", 0))
@@ -1062,7 +1084,7 @@ def _remove_tree_under_copyback_mutex(
     deadline's wait.
     """
     if copyback_lock.remaining_seconds <= 0:
-        raise CopybackLockError(
+        raise CopybackLockBudgetExhausted(
             f"copyback batch lock wait budget of {copyback_lock.budget_seconds}s "
             f"is exhausted for this retention pass; {path} was not removed"
         )

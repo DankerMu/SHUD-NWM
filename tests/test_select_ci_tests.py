@@ -1087,11 +1087,14 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
     # migrations as text and the status sets as objects), and to 47 in #2238
     # (the copyback-mutex retention partition: 25 tests in 5.27s, DB-free — no
-    # DB markers and no psycopg, green with no database up). Those running
+    # DB markers and no psycopg, green with no database up), and to 49 in
+    # harden-copyback-mutex-residuals (the retention lock-signal suite, 5 tests
+    # in ~1.0s, and the run-tree backup-lifecycle suite, 11 tests in ~0.1s;
+    # both DB-free). Those running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 49 targets, the rule's 47 plus two riders that arrive from OUTSIDE the rule
+    # 51 targets, the rule's 49 plus two riders that arrive from OUTSIDE the rule
     # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
     # river-segment write-surface scan by the services/** supplemental route.
     # The literal stays FROZEN here:
@@ -1142,6 +1145,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # broad rule reds this assertion (retry.py's selection loses it, and no
         # importer derivation re-supplies it there), and no disposition token can
         # mask that -- `select_ci_tests` never reads the exclusion table.
+        "tests/test_retention_copyback_lock_signal.py",
         "tests/test_retention_copyback_mutex.py",
         "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
@@ -1154,6 +1158,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         WRITE_SURFACE_SCAN_PATH,
         "tests/test_run_identity.py",
         "tests/test_run_tree_copyback.py",
+        "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_scheduler_backfill.py",
         "tests/test_scheduler_backfill_predecessor.py",
         "tests/test_scheduler_file_provider_refresh.py",
@@ -9584,7 +9589,7 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "services/tile_publisher/forcing_copyback_backfill.py",
-        ("tests/test_forcing_copyback_backfill.py",),
+        ("tests/test_forcing_copyback_backfill.py", "tests/test_forcing_copyback_backfill_lock_scope.py"),
     ),
     (
         "db/seeds/seed_demo.py",
@@ -9621,13 +9626,19 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
             # because the pin below only counts as "the positive floor above
             # proves each partition IS selected" if the floor actually names it.
             "tests/test_retention_copyback_mutex.py",
+            # harden-copyback-mutex-residuals EF-20: the typed lock-failure signal.
+            "tests/test_retention_copyback_lock_signal.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
         ),
     ),
-    ("services/orchestrator/run_tree_copyback.py", ("tests/test_run_tree_copyback.py",)),
+    (
+        "services/orchestrator/run_tree_copyback.py",
+        ("tests/test_run_tree_copyback.py", "tests/test_run_tree_copyback_backup_lifecycle.py"),
+    ),
+    ("scripts/node27_raw_retention.py", ("tests/test_node27_raw_retention_copyback_mutex.py",)),
 )
 
 
@@ -10152,17 +10163,24 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # 9 -> 10: a path-exact rule with neither flag, so the same-name suite, the
     # selector meta-guard rider, the #1744 core-smoke baseline and both
     # supplemental invariant routes all still accumulate beside the mutex suite.
+    # 10 -> 15: harden-copyback-mutex-residuals routed the guard's primitive
+    # suite and the four lane suites that read its new names.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
         "tests/test_copyback_guard.py",
+        "tests/test_copyback_guard_primitive.py",
+        "tests/test_forcing_copyback_backfill_lock_scope.py",
         "tests/test_gateway.py",
         "tests/test_migrations.py",
+        "tests/test_node27_raw_retention_copyback_mutex.py",
         "tests/test_orchestration_chain.py",
         "tests/test_production_scheduler.py",
+        "tests/test_retention_copyback_lock_signal.py",
         "tests/test_retention_copyback_mutex.py",
         "tests/test_river_segment_write_surface_scan.py",
+        "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_select_ci_tests.py",
         "tests/test_timescale_write_guard_wire_site_invariant.py",
     ]
@@ -10171,9 +10189,11 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
 @pytest.mark.parametrize(
     ("module_path", "expected_count"),
     (
-        ("services/orchestrator/retention.py", 49),
+        # 49 -> 51 and 48 -> 50: harden-copyback-mutex-residuals added two
+        # orchestrator-tree suites (lock signal, run-tree backup lifecycle).
+        ("services/orchestrator/retention.py", 51),
         ("services/orchestrator/cli.py", 30),
-        ("services/orchestrator/__init__.py", 48),
+        ("services/orchestrator/__init__.py", 50),
         ("tests/retention_test_helpers.py", 6),
     ),
 )
