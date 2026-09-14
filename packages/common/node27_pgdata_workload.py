@@ -23,6 +23,7 @@ from packages.common.node27_pgdata_workload_measure import (
 )
 from packages.common.node27_pgdata_workload_query import (
     CanonicalExplicitCycleIdentity,
+    canonical_query_parameters,
     parse_issue_time,
     record_explicit_cycle_curve,
     scenario_for_source,
@@ -128,6 +129,7 @@ def measure_workload(
     )
     api_eval = evaluate_api_samples(warmup=api_warmup, accepted=api_accepted, path=str(captured["api_path"]))
     instant = (now or utc_now)().astimezone(UTC).isoformat().replace("+00:00", "Z")
+    typed_parameters = canonical_query_parameters(captured["parameters"])
     document = {
         "artifact": ARTIFACT,
         "schema_version": SCHEMA_VERSION,
@@ -164,7 +166,7 @@ def measure_workload(
         "query": {
             "sql": captured["sql"],
             "explain_sql": captured["explain_sql"],
-            "parameters": captured["parameters"],
+            "parameters": typed_parameters,
             "query_digest": captured["query_digest"],
         },
         "samples": {
@@ -174,7 +176,9 @@ def measure_workload(
             "api_accepted_ms": api_eval["accepted_durations_ms"],
         },
     }
-    return redact_payload(document)
+    redacted = redact_payload(document)
+    redacted["query"]["parameters"] = typed_parameters
+    return redacted
 
 
 __all__ = (

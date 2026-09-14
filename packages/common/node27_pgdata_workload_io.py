@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import stat
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -12,13 +13,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from packages.common.node27_pgdata_workload_types import refuse
+from packages.common.node27_pgdata_workload_types import PgdataWorkloadError, refuse
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     read_bytes_durable_no_follow,
     stat_no_follow,
+    unlink_no_follow,
+)
+from packages.common.safe_fs_publication import (
+    move_regular_file_no_follow_exclusive,
     write_bytes_no_follow_exclusive,
 )
 
@@ -35,11 +40,10 @@ MAX_DSN_BYTES = 16384
 MAX_OUTPUT_BYTES = 262_144
 MAX_JSON_DEPTH = 16
 MAX_JSON_NODES = 4096
+OUTPUT_FILE_MODE = 0o600
 
 
 def format_refusal(error: Exception) -> str:
-    from packages.common.node27_pgdata_workload_types import PgdataWorkloadError
-
     if isinstance(error, PgdataWorkloadError):
         return redact_text(f"{error.code}: {error}")
     return redact_text("SQL_CONNECT_FAILED: readonly workload connection failed")
@@ -95,7 +99,10 @@ def read_private_dsn_file(path: Path) -> str:
         raw = read_bytes_durable_no_follow(target, max_bytes=MAX_DSN_BYTES)
     except (OSError, SafeFilesystemError):
         refuse("reader DSN file is unavailable", code="DSN_FILE_UNAVAILABLE", stage="io")
-    text = raw.decode("utf-8").strip()
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        refuse("reader DSN file is not valid UTF-8", code="DSN_FILE_INVALID", stage="io")
     if not text or "\n" in text or "\x00" in text:
         refuse("reader DSN file is empty or multiline", code="DSN_FILE_INVALID", stage="io")
     return text
@@ -156,6 +163,10 @@ def open_readonly_connection(
             cursor.execute(f"SET LOCAL statement_timeout = {int(STATEMENT_TIMEOUT_MS)}")
             cursor.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
             cursor.execute(f"SET LOCAL application_name = '{APPLICATION_NAME}'")
+    except PgdataWorkloadError:
+        if connection is not None:
+            close_readonly_connection(connection)
+        raise
     except Exception:
         if connection is not None:
             close_readonly_connection(connection)
@@ -227,19 +238,65 @@ def encode_evidence(document: Mapping[str, Any]) -> bytes:
     return encoded
 
 
+def _stage_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = stat_no_follow(path)
+    except (OSError, SafeFilesystemError):
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _unlink_owned_stage(path: Path, identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        return
+    current = _stage_identity(path)
+    if current != identity:
+        return
+    try:
+        unlink_no_follow(path, missing_ok=True)
+    except (OSError, SafeFilesystemError):
+        return
+
+
 def publish_measurement_output(path: Path, document: Mapping[str, Any]) -> None:
     target = require_absolute_path(path, code="OUTPUT_PATH_INVALID")
     encoded = encode_evidence(document)
+    stage = target.with_name(f".{target.name}.{secrets.token_hex(16)}.tmp")
+    staged_identity: tuple[int, int] | None = None
     try:
-        write_bytes_no_follow_exclusive(target, encoded)
+        write_bytes_no_follow_exclusive(
+            stage,
+            encoded,
+            require_durable_create=True,
+            mode=OUTPUT_FILE_MODE,
+        )
     except FileExistsError:
-        refuse("target already exists", code="OUTPUT_EXISTS", stage="io")
-    except SafeFilesystemError:
         refuse("measurement output could not be published", code="OUTPUT_PUBLISH_FAILED", stage="io")
+    except SafeFilesystemError as error:
+        if error.kind == "indeterminate":
+            refuse(
+                "measurement output publication is indeterminate",
+                code="OUTPUT_PUBLISH_INDETERMINATE",
+                stage="io",
+            )
+        refuse("measurement output could not be published", code="OUTPUT_PUBLISH_FAILED", stage="io")
+    staged_identity = _stage_identity(stage)
     try:
-        os.chmod(target, 0o600)
-    except OSError:
-        refuse("measurement output mode could not be set", code="OUTPUT_MODE_FAILED", stage="io")
+        move_regular_file_no_follow_exclusive(stage.parent, stage.name, target.parent, target.name)
+    except FileExistsError:
+        _unlink_owned_stage(stage, staged_identity)
+        refuse("target already exists", code="OUTPUT_EXISTS", stage="io")
+    except SafeFilesystemError as error:
+        if error.kind == "indeterminate":
+            refuse(
+                "measurement output publication is indeterminate",
+                code="OUTPUT_PUBLISH_INDETERMINATE",
+                stage="io",
+            )
+        _unlink_owned_stage(stage, staged_identity)
+        refuse("measurement output could not be published", code="OUTPUT_PUBLISH_FAILED", stage="io")
 
 
 def replace_measurement_output(path: Path, document: Mapping[str, Any]) -> None:

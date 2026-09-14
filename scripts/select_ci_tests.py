@@ -837,6 +837,7 @@ C4_PRODUCTION_ACCEPTANCE_TESTS: tuple[str, ...] = (
 NODE27_PGDATA_WORKLOAD_TESTS: tuple[str, ...] = (
     "tests/test_node27_pgdata_workload.py",
     "tests/test_node27_pgdata_workload_plan.py",
+    "tests/test_node27_pgdata_workload_io.py",
     "tests/test_forecast_api.py",
     "tests/test_forecast_store_routing.py",
     "tests/test_select_ci_tests.py",
@@ -1058,6 +1059,11 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_node27_pgdata_workload_plan.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_workload_io.py",
         NODE27_PGDATA_WORKLOAD_TESTS,
         stop_on_match=True,
     ),
@@ -2499,6 +2505,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_forecast_store_routing.py",
             "tests/test_node27_pgdata_workload.py",
             "tests/test_node27_pgdata_workload_plan.py",
+            "tests/test_node27_pgdata_workload_io.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",

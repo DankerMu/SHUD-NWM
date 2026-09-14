@@ -692,14 +692,22 @@ Missing DB/browser evidence remains pending, never mocked PASS.
 SQL/API measurement is owned by the PGDATA workload CLI. It captures the
 shipping explicit-cycle `forecast_series()` named query once, then discards
 one warmup and accepts 20 serial SQL EXPLAIN and local forecast-series API
-samples. Isolated receipts never imply live acceptance. Reader credentials
-use a descriptor-bound mode-0600 nonsymlink private DSN file for
-`nhms_display_ro` (not `display.env` or shell sourcing). Repeat the same
-frozen inputs for representative uncompressed and compressed windows already
-present. Browser click P95 remains independent C4/river-click (`<2s`).
-Readonly DB remains `scripts/validate_readonly_db_boundary.py`. Controlled
-ingest remains PGDATA §D under the hold owner's separate authorization. Do
-not point operators at withdrawn `node27_issue1895_performance_oracle.py`.
+samples. Isolated receipts never imply live acceptance. Published
+`query.parameters` is the existing `query_digest` typed representation
+(`{mapping:...}`, datetime `{datetime:UTC ISO}`, sequence `{sequence:[...]}`);
+an independent SHA-256 of compact sorted JSON `{sql,parameters}` must equal
+the recorded digest. General redaction still applies; only that validated
+parameter block is restored. Receipts are written through a private staged
+sibling and exclusive publication so the final path is mode-0600 from the
+first byte and a pre-publish write/fsync failure leaves no partial final.
+Reader credentials use a descriptor-bound mode-0600 nonsymlink private DSN
+file for `nhms_display_ro` (not `display.env` or shell sourcing). Invalid UTF-8
+DSN bytes refuse `DSN_FILE_INVALID`. Repeat the same frozen inputs for
+representative uncompressed and compressed windows already present. Browser
+click P95 remains independent C4/river-click (`<2s`). Readonly DB remains
+`scripts/validate_readonly_db_boundary.py`. Controlled ingest remains PGDATA
+§D under the hold owner's separate authorization. Do not point operators at
+withdrawn `node27_issue1895_performance_oracle.py`.
 
 ```bash
 uv run --no-sync python scripts/node27_pgdata_workload.py measure \

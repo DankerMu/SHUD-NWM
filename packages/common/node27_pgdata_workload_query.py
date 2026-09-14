@@ -258,16 +258,25 @@ def _canonical_param(value: Any) -> Any:
     raise AssertionError("unreachable")
 
 
-def query_digest(*, sql: str, parameters: NativeParameters) -> str:
+def canonical_query_parameters(parameters: NativeParameters) -> dict[str, Any]:
+    """Return the query_digest typed representation for one named mapping."""
+
     copied = _copy_named_parameters(parameters, error_code="QUERY_BINDING_INVALID")
+    return {"mapping": {key: _canonical_param(copied[key]) for key in sorted(copied)}}
+
+
+def query_digest_preimage(*, sql: str, parameters: NativeParameters) -> bytes:
     payload = {
         "sql": " ".join(sql.split()),
-        "parameters": {"mapping": {key: _canonical_param(copied[key]) for key in sorted(copied)}},
+        "parameters": canonical_query_parameters(parameters),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
         "utf-8"
     )
-    return hashlib.sha256(encoded).hexdigest()
+
+
+def query_digest(*, sql: str, parameters: NativeParameters) -> str:
+    return hashlib.sha256(query_digest_preimage(sql=sql, parameters=parameters)).hexdigest()
 
 
 def _canonical_identity(expected: Mapping[str, Any] | CanonicalExplicitCycleIdentity) -> CanonicalExplicitCycleIdentity:
@@ -521,6 +530,10 @@ def _parse_series_point(point: object) -> tuple[int, float]:
     raise AssertionError("unreachable")
 
 
+def _is_json_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
 def _canonical_source(value: object) -> str:
     text = str(value or "").strip().upper()
     if text not in SCENARIO_BY_SOURCE:
@@ -552,7 +565,8 @@ def validate_river_series_response(
     bound_response_json(payload, code="API_JSON_TOO_COMPLEX", stage="performance")
     if not isinstance(payload, Mapping):
         refuse("API body is not a RiverSeriesResponse object", code="API_BODY_INVALID", stage="performance")
-    if "data" in payload or payload.get("status") in {"ok", "ready"} or "segments" in payload:
+    status = payload.get("status")
+    if "data" in payload or "segments" in payload or (_is_json_scalar(status) and status in {"ok", "ready"}):
         refuse(
             "API body is an envelope, not a raw RiverSeriesResponse", code="API_ENVELOPE_INVALID", stage="performance"
         )
@@ -564,9 +578,16 @@ def validate_river_series_response(
     unit = str(payload.get("unit") or "").strip()
     if not unit or len(unit) > UNIT_LIMIT:
         refuse("RiverSeriesResponse unit is missing or oversized", code="API_UNIT_MISSING", stage="performance")
-    if payload.get("issue_time") in {None, ""}:
+    issue_raw = payload.get("issue_time")
+    if issue_raw is None or issue_raw == "":
         refuse("RiverSeriesResponse issue_time is missing", code="API_ISSUE_TIME_MISSING", stage="performance")
-    response_issue = iso_utc(parse_issue_time(str(payload.get("issue_time"))))
+    if not isinstance(issue_raw, str):
+        refuse(
+            "RiverSeriesResponse issue_time does not match the frozen pin",
+            code="API_ISSUE_TIME_MISMATCH",
+            stage="performance",
+        )
+    response_issue = iso_utc(parse_issue_time(issue_raw))
     expected_issue = iso_utc(parse_issue_time(issue_time))
     series = payload.get("series")
     if not isinstance(series, list) or not series:
@@ -590,7 +611,7 @@ def validate_river_series_response(
             continue
         matched.append(item)
         variable = item.get("variable")
-        if variable not in {None, FORECAST_VARIABLE}:
+        if not _is_json_scalar(variable) or variable not in {None, FORECAST_VARIABLE}:
             refuse("RiverSeriesResponse variable is not q_down", code="API_VARIABLE_INVALID", stage="performance")
         raw_points = item.get("points")
         if not isinstance(raw_points, list) or not raw_points:
@@ -609,8 +630,10 @@ def validate_river_series_response(
                 stage="performance",
             )
         item_source = item.get("source_id") or item.get("source")
-        if item_source in {None, ""}:
+        if item_source is None or item_source == "":
             refuse("matching series is missing source_id", code="API_SOURCE_MISSING", stage="performance")
+        if not isinstance(item_source, str):
+            refuse("series source_id is not canonical GFS/IFS", code="API_SOURCE_INVALID", stage="performance")
         if _canonical_source(item_source) != expected_source:
             refuse(
                 "matching series source_id does not equal the requested source",
@@ -618,7 +641,16 @@ def validate_river_series_response(
                 stage="performance",
             )
         cycle_raw = item.get("cycle_time")
-        cycle_iso = iso_utc(parse_issue_time(str(cycle_raw))) if cycle_raw not in {None, ""} else None
+        if cycle_raw is None or cycle_raw == "":
+            cycle_iso = None
+        elif not isinstance(cycle_raw, str):
+            refuse(
+                "matching series cycle_time does not equal the requested cycle",
+                code="API_CYCLE_MISMATCH",
+                stage="performance",
+            )
+        else:
+            cycle_iso = iso_utc(parse_issue_time(cycle_raw))
         if cycle_iso is None and response_issue != expected_issue:
             refuse(
                 "matching series is missing cycle_time and issue_time does not bind the lane",
@@ -631,9 +663,11 @@ def validate_river_series_response(
                 code="API_CYCLE_MISMATCH",
                 stage="performance",
             )
-        if run_id is not None and item.get("run_id") not in {None, "", run_id}:
+        item_run = item.get("run_id")
+        if run_id is not None and not (_is_json_scalar(item_run) and item_run in {None, "", run_id}):
             refuse("API run_id does not match the frozen pin", code="API_RUN_MISMATCH", stage="performance")
-        if model_id is not None and item.get("model_id") not in {None, "", model_id}:
+        item_model = item.get("model_id")
+        if model_id is not None and not (_is_json_scalar(item_model) and item_model in {None, "", model_id}):
             refuse("API model_id does not match the frozen pin", code="API_MODEL_MISMATCH", stage="performance")
         for point in raw_points:
             instant_ms, _value = _parse_series_point(point)
