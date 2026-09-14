@@ -122,6 +122,7 @@ def measure_workload(
         accepted=sql_accepted,
         candidate_chunk_names=candidates["candidate_chunk_names"],
         segment_id=str(captured["timeseries_segment_id"]),
+        river_network_version_id=str(captured["river_network_version_id"]),
         window_start=str(captured["window_start"]),
         window_end=str(captured["window_end"]),
     )

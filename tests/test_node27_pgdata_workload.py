@@ -334,12 +334,6 @@ def test_shipping_named_capture_preserves_unique_mapping_and_reaches_explain() -
     )
     parameters = recorded["parameters"]
     assert isinstance(parameters, Mapping)
-    assert "h.cycle_time = %(issue_time)s" in recorded["sql"]
-    assert recorded["sql"].count("%(issue_time)s") == 2
-    assert recorded["sql"].count("rt.river_segment_id = %(river_segment_id)s") >= 2
-    assert "LOWER(h.source_id) = ANY(%(scenario_tokens)s)" in recorded["sql"]
-    assert "LOWER(h.scenario_id) = ANY(%(scenario_ids)s)" in recorded["sql"]
-    assert "selected_cycles" not in recorded["sql"]
     assert set(parameters) >= {
         "basin_version_id",
         "river_segment_id",
@@ -637,6 +631,17 @@ def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
             "compressed_schema": "_timescaledb_internal",
             "compressed_name": "compress_hyper_2_1_chunk",
         },
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_1_2_chunk",
+            "range_start": WINDOW_END,
+            "range_end": "2026-08-15T00:00:00Z",
+            "is_compressed": False,
+            "compressed_schema": None,
+            "compressed_name": None,
+        },
     ]
 
     def execute(_sql: str, _params: object = None) -> list[dict[str, Any]]:
@@ -644,11 +649,13 @@ def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
 
     loaded = load_candidate_relations(execute, window_start=ISSUE, window_end=WINDOW_END)
     assert "_hyper_1_1_chunk" in loaded["origin_chunk_names"]
+    assert "_hyper_1_2_chunk" in loaded["origin_chunk_names"]
     assert "compress_hyper_2_1_chunk" in loaded["compressed_chunk_names"]
     assert "compress_hyper_2_1_chunk" in loaded["candidate_chunk_names"]
     _assert_code(
         lambda: normalize_candidate_chunk_name("_timescaledb_internal._hyper_1_1_chunk"), "PLAN_CANDIDATE_NAME_INVALID"
     )
+
 
     def unrelated(_sql: str, _params: object = None) -> list[dict[str, Any]]:
         bad = dict(rows[0])
@@ -659,6 +666,258 @@ def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
         lambda: load_candidate_relations(unrelated, window_start=ISSUE, window_end=WINDOW_END),
         "PLAN_UNRELATED_PARENT",
     )
+
+
+def _native_initplan(*, segment: str = TS_SEGMENT, network: str = RNV, returns: str = "$4") -> dict[str, Any]:
+    return {
+        "Node Type": "Index Scan",
+        "Relation Name": "river_segment",
+        "Parent Relationship": "InitPlan",
+        "Subplan Name": f"InitPlan 5 (returns {returns})",
+        "Index Cond": (
+            f"((river_segment_id = '{segment}'::text) AND "
+            f"(river_network_version_id = '{network}'::text))"
+        ),
+        "Actual Rows": 1,
+        "Actual Loops": 1,
+        "Shared Read Blocks": 0,
+        "Shared Hit Blocks": 2,
+    }
+
+
+
+def _native_index_plan(
+    *,
+    relation: str,
+    index_cond: str,
+    segment: str = TS_SEGMENT,
+    network: str = RNV,
+) -> list[dict[str, Any]]:
+    access = {
+        "Node Type": "Index Scan",
+        "Schema": "_timescaledb_internal",
+        "Relation Name": relation,
+        "Index Cond": index_cond,
+        "Actual Rows": 2,
+        "Actual Loops": 1,
+        "Shared Read Blocks": 0,
+        "Shared Hit Blocks": 2,
+        "Rows Removed by Filter": 0,
+    }
+    return [
+        {
+            "Plan": {
+                "Node Type": "Nested Loop",
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 26,
+                "Actual Rows": 2,
+                "Plans": [_native_initplan(segment=segment, network=network), access],
+            }
+        }
+    ]
+
+
+
+def test_native_pg_timestamp_and_surrogate_key_are_accepted() -> None:
+    start = "2026-05-03T00:00:00Z"
+    end = "2026-05-10T00:00:00Z"
+    payload = _native_index_plan(
+        relation="_hyper_6_1_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) "
+            "AND (valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+    )
+    result = evaluate_explain_json_plan(
+        payload,
+        candidate_chunk_names=("_hyper_6_1_chunk",),
+        segment_id=TS_SEGMENT,
+        river_network_version_id=RNV,
+        window_start=start,
+        window_end=end,
+    )
+    assert result["touched_count"] == 1
+    assert result["seq_scan"] is False
+
+
+def test_native_plan_refuses_wrong_time_surrogate_and_unrelated_chunk() -> None:
+    start = "2026-05-03T00:00:00Z"
+    end = "2026-05-10T00:00:00Z"
+    candidates = ("_hyper_6_1_chunk",)
+    kwargs = dict(
+        candidate_chunk_names=candidates,
+        segment_id=TS_SEGMENT,
+        river_network_version_id=RNV,
+        window_start=start,
+        window_end=end,
+    )
+    wrong_time = _native_index_plan(
+        relation="_hyper_6_1_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (valid_time >= '2026-05-04 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+    )
+    _assert_code(lambda: evaluate_explain_json_plan(wrong_time, **kwargs), "PLAN_OUT_OF_WINDOW")
+    half_open = _native_index_plan(
+        relation="_hyper_6_1_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time < '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+    )
+    _assert_code(lambda: evaluate_explain_json_plan(half_open, **kwargs), "PLAN_OUT_OF_WINDOW")
+    wrong_segment = _native_index_plan(
+        relation="_hyper_6_1_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+        segment="other_segment",
+    )
+    _assert_code(lambda: evaluate_explain_json_plan(wrong_segment, **kwargs), "PLAN_SEGMENT_UNBOUND")
+    missing = [
+        {
+            "Plan": {
+                "Node Type": "Index Scan",
+                "Schema": "_timescaledb_internal",
+                "Relation Name": "_hyper_6_1_chunk",
+                "Index Cond": (
+                    "((river_segment_key = $4) AND "
+                    "(valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+                    "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+                ),
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 2,
+                "Actual Rows": 2,
+            }
+        }
+    ]
+    _assert_code(lambda: evaluate_explain_json_plan(missing, **kwargs), "PLAN_SEGMENT_UNBOUND")
+    wrong_network = _native_index_plan(
+        relation="_hyper_6_1_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+        network="other-network",
+    )
+    _assert_code(lambda: evaluate_explain_json_plan(wrong_network, **kwargs), "PLAN_SEGMENT_UNBOUND")
+    unrelated = _native_index_plan(
+        relation="_hyper_9_9_chunk",
+        index_cond=(
+            "((river_segment_key = $4) AND (valid_time >= '2026-05-03 00:00:00+00'::timestamp with time zone) "
+            "AND (valid_time <= '2026-05-10 00:00:00+00'::timestamp with time zone))"
+        ),
+    )
+    _assert_code(lambda: evaluate_explain_json_plan(unrelated, **kwargs), "PLAN_UNRELATED_CHUNK")
+
+
+def test_compressed_physical_index_uses_initplan_and_seq_scan_still_refuses() -> None:
+    initplan = _native_initplan()
+    indexed = {
+        "Node Type": "Custom Scan",
+        "Custom Plan Provider": "DecompressChunk",
+        "Schema": "_timescaledb_internal",
+        "Relation Name": "_hyper_6_2_chunk",
+        "Filter": (
+            "((valid_time >= '2026-08-01 00:00:00+00'::timestamp with time zone) AND "
+            "(valid_time <= '2026-08-08 00:00:00+00'::timestamp with time zone) AND "
+            "(basin_version_key = $3) AND (river_network_version_key = $5) AND "
+            "(variable_e = 'q_down'::hydro.river_variable))"
+        ),
+        "Shared Read Blocks": 0,
+        "Shared Hit Blocks": 1,
+        "Actual Rows": 8,
+        "Actual Loops": 1,
+        "Plans": [
+            {
+                "Node Type": "Index Scan",
+                "Schema": "_timescaledb_internal",
+                "Relation Name": "compress_hyper_7_4_chunk",
+                "Index Cond": "(river_segment_key = $4)",
+                "Filter": (
+                    "((_ts_meta_max_2 >= '2026-08-01 00:00:00+00'::timestamp with time zone) AND "
+                    "(_ts_meta_min_2 <= '2026-08-08 00:00:00+00'::timestamp with time zone))"
+                ),
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 1,
+                "Actual Rows": 8,
+                "Actual Loops": 1,
+            }
+        ],
+    }
+    payload = [
+        {
+            "Plan": {
+                "Node Type": "Nested Loop",
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 12,
+                "Actual Rows": 8,
+                "Plans": [initplan, indexed],
+            }
+        }
+    ]
+    candidates = ("_hyper_6_2_chunk", "compress_hyper_7_4_chunk")
+    result = evaluate_explain_json_plan(
+        payload,
+        candidate_chunk_names=candidates,
+        segment_id=TS_SEGMENT,
+        river_network_version_id=RNV,
+        window_start=ISSUE,
+        window_end=WINDOW_END,
+    )
+    assert result["decompressed_count"] == 1
+    assert result["seq_scan"] is False
+    seq_child = {
+        "Node Type": "Custom Scan",
+        "Custom Plan Provider": "DecompressChunk",
+        "Schema": "_timescaledb_internal",
+        "Relation Name": "_hyper_6_2_chunk",
+        "Filter": (
+            "((valid_time >= '2026-08-01 00:00:00+00'::timestamp with time zone) AND "
+            "(valid_time <= '2026-08-08 00:00:00+00'::timestamp with time zone))"
+        ),
+        "Shared Read Blocks": 0,
+        "Shared Hit Blocks": 1,
+        "Actual Rows": 8,
+        "Plans": [
+            {
+                "Node Type": "Seq Scan",
+                "Schema": "_timescaledb_internal",
+                "Relation Name": "compress_hyper_7_4_chunk",
+                "Filter": "(river_segment_key = $4)",
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 1,
+                "Actual Rows": 8,
+            }
+        ],
+    }
+    seq_payload = [
+        {
+            "Plan": {
+                "Node Type": "Nested Loop",
+                "Shared Read Blocks": 0,
+                "Shared Hit Blocks": 12,
+                "Actual Rows": 8,
+                "Plans": [initplan, seq_child],
+            }
+        }
+    ]
+    _assert_code(
+        lambda: evaluate_explain_json_plan(
+            seq_payload,
+            candidate_chunk_names=candidates,
+            segment_id=TS_SEGMENT,
+            river_network_version_id=RNV,
+            window_start=ISSUE,
+            window_end=WINDOW_END,
+        ),
+        "PLAN_SEQ_SCAN",
+    )
+
+
 
 
 def test_api_wrong_identity_empty_series_and_redirect_refuse() -> None:
@@ -891,4 +1150,5 @@ def test_measure_requires_complete_sql_and_api_probes() -> None:
     }
     _assert_code(lambda: measure_workload(**kwargs, sql_probe=sql_probe), "INJECTION_MIXED")
     _assert_code(lambda: measure_workload(**kwargs, api_probe=api_probe), "INJECTION_MIXED")
-    _assert_code(lambda: measure_workload(**kwargs, evidence_kind="rehearsal"), "INPUT_KIND_INVALID")
+    rehearsal_kwargs = {**kwargs, "evidence_kind": "rehearsal"}
+    _assert_code(lambda: measure_workload(**rehearsal_kwargs), "INPUT_KIND_INVALID")

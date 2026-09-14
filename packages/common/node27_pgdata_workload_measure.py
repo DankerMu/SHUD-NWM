@@ -121,6 +121,7 @@ def evaluate_sql_samples(
     segment_id: str,
     window_start: str,
     window_end: str,
+    river_network_version_id: str | None = None,
 ) -> dict[str, Any]:
     if warmup.get("index") != 0 or warmup.get("discarded") is not True:
         refuse("SQL warmup is not the discarded index-0 sample", code="SQL_WARMUP_INVALID", stage="performance")
@@ -136,6 +137,7 @@ def evaluate_sql_samples(
             payload,
             candidate_chunk_names=candidate_chunk_names,
             segment_id=segment_id,
+            river_network_version_id=river_network_version_id,
             window_start=window_start,
             window_end=window_end,
             require_segment_bound=True,

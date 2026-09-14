@@ -5,7 +5,10 @@ and legacy ``hydro.river_timeseries_legacy``) and the frozen seven-day window.
 Origin and physical compressed identities come from Timescale catalog
 relationships, not name prefixes or cold topology. Own-candidate DecompressChunk
 is allowed; unrelated chunk or relevant Seq Scan refuses. Root Shared Hit+Read
-is the only buffer total.
+is the only buffer total. Window proof compares parsed timestamptz instants
+from valid_time/_ts_meta bounds, not rendered ISO substrings. Segment proof
+accepts a fact ``river_segment_key`` parameter only when an InitPlan on
+``core.river_segment`` resolves that parameter to the frozen text identity.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.evidence_io import BoundedEvidenceError, validate_json_complexity
@@ -27,6 +31,18 @@ MAX_CANDIDATES = 64
 NARROW_HYPERTABLE = ("hydro", "river_timeseries")
 LEGACY_HYPERTABLE = ("hydro", "river_timeseries_legacy")
 CHUNK_NAME_RE = re.compile(r"^[_A-Za-z][_A-Za-z0-9]*$")
+_INITPLAN_RETURNS_RE = re.compile(r"InitPlan\s+\d+\s+\(\s*returns\s+(\$\d+)\s*\)", re.IGNORECASE)
+_TIME_PREDICATE_RE = re.compile(
+    r"\b(valid_time|_ts_meta_(?:min|max)_\d+)\s*(>=|<=|>|<|=)\s*'([^']+)'",
+    re.IGNORECASE,
+)
+_SEGMENT_ID_EQ_RE = re.compile(r"\briver_segment_id\s*=\s*'([^']+)'", re.IGNORECASE)
+_NETWORK_ID_EQ_RE = re.compile(r"\briver_network_version_id\s*=\s*'([^']+)'", re.IGNORECASE)
+_SEGMENT_KEY_PARAM_RE = re.compile(
+    r"\briver_segment_key\s*=\s*(\$\d+)|\b(\$\d+)\s*=\s*river_segment_key\b",
+    re.IGNORECASE,
+)
+_OFFSET_HOURS_RE = re.compile(r"[+-]\d{2}$")
 CANDIDATE_CHUNKS_SQL = """
 SELECT
     v.hypertable_schema,
@@ -219,6 +235,110 @@ def _actual_loops(node: Mapping[str, Any]) -> int:
     return parsed if parsed is not None and parsed > 0 else 1
 
 
+def _node_predicate_raw(node: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("Index Cond", "Filter", "Recheck Cond", "Chunk Quals", "Chunk Qual"):
+        value = node.get(key)
+        if value:
+            parts.append(str(value))
+    return " ".join(parts)
+
+
+def _parse_plan_instant(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    if _OFFSET_HOURS_RE.search(text):
+        text += ":00"
+    if "T" not in text[:19] and " " in text:
+        text = text.replace(" ", "T", 1)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _node_has_time_bound(node: Mapping[str, Any]) -> bool:
+    return _TIME_PREDICATE_RE.search(_node_predicate_raw(node)) is not None
+
+
+def _node_time_bound_matches(node: Mapping[str, Any], start_at: datetime, end_at: datetime) -> bool:
+    start_ok = False
+    end_ok = False
+    matches = list(_TIME_PREDICATE_RE.finditer(_node_predicate_raw(node)))
+    if not matches:
+        return False
+    for match in matches:
+        column = match.group(1).lower()
+        op = match.group(2)
+        instant = _parse_plan_instant(match.group(3))
+        if instant is None:
+            return False
+        recognized = False
+        if op in {">=", "="} and instant == start_at and (column == "valid_time" or column.startswith("_ts_meta_max")):
+            start_ok = True
+            recognized = True
+        if op in {"<=", "="} and instant == end_at and (column == "valid_time" or column.startswith("_ts_meta_min")):
+            end_ok = True
+            recognized = True
+        if not recognized:
+            return False
+    return start_ok and end_ok
+
+
+def _initplan_segment_params(nodes: Sequence[Mapping[str, Any]]) -> dict[str, tuple[str, str | None]]:
+    found: dict[str, tuple[str, str | None]] = {}
+    for node in nodes:
+        subplan = str(node.get("Subplan Name") or "")
+        returned = _INITPLAN_RETURNS_RE.search(subplan)
+        if returned is None:
+            continue
+        if str(node.get("Parent Relationship") or "").strip().lower() != "initplan":
+            continue
+        if _relation_basename(node) != "river_segment":
+            continue
+        raw = _node_predicate_raw(node)
+        segment = _SEGMENT_ID_EQ_RE.search(raw)
+        if segment is None:
+            continue
+        network = _NETWORK_ID_EQ_RE.search(raw)
+        found[returned.group(1)] = (segment.group(1), network.group(1) if network else None)
+    return found
+
+
+def _segment_key_params(node: Mapping[str, Any]) -> tuple[str, ...]:
+    params: list[str] = []
+    for match in _SEGMENT_KEY_PARAM_RE.finditer(_node_predicate_raw(node)):
+        params.append(match.group(1) or match.group(2))
+    return tuple(params)
+
+
+def _segment_identity_bound(
+    node: Mapping[str, Any],
+    *,
+    token: str,
+    network_token: str,
+    initplans: Mapping[str, tuple[str, str | None]],
+) -> bool:
+    if token in _index_cond_text(node):
+        return True
+    for param in _segment_key_params(node):
+        identity = initplans.get(param)
+        if identity is None:
+            continue
+        segment_id, network_id = identity
+        if segment_id.casefold() != token:
+            continue
+        if network_token and (network_id is None or network_id.casefold() != network_token):
+            continue
+        return True
+    return False
+
+
 def load_candidate_relations(
     execute: Any,
     *,
@@ -276,6 +396,7 @@ def evaluate_explain_json_plan(
     buffer_limit: int = PLAN_BUFFER_LIMIT,
     require_segment_bound: bool = True,
     segment_id: str | None = None,
+    river_network_version_id: str | None = None,
     window_start: str | None = None,
     window_end: str | None = None,
     allow_empty_rows: bool = False,
@@ -327,27 +448,36 @@ def evaluate_explain_json_plan(
     unique_decompressed = tuple(dict.fromkeys(decompressed))
     unique_touched = tuple(dict.fromkeys(touched))
     if window_start and window_end:
-        start_token = str(window_start).replace("+00:00", "Z")
-        end_token = str(window_end).replace("+00:00", "Z")
+        start_at = _parse_plan_instant(window_start)
+        end_at = _parse_plan_instant(window_end)
+        if start_at is None or end_at is None:
+            refuse("plan scanned an out-of-window chunk", code="PLAN_OUT_OF_WINDOW", stage="plan")
         for node in nodes:
-            predicate = _node_predicate_text(node)
-            if not predicate:
+            if not _node_has_time_bound(node):
                 continue
-            if "valid_time" in predicate and start_token not in predicate and end_token not in predicate:
-                if "chunk" in str(node.get("Node Type") or "").lower() or _relation_basename(node) in candidate_set:
-                    refuse("plan scanned an out-of-window chunk", code="PLAN_OUT_OF_WINDOW", stage="plan")
+            relation = _relation_basename(node)
+            relevant = _is_relevant_relation(node, candidates=candidates, expected_relations=expected)
+            if (
+                not relevant
+                and "chunk" not in str(node.get("Node Type") or "").lower()
+                and relation not in candidate_set
+            ):
+                continue
+            if not _node_time_bound_matches(node, start_at, end_at):
+                refuse("plan scanned an out-of-window chunk", code="PLAN_OUT_OF_WINDOW", stage="plan")
     if require_segment_bound:
         token = str(segment_id or "").strip().lower()
         if not token:
             refuse("segment-bound access is missing from the plan identity", code="PLAN_SEGMENT_UNBOUND", stage="plan")
+        network_token = str(river_network_version_id or "").strip().lower()
+        initplans = _initplan_segment_params(nodes)
         bound = False
         for node in nodes:
             if not _is_relevant_relation(node, candidates=candidates, expected_relations=expected):
                 continue
-            cond = _index_cond_text(node)
-            if token not in cond:
+            if not (_is_index_access(node) or _is_decompress_chunk(node)):
                 continue
-            if _is_index_access(node) or _is_decompress_chunk(node):
+            if _segment_identity_bound(node, token=token, network_token=network_token, initplans=initplans):
                 bound = True
                 break
         if not bound:
