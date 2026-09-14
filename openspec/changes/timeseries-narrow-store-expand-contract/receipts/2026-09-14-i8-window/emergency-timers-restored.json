@@ -1,0 +1,14 @@
+{
+  "timers": [
+    "nhms-node27-autopipe.timer",
+    "nhms-node27-download.timer",
+    "nhms-node27-frontier-alert.timer",
+    "nhms-node27-mvt-cache-retention.timer",
+    "nhms-node27-raw-retention.timer",
+    "nhms-node27-resource-governance.timer",
+    "nhms-node27-timeseries-compression.timer",
+    "nhms-node27-timeseries-retention.timer"
+  ],
+  "result": "systemctl start exit0",
+  "basis": "only original snapshot active and authorized timers after verified old schema/source/reader and actual API readiness"
+}

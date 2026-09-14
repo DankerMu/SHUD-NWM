@@ -1,0 +1,12 @@
+{
+  "unit": "nhms-issue1987-window-415-typed-20260914.service",
+  "exit": 1,
+  "phase": "BLOCKED_FENCED",
+  "t0": "2026-09-14T21:10:39.019294Z",
+  "terminal_at": "2026-09-14T21:12:08.561386Z",
+  "cause": "start_runtime immediately probes HTTP after Type=simple start; ConnectionRefused before listener readiness. Same path failed during automatic recovery.",
+  "automatic_recovery": "D12 catalog/OLDsource/legacyreader proven restored; readiness failure then emergency fence",
+  "manual_recovery": "verified old canonicalOID24541, retainednarrowOID309763188, matchedlegacydigest; startedoriginalAPI, awaitedhealth200, publiclayers200, restored8previouslyactiveauthorizedtimers",
+  "saved_state_not_rewritten": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+  "no_further_window_attempt": true
+}

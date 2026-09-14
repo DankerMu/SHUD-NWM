@@ -1,0 +1,23 @@
+{
+  "source": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+  "canonical_oid": 24541,
+  "retained_narrow_oid": 309763188,
+  "legacy_reader_digest_matches": true,
+  "local_health": 200,
+  "public_layers": 200,
+  "active_units": [
+    "nhms-display-api.service",
+    "nhms-node27-autopipe.timer",
+    "nhms-node27-download.timer",
+    "nhms-node27-frontier-alert.timer",
+    "nhms-node27-mvt-cache-retention.timer",
+    "nhms-node27-raw-retention.timer",
+    "nhms-node27-resource-governance.timer",
+    "nhms-node27-timeseries-compression.timer",
+    "nhms-node27-timeseries-retention.timer"
+  ],
+  "state_file_not_rewritten": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+  "executor_recorded_phase": "BLOCKED_FENCED (historical failed executor state; manual service recovery recorded separately)",
+  "no_ledger_delete": true,
+  "no_forward_retry": true
+}
