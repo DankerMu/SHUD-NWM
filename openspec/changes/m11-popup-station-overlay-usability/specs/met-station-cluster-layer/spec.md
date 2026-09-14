@@ -54,11 +54,11 @@ the station overlay is enabled and has renderable features.
 
 Station GeoJSON data SHALL be loaded through the independent
 `stores/stationLayerData.ts` path and SHALL NOT pollute the `overviewData`
-store. In overview mode the station request contexts SHALL come from the
-currently visible basin contexts; in basin-detail mode they SHALL come from the
-current basin context. For each basin context, station inventory loading SHALL
+store. The station request contexts SHALL come from the currently visible basin
+contexts of the national overview (basin-detail mode is retired, #2109
+decision B). For each basin context, station inventory loading SHALL
 use the station API's supported basin/model scope (`basin_version_id` and/or
-`model_id` derived from the visible/current basin context); it MUST NOT claim
+`model_id` derived from the visible basin context); it MUST NOT claim
 source/cycle filtering for the station inventory endpoint. The store MUST
 paginate station requests beyond the backend page limit up to a documented
 client cap and expose `total`/`loaded`/`truncated` so UI and receipts honestly
@@ -74,14 +74,6 @@ station-series curve loading after a station is clicked.
   contexts
 - **AND** the map MUST be able to display QHH and Heihe station features
   together, subject to the client cap and honest truncation state.
-
-#### Scenario: 流域详情按当前流域加载代站
-
-- **WHEN** the user is in basin-detail mode for QHH
-- **AND** the station overlay is enabled
-- **THEN** station loading MUST request QHH stations using the current basin's
-  station inventory scope
-- **AND** it MUST NOT mix station identities from another basin.
 
 #### Scenario: 流域站点超 500 时分页取至 cap 并标注
 

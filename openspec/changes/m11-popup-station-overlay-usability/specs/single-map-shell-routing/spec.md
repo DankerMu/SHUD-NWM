@@ -9,8 +9,9 @@ browser history is not polluted, MUST preserve the original search query, and
 MUST append semantic mapping parameters. `/meteorology` SHALL append
 `metStations=1` instead of the retired primary-layer state `layer=met-stations`;
 `/flood-alerts` SHALL append
-`layer=flood-return-period`; `/basins/:basinId` SHALL append
-`basinId=:basinId`; `/segments/:segmentId` SHALL append
+`layer=flood-return-period`; `/basins/:basinId` SHALL drop the path parameter and append
+nothing, because basin-detail mode is retired (#2109 decision B) and `basinId`
+is not a query key; `/segments/:segmentId` SHALL append
 `segmentId=:segmentId`. When the original search already contains the same key,
 the original search value MUST win.
 
@@ -22,11 +23,17 @@ the original search value MUST win.
 
 #### Scenario: 带语义的重定向保留 query
 
-- **WHEN** a user visits `/meteorology`, `/flood-alerts`,
-  `/basins/basins_qhh`, or `/segments/seg_001`
+- **WHEN** a user visits `/meteorology`, `/flood-alerts`, or `/segments/seg_001`
 - **THEN** the redirect targets `/` with semantic query state equivalent to
-  `?metStations=1`, `?layer=flood-return-period`,
-  `?basinId=basins_qhh`, and `?segmentId=seg_001` respectively.
+  `?metStations=1`, `?layer=flood-return-period`, and `?segmentId=seg_001`
+  respectively.
+
+#### Scenario: 旧 basins 路由丢弃路径参数
+
+- **WHEN** a user visits `/basins/basins_qhh?source=ifs`
+- **THEN** the redirect target before query normalisation is `/?source=ifs`
+- **AND** the final URL has pathname `/`, keeps `source=ifs`, contains no
+  `basinId` key, and the national overview renders.
 
 #### Scenario: 深链原始 search 不丢失
 

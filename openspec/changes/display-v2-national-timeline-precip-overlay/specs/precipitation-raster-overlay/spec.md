@@ -195,14 +195,14 @@ This requirement is deliberately hosted in `precipitation-raster-overlay` (rathe
 - **AND** the deadline is bounded by the interval at which the ingest tick invokes prewarm, so one degraded run cannot span several ticks
 
 ### Requirement: Frontend precipitation overlay follows the hydrology selection
-The frontend SHALL render the precipitation PNG as a MapLibre `image` source + `raster` layer (opacity 0.55, linear resampling) placed beneath the national river layers, driven by the same `(source, cycle, validTime)` as the discharge layer. The overlay SHALL be a boolean query-state field `precip` defaulting to `true`, serialized as `precip=0` when disabled, and MUST NOT be a member of the `M11Layer` union. The overlay URL MUST only ever name a concrete `gfs` or `ifs` source: when the active source is `best` or `compare` (still offered in basin detail), the frontend MUST use the concrete resolved source if one exists — the same resolution `map-layer-timeline-controls` already requires for run, pipeline and forecast APIs — and otherwise hide the overlay with a stated reason. A request to `/api/v1/precip/best/...` or `/api/v1/precip/compare/...` MUST never be issued.
+The frontend SHALL render the precipitation PNG as a MapLibre `image` source + `raster` layer (opacity 0.55, linear resampling) placed beneath the national river layers, driven by the same `(source, cycle, validTime)` as the discharge layer. The overlay SHALL be a boolean query-state field `precip` defaulting to `true`, serialized as `precip=0` when disabled, and MUST NOT be a member of the `M11Layer` union. The overlay URL MUST only ever name a concrete `gfs` or `ifs` source: when the active source is `best` or `compare` (restorable from a shared URL), the frontend MUST use the concrete resolved source if one exists — the same resolution `map-layer-timeline-controls` already requires for run, pipeline and forecast APIs — and otherwise hide the overlay with a stated reason. A request to `/api/v1/precip/best/...` or `/api/v1/precip/compare/...` MUST never be issued.
 
 #### Scenario: Overlay tracks timeline
 - **WHEN** the operator changes `validTime`, `cycle`, or `source`
 - **THEN** the image source URL updates to `/api/v1/precip/{source}/{cycle}/{validTime}.png` for the new selection, with `cycle` and `validTime` in the seconds-precision RFC3339 spelling
 
 #### Scenario: Non-concrete source resolves or hides
-- **WHEN** the active source is `best` or `compare` in basin detail
+- **WHEN** the active source is `best` or `compare` (restored from a shared URL)
 - **THEN** the overlay URL uses the concrete GFS or IFS source that Best Available resolved to
 - **AND** when no concrete source can be resolved (including `compare`, which has no single source), the raster layer is hidden with a stated reason and no precipitation request is issued
 - **AND** the string `/api/v1/precip/best/` or `/api/v1/precip/compare/` MUST NOT appear in any issued request
