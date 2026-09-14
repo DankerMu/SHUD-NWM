@@ -210,3 +210,39 @@ table, not just the recalibration ones.
   generation quarantine, and the derivation of the content-addressed
   `model_id`. A model with no clone row is scored and admitted byte-for-byte
   as before.
+
+## Addendum: #1720 — the cutover declaration does not exist on direct-grid (2026-09-14)
+
+Rejected alternative (b) above assumed "the old dg row walks the existing
+`retire` path unchanged". On the production topology it cannot. With
+`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`, the `publish_registry()` direct-grid
+branch of `scripts/scheduler_file_provider_refresh.py` runs the precommit gate
+over `previous_models_snapshot` and republishes it: prospective equals previous,
+so `removed` and `package_changed` are always empty and the #1080 / #1433
+cutover gate cannot observe a model-set change. A `retire` entry then names a
+model outside the (empty) removal set and invalidates the whole declaration —
+the **next** refresh refuses with `registry_cutover_declaration_invalid`, not
+only after the declaration expires.
+
+**Decision (owner, 2026-09-14): scope the runbook by topology; do not revive
+the gate.** The declaration procedures in
+`docs/runbooks/current-production-ops.md` §3.1.2 are fenced to the
+non-direct-grid topology; direct-grid model-set changes go through
+`scripts/provision_direct_grid_scheduler_registry.py` plus a direct manifest
+publish (§5.7.1), and retirement through the manifest edit of §7.2.
+
+Rejected: teaching the direct-grid refresh to classify a real prospective set
+so a declaration can bind again. That is an M-size change to the production
+refresh path to reinstate an approval step for an operation that already has a
+working, receipted direct-publish channel.
+
+Consequence: `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` must stay unset on
+direct-grid production — the whole line removed, not left empty. A leftover
+declaration is a pipeline stall, not an inert file.
+
+Part 2 of the same issue unified the `selected_predecessor` evidence identity:
+`services/orchestrator/scheduler_generation.py` `_predecessor_identity` now
+reports the matcher's state-index key (`valid_time` = candidate cycle,
+`cycle_id` = producing cycle), and §8.6
+`services/orchestrator/scheduler_backfill_predecessor.py` derives the
+predecessor cycle from it.

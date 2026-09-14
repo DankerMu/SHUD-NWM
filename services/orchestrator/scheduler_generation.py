@@ -918,10 +918,20 @@ class _HistorySignal:
 def _predecessor_identity(
     *, source_id: str, valid_time: datetime, lead_hours: int, generation: str
 ) -> dict[str, Any]:
-    predecessor_time = valid_time.astimezone(UTC) - timedelta(hours=int(lead_hours))
+    """The exact-predecessor state-index identity the matcher looks up (#1720).
+
+    Same key ``state_manager.generation_scoped_history_signal`` builds and the
+    WARM_CONTINUE evidence reports: ``valid_time`` is the candidate cycle time
+    (the state's valid time), ``cycle_id`` names the producing cycle
+    ``valid_time - lead_hours``.  Consumers derive the predecessor cycle time
+    from this identity; no field carries the producing cycle's time directly.
+    """
+    state_valid_time = valid_time.astimezone(UTC)
+    producing_cycle_time = state_valid_time - timedelta(hours=int(lead_hours))
     return {
         "source_id": source_id,
-        "valid_time": _iso_utc(predecessor_time),
+        "valid_time": _iso_utc(state_valid_time),
+        "cycle_id": cycle_id_for(source_id, producing_cycle_time),
         "lead_hours": int(lead_hours),
         "generation": generation,
     }

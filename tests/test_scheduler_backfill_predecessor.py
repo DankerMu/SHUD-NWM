@@ -32,7 +32,7 @@ from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_backfill_predecessor as _bf
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from tests.test_file_orchestration_journal import _latest_view
-from workers.data_adapters.base import CycleDiscovery, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 SchedulerCandidate = scheduler_module.SchedulerCandidate
 
@@ -90,17 +90,21 @@ def _predecessor_pending_evidence(
     generation: str = "manifest-newgen",
 ) -> dict[str, Any]:
     """Build a ``registry_cutover_transition`` state evidence pointing at a
-    §8.6 pending predecessor (the shape emit_predecessor_candidates scans)."""
+    §8.6 pending predecessor (the shape emit_predecessor_candidates scans).
+
+    #1720: ``selected_predecessor`` is the matcher's state-index identity —
+    ``valid_time`` is the SUCCESSOR cycle (predecessor cycle + lead) and
+    ``cycle_id`` names the predecessor (producing) cycle."""
     return {
         "registry_cutover_transition": {
             "decision": "block_predecessor_pending",
             "generation": generation,
             "selected_predecessor": {
                 "source_id": source_id,
-                "valid_time": predecessor_cycle_time.isoformat(),
+                "valid_time": (predecessor_cycle_time + timedelta(hours=lead_hours)).isoformat(),
+                "cycle_id": cycle_id_for(source_id, predecessor_cycle_time),
                 "lead_hours": lead_hours,
                 "generation": generation,
-                "cycle_id": f"{source_id}_" + predecessor_cycle_time.strftime("%Y%m%d%H"),
             },
         }
     }
@@ -391,7 +395,8 @@ def test_emit_predecessor_truncates_at_max_emissions(monkeypatch: Any) -> None:
                     "generation": "manifest-newgen",
                     "selected_predecessor": {
                         "source_id": "gfs",
-                        "valid_time": pred_time.isoformat(),
+                        "valid_time": succ_time.isoformat(),
+                        "cycle_id": cycle_id_for("gfs", pred_time),
                         "lead_hours": 12,
                         "generation": "manifest-newgen",
                     },
@@ -442,7 +447,8 @@ def test_emit_predecessor_prepend_respects_max_candidates(monkeypatch: Any) -> N
                         "generation": "manifest-newgen",
                         "selected_predecessor": {
                             "source_id": "gfs",
-                            "valid_time": pred_time.isoformat(),
+                            "valid_time": succ_time.isoformat(),
+                            "cycle_id": cycle_id_for("gfs", pred_time),
                             "lead_hours": 12,
                             "generation": "manifest-newgen",
                         },
@@ -1596,3 +1602,202 @@ def test_emit_predecessor_lineage_guard_is_scoped_to_the_matching_model(
     )
 
     assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]
+
+
+# ---------------------------------------------------------------------------
+# #1720: ``selected_predecessor`` is the matcher's state-index identity
+# (``valid_time`` = successor cycle T, ``cycle_id`` = producing cycle T - lead).
+# §8.6 derives the predecessor cycle from that identity and refuses evidence
+# whose two fields disagree.  Expected values are literal wall-clock cycles,
+# independent of the helpers under test.
+# ---------------------------------------------------------------------------
+
+
+def _selected_predecessor_evidence(selected: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "registry_cutover_transition": {
+            "decision": "block_predecessor_pending",
+            "generation": "manifest-newgen",
+            "selected_predecessor": {"generation": "manifest-newgen", **selected},
+        }
+    }
+
+
+def _emit_for_successor(
+    selected: dict[str, Any],
+    *,
+    source_id: str = "gfs",
+    lineage_cutover_for_model_source: Any | None = None,
+) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]]]:
+    successor = _candidate(
+        candidate_id=f"cand_{source_id}_2026070612_model_a",
+        cycle_id=f"{source_id}_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        source_id=source_id,
+        state_evidence=_selected_predecessor_evidence(selected),
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [successor]
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        lineage_cutover_for_model_source=lineage_cutover_for_model_source,
+    )
+    return candidates, blocked, evidence
+
+
+def test_unified_identity_emits_the_producing_cycle(monkeypatch: Any) -> None:
+    """Spec: valid_time 12Z + lead 12 + cycle_id gfs_2026070600 → 00Z candidate."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "gfs",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "cycle_id": "gfs_2026070600",
+            "lead_hours": 12,
+        }
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]
+    assert candidates[0].cycle_id == "gfs_2026070600"
+    assert candidates[0].source_id == "gfs"
+    assert candidates[0].model_id == "model_a"
+    assert [entry.candidate_id for entry in blocked] == ["cand_gfs_2026070612_model_a"]
+    emitted = [record for record in evidence if record.get("status") == "emitted"]
+    assert len(emitted) == 1
+
+
+def test_unified_identity_for_ifs_with_24h_lead_emits_previous_day_cycle(
+    monkeypatch: Any,
+) -> None:
+    """Boundary: ifs, lead 24 → valid_time 2026-07-06T12Z names cycle 2026-07-05T12Z."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "ifs",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "cycle_id": "ifs_2026070512",
+            "lead_hours": 24,
+        },
+        source_id="ifs",
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-05T12:00:00Z")]
+    assert candidates[0].cycle_id == "ifs_2026070512"
+    assert candidates[0].source_id == "ifs"
+    assert [entry.candidate_id for entry in blocked] == ["cand_ifs_2026070612_model_a"]
+    assert [record["status"] for record in evidence] == ["emitted"]
+
+
+def test_identity_with_disagreeing_cycle_id_is_not_emitted(monkeypatch: Any) -> None:
+    """A cycle_id naming a cycle other than valid_time - lead_hours is malformed."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "gfs",
+            # Old (pre-#1720) mislabeled shape: valid_time carried T - lead
+            # (00Z) and cycle_id named that same cycle.  Derived producing
+            # cycle 2026-07-05T12Z disagrees with gfs_2026070600 → skipped.
+            "valid_time": "2026-07-06T00:00:00Z",
+            "cycle_id": "gfs_2026070600",
+            "lead_hours": 12,
+        }
+    )
+
+    assert candidates == []
+    assert [entry.candidate_id for entry in blocked] == ["cand_gfs_2026070612_model_a"]
+    assert evidence == []
+
+
+def test_identity_with_unknown_source_and_cycle_id_is_not_emitted(monkeypatch: Any) -> None:
+    """``cycle_id_for`` rejecting the source id is malformed evidence, not a crash."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, _blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "not-a-source",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "cycle_id": "not-a-source_2026070600",
+            "lead_hours": 12,
+        },
+        source_id="not-a-source",
+    )
+
+    assert candidates == []
+    assert evidence == []
+
+
+def test_identity_without_cycle_id_is_derived(monkeypatch: Any) -> None:
+    """Missing cycle_id → accepted; cycle derived as valid_time - lead_hours."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, _blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "gfs",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "lead_hours": 12,
+        }
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]
+    assert candidates[0].cycle_id == "gfs_2026070600"
+    assert [record["status"] for record in evidence] == ["emitted"]
+
+
+def test_era5_identity_with_lowercased_cycle_id_is_emitted(monkeypatch: Any) -> None:
+    """ERA5: the producer's cycle_id is lowercased (``era5_…``); the guard uses
+    the same helper, so the record is emitted, and the candidate keeps the
+    case-preserving ``_predecessor_cycle_id`` value (D5, unchanged)."""
+    _wire_manifest_ready(monkeypatch)
+    candidates, _blocked, evidence = _emit_for_successor(
+        {
+            "source_id": "ERA5",
+            "valid_time": "2026-07-06T12:00:00Z",
+            "cycle_id": "era5_2026070600",
+            "lead_hours": 12,
+        },
+        source_id="ERA5",
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]
+    assert candidates[0].source_id == "ERA5"
+    assert candidates[0].cycle_id == "ERA5_2026070600"
+    assert [record["status"] for record in evidence] == ["emitted"]
+
+
+def test_lineage_scope_out_sees_the_derived_predecessor_cycle(monkeypatch: Any) -> None:
+    """#1735 × #1720: t*=06Z, successor T=12Z, lead 12 → predecessor 00Z < t*.
+
+    The scope-out record and the emission evidence carry the 00Z predecessor
+    cycle — the same values the pre-#1720 shape produced — not the 12Z
+    successor cycle now stored in ``valid_time``."""
+    _wire_manifest_ready(monkeypatch)
+    selected = {
+        "source_id": "gfs",
+        "valid_time": "2026-07-06T12:00:00Z",
+        "cycle_id": "gfs_2026070600",
+        "lead_hours": 12,
+    }
+    resolver = _lineage_resolver(_dt("2026-07-06T06:00:00Z"))
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_selected_predecessor_evidence(selected),
+    )
+
+    records = _bf._extract_pending_predecessors([successor], resolver)
+    assert len(records) == 1
+    assert records[0]["cycle_time"] == _dt("2026-07-06T00:00:00Z")
+    assert records[0]["lineage_scoped_out"]["cycle_time_utc"] == "2026-07-06T00:00:00Z"
+    assert records[0]["lineage_scoped_out"]["cutover_valid_time"] == "2026-07-06T06:00:00Z"
+
+    candidates, _blocked, evidence = _emit_for_successor(
+        selected, lineage_cutover_for_model_source=resolver
+    )
+    assert candidates == []
+    assert [record["reason"] for record in evidence] == ["lineage_scoped_out_pre_cutover"]
+    assert evidence[0]["predecessor_cycle_time"] == "2026-07-06T00:00:00+00:00"
