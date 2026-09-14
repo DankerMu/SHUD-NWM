@@ -25,7 +25,7 @@
 ## 采集方式
 
 - 本地 Playwright chromium（1440×900）打开线上页面，记录全部请求。脚本：`capture.cjs`，原始输出：`capture.log`。
-- 截图与完整 `requests.jsonl` 保存在本地 `.workplans/issue-2336/evidence/`（gitignored，约 3.3 MB，未入库）。
+- 关键截图已缩到 1100 px 宽、JPEG 质量 70 并入库：`03-play-4x.jpg`（4x 播放后）、`05-ifs-unlisted-cycle.jpg`（未列出周期文案）、`06-bootstrap-basins-abort.jpg`（bootstrap 失败提示）。原尺寸 PNG 共 6 张，与完整 `requests.jsonl` 一起留在本地 `.workplans/issue-2336/evidence/`（gitignored）；可用入库的脚本重新生成。
 - 分类规则：`/api/v1/tiles/**` 算瓦片；其它 `/api/**` 算 API 请求。
 
 - 时间轴步进会换 `valid_time`，所以 MapLibre 拉取新瓦片是预期行为。验收要求的「零新增请求」针对的是 API 请求，逐项列在下表。
