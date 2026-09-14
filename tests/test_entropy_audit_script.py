@@ -4431,6 +4431,7 @@ def test_entropy_audit_topology_guardrails_allow_explicit_negative_node22_db_acc
 def test_entropy_audit_topology_guardrails_allow_json_coordinated_negative_node22_limit(
     tmp_path: Path,
 ) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
     evidence_path = tmp_path / "openspec" / "changes" / "check" / "evidence" / "receipt.json"
     _write(
         evidence_path,
@@ -4463,6 +4464,7 @@ def test_entropy_audit_topology_guardrails_allow_coordinated_negative_node22_db_
     tmp_path: Path,
     statement: str,
 ) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "docs/runbooks/current-production-ops.md", f"{statement}\n")
 
     report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
@@ -4487,6 +4489,7 @@ def test_entropy_audit_topology_guardrails_flag_non_negating_node22_writer_text(
     tmp_path: Path,
     statement: str,
 ) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "docs/runbooks/current-production-ops.md", f"{statement}\n")
 
     report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
@@ -4504,6 +4507,7 @@ def test_entropy_audit_topology_guardrails_flag_non_negating_node22_writer_text(
 def test_entropy_audit_topology_guardrails_do_not_allow_json_positive_after_coordinated_negative(
     tmp_path: Path,
 ) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
     _write(
         tmp_path / "openspec" / "changes" / "check" / "evidence" / "receipt.json",
         json.dumps(
