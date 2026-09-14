@@ -59,6 +59,23 @@ describe('overview data store discharge loading', () => {
     expect(runCalls.every((call) => Object.keys(call.query ?? {}).every((key) => allowedRunQueryKeys.has(key)))).toBe(true)
   })
 
+  it('sends the same /api/v1/runs request object per ready status', async () => {
+    // #2332：`fetchRuns*` 去掉恒为 undefined 的 `basinId` 参数前后，请求对象必须逐字段不变。
+    // `toEqual` 不区分 undefined 键：改动前的 `basin_id: undefined` 本就被 openapi-fetch 的 query 序列化略去。
+    const calls = mockApi()
+
+    await useOverviewDataStore.getState().loadOverview(query)
+
+    expect(
+      calls.filter((call) => call.path === '/api/v1/runs').map((call) => ({ path: call.path, query: call.query })),
+    ).toEqual([
+      {
+        path: '/api/v1/runs',
+        query: { source: 'GFS', cycle_time: '2026-05-18T00:00:00.000Z', status: 'published', limit: 20, offset: 0 },
+      },
+    ])
+  })
+
   it('consumes the default cycle from catalog metadata without any valid-times request', async () => {
     // spec frontend-mvt-layer-consumption「Metadata carries valid_times for the default cycle」
     const calls = mockApi()

@@ -140,7 +140,6 @@ export function M11MapStatusOverlays({
   basinFeatureCount,
   skippedBasinGeometryCount,
   unavailableReason,
-  basinRiverUnavailableReason,
   selectedSegmentMapState,
   selectedSegmentUnavailableReason,
   mapSourceError,
@@ -152,7 +151,6 @@ export function M11MapStatusOverlays({
   basinFeatureCount: number
   skippedBasinGeometryCount: number
   unavailableReason: string | null
-  basinRiverUnavailableReason: string | null
   selectedSegmentMapState: 'idle' | 'selected-layer' | 'unavailable'
   selectedSegmentUnavailableReason: string | null
   mapSourceError: string | null
@@ -170,12 +168,6 @@ export function M11MapStatusOverlays({
       {!loading && unavailableReason ? (
         <M11MapStatusNotice testId="m11-map-unavailable" topClassName="top-20">
           {unavailableReason}
-        </M11MapStatusNotice>
-      ) : null}
-
-      {!loading && basinRiverUnavailableReason ? (
-        <M11MapStatusNotice testId="m11-basin-river-unavailable" topClassName="top-32">
-          {basinRiverUnavailableReason}
         </M11MapStatusNotice>
       ) : null}
 

@@ -623,17 +623,10 @@ async function fetchModels(basinVersionId?: string) {
   )
 }
 
-async function fetchRunsPageByStatus(
-  query: M11QueryState,
-  basinId: string | undefined,
-  limit: number,
-  offset: number,
-  status: ReadyRunStatus,
-) {
+async function fetchRunsPageByStatus(query: M11QueryState, limit: number, offset: number, status: ReadyRunStatus) {
   const source = sourceForApi(query.source)
   return cached(
     cacheKey('/api/v1/runs', {
-      basinId,
       source,
       cycleTime: query.cycle ?? 'latest',
       status,
@@ -646,7 +639,6 @@ async function fetchRunsPageByStatus(
         {
           params: {
             query: {
-              basin_id: basinId,
               source,
               cycle_time: query.cycle ?? undefined,
               status,
@@ -660,13 +652,13 @@ async function fetchRunsPageByStatus(
   )
 }
 
-async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, limit: number, offset: number) {
-  const pages = await Promise.all(READY_RUN_STATUSES.map((status) => fetchRunsPageByStatus(query, basinId, limit, offset, status)))
+async function fetchRunsPage(query: M11QueryState, limit: number, offset: number) {
+  const pages = await Promise.all(READY_RUN_STATUSES.map((status) => fetchRunsPageByStatus(query, limit, offset, status)))
   return mergeRunPages(pages)
 }
 
-async function fetchRuns(query: M11QueryState, basinId?: string) {
-  return fetchRunsPage(query, basinId, 20, 0)
+async function fetchRuns(query: M11QueryState) {
+  return fetchRunsPage(query, 20, 0)
 }
 
 async function fetchPipelineStatus(query: M11QueryState, run: ApiHydroRun | null = null) {
@@ -930,7 +922,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     }
 
     // 阶段 1（mapBootstrap critical path）：basins + runless layers + 当前 layer 的 valid_time。
-    // 不依赖 fetchRuns/fetchModels/fetchPipelineStatus/fetchBasinVersions/fetchLayerValidTimes。
+    // 不依赖 fetchRuns/fetchModels/fetchPipelineStatus/fetchBasinVersions/fetchLayerValidTimesForCycle。
     const bootstrapPromise = (async () => {
       const [basinsResult, runlessLayersResult] = await Promise.allSettled([fetchBasins(), fetchLayers(null)])
 
@@ -1060,7 +1052,17 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 等阶段 1 settle 后再合成最终快照（bootstrap 字段需存在）；bootstrap reject 时仍生成快照
       // 但 bootstrap=null（OverviewPage 将识别为 mapBootstrap 失败态而非 ready）。
       const bootstrapForSnapshot = await bootstrapPromise.catch(() => null)
-      const layers = mergeLayerCatalogs(bootstrapForSnapshot?.layers ?? [], scopedLayers)
+      // 一代只有一份 discharge 目录身份（#2140）：阶段 3 按 runless 快照解出 `(source, cycle)` 并写
+      // per-cycle 键，这里若让 run-scoped 条目顶掉它，两次 fetch 之间后端 `default_cycle` 一翻转，
+      // 读取键就与写入键静默错开（index 停在 pending / 深链报「还在加载」却无请求在途）。
+      // 故 bootstrap 成功且带 discharge 条目时，丢弃 run-scoped 的 discharge；runless 没有该条目
+      // （尚无 display-ready run）或 bootstrap 失败（阶段 3 整段跳过）时照旧用 run-scoped 条目。
+      const bootstrapLayers = bootstrapForSnapshot?.layers ?? []
+      const bootstrapHasDischarge = bootstrapLayers.some((item) => item.layer_id === 'discharge')
+      const layers = mergeLayerCatalogs(
+        bootstrapLayers,
+        bootstrapHasDischarge ? scopedLayers.filter((item) => item.layer_id !== 'discharge') : scopedLayers,
+      )
       // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
       // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
       // 本块从 `await bootstrapPromise` 到 `set` 之间没有 await，故与 enrichment 的写入互斥：
