@@ -164,7 +164,7 @@ class BoundaryExecutor(w.Executor):
                     ["OnCalendar", "Mon *-*-* 04:00:00"],
                 ]
                 if name == w.TIMERS[0]
-                else [["OnCalendar", "*-*-* 01:00:00"]],
+                else [["OnCalendar", "*-*-* 01:00:00"]]
             )
             for name in self.units
         }
