@@ -1,4 +1,4 @@
-"""Independent G8 watermark/cutoff and systemd invocation facts."""
+"""Independent G8 watermark/cutoff observation for display-runtime consumers."""
 
 from __future__ import annotations
 
@@ -10,13 +10,6 @@ from packages.common.compressed_chunk_cold_residency import compute_cutoff, json
 from packages.common.display_watermark import fetch_display_watermark
 from packages.common.node27_issue1895_env import validate_canonical_positive_decimal
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
-
-COMPRESSION_TIMER = "nhms-node27-timeseries-compression.timer"
-COMPRESSION_SERVICE = "nhms-node27-timeseries-compression.service"
-COMPRESSION_WRAPPER = "/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh"
-COLD_WRAPPER = "/home/nwm/NWM/scripts/node27_cold_residency_once.sh"
-TIMER_FRAGMENT = "/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer"
-SERVICE_FRAGMENT = "/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service"
 
 
 def iso_utc(value: datetime) -> str:
@@ -79,107 +72,6 @@ def assert_independent_receipt_horizon(
             code="TICK_BOUND_MISMATCH",
             stage="watermark",
         )
-
-
-def _require_text(facts: Mapping[str, Any], key: str) -> str:
-    value = facts.get(key)
-    if not isinstance(value, str) or not value.strip() or value.strip() in {"n/a", "0"}:
-        raise Issue1895ReadinessError(
-            f"systemd fact {key} is missing",
-            code="SYSTEMD_FACT_MISSING",
-            stage="systemd",
-        )
-    return value.strip()
-
-
-def parse_exec_start(value: str) -> tuple[str, ...]:
-    entries: list[str] = []
-    for raw in str(value).split("\n"):
-        text = raw.strip()
-        if not text:
-            continue
-        if text.startswith("{") and "; " in text:
-            text = text.split("; ", 1)[1].rstrip("}")
-        entries.append(text)
-    return tuple(entries)
-
-
-def assert_systemd_invocation_facts(
-    *,
-    timer: Mapping[str, Any],
-    service: Mapping[str, Any],
-    expected_timer: str = COMPRESSION_TIMER,
-    expected_service: str = COMPRESSION_SERVICE,
-) -> dict[str, Any]:
-    timer_id = _require_text(timer, "Id")
-    if timer_id != expected_timer:
-        raise Issue1895ReadinessError(
-            "timer Id is not the compression timer",
-            code="SYSTEMD_TIMER_ID",
-            stage="systemd",
-        )
-    if _require_text(timer, "Unit") != expected_service:
-        raise Issue1895ReadinessError(
-            "timer Unit is not the compression service",
-            code="SYSTEMD_TIMER_UNIT",
-            stage="systemd",
-        )
-    fragment = _require_text(timer, "FragmentPath")
-    if not fragment.endswith("nhms-node27-timeseries-compression.timer"):
-        raise Issue1895ReadinessError(
-            "timer FragmentPath is not the shipping unit",
-            code="SYSTEMD_TIMER_FRAGMENT",
-            stage="systemd",
-        )
-    service_id = _require_text(service, "Id")
-    if service_id != expected_service:
-        raise Issue1895ReadinessError(
-            "service Id is not the compression service",
-            code="SYSTEMD_SERVICE_ID",
-            stage="systemd",
-        )
-    service_fragment = _require_text(service, "FragmentPath")
-    if not service_fragment.endswith("nhms-node27-timeseries-compression.service"):
-        raise Issue1895ReadinessError(
-            "service FragmentPath is not the shipping unit",
-            code="SYSTEMD_SERVICE_FRAGMENT",
-            stage="systemd",
-        )
-    exec_start = parse_exec_start(str(service.get("ExecStart") or ""))
-    if len(exec_start) < 2:
-        raise Issue1895ReadinessError(
-            "service ExecStart does not list both wrappers",
-            code="SYSTEMD_EXEC_START",
-            stage="systemd",
-        )
-    if COMPRESSION_WRAPPER not in exec_start[0] or COLD_WRAPPER not in exec_start[1]:
-        raise Issue1895ReadinessError(
-            "ExecStart order is not compression wrapper then cold wrapper",
-            code="SYSTEMD_EXEC_ORDER",
-            stage="systemd",
-        )
-    invocation = _require_text(service, "InvocationID")
-    start = _require_text(service, "ExecMainStartTimestamp")
-    end = _require_text(service, "ExecMainExitTimestamp")
-    result = _require_text(service, "Result")
-    if result != "success":
-        raise Issue1895ReadinessError(
-            "service Result is not success",
-            code="SYSTEMD_RESULT",
-            stage="systemd",
-        )
-    return {
-        "timer_id": timer_id,
-        "timer_unit": expected_service,
-        "timer_fragment": fragment,
-        "service_id": service_id,
-        "service_fragment": service_fragment,
-        "exec_start": list(exec_start),
-        "invocation_id": invocation,
-        "start": start,
-        "end": end,
-        "result": result,
-    }
 
 
 def parse_systemctl_show(text: str) -> dict[str, str]:

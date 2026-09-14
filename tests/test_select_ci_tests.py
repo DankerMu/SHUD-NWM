@@ -407,22 +407,22 @@ def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consu
 def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> None:
     """#1712 — the `.service` row is narrower than its `.timer` sibling on purpose.
 
-    Exact equality, not a subset: the comment at
-    ``scripts/select_ci_tests.py:1972-1977`` says the unit body cannot break
-    ``tests/test_node27_cold_residency.py`` (that target is the `.timer` row's
-    schedule coverage), so a subset assertion would let the two rows quietly
-    converge — which is the one drift this row exists to prevent. The
-    `.timer` sibling is asserted alongside it so the difference itself is the
-    pinned fact, not an accident of two independent rows.
+    Exact equality, not a subset: the `.timer` sibling is retention-only after
+    cold-residency retirement, so a subset assertion would let the two rows
+    quietly converge. The `.timer` sibling is asserted alongside it so the
+    difference itself is the pinned fact, not an accident of two independent
+    rows. Compression.timer never selects this suite.
     """
     assert select_tests(["infra/systemd/nhms-node27-timeseries-retention.service"], repo_root=Path(".")) == [
         "tests/test_node27_timeseries_retention.py"
     ]
 
     assert select_tests(["infra/systemd/nhms-node27-timeseries-retention.timer"], repo_root=Path(".")) == [
-        "tests/test_node27_cold_residency.py",
         "tests/test_node27_timeseries_retention.py",
     ]
+    assert "tests/test_node27_timeseries_retention.py" not in set(
+        select_tests(["infra/systemd/nhms-node27-timeseries-compression.timer"], repo_root=Path("."))
+    )
 
 
 def test_node27_autopipe_timer_row_selects_both_of_its_readers() -> None:
@@ -526,7 +526,6 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     "infra/systemd/nhms-node27-download.timer": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-timeseries-compression.timer": frozenset(
         {
-            "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
         }
     ),
@@ -10255,7 +10254,7 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # owner).
     ("tests/retention_test_helpers.py", "tests/test_retention.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
-    ("tests/cold_residency_fakes.py", "tests/test_node27_cold_residency.py"),
+    ("tests/cold_residency_fakes.py", "tests/test_node27_cold_residency_census.py"),
     (
         "tests/cold_residency_identity_mutants.py",
         "tests/test_issue2224_origin_chunk_parity.py",
@@ -12970,7 +12969,7 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
 # from its route. Named once here so the green membership pin and the red removal
 # leg below cannot disagree about which edge is under test.
 COLD_RESIDENCY_FAKES_PRODUCER = "tests/cold_residency_fakes.py"
-COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER = "tests/test_node27_cold_residency_schema_compat.py"
+COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER = "tests/test_node27_cold_residency_census.py"
 
 
 def _support_rule_for(module: str) -> PathTestRule:
@@ -13118,10 +13117,6 @@ def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(mo
                 "tests/test_compressed_chunk_cold_target.py",
                 "tests/test_compressed_chunk_cold_runtime.py",
                 "tests/test_compressed_chunk_cold_runtime_proof.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
             ),
         ),
         # Movement owner: sequence execution that calls the preflight gate and
@@ -13132,10 +13127,6 @@ def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(mo
             (
                 "tests/test_compressed_chunk_cold_runtime.py",
                 "tests/test_compressed_chunk_cold_runtime_proof.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
             ),
         ),
         # #1929 split: sole definition site of the target-preflight identity
@@ -13149,10 +13140,6 @@ def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(mo
                 "tests/test_compressed_chunk_cold_runtime.py",
                 "tests/test_compressed_chunk_cold_runtime_proof.py",
                 "tests/test_compressed_chunk_cold_runtime_integration.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
             ),
         ),
         # target_payload + runtime_config propagation into every terminal.
@@ -13160,74 +13147,42 @@ def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(mo
             "packages/common/compressed_chunk_cold_tick.py",
             (
                 "tests/test_compressed_chunk_cold_runtime.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency_schema_compat.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
             ),
         ),
         # Writer version, tombstone nulls, and the 1.0/1.1 readers.
         (
             "packages/common/compressed_chunk_cold_receipt.py",
             (
-                "tests/test_node27_cold_residency_schema_compat.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
                 "tests/test_timeseries_storage_schemas.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
             ),
         ),
         # CLI: required env parsing, placeholder config, RunnerConfig fields,
         # and the SCHEMA_VERSION mirror asserted against the writer.
         (
-            "scripts/node27_cold_residency.py",
-            (
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency_schema_compat.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_phase2.py",
-                "tests/test_node27_cold_residency_publication.py",
-            ),
-        ),
-        # Env template: both keys present and unassigned.
-        (
-            "infra/env/node27-cold-residency.example",
-            (
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-            ),
-        ),
-        # Schema and every shipping example: the version union and target shape.
-        (
             "schemas/timeseries_cold_residency_receipt.schema.json",
             (
-                "tests/test_node27_cold_residency_schema_compat.py",
                 "tests/test_timeseries_storage_schemas.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency.py",
             ),
         ),
         (
             "schemas/examples/timeseries_cold_residency_receipt.example.json",
             (
-                "tests/test_node27_cold_residency_schema_compat.py",
                 "tests/test_timeseries_storage_schemas.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
             ),
         ),
         (
             "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
             (
-                "tests/test_node27_cold_residency_schema_compat.py",
                 "tests/test_timeseries_storage_schemas.py",
             ),
         ),
-        # Runbook: the mandatory env / fresh-observation procedure.
+        # Runbook: current ordinary-maintenance catch-up, not the retired cold CLI.
         (
             "docs/runbooks/tier-node27-timeseries-storage.md",
-            ("tests/test_node27_cold_residency_runtime_identity.py",),
+            (
+                "tests/test_node27_timeseries_compression.py",
+                "tests/test_node27_timeseries_compression_budget.py",
+            ),
         ),
         # Shared fakes gained the identity helpers these suites consume. The
         # schema-compat suite is here too: it imports FakeConnection at file
@@ -13239,8 +13194,6 @@ def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(mo
             (
                 "tests/test_compressed_chunk_cold_runtime_integration.py",
                 "tests/test_compressed_chunk_cold_target.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_cold_residency_schema_compat.py",
             ),
         ),
     ],
@@ -13370,10 +13323,6 @@ ISSUE1895_CLI_CONSUMER_MAP: dict[str, tuple[str, ...]] = {
         *ISSUE1895_READINESS_STORAGE_TESTS,
         "tests/test_issue1895_runbook_contract.py",
     ),
-    "scripts/node27_issue1895_systemd_facts.py": (
-        *ISSUE1895_READINESS_STORAGE_TESTS,
-        "tests/test_issue1895_runbook_contract.py",
-    ),
 }
 
 
@@ -13430,19 +13379,12 @@ ORIGIN_CHUNK_PARITY_OWNER_LEGS = {
         "tests/test_select_ci_tests.py",
     },
     "packages/common/compressed_chunk_cold_receipt.py": {
-        "tests/test_node27_cold_residency.py",
-        "tests/test_node27_cold_residency_publication.py",
-        "tests/test_node27_cold_residency_phase2.py",
-        "tests/test_node27_cold_residency_runtime_identity.py",
-        "tests/test_node27_cold_residency_schema_compat.py",
         "tests/test_timeseries_storage_schemas.py",
     },
 }
 ORIGIN_CHUNK_PARITY_PARTITIONS = (
     "tests/test_compressed_chunk_cold_runtime.py",
     "tests/test_compressed_chunk_cold_runtime_proof.py",
-    "tests/test_node27_cold_residency.py",
-    "tests/test_node27_cold_residency_phase2.py",
     "tests/test_node27_cold_residency_census.py",
     "tests/test_compressed_chunk_cold_runtime_integration.py",
     "tests/test_issue1895_readiness_storage.py",
@@ -13567,9 +13509,10 @@ def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
     assert "tests/test_issue1895_readiness_performance_live.py" in selected
     # The runbook's broader sequential/cold-residency owners stay intact.
     for suite in (
-        "tests/test_node27_timeseries_sequential_budget.py",
-        "tests/test_node27_cold_residency_runtime_identity.py",
-        "tests/test_node27_cold_residency.py",
+        "tests/test_node27_timeseries_compression_budget.py",
+        "tests/test_node27_timeseries_compression_wrappers.py",
+        "tests/test_node27_timeseries_compression.py",
+        "tests/test_node27_timeseries_lifecycle_lock.py",
     ):
         assert suite in selected, f"runbook selection lost {suite}"
 
@@ -19156,11 +19099,10 @@ def _issue2291_retained_targets(owner: str) -> set[str]:
             *ORIGIN_CHUNK_PARITY_TESTS,
             *_prod_module.ISSUE1895_READINESS_TESTS,
             "tests/test_node27_timeseries_compression.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_runtime_identity.py",
-            "tests/test_node27_timeseries_sequential_budget.py",
-            "tests/test_node27_timeseries_sequential_runner_config.py",
-            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_timeseries_compression_budget.py",
+            "tests/test_node27_timeseries_compression_runner_config.py",
+            "tests/test_node27_timeseries_compression_wrappers.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
             "tests/test_node27_lifecycle_contract.py",
             "tests/test_issue1895_runbook_contract.py",
             "tests/test_issue2290_cold_parent_admission.py",

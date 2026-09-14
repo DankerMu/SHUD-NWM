@@ -1,5 +1,6 @@
-# Node-27 timeseries compression runner (issue #851 / OpenSpec: tier-node27-timeseries-storage).
-# Compression is DB-side only and has no archive-lane coupling (the archive lane retired in #1370, ADR 0002 Revision 2026-08-11). Do not sync this env against node27-resource-governance.env.
+# Node-27 timeseries compression runner (issue #851 / OpenSpec: hypertable-compression).
+# Compression is DB-side only and has no archive-lane or cold-residency coupling.
+# Do not sync this env against node27-resource-governance.env.
 #
 # Copy to node27-timeseries-compression.env and chmod 0600.
 
@@ -12,8 +13,8 @@ NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 # Writer role (#1774): the DSN user MUST be `nhms_ingest_rw`, the non-superuser
 # role provisioned by scripts/node27_provision_write_roles.sh. It owns every
 # relation in core/hydro/met/ops/map/flood, which is what compress_chunk /
-# decompress_chunk / drop_chunks / `SET TABLESPACE` / chunk ANALYZE require, and
-# it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
+# decompress_chunk / drop_chunks / chunk ANALYZE require, and it cannot
+# `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
 DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The runner uses this connection read-only first to resolve the display
 # business-time watermark, then applies the two-day lag to that watermark.
@@ -31,22 +32,20 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 
-# --- Timeout budget chain (issue #1156) -------------------------------------
-# The two lane env files are one sequential assembly input. The shared preflight
-# reads both as data before either runner starts; do not edit one declaration in
-# isolation. Unset or empty wall/statement declarations resolve to the defaults
-# below, but every explicit value must be a canonical positive decimal.
+# --- Timeout budget chain ---------------------------------------------------
+# One compression env file is the operator-owned budget input. The preflight
+# reads it as inert data before the runner starts. Unset or empty
+# wall/statement declarations resolve to the defaults below, but every
+# explicit value must be a canonical positive decimal.
 #
 #   compression wrapper >= ceil(COMPRESS_TIMEOUT_MS / 1000) + 300 s cleanup
-#   cold wrapper >= ceil(COLD_STATEMENT_TIMEOUT_MS / 1000) + 300 s cleanup
-#   shared service wall > compression wrapper + cold wrapper + 40 s margin
+#   service wall > compression wrapper + 40 s margin
 #
-# Defaults: compression statement 3600000 ms, wrapper 3900 s; cold statement
-# 3600000 ms, wrapper 3901 s; shared service 7842 s (=3900+3901+40+1).
-# The 300-second compression cleanup contract is operational: watermark,
-# probes, catalog, measurements, reconcile, receipt and process cleanup all
-# consume time outside compress_chunk. Raising COMPRESS_TIMEOUT_MS above
-# 3600000 requires PER_TICK_BOUND=1.
+# Defaults: compression statement 3600000 ms, wrapper 3900 s, service 3941 s
+# (=3900+40+1). The 300-second compression cleanup contract is operational:
+# watermark, probes, catalog, measurements, reconcile, receipt and process
+# cleanup all consume time outside compress_chunk. Raising COMPRESS_TIMEOUT_MS
+# above 3600000 requires PER_TICK_BOUND=1.
 #
 # Per-chunk `SET statement_timeout` for compress_chunk, in milliseconds.
 # Default 3600000 = 60 minutes. Minimum 1000.
@@ -64,21 +63,20 @@ NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=3600000
 # scripts/node27_timeseries_compression_once.sh. Default 3900.
 NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900
 #
-# Shared service declaration, mirrored exactly in node27-cold-residency.env.
-# This is a declaration checked by the shared preflight; it does not inspect
-# systemd. For catch-up, install a matching larger systemd drop-in FIRST, reload
-# and verify it, then atomically set the same larger declaration in BOTH lane
-# env files before starting the service. The committed unit is 7842 seconds.
-NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=7842
+# Declared service wall checked by the compression preflight; it does not
+# inspect systemd. For catch-up, install a matching larger systemd drop-in
+# FIRST, reload and verify it, then set the same larger declaration in this
+# env file before starting the service. The committed unit is 3941 seconds.
+NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=3941
 #
 # Per-tick bound during a catch-up: MANDATORY, not a hint. The invariant above
 # bounds ONE chunk's budget, so a second chunk in the same tick still dies on
 # the wall — whenever you raise COMPRESS_TIMEOUT_MS above the 3600000 default,
-# NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 is required and leg 3 refuses
-# the configuration outright if you skip it. That is also the state you are in
-# wherever chunks approach the per-chunk ceiling — which the 268-409 GB
-# steady-state chunks of hydro.river_timeseries do: bound 1, and let the daily
-# timer drain the backlog one chunk at a time.
+# NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 is required and the preflight
+# refuses the configuration outright if you skip it. That is also the state
+# you are in wherever chunks approach the per-chunk ceiling — which the
+# 268-409 GB steady-state chunks of hydro.river_timeseries do: bound 1, and
+# let the daily timer drain the backlog one chunk at a time.
 # Full ordered procedure (drop-in first, timer stopped+masked, no replay in the
 # window, override removed FIRST on cleanup): runbook section 4.5
 # "大 chunk 追赶", docs/runbooks/tier-node27-timeseries-storage.md.

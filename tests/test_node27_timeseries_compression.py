@@ -52,10 +52,7 @@ def _base_env(tmp_path: Path, *, override: dict[str, str | None] | None = None) 
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "5",
         "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "3600000",
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
-        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
-        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "3941",
         "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
         "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(tmp_path / "runner.lock"),
     }
@@ -142,8 +139,8 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
 
     assert config.compress_timeout_ms == 3_600_000
     assert config.wrapper_wall_seconds == 3_900
-    assert config.systemd_wall_seconds == 7_842
-    from packages.common.node27_timeseries_sequential_budget import COMPRESSION_CLEANUP_MARGIN_SECONDS
+    assert config.systemd_wall_seconds == 3_941
+    from packages.common.node27_timeseries_compression_budget import COMPRESSION_CLEANUP_MARGIN_SECONDS
 
     assert COMPRESSION_CLEANUP_MARGIN_SECONDS == 300
     assert compression._CLEANUP_MARGIN_SECONDS is COMPRESSION_CLEANUP_MARGIN_SECONDS
@@ -151,23 +148,22 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
     # The exact admission boundary is the shared 300-second cleanup contract.
     assert compression._ceil_div(config.compress_timeout_ms, 1000) == 3_600
     assert config.wrapper_wall_seconds == 3_600 + COMPRESSION_CLEANUP_MARGIN_SECONDS
-    # Leg 2: the sequential compression-then-cold oneshot wall must exceed
-    # compression wrapper + cold wrapper + 40 s systemd margin (7841). Equality
-    # is not enough; the committed default is 7842.
+    # Leg 2: service wall must sit strictly above wrapper + 40 s systemd margin.
+    # Equality at wrapper+40 is refused; the committed default is 3941.
     assert config.wrapper_wall_seconds + compression._SYSTEMD_MARGIN_SECONDS < config.systemd_wall_seconds
-    assert config.systemd_wall_seconds > 3_900 + 3_901 + 40
+    assert config.systemd_wall_seconds == 3_900 + 40 + 1
 
 
 @pytest.mark.parametrize(
     ("variable", "raw", "match"),
     [
-        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "0", "COMPRESS_TIMEOUT_MS"),
-        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "-1", "COMPRESS_TIMEOUT_MS"),
-        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "abc", "COMPRESS_TIMEOUT_MS"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "0", "must be a canonical positive integer"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "-1", "must be a canonical positive integer"),
+        ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "abc", "must be a canonical positive integer"),
         ("NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS", "999", "must be >= 1000"),
-        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "0", "WRAPPER_WALL_SECONDS"),
-        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "abc", "WRAPPER_WALL_SECONDS"),
-        ("NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS", "abc", "SYSTEMD_WALL_SECONDS"),
+        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "0", "must be a canonical positive integer"),
+        ("NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS", "abc", "must be a canonical positive integer"),
+        ("NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS", "abc", "must be a canonical positive integer"),
     ],
 )
 def test_budget_chain_variables_parse_fail_closed(tmp_path: Path, variable: str, raw: str, match: str) -> None:
@@ -191,7 +187,7 @@ def test_empty_budget_chain_variables_take_the_defaults(tmp_path: Path) -> None:
     assert (config.compress_timeout_ms, config.wrapper_wall_seconds, config.systemd_wall_seconds) == (
         3_600_000,
         3_900,
-        7_842,
+        3_941,
     )
 
 
@@ -279,10 +275,7 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
             "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "1800000",
             "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "5",
             "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
-            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
-            "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-            "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-            "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "3941",
         },
     )
     for key, value in env.items():
@@ -313,11 +306,11 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     ("compress_ms", "wall", "systemd", "reason_fragment", "numbers"),
     [
         # A wrapper below the 300-second operational cleanup floor is refused.
-        ("3600000", "3800", "7842", "compression wrapper wall", ("3800", "3900")),
-        # A compression-only service wall below the sequential oneshot is refused.
-        ("3600000", "3900", "3940", "service wall", ("3940", "7841")),
+        ("3600000", "3800", "3941", "compression wrapper wall", ("3800", "3900")),
+        # Equality at wrapper+40 is refused; the service wall must sit strictly above.
+        ("3600000", "3900", "3940", "service wall", ("3940", "3940")),
         # A raised statement ceiling cannot fit the actual wrapper plus cleanup margin.
-        ("4200000", "3900", "7842", "cleanup margin", ("3900", "4500")),
+        ("4200000", "3900", "3941", "cleanup margin", ("3900", "4500")),
     ],
 )
 def test_main_rejects_a_budget_chain_violation_before_any_db_call(
@@ -330,7 +323,7 @@ def test_main_rejects_a_budget_chain_violation_before_any_db_call(
     reason_fragment: str,
     numbers: tuple[str, ...],
 ) -> None:
-    """B3: fail closed, name the violated sequential budget, touch no DB.
+    """B3: fail closed, name the violated compression budget, touch no DB.
 
     ``fetch_display_watermark`` is intentionally NOT patched: it opens its own
     connection, so a configuration that wrongly slipped through would show up
@@ -342,9 +335,6 @@ def test_main_rejects_a_budget_chain_violation_before_any_db_call(
             "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": compress_ms,
             "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": wall,
             "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": systemd,
-            "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-            "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-            "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": systemd,
         },
     )
     for key, value in env.items():
@@ -369,7 +359,7 @@ def test_main_accepts_the_exact_budget_chain_equality(tmp_path: Path, monkeypatc
         override={
             "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "3600000",
             "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
-            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
+            "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "3941",
         },
     )
     for key, value in env.items():
@@ -1124,6 +1114,52 @@ def test_main_publishes_refused_lock_receipt_without_db_calls(
     assert receipt_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_lifecycle_lock_env_override_is_refused_before_any_lock(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path,
+        override={"NODE27_TIMESERIES_LIFECYCLE_LOCK_PATH": str(tmp_path / "split.lock")},
+    )
+    with pytest.raises(compression.CompressionConfigError, match="cannot override"):
+        compression.config_from_args(_args(), env)
+
+
+def test_lifecycle_contention_leaves_the_mutex_file_and_skips_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from packages.common.node27_timeseries_lifecycle_lock import (
+        LIFECYCLE_LOCK_PATH,
+        acquire_timeseries_lifecycle_lock,
+        release_timeseries_lifecycle_lock,
+    )
+
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    held = acquire_timeseries_lifecycle_lock()
+    assert held is not None
+    db_calls: list[str] = []
+
+    def fail_fetch(dsn: str) -> list[compression.ChunkRow]:
+        db_calls.append(dsn)
+        raise AssertionError("lifecycle contender must not call the database")
+
+    try:
+        code = compression.main(argv=[], now_utc=_NOW, fetch_chunks=fail_fetch)
+        assert code == 0
+        diagnostic = json.loads(capsys.readouterr().err.strip())
+        assert diagnostic["status"] == "refused_lock"
+        assert diagnostic["reason"] == "lock-contended"
+        assert db_calls == []
+        assert LIFECYCLE_LOCK_PATH.exists()
+        receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+        assert receipt["outcome"] == "refused_lock"
+    finally:
+        release_timeseries_lifecycle_lock(held)
+        assert LIFECYCLE_LOCK_PATH.exists()
+
+
 # ---------------------------------------------------------------------------
 # Receipt schema + semantic contract
 # ---------------------------------------------------------------------------
@@ -1328,13 +1364,13 @@ def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
 _DEFAULT_BUDGET = {
     "compress_timeout_ms": 3_600_000,
     "wrapper_wall_seconds": 3_900,
-    "systemd_wall_seconds": 7_842,
+    "systemd_wall_seconds": 3_941,
     "cleanup_margin_seconds": 300,
 }
 _NON_DEFAULT_BUDGET = {
     "compress_timeout_ms": 1_800_000,
     "wrapper_wall_seconds": 3_900,
-    "systemd_wall_seconds": 7_842,
+    "systemd_wall_seconds": 3_941,
     "cleanup_margin_seconds": 300,
 }
 
@@ -1345,9 +1381,6 @@ def _budget_env_override(budget: dict[str, int], *, per_tick_bound: str) -> dict
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": str(budget["wrapper_wall_seconds"]),
         "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": str(budget["systemd_wall_seconds"]),
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": per_tick_bound,
-        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": str(budget["systemd_wall_seconds"]),
     }
 
 
@@ -1599,7 +1632,7 @@ def test_raising_the_compress_timeout_without_dropping_the_bound_fails_closed(
             {
                 "compress_timeout_ms": compression._DEFAULT_COMPRESS_TIMEOUT_MS + 1,
                 "wrapper_wall_seconds": 3_901,
-                "systemd_wall_seconds": 7_843,
+                "systemd_wall_seconds": 3_942,
             },
             per_tick_bound="4",
         ),
@@ -1624,11 +1657,11 @@ def test_raising_the_compress_timeout_without_dropping_the_bound_fails_closed(
     ("compress_timeout_ms", "wrapper", "systemd", "bound"),
     [
         # Raised ceiling with the catch-up bound: the sanctioned combination.
-        (_DEFAULT_BUDGET["compress_timeout_ms"] + 1, 3_901, 7_843, "1"),
+        (_DEFAULT_BUDGET["compress_timeout_ms"] + 1, 3_901, 3_942, "1"),
         # Default ceiling with the #1237 capacity bound: the normal régime.
-        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 7_842, "4"),
+        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 3_941, "4"),
         # Below the default with a high bound: leg 3 only guards raising.
-        (1_800_000, 3_900, 7_842, "4"),
+        (1_800_000, 3_900, 3_941, "4"),
     ],
 )
 def test_legal_timeout_bound_combinations_still_construct(
@@ -1884,18 +1917,17 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
     exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
     assert exec_lines == [
         "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce",
-        "ExecStart=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce",
     ]
     assert "node27_timeseries_compression_supervisor.py" not in service_text
     # The unit's real wall must be the runner's DECLARED default systemd wall,
-    # which in turn must be the default wrapper wall plus the kill-after
-    # margin. Asserting the relation rather than re-writing the literal keeps
-    # the three artifacts on one source of truth.
+    # which in turn must sit strictly above wrapper + 40 s. Asserting the
+    # relation rather than re-writing the literal keeps the three artifacts
+    # on one source of truth.
     timeout_start_lines = [line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")]
     assert len(timeout_start_lines) == 1
     unit_wall_seconds = int(timeout_start_lines[0].split("=", 1)[1])
     assert unit_wall_seconds == compression._DEFAULT_SYSTEMD_WALL_SECONDS
-    assert unit_wall_seconds == 7_842
+    assert unit_wall_seconds == 3_941
 
     wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
     preflight_text = (_ROOT / "scripts/node27_timeseries_budget_preflight.py").read_text(encoding="utf-8")
@@ -1923,12 +1955,12 @@ def test_compression_env_example_documents_the_budget_chain() -> None:
     ) in text
     # The paired operational invariant and catch-up bound are explicit.
     assert "ceil(COMPRESS_TIMEOUT_MS / 1000) + 300 s cleanup" in text
-    assert "node27-cold-residency.env" in text
+    assert "node27-cold-residency.env" not in text
     assert "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1" in text
     assert "matching larger systemd drop-in FIRST" in text
 
 
-def test_compression_cannot_shrink_shared_service_below_cold_leg(tmp_path: Path) -> None:
+def test_compression_cannot_shrink_service_to_wrapper_plus_margin(tmp_path: Path) -> None:
     env = _base_env(
         tmp_path,
         override={
@@ -1940,19 +1972,17 @@ def test_compression_cannot_shrink_shared_service_below_cold_leg(tmp_path: Path)
         compression.config_from_args(_args(), env)
 
 
-def test_shared_sequential_budget_literals_match_wrappers_and_unit() -> None:
-    from packages.common.node27_timeseries_sequential_budget import sequential_service_budget
+def test_shared_compression_budget_literals_match_wrapper_and_unit() -> None:
+    from packages.common.node27_timeseries_compression_budget import compression_service_budget
 
-    authority = sequential_service_budget()
+    authority = compression_service_budget()
     wrapper = _WRAPPER_PATH.read_text(encoding="utf-8")
-    cold = (_ROOT / "scripts/node27_cold_residency_once.sh").read_text(encoding="utf-8")
     service = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
     assert "--launch compression" in wrapper
-    assert "--launch cold" in cold
+    assert "--launch cold" not in wrapper
     assert "node27_timeseries_budget_preflight.py" in wrapper
-    assert "node27_timeseries_budget_preflight.py" in cold
     assert f"TimeoutStartSec={authority.service_wall_seconds}" in service
-    assert compression._DEFAULT_WRAPPER_WALL_SECONDS == authority.compression_wrapper_wall_seconds
+    assert compression._DEFAULT_WRAPPER_WALL_SECONDS == authority.wrapper_wall_seconds
     assert compression._DEFAULT_SYSTEMD_WALL_SECONDS == authority.service_wall_seconds
 
 

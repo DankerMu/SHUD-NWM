@@ -59,7 +59,6 @@ from packages.common.object_store_forcing import PsycopgStationLookup
 from packages.common.state_manager import StateManager
 from scripts import (
     node27_autopipeline,
-    node27_cold_residency,
     node27_download_cycles,
     node27_ingest_run,
     node27_raw_retention,
@@ -87,7 +86,6 @@ REGISTERED_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("scripts/node27_timeseries_retention.py", "nhms-ts-retention"),
     ("scripts/node27_timeseries_compression.py", "nhms-ts-compression"),
     ("scripts/node27_raw_retention.py", "nhms-raw-retention"),
-    ("scripts/node27_cold_residency.py", "nhms-ts-cold-residency"),
 )
 
 
@@ -155,11 +153,6 @@ def _invoke_compression_fetch_chunks(dsn: str, tmp_path: Path) -> None:
 def _invoke_compression_compress_chunk(dsn: str, tmp_path: Path) -> None:
     node27_timeseries_compression._default_compress_chunk(dsn, None, compress_timeout_ms=1000)
 
-
-def _invoke_cold_residency_connect(dsn: str, tmp_path: Path) -> None:
-    node27_cold_residency._connect_factory(dsn, node27_cold_residency._DEFAULT_STATEMENT_TIMEOUT_MS)()
-
-
 # (case id, invoker, expected identity, expected OTHER connect kwargs).
 # The fourth element is the invariant lock: introducing the attribution kwarg
 # must not have moved cursor_factory / connect_timeout / options on any site.
@@ -200,12 +193,6 @@ PSYCOPG2_CASES: tuple[tuple[str, Any, str, dict[str, Any]], ...] = (
         _invoke_compression_compress_chunk,
         "nhms-ts-compression",
         {"connect_timeout": 10},
-    ),
-    (
-        "cold_residency_connect",
-        _invoke_cold_residency_connect,
-        "nhms-ts-cold-residency",
-        {"connect_timeout": 10, "cursor_factory": psycopg2.extras.RealDictCursor},
     ),
 )
 
@@ -449,34 +436,13 @@ def _run_compression_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: 
         "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "3600000",
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "5",
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
-        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
-        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "3941",
         "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
         "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(tmp_path / "runner.lock"),
     }.items():
         monkeypatch.setenv(key, value)
     assert node27_timeseries_compression.main([]) != 0
 
-
-def _run_cold_residency_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
-    for key, value in {
-        "DATABASE_URL": dsn,
-        "NODE27_COLD_RESIDENCY_RECEIPT_PATH": str(tmp_path / "receipt.json"),
-        "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
-        "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
-        "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
-        "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID": "1005",
-        "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID": "1005",
-    }.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(
-        node27_cold_residency,
-        "_observe_head",
-        lambda *_args, **_kwargs: ("a" * 40, True, False),
-    )
-    assert node27_cold_residency.main([]) != 0
 
 
 def _run_raw_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
@@ -498,7 +464,6 @@ DELEGATED_WATERMARK_CASES: tuple[tuple[str, Any, str], ...] = (
     ("retention_main_watermark", _run_retention_main, "nhms-ts-retention"),
     ("compression_main_watermark", _run_compression_main, "nhms-ts-compression"),
     ("raw_retention_main_watermark", _run_raw_retention_main, "nhms-raw-retention"),
-    ("cold_residency_main_watermark", _run_cold_residency_main, "nhms-ts-cold-residency"),
 )
 
 
@@ -771,7 +736,6 @@ def test_registered_modules_expose_the_expected_identity_at_runtime() -> None:
         "scripts/node27_timeseries_retention.py": node27_timeseries_retention,
         "scripts/node27_timeseries_compression.py": node27_timeseries_compression,
         "scripts/node27_raw_retention.py": node27_raw_retention,
-        "scripts/node27_cold_residency.py": node27_cold_residency,
     }
     assert dict(REGISTERED_COMPONENTS).keys() == imported.keys()
     for relative_path, expected_name in REGISTERED_COMPONENTS:

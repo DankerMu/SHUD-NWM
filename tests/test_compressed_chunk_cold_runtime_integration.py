@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import os
-import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common.compressed_chunk_cold_receipt import sidecar_status, validate_receipt
 from packages.common.compressed_chunk_cold_residency import (
     ACCEPTED_SEQUENCE_NAME,
     COLD_TABLESPACE_NAME,
@@ -28,8 +24,6 @@ from packages.common.compressed_chunk_cold_runtime import (
     migrate_residency_group,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories
-from packages.common.compressed_chunk_cold_tick import run_tick
-from scripts.node27_cold_residency import RunnerConfig
 from tests.cold_residency_fakes import expected_exec_identity, target_observation
 
 _WATERMARK = datetime(2026, 7, 11, tzinfo=UTC)
@@ -195,97 +189,6 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
             assert again.shell_sql_executed is False
             assert ACCEPTED_SEQUENCE_NAME == "shell_first_decompress_recompress_atomic"
 
-            work = Path(config.work_root)
-            progress: dict[str, Any] = {}
-
-            def after_group_progress(_rank: int, _payload: object) -> None:
-                intent_path = work / ".receipt.json.intent"
-                receipt_path = work / "receipt.json"
-                intent = json.loads(intent_path.read_text(encoding="utf-8"))
-                public = json.loads(receipt_path.read_text(encoding="utf-8"))
-                validate_receipt(intent)
-                validate_receipt(public)
-                assert intent["outcome"] == "in_progress"
-                assert public["outcome"] == "in_progress"
-                assert stat.S_ISREG(os.lstat(intent_path).st_mode)
-                assert stat.S_IMODE(os.lstat(intent_path).st_mode) == 0o600
-                forcing_items = [
-                    item for item in intent["selected"] if item.get("durable", {}).get("hypertable_schema") == "met"
-                ]
-                assert forcing_items
-                forcing = forcing_items[0]
-                assert isinstance(forcing.get("before"), dict)
-                assert isinstance(forcing.get("before_parity"), dict)
-                assert isinstance(forcing.get("capacity"), dict)
-                assert forcing["outcome"] == "migrated"
-                progress["intent"] = intent
-                progress["receipt"] = public
-
-            tick_config = RunnerConfig(
-                database_url="postgresql://unused",
-                lag_seconds=_LAG,
-                per_tick_bound=1,
-                receipt_path=work / "receipt.json",
-                intent_path=work / ".receipt.json.intent",
-                lock_path=work / "runner.lock",
-                lifecycle_lock_path=work / "lifecycle.lock",
-                enforce=True,
-                statement_timeout_ms=3600000,
-                wrapper_wall_seconds=3901,
-                compression_wrapper_wall_seconds=3900,
-                systemd_wall_seconds=7842,
-                cold_reserve_bytes=1,
-                wal_reserve_bytes=1,
-                max_members=64,
-                lock_timeout="30s",
-                expected_catalog_location="/home/postgres/pgdata/tablespaces/nhms_cold",
-                expected_container_bind=str(work / "cold"),
-                expected_host_path=str(work / "cold"),
-                expected_container_name=config.container_name,
-                expected_device_identity="isolated",
-                # #1929: the disposable oracle runs its container as the host
-                # observer's numeric identity, so expected and observed agree.
-                **expected_exec_identity(),
-                inspect_target=lambda: target_observation(
-                    container_name=config.container_name,
-                    container_bind=str(work / "cold"),
-                    host_path=str(work / "cold"),
-                    device_identity="isolated",
-                ),
-                cold_free_bytes=10**12,
-                hot_free_bytes=10**12,
-                after_group_progress=after_group_progress,
-            )
-            tick_receipt = run_tick(
-                tick_config,
-                now_utc=_WATERMARK,
-                head_sha=_HEAD,
-                connect=ordinary,
-                fetch_watermark=lambda: _WATERMARK,
-                attributed_connect=lambda *_a, **_k: connect(config, autocommit=False),
-                application_name="nhms-ts-cold-residency",
-                cleanup_margin_seconds=300,
-                systemd_margin_seconds=40,
-                max_catalog_rows=10,
-                max_catalog_bytes=16 * 1024**2,
-            )
-            assert progress
-            validate_receipt(tick_receipt)
-            assert tick_receipt["outcome"] == "clean"
-            forcing_final = [
-                item for item in tick_receipt["selected"] if item.get("durable", {}).get("hypertable_schema") == "met"
-            ]
-            assert forcing_final
-            assert forcing_final[0]["outcome"] == "migrated"
-            assert forcing_final[0]["reconciliation"] == "complete_target"
-            river_selected = [
-                item for item in tick_receipt["selected"] if item.get("durable", {}).get("hypertable_schema") == "hydro"
-            ]
-            if river_selected:
-                assert river_selected[0]["outcome"] == "already_cold"
-            assert forcing_final, "already-cold river must not consume the mutation bound"
-            validate_receipt(json.loads((work / "receipt.json").read_text(encoding="utf-8")))
-            assert sidecar_status(work / ".receipt.json.intent") == "absent"
             assert _execute(
                 connection, "SELECT count(*) AS n, sum(value) AS total FROM hydro.river_timeseries_legacy"
             ) == [{"n": 7248, "total": 14496.0}]

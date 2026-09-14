@@ -47,6 +47,12 @@ Mixed-import closure in this merge:
   parse_exec_start/COLD_WRAPPER used only by retired systemd facts. Keep
   observe_current_cutoff/assert_independent_receipt_horizon/parse_systemctl_show
   and their remaining consumers. Remove obsolete G8 runbook source-text pins.
+- `test_node27_write_roles.py` removes the deleted
+  `scripts/node27_cold_residency.py` entry from `_RECURRING_ENTRYPOINTS` and
+  therefore its derived `_CONVERTED_LANE_SOURCES` in this merge. Preserve the
+  remaining cold-package/grant/SET TABLESPACE rows until the remaining-deletion
+  fixture owns their removal. Execute the existing role suite and audit active
+  references; do not add an incidental source-text absence test.
 
 New budget owner: `packages/common/node27_timeseries_compression_budget.py`;
 all consumers migrate, old sequential-budget module disappears with no aliases.
