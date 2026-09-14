@@ -1240,6 +1240,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
             "tests/test_node27_pgdata_workload.py",
+            "tests/test_node27_pgdata_workload_plan.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
@@ -19327,6 +19328,7 @@ def test_pgdata_workload_owners_select_their_suite() -> None:
         "packages/common/node27_pgdata_workload_io.py",
         "scripts/node27_pgdata_workload.py",
         "tests/test_node27_pgdata_workload.py",
+        "tests/test_node27_pgdata_workload_plan.py",
     ):
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert expected <= selected, f"{producer} lost PGDATA workload suite: {sorted(expected - selected)}"
@@ -19337,5 +19339,6 @@ def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
     assert "tests/test_forecast_api.py" in selected
     assert "tests/test_forecast_store_routing.py" in selected
     assert "tests/test_node27_pgdata_workload.py" in selected
+    assert "tests/test_node27_pgdata_workload_plan.py" in selected
     assert set(CORE_SMOKE_TESTS) <= selected
 

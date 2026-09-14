@@ -6,7 +6,9 @@ Origin and physical compressed identities come from Timescale catalog
 relationships, not name prefixes or cold topology. Own-candidate DecompressChunk
 is allowed; unrelated chunk or relevant Seq Scan refuses. Root Shared Hit+Read
 is the only buffer total. Window proof compares parsed timestamptz instants
-from valid_time/_ts_meta bounds, not rendered ISO substrings. Segment proof
+from valid_time/_ts_meta bounds, not rendered ISO substrings. Empty in-window
+candidate index probes are allowed when the representative query returns rows
+and those probes remove no filtered rows. Segment proof
 accepts a fact ``river_segment_key`` parameter only when an InitPlan on
 ``core.river_segment`` resolves that parameter to the frozen text identity.
 """
@@ -493,7 +495,9 @@ def evaluate_explain_json_plan(
             if actual_rows is not None:
                 break
     if actual_rows is None:
-        actual_rows = 0 if allow_empty_rows else 1
+        if not allow_empty_rows:
+            refuse("root Plan actual row counter is missing or invalid", code="PLAN_ROWS_INVALID", stage="plan")
+        actual_rows = 0
     if actual_rows == 0 and not allow_empty_rows:
         refuse("representative query returned no rows", code="PLAN_NO_ROWS", stage="plan")
     for node in nodes:
@@ -507,10 +511,6 @@ def evaluate_explain_json_plan(
         loops = _actual_loops(node)
         removed_total = _rows_removed(node) * loops
         returned_total = returned * loops
-        if returned_total <= 0:
-            if not allow_empty_rows:
-                refuse("relevant access node returned no rows", code="PLAN_NO_ROWS", stage="plan")
-            continue
         if removed_total > returned_total * filter_ratio_limit:
             refuse("plan filter ratio exceeds the closed ceiling", code="PLAN_FILTER_RATIO", stage="plan")
     shared_hit = _root_shared_hit_blocks(plan)
