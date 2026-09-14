@@ -2842,11 +2842,13 @@ def test_declared_entry_that_matches_no_calibration_file_refuses(tmp_path: Path)
     assert excinfo.value.details["calibration_file_count"] == 0
 
 
-def test_checked_in_declaration_seeds_exactly_seven_entries() -> None:
-    """#1832 §3.1: the current checked-in declaration is exactly these seven.
+def test_checked_in_declaration_seeds_exactly_one_entry() -> None:
+    """#1832 §3.1: the current checked-in declaration is exactly this one entry.
 
-    hetianhe's GEOL_DMAC=4 is the first entry; the six HHe sub-basins each
-    declare GEOL_KSATH=2.0.  This exact tuple is the deliberate review gate for
+    hetianhe's GEOL_DMAC=4 is the only entry.  The six HHe GEOL_KSATH=2.0
+    entries were retired on 2026-09-14 (#1904): the owner confirmed the override
+    was not needed, and node-22's active HHe packages already run the delivered
+    calibration.  This exact tuple is the deliberate review gate for
     declaration-content changes: the default-load fixture above derives its
     basins/expected bytes from `load_calibration_overrides`, so an accidental
     slug or value change cannot hide behind a fixture that builds itself.
@@ -2857,12 +2859,6 @@ def test_checked_in_declaration_seeds_exactly_seven_entries() -> None:
 
     assert [(item.basin_slug, item.parameter, item.value) for item in overrides] == [
         ("hetianhe", "GEOL_DMAC", "4"),
-        ("hekouzhen_zhi_longmen", "GEOL_KSATH", "2.0"),
-        ("longyangxia_yishang", "GEOL_KSATH", "2.0"),
-        ("sanmenxia_zhi_huayuankou", "GEOL_KSATH", "2.0"),
-        ("longmen_zhi_sanmenxia", "GEOL_KSATH", "2.0"),
-        ("longyangxia_zhi_lanzhou", "GEOL_KSATH", "2.0"),
-        ("lanzhou_zhi_hekouzhen", "GEOL_KSATH", "2.0"),
     ]
     # §3.2: SOIL_ALPHA is not declared for ANY basin; the source value stands.
     assert all(item.parameter != "SOIL_ALPHA" for item in overrides)
