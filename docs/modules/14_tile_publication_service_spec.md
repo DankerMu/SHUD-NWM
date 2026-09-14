@@ -81,9 +81,11 @@ GeoJSON delivery metadata（`flood.return_period_result` → `layer_id=flood_ret
   `layer_id=q_down_<run_id>_<river_network_version_id>`，`layer_type=q_down_timeseries`，
   `tile_format=geojson_timeseries`，`published_flag=true`，`tile_uri_template` 指向该 run 的 manifest URI。
 - 幂等性：同一 cycle 重复发布返回同一 logical layer，不新增重复 layer，也不写冲突 cache row。
-- 失败：缺少环境/数据库 schema/产品或对象存储 artifact 时输出 JSON `status=failed_publish`，
-  带稳定 `error_code` 和 `error_message`，并以非 0 退出；编排器将 publish 失败映射为
-  `failed_publish`。
+- 失败：找不到可发布 q_down 产品（`NO_PUBLISHABLE_QDOWN_PRODUCTS`）、delivery schema 缺失
+  （`DELIVERY_SCHEMA_MISSING`）或全部 run identity 不完整（`PUBLISH_IDENTITY_INCOMPLETE`）时输出 JSON
+  `status=failed_publish`，带稳定 `error_code` 和 `error_message`，并以非 0 退出；编排器将 publish 失败映射为
+  `failed_publish`。例外：CLI 缺少 `DATABASE_URL` 时返回 `status=deferred_to_node27_ingest` 并退出 0
+  （`services/orchestrator/cli.py` `_publish_tiles`）。
 
 ## 7. 配置项
 

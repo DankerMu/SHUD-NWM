@@ -53,7 +53,7 @@ Risk packs:
 - [x] 2.7 #1935 `for f in docs/VALIDATION.md docs/validation/production-closure.md; do awk '/\\$/{sub(/\\$/,"");printf "%s",$0;next}1' "$f" | grep -nE 'ruff (check|format)[^|&;]*\.md'; done` → no output; Python path lists before/after identical (pasted); each edited ruff command exits 0 locally.
 - [x] 2.8 #1862 `grep -n "more than one row from this" docs/runbooks/failed-basin-retry.md` → 0; outcome table diff empty.
 - [x] 2.9 `openspec validate fix-batch2-docs-contract-drift --strict --no-interactive` → valid, with deltas for both `basins-registry-import` (3 requirements) and `ci-contract-baseline`.
-- [x] 2.10 `uv run ruff check .` → clean; markdownlint in CI form over `docs/**/*.md` (repo config, same tool/version as `.github/workflows/ci.yml` Markdown Lint job) → exit 0, which covers #1935 targets `docs/runbooks/api-latency.md` and `docs/runbooks/tile-publish-error.md`.
+- [x] 2.10 `uv run ruff check .` → clean; markdownlint-cli2 0.17.2 over `docs/**/*.md` with `.markdownlint.yaml` (same glob/config as the `.github/workflows/ci.yml` Markdown Lint job, which runs `markdownlint-cli2-action@v19`) → exit 0, which covers #1935 targets `docs/runbooks/api-latency.md` and `docs/runbooks/tile-publish-error.md`.
 
 ## Non-goals
 
