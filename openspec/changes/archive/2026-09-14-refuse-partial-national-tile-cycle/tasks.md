@@ -95,13 +95,13 @@ Evidence floor:
   - hand-edit `openapi/nhms.v1.yaml` (that path's 424 plus `components/responses`, and the docstring description if the docstring changes);
   - `cd apps/frontend && pnpm generate:api`.
 - [x] 3.3 Tests E1–E4, E6–E8.
-- [ ] 3.4 Integration test E11 (node-27 throwaway DB).
+- [x] 3.4 Integration test E11 (node-27 throwaway DB): pre-change 1 failed (E11(a) 200) / 32 passed; PR head 33 passed; E11(c) sha256 identical.
 
 ### 4. Close-out
 
-- [ ] 4.1 File the node-27 post-deploy receipt follow-up issue (design D6), link it from the PR body.
-- [ ] 4.2 PR closes #2153.
-- [ ] 4.3 After merge: archive this change.
+- [x] 4.1 File the node-27 post-deploy receipt follow-up issue (design D6), link it from the PR body (#2343).
+- [x] 4.2 PR closes #2153 (PR #2344 merged as 8bbbc4dd0).
+- [x] 4.3 After merge: archive this change.
 
 ## Evidence Mapping
 
