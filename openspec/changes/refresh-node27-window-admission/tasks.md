@@ -120,13 +120,14 @@ separate authority.
 
 ## 4. Stable unit configuration comparison (#2370)
 
-- [ ] 4.1 Replace volatile show-string comparisons with typed complete stable command/calendar semantics; normal
+- [x] 4.1 Replace volatile show-string comparisons with typed complete stable command/calendar semantics; normal
       service reruns and next-elapse changes pass.
-- [ ] 4.2 Preserve true command/calendar/env/file/path/timeout drift refusal and malformed-data fail-closed behavior.
-- [ ] 4.3 Refuse prior snapshot format before writes, require fresh state, and preserve source/config/driver/ledger
+- [x] 4.2 Preserve true command/calendar/env/file/path/timeout drift refusal and malformed-data fail-closed behavior.
+- [x] 4.3 Refuse prior snapshot format before writes, require fresh state, and preserve source/config/driver/ledger
       and ownership guards.
-- [ ] 4.4 Prove focused original-red/changed-green isolated admission and real node27 readonly semantic comparison;
-      run fresh prepare, without child T0.
+- [x] 4.4 Prove focused original-red/changed-green isolated admission and real node27 readonly semantic comparison;
+      run fresh prepare, without child T0 (1b8b2b5b final tools, focused PASS, 8/8 matrix PASS, PREPARED20:01:20Z;
+      `receipts/child2370-verification.json`).
 - [ ] 4.5 Confirm governance tool hashes unchanged, complete expanded review/CI and publish immutable parent handoff.
 
 Evidence Floor: actual typed payload and drift records from the failed parent attempt; focused real-comparator smoke

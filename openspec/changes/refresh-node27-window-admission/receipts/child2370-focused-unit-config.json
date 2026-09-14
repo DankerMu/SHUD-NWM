@@ -6,6 +6,11 @@
       "result": "pass"
     },
     {
+      "case": "installed-unloaded",
+      "result": "pass",
+      "unit": "nhms-node27-timeseries-compression-replay.service"
+    },
+    {
       "case": "exec-path",
       "check": "UNIT_CONFIG_CHANGED"
     },
@@ -138,5 +143,5 @@
   ],
   "result": "PASS",
   "scope": "typed unit comparator and pre-T0 admission only; no database or production operation",
-  "state": "/home/nwm/tmp/issue2370-unit-config-fecec0ea"
+  "state": "/home/nwm/tmp/issue2370-unit-config-1b8b2b5b"
 }

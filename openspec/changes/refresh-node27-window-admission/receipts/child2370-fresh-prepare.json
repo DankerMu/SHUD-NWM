@@ -1,0 +1,37 @@
+{
+  "event": "completed",
+  "operation": "prepare",
+  "exit": 0,
+  "phase": "PREPARED",
+  "records": [
+    {
+      "executor_lock_held": false,
+      "fence_epochs": [],
+      "last_command_rc": 0,
+      "new_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+      "old_oid": 24541,
+      "old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+      "phase": "PREPARED",
+      "recovery_command": "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python /home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_execute.py recover --state /home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare --go Danker",
+      "state": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+      "status_is_not_live_health": true,
+      "updated_at": "2026-09-14T20:01:20.367360+00:00"
+    }
+  ],
+  "state": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+  "input_bundle": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs",
+  "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "tool_commit": "1b8b2b5b447d07091af98eb1e4ccbd1884e5b899",
+  "source_sha256": "70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5",
+  "config_sha256": "114fd46b31848392abc7c767cd87f273d1cbbfdea194666f0034ae1f4bf2bd00",
+  "active_head": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+  "staged_identity_and_pin_preserved": true,
+  "logs": {
+    "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/prepare.stdout": "5a976fdc947400b71bf5098e8ce0a8147b6e2025aa623cce839123dd01cd2d5b",
+    "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/prepare.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "t0_executed": false,
+  "window_executed": false,
+  "recover_executed": false,
+  "unstage_executed": false
+}

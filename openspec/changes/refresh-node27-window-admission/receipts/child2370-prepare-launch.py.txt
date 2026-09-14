@@ -1,0 +1,159 @@
+"""Actual fresh prepare only. Credentials remain in memory/environment; no T0 or recovery."""
+
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+ACTIVE = Path("/home/nwm/NWM")
+TARGET = Path("/home/nwm/NWM-i8-target-415cbd1e")
+TARGET_SHA = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+OLD_SHA = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+GOV_STATE = Path("/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json")
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def role_url(name, user):
+    path = ACTIVE / "infra/env" / name
+    assert not path.is_symlink() and path.stat().st_uid == 1005 and path.stat().st_mode & 0o777 == 0o600
+    values = []
+    for line in path.read_text().splitlines():
+        if line.strip().startswith("DATABASE_URL="):
+            values.extend(shlex.split(line.strip().split("=", 1)[1], comments=True))
+    assert len(values) == 1
+    value = values[0]
+    parsed = urllib.parse.urlsplit(value)
+    assert (parsed.username, parsed.hostname, parsed.port, parsed.path) == (user, "127.0.0.1", 55432, "/nhms")
+    return value
+
+
+def main():
+    os.umask(0o077)
+    supplied = json.load(sys.stdin)
+    publication, hashes = supplied["publication"], supplied["hashes"]
+    assert publication["target"] == TARGET_SHA
+    root = Path(publication["input_bundle"])
+    runstate = Path(publication["state"])
+    source = Path("/home/nwm/.local/state/issue1987-tools") / publication["tool_commit"] / "window_execute.py"
+    assert digest(source) == hashes["window_execute.py"]
+    assert digest(Path(publication["config"])) == publication["config_sha256"]
+    assert not runstate.exists() and not (root / "prepare-process.json").exists()
+    assert digest(GOV_STATE) == publication["original_state_sha256"]
+    staged = json.loads(GOV_STATE.read_text())
+    pin = (
+        Path(staged["identity"]["unit_root"])
+        / "nhms-node27-resource-governance.service.d"
+        / "70-issue1987-governance-reviewed-source.conf"
+    )
+    assert digest(pin) == publication["owned_pin_sha256"]
+    container = json.loads(subprocess.check_output(["docker", "inspect", "nhms-db"], text=True))[0]
+    assert (
+        container["Id"] == "5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f"
+        and container["State"]["Running"]
+    )
+    variables = dict(item.split("=", 1) for item in container["Config"]["Env"])
+    assert (
+        variables["POSTGRES_USER"] == "nhms" and variables["POSTGRES_DB"] == "nhms" and variables["POSTGRES_PASSWORD"]
+    )
+    admin = role_url("node27-timeseries-compression-replay.env", "nhms")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("PG")
+        and key
+        not in {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "UV_PROJECT_ENVIRONMENT",
+            "VIRTUAL_ENV",
+            "NODE27_INGEST_RW_PASSWORD",
+            "NODE27_DOWNLOAD_RW_PASSWORD",
+        }
+    }
+    env.update(
+        PATH="/home/nwm/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        TMPDIR="/home/nwm/tmp",
+        PYTHONNOUSERSITE="1",
+        DATABASE_URL=admin,
+        I8_INGEST_DSN=role_url("node27-ingest.env", "nhms_ingest_rw"),
+        I8_DISPLAY_DSN=role_url("display.env", "nhms_display_ro"),
+    )
+    command = [
+        str(TARGET / ".venv/bin/python"),
+        "-B",
+        str(source),
+        "prepare",
+        "--state",
+        str(runstate),
+        "--config",
+        publication["config"],
+    ]
+    with (root / "prepare.stdout").open("xb") as out, (root / "prepare.stderr").open("xb") as err:
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, cwd="/home/nwm", start_new_session=True
+        )
+    launched = dict(
+        operation="prepare",
+        pid=process.pid,
+        start_ticks=Path("/proc/" + str(process.pid) + "/stat").read_text().rsplit(")", 1)[1].split()[19],
+        command=command,
+        source_sha256=digest(source),
+        config_sha256=publication["config_sha256"],
+        state=str(runstate),
+        input_bundle=str(root),
+        target=TARGET_SHA,
+        credentials_persisted=False,
+        t0_executed=False,
+    )
+    with (root / "prepare-process.json").open("x") as stream:
+        json.dump(launched, stream, indent=2)
+    print(json.dumps(dict(event="launched", **launched)), flush=True)
+    exit_code = process.wait(timeout=1200)
+    state_file = runstate / "state.json"
+    saved = json.loads(state_file.read_text()) if state_file.exists() else {}
+    records = []
+    for line in (root / "prepare.stdout").read_text().splitlines():
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    active_after = subprocess.check_output(["git", "-C", str(ACTIVE), "rev-parse", "HEAD"], text=True).strip()
+    preserved = (
+        digest(GOV_STATE) == publication["original_state_sha256"] and digest(pin) == publication["owned_pin_sha256"]
+    )
+    result = dict(
+        event="completed",
+        operation="prepare",
+        exit=exit_code,
+        phase=saved.get("phase"),
+        records=records,
+        state=str(runstate),
+        input_bundle=str(root),
+        target=TARGET_SHA,
+        tool_commit=publication["tool_commit"],
+        source_sha256=digest(source),
+        config_sha256=digest(Path(publication["config"])),
+        active_head=active_after,
+        staged_identity_and_pin_preserved=preserved,
+        logs={str(root / name): digest(root / name) for name in ("prepare.stdout", "prepare.stderr")},
+        t0_executed=False,
+        window_executed=False,
+        recover_executed=False,
+        unstage_executed=False,
+    )
+    with (root / "prepare-exit.json").open("x") as stream:
+        json.dump(result, stream, indent=2)
+    print(json.dumps(result), flush=True)
+    assert active_after == OLD_SHA and preserved
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

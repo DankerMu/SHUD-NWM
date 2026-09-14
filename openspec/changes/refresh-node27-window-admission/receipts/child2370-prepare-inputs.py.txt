@@ -1,0 +1,165 @@
+"""Create new qualification inputs; preserve historical inputs and staged governance identity."""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+OLD_INPUT = Path("/home/nwm/.local/state/issue1987-window-f24-inputs-v2/inputs.json")
+OLD_INPUT_SHA = "3f6477d5e76a5f2aea2d643259b5499b2bec6bb495fe85d2b06df01f567a8279"
+STATE = Path("/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json")
+ACTIVE = Path("/home/nwm/NWM")
+RETAINED = "/home/nwm/NWM-governance-reviewed-1a32ebb7"
+TARGET = "/home/nwm/NWM-i8-target-415cbd1e"
+TARGET_SHA = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+OLD_SHA = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def private_write(path, data):
+    with path.open("xb") as stream:
+        stream.write(data)
+
+
+def encode(value):
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def main():
+    os.umask(0o077)
+    qualification = json.loads(Path('/home/nwm/.local/state/issue2325-window-92a5b4350992-inputs/qualification.json').read_text())
+    qualification.update({'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'hashes': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'matrix': [{'case': 'happy', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_1b8b2b5b_20260914194634120963.receipt.json', 'case': 'happy', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_1b8b2b5b_20260914194634120963-state', '--case', 'happy'], 'database': 'i8_1987_happy_1b8b2b5b_20260914194634120963', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_1b8b2b5b_20260914194634120963-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_1b8b2b5b_20260914194634120963.stdout': '8e599974eab3d2d6a400c2973e49ca98a7de45aef0e52e278cc2413697315d56', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_1b8b2b5b_20260914194634120963.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'stop', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_1b8b2b5b_20260914194649071515.receipt.json', 'case': 'stop', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_1b8b2b5b_20260914194649071515-state', '--case', 'stop'], 'database': 'i8_1987_stop_1b8b2b5b_20260914194649071515', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_1b8b2b5b_20260914194649071515-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_1b8b2b5b_20260914194649071515.stdout': 'e14843c6812e3a370d52f3035b5f4b8812951cad2f97bb6451b2d1bac223f604', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_1b8b2b5b_20260914194649071515.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'session', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_1b8b2b5b_20260914194655962347.receipt.json', 'case': 'session', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_1b8b2b5b_20260914194655962347-state', '--case', 'session'], 'database': 'i8_1987_session_1b8b2b5b_20260914194655962347', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_1b8b2b5b_20260914194655962347-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_1b8b2b5b_20260914194655962347.stdout': 'efaa78d7f1079281bdb73f3ba65dc1d51defd270066c997ff860543357ade520', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_1b8b2b5b_20260914194655962347.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'fence', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_1b8b2b5b_20260914194702853858.receipt.json', 'case': 'fence', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_1b8b2b5b_20260914194702853858-state', '--case', 'fence'], 'database': 'i8_1987_fence_1b8b2b5b_20260914194702853858', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_1b8b2b5b_20260914194702853858-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_1b8b2b5b_20260914194702853858.stdout': '7d389fe5840fa7615793580224bade535ce5dfb697bfcc1de9268899faa30950', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_1b8b2b5b_20260914194702853858.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'do-before-ledger', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155.receipt.json', 'case': 'do-before-ledger', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155-state', '--case', 'do-before-ledger'], 'database': 'i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155.stdout': '86e4b7e358e2744874d34de1943bb62c7e8888422d1665c5ce30aee6b3e1591b', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_1b8b2b5b_20260914194709700155.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'rename', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_1b8b2b5b_20260914194718541156.receipt.json', 'case': 'rename', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_1b8b2b5b_20260914194718541156-state', '--case', 'rename'], 'database': 'i8_1987_rename_1b8b2b5b_20260914194718541156', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_1b8b2b5b_20260914194718541156-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_1b8b2b5b_20260914194718541156.stdout': 'ba4272a69f22bd4cd1f1ba8cb6539360ba0495138ba4deadc3c38910f4000dac', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_1b8b2b5b_20260914194718541156.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'source', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_1b8b2b5b_20260914194726929841.receipt.json', 'case': 'source', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_1b8b2b5b_20260914194726929841-state', '--case', 'source'], 'database': 'i8_1987_source_1b8b2b5b_20260914194726929841', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_1b8b2b5b_20260914194726929841-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_1b8b2b5b_20260914194726929841.stdout': 'e8342a1c614b8cc2a7c86c2990d903f198b7796311488483f8e0f2a798ea3ddf', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_1b8b2b5b_20260914194726929841.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}, {'case': 'restart', 'exit': 0, 'receipt': {'receipt_path': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_1b8b2b5b_20260914194735176044.receipt.json', 'case': 'restart', 'returncode': 0, 'command': ['/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python', '/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_smoke.py', '--oracle', '/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt', '--old-repo', '/home/nwm/NWM-i8-oracle-old-a8db554d', '--new-repo', '/home/nwm/NWM-i8-target-415cbd1e', '--original-new-repo', '/home/nwm/NWM-governance-reviewed-1a32ebb7', '--container', 'nwm-i8-1987-window-volume-6fb30b552', '--state', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_1b8b2b5b_20260914194735176044-state', '--case', 'restart'], 'database': 'i8_1987_restart_1b8b2b5b_20260914194735176044', 'state': '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_1b8b2b5b_20260914194735176044-state', 'records': [{'result': 'PASS'}], 'tool_commit': '1b8b2b5b447d07091af98eb1e4ccbd1884e5b899', 'deployment_sha': '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2', 'driver_sha256': '68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230', 'manifest_sha256': 'fb5fa962466f21a0be0daa75c14e2fcbabd2957d026367adb9e8290bd16bbce0', 'oracle_sha256': '162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2', 'executors': {'window_execute.py': '70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5', 'governance_stage.py': '7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d', 'governance_smoke.py': '6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86', 'window_smoke.py': '05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513'}, 'logs': {'/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_1b8b2b5b_20260914194735176044.stdout': '0c146c1f0ebd380a1dfca49050b3c3fe3fcaaf583915429f2d691215b1a36860', '/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_1b8b2b5b_20260914194735176044.stderr': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}, 'production_operations': False}}], 'publication_equivalence': {'governance_tools_unchanged': True, 'window_executor_changed': '#2370 typed stable LoadUnit snapshots; final eight-case matrix passed'}, 'pending_gates': ['fresh prepare with typed snapshot', 'child2370 review and CI', 'parent production window and owned unstage']})
+    assert qualification["deployment_target"] == TARGET_SHA
+    assert qualification["read_only_audit"]["exit"] == 0
+    assert qualification["read_only_audit"]["critical_codes"] == []
+    assert qualification["selector"]["result"] == "PASS"
+    assert len(qualification["matrix"]) == 8 and all(row["exit"] == 0 for row in qualification["matrix"])
+    tool_sha = qualification["tool_commit"]
+    root = Path("/home/nwm/.local/state") / ("issue2370-window-" + tool_sha[:12] + "-retry-inputs")
+    runstate = root.with_name(root.name.removesuffix("-inputs") + "-prepare")
+    assert not root.exists() and not runstate.exists()
+    old_bytes = OLD_INPUT.read_bytes()
+    assert digest(old_bytes) == OLD_INPUT_SHA
+    config = json.loads(old_bytes)
+    assert config["old_sha"] == OLD_SHA
+    assert config["new_sha"] == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+    assert subprocess.check_output(["git", "-C", str(ACTIVE), "rev-parse", "HEAD"], text=True).strip() == OLD_SHA
+    branch = subprocess.check_output(["git", "-C", str(ACTIVE), "symbolic-ref", "--short", "HEAD"], text=True).strip()
+    state_bytes = STATE.read_bytes()
+    staged = json.loads(state_bytes)
+    assert staged["phase"] == "staged" and staged["identity"]["runtime_root"] == RETAINED
+    pin = (
+        Path(staged["identity"]["unit_root"])
+        / "nhms-node27-resource-governance.service.d"
+        / "70-issue1987-governance-reviewed-source.conf"
+    )
+    pin_bytes = pin.read_bytes()
+    assert digest(pin_bytes) == staged["pin_digest"]
+    qualification["original_staged_identity"] = staged["identity"]
+    qualification["original_state_sha256"] = digest(state_bytes)
+    qualification["owned_pin_sha256"] = digest(pin_bytes)
+    qualification["scope"] = (
+        "Candidate fresh prepare only; production T0/window/recover/unstage remain forbidden in this child."
+    )
+    root.mkdir(mode=0o700)
+    (root / "admission").mkdir(mode=0o700)
+    qualification_path = root / "qualification.json"
+    private_write(qualification_path, encode(qualification))
+    config.update(
+        new_sha=TARGET_SHA,
+        staged_new_repo=TARGET,
+        restore_branch="issue1987-reviewed-new-415cbd1e",
+        restore_ref="refs/remotes/origin/issue1987-frozen-new-415cbd1e",
+    )
+    config["protected_files"] = [*config["protected_files"], str(qualification_path)]
+    provenance = {}
+    for key in ("go", "d12", "capacity", "artifacts", "governance"):
+        old_entry = config["admission"][key]
+        raw = Path(old_entry["path"]).read_bytes()
+        assert digest(raw) == old_entry["sha256"]
+        provenance[key] = dict(old_entry)
+        payload = json.loads(raw)
+        if key == "go":
+            payload = dict(
+                operation="prepare",
+                prior_authority=payload,
+                prior_authority_artifact_sha256=old_entry["sha256"],
+                old_sha=OLD_SHA,
+                new_sha=TARGET_SHA,
+                tool_publication=tool_sha,
+                window_executor_sha256=qualification["hashes"]["window_execute.py"],
+                prepare_authority="User-authorized admission change and issue2325 fresh-prepare acceptance.",
+                scope="Prepare only; no T0/window/recover/unstage. No expansion of the prior authority.",
+                review_gate="Current child review and merge remain external gates; not completed by this artifact.",
+                parent_gate="Parent1987 retains conditional T0 authority after all remaining gates.",
+                source_refs=dict(
+                    active_head=OLD_SHA,
+                    active_branch=branch,
+                    restore_branch=config["restore_branch"],
+                    restore_ref=config["restore_ref"],
+                    new_sha=TARGET_SHA,
+                    working_tree_changed=False,
+                ),
+            )
+            raw = encode(payload)
+        elif key == "d12":
+            payload = dict(
+                scope=payload["scope"],
+                prior_d12_artifact=payload,
+                prior_artifact_sha256=old_entry["sha256"],
+                current_runtime=dict(old=OLD_SHA, new=TARGET_SHA),
+                current_interface_evidence=qualification["d4"],
+                current_recovery_matrix=qualification["matrix"],
+                historical_ledger_rule="Keep L pre-commit; L plus000059 post-commit/D12; no ledger deletion.",
+            )
+            raw = encode(payload)
+        elif key == "governance":
+            payload = dict(
+                original_staged_artifact=payload,
+                original_staged_artifact_sha256=old_entry["sha256"],
+                original_staged_identity=staged["identity"],
+                original_state_sha256=digest(state_bytes),
+                owned_pin_sha256=digest(pin_bytes),
+                retained_runtime=RETAINED,
+                target_runtime=TARGET_SHA,
+                handoff_oracle=qualification["governance_handoff"],
+                read_only_target_audit=qualification["read_only_audit"],
+                production_unstage_executed=False,
+            )
+            raw = encode(payload)
+        destination = root / "admission" / (key + ".json")
+        private_write(destination, raw)
+        config["admission"][key] = dict(path=str(destination), sha256=digest(raw))
+    config_bytes = encode(config)
+    private_write(root / "inputs.json", config_bytes)
+    assert STATE.read_bytes() == state_bytes and pin.read_bytes() == pin_bytes
+    assert OLD_INPUT.read_bytes() == old_bytes
+    proof = dict(
+        input_bundle=str(root),
+        config=str(root / "inputs.json"),
+        config_sha256=digest(config_bytes),
+        state=str(runstate),
+        state_not_precreated=True,
+        target=TARGET_SHA,
+        tool_commit=tool_sha,
+        admission=config["admission"],
+        original_admission=provenance,
+        qualification_sha256=digest(qualification_path.read_bytes()),
+        original_state_sha256=digest(state_bytes),
+        owned_pin_sha256=digest(pin_bytes),
+        staged_identity_preserved=True,
+        historical_inputs_preserved=True,
+        credentials_written=False,
+        production_operations=False,
+    )
+    private_write(root / "input-publication.json", encode(proof))
+    print(json.dumps(proof), flush=True)
+
+
+if __name__ == "__main__":
+    main()

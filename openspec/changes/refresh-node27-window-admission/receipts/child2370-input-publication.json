@@ -1,0 +1,60 @@
+{
+  "input_bundle": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs",
+  "config": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/inputs.json",
+  "config_sha256": "114fd46b31848392abc7c767cd87f273d1cbbfdea194666f0034ae1f4bf2bd00",
+  "state": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+  "state_not_precreated": true,
+  "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "tool_commit": "1b8b2b5b447d07091af98eb1e4ccbd1884e5b899",
+  "admission": {
+    "go": {
+      "path": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/admission/go.json",
+      "sha256": "521c6bc16581cfdbf4c4869efdf995bd885c7c4695fd4f76e12cd6240d392cbc"
+    },
+    "d12": {
+      "path": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/admission/d12.json",
+      "sha256": "e9a0c6ad6887999590ae240d5e136cc945e7f6622f81633feaedfe94e5e839de"
+    },
+    "capacity": {
+      "path": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/admission/capacity.json",
+      "sha256": "ba920568c900a2623f96f61dc6f50431fb0d79ffd4ea342b52b66026fb5ccbd5"
+    },
+    "artifacts": {
+      "path": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/admission/artifacts.json",
+      "sha256": "60167a915173ee69c31047bbf4e2048b14db11fdcc76617b535d168b99755362"
+    },
+    "governance": {
+      "path": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-inputs/admission/governance.json",
+      "sha256": "69d8cc648736868113a9590ddccff3cfcda38e94f57bd8c81f1c2578876e5311"
+    }
+  },
+  "original_admission": {
+    "go": {
+      "path": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2/admission/go.json",
+      "sha256": "cb4a02425f292d66b5ed229883b0901f75eb3f15a0ba8bc5176a2e4b36584c20"
+    },
+    "d12": {
+      "path": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2/admission/d12.json",
+      "sha256": "9a39e643a7342894f96f3f639f3cffac0f7203e0996dd800828903db3f87a17e"
+    },
+    "capacity": {
+      "path": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2/admission/capacity.json",
+      "sha256": "ba920568c900a2623f96f61dc6f50431fb0d79ffd4ea342b52b66026fb5ccbd5"
+    },
+    "artifacts": {
+      "path": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2/admission/artifacts.json",
+      "sha256": "60167a915173ee69c31047bbf4e2048b14db11fdcc76617b535d168b99755362"
+    },
+    "governance": {
+      "path": "/home/nwm/.local/state/issue1987-window-f24-inputs-v2/admission/governance.json",
+      "sha256": "2865ad5c03b426bbe5c25fdd6e3c7ffabaddc8f61a540f6f6566a461a48926fb"
+    }
+  },
+  "qualification_sha256": "04b8b4d8575f8cb82f7838dd7d9689acd53c4d51c0460356d0e9ff3e26f1533d",
+  "original_state_sha256": "b8008c874a450c6b20607c044dd9f99e68be18547266ecf85cad5d2e953b7d04",
+  "owned_pin_sha256": "da33e7315a4a5415ed02bef5bf1bddfb8cd1a2b79d2939651075eadb93d1cb5f",
+  "staged_identity_preserved": true,
+  "historical_inputs_preserved": true,
+  "credentials_written": false,
+  "production_operations": false
+}
