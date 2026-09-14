@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2222,3 +2223,101 @@ def test_national_identity_rejects_opposite_store_only_half_hour_facts(
     finally:
         engine.dispose()
     _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _CYCLE_TIME, instant))
+
+
+# ---------------------------------------------------------------------------
+# #2153: the canonical route refuses a `(source, cycle)` identity only SOME
+# active networks cover, using the per-cycle valid-times coverage helper, and a
+# fully covered identity keeps its bytes. These prove the helper's SQL and the
+# tile SQL agree on real rows, which no fake session can.
+# ---------------------------------------------------------------------------
+
+_E11_EVIDENCE_FILE = "e11c-full-coverage-tile.txt"
+
+
+def _emit_full_coverage_tile_evidence(line: str) -> None:
+    """Print (visible under `-s`) and, when `NHMS_EVIDENCE_DIR` is set, append to a file.
+
+    The PR head and the pre-#2153 tree are compared on these two fields.
+    """
+    print(line)
+    evidence_dir = os.getenv("NHMS_EVIDENCE_DIR")
+    if evidence_dir:
+        Path(evidence_dir).mkdir(parents=True, exist_ok=True)
+        with Path(evidence_dir, _E11_EVIDENCE_FILE).open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
+def test_national_identity_tile_is_refused_when_one_of_two_active_networks_has_no_run(
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
+    """E11(a): network 1 covers `(gfs, A)`, active network 2 has no run -> 424 incomplete, 1/2.
+
+    Before #2153 this was a 200 painting network 1 alone.
+    """
+    database_url, client = national_tile
+    _seed_second_network(database_url)
+    _refresh_coverage(database_url)
+    _assert_coverage_segment_counts(database_url, {_RUN_ID: len(_SEGMENT_IDS)})
+    assert _query(
+        database_url,
+        "SELECT count(DISTINCT river_network_version_id) AS n FROM core.model_instance WHERE active_flag",
+        (),
+    ) == [{"n": 2}]
+    assert _query(
+        database_url,
+        "SELECT count(*) AS n FROM hydro.hydro_run WHERE basin_version_id = %s",
+        (_SECOND_BASIN_VERSION_ID,),
+    ) == [{"n": 0}]
+    post_expand_forecast_database({_RUN_ID: "legacy"})
+
+    response = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
+
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == "MVT_NATIONAL_IDENTITY_INCOMPLETE"
+    assert error["details"] == {
+        "layer_id": _LAYER_ID,
+        "source": "gfs",
+        "cycle": _stamp(_CYCLE_TIME),
+        "covered_network_count": 1,
+        "active_network_count": 2,
+    }
+
+
+def test_national_identity_tile_ignores_an_inactive_network_without_a_run(
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
+    """E11(b): the denominator is ACTIVE networks only, so an inactive one refuses nothing."""
+    database_url, client = national_tile
+    _seed_second_network(database_url, active=False)
+    _refresh_coverage(database_url)
+    _assert_coverage_segment_counts(database_url, {_RUN_ID: len(_SEGMENT_IDS)})
+    assert _query(
+        database_url,
+        "SELECT count(DISTINCT river_network_version_id) AS n FROM core.model_instance WHERE active_flag",
+        (),
+    ) == [{"n": 1}]
+    post_expand_forecast_database({_RUN_ID: "legacy"})
+
+    _assert_tile_carries_the_seeded_features(_request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END))
+
+
+def test_national_identity_tile_serves_a_fully_covered_identity(
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
+    """E11(c): both active networks cover `(gfs, A)` -> 200 painting both, bytes recorded for comparison."""
+    database_url, client = national_tile
+    _seed_mixed_national_networks(database_url)
+    post_expand_forecast_database({_RUN_ID: "legacy", _MIXED_RUN_ID: "legacy"})
+
+    response = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(MVT_MEDIA_TYPE)
+    assert _NETWORK_ID.encode() in response.content
+    assert _SECOND_NETWORK_ID.encode() in response.content
+    _emit_full_coverage_tile_evidence(
+        f"E11(c) gfs {_stamp(_CYCLE_TIME)} {_stamp(_WINDOW_END)} z={_ZOOM} "
+        f"sha256={hashlib.sha256(response.content).hexdigest()} etag={response.headers['etag']}"
+    )

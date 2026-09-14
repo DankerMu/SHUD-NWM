@@ -33,7 +33,12 @@ from apps.api.routes import pipeline as pipeline_routes
 # `max: float | None` pydantic already emits as a 3.1 `anyOf` union rather than
 # a `nullable` node; the open-ended top class stays nullable (pinned decision 5)
 # and was NOT made non-nullable to keep this number still.
-BASELINE_NULLABLE_COUNT = 115
+#
+# 115 -> 116 with #2153: the canonical source/cycle national tile route's 424
+# now references its own `MvtNationalIdentityUnavailable` response (both error
+# codes), whose `error.details` is the same nullable object the shared
+# `MvtLivePostgisUnavailable` carries, so the census moves by exactly one.
+BASELINE_NULLABLE_COUNT = 116
 COMPOSED_NULLABLE_PATH = ("components", "schemas", "Layer", "properties", "metadata")
 
 # The exact pinned openapi-typescript package the generated-type assertions run

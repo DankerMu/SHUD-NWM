@@ -42,6 +42,7 @@ from services.tiles.mvt import (
     collection_coordinate_limit,
     display_ready_run,
     layer_metadata,
+    national_discharge_cycle_coverage,
     national_discharge_cycles,
     national_discharge_source_version,
     national_discharge_valid_times,
@@ -912,6 +913,27 @@ def _fetch_hydro_national_mvt_tile_bytes(
     source: str | None,
     cycle: datetime | None,
 ) -> bytes:
+    if source is not None and cycle is not None:
+        # #2153: an identity only SOME active networks cover renders a national map
+        # whose missing basins look like "no flow", and it would be cached. Refuse
+        # it with the per-cycle valid-times rule (one helper, set comparison). The
+        # gate goes first so disabled/sqlite keeps its 424 with no statement run;
+        # covered = empty falls through to the tile SQL's own no-run 424 unchanged.
+        _require_live_postgis_mvt(session, "hydro-national")
+        coverage = national_discharge_cycle_coverage(session, source=source, cycle=cycle)
+        if coverage.covered_networks and not coverage.complete:
+            raise ApiError(
+                status_code=424,
+                code="MVT_NATIONAL_IDENTITY_INCOMPLETE",
+                message="The requested national identity is not covered by every active river network.",
+                details={
+                    "layer_id": public_hydro_layer_id(variable),
+                    "source": source,
+                    "cycle": _format_time(cycle),
+                    "covered_network_count": len(coverage.covered_networks),
+                    "active_network_count": len(coverage.active_networks),
+                },
+            )
     return _fetch_postgis_tile_bytes(
         session,
         "hydro-national",

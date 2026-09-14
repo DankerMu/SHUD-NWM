@@ -2059,24 +2059,22 @@ def national_discharge_valid_times(
             "given would serve one source's times under another's request."
         )
     sample_limit = max(0, limit)
+    if source is not None and cycle is not None:
+        # Intersection-scoped, like `national_discharge_cycles`: a cycle the
+        # catalog refuses to list must not get times from this endpoint either.
+        # The canonical national tile route (#2153) refuses through the same
+        # helper, so the timeline and the tile cannot disagree on "complete".
+        coverage = national_discharge_cycle_coverage(session, source=source, cycle=cycle)
+        if not coverage.complete:
+            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+        return _national_cycle_valid_times(coverage.rows, cycle=cycle, limit=sample_limit)
+
     # `since=None` on BOTH branches, deliberately: the cycle-dimension bound belongs
     # to `national_discharge_cycles` alone. The per-cycle branch is already pinned to
     # one cycle by `:cycle`, and the no-argument branch must keep including a network
     # whose newest display-ready run is older than the window -- dropping it would
     # shrink the intersection and change a result master publishes today.
-    rows, active_networks = _national_discharge_coverage_rows(
-        session, source=source, cycle=cycle, since=None
-    )
-
-    if cycle is not None:
-        # Intersection-scoped, like `national_discharge_cycles`: a cycle the
-        # catalog refuses to list must not get times from this endpoint either.
-        # SETS, not cardinalities, the second site of the `national_discharge_cycles`
-        # rule: equal counts with different members is the fail-open case (matrix 40b).
-        covered_networks = frozenset(row["river_network_version_id"] for row in rows)
-        if covered_networks != active_networks:
-            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-        return _national_cycle_valid_times(rows, cycle=cycle, limit=sample_limit)
+    rows, _active_networks = _national_discharge_coverage_rows(session, source=None, cycle=None, since=None)
 
     latest_by_network: dict[Any, Mapping[str, Any]] = {}
     for row in rows:
@@ -2205,6 +2203,38 @@ def national_discharge_cycles(
         "cycles": cycles,
         "default_cycle": cycles[0]["cycle_time"] if cycles else None,
     }
+
+
+@dataclass(frozen=True)
+class NationalCycleCoverage:
+    """One ``(source, cycle)`` identity's coverage rows and the two network sets they are judged by."""
+
+    rows: list[Mapping[str, Any]]
+    covered_networks: frozenset[str]
+    active_networks: frozenset[str]
+
+    @property
+    def complete(self) -> bool:
+        # SETS, not cardinalities, the `national_discharge_cycles` rule: equal
+        # counts with different members is the fail-open case (matrix 40b).
+        return self.covered_networks == self.active_networks
+
+
+def national_discharge_cycle_coverage(session: Session, *, source: str, cycle: datetime) -> NationalCycleCoverage:
+    """The single owner of "is this ``(source, cycle)`` covered by every active network".
+
+    Read by ``national_discharge_valid_times``' per-cycle branch and by the
+    canonical national tile route (#2153), so the timeline a client is offered and
+    the tile it then requests apply one rule. ``since=None``: the identity is
+    already pinned to one cycle, and the lookback belongs to
+    ``national_discharge_cycles`` alone.
+    """
+    rows, active_networks = _national_discharge_coverage_rows(session, source=source, cycle=cycle, since=None)
+    return NationalCycleCoverage(
+        rows=rows,
+        covered_networks=frozenset(row["river_network_version_id"] for row in rows),
+        active_networks=active_networks,
+    )
 
 
 def _national_discharge_coverage_rows(
