@@ -1,0 +1,11 @@
+Mon Sep 14 06:33:56 PM UTC 2026
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   74G   20G  79% /
+/dev/mapper/ubuntu--vg-home        1.7T  482G  1.1T  31% /home
+/dev/md0                            15T  1.4T   13T  11% /data/GHDC
+a8db554d6402bec642e9a05627eae64b2b79aec3
+NextElapseUSecRealtime=Tue 2026-09-15 12:25:00 CST
+Id=nhms-node27-timeseries-compression.timer
+
+NextElapseUSecRealtime=Tue 2026-09-15 13:15:00 CST
+Id=nhms-node27-timeseries-retention.timer

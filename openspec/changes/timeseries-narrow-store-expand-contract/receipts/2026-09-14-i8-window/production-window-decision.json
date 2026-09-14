@@ -1,0 +1,26 @@
+{
+  "owner": "Danker",
+  "executor": "Main",
+  "authority": "Existing conditional production window approval plus subsequent user instruction: 尽快完成I8，后续需要我决策的，按照你的推荐实施",
+  "prerequisites": {
+    "2324": "merged2335",
+    "2325": "merged2350",
+    "2349": "merged2367",
+    "prepared_state": "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare"
+  },
+  "operation": "one reviewed window invocation --go Danker; then owned governance unstage",
+  "bounds": "existing executor:30min window,10min outage restoration guard,automatic reviewed recovery on forward failure",
+  "preserve": [
+    "foreign holds/pins",
+    "node22",
+    "physical PGDATA placement",
+    "failed prepare states",
+    "legacy facts and source artifacts"
+  ],
+  "baseline_limits": [
+    "legacy SHJ API p95~1.19s",
+    "QHH authoritative fallback analyze timeout15s with estimated plan preserved; not PASS",
+    "small performance baseline uses latest retained Aug24 pin, not Aug19 isolated qualification pin"
+  ],
+  "no_acceptance_waiver": true
+}

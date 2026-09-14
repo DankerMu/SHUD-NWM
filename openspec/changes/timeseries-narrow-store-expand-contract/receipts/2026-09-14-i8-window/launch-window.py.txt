@@ -1,0 +1,58 @@
+"""Actual fresh prepare only. Credentials remain in memory/environment; no T0 or recovery."""
+
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+ACTIVE = Path("/home/nwm/NWM")
+TARGET = Path("/home/nwm/NWM-i8-target-415cbd1e")
+TARGET_SHA = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+OLD_SHA = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+GOV_STATE = Path("/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json")
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def role_url(name, user):
+    path = ACTIVE / "infra/env" / name
+    assert not path.is_symlink() and path.stat().st_uid == 1005 and path.stat().st_mode & 0o777 == 0o600
+    values = []
+    for line in path.read_text().splitlines():
+        if line.strip().startswith("DATABASE_URL="):
+            values.extend(shlex.split(line.strip().split("=", 1)[1], comments=True))
+    assert len(values) == 1
+    value = values[0]
+    parsed = urllib.parse.urlsplit(value)
+    assert (parsed.username, parsed.hostname, parsed.port, parsed.path) == (user, "127.0.0.1", 55432, "/nhms")
+    return value
+
+
+
+def main():
+ os.umask(0o077)
+ root=Path('/home/nwm/.local/state/issue1987-window-415-20260914')
+ root.mkdir(mode=0o700)
+ state=Path('/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare')
+ source=Path('/home/nwm/.local/state/issue1987-tools/92a5b4350992e130e6191d35162817d73c1e6454/window_execute.py')
+ assert digest(source)=='a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5'
+ saved=json.loads((state/'state.json').read_text());assert saved['phase']=='PREPARED'
+ env={k:v for k,v in os.environ.items() if not k.startswith('PG') and k not in {'PYTHONPATH','PYTHONHOME','UV_PROJECT_ENVIRONMENT','VIRTUAL_ENV','NODE27_INGEST_RW_PASSWORD','NODE27_DOWNLOAD_RW_PASSWORD'}}
+ env.update(PATH='/home/nwm/.local/bin:/usr/local/bin:/usr/bin:/bin',TMPDIR='/home/nwm/tmp',PYTHONNOUSERSITE='1',DATABASE_URL=role_url('node27-timeseries-compression-replay.env','nhms'),I8_INGEST_DSN=role_url('node27-ingest.env','nhms_ingest_rw'),I8_DISPLAY_DSN=role_url('display.env','nhms_display_ro'))
+ cmd=[str(TARGET/'.venv/bin/python'),'-B',str(source),'window','--state',str(state),'--go','Danker']
+ with (root/'window.stdout').open('xb') as out,(root/'window.stderr').open('xb') as err:
+  process=subprocess.Popen(cmd,cwd='/home/nwm',env=env,stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True)
+ with (root/'process.json').open('x') as stream:json.dump({'pid':process.pid,'command':cmd,'state':str(state),'source_sha256':digest(source),'credentials_persisted':False},stream,indent=2)
+ rc=process.wait()
+ final=json.loads((state/'state.json').read_text())
+ result={'exit':rc,'phase':final.get('phase'),'state':str(state),'active_head':subprocess.check_output(['git','-C',str(ACTIVE),'rev-parse','HEAD'],text=True).strip(),'t0':final.get('t0'),'remaining':final.get('remaining'),'stdout_sha256':digest(root/'window.stdout'),'stderr_sha256':digest(root/'window.stderr')}
+ with (root/'result.json').open('x') as stream:json.dump(result,stream,indent=2)
+ print(json.dumps(result),flush=True)
+ return rc
+if __name__=='__main__':raise SystemExit(main())
