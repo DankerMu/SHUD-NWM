@@ -1,0 +1,12 @@
+{
+  "old_manifest_refused": "MANIFEST_SCHEMA",
+  "semantic_scan_drift_refused": "PGOPTIONS_DRIFT",
+  "private_drift_refused": "PROTECTED_HASH_DRIFT",
+  "no_partial_delete_on_drift": true,
+  "cleanup_removed_only_two_private_envs": true,
+  "historical_receipt_and_manifest_preserved": true,
+  "protected_bytes_unchanged": true,
+  "preflight": "real frozen-OLD paired preflight, synthetic credential-free envs; no runner",
+  "system_boundaries": "git identity and unit inspection substituted; UID/filesystem/preflight real",
+  "assembly": "6300,3901,10242,6000000,3600000,1"
+}

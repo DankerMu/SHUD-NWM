@@ -1,0 +1,12 @@
+{
+  "postgres": {
+    "exit": 0,
+    "stdout": "{\"compression_gucs\" : { \"timescaledb.enable_compression_indexscan\" : \"on\", \"timescaledb.enable_transparent_decompression\" : \"on\" }, \"indexes\" : [\"CREATE UNIQUE INDEX \\\"107_230_river_timeseries_pkey\\\" ON _timescaledb_internal._hyper_3_107_chunk USING btree (run_id, river_network_version_id, river_segment_id, variable, valid_time)\", \"CREATE INDEX _hyper_3_107_chunk_river_timeseries_valid_time_idx ON _timescaledb_internal._hyper_3_107_chunk USING btree (valid_time DESC)\", \"CREATE INDEX _hyper_3_107_chunk_river_ts_segment_time_idx ON _timescaledb_internal._hyper_3_107_chunk USING btree (river_segment_id, variable, valid_time DESC)\", \"CREATE INDEX _hyper_3_107_chunk_river_timeseries_mvt_selected_identity_valid ON _timescaledb_internal._hyper_3_107_chunk USING btree (run_id, basin_version_id, river_network_version_id, variable, valid_time DESC)\", \"CREATE INDEX _hyper_3_107_chunk_river_ts_selected_identity_key_valid_time_id ON _timescaledb_internal._hyper_3_107_chunk USING btree (run_key, basin_version_key, river_network_version_key, variable_e, valid_time DESC)\"], \"correlation\" : [{\"attname\":\"run_id\",\"correlation\":0.5171444}, \n {\"attname\":\"river_network_version_id\",\"correlation\":0.03174088}, \n {\"attname\":\"river_segment_id\",\"correlation\":-0.008594023}, \n {\"attname\":\"valid_time\",\"correlation\":0.69531417}, \n {\"attname\":\"variable\",\"correlation\":1}]}\n",
+    "stderr": ""
+  },
+  "mdstat": {
+    "exit": 0,
+    "stdout": "Personalities : [raid1] [linear] [multipath] [raid0] [raid6] [raid5] [raid4] [raid10] \nmd0 : active raid1 sdc1[0] sdd1[1]\n      15625745408 blocks super 1.2 [2/2] [UU]\n      bitmap: 0/117 pages [0KB], 65536KB chunk\n\nunused devices: <none>\n",
+    "stderr": ""
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "{\"existing_destination\": {\"error\": \"OUTPUT_EXISTS\", \"error_path\": \"/home/nwm/.local/state/issue2349-catchup-exists-smoke-f53181cd\", \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}, \"wrong_head\": {\"error\": \"GIT_HEAD_MISMATCH\", \"error_path\": null, \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}, \"existing_sentinel_preserved\": true, \"timer_refusal_created_no_root\": true, \"wrong_head_created_no_root\": true, \"wrong_head_seam\": \"only git rev-parse output substituted; production source unchanged\", \"smoke_owned_files_removed\": true}\n",
+  "stderr": ""
+}

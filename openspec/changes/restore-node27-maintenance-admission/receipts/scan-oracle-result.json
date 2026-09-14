@@ -1,0 +1,49 @@
+{
+  "result": "PASS",
+  "container": "nwm-i8-1987-window-volume-6fb30b552",
+  "container_id": "a3b94458fbf20d57529f47add0d125529358ba7f7b6de603d7b2ce7f1bd512a1",
+  "database": "issue2349_scan_f53181cd",
+  "timescaledb": "2.10.2",
+  "rows_per_case": 200000,
+  "cases": [
+    {
+      "mode": "on",
+      "elapsed_seconds": 0.9298901199363172,
+      "before": {
+        "rows": 200000,
+        "sha": "75d8bfe99d051fbe7d4881092adc03d5"
+      },
+      "after": {
+        "rows": 200000,
+        "sha": "75d8bfe99d051fbe7d4881092adc03d5"
+      },
+      "chunks": {
+        "total": 1,
+        "compressed": 1
+      },
+      "sql_output": "SET\non\n_timescaledb_internal._hyper_1_1_chunk\n"
+    },
+    {
+      "mode": "off",
+      "elapsed_seconds": 1.685394347179681,
+      "before": {
+        "rows": 200000,
+        "sha": "75d8bfe99d051fbe7d4881092adc03d5"
+      },
+      "after": {
+        "rows": 200000,
+        "sha": "75d8bfe99d051fbe7d4881092adc03d5"
+      },
+      "chunks": {
+        "total": 1,
+        "compressed": 1
+      },
+      "sql_output": "SET\noff\n_timescaledb_internal._hyper_3_2_chunk\n"
+    }
+  ],
+  "global_setting_unchanged": true,
+  "owned_database_dropped": true,
+  "primary_touched": false,
+  "timing_scope": "small-data correctness/control only; not representative of billion-row production throughput",
+  "fingerprint_algorithm": "MD5; raw before/after key named sha in the executed smoke driver"
+}

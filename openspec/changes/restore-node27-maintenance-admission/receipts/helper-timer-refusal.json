@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "{\"error\": \"TIMER_ACTIVE\", \"error_path\": \"nhms-node27-timeseries-compression.timer\", \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}\n",
+  "stderr": ""
+}

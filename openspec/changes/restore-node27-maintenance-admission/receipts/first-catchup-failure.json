@@ -1,0 +1,94 @@
+{
+  "unit": {
+    "exit": 0,
+    "stdout": "MainPID=0\nResult=exit-code\nExecMainStatus=1\nId=nhms-issue2349-catchup-f53181cd-20260914.service\nActiveState=failed\nSubState=failed\n",
+    "stderr": ""
+  },
+  "receipt": {
+    "schema_version": "2.1",
+    "head_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "generated_at": "2026-09-14T10:42:52.881748Z",
+    "now_utc": "2026-09-13T12:00:00Z",
+    "mode": "enforce",
+    "outcome": "partial",
+    "budget": {
+      "cleanup_margin_seconds": 300,
+      "compress_timeout_ms": 6000000,
+      "systemd_wall_seconds": 10242,
+      "wrapper_wall_seconds": 6300
+    },
+    "per_tick_bound": 1,
+    "selected": [
+      {
+        "after_bytes": null,
+        "before_bytes": 643948429312,
+        "chunk_name": "_hyper_3_107_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "error": "compress_chunk before mutation failed (QueryCanceled)",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "mutation_state": "failed_before_mutation",
+        "range_end": "2026-09-10T00:00:00Z",
+        "range_start": "2026-09-03T00:00:00Z"
+      }
+    ],
+    "deferred": [],
+    "per_table_totals": {
+      "hydro.river_timeseries": {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunks_compressed": 0
+      },
+      "met.forcing_station_timeseries": {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunks_compressed": 0
+      }
+    },
+    "failure": null
+  },
+  "catalog": {
+    "hypertable_schema": "hydro",
+    "hypertable_name": "river_timeseries",
+    "chunk_schema": "_timescaledb_internal",
+    "chunk_name": "_hyper_3_107_chunk",
+    "range_start": "2026-09-03T00:00:00+00:00",
+    "range_end": "2026-09-10T00:00:00+00:00",
+    "is_compressed": false,
+    "status": 0,
+    "compressed_chunk_id": null,
+    "bytes": 643948429312
+  },
+  "cleanup": {
+    "exit": 0,
+    "stdout": "{\"digests\": {\"manifest\": \"e4b568b2fcde71d2ee2a956e2b3bcb3b32cd660edbe58c2d47f4baa2ef69d838\", \"original_cold_env\": \"1e2088cd1ab851ff56973950b6d00e36cfbb74fbf5d498978f0c747872bb795a\", \"original_compression_env\": \"3add1339c62fb9243c307e0da1cf0f5e4db1884a6c298788f5a9d291b4673354\", \"private_scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\", \"retention_receipt\": \"8d4db2890731c666afa462e39ab080e87c6cb52acd4965112d94518dd77fb9e2\", \"scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\"}, \"error\": null, \"error_path\": null, \"operation\": \"cleanup\", \"outcome\": \"CLEANED\", \"removed\": [\"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-timeseries-compression.env\", \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-cold-residency.env\"], \"retained\": [\"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/manifest.json\", \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/scheduled-receipt.json\", \"/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json\", \"/home/nwm/node27-timeseries-retention-logs/retention-20260913T051532Z.json\", \"/home/nwm/NWM/infra/env/node27-timeseries-compression.env\", \"/home/nwm/NWM/infra/env/node27-cold-residency.env\"], \"root\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914\", \"schema_version\": \"issue2349.catchup.cleanup.v1\", \"transient_unit\": \"nhms-issue2349-catchup-f53181cd-20260914.service\"}\n",
+    "stderr": ""
+  },
+  "retention_recovery": {
+    "path": "/home/nwm/node27-timeseries-retention-logs/retention-20260914T104952Z.json",
+    "receipt": {
+      "archive_gate": {
+        "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+        "mode": "disabled"
+      },
+      "cutoff": "2026-08-23T12:00:00Z",
+      "deferred_remainder": [],
+      "dropped_chunks": [],
+      "generated_at": "2026-09-14T10:49:52.388620Z",
+      "mode": "enforce",
+      "outcome": "enforced",
+      "reference_time": "2026-09-13T12:00:00Z",
+      "salvage_backed_windows": [],
+      "schema_version": "1.1",
+      "window_days": 21
+    }
+  },
+  "retention_unit": {
+    "exit": 0,
+    "stdout": "MainPID=0\nResult=success\nExecMainStartTimestamp=Mon 2026-09-14 18:49:52 CST\nExecMainStatus=0\nId=nhms-node27-timeseries-retention.service\nActiveState=inactive\nSubState=dead\n",
+    "stderr": ""
+  },
+  "local_transport_exit": 255,
+  "transport_note": "Owned SSH systemd-run --wait client was closed only after remote unit failed with status1 and no compression backend remained;255 is not the compression outcome.",
+  "next_attempt_requires_separate_approval": true
+}

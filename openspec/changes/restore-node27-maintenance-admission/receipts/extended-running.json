@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "TimeoutStartUSec=7h 10min 42s\nRuntimeMaxUSec=7h 10min 42s\nMainPID=1903\nResult=success\nExecMainStartTimestamp=Mon 2026-09-14 22:01:14 CST\nExecMainStatus=0\nId=nhms-issue2349-catchup-5f51312f-extended-20260914.service\nActiveState=active\nSubState=running\n",
+  "stderr": ""
+}

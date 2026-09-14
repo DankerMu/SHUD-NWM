@@ -1,0 +1,6 @@
+{
+  "url": "http://127.0.0.1:8080/api/v1/tiles/hydro-national/q_down/2026-09-13T12%3A00%3A00Z/4/12/6.pbf",
+  "exit": 0,
+  "stdout": "200 0.045945\n",
+  "stderr": ""
+}

@@ -1,0 +1,50 @@
+import os,json,hashlib,importlib.util
+from pathlib import Path
+os.umask(0o077)
+helper=Path('/home/nwm/.local/state/issue2349-tools/bb2db64cc22c4cb742c3b539d8ad8e23a0531751/prepare_catchup.py')
+assert hashlib.sha256(helper.read_bytes()).hexdigest()=='aa6fe2dfefac58e00d1980f4e2f13339fb7e224d3eff7787b3564762f28f2d24'
+spec=importlib.util.spec_from_file_location('helper_smoke',helper);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+base=Path('/home/nwm/.local/state/issue2349-cleanup-smoke-bb2db64c');base.mkdir(mode=0o700,exist_ok=True)
+prod=base/'production';prod.mkdir(mode=0o700,exist_ok=True);state_parent=base/'state';state_parent.mkdir(mode=0o700,exist_ok=True);units=base/'units';units.mkdir(mode=0o700,exist_ok=True)
+pin_dir=units/(m.GOVERNANCE_SERVICE+'.d');pin_dir.mkdir(mode=0o700,exist_ok=True);pin=pin_dir/m.PIN_NAME;pin.write_bytes(b'fixture-pin')
+comp=prod/'compression.env';cold=prod/'cold.env';comp.write_bytes(b'DATABASE_URL=postgresql://fixture@127.0.0.1/fixture\nNODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4\n');cold.write_bytes(b'# no cold activation\n')
+gov=base/'state.json';gov.write_text(json.dumps({'phase':'staged','identity':{'runtime_root':m.GOVERNANCE_RUNTIME,'unit_root':str(units)},'pin_digest':hashlib.sha256(pin.read_bytes()).hexdigest()}))
+ret=base/'retention.json';ret.write_bytes(b'prior-retention-receipt');sched=base/'scheduled.json';sched.write_bytes(b'prior-compression-receipt')
+m.PRODUCTION=prod;m.STATE_PARENT=state_parent;m.COMPRESSION_ENV=comp;m.COLD_ENV=cold;m.GOVERNANCE_STATE=gov;m.RETENTION_RECEIPT=ret;m.RETENTION_SHA=hashlib.sha256(ret.read_bytes()).hexdigest();m.SCHEDULED_RECEIPT=sched;m.SCHEDULED_SHA=hashlib.sha256(sched.read_bytes()).hexdigest()
+m.git=lambda *args:m.OLD if args==('rev-parse','HEAD') else ''
+def show(unit,*args,**kwargs):
+ return {'Id':unit,'LoadState':'loaded','ActiveState':'inactive','SubState':'dead',**({'MainPID':'0'} if unit.endswith('.service') else {})}
+m.systemctl_show=show
+originals={p: p.read_bytes() for p in (comp,cold,gov,pin,ret,sched)}
+root=state_parent/'issue2349-catchup-cleanup-fixture'
+prepared=m.prepare(root);c=root/m.PRIVATE_COMPRESSION_NAME;k=root/m.PRIVATE_COLD_NAME;original=c.read_bytes()
+manifest_path=root/m.MANIFEST_NAME;manifest_bytes=manifest_path.read_bytes()
+old=json.loads(manifest_bytes);old['schema_version']='issue2349.catchup.prepare.v1';manifest_path.write_text(json.dumps(old))
+try:m.check(root)
+except m.Refusal as e:assert str(e)=='MANIFEST_SCHEMA';old_refusal=str(e)
+else:raise AssertionError('old manifest accepted')
+manifest_path.write_bytes(manifest_bytes)
+tampered=original.replace(b'timescaledb.enable_compression_indexscan=off',b'timescaledb.enable_compression_indexscan=on')
+assert tampered!=original;c.write_bytes(tampered)
+changed=json.loads(manifest_bytes);payload,ident=m.read_regular(c,max_bytes=m.MAX_ENV_BYTES,private=True)
+changed['private']['compression_env']['sha256']=hashlib.sha256(payload).hexdigest();changed['private']['compression_env']['identity']=ident
+manifest_path.write_text(json.dumps(changed))
+try:m.check(root)
+except m.Refusal as e:assert str(e)=='PGOPTIONS_DRIFT';scan_refusal=str(e)
+else:raise AssertionError('claimed-off manifest accepted actual-on private env')
+assert c.exists() and k.exists();c.write_bytes(original);manifest_path.write_bytes(manifest_bytes)
+c.write_bytes(original+b'# drift\n')
+try:m.cleanup(root)
+except m.Refusal as e: assert str(e)=='PROTECTED_HASH_DRIFT';refusal=str(e)
+else:raise AssertionError('cleanup accepted private drift')
+assert c.exists() and k.exists()
+c.write_bytes(original)
+checked=m.check(root);cleaned=m.cleanup(root)
+assert not c.exists() and not k.exists()
+assert (root/m.MANIFEST_NAME).exists() and (root/m.PRIVATE_RECEIPT_NAME).read_bytes()==sched.read_bytes()
+assert all(p.read_bytes()==data for p,data in originals.items())
+print(json.dumps({'old_manifest_refused':old_refusal,'semantic_scan_drift_refused':scan_refusal,'private_drift_refused':refusal,'no_partial_delete_on_drift':True,'cleanup_removed_only_two_private_envs':True,'historical_receipt_and_manifest_preserved':True,'protected_bytes_unchanged':True,'preflight':'real frozen-OLD paired preflight, synthetic credential-free envs; no runner','system_boundaries':'git identity and unit inspection substituted; UID/filesystem/preflight real','assembly':prepared['budget']['assembly']}))
+for p in (root/m.MANIFEST_NAME,root/m.PRIVATE_RECEIPT_NAME):p.unlink()
+root.rmdir()
+for p in originals:p.unlink()
+pin_dir.rmdir();units.rmdir();prod.rmdir();state_parent.rmdir();base.rmdir()

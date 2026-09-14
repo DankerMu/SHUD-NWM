@@ -1,0 +1,26 @@
+{
+  "outcome": "clean",
+  "mutation_state": "committed",
+  "chunk": "_hyper_3_107_chunk",
+  "started_at": "2026-09-14T14:01:14Z",
+  "completed_at": "2026-09-14T17:18:46Z",
+  "elapsed_seconds": 11851.564053,
+  "before_bytes": 643948429312,
+  "after_bytes": 29959569408,
+  "catalog_is_compressed": true,
+  "cleanup": "CLEANED; removed only two private envs; protected digests unchanged",
+  "original_compression": {
+    "result": "success",
+    "status": 0,
+    "receipt_generated_at": "2026-09-14T17:24:14.473882Z",
+    "outcome": "clean",
+    "selected": [],
+    "default_budget_restored": true
+  },
+  "timers": {
+    "compression": "active",
+    "retention": "active"
+  },
+  "fresh_prepare": "failed COMMAND_FAILED; staged imports nhms TCP password authentication failure; no T0",
+  "credential_probe": "container POSTGRES_PASSWORD fails independent host TCP connection"
+}

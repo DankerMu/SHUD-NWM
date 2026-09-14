@@ -1,0 +1,145 @@
+{
+  "helper_commit": "f53181cd46dccfc3b8eed4cc1ede1af8099d8113",
+  "helper_sha256": "1c70d8629c6250ce2d2d4300a8e4e2fa88b7e27626338616e43158e57e4c4b12",
+  "phase": "first_attempt_failed_and_owned_copies_cleaned",
+  "local_ruff": "PASS",
+  "fixture_review": "RecoveryFixtureReview PASS",
+  "strict_openspec": "PASS",
+  "dry_receipt": {
+    "schema_version": "2.1",
+    "head_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "generated_at": "2026-09-14T09:01:42.248084Z",
+    "now_utc": "2026-09-13T12:00:00Z",
+    "mode": "dry-run",
+    "outcome": "clean",
+    "budget": {
+      "cleanup_margin_seconds": 300,
+      "compress_timeout_ms": 6000000,
+      "systemd_wall_seconds": 10242,
+      "wrapper_wall_seconds": 6300
+    },
+    "per_tick_bound": 1,
+    "selected": [
+      {
+        "after_bytes": null,
+        "before_bytes": 643948429312,
+        "chunk_name": "_hyper_3_107_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "mutation_state": "not_applicable",
+        "range_end": "2026-09-10T00:00:00Z",
+        "range_start": "2026-09-03T00:00:00Z"
+      }
+    ],
+    "deferred": [],
+    "skipped": [
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_110_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_3_113_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_109_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-17T00:00:00Z",
+        "range_start": "2026-09-10T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      },
+      {
+        "after_bytes": null,
+        "before_bytes": 0,
+        "chunk_name": "_hyper_1_112_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "range_end": "2026-09-24T00:00:00Z",
+        "range_start": "2026-09-17T00:00:00Z",
+        "skip_reason": "range_end inside lag window"
+      }
+    ]
+  },
+  "live_unit": {
+    "exit": 0,
+    "stdout": "TimeoutStartUSec=2h 50min 42s\nRuntimeMaxUSec=2h 50min 42s\nMainPID=3881507\nResult=success\nExecMainStartTimestamp=Mon 2026-09-14 17:02:51 CST\nExecMainStatus=0\nId=nhms-issue2349-catchup-f53181cd-20260914.service\nLoadState=loaded\nActiveState=active\nSubState=running\n",
+    "stderr": ""
+  },
+  "live_backend": {
+    "exit": 0,
+    "stdout": "[{\"pid\":78398,\"usename\":\"nhms_ingest_rw\",\"application_name\":\"nhms-ts-compression\",\"state\":\"active\",\"wait_event_type\":\"IO\",\"wait_event\":\"DataFileRead\",\"query_start\":\"2026-09-14T09:02:51.692367+00:00\",\"backend_start\":\"2026-09-14T09:02:51.673621+00:00\",\"query\":\"SELECT compress_chunk('_timescaledb_internal._hyper_3_107_chunk'::regclass)\"}]\n",
+    "stderr": ""
+  },
+  "checks": {
+    "timer_refusal": {
+      "exit": 1,
+      "stdout": "{\"error\": \"TIMER_ACTIVE\", \"error_path\": \"nhms-node27-timeseries-compression.timer\", \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}\n",
+      "stderr": ""
+    },
+    "boundary_smoke": {
+      "exit": 0,
+      "stdout": "{\"existing_destination\": {\"error\": \"OUTPUT_EXISTS\", \"error_path\": \"/home/nwm/.local/state/issue2349-catchup-exists-smoke-f53181cd\", \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}, \"wrong_head\": {\"error\": \"GIT_HEAD_MISMATCH\", \"error_path\": null, \"operation\": \"prepare\", \"outcome\": \"REFUSED\", \"schema_version\": \"issue2349.catchup.helper.v1\"}, \"existing_sentinel_preserved\": true, \"timer_refusal_created_no_root\": true, \"wrong_head_created_no_root\": true, \"wrong_head_seam\": \"only git rev-parse output substituted; production source unchanged\", \"smoke_owned_files_removed\": true}\n",
+      "stderr": ""
+    },
+    "private_prepare": {
+      "exit": 0,
+      "stdout": "{\"budget\": {\"assembly\": \"6300,3901,10242,6000000,3600000,1\", \"cold_wrapper_wall_seconds\": 3901, \"compression_per_tick_bound\": 1, \"compression_statement_timeout_ms\": 6000000, \"compression_wrapper_wall_seconds\": 6300, \"service_wall_seconds\": 10242}, \"digests\": {\"governance_pin\": \"da33e7315a4a5415ed02bef5bf1bddfb8cd1a2b79d2939651075eadb93d1cb5f\", \"governance_state\": \"b8008c874a450c6b20607c044dd9f99e68be18547266ecf85cad5d2e953b7d04\", \"manifest\": \"e4b568b2fcde71d2ee2a956e2b3bcb3b32cd660edbe58c2d47f4baa2ef69d838\", \"original_cold_env\": \"1e2088cd1ab851ff56973950b6d00e36cfbb74fbf5d498978f0c747872bb795a\", \"original_compression_env\": \"3add1339c62fb9243c307e0da1cf0f5e4db1884a6c298788f5a9d291b4673354\", \"private_cold_env\": \"b1b803c129c73702d790345c259701665ed5c9199068114c91eea23ddd7fc7f7\", \"private_compression_env\": \"67cba2d137c7ea6f160148b3f6bc2e9c8615f47cd82cd2aaafbf18bb52ca8495\", \"private_scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\", \"retention_receipt\": \"8d4db2890731c666afa462e39ab080e87c6cb52acd4965112d94518dd77fb9e2\", \"scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\"}, \"error\": null, \"error_path\": null, \"operation\": \"prepare\", \"outcome\": \"PREPARED\", \"paths\": {\"governance_pin\": \"/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/70-issue1987-governance-reviewed-source.conf\", \"governance_state\": \"/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json\", \"original_cold_env\": \"/home/nwm/NWM/infra/env/node27-cold-residency.env\", \"original_compression_env\": \"/home/nwm/NWM/infra/env/node27-timeseries-compression.env\", \"private_cold_env\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-cold-residency.env\", \"private_compression_env\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-timeseries-compression.env\", \"private_scheduled_receipt\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/scheduled-receipt.json\", \"retention_receipt\": \"/home/nwm/node27-timeseries-retention-logs/retention-20260913T051532Z.json\", \"scheduled_receipt\": \"/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json\"}, \"root\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914\", \"schema_version\": \"issue2349.catchup.prepare.v1\", \"source_head\": \"a8db554d6402bec642e9a05627eae64b2b79aec3\", \"transient_unit\": \"nhms-issue2349-catchup-f53181cd-20260914.service\"}\n",
+      "stderr": ""
+    },
+    "pre_enforce_check": {
+      "exit": 0,
+      "stdout": "{\"budget\": {\"assembly\": \"6300,3901,10242,6000000,3600000,1\", \"cold_wrapper_wall_seconds\": 3901, \"compression_per_tick_bound\": 1, \"compression_statement_timeout_ms\": 6000000, \"compression_wrapper_wall_seconds\": 6300, \"service_wall_seconds\": 10242}, \"digests\": {\"governance_pin\": \"da33e7315a4a5415ed02bef5bf1bddfb8cd1a2b79d2939651075eadb93d1cb5f\", \"governance_state\": \"b8008c874a450c6b20607c044dd9f99e68be18547266ecf85cad5d2e953b7d04\", \"manifest\": \"e4b568b2fcde71d2ee2a956e2b3bcb3b32cd660edbe58c2d47f4baa2ef69d838\", \"original_cold_env\": \"1e2088cd1ab851ff56973950b6d00e36cfbb74fbf5d498978f0c747872bb795a\", \"original_compression_env\": \"3add1339c62fb9243c307e0da1cf0f5e4db1884a6c298788f5a9d291b4673354\", \"private_cold_env\": \"b1b803c129c73702d790345c259701665ed5c9199068114c91eea23ddd7fc7f7\", \"private_compression_env\": \"67cba2d137c7ea6f160148b3f6bc2e9c8615f47cd82cd2aaafbf18bb52ca8495\", \"private_scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\", \"retention_receipt\": \"8d4db2890731c666afa462e39ab080e87c6cb52acd4965112d94518dd77fb9e2\", \"scheduled_receipt\": \"a3df33cf1d9a421ecb3e16d0f0ad3184cf11c62cdab8c7764face3e20ddd0ae3\"}, \"error\": null, \"error_path\": null, \"operation\": \"check\", \"outcome\": \"CHECK_OK\", \"paths\": {\"governance_pin\": \"/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service.d/70-issue1987-governance-reviewed-source.conf\", \"governance_state\": \"/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json\", \"original_cold_env\": \"/home/nwm/NWM/infra/env/node27-cold-residency.env\", \"original_compression_env\": \"/home/nwm/NWM/infra/env/node27-timeseries-compression.env\", \"private_cold_env\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-cold-residency.env\", \"private_compression_env\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/node27-timeseries-compression.env\", \"private_scheduled_receipt\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/scheduled-receipt.json\", \"retention_receipt\": \"/home/nwm/node27-timeseries-retention-logs/retention-20260913T051532Z.json\", \"scheduled_receipt\": \"/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json\"}, \"root\": \"/home/nwm/.local/state/issue2349-catchup-f53181cd-20260914\", \"schema_version\": \"issue2349.catchup.check.v1\", \"source_head\": \"a8db554d6402bec642e9a05627eae64b2b79aec3\", \"transient_unit\": \"nhms-issue2349-catchup-f53181cd-20260914.service\"}\n",
+      "stderr": ""
+    },
+    "cleanup_smoke": {
+      "exit": 0,
+      "stdout": "{\"private_drift_refused\": \"PROTECTED_HASH_DRIFT\", \"no_partial_delete_on_drift\": true, \"cleanup_removed_only_two_private_envs\": true, \"historical_receipt_and_manifest_preserved\": true, \"protected_bytes_unchanged\": true, \"preflight\": \"real frozen-OLD paired preflight, synthetic credential-free envs; no runner\", \"system_boundaries\": \"git identity and unit inspection substituted; UID/filesystem/preflight real\", \"assembly\": \"6300,3901,10242,6000000,3600000,1\"}\n",
+      "stderr": ""
+    }
+  },
+  "deviations": [
+    {
+      "what": "Timer-unit property expectation repaired before publication",
+      "why": "Actual timer show omits service-only MainPID; services still require it.",
+      "proof": "helper-systemctl-contract-probe.json"
+    },
+    {
+      "what": "Cleanup smoke adapter arity corrected",
+      "why": "Test boundary substitution initially accepted one positional argument while helper passes property tuple. Helper unchanged.",
+      "proof": "helper-cleanup-smoke.json -> helper-cleanup-smoke-confirmed.json"
+    }
+  ],
+  "lock_guidance": {
+    "code": "RETENTION_CONCURRENT_INVOCATION",
+    "carriers": [
+      "/tmp/nhms-node27-timeseries-lifecycle.lock",
+      "/tmp/nhms-node27-timeseries-retention.lock"
+    ],
+    "recovery": "Do not unlink either as a flock recovery action. Identify the live holder; process exit releases its lock. An unheld own-lock file does not block acquisition. Shared lifecycle lock must never be deleted."
+  },
+  "actual_live_cleanup_pending": false,
+  "actual_catchup_result_pending": false,
+  "no_T0": true,
+  "terminal_receipt": "first-catchup-failure.json",
+  "outcome": "partial/failed_before_mutation; not a maintenance recovery pass"
+}

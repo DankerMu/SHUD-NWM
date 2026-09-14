@@ -1,0 +1,12 @@
+{
+  "timer": {
+    "exit": 0,
+    "stdout": "Id=nhms-node27-timeseries-compression.timer\nLoadState=loaded\nActiveState=active\nSubState=waiting\n",
+    "stderr": ""
+  },
+  "absent_unit": {
+    "exit": 0,
+    "stdout": "MainPID=0\nId=nhms-issue2349-catchup-probe-20260914.service\nLoadState=not-found\nActiveState=inactive\nSubState=dead\n",
+    "stderr": ""
+  }
+}
