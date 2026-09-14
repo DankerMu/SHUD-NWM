@@ -515,7 +515,9 @@ def evaluate_canonical_readiness(
                     "required_variable_count": len(required_for_lead),
                 }
             )
-    identity_mismatch = bool(
+    # Zero candidate rows have no identity to disagree with: a fresh cycle reports
+    # missing variables/leads, never canonical_identity_mismatch (#2042).
+    identity_mismatch = bool(cycle_rows) and bool(
         (expected_policy_id and not policy_identities) or (expected_object_id and not object_identities)
         or (identity_rejected_row_count and (missing_variables or missing_leads))
     )

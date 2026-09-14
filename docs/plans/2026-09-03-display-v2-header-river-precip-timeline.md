@@ -95,6 +95,7 @@
   - 复用 `_copyback_object_tree_with_rollback` 的 temp-tree + rollback
   - 幂等（目标已存在且大小一致则跳过）
   - 缺源文件 fail loudly 但**不阻塞** q_down 发布（降水是展示附属，写 lineage 记录失败）。
+  > Supersession（追加指针，原文保留）：本条及其子条的触发点「q_down publish 成功后镜像」与「写 lineage 记录失败」已被取代——镜像挂在 orchestrator `convert` 终态 hook（在该入口 cycle 状态写入之后），失败 fail-open 记 `canonical_precip_mirror` pipeline_event receipt，并由 `_run_cycle_chain` 出口的 chain-exit recovery 补漏（下游 restart pass / 同 pass `failed` 重试）；q_down 调用点已删、`PublishResult.lineage` 不再带 `precip_mirror`。当前权威：`openspec/changes/display-v2-national-timeline-precip-overlay/specs/canonical-precip-copyback/spec.md` Requirement 1，以及同 change `tasks.md` 的 `### #2069` 节与 `### #2076 / #2070 / #2061` 节。
 - 回填脚本 `scripts/canonical_precip_copyback_backfill.py`：一次性镜像现存保留周期，node-22 用 `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill`，只用 `shutil`，无新依赖，不触发 `uv sync`。
 - 保留：`scripts/node27_raw_retention.py` 扩展目标到 `canonical/<source>/<cycle>`，同一 keep 水位；`grid/` 不剪。
 

@@ -362,6 +362,25 @@ sbatch 可能仍在写，镜像会忠实地拷走半棵树并记 `ok`。所以�
 `resume_cycle_stage` 再进该 hook，不是 partial-array 重试），只要有一条记录了镜像结果即可，
 重复的那条通常是 `skipped`。
 
+**两种触发靠 `message` 区分**（`status_to` 与 `details` 形状完全相同，`message` 在
+`.payload.message`）：`"Canonical precipitation mirror ran after convert."` 是 `convert` 终态
+hook（排在该入口的 cycle 状态写入之后，#2070）；`"Canonical precipitation mirror recovered at chain exit."`
+是 `_run_cycle_chain` 出口的补漏（#2076），只在两种情况下出现——本 pass 从 `convert` 下游
+restart（如 `restart_stage=forecast`，整段跳过 `convert`），或本 pass 的 hook 已记 `failed`（同 pass
+重试一次）；且本地 `prcp_rate_or_amount/` 仍在（retention 剪掉后不补、不发回执）。补漏回执记 `skipped`
++ `trees_already_mirrored` 表示 NFS 树已与源一致、没重写任何文件——下游 restart pass 每次都会留一条，
+属预期开销不是故障。并发 pass（如 `skipped_duplicate_submission`）的补漏若撞上持锁者，会以
+`error_type == "CopybackLockTimeout"` 记一条 `failed`，下一个经过该 cycle 的下游 restart pass 会自愈，
+无需处置；只有此后该 cycle 再无 pass 时才手工 backfill（`current-production-ops.md`
+「`canonical_precip_mirror` 记了 `failed` receipt 怎么补」）。
+
+```bash
+jq -c 'select(.record_type == "pipeline_event"
+        and .payload.event_type == "canonical_precip_mirror")
+       | [.payload.message, .payload.status_to, .payload.details.precip_mirror.reason]' \
+  "$NHMS_SCHEDULER_JOURNAL_ROOT"/journal/IFS/2026050100*.jsonl
+```
+
 ## 8. 部署前检查清单
 
 ### 8.1 两边都要确认

@@ -2526,18 +2526,29 @@ ssh -p 32099 nwm@210.77.77.27 \
           ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"'
        ```
 
-   - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：没有任何东西会重试它。
+   - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：多数情况下会自动补，
+     手工 backfill 只留给此后再无 pass 的 cycle。
      吞异常的是 `_copyback_canonical_precip` 自己的 `except Exception`
      （`publisher.py:1376`）：它不抛，直接返回一份 `status: "failed"` 的 summary，
-     `convert` 终态 hook 只是把这份 summary 写成 receipt，cycle 照常往下走。
-     hook 自己的 `except Exception`（`chain_forecast_execution.py:1046`）根本
+     `convert` 终态 hook 在该入口的 cycle 状态写入**之后**（#2070）把这份 summary 写成
+     receipt，cycle 照常往下走。
+     hook 自己的 `except Exception`（`chain_forecast_execution.py:1083`）根本
      见不到 copyback 失败——它兜的是 publisher 那个 `try:`（`publisher.py:1275`）
      **之外**抛出的东西：`format_cycle_time`、`TilePublisher(...)` 构造，以及
      `finally` 里 `release_copyback_batch_lock` 抛的 `OSError`
      （`publisher.py:1411-1413` → `packages/common/copyback_guard.py:310-316`），
      最后这个正是该 `try:` 自己的 `except` 抓不到的（`finally` 在它算完返回值之后才跑）。
-     失败的那个 cycle 的镜像**不会在下个 cycle 被补上**。唯一的补救是手工跑
-     backfill：
+     重试靠 `_run_cycle_chain` 出口的 chain-exit recovery（#2076），前提是
+     copyback root 已配、本地 `canonical/<S>/<cycle>/prcp_rate_or_amount/` 仍在
+     （任一路径分量为 symlink 视为不在，retention 剪掉后不再补也不发 receipt）：
+     - **同一 pass**：hook 记了 `failed`，该 pass 退出时（正常返回或抛异常）再镜像一次；
+     - **后续 pass**：之后经过该 cycle 的每个下游 restart pass（`restart_stage` 在
+       `convert` 之后，如 `forecast`）退出时都会再镜像一次，树已一致则记 `skipped`、不重写。
+     重试记的仍是 `canonical_precip_mirror` receipt，`message` 为
+     "Canonical precipitation mirror recovered at chain exit."（判读见
+     `two-node-deployment-overview.md` §7.4）。它只搭**这个 cycle** 自己的 pass，
+     不会被下个 cycle 顺带补上。hook 与同 pass 重试都失败、且此后该 cycle 再无任何
+     pass（链已完成、retry 用尽）时，才需要手工跑 backfill：
 
      ```bash
      ssh -p 32099 frd_muziyao@210.77.77.22 \
