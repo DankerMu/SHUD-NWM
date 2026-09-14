@@ -1,0 +1,5 @@
+{
+  "edited_symbol": "_topology_context_has_negative_node22_db_access",
+  "change": "Existing without/no + node22-db alternative unchanged. Coordinated alternative is one anchored re.fullmatch: leading quote/space + no/without + closed domain modifiers + database noun + mutation/write + or/nor + node22 access + trailing punctuation. Prefix/suffix slices and extra token scans removed. JSON terminator in _topology_node22_writer_claim_context unchanged. Tests unchanged.",
+  "parent_simplification": "Coordinated alternative uses one anchored fullmatch; no prefix/suffix slices or redundant scans."
+}

@@ -1823,7 +1823,10 @@ def _topology_forward_claim_context(lines: list[str], line_no: int, *, after: in
 
 def _topology_node22_writer_claim_context(lines: list[str], line_no: int) -> str:
     line = lines[line_no - 1]
-    line_ends_claim = line.rstrip().endswith((".", "。", "!", "！", "?", "？"))
+    stripped = line.rstrip()
+    line_ends_claim = stripped.endswith((".", "。", "!", "！", "?", "？")) or bool(
+        re.search(r'[.。!！?？]["\']\s*,?\s*$', stripped)
+    )
     after = 0 if _topology_line_may_have_node22_db_writer_drift(line) and line_ends_claim else 2
     return _topology_line_context(lines, line_no, before=0, after=after)
 
@@ -2058,10 +2061,24 @@ def _topology_context_has_negative_node22_db_access(context: str) -> bool:
         r"|relying\s+on\s+(?:an?\s+)?(?:active\s+)?"
         r")?"
     )
+    if re.search(
+        rf"\b(?:without|no)\s+{access_verb}(?:an?\s+)?(?:active\s+)?{node22_db}"
+        r"(?:\s+(?:access|query|queries|connection|read|reads|writer))?\b",
+        context,
+    ):
+        return True
+    domain_modifier = (
+        r"(?:an?\s+|the\s+|any\s+)?"
+        r"(?:(?:production|active|primary|current|local|env(?:ironment)?|unit)[\s/]+)*"
+    )
+    database_noun = r"(?:db|database|postgres|postgresql)"
+    mutation_noun = r"(?:mutation|mutations|write|writes)"
+    node22 = r"node[-_ ]?22"
+    access_noun = r"(?:access|query|queries|connection|read|reads)"
     return bool(
-        re.search(
-            rf"\b(?:without|no)\s+{access_verb}(?:an?\s+)?(?:active\s+)?{node22_db}"
-            r"(?:\s+(?:access|query|queries|connection|read|reads|writer))?\b",
+        re.fullmatch(
+            rf"[\s\"']*(?:without|no)\s+{domain_modifier}{database_noun}\s+{mutation_noun}"
+            rf"\s+(?:or|nor)\s+{node22}\s+{access_noun}[\s.。!！?？\"']*",
             context,
         )
     )

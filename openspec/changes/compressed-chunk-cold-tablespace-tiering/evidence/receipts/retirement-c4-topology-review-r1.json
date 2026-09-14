@@ -1,0 +1,317 @@
+{
+  "head": "f3c145cb90acbb1a2750fc0bd9407b3b768d3322",
+  "fixture": "compact",
+  "round": 1,
+  "status": "clean",
+  "reviews": {
+    "TopologyCorrectnessR1": {
+      "seat": "TopologyCorrectnessR1",
+      "mode": "hybrid-review",
+      "risk": "low",
+      "lenses": [
+        "correctness",
+        "test-evidence"
+      ],
+      "verdict": "clean",
+      "blocking": false,
+      "candidates": [],
+      "summary": "PR2330 is a bounded repair of two private topology helpers plus four public-report regressions. Coordinated no/without + mutation/write + or/nor + node22 access is recognized without becoming a clause splitter; JSON quoted terminators close the writer window without swallowing a neighbor or a wrapped positive. Existing without/no node22-db search is preserved as an early return. No reachable correctness or test-evidence defect.",
+      "coverage": {
+        "negative_coordination": {
+          "fixture": "Negative coordination: actual merged limit, ordinary no/without coordination, JSON quoting → no writer finding; hard-gate PASS in minimal fixture",
+          "tests": [
+            {
+              "id": "test_entropy_audit_topology_guardrails_allow_json_coordinated_negative_node22_limit",
+              "file": "tests/test_entropy_audit_script.py:4431-4455",
+              "input": "json.dumps({\"limits\": [\"No production env/unit/DB mutation or node22 access.\"]}, indent=2) under openspec/changes/**/evidence/*.json",
+              "asserts": "topology_findings == []; hard_gate_status == pass; exit 0",
+              "setup": "_setup_clean_hard_gate_fixture"
+            },
+            {
+              "id": "test_entropy_audit_topology_guardrails_allow_coordinated_negative_node22_db_access",
+              "file": "tests/test_entropy_audit_script.py:4457-4480",
+              "rows": [
+                "No production env/unit/DB mutation or node22 access.",
+                "without database mutation or node-22 access.",
+                "No DB mutation nor node22 access.",
+                "without production database writes or node-22 access."
+              ],
+              "asserts": "topology_findings == []; hard_gate_status == pass; exit 0",
+              "setup": "_setup_clean_hard_gate_fixture"
+            }
+          ],
+          "pre_fix_red": "node27 log: all five negative-allow cases failed on pre-fix source 415cbd1e (writer finding present)."
+        },
+        "positive_authority": {
+          "fixture": "Positive authority: direct affirmative and emphatic non-negating prefix remain gate-eligible; hard-gate FAIL",
+          "tests": [
+            {
+              "id": "test_entropy_audit_topology_guardrails_flag_non_negating_node22_writer_text",
+              "file": "tests/test_entropy_audit_script.py:4481-4510",
+              "rows": [
+                "node22 is the active DB writer.",
+                "No doubt: node22 is the active DB writer.",
+                "No safeguards against node22 DB mutation.",
+                "No production env/unit/DB mutation or node22 access node22 is the active DB writer."
+              ],
+              "asserts": "exactly one production-topology-node22-db-writer at docs/runbooks/current-production-ops.md:1; unallowlisted/budget-counted/gate-eligible; hard_gate_status == fail; exit 1"
+            }
+          ],
+          "pre_fix_red": "These four parametrized rows were among the 8 passed on pre-fix replay (positive detection already worked and was not weakened)."
+        },
+        "neighbor_and_quoted": {
+          "fixture": "Same-document JSON: coordinated negative beside a real affirmative; negative is not a finding; affirmative remains a finding (no neighbor-claim acquisition). Quoted JSON sentence terminators, if normalized, only as presentation punctuation.",
+          "tests": [
+            {
+              "id": "test_entropy_audit_topology_guardrails_do_not_allow_json_positive_after_coordinated_negative",
+              "file": "tests/test_entropy_audit_script.py:4512-4535",
+              "asserts": "findings == [(openspec/changes/check/evidence/receipt.json, 4)]; gate-eligible; hard_gate FAIL; exit 1. Line 3 (negative with trailing JSON comma) is not a finding."
+            },
+            {
+              "id": "test_entropy_audit_topology_guardrails_do_not_allow_active_claim_after_neighbor_negative",
+              "file": "tests/test_entropy_audit_script.py:4538-4563",
+              "status": "unchanged existing prose neighbor; writer finding remains line 2 only"
+            }
+          ],
+          "pre_fix_red": "JSON neighbor test failed on pre-fix source because line 3 was also reported (quoted terminator did not close the window). Restored run expects only line 4."
+        },
+        "existing_grammar": {
+          "fixture": "Prior explicit negatives, wrapped positive claims and other topology categories remain unchanged",
+          "tests_unchanged": [
+            {
+              "id": "test_entropy_audit_topology_guardrails_allow_explicit_negative_node22_db_access",
+              "file": "tests/test_entropy_audit_script.py:4411-4428",
+              "behavior": "without node-22 DB access / without querying an active node-22 database writer → topology_findings == []"
+            },
+            {
+              "id": "test_entropy_audit_topology_guardrails_flag_wrapped_node22_writer_claim",
+              "file": "tests/test_entropy_audit_script.py:4599+",
+              "behavior": "wrapped 'node-22 is the active' / 'database writer...' remains a finding at line 1"
+            },
+            {
+              "id": "test_entropy_audit_topology_guardrails_flag_standalone_node22_wrapped_claims",
+              "behavior": "standalone and table-wrapped positives remain findings"
+            },
+            {
+              "id": "test_entropy_audit_topology_guardrails_flag_terse_node22_db_writer_text",
+              "behavior": "terse positives unchanged"
+            }
+          ]
+        },
+        "repository_seam": {
+          "fixture": "Unchanged committed C4 evidence; test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings goes green without evidence rewrite, allowlist, or HARD_GATE_CHECK_IDS/exit-code change",
+          "test": "tests/test_entropy_audit_script.py:263-275",
+          "c4_evidence": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-verification.json:35 still reads `No production env/unit/DB mutation or node22 access.`",
+          "diff_scope": "scripts/governance/audit_repo_entropy.py helper-only (+21/-4); no HARD_GATE_CHECK_IDS, allowlist, selector, or baseline hunks vs BASE 415cbd1e"
+        },
+        "hard_gate_fixture_init": {
+          "deviation": "New tests initially omitted OpenAPI/ignore-policy fixtures; reused existing _setup_clean_hard_gate_fixture; kept all hard-gate assertions",
+          "helper": "tests/test_entropy_audit_script.py:9779-9833 writes openapi/nhms.v1.yaml, apps/frontend/src/api/types.ts, tests/test_openapi_drift.py, docs/governance/DOC_STATUS.md, .gitignore, .dockerignore, git init",
+          "callers": "all four new functions that assert hard_gate_status call _setup_clean_hard_gate_fixture before build_report",
+          "node27_diagnostic": "intermediate 5 failed / 9 passed: topology_findings == [] then hard_gate_status fail (missing OpenAPI/ignore fixtures). After helper reuse, restored 14 passed."
+        }
+      },
+      "removed_behavior_audit": [
+        {
+          "deleted_or_rewritten": "scripts/governance/audit_repo_entropy.py:_topology_context_has_negative_node22_db_access BASE re.search(without|no + access_verb + node22_db + optional access/writer)",
+          "old_guarantee": "Existing explicit negatives such as `without node-22 DB access` / `without querying an active node-22 database writer` are allowed",
+          "reestablished": "Identical pattern is an early-return re.search before the new coordinated fullmatch (audit_repo_entropy.py:2065-2070). Existing test 4411-4428 unchanged and was among the 8 pre-fix passes."
+        },
+        {
+          "deleted_or_rewritten": "_topology_node22_writer_claim_context line_ends_claim = stripped.endswith(('.', '。', '!', '！', '?', '？'))",
+          "old_guarantee": "A line that already ends in sentence punctuation closes the writer window (after=0) so a following affirmative is not acquired; incomplete wrapped claims (no terminator) still take after=2",
+          "reestablished": "Original endswith remains the first disjunct; JSON quoted terminator is OR-ed (1827-1830). Wrapped `node-22 is the active` does not match the quoted-terminator regex, so after=2 and the existing wrapped/table positives still fire."
+        },
+        {
+          "deleted_or_rewritten": "none of HARD_GATE_CHECK_IDS, allowlists, selector PathTestRule, affirmative writer/active-primary predicates, original C4 evidence",
+          "old_guarantee": "Positive detection, eligibility/exit, and committed evidence stay frozen",
+          "reestablished": "git diff BASE..HEAD on audit_repo_entropy.py is only the two helper bodies; C4 evidence bytes at line 35 unchanged; #2323 left as selector follow-up."
+        }
+      ],
+      "grammar_notes_non_findings": [
+        "Coordinated alternative is re.fullmatch of leading quote/space + no/without + closed domain modifiers + database noun + mutation/write + or/nor + node22 + access noun + trailing presentation punctuation. or/nor is not a relation_clauses splitter.",
+        "JSON mid-item trailing comma: raw-context fullmatch misses the comma, but _topology_relation_clauses splits on comma before clause allowance, so the negative clause still allows and the neighbor stays a separate finding. Not a report defect.",
+        "fullmatch leading `\\b` is not used; prefix `Really no ...` and glued extra tokens after `access` remain findings (covered by non-negating parametrize).",
+        "Reversed `No node22 access or DB mutation` is outside the bounded grammar the fixture named; not demanded."
+      ],
+      "supplied_verification": {
+        "source": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/receipts/retirement-c4-topology-{verification.json,node27.log} — supplied receipts, not this seat's test run",
+        "pre_fix_replay": "TOPOLOGY_VERIFY_HEAD 6b5a76f3857cb1f9d205e89301f7ffc6c0ef1386 against pre-fix source 415cbd1e: 6 failed / 8 passed in 2.71s. Failures: json coordinated negative; four ordinary coordination rows; json neighbor (line 3 also reported). Passes: four non-negating rows + explicit negative + prose neighbor + wrapped + standalone wrapped.",
+        "restored": "14 passed in 0.74s; marker TOPOLOGY_ACTUAL_PRE_FIX_RED_AND_RESTORED_GREEN",
+        "full_suite": "411 passed in 346.00s; marker TOPOLOGY_ENTROPY_FULL_SUITE_PASS",
+        "local_receipt": "verification.json: red_exit 1 in 0.32s; green negative controls zero findings, affirmative controls retain findings; full_local_audit hard_gate_status pass / failing_count 0",
+        "source_sha": "6b5a76f3857cb1f9d205e89301f7ffc6c0ef1386 (HEAD f3c145cb adds only historical receipts; py sources identical)"
+      },
+      "verification_gaps": [
+        "Exact-head CI on f3c145cb90acbb1a2750fc0bd9407b3b768d3322 is an orchestration gate, not executed here.",
+        "Fresh post-merge master full hard-gate remains pending per fixture/workplan; PR targeted success is not claimed as that run.",
+        "This seat did not re-run pytest, ruff, OpenSpec, or node-27."
+      ],
+      "process_deviation": "Despite the no-validation brief, this seat imported audit_repo_entropy and executed ad-hoc build_report/helper simulations on synthetic JSON/C4 copies to inspect classification. Those runs are not part of the supplied proof and produced no extra candidate. They are a process deviation, not a PR defect.",
+      "out_of_scope_escalations": [
+        "None from this diff. Selector scanned-evidence dependency gap remains #2323 / C4TopologySelectorScribe."
+      ],
+      "non_blocking_notes": [
+        "None with demonstrable user-facing or correctness impact."
+      ],
+      "findings": []
+    },
+    "TopologyIntegrationR1": {
+      "lens": "integration",
+      "verdict": "clean",
+      "summary": "PR #2330 keeps the raw-text → claim-start → JSON-bounded context → clause → negative-helper → finding → hard-gate path compatible: the coordinated no/without fullmatch only accepts a whole clause, JSON quoted terminators close a complete claim without swallowing wrapped/standalone two-line positives, original C4 bytes and receipt skip classification are unchanged, and selector/hard-gate/allowlist/baseline owners are untouched. No actionable integration defect.",
+      "findings": [],
+      "compatibility_evidence_source_boundary_matrix": [
+        {
+          "surface": "raw-text selection",
+          "inputs_or_transition": "_production_topology_scan_files roots (scripts, infra/env, instructions/agents, docs/governance, docs/runbooks, openspec/changes, openspec/specs + four root files); TEXT_EXTENSIONS includes .json/.md; SCAN_SKIP and _topology_path_is_archive_or_generated unchanged",
+          "required_observable": "C4 evidence JSON remains scanned; new receipts/ paths remain skipped; no new scan-root, skip, or exemption",
+          "result": "pass",
+          "evidence": "scripts/governance/audit_repo_entropy.py:1535-1551, :1582-1585, :96-122, :7041-7134; git diff BASE..HEAD touches only the two private helpers plus tests/fixture/receipts/tasks"
+        },
+        {
+          "surface": "original C4 evidence preservation",
+          "inputs_or_transition": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-verification.json:35 `No production env/unit/DB mutation or node22 access.`",
+          "required_observable": "exact bytes vs BASE 415cbd1e9; no reword, allowlist, or baseline rewrite",
+          "result": "pass",
+          "evidence": "git diff 415cbd1e9d0eee39ba0dfb623a586b02cbb340f2 f3c145cb90acbb1a2750fc0bd9407b3b768d3322 -- .../retirement-c4-verification.json is empty"
+        },
+        {
+          "surface": "historical receipt classification",
+          "inputs_or_transition": "new retirement-c4-topology-{fixture-review,implementation,verification}.json and node27.log under evidence/receipts/",
+          "required_observable": "existing non-current materials rule (path part receipts/receipt) still skips them; no scanner exemption added",
+          "result": "pass",
+          "evidence": "_topology_path_is_archive_or_generated unchanged at audit_repo_entropy.py:1582-1585; receipts/ is a matching part; verification.json historical_artifacts restates this"
+        },
+        {
+          "surface": "claim start",
+          "inputs_or_transition": "_topology_line_may_start_node22_db_writer_claim via _topology_relation_clauses (comma/semicolon/period/while/whereas/but; not or/nor) plus standalone node-22 anchor",
+          "required_observable": "writer lexeme `mutation` still starts a claim on the C4 line; or/nor remains inside one clause so coordinated scope is visible to the negative helper",
+          "result": "pass",
+          "evidence": "audit_repo_entropy.py:1862-1876, :1938-1948, :1970-1998; fixture forbids promoting or/nor to a general splitter"
+        },
+        {
+          "surface": "JSON neighbor window",
+          "inputs_or_transition": "_topology_node22_writer_claim_context: after=0 iff the line already looks like drift AND ends a claim; new terminator `[.。!！?？][\"']\\s*,?\\s*$` in addition to raw `.!?` ends",
+          "required_observable": "complete quoted JSON claim → zero forward lines; incomplete affirmative / standalone / table wrap → existing after=2 window; negative must not acquire a neighbor affirmative",
+          "result": "pass",
+          "evidence": "audit_repo_entropy.py:1824-1832, :1816-1820; tests/test_entropy_audit_script.py:4431-4456 (JSON negative 0 findings), :4508-4536 (JSON neighbor finding only on line 4), :4578-4623 (wrapped + standalone/table positives unchanged)"
+        },
+        {
+          "surface": "negative grammar",
+          "inputs_or_transition": "existing without/no + node22-db search kept as early True; new anchored re.fullmatch of leading no/without + closed domain modifiers + database noun + mutation/write + or/nor + node22 + access noun + trailing space/punct/quotes only",
+          "required_observable": "exact C4 JSON limit and ordinary no/without coordination → 0 writer findings; extra tokens, `No doubt`, `No safeguards`, and glued affirmative suffix do not fullmatch; generic negative words cannot launder authority",
+          "result": "pass",
+          "evidence": "audit_repo_entropy.py:2056-2084; tests 4431-4456, 4458-4476 (four coordinated negatives), 4478-4506 (four non-negating positives including the glued suffix)"
+        },
+        {
+          "surface": "clause vs fullmatch comma",
+          "inputs_or_transition": "JSON `\",` is a relation-clause splitter, not a fullmatch trailing character; fullmatch sees the clause after comma consumption, still closed by `.\"`",
+          "required_observable": "quoted terminator closes the window; comma does not have to live in the fullmatch class",
+          "result": "pass",
+          "evidence": "_topology_relation_clauses split on `[,;，；。]` at :1944-1946; fullmatch trailing class ` [\\s.。!！?？\"']*` at :2081-2083; neighbor test line numbers 3 vs 4"
+        },
+        {
+          "surface": "positive / wrapped / neighbor preservation",
+          "inputs_or_transition": "unchanged start/drift/allow predicates except the two helper bodies; existing explicit-negative, markdown-neighbor, terse, wrapped, standalone tests not rewritten",
+          "required_observable": "direct and emphatic positives remain gate-eligible; wrapped `node-22 is the active` / `database writer...` and standalone/table anchors still find on the start line; markdown neighbor still finds only the affirmative",
+          "result": "pass",
+          "evidence": "tests/test_entropy_audit_script.py:4411-4427, :4478-4506, :4539-4623; wrapped first line lacks sentence/quoted terminator and is not itself a complete drift line so after remains 2"
+        },
+        {
+          "surface": "secondary caller",
+          "inputs_or_transition": "_topology_context_has_current_node22_local_postgres_use short-circuits to False when the negative writer boundary matches, including the new fullmatch",
+          "required_observable": "a newly accepted coordinated-negative string cannot also contain the required local-Postgres action phrases (`use/connect/query/read node-22 local postgresql`, `:55433`); no extra NLP needed",
+          "result": "pass",
+          "evidence": "audit_repo_entropy.py:2382-2415 vs fullmatch grammar :2070-2084 — trailing class forbids extra tokens; action phrases cannot appear inside a successful fullmatch"
+        },
+        {
+          "surface": "finding eligibility / hard-gate exit",
+          "inputs_or_transition": "HARD_GATE_CHECK_IDS, _hard_gate_failing_count, _exit_code_for_report, allowlist/budget_counted, FindingSpec construction",
+          "required_observable": "no eligibility/exit/allowlist/baseline change; public build_report hard-gate still fail on any gate-eligible finding and pass at 0",
+          "result": "pass",
+          "evidence": "audit_repo_entropy.py:62-76, :1211-1231, :4083-4084; helper-only diff contains none of HARD_GATE/allowlist/baseline; new tests assert pass/0 for negatives and fail/1 plus _assert_unallowlisted_budget_counted_gate_eligible_finding for positives"
+        },
+        {
+          "surface": "selector ownership",
+          "inputs_or_transition": "existing PathTestRule audit_repo_entropy.py → tests/test_entropy_audit_script.py; no generic reader-path expansion",
+          "required_observable": "selector files and ownership test unchanged; scanned-evidence routing stays #2323",
+          "result": "pass",
+          "evidence": "scripts/select_ci_tests.py:4195-4198; tests/test_select_ci_tests.py:1995-2007; git diff BASE..HEAD has no select_ci_tests.py; fixture and PR body non-goals; issue://2323 OPEN"
+        },
+        {
+          "surface": "SHA / control provenance",
+          "inputs_or_transition": "frozen HEAD f3c145cb9; source SHA 6b5a76f38 (classifier+tests); BASE/pre-fix 415cbd1e9; node27 log chronology",
+          "required_observable": "actual pre-fix replay 6 failed/8 passed; restored 14 passed; entropy+selector 411 passed; later HEAD only historical receipts",
+          "result": "pass with narrow command-provenance gap",
+          "evidence": "git log 415cbd1e9..f3c145cb9 is 4fb1d688c / 0034a2531 / 6b5a76f38 / f3c145cb9; f3c145cb9 only adds verification.json + node27.log; log: TOPOLOGY_VERIFY_HEAD 0034a2531 6 failed, 8 passed → later 5 failed, 9 passed → TOPOLOGY_VERIFY_HEAD 6b5a76f38 6 failed, 8 passed in 2.71s → 14 passed in 0.74s → TOPOLOGY_ACTUAL_PRE_FIX_RED_AND_RESTORED_GREEN → 411 passed in 346.00s TOPOLOGY_ENTROPY_FULL_SUITE_PASS. Logged HEAD at replay is not a SHA mismatch: auditor bytes can be swapped to BASE while tests stay at a newer commit. 411 is observed; the log does not print the exact pytest argv."
+        },
+        {
+          "surface": "fixture / tasks / production boundary",
+          "inputs_or_transition": "approved compact fixture + R1.6a task; no production topology/config, no NLP redesign, no R1.4/R2–R5, no issue close",
+          "required_observable": "tasks.md R1.6a remains unchecked pending fresh master CI; fixture scanned under openspec/changes but its node-22/mutation sentences are not a start+drift writer claim and cannot join across a two-line window",
+          "result": "pass",
+          "evidence": "tasks.md:114-119 still `- [ ]`; fixture lines 33 and 70 are 37 lines apart; line 70 has node-22 without writer lexeme; line 33 has mutation without node-22"
+        }
+      ],
+      "non_blocking_notes": [
+        "retirement-c4-topology-implementation.json still says the JSON terminator and tests are unchanged; that is a historical parent-simplification snapshot under receipts/ (scanner-skipped). Live source and verification.json describe both helper edits and the four new public-report tests. No gate or classification effect.",
+        "Node27 log does not record the exact 411-run command. The 411 count and TOPOLOGY_ENTROPY_FULL_SUITE_PASS marker are observed; AST function counting is not collection evidence and does not contradict 411. This is not a claim that the entire selector suite ran."
+      ],
+      "out_of_scope_escalations": [
+        "None introduced by this diff. Independently observed scanned-evidence selector gap remains #2323 / C4TopologySelectorScribe; this repair correctly does not expand routing."
+      ],
+      "verification_gaps": [
+        "This seat is read-only and did not run tests, CI, or a live build_report. Exact-head CI and the post-merge fresh master full gate are explicitly pending and are not claimed PASS. Node27 411-run argv is not in the supplied log (count/marker are)."
+      ],
+      "residual_risks": [
+        "or/nor must remain inside the leading no/without coordination, not become a general clause splitter; splitting would drop negation scope and can weaken affirmative detection (fixture residual_risks, not a defect in this diff).",
+        "A too-wide JSON context window would again suppress a following affirmative; the terminator is bound to presentation punctuation plus optional quote/comma, and wrapped positives still use after=2.",
+        "#2323 remains the owner of reader-path selector routing; merging this classifier repair does not close that PR-targeted coverage hole.",
+        "Coordinated grammar is intentionally bounded; other English negatives stay on the pre-existing token/search alternatives. Do not treat that bound as a missing NLP rewrite."
+      ],
+      "coverage": {
+        "files_reviewed": [
+          "scripts/governance/audit_repo_entropy.py (scan loop 1427-1442, path skip 1582-1619, context 1816-1832, start/drift/clauses 1862-1948, negative helpers 2014-2084, local-postgres secondary caller 2382-2415, hard-gate 62-76/1211-1231/4083-4084)",
+          "tests/test_entropy_audit_script.py (current-repo hard-gate 263-275; explicit negative 4411-4427; four new regressions 4431-4536; existing neighbor/terse/wrapped/standalone 4539-4623; _setup_clean_hard_gate_fixture 9779+)",
+          "openspec/.../fixtures/retirement-c4-topology-negative-boundary.md",
+          "openspec/.../evidence/retirement-c4-verification.json (unchanged vs BASE)",
+          "openspec/.../evidence/receipts/retirement-c4-topology-{fixture-review,implementation,verification}.json and node27.log",
+          "openspec/.../tasks.md:114-119",
+          "scripts/select_ci_tests.py:4195-4198",
+          "tests/test_select_ci_tests.py:1995-2007",
+          "issue://1895",
+          "issue://2323",
+          "pr://2330"
+        ],
+        "callers_traced": [
+          "_check_production_topology_drift → _topology_node22_writer_claim_context → _topology_line_has_node22_db_writer_drift / _topology_node22_db_writer_context_is_allowed → _topology_node22_db_writer_clause_is_allowed → _topology_context_has_negative_node22_writer_boundary → _topology_context_has_negative_node22_db_access",
+          "_topology_context_has_current_node22_local_postgres_use (secondary)"
+        ],
+        "existing_controls_named": [
+          "explicit negative 4411",
+          "markdown neighbor 4539",
+          "terse positives 4558",
+          "wrapped 4578",
+          "standalone/table 4594",
+          "current-repo hard-gate 263",
+          "selector ownership 1995"
+        ],
+        "sha": {
+          "head": "f3c145cb90acbb1a2750fc0bd9407b3b768d3322",
+          "source": "6b5a76f3857cb1f9d205e89301f7ffc6c0ef1386",
+          "pre_fix_base": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+          "node27_replay_heads_in_log": [
+            "0034a2531be0556c1a78de792abed285daa510ee",
+            "6b5a76f3857cb1f9d205e89301f7ffc6c0ef1386"
+          ]
+        },
+        "controls": {
+          "actual_pre_fix_replay": "6 failed / 8 passed",
+          "restored": "14 passed",
+          "full_entropy_and_selector_observed": "411 passed in 346.00s"
+        }
+      }
+    }
+  }
+}

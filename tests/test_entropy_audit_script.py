@@ -4428,6 +4428,113 @@ def test_entropy_audit_topology_guardrails_allow_explicit_negative_node22_db_acc
     assert topology_findings == []
 
 
+def test_entropy_audit_topology_guardrails_allow_json_coordinated_negative_node22_limit(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    evidence_path = tmp_path / "openspec" / "changes" / "check" / "evidence" / "receipt.json"
+    _write(
+        evidence_path,
+        json.dumps(
+            {"limits": ["No production env/unit/DB mutation or node22 access."]},
+            indent=2,
+        )
+        + "\n",
+    )
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    topology_findings = [
+        finding for finding in report["findings"] if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+    assert report["metadata"]["hard_gate_status"] == "pass"
+    assert audit_repo_entropy._exit_code_for_report(report) == 0
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "No production env/unit/DB mutation or node22 access.",
+        "without database mutation or node-22 access.",
+        "No DB mutation nor node22 access.",
+        "without production database writes or node-22 access.",
+    ],
+)
+def test_entropy_audit_topology_guardrails_allow_coordinated_negative_node22_db_access(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / "docs/runbooks/current-production-ops.md", f"{statement}\n")
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    topology_findings = [
+        finding for finding in report["findings"] if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+    assert report["metadata"]["hard_gate_status"] == "pass"
+    assert audit_repo_entropy._exit_code_for_report(report) == 0
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "node22 is the active DB writer.",
+        "No doubt: node22 is the active DB writer.",
+        "No safeguards against node22 DB mutation.",
+        "No production env/unit/DB mutation or node22 access node22 is the active DB writer.",
+    ],
+)
+def test_entropy_audit_topology_guardrails_flag_non_negating_node22_writer_text(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / "docs/runbooks/current-production-ops.md", f"{statement}\n")
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    findings = [
+        finding for finding in report["findings"] if finding["check_id"] == "production-topology-node22-db-writer"
+    ]
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("docs/runbooks/current-production-ops.md", 1)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+    assert report["metadata"]["hard_gate_status"] == "fail"
+    assert audit_repo_entropy._exit_code_for_report(report) == 1
+
+def test_entropy_audit_topology_guardrails_do_not_allow_json_positive_after_coordinated_negative(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(
+        tmp_path / "openspec" / "changes" / "check" / "evidence" / "receipt.json",
+        json.dumps(
+            {
+                "limits": [
+                    "No production env/unit/DB mutation or node22 access.",
+                    "node22 is the active DB writer.",
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    findings = [
+        finding for finding in report["findings"] if finding["check_id"] == "production-topology-node22-db-writer"
+    ]
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("openspec/changes/check/evidence/receipt.json", 4)
+    ]
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
+    assert report["metadata"]["hard_gate_status"] == "fail"
+    assert audit_repo_entropy._exit_code_for_report(report) == 1
+
+
 def test_entropy_audit_topology_guardrails_do_not_allow_active_claim_after_neighbor_negative(
     tmp_path: Path,
 ) -> None:

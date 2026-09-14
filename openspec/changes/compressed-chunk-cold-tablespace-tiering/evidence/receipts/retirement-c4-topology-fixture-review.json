@@ -1,0 +1,51 @@
+{
+  "verdict": "PASS",
+  "scope": "Fixture readiness only for R1.6a bounded topology-guard repair. Not an implementation or merge verdict.",
+  "fixture": "openspec/changes/compressed-chunk-cold-tablespace-tiering/fixtures/retirement-c4-topology-negative-boundary.md",
+  "task": "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:114-119 (R1.6a)",
+  "required_amendments": [],
+  "summary": "The compact fixture correctly bounds a static classifier repair of one false writer finding on a truthful coordinated-negative C4 evidence line. Negative grammar, positive/no-doubt/neighbor/quoted/wrapped preservation, the real hard-gate regression seam, selector non-expansion, and the evidence floor are all specified. No fixture amendments are required. Selector dependency-routing omission stays with C4TopologySelectorScribe.",
+  "grounding": {
+    "failing_evidence": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-verification.json:35 — `No production env/unit/DB mutation or node22 access.` Parent diagnosis (.workplans/pr-2321/topology-diagnosis.json) and topology-report.json both pin check_id production-topology-node22-db-writer, line 35, gate-eligible P1.",
+    "writer_vs_active_primary": "scripts/governance/audit_repo_entropy.py:_topology_mentions_writer (1970-1998) fires on `mutation`; _topology_mentions_active_primary_database_authority (2000-2009) does not. Matches parent topology-minimal.py: writer lexeme true, active-primary predicate false.",
+    "existing_negative_grammar_miss": "_topology_context_has_negative_node22_db_access (2053-2068) requires `(without|no)` then optional access-verb then `node[-_ ]?22` then a database noun. The C4 sentence has leading `No` governing coordinated `DB mutation or node22 access`, so the database noun precedes the node reference and the recognizer misses the coordinated scope. Existing supported form `without node-22 DB access...` (tests/test_entropy_audit_script.py:4411-4427) already matches and is accepted.",
+    "clause_and_json_boundary": "_topology_relation_clauses (1932-1942) splits on comma/semicolon/period/while/whereas/but, not on or/nor. _topology_node22_writer_claim_context (1824-1828) only closes the window when the raw line ends with sentence punctuation; JSON `\",` therefore can pull neighbor lines. Fixture correctly forbids or/nor as a general splitter and bounds quoted-terminator handling to presentation punctuation while preserving wrapped affirmatives.",
+    "existing_controls": "tests/test_entropy_audit_script.py:4411-4427 explicit negative accepted; 4431-4456 neighbor negative does not suppress a following affirmative; 4458-4475 terse positives remain findings; 4481-4521 wrapped and standalone-wrapped positives remain findings. Repository seam: test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings (263-275) is the master-red gate (HARD_GATE_CHECK_IDS includes production-topology-node22-db-writer at audit_repo_entropy.py:63-76).",
+    "selector_ownership": "scripts/select_ci_tests.py:4195-4198 PathTestRule(audit_repo_entropy.py -> tests/test_entropy_audit_script.py). tests/test_select_ci_tests.py:1995-2007 asserts that mapping and forbids core-smoke fallback. Fixture keeps this ownership and forbids generic selector expansion; scanned-evidence routing is explicitly a separate follow-up.",
+    "r16a_alignment": "tasks.md:114-119 requires repair of the approved C4 coordinated negative, preserve affirmative/neighbor/wrapped controls and original evidence, no allowlist or weaker hard gate, red/green public-report proof, full entropy suite on node-27, and fresh master CI. Fixture restates all of these and names compact risk packs plus two review seats."
+  },
+  "minimal_red_green_controls": {
+    "must_pass_no_writer_finding": [
+      "Exact merged JSON limit: `No production env/unit/DB mutation or node22 access.` inside an openspec/changes/**/evidence/*.json document (public build_report, mode=hard-gate).",
+      "Ordinary equivalent leading no/without coordination of database mutation/write and node-access noun phrases joined by or/nor.",
+      "Already-supported explicit negative: `Current production readiness runs without node-22 DB access to any active primary database writer.` (existing test 4411)."
+    ],
+    "must_remain_gate_eligible_findings": [
+      "Direct affirmative: `node22 is the active DB writer.`",
+      "Emphatic non-negating prefix: `No doubt: node22 is the active DB writer.`",
+      "Existing wrapped positive: `node-22 is the active` / `database writer for current NHMS production.` (test 4481).",
+      "Standalone/table wrapped positives (test 4499)."
+    ],
+    "neighbor_and_quoted": [
+      "Same-document JSON: coordinated negative beside a real affirmative; the negative is not a finding and the affirmative remains a finding (no neighbor-claim acquisition).",
+      "Quoted JSON sentence terminators, if normalized, only as presentation punctuation; wrapped affirmatives stay findings."
+    ],
+    "repository_seam": "Unchanged committed C4 evidence; test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings goes from current master-red (exit 1, one topology writer finding) to green (hard_gate_status=pass, zero production-topology findings, exit 0). No evidence rewrite, no allowlist, no HARD_GATE_CHECK_IDS/exit-code change.",
+    "selector": "Existing auditor PathTestRule continues to select tests/test_entropy_audit_script.py; no generic selector expansion in this repair."
+  },
+  "non_goals_confirmed": [
+    "Not production topology or config.",
+    "Not a general NLP parser.",
+    "Not evidence sanitization or baseline-count rewrite.",
+    "Not allowlisting the C4 evidence path.",
+    "Not selector/dependency-routing expansion (scribe-owned).",
+    "Not R1.4 / R2-R5 / epic closure."
+  ],
+  "verification_gaps": "This review is static and read-only. Parent-supplied red evidence is accepted: topology-repro.py 17.52s exit 1; topology-minimal.py 0.32s exit 1 with coordinated_negative misclassified and supported_negative/positive/no-doubt behaving as stated. Implementation green, full tests/test_entropy_audit_script.py on node-27, targeted selector-ownership proof, Ruff/OpenSpec, exact-head CI, and post-merge master hard-gate remain parent-owned and were not executed here.",
+  "residual_risks": [
+    "Implementer must keep or/nor inside the leading-no/without coordination, not as a new clause splitter; splitting would drop negation scope and can weaken affirmative detection.",
+    "JSON neighbor-window (line not ending in `.`) is the real quoted-boundary hazard; a too-wide context allow would suppress a following affirmative in the same JSON object.",
+    "Selector scanned-evidence dependency gap is out of this fixture and must not be folded into the classifier repair."
+  ],
+  "out_of_scope_escalations": "None for this fixture. Independently observed scanned-evidence dependency-routing omission is already assigned to C4TopologySelectorScribe."
+}

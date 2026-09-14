@@ -1,0 +1,48 @@
+{
+  "source_sha": "6b5a76f3857cb1f9d205e89301f7ffc6c0ef1386",
+  "pre_fix_source": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "diagnosis": {
+    "actual_writer_lexeme": true,
+    "active_primary_predicate": false,
+    "cause": "Existing negative grammar missed coordinated scope; quoted sentence terminators allowed neighboring claim acquisition."
+  },
+  "minimal_local": {
+    "red_exit": 1,
+    "red_seconds": 0.32,
+    "green": "negative controls zero findings; affirmative controls retain findings"
+  },
+  "full_local_audit": {
+    "hard_gate_status": "pass",
+    "hard_gate_failing_count": 0
+  },
+  "node27": {
+    "actual_pre_fix_replay": {
+      "failed": 6,
+      "passed": 8
+    },
+    "restored_controls": {
+      "passed": 14
+    },
+    "full_entropy_and_selector_suite": {
+      "passed": 411,
+      "seconds": 346.0
+    },
+    "log": "retirement-c4-topology-node27.log"
+  },
+  "unchanged": [
+    "original C4 evidence",
+    "hard-gate eligibility/exit contract",
+    "positive classifier",
+    "allowlists",
+    "baselines",
+    "selector rules",
+    "production state"
+  ],
+  "deviations": [
+    "Whole-file formatter changed unrelated lines; restored baseline formatting outside approved symbols with complete AST equality proof.",
+    "New minimal tests initially omitted required clean hard-gate fixture and hit unrelated OpenAPI/ignore-policy failures; reused existing helper, kept all hard-gate assertions."
+  ],
+  "followup": "https://github.com/DankerMu/SHUD-NWM/issues/2323",
+  "historical_artifacts": "Raw review/test receipts use existing non-current receipts path classification; no scanner exemption added.",
+  "master_full_regression": "Pending post-merge, not claimed PASS."
+}
