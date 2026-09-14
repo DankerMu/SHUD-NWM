@@ -119,3 +119,23 @@ excluding only typed execution metadata from ExecStart and next-elapse from Time
 
 - **WHEN** a prior raw-display snapshot is consumed by the changed executor
 - **THEN** it refuses with an explicit fresh-state requirement before mutating that state; no phase-only bypass occurs
+
+### Requirement: Display startup waits for bounded actual readiness
+
+The shared forward and recovery startup path SHALL wait for actual local health HTTP200 after submitting service
+start, bounded by30 seconds and by remaining forward window/outage budgets where those budgets apply.
+
+#### Scenario: Listener becomes ready after service start returns
+
+- **WHEN** the service is starting and the local listener is temporarily unavailable, then becomes healthy within budget
+- **THEN** startup proceeds only after health200 and the existing source/proxy checks, without restarting the service
+
+#### Scenario: Readiness fails or its budget expires
+
+- **WHEN** the service fails, a permanent response error occurs, or actual readiness is not achieved within budget
+- **THEN** startup refuses without falsely marking basic_ready or releasing the fence/timers
+
+#### Scenario: Authorized recovery begins after a historical forward deadline
+
+- **WHEN** recovery is otherwise eligible after a prior forward deadline expired
+- **THEN** the existing recovery policy remains available with its own bounded readiness attempt and all guards intact

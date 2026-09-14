@@ -420,9 +420,9 @@ class Executor:
             stable.append([base, expression])
         return {"TimersCalendar": json.dumps(stable, separators=(",", ":"))}
 
-    def unit(self, name):
+    def unit(self, name, timeout=30):
         raw = self.run(
-            ["systemctl", "--user", "show", name, "--no-pager", *[f"--property={p}" for p in PROPS]], timeout=30
+            ["systemctl", "--user", "show", name, "--no-pager", *[f"--property={p}" for p in PROPS]], timeout=timeout
         ).decode()
         return dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
 
@@ -512,7 +512,7 @@ class Executor:
             }
         )
 
-    def http(self, path, port=8080):
+    def http(self, path, port=8080, timeout=15):
         require(
             path.startswith("/api/") or path == self.c.get("api_health_path") or path == self.c.get("yd_health_path"),
             "LOCAL_HTTP_PATH_REQUIRED",
@@ -520,7 +520,7 @@ class Executor:
         url = f"http://127.0.0.1:{port}" + path
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(url, timeout=15) as r:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
                 status, body, headers = r.status, r.read(8 * 1024 * 1024 + 1), dict(r.headers)
         except urllib.error.HTTPError as e:
             status, body, headers = e.code, e.read(8 * 1024 * 1024 + 1), dict(e.headers)
@@ -1112,6 +1112,94 @@ class Executor:
         require(proofs and self.git("rev-parse", "HEAD") == (OLD if self.recovering else NEW), "RUNTIME_SHA_MISMATCH")
         return {"unit": unit, "processes": proofs, "execution": u["ExecMainStartTimestampMonotonic"]}
 
+    def remaining_deadline(self, until):
+        remaining = until - time.monotonic()
+        require(remaining > 0, "DISPLAY_READINESS_TIMEOUT")
+        return remaining
+
+    def display_startup_deadline(self):
+        until = time.monotonic() + 30
+        if not self.recovering:
+            if "t0_mono" in self.s:
+                until = min(until, self.s["t0_mono"] + 1800)
+            if "stop_mono" in self.s and not self.s.get("basic_ready"):
+                until = min(until, self.s["stop_mono"] + 600)
+        require(until - time.monotonic() > 0, "DISPLAY_READINESS_TIMEOUT")
+        return until
+
+    def display_unit_failed(self, unit):
+        result = unit.get("Result", "")
+        status = unit.get("ExecMainStatus", "0")
+        return unit.get("ActiveState") == "failed" or result not in ("", "success", "n/a") or status not in ("", "0")
+
+    def display_unit_waiting(self, unit):
+        return unit.get("ActiveState") in ("activating", "active") and not self.display_unit_failed(unit)
+
+    def display_transient_error(self, error):
+        if isinstance(error, TimeoutError):
+            return True
+        if isinstance(error, ConnectionRefusedError):
+            return True
+        if isinstance(error, urllib.error.URLError):
+            return self.display_transient_error(error.reason)
+        return False
+
+    def display_health_probe(self, timeout):
+        previous = signal.getsignal(signal.SIGALRM)
+        pending = signal.getitimer(signal.ITIMER_REAL)
+
+        def expire(_signum, _frame):
+            raise TimeoutError("DISPLAY_HEALTH_TIMEOUT")
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:8080{self.c['api_health_path']}",
+            method="GET",
+        )
+        request.add_header("Connection", "close")
+        signal.signal(signal.SIGALRM, expire)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                require(response.geturl() == request.full_url, "DISPLAY_HEALTH_FAILED")
+                status = response.status
+                body = response.read(1024) if status == 200 else b""
+        except urllib.error.HTTPError as error:
+            require(error.geturl() == request.full_url, "DISPLAY_HEALTH_FAILED")
+            status, body = error.code, b""
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+            if pending[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, pending[0], pending[1])
+        return status, body
+
+    def wait_display_ready(self):
+        until = self.display_startup_deadline()
+        while True:
+            remaining = self.remaining_deadline(until)
+            unit = self.unit(DISPLAY, timeout=min(30, remaining))
+            require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
+            require(self.display_unit_waiting(unit), "DISPLAY_SERVICE_FAILED")
+            remaining = self.remaining_deadline(until)
+            try:
+                status, body = self.display_health_probe(min(15, remaining))
+            except (TimeoutError, ConnectionRefusedError, urllib.error.URLError) as error:
+                require(self.display_transient_error(error), "DISPLAY_HEALTH_FAILED")
+                remaining = self.remaining_deadline(until)
+                unit = self.unit(DISPLAY, timeout=min(30, remaining))
+                require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
+                require(self.display_unit_waiting(unit), "DISPLAY_SERVICE_FAILED")
+                remaining = self.remaining_deadline(until)
+                time.sleep(min(0.2, remaining))
+                continue
+            require(time.monotonic() < until, "DISPLAY_READINESS_TIMEOUT")
+            if status == 200:
+                return {"status": status}, body
+            remaining = self.remaining_deadline(until)
+            unit = self.unit(DISPLAY, timeout=min(30, remaining))
+            require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
+            require(False, "DISPLAY_HEALTH_FAILED")
+
     def start_runtime(self):
         self.immutable()
         epoch = self.fence_epoch()
@@ -1121,7 +1209,7 @@ class Executor:
         epoch["restart_attempts"].append(now())
         self.phase("STARTING_DISPLAY", fence_epochs=self.s["fence_epochs"])
         self.system("start", [DISPLAY])
-        require(self.http(self.c["api_health_path"])[0]["status"] == 200, "DISPLAY_HEALTH_FAILED")
+        self.wait_display_ready()
         display = self.source_process(DISPLAY)
         self.public_probe()
         epoch["validated_restart"] = {

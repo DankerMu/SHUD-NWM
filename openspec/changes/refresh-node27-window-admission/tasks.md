@@ -136,3 +136,17 @@ with volatile success plus path/argv/ignore_errors/calendar and existing config/
 old-state bytes unchanged; actual window admission before a deliberately stopped isolated mutation boundary; fresh
 node27 prepare. Reuse existing ledger/governance matrices where bytes are unchanged. Local targeted Ruff and strict
 OpenSpec; runtime smoke on node27 with TMPDIR=/home/nwm/tmp. No live unit changes or second production window here.
+
+## 5. Bounded display readiness (#2373)
+
+- [ ] 5.1 Wait for actual local health200 after one service start, with bounded transient retries and terminal failure
+      refusal; preserve source/proxy checks before basic_ready.
+- [ ] 5.2 Bound attempts/status/sleeps by startup and applicable forward deadlines; preserve bounded late recovery.
+- [ ] 5.3 Prove old-red/changed-green delayed listener, never-ready, failed-unit/permanent-error and both startup paths,
+      plus the retained eight-case isolated window matrix; no production restart.
+- [ ] 5.4 Complete focused review/CI and publish immutable source/evidence for parent recovery and re-forward work.
+
+Evidence Floor: real recorded ConnectionRefused failure in both startup paths and separate manual OLD restoration;
+focused actual HTTP listener oracle plus deterministic deadline failures, source/public gating and no timer release
+on failure. Local Ruff/strict OpenSpec; node27 isolated runtime verification with TMPDIR=/home/nwm/tmp. Production
+remains OLD with retained narrow rollback and ledger; #2374 owns new re-forward admission, not this child.

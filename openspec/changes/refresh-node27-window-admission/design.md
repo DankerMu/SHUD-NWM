@@ -265,3 +265,26 @@ Evidence uses actual node27 typed payloads and recorded before/current drift. Fo
 raw-string comparison and pass after repair, exercise real comparison/window admission in isolation, and preserve
 governance sibling source hashes. Main performs a read-only live semantic comparison and fresh production prepare;
 child never performs T0. Parent uses the new immutable published executor only after child merge.
+
+## D7. Display readiness after asynchronous start (#2373)
+
+Expanded fixture; selected risks: service lifecycle, outage bounds, forward/recovery state transitions and evidence.
+The minimal atomic slice is the shared start_runtime health-readiness seam plus its focused oracle. No DB/schema/
+ledger, governance, typed-unit comparison or post-D12 re-forward changes.
+
+After the existing single StartUnit submission, wait for actual local health HTTP200, with a30-second absolute
+monotonic startup bound. In forward execution intersect it with remaining t0+1800 and stop+600 budgets using existing
+deadline policy. Clip each health attempt, unit-status call and sleep to remaining time. Do not restart the service.
+Only transient listener-not-ready/transport conditions may wait; a terminal failed service or permanent HTTP error
+refuses immediately. Source-process provenance and public-proxy verification still run after local readiness and
+before basic_ready/fence release; never infer readiness from unit active state alone.
+
+Preserve existing recovery policy: recovery may occur after historical forward deadlines expired, so recovery gets
+its own bounded30-second readiness attempt rather than being permanently barred by an old t0. This does not reset
+forward deadlines. The issue clarification records this decision; no unbounded recovery HTTP attempt is added.
+
+Required proof: old code fails on delayed listener; changed code reaches readiness in forward and recovery, including
+late authorized recovery. Never-ready exhausts the bound, failed-unit/permanent-error stops early, and neither path
+marks basic_ready or restores timers without health+source+public proofs. Use a real local delayed-listener seam for
+the targeted smoke; systemd remains isolated. Retain the eight real-DB window cases and all original state guards.
+No production restart is required for this child; actual OLD availability was restored separately and remains up.

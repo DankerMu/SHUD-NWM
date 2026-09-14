@@ -1,0 +1,63 @@
+{
+  "source_sha256": "70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5",
+  "window_t0": "2026-09-14T21:10:39.019294Z",
+  "window_exit": 1,
+  "phase": "BLOCKED_FENCED",
+  "failure_site": "window_execute.py start_runtime: system(start DISPLAY) immediately followed by http(api_health_path), URLError(ConnectionRefusedError111)",
+  "forward_and_recovery_shared_path": true,
+  "old_restoration": {
+    "source": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "canonical_oid": 24541,
+    "retained_narrow_oid": 309763188,
+    "legacy_reader_digest_matches": true,
+    "local_health": 200,
+    "public_layers": 200,
+    "active_units": [
+      "nhms-display-api.service",
+      "nhms-node27-autopipe.timer",
+      "nhms-node27-download.timer",
+      "nhms-node27-frontier-alert.timer",
+      "nhms-node27-mvt-cache-retention.timer",
+      "nhms-node27-raw-retention.timer",
+      "nhms-node27-resource-governance.timer",
+      "nhms-node27-timeseries-compression.timer",
+      "nhms-node27-timeseries-retention.timer"
+    ],
+    "state_file_not_rewritten": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+    "executor_recorded_phase": "BLOCKED_FENCED (historical failed executor state; manual service recovery recorded separately)",
+    "no_ledger_delete": true,
+    "no_forward_retry": true
+  },
+  "source_provenance": {
+    "unit": "nhms-display-api.service",
+    "processes": [
+      {
+        "pid": 610700,
+        "cwd": "/home/nwm/NWM",
+        "cmd_sha256": "42affe4a21dad0dde11b4d5137d9d9d1fa06bf06dcb1c7c089c30a31b4d65b37",
+        "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11"
+      },
+      {
+        "pid": 610706,
+        "cwd": "/home/nwm/NWM",
+        "cmd_sha256": "131bbb62dda2dd38aa7371bca0fa8344845eb0a037c0eb562cdb1ffe31ccdc10",
+        "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11"
+      },
+      {
+        "pid": 610707,
+        "cwd": "/home/nwm/NWM",
+        "cmd_sha256": "cfccc02bc6e519b73eb5e5ac093aa34169454880e3fcee53e08f9e02a8b3b570",
+        "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11"
+      },
+      {
+        "pid": 610708,
+        "cwd": "/home/nwm/NWM",
+        "cmd_sha256": "dd19a0931cf33124e6223694010ffcc975ba678c204ff1dc2b38bbcfef527f0f",
+        "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11"
+      }
+    ],
+    "execution": "2278282219180"
+  },
+  "deadline_decision": "https://github.com/DankerMu/SHUD-NWM/issues/2373#issuecomment-5671148492",
+  "no_new_production_restart_for_test": true
+}

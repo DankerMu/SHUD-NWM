@@ -48,3 +48,10 @@ The first authorized parent window refused before T0 because normal service exec
 display-only fields inside ExecStart/TimersCalendar. Compare typed stable configuration instead; preserve every real
 command, environment, file and timer-expression drift check. This focused child changes only window executor and oracle,
 requires fresh state, and does not itself execute production window or governance unstage.
+
+## Follow-on #2373: bounded display readiness
+
+The real window reached migration and parsing, but Type=simple service start returned before the API listened.
+Immediate health probing failed in forward and D12 recovery. Wait for actual local HTTP200 within a bounded startup
+attempt; never confuse successful start submission with readiness. Keep subsequent source/public/fence checks and
+all data/state guards. This child changes only the shared startup seam and its oracle, not retained-D12 re-forward.
