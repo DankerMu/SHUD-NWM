@@ -243,7 +243,9 @@ Expanded fixture; selected risks: persisted state compatibility, immutable confi
 evidence. Not selected: migration SQL, application behavior, permissions, governance handoff changes; those bytes stay
 unchanged. Minimal slice: window snapshot/comparison and its focused oracle together.
 
-Use the established GetUnit object-path resolution with typed busctl JSON. Service ExecStart has signature
+Resolve object paths with Manager.LoadUnit and typed busctl JSON. Unlike GetUnit, it also reads installed inactive
+units not currently loaded by the manager; it loads configuration only, never starts the unit. Real node27 replay-unit
+GetUnit refusal and successful LoadUnit/property read are preserved as evidence. Service ExecStart has signature
 `a(sasbttttuii)`: compare each ordered command's executable path, complete argv and ignore_errors; discard only the
 runtime timestamp/PID/result tail. Timer TimersCalendar has signature `a(sst)`: compare each base/expression pair;
 discard only next-elapse. Validate signature, row shapes and types; malformed/unsupported data refuses. Multiple

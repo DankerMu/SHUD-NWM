@@ -171,6 +171,9 @@ class BoundaryExecutor(w.Executor):
         self.bus_tick = 0
         self.show_tick = 0
         self.bus_fault = None
+        self.bus_loads = []
+        self.unloaded_units = set()
+        self.bus_properties = []
 
     def sql(self, query):
         import psycopg2
@@ -300,12 +303,15 @@ class BoundaryExecutor(w.Executor):
 
     def bus_run(self, argv):
         if argv[:4] == ["busctl", "--user", "--json=short", "call"]:
+            if len(argv) == 10 and argv[7] == "GetUnit" and argv[9] in self.unloaded_units:
+                raise w.Refusal("UNLOADED_UNIT_GETUNIT_REFUSED")
             w.require(
-                argv[4:9] == [w._SYSTEMD, w._SYSTEMD_MANAGER_PATH, w._SYSTEMD + ".Manager", "GetUnit", "s"]
+                argv[4:9] == [w._SYSTEMD, w._SYSTEMD_MANAGER_PATH, w._SYSTEMD + ".Manager", "LoadUnit", "s"]
                 and len(argv) == 10
                 and argv[9] in self.bus_paths,
                 "UNKNOWN_BUSCTL_BOUNDARY",
             )
+            self.bus_loads.append(argv[9])
             if self.bus_fault == "resolution":
                 return json.dumps({"type": "s", "data": ["not-an-object-path"]}).encode()
             return json.dumps({"type": "o", "data": [self.bus_paths[argv[9]]]}).encode()
@@ -329,6 +335,7 @@ class BoundaryExecutor(w.Executor):
                 (interface, property_name) == (w._SYSTEMD + ".Timer", "TimersCalendar"),
                 "BUS_PROPERTY_INTERFACE_MISMATCH",
             )
+        self.bus_properties.append((name, property_name))
         return json.dumps(self.bus_property(name, property_name)).encode()
 
     def run(self, argv, **kwargs):
@@ -887,6 +894,24 @@ def unit_config_oracle(args):
     try:
         executor.immutable()
         reports.append({"case": "runtime-metadata", "result": "pass"})
+    finally:
+        close(executor)
+    executor, _, _ = fixture("installed-unloaded")
+    try:
+        unloaded = "nhms-node27-timeseries-compression-replay.service"
+        executor.units[unloaded].update(ActiveState="inactive", MainPID="0", SubState="dead")
+        executor.unloaded_units.add(unloaded)
+        executor.immutable()
+        w.require(
+            unloaded in executor.bus_loads
+            and (unloaded, "ExecStart") in executor.bus_properties
+            and executor.units[unloaded]["ActiveState"] == "inactive"
+            and executor.units[unloaded]["MainPID"] == "0"
+            and executor.units[unloaded]["SubState"] == "dead"
+            and not executor.system_actions,
+            "UNLOADED_UNIT_LOAD_STARTED_OR_MUTATED",
+        )
+        reports.append({"case": "installed-unloaded", "result": "pass", "unit": unloaded})
     finally:
         close(executor)
 

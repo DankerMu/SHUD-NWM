@@ -348,7 +348,7 @@ class Executor:
                 _SYSTEMD,
                 _SYSTEMD_MANAGER_PATH,
                 _SYSTEMD + ".Manager",
-                "GetUnit",
+                "LoadUnit",
                 "s",
                 name,
             ],

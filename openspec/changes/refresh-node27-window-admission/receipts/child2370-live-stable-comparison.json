@@ -1,0 +1,83 @@
+{
+  "result": "PASS",
+  "source_sha256": "0d972c3dcc57984431c363a97878e143414800b646bea8ad8a536a198bec4cfd",
+  "readonly": true,
+  "records": [
+    {
+      "unit": "nhms-node27-autopipe.service",
+      "stable": {
+        "ExecStart": "[[\"/bin/bash\",[\"/bin/bash\",\"/home/nwm/NWM/scripts/node27_autopipe_cron.sh\"],false]]"
+      },
+      "prior_typed": {
+        "type": "a(sasbttttuii)",
+        "data": [
+          [
+            "/bin/bash",
+            [
+              "/bin/bash",
+              "/home/nwm/NWM/scripts/node27_autopipe_cron.sh"
+            ],
+            false,
+            1789410340554657,
+            2268152316927,
+            0,
+            0,
+            366412,
+            0,
+            0
+          ]
+        ]
+      },
+      "current_typed": {
+        "type": "a(sasbttttuii)",
+        "data": [
+          [
+            "/bin/bash",
+            [
+              "/bin/bash",
+              "/home/nwm/NWM/scripts/node27_autopipe_cron.sh"
+            ],
+            false,
+            1789410340554657,
+            2268152316927,
+            0,
+            0,
+            366412,
+            0,
+            0
+          ]
+        ]
+      },
+      "stable_equal": true,
+      "raw_metadata_changed": false
+    },
+    {
+      "unit": "nhms-node27-frontier-alert.timer",
+      "stable": {
+        "TimersCalendar": "[[\"OnCalendar\",\"*-*-* *:00/30:00\"]]"
+      },
+      "prior_typed": {
+        "type": "a(sst)",
+        "data": [
+          [
+            "OnCalendar",
+            "*-*-* *:00/30:00",
+            1789412400000000
+          ]
+        ]
+      },
+      "current_typed": {
+        "type": "a(sst)",
+        "data": [
+          [
+            "OnCalendar",
+            "*-*-* *:00/30:00",
+            1789416000000000
+          ]
+        ]
+      },
+      "stable_equal": true,
+      "raw_metadata_changed": true
+    }
+  ]
+}
