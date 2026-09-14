@@ -848,7 +848,9 @@ canonical replace 前退出、非零：
   publisher 的 not-publishable 判据；`unreadable_required_files` 是「必需文件
   匹配到但读不出」的第三态，#1552/#1553：此时前两个 list 可能都为空，不能据此
   当成「无因的 partial」）；无这四键 = model 目录真没了。
-  合法下线走下面的 **retire declaration 恢复顺序**；不打算下线就修包后重跑。
+  合法下线：非 direct-grid 拓扑走下面的 **retire declaration 恢复顺序**；
+  direct-grid 生产（`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`）不走 declaration，见下面的
+  **拓扑围栏**与 §7.2。不打算下线就修包后重跑。
 - `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
   原因：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 指向的文件不存在 / 不可读（已被删除或
   轮转走）、schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
@@ -921,6 +923,28 @@ model set 真正变了，generation 才会变（这时也必须重新出 declara
 为 `null`——id-only 分类的 prospective 行没有 checksum，其 generation 不是真实
 publish 绑定的那个值，**不要从 dry-run 拷**。
 
+> **拓扑围栏（#1720，先读再往下做）**：本节以下的 declaration 操作流程——手动 CLI
+> 路径、retire declaration 恢复顺序、systemd 路径——**只适用于
+> `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID` 不为 true 的拓扑**。当前生产（direct-grid）
+> 两个 env 都是 `true`：`scripts/scheduler_file_provider_refresh.py` 的
+> `publish_registry()` 走 direct-grid 分支，
+> `precommit_provider_generation(workspace, [], previous_models_snapshot)` 再重发
+> `previous_models_snapshot`——prospective ≡ previous，`removed` / `package_changed`
+> 恒为空，cutover 闸结构性看不到任何 model set 变更。于是：
+>
+> - **retire** entry 匹配不到任何 removal，按 rule 1（retire 的 `model_id` 必须在
+>   `removed` 集合里）判无效——**下一次** refresh 就以 outcome=`failed`、reason=
+>   `registry_cutover_declaration_invalid` 拒跑，不是等过期之后才拒。`--dry-run`
+>   预览看不到这条拒绝（refusal 只在真实 publish 上评估），不能用它"先试一下"。
+> - **replace** entry 没有 `package_changed` 可覆盖，永远不生效；它的 `generation`
+>   一旦与 renewal 的 prospective 不符、或 declaration 过期 / 文件不可读，同样拖停
+>   每日管线。
+>
+> direct-grid 生产上的换包 / 退役不走 declaration：率定切换按 §5.7.1（provision
+> `M1′` + 直接发布合并 manifest），退役按 §7.2（手工删 manifest 行 + 后续 DB 侧
+> deactivate）。direct-grid 生产上 `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 必须保持
+> 未设置（删掉整行，不留空值）。
+
 操作流程（手动 CLI 路径）：先看被拒 receipt -> 拷 generation / old/new checksum 到
 declaration -> 提交 declaration 到 mode-0600 路径 ->
 `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑 refresh。
@@ -929,7 +953,8 @@ declaration -> 提交 declaration 到 mode-0600 路径 ->
 `new_checksum` 必须是 64 位 hex）和 `retire`（下线一行，`new_checksum` 必须显式写
 `null`——缺键与 `null` 语义不同，schema 两条 if/then 钉死这个配对）。
 
-**退役一个 model（retire declaration 恢复顺序，#1433，首选路径）**：这是
+**退役一个 model（retire declaration 恢复顺序，#1433；仅非 direct-grid 拓扑的首选路径，
+direct-grid 生产见上面的拓扑围栏与 §7.2）**：在非 direct-grid 拓扑上这是
 `registry_cutover_removal_refused` 的正规出口，无论 removal 来自「删了目录」还是
 「包变 invalid 被 skip」。全程适用 #1104 并发禁令。
 
@@ -2992,10 +3017,14 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
 5.7 只讲克隆工具本身。一次完整的率定切换还要 provision 与 manifest 发布，**顺序是硬约束**：
 
 ```text
-provision M1′（node-27，写 core.model_instance）
+provision M1′（node-27，写 core.model_instance；工具 scripts/provision_direct_grid_scheduler_registry.py）
   -> 写克隆行（node-22，两份 state-index）
   -> 最后才发布合并 manifest
 ```
+
+direct-grid 生产上 model set 变更的通道就是这三步：`M1′` 行由
+`scripts/provision_direct_grid_scheduler_registry.py` 产出，再由下面的直接发布落到
+manifest——**不是** §3.1.2 的 cutover declaration。
 
 倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
 在任何 generation 都没有 state 行，走的是 first-cycle 分支
@@ -3023,9 +3052,12 @@ provision M1′（node-27，写 core.model_instance）
 
 > **不要为这种切换准备 retire declaration。** 它不会被任何东西匹配（refresh 侧闸看不到
 > 变更；scheduler 侧 §8 因为克隆行制造了同代历史而走 `warm_continue`，该分支根本不读
-> declaration）。而留在 env 里的 declaration 会过期，之后**每一次** refresh 都以
-> `registry_cutover_declaration_invalid` 拒跑，把每日管线拖停。5.x 的
-> 「retire declaration 恢复顺序」适用于非 direct-grid 拓扑，不适用于这里。
+> declaration）。更糟的是它不必等过期：renewal 的 `removed` 恒为空，retire entry
+> 按 rule 1 直接判无效，**下一次** refresh 就以 `registry_cutover_declaration_invalid`
+> 拒跑（此后每一次都拒，直到删掉 env 行），把每日管线拖停；replace entry 也匹配不到
+> 任何 `package_changed`，一旦过期或 generation 不符同样拒跑。§3.1.2 的
+> 「retire declaration 恢复顺序」只适用于非 direct-grid 拓扑（见该节的拓扑围栏），
+> 不适用于这里。
 
 做法是直接调 `publish_scheduler_registry_manifest`，两份目标**共用同一个 `generated_at`**
 （这样两份字节相同是结构性的，不依赖事后比对），canonical 侧带 `expected_preimage` 做 CAS：

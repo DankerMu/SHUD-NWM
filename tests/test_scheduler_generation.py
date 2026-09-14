@@ -87,6 +87,49 @@ def _write_declaration(
     return path
 
 
+def _assert_selected_predecessor_is_matcher_key(
+    selected: Mapping[str, Any] | None,
+    *,
+    model_id: str,
+    source_id: str,
+    candidate_cycle_time: str,
+    lead_hours: int,
+    expected_valid_time: str,
+    expected_cycle_id: str,
+) -> None:
+    """#1720: ``selected_predecessor`` carries the exact-predecessor key.
+
+    The literal ``expected_*`` values come from the spec scenario; the key
+    comparison rebuilds the lookup exactly as
+    ``state_manager.generation_scoped_history_signal`` does
+    (``valid_time=cutoff``, ``cycle_id=expected_predecessor_cycle_id``) with
+    the cycle id composed the way the gate composes it.
+    """
+    from packages.common.state_manager import _state_index_identity_key, cycle_id_for
+
+    assert selected is not None
+    assert selected["source_id"] == source_id
+    assert selected["valid_time"] == expected_valid_time
+    assert selected["cycle_id"] == expected_cycle_id
+    assert selected["lead_hours"] == lead_hours
+    cutoff = _dt(candidate_cycle_time)
+    matcher_key = _state_index_identity_key(
+        model_id=model_id,
+        source_id=source_id,
+        valid_time=cutoff,
+        cycle_id=cycle_id_for(source_id, cutoff - timedelta(hours=lead_hours)),
+        lead_hours=lead_hours,
+    )
+    evidence_key = _state_index_identity_key(
+        model_id=model_id,
+        source_id=selected["source_id"],
+        valid_time=selected["valid_time"],
+        cycle_id=selected["cycle_id"],
+        lead_hours=selected["lead_hours"],
+    )
+    assert evidence_key == matcher_key
+
+
 # ---------------------------------------------------------------------------
 # Test helper: signal builder
 # ---------------------------------------------------------------------------
@@ -416,6 +459,16 @@ def test_transition_blocks_predecessor_pending_after_effective_cycle_without_new
     assert evaluation.typed_reason == "state_snapshot_index_prior_checkpoint_missing_after_history"
     assert evaluation.selected_predecessor is not None
     assert evaluation.selected_predecessor["generation"] == NEW_GENERATION
+    # #1720: the evidence names the key the matcher looked up, not T - lead.
+    _assert_selected_predecessor_is_matcher_key(
+        evaluation.selected_predecessor,
+        model_id="model_a",
+        source_id="gfs",
+        candidate_cycle_time="2026-07-06T12:00:00Z",
+        lead_hours=12,
+        expected_valid_time="2026-07-06T12:00:00Z",
+        expected_cycle_id="gfs_2026070600",
+    )
 
 
 def test_transition_blocks_predecessor_pending_within_current_generation() -> None:
@@ -441,6 +494,15 @@ def test_transition_blocks_predecessor_pending_within_current_generation() -> No
     assert evaluation.selected_predecessor is not None
     assert evaluation.selected_predecessor["source_id"] == "gfs"
     assert evaluation.selected_predecessor["lead_hours"] == 12
+    _assert_selected_predecessor_is_matcher_key(
+        evaluation.selected_predecessor,
+        model_id="model_a",
+        source_id="gfs",
+        candidate_cycle_time="2026-07-06T12:00:00Z",
+        lead_hours=12,
+        expected_valid_time="2026-07-06T12:00:00Z",
+        expected_cycle_id="gfs_2026070600",
+    )
 
 
 def test_transition_typed_reason_mapping_is_1_to_1() -> None:
@@ -739,6 +801,17 @@ def test_transition_blocks_wrong_generation_at_expected_predecessor_key(
         evaluation.declaration_evidence["wrong_generation_predecessor_checksum_prefix"]
         == OLD_CHECKSUM[:12]
     )
+    # #1720: identical identity to the pending case — the key that holds the
+    # wrong-generation entry.
+    _assert_selected_predecessor_is_matcher_key(
+        evaluation.selected_predecessor,
+        model_id="model_a",
+        source_id="gfs",
+        candidate_cycle_time="2026-07-06T12:00:00Z",
+        lead_hours=12,
+        expected_valid_time="2026-07-06T12:00:00Z",
+        expected_cycle_id="gfs_2026070600",
+    )
 
 
 def test_transition_blocks_wrong_generation_within_current_generation_history() -> None:
@@ -762,6 +835,15 @@ def test_transition_blocks_wrong_generation_within_current_generation_history() 
     )
     assert evaluation.decision == generation.TransitionDecision.BLOCK_WRONG_GENERATION
     assert evaluation.typed_reason == "state_snapshot_index_generation_mismatch"
+    _assert_selected_predecessor_is_matcher_key(
+        evaluation.selected_predecessor,
+        model_id="model_a",
+        source_id="gfs",
+        candidate_cycle_time="2026-07-06T12:00:00Z",
+        lead_hours=12,
+        expected_valid_time="2026-07-06T12:00:00Z",
+        expected_cycle_id="gfs_2026070600",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1744,6 +1826,16 @@ def test_wrong_generation_state_at_predecessor_slot_flags_operator_action(
         state_evidence["self_heal_probe"]["reason"]
         == "state_snapshot_index_model_package_checksum_mismatch"
     )
+    # #1720: pending evidence nests the identity under the transition; it is
+    # the matcher key (valid_time = candidate cycle) and agrees with the
+    # self-heal ``required_prior_*`` producing-cycle fields.
+    selected = state_evidence["registry_cutover_transition"]["selected_predecessor"]
+    assert selected["valid_time"] == "2026-05-21T12:00:00Z"
+    assert selected["cycle_id"] == "gfs_2026052100"
+    assert selected["cycle_id"] == state_evidence["required_prior_cycle_id"]
+    assert _pdt(selected["valid_time"]) == _pdt(
+        state_evidence["required_prior_cycle_time"]
+    ) + timedelta(hours=selected["lead_hours"])
     # Non-goal guard: the failure block is untouched by the additive signal.
     assert state_evidence["failure"]["retryable"] is True
     assert state_evidence["failure"]["permanent"] is False
@@ -2520,6 +2612,19 @@ def test_env_override_does_not_admit_wrong_generation_checkpoint(
         transition.get("declaration", {}).get("window_direction")
         == "current_generation_history"
     )
+    # #1720: the gate's block evidence (declaration-level branch) reports the
+    # exact key that holds the wrong-generation entry, and it agrees with the
+    # gate's own ``required_prior_*`` producing-cycle fields.
+    state_evidence = blocked[0].state_evidence
+    selected = state_evidence["selected_predecessor"]
+    assert selected == transition["selected_predecessor"]
+    assert selected["valid_time"] == wrong_gen_entry["valid_time"]
+    assert selected["cycle_id"] == wrong_gen_entry["cycle_id"]
+    assert selected["lead_hours"] == wrong_gen_entry["lead_hours"]
+    assert selected["cycle_id"] == state_evidence["required_prior_cycle_id"]
+    assert _pdt(selected["valid_time"]) == _pdt(
+        state_evidence["required_prior_cycle_time"]
+    ) + timedelta(hours=selected["lead_hours"])
 
 
 def _looks_like_hex64(value: str) -> bool:

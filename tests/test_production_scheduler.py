@@ -53914,7 +53914,9 @@ def _predecessor_pending_successor(
                 "generation": "gen-fixture",
                 "selected_predecessor": {
                     "source_id": "gfs",
-                    "valid_time": _format_iso_z(predecessor_time),
+                    # #1720: the matcher's state-index identity — valid_time
+                    # is the successor cycle, cycle_id the producing cycle.
+                    "valid_time": _format_iso_z(successor.cycle_time_utc),
                     "lead_hours": _WARM_START_TOGGLE_LEAD_HOURS,
                     "generation": "gen-fixture",
                     "cycle_id": cycle_id_for("gfs", predecessor_time),

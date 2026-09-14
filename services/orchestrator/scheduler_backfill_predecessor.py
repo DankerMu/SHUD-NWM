@@ -19,7 +19,9 @@ Constraints
 -----------
 - We emit predecessor candidates ONLY when the successor block carries a
   ``registry_cutover_transition`` state_evidence field pointing to
-  ``block_predecessor_pending`` with a well-formed ``selected_predecessor``.
+  ``block_predecessor_pending`` with a well-formed ``selected_predecessor``
+  (the matcher's state-index identity: ``valid_time`` = successor cycle,
+  ``cycle_id`` = producing cycle ``valid_time - lead_hours``; #1720).
   §8.6 spec Scenario "Backfill respects generation identity" refuses
   cross-generation predecessors; that guard is enforced downstream by the
   §8 gate applied to the emitted candidate itself.
@@ -36,12 +38,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
 from services.orchestrator.scheduler_discovery import SchedulerResourceLimitError
-from workers.data_adapters.base import CycleDiscovery
+from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +74,13 @@ def _extract_pending_predecessors(
 ) -> list[dict[str, Any]]:
     """Return one dict per §8.6 predecessor-pending block.
 
+    #1720: the predecessor ``cycle_time`` is derived from the
+    ``selected_predecessor`` state-index identity as ``valid_time -
+    lead_hours``.  A record whose present ``cycle_id`` disagrees with
+    ``cycle_id_for(source_id, valid_time - lead_hours)`` — or whose source id
+    that helper rejects — is skipped like any other malformed evidence; a
+    record without ``cycle_id`` is accepted and derived.
+
     #1735: when a lineage resolver is supplied, a record whose predecessor
     cycle predates the model's OWN state-lineage cutover ``t*`` is marked
     ``lineage_scoped_out`` so :func:`emit_predecessor_candidates` refuses the
@@ -94,10 +103,10 @@ def _extract_pending_predecessors(
         selected = transition.get("selected_predecessor") or {}
         if not isinstance(selected, Mapping):
             continue
-        cycle_time = _parse_iso(selected.get("valid_time"))
+        state_valid_time = _parse_iso(selected.get("valid_time"))
         source_id = str(selected.get("source_id") or "")
         model_id = str(getattr(entry, "model_id", "") or "")
-        if cycle_time is None or not source_id or not model_id:
+        if state_valid_time is None or not source_id or not model_id:
             continue
         try:
             lead_hours = int(selected.get("lead_hours") or 0)
@@ -105,6 +114,21 @@ def _extract_pending_predecessors(
             continue
         if lead_hours <= 0:
             continue
+        # #1720: ``selected_predecessor`` is the matcher's state-index
+        # identity — ``valid_time`` is the successor's own cycle time and the
+        # predecessor (producing) cycle sits ``lead_hours`` earlier.
+        cycle_time = state_valid_time - timedelta(hours=lead_hours)
+        declared_cycle_id = str(selected.get("cycle_id") or "").strip()
+        if declared_cycle_id:
+            # A present ``cycle_id`` must name that same producing cycle.  A
+            # disagreement (or a source id the helper rejects) is malformed
+            # evidence: skip it, never "repair" it by preferring one field.
+            try:
+                expected_cycle_id = cycle_id_for(source_id, cycle_time)
+            except ValueError:
+                continue
+            if declared_cycle_id != expected_cycle_id:
+                continue
         record: dict[str, Any] = {
             "source_id": source_id,
             "cycle_time": cycle_time,
