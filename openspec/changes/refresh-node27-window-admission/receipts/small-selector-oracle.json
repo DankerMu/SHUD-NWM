@@ -1,0 +1,27 @@
+{
+  "schema_version": "issue1987.admission.selector-oracle.v1",
+  "source_runtime": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+  "qualification_target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "new_runtime_verified": false,
+  "database": "i8_1987_small_real_20260913044203",
+  "request": {
+    "run_id": "fcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
+    "model_id": "dg_945b6f0bbf63c5314d47df9481892229",
+    "basin_version_id": "basins_lh_ylj_vbasins",
+    "river_network_version_id": "basins_lh_ylj_rivnet_vbasins",
+    "segment_id": "basins_lh_ylj_shud_shud_riv_000001",
+    "issue_time": "2026-08-19T12:00:00+00:00",
+    "variables": [
+      "q_down"
+    ],
+    "scenarios": [
+      "forecast_gfs_deterministic"
+    ]
+  },
+  "expected": {
+    "points": 168,
+    "response_sha256": "84a95266f402a20d9f26834bba5f16972266f1075e6859798eea37b82738b483"
+  },
+  "source_scope": "readonly exact planned selector on retained 512232-row isolated fixture; no primary or write",
+  "primary_mutated": false
+}

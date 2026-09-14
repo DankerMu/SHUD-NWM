@@ -1,0 +1,26 @@
+{
+  "schema_version": "issue1987.admission.ledger-input.v1",
+  "source": "previously executed read-only node27 diagnostic; not rerun",
+  "observation": {
+    "source": "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+    "files_count": 53,
+    "ledger_count": 59,
+    "pending": [
+      "000059_river_timeseries_narrow_expand.sql"
+    ],
+    "ledger_not_in_files": [
+      "000007_flood.sql",
+      "000015_flood_return_period_identity_indexes.sql",
+      "000017_return_period_max_over_window_identity.sql",
+      "000020_valid_time_discovery_indexes.sql",
+      "000031_search_discovery_return_period_performance.sql",
+      "000034_return_period_run_quality_materialization.sql",
+      "000036_run_product_quality_explicit_source.sql"
+    ],
+    "scope": "read-only set comparison; no migrations or ledger edits"
+  },
+  "expected_after_expand": "L plus 000059",
+  "expected_after_d12": "L plus 000059",
+  "expected_before_commit_failure": "L",
+  "production_ledger_mutated": false
+}

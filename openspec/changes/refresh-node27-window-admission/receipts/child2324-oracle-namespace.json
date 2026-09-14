@@ -1,0 +1,54 @@
+{
+  "issue": 2324,
+  "candidate": "91cfabb78b80fb3faeb4fe404d27a4b98befbbc3",
+  "red_command": "oracle-happy-attempt2-command.json",
+  "receipt": {
+    "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914015712.receipt.json",
+    "case": "happy",
+    "returncode": 1,
+    "command": [
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+      "/home/nwm/.local/state/issue1987-tools/91cfabb78b80fb3faeb4fe404d27a4b98befbbc3/window_smoke.py",
+      "--oracle",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+      "--old-repo",
+      "/home/nwm/NWM-i8-oracle-old-a8db554d",
+      "--new-repo",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+      "--container",
+      "nwm-i8-1987-window-volume-6fb30b552",
+      "--state",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914015712-state",
+      "--case",
+      "happy"
+    ],
+    "database": "i8_1987_happy_6fb30b552_20260914015712",
+    "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914015712-state",
+    "state_exists": true,
+    "records": [
+      {
+        "result": "FAIL",
+        "error_type": "Refusal",
+        "check": "F24_PREPARE_SHOULD_REFUSE_HISTORICAL"
+      }
+    ],
+    "logs": {
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914015712.stdout": "5d7c8738fe17b8e1f15322d52321b9f66f4274f0334e5006c2006301ccff6251",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914015712.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executors": {
+      "/home/nwm/.local/state/issue1987-tools/91cfabb78b80fb3faeb4fe404d27a4b98befbbc3/window_smoke.py": "2b3956b511e9fdcea1935fc98f82f2ede719606322e6797020f3b31a9dfbc3a3",
+      "/home/nwm/.local/state/issue1987-tools/91cfabb78b80fb3faeb4fe404d27a4b98befbbc3/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+    }
+  },
+  "inner_result": {
+    "error_type": "Refusal",
+    "check": null,
+    "phase": "PREPARATION_FAILED"
+  },
+  "private_trace_signal": "window_executor_f24.Refusal: PENDING_MIGRATIONS_NOT_EXACT",
+  "confirmed_cause": "Baseline f24.prepare ran under changed w.main, whose Refusal isinstance filter belongs to another module and drops the expected check.",
+  "fix": "Dispatch each probe through its owning module main, factory and safe_path boundary; do not weaken error assertions or alter original Refusal classes.",
+  "production_mutations": false,
+  "status": "repair delegated; same full happy rerun pending"
+}

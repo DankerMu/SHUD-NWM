@@ -1,0 +1,154 @@
+{
+  "verdict": "revise",
+  "fixture_review": "revise",
+  "scope": "Phase 0.5 fixture completeness for refresh-node27-window-admission children 1-2; not a code-review round",
+  "summary": "The four fixtures correctly split two independently ordered children, keep f24 lineage, freeze deployment 415cbd1e vs tool-delivery f24c3fb37, and keep parent T0/unstage/#2280 off the child gate. They must be revised: D12 is specified as deleting 000059, which inverts the frozen recover contract; the isolated window oracle cannot currently reproduce the seven ledger-only rows at both admission sites; Child 2 verification still points at a same-NEW smoke that cannot prove old-state/new-active handoff; and tools/ under this OpenSpec change have no CI-scope or archive-launch contract.",
+  "invariant_matrix_assessment": {
+    "present": true,
+    "repair_intensity": "high",
+    "governing_invariant": "Admit only the explicitly frozen, recoverable operation; preserve historical data and ownership before any operational mutation. (design.md:76)",
+    "what_is_adequate": [
+      "Nine boundary rows cover prepare vs worker, target/import identity, old-pin/new-active, interrupted unstage, live audit criticals, and child-vs-parent readiness.",
+      "Child-readiness row correctly forbids claiming T0, production migration, live pin removal, or #2280."
+    ],
+    "blocking_defects": [
+      "design.md:82 expand -> D12 says rollback removes only this operation's migration entry. Frozen recover does not delete schema_migrations rows: window_execute.py:1305-1308 is rename-only; :1280-1281 allows ledger_before or ledger_before+[EXPAND]; :1346 requires ledger == recovery_ledger; I8-1987.md:86-87 and :118-121 require the 000059 row to remain so ordinary migrate skips. The matrix would make Child 1 implement ledger deletion and enable re-expand.",
+      "D1 design.md:35, tasks.md:14, and spec.md:12 say D12 restores the complete original (pre-expand) ledger. That is the same inverted contract, not an independent row.",
+      "High-intensity template surfaces are missing as named inventory (source-of-truth, producers, validators, storage, entrypoints, downstream, failure, evidence). More important than labels: there is no regression row for disposable ledger = current files + seven named ledger-only versions, pending == [000059], at BOTH prepare and worker; and no row that after expand+D12 the ledger is original+000059 including the seven historical names."
+    ],
+    "required_matrix_rows": [
+      "historical ledger x prepare: seven named ledger-only versions present, no retired SQL files, pending == [000059] accepted; ledger rows untouched.",
+      "historical ledger x migration worker: same input; zero pending and extra current pending refuse before apply.",
+      "expand: ledger becomes original + 000059 only.",
+      "D12: ledger still original + 000059 (000059 retained); historical seven retained; only rename reverse; retained narrow provenance kept.",
+      "unstage ordering: active==new target and ownership/drift checks, stop timer, remove owned pin, audit ordinary new runtime with no criticals, then restore original timer activity. HEAD still OLD refuses and keeps the 1a32 pin."
+    ]
+  },
+  "missing_axes": [
+    {
+      "id": "d12-ledger-retention",
+      "severity": "P0",
+      "axis": "complete ledger expand/D12 preservation",
+      "evidence": [
+        "design.md:35",
+        "design.md:82",
+        "tasks.md:14",
+        "specs/node27-window-admission/spec.md:12",
+        "window_execute.py:1087,1280-1281,1305-1308,1346",
+        "openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I8-1987.md:86-87,118-121"
+      ],
+      "gap": "Fixture currently requires D12 to restore the pre-expand ledger / remove the 000059 schema_migrations row. Frozen D12 is catalog reverse only and MUST retain 000059 plus all historical rows, including the seven retired names. Child 1 must not add ledger DELETE."
+    },
+    {
+      "id": "prepare-and-worker-historical-oracle",
+      "severity": "P1",
+      "axis": "historical ledger semantics at BOTH prepare and migration worker; verification executable under existing node-27 oracle conventions",
+      "evidence": [
+        "tasks.md:13-19",
+        "design.md:31-33,80-81",
+        "spec.md:8-18",
+        "window_execute.py:779-780,1561-1563",
+        "window_smoke.py:281,412-441,1100-1108",
+        "resume2100-migration-admission-diagnostic.json ledger_not_in_files"
+      ],
+      "gap": "Evidence floor requires the seven observed ledger-only entries and a f24-red/child-green on the existing window oracle at both prepare and worker. The current oracle seeds apply_migrations_from_zero(through='000058') and therefore never has those seven rows; f24's subset check would stay green. Happy also drives worker('migrate') but does not execute Executor.prepare()'s PENDING_MIGRATIONS_NOT_EXACT against that history (prepare is production-gated; late-prepare/entrypoint paths do not seed retired versions). Name the seven versions, require INSERT into public.schema_migrations without recreating SQL files, and require both admission sites to see that catalog."
+    },
+    {
+      "id": "child2-old-state-new-active-oracle",
+      "severity": "P1",
+      "axis": "Child 2 old-state/new-active compatibility and actual unstage audit ordering",
+      "evidence": [
+        "design.md:43-59,D3",
+        "design.md:85-87",
+        "tasks.md:33-43",
+        "spec.md:33-56",
+        "governance_stage.py:164-166,352,519-523,657-687",
+        "governance_smoke.py:396-418,446-456"
+      ],
+      "gap": "Handoff, interrupted unstage, live-runner, and pre-cutover refusal are required, but verification says run the existing published governance smoke. That smoke stages and unstages with one NEW constant after an in-process cutover flag; it does not consume 1a32-produced state with a 415cbd1e tool, does not refuse HEAD==OLD, and has no RUNNER_NOT_IDLE or interrupted-unstage resume. Discriminating Child 2 proof must be named: old tool at 1a32 writes state.identity/pin_digest; retargeted tool with identical args (operation excluded) unstages only after active==415cbd1e; audit of unpinned new runtime then timer restore; production unstage remains parent #1987."
+    },
+    {
+      "id": "openspec-tools-ci-archive",
+      "severity": "P1",
+      "axis": "CI-scope and archive-launch for tools under openspec",
+      "evidence": [
+        "proposal.md:26",
+        "design.md:7",
+        "tasks.md:5,21,27,43",
+        "receipts/f24-baseline.json new_owner tools/*.py",
+        ".github/workflows/ci.yml:52-53",
+        "scripts/select_ci_tests.py:4940-4950",
+        "pyproject.toml:74"
+      ],
+      "gap": "Executable owner is this change's tools/*.py. CI backend filter **/*.py will start the PR unit job, but openspec/ is not a backend prefix, so selection is collect-only; pytest testpaths=['tests'] will not collect these files; there is no CI ruff job. Archive would relocate the execution owner. Document: no tests/ mirrors; targeted local ruff + node-27 oracles are the evidence; do not archive this change before parent #1987 window (same discipline as I8 'Do not archive the shared change'), or name the post-archive stable owner path."
+    },
+    {
+      "id": "child2-selector-expected-output",
+      "severity": "P1",
+      "axis": "Child 2 small-selector expected output",
+      "evidence": [
+        "tasks.md:38",
+        "spec.md:24",
+        "window-authoritative-small-selector-proof.txt"
+      ],
+      "gap": "Child 2 requires the exact 168-point digest but does not pin it. Pin points=168 and response_sha256=84a95266f402a20d9f26834bba5f16972266f1075e6859798eea37b82738b483 against the retained isolated fixture; do not rerun write-budget 512232 as new evidence."
+    }
+  ],
+  "required_additions": [
+    "Rewrite D1, the expand->D12 matrix row, tasks.md Child 1 D12 bullet, and spec scenario so D12 retains 000059 and the seven historical ledger-only versions; rollback is rename/provenance only; ordinary migrate must still skip 000059.",
+    "Add an isolated-oracle seed+assertion contract for the seven named versions (000007_flood.sql, 000015_flood_return_period_identity_indexes.sql, 000017_return_period_max_over_window_identity.sql, 000020_valid_time_discovery_indexes.sql, 000031_search_discovery_return_period_performance.sql, 000034_return_period_run_quality_materialization.sql, 000036_run_product_quality_explicit_source.sql) at both prepare and worker, using the existing guarded window_smoke launcher (private I8_REHEARSAL_DSN, parent-provisioned nwm-i8-1987-* disposable container, --oracle .../rehearse_river_rollback.py.txt, fresh DB/state per case). Keep the eight recovery cases and fourteen CLI cases as retained, not redesigned.",
+    "Name a Child 2 governance-smoke/handoff case that is not the inherited same-NEW happy path; keep production unstage off this change.",
+    "Document CI-scope and archive-launch for openspec/changes/refresh-node27-window-admission/tools/*.py.",
+    "Pin the existing 168-point selector digest in Child 2 evidence.",
+    "Correct the invariant-matrix D12 row and add the discriminating historical-ledger and unstage-ordering rows listed above."
+  ],
+  "non_gaps": [
+    "Risk packs: all 11 core packs are marked; Resource limits/discovery is not selected with a defensible preserve-existing-bounds reason; domain packs match project-profile.md. Selected packs map to retained oracles or explicit non-goals. Do not require a new File-IO symlink matrix or re-select hydro-met/Slurm/CRS/SHUD.",
+    "Child 1 independently mergeable: D2/tasks 1.1 keep old runtime pins and exclude governance retarget; not folded into Child 2.",
+    "Frozen deployment vs tool delivery: 415cbd1e vs f24c3fb37 receipts/hashes in design.md, proposal.md, and receipts/f24-baseline.json; OLD a8db554d and governance runtime 1a32ebb7 retained; absence on target is not retirement.",
+    "Child vs parent receipts: tasks.md section 3 and spec child-qualification requirement correctly keep T0, production 000059, owned unstage, #2280, and task 5.2 on parent #1987. No node-22 work and no production unstage before the window.",
+    "Unstage ordering in D3 matches governance_stage.py:657-687 (ownership/drift, stop timer, remove owned pin, audit unpinned active==NEW, restore timer). The gap is oracle naming, not the stated order.",
+    "Do not treat inherited window_smoke bulk (14 CLI, 8 recovery, late-prepare, write-budget) as newly designed behavior; only the historical-ledger seed and Child 2 retarget/handoff are new contracts.",
+    "Source ownership/provenance: adopt four f24 artifacts into this change's tools/, record original SHA-256 plus semantic delta, leave historical receipts untouched, skip the already-applied PGDATA patch."
+  ],
+  "risk_packs": {
+    "fixture_level": "expanded",
+    "repair_intensity": "high",
+    "profile": "openspec/project-profile.md",
+    "core_selected": [
+      "Public API/CLI/script entry",
+      "Config/setup",
+      "File IO/ownership",
+      "Schema/field identity",
+      "Permissions/secrets",
+      "Shared-state ordering",
+      "Legacy compatibility",
+      "Error/rollback",
+      "Release/dependency compatibility",
+      "Documentation"
+    ],
+    "core_not_selected": [
+      "Resource limits/discovery \u2014 no new algorithm; existing bounds retained"
+    ],
+    "domain_selected": [
+      "PostgreSQL/Timescale behavior",
+      "manifest/provenance",
+      "published artifact identity"
+    ],
+    "domain_not_selected": [
+      "Geospatial/CRS",
+      "hydro-met temporal semantics",
+      "SHUD numerics",
+      "Slurm lifecycle",
+      "external-provider behavior"
+    ],
+    "pack_selection_adequate": true
+  },
+  "verification_executability": {
+    "retained_window_matrix": "Executable: window_smoke.py --case happy plus stop, session, fence, do-before-ledger, rename, source, restart on the existing disposable launcher; fourteen CLI cases ride happy. Do not invent a new launcher.",
+    "historical_ledger_red_green": "Not executable until the seven ledger-only rows are seeded into the disposable DB and both prepare and worker are asserted.",
+    "child2_existing_governance_smoke": "Executable as retained compatibility, not as old-state/new-active proof.",
+    "child2_live_readonly_audit_and_fresh_prepare": "Stated correctly as pre-T0 qualification; not production unstage.",
+    "small_selector": "Executable on retained isolated data once the digest is pinned."
+  }
+}

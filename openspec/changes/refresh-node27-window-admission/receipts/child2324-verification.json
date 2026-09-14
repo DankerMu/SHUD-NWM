@@ -1,0 +1,488 @@
+{
+  "schema_version": "issue2324.verification.v1",
+  "issue": 2324,
+  "result": "PASS",
+  "tool_commit": "fe4c308977da7b013e621772cac9ddbc54691940",
+  "tool_sha256": {
+    "window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e",
+    "window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c"
+  },
+  "oracle_runtime_sha": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+  "fixture_snapshot": "aa7bae6185d702e7f8054f755bcd57334639136c",
+  "matrix": [
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914021501.receipt.json",
+        "case": "do-before-ledger",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914021501-state",
+          "--case",
+          "do-before-ledger"
+        ],
+        "database": "i8_1987_do_before_ledger_6fb30b552_20260914021501",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914021501-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914021501.stdout": "eb7544836bc207809c20f61c3af3b1973ec2c1aa8488070c6ba19ad0770be0a2",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914021501.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-do-before-ledger",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914021511.receipt.json",
+        "case": "happy",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914021511-state",
+          "--case",
+          "happy"
+        ],
+        "database": "i8_1987_happy_6fb30b552_20260914021511",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914021511-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914021511.stdout": "bc4614588e7a12de07507887926a6d7b7f1b70f46de043f47599a77ab678d7e1",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914021511.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-happy",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_6fb30b552_20260914021526.receipt.json",
+        "case": "stop",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_6fb30b552_20260914021526-state",
+          "--case",
+          "stop"
+        ],
+        "database": "i8_1987_stop_6fb30b552_20260914021526",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_6fb30b552_20260914021526-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_6fb30b552_20260914021526.stdout": "9dc706363b3d4a884b9e30047c97c353a8bc070c49731cff79210c14b288579a",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_6fb30b552_20260914021526.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-stop",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_6fb30b552_20260914021534.receipt.json",
+        "case": "session",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_6fb30b552_20260914021534-state",
+          "--case",
+          "session"
+        ],
+        "database": "i8_1987_session_6fb30b552_20260914021534",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_6fb30b552_20260914021534-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_6fb30b552_20260914021534.stdout": "961563d0837b12f34e10e2183491e56fd90a928870fb5f32278c43577a9c7405",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_6fb30b552_20260914021534.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-session",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_6fb30b552_20260914021542.receipt.json",
+        "case": "fence",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_6fb30b552_20260914021542-state",
+          "--case",
+          "fence"
+        ],
+        "database": "i8_1987_fence_6fb30b552_20260914021542",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_6fb30b552_20260914021542-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_6fb30b552_20260914021542.stdout": "4d794e060cced16dfbdb46c946ef39651b8bd2e508ae91b2f3d6fab0b83f82bb",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_6fb30b552_20260914021542.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-fence",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_6fb30b552_20260914021549.receipt.json",
+        "case": "rename",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_6fb30b552_20260914021549-state",
+          "--case",
+          "rename"
+        ],
+        "database": "i8_1987_rename_6fb30b552_20260914021549",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_6fb30b552_20260914021549-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_6fb30b552_20260914021549.stdout": "0dc8b600fa24a98f5e07a291c993cc33ef080ca8f8ddc9bd118b68a00df4f06c",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_6fb30b552_20260914021549.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-rename",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_6fb30b552_20260914021559.receipt.json",
+        "case": "source",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_6fb30b552_20260914021559-state",
+          "--case",
+          "source"
+        ],
+        "database": "i8_1987_source_6fb30b552_20260914021559",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_6fb30b552_20260914021559-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_6fb30b552_20260914021559.stdout": "ec5a631dd8fbdb8dfde38f68a20d9a49b33bbfe54368910223c6a5cf4495f91c",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_6fb30b552_20260914021559.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-source",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    },
+    {
+      "exit": 0,
+      "receipt": {
+        "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_6fb30b552_20260914021609.receipt.json",
+        "case": "restart",
+        "returncode": 0,
+        "command": [
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py",
+          "--oracle",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+          "--old-repo",
+          "/home/nwm/NWM-i8-oracle-old-a8db554d",
+          "--new-repo",
+          "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "--container",
+          "nwm-i8-1987-window-volume-6fb30b552",
+          "--state",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_6fb30b552_20260914021609-state",
+          "--case",
+          "restart"
+        ],
+        "database": "i8_1987_restart_6fb30b552_20260914021609",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_6fb30b552_20260914021609-state",
+        "state_exists": true,
+        "records": [
+          {
+            "result": "PASS"
+          }
+        ],
+        "logs": {
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_6fb30b552_20260914021609.stdout": "2e65aa1e1724c4c0ec87c094da5d90caaccd5724825a22b49b54cd54b9c1f2e3",
+          "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_6fb30b552_20260914021609.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "executors": {
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_smoke.py": "3cbeba7edf54503f6299a253875986fcc24139a4fb56562fd4a8d3e5c795929c",
+          "/home/nwm/.local/state/issue1987-tools/fe4c308977da7b013e621772cac9ddbc54691940/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+        }
+      },
+      "label": "final-oracle-restart",
+      "sha": "fe4c308977da7b013e621772cac9ddbc54691940"
+    }
+  ],
+  "recovery_state_proofs": {
+    "do-before-ledger": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 59,
+      "equals_original": true,
+      "equals_original_plus_expand": false,
+      "expand_present": false,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries",
+        "river_timeseries_narrow_rollback"
+      ]
+    },
+    "happy": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 60,
+      "equals_original": false,
+      "equals_original_plus_expand": true,
+      "expand_present": true,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries",
+        "river_timeseries_narrow_rollback"
+      ]
+    },
+    "stop": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 59,
+      "equals_original": true,
+      "equals_original_plus_expand": false,
+      "expand_present": false,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries"
+      ]
+    },
+    "session": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 59,
+      "equals_original": true,
+      "equals_original_plus_expand": false,
+      "expand_present": false,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries"
+      ]
+    },
+    "fence": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 59,
+      "equals_original": true,
+      "equals_original_plus_expand": false,
+      "expand_present": false,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries"
+      ]
+    },
+    "rename": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 60,
+      "equals_original": false,
+      "equals_original_plus_expand": true,
+      "expand_present": true,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries",
+        "river_timeseries_narrow_rollback"
+      ]
+    },
+    "source": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 60,
+      "equals_original": false,
+      "equals_original_plus_expand": true,
+      "expand_present": true,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries",
+        "river_timeseries_narrow_rollback"
+      ]
+    },
+    "restart": {
+      "phase": "RECOVERED_OLD_RETAINED",
+      "ledger_before_count": 59,
+      "recovery_ledger_count": 60,
+      "equals_original": false,
+      "equals_original_plus_expand": true,
+      "expand_present": true,
+      "historical_retained": true,
+      "catalog_keys": [
+        "river_timeseries",
+        "river_timeseries_narrow_rollback"
+      ]
+    }
+  },
+  "original_remote_detail_sha256": {
+    "historical-ledger-admission.json": "6f4a8ef0320991709e9c81cefc15e9dfffcb10e13a9399e679152a09ed0fac29",
+    "historical-ledger-changed-worker-positive.json": "cc48f99f1f66b47cae1a57011793e7a85ae07c56226e3740dbaf3dedc74fe1bc",
+    "late-prepare-admission.json": "0dfb5278d75751dd4525068e25e06648e5c6ad60f554f55c9f625bed313a8b3d",
+    "entrypoint-admission.json": "f89e1641eaf51a75ce78c3811f55fa74e8325f138a6b9e9217d2ed6ba287a8e9"
+  },
+  "export_format": "Detail JSON files are parsed/canonical exports; remote-original hashes are separate from local export bytes.",
+  "cli_cases": 14,
+  "late_prepare_cases": 4,
+  "historical_admission_cases": 7,
+  "changed_worker": "accepted-and-committed real 000059, ledger count 60",
+  "limits": [
+    "prepare control flow uses exactly one disposable expected-OID substitution; not byte-identical production prepare",
+    "unit/process/network boundaries simulated; PostgreSQL, OIDs, ledger, parser and reader are real",
+    "no production mutation, active source switch, governance pin change or node22 operation",
+    "prior failed candidate receipts are diagnostic history, not this final matrix",
+    "backend CI may be collect-only; these explicit node27 oracles are the behavioral evidence"
+  ],
+  "resolved_local_repairs": [
+    "removed internal migration fake and retained-checkout SQL write before first publication",
+    "fresh prepare state directory",
+    "native f24 exception/entrypoint namespace",
+    "phase-aware L versus L+000059 recovery expectation"
+  ],
+  "launcher": {
+    "path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/window_smoke_launch.py",
+    "sha256": "e8106143bea026f803f2a3b9b62d66214f4ec39420140e14985f335198ab04fa",
+    "guard": "container ID, image, disposable label, sole named volume, loopback :32771 before private DSN construction",
+    "overrides": "TOOLS only; runtime NEW remains the retained immutable 1a32 checkout; PYTHONDONTWRITEBYTECODE=1"
+  },
+  "local_hygiene": {
+    "ruff": "PASS, adopted Python tools",
+    "openspec": "PASS, strict/no-interactive",
+    "markdownlint": "PASS, four fixture documents, zero issues"
+  }
+}

@@ -1,0 +1,1671 @@
+#!/usr/bin/env python3
+"""Private node27 I8b executor; run from outside /home/nwm/NWM.
+
+Operator interface (run via retained Python 3.11, durable supervisor, never SSH foreground):
+  window_execute.py prepare --state /home/nwm/.local/state/i8-window --config PRIVATE.json
+  window_execute.py window --state ... --go Danker
+  window_execute.py status --state ...
+  window_execute.py recover --state ... --go Danker
+Status is inspection, never resume. After transport loss inspect supervisor AND status;
+never repeat window. recover re-fences and examines physical OIDs, not the last label.
+Pre-admission recovery refusals are inspection-only: no service or timer stop.
+Admitted recovery failures attempt emergency fencing; no ledger deletion or data DROP.
+
+Required private config (JSON, owner uid1005, mode0600):
+  old_sha, new_sha: exact frozen SHAs below
+  repo: /home/nwm/NWM; staged_new_repo: retained exact NEW checkout
+  restore_branch: approved existing local branch; restore_ref: refs/remotes/<remote>/<fixed-ref>
+    Both must already resolve to exact NEW; executor never fetches moving master.
+  parse_run_id: existing succeeded + parsed_at NULL run; artifacts_root; object_store_prefix
+  reads: {legacy: {request: forecast_series kwargs},
+          narrow: {request: forecast_series kwargs}}
+    request includes run_id, segment_id, basin_version_id, river_network_version_id,
+    issue_time, variables, scenarios, model_id. narrow.run_id must be parse_run_id.
+    Representative single q_down variable; observed SQL fact values are compared with
+    the actual reader, and legacy response digest must survive the expand unchanged.
+  env_files: absolute paths of ALL installed EnvironmentFiles (plus active env files)
+  protected_files: absolute HOLD state.json and resume-approved plus admission evidence
+  yd_pids: exact reviewed :8081 process IDs; yd_health_path: actual health endpoint
+  api_health_path: actual :8080 health endpoint
+  authorized_timers: subset of named TIMERS below (only originally active restored)
+  lock_files: all reviewed actual writer lock files (required G4 locks included)
+  admission: {go, d12, capacity, artifacts, governance}: {path, sha256} per artifact
+    Human reviews the contents; private GO records the approved inputs, retained SHUD facts,
+    original OLD, NEW, 30min window, ten-minute restore threshold, ingress mechanism.
+  public_base_url: actual public display proxy origin (https, no credentials/query)
+  proxy: {master_pid, files: {absolute installed config path: reviewed sha256}}
+    Include the master -c configuration and its complete active include closure.
+    Installed unit/cgroup drain, absent direct listener and public refusal fence ingress.
+  read_guards: [{path: actual API relative path, status: expected 4xx}]
+    Must include at least one real guarded selector request; no fabricated production run.
+
+Only DATABASE_URL (admin), I8_INGEST_DSN, I8_DISPLAY_DSN environment credentials.
+All outputs/snapshots private; stdout is a small allowlisted receipt. No credentials
+are accepted in argv/config. No full backup/restore, Node22 changes, cold activation,
+unit installation, forced git cleanup, blanket process kill, or governance-pin removal.
+
+Parent smoke: syntax/help; disposable real PG15.2+Timescale clone populated with
+real-format artifact fixture; fake system boundary commands for stop failures,
+unknown sessions, fence failure, timeout after DO before ledger, SIGKILL at each
+rename/source/restart boundary; recover twice and assert OIDs, retained rows, ledger,
+foreign files, timer authorization and no serving. Production gates require actual
+systemd, ingress audit, parser/readers and four national API responses, not mocks.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+NEW = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+_WORKER_DATABASE = "nhms"
+_WORKER_PORT = "55432"
+_WORKER_USERS = {"parse": "nhms_ingest_rw", "read": "nhms_display_ro", "admin": "nhms"}
+_PROCESS_INVENTORY_ROOT = Path("/proc")
+EXPAND = "000059_river_timeseries_narrow_expand.sql"
+DISPLAY = "nhms-display-api.service"
+AUTO = "nhms-node27-autopipe.service"
+GOV = "nhms-node27-resource-governance.service"
+FAMILIES = (
+    "autopipe",
+    "download",
+    "raw-retention",
+    "frontier-alert",
+    "mvt-cache-retention",
+    "timeseries-compression",
+    "timeseries-retention",
+    "resource-governance",
+)
+TIMERS = [f"nhms-node27-{x}.timer" for x in FAMILIES]
+SERVICES = (
+    [DISPLAY] + [f"nhms-node27-{x}.service" for x in FAMILIES] + ["nhms-node27-timeseries-compression-replay.service"]
+)
+LOCKS = {
+    "/tmp/autopipe.cron.lock",
+    "/tmp/nhms-node27-timeseries-lifecycle.lock",
+    "/tmp/nhms-node27-timeseries-cold-residency.lock",
+}
+PROPS = (
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Result",
+    "MainPID",
+    "ControlGroup",
+    "UnitFileState",
+    "FragmentPath",
+    "DropInPaths",
+    "WorkingDirectory",
+    "ExecStart",
+    "Environment",
+    "EnvironmentFiles",
+    "TimeoutStartUSec",
+    "TimersCalendar",
+    "ExecMainStartTimestampMonotonic",
+    "ExecMainStatus",
+    "ConditionResult",
+)
+CONFIG_PROPS = (
+    "FragmentPath",
+    "DropInPaths",
+    "WorkingDirectory",
+    "ExecStart",
+    "Environment",
+    "EnvironmentFiles",
+    "UnitFileState",
+    "TimeoutStartUSec",
+    "TimersCalendar",
+)
+
+
+class Refusal(Exception):
+    pass
+
+
+def require(ok, code):
+    if not ok:
+        raise Refusal(code)
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def safe_path(path, private=False):
+    p = Path(path)
+    require(p.is_absolute(), "ABSOLUTE_PATH_REQUIRED")
+    require(not any(x.is_symlink() for x in (p, *p.parents)), "SYMLINK_REFUSED")
+    s = p.stat()
+    require(stat.S_ISREG(s.st_mode), "REGULAR_FILE_REQUIRED")
+    if private:
+        require(s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o600, "PRIVATE_FILE_REQUIRED")
+    return p
+
+
+def private_write(path, data):
+    p = Path(path)
+    require(not p.is_symlink(), "OUTPUT_SYMLINK_REFUSED")
+    temp = p.with_name(p.name + ".new")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp, p)
+        d = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(d)
+        finally:
+            os.close(d)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+class Executor:
+    def __init__(self, args):
+        self.args = args
+        self.root = Path(args.state).absolute()
+        require(not any(p.is_symlink() for p in (self.root, *self.root.parents)), "STATE_SYMLINK")
+        if args.command == "prepare":
+            self.root.mkdir(mode=0o700, parents=False, exist_ok=False)
+        s = self.root.stat()
+        require(s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == 0o700, "PRIVATE_STATE_REQUIRED")
+        self.lock = os.open(self.root / "executor.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        self.running = False
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            require(args.command == "status", "EXECUTOR_ALREADY_RUNNING")
+            self.running = True
+        self.state_file = self.root / "state.json"
+        self.s = json.loads(safe_path(self.state_file, True).read_text()) if self.state_file.exists() else {}
+        self.seq = self.s.get("seq", 0)
+        self.recovering = args.command == "recover"
+        self._recovery_active = False
+        if args.command == "prepare":
+            self.c = json.loads(safe_path(args.config, True).read_text())
+            self.save_file("config.json", json.dumps(self.c).encode())
+        else:
+            self.c = json.loads(safe_path(self.root / "config.json", True).read_text())
+        self.repo = Path(self.c["repo"])
+
+    def save_file(self, name, data):
+        private_write(self.root / name, data)
+
+    def save(self, phase=None, **values):
+        self.s.update(values)
+        if phase:
+            self.s["phase"] = phase
+        self.s.update(updated_at=now(), seq=self.seq, executor_pid=os.getpid())
+        self.save_file("state.json", json.dumps(self.s, default=str, sort_keys=True).encode())
+
+    def phase(self, name, **values):
+        self.save(name, **values)
+        self.deadline()
+
+    def deadline(self):
+        if self.recovering:
+            return
+        if "t0_mono" in self.s:
+            require(time.monotonic() - self.s["t0_mono"] < 1800, "WINDOW_DEADLINE")
+        if "stop_mono" in self.s and not self.s.get("basic_ready"):
+            require(time.monotonic() - self.s["stop_mono"] < 600, "RESTORE_DEADLINE")
+
+    def run(self, argv, *, data=None, env=None, cwd=None, timeout=120, check=True):
+        self.deadline()
+        if not self.recovering:
+            remaining = []
+            if "t0_mono" in self.s:
+                remaining.append(1800 - (time.monotonic() - self.s["t0_mono"]))
+            if "stop_mono" in self.s and not self.s.get("basic_ready"):
+                remaining.append(600 - (time.monotonic() - self.s["stop_mono"]))
+            if remaining:
+                timeout = min(timeout, max(0.1, min(remaining)))
+        self.seq += 1
+        prefix = f"command-{self.seq:05d}"
+        self.save(last_command=prefix)
+        start = time.monotonic()
+        # File-backed output prevents parser/psql logs filling parent memory.
+        with open(self.root / (prefix + ".stdout"), "xb") as out, open(self.root / (prefix + ".stderr"), "xb") as err:
+            p = subprocess.Popen(
+                argv,
+                cwd=cwd or self.repo,
+                env=env,
+                stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                start_new_session=True,
+            )
+            self.save(child_pid=p.pid)
+            try:
+                p.communicate(data, timeout=timeout)
+            except BaseException:
+                # Only our own direct command process group, never DB/systemd writers.
+                os.killpg(p.pid, signal.SIGTERM)
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait()
+                raise
+            finally:
+                out.flush()
+                err.flush()
+                os.fsync(out.fileno())
+                os.fsync(err.fileno())
+        elapsed = time.monotonic() - start
+        self.save(child_pid=None, last_command_seconds=elapsed, last_command_rc=p.returncode)
+        require(not check or p.returncode == 0, "COMMAND_FAILED")
+        output_path = self.root / (prefix + ".stdout")
+        require(output_path.stat().st_size <= 16 * 1024 * 1024, "COMMAND_OUTPUT_TOO_LARGE_USE_PRIVATE_LOG")
+        return output_path.read_bytes()
+
+    def sql(self, query):
+        raw = self.run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                "nhms-db",
+                "psql",
+                "-X",
+                "-qAt",
+                "-U",
+                "nhms",
+                "-d",
+                "nhms",
+                "-v",
+                "ON_ERROR_STOP=1",
+            ],
+            data=("SET lock_timeout='5s'; SET statement_timeout='120s';\n" + query).encode(),
+            timeout=135,
+        )
+        return raw.decode().strip()
+
+    def rows(self, query):
+        return json.loads(self.sql("SELECT coalesce(json_agg(t), '[]'::json) FROM (" + query + ") t;"))
+
+    def ledger(self):
+        return [r["version"] for r in self.rows("SELECT version FROM public.schema_migrations ORDER BY version")]
+
+    def catalog(self):
+        return self.rows(
+            "SELECT c.oid::bigint AS oid,c.relname,pg_get_userbyid(c.relowner) AS owner FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='hydro' AND c.relname IN "
+            "('river_timeseries','river_timeseries_legacy','river_timeseries_narrow_rollback') ORDER BY c.relname"
+        )
+
+    def unit(self, name):
+        raw = self.run(
+            ["systemctl", "--user", "show", name, "--no-pager", *[f"--property={p}" for p in PROPS]], timeout=30
+        ).decode()
+        return dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+
+    def system(self, action, names):
+        if names:
+            self.run(["systemctl", "--user", action, *names], timeout=90)
+
+    def git(self, *args, repo=None):
+        return self.run(["git", *args], cwd=repo or self.repo, timeout=30).decode().strip()
+
+    def clean(self):
+        require(not self.git("status", "--porcelain=v1", "--untracked-files=all"), "DIRTY_ACTIVE_REPOSITORY")
+
+    def immutable(self):
+        for path, record in self.s["files"].items():
+            require(digest(safe_path(path).read_bytes()) == record["sha256"], "UNIT_ENV_HOLD_OR_FOREIGN_FILE_CHANGED")
+        for name, before in self.s["units"].items():
+            current = self.unit(name)
+            require(all(current.get(k, "") == before.get(k, "") for k in CONFIG_PROPS), "UNIT_CONFIG_CHANGED")
+
+    def public_probe(self, stopped=False):
+        url = self.c["public_base_url"].rstrip("/") + "/api/v1/layers"
+        try:
+            with urllib.request.urlopen(url, timeout=15) as response:
+                status = response.status
+                body = response.read(8 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as error:
+            status, body = error.code, error.read(8 * 1024 * 1024 + 1)
+        require(status in {502, 503, 504} if stopped else status == 200, "PUBLIC_PROXY_FENCE_OR_RESTORE_FAILED")
+        self.save_file("public-probe.body", body)
+        self.save(public_probe={"status": status, "sha256": digest(body), "at": now()})
+
+    def proxy_binding(self):
+        proxy = self.c["proxy"]
+        require("access_log" not in self.c, "OBSOLETE_ACCESS_LOG_CONFIG")
+        pid = proxy["master_pid"]
+        require(isinstance(pid, int) and pid > 1, "PROXY_MASTER_PID_REQUIRED")
+        root = Path(f"/proc/{pid}")
+        command = (root / "cmdline").read_bytes()
+        require(
+            b"nginx: master process" in command and b"-c /etc/nginx/nginx.conf" in command,
+            "INSTALLED_PROXY_MASTER_REQUIRED",
+        )
+        files = proxy["files"]
+        require("/etc/nginx/nginx.conf" in files and len(files) > 1, "PROXY_INCLUDE_CLOSURE_REQUIRED")
+        for path, expected in files.items():
+            require(digest(safe_path(path).read_bytes()) == expected, "PROXY_CONFIG_CHANGED")
+        binding = {
+            "pid": pid,
+            "start": (root / "stat").read_text().rsplit(")", 1)[1].split()[19],
+            "command_sha256": digest(command),
+            "files": files,
+        }
+        if "proxy_binding" in self.s:
+            require(binding == self.s["proxy_binding"], "PROXY_PROCESS_CHANGED")
+        return binding
+
+    def fence_epoch(self):
+        epochs = self.s.get("fence_epochs")
+        require(isinstance(epochs, list), "UNKNOWN_FENCE_HISTORY")
+        for index, epoch in enumerate(epochs):
+            require(
+                isinstance(epoch, dict)
+                and epoch.get("number") == index + 1
+                and epoch.get("start")
+                and isinstance(epoch.get("drains"), list)
+                and isinstance(epoch.get("restart_attempts"), list),
+                "UNKNOWN_FENCE_EPOCH",
+            )
+            require(index == len(epochs) - 1 or epoch.get("validated_restart"), "UNCLOSED_FENCE_HISTORY")
+        if not epochs or epochs[-1].get("validated_restart"):
+            epochs.append({"number": len(epochs) + 1, "start": now(), "drains": [], "restart_attempts": []})
+        self.save(fence_epochs=epochs)
+        return epochs[-1]
+
+    def ingress_audit(self):
+        self.proxy_binding()
+        epochs = self.s["fence_epochs"]
+        require(epochs and epochs[-1].get("drains"), "FENCE_DRAIN_EVIDENCE_REQUIRED")
+        require(epochs[-1].get("validated_restart"), "RESTART_NOT_VALIDATED")
+        self.save(
+            ingress_audit={
+                "epoch": epochs[-1]["number"],
+                "mechanism": "physical-unit-cgroup-listener-public-refusal",
+                "continuous_access_log_claim": False,
+            }
+        )
+
+    def http(self, path, port=8080):
+        require(
+            path.startswith("/api/") or path == self.c.get("api_health_path") or path == self.c.get("yd_health_path"),
+            "LOCAL_HTTP_PATH_REQUIRED",
+        )
+        url = f"http://127.0.0.1:{port}" + path
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                status, body, headers = r.status, r.read(8 * 1024 * 1024 + 1), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            status, body, headers = e.code, e.read(8 * 1024 * 1024 + 1), dict(e.headers)
+        require(len(body) <= 8 * 1024 * 1024, "API_BODY_LIMIT")
+        self.seq += 1
+        self.save()
+        self.save_file(f"http-{self.seq:05d}.body", body)
+        proof = {
+            "path": path,
+            "port": port,
+            "status": status,
+            "sha256": digest(body),
+            "bytes": len(body),
+            "seconds": time.monotonic() - started,
+            "headers": headers,
+            "at": now(),
+        }
+        self.save_file(f"http-{self.seq:05d}.json", json.dumps(proof).encode())
+        return proof, body
+
+    def yd(self):
+        listener = self.run(["ss", "-Hlnpt", "sport = :8081"], timeout=15).decode()
+        actual = sorted({int(p) for p in re.findall(r"pid=(\d+)", listener)})
+        require(actual == sorted(self.c["yd_pids"]) and actual, "YD_LISTENER_IDENTITY_CHANGED")
+        identities = {
+            str(p): {
+                "start": Path(f"/proc/{p}/stat").read_text().rsplit(")", 1)[1].split()[19],
+                "cwd": str(Path(f"/proc/{p}/cwd").resolve()),
+                "cmd_sha256": digest(Path(f"/proc/{p}/cmdline").read_bytes()),
+            }
+            for p in actual
+        }
+        if "yd" in self.s:
+            require(identities == self.s["yd"], "YD_PROCESS_CHANGED")
+        require(self.http(self.c["yd_health_path"], 8081)[0]["status"] == 200, "YD_HEALTH_FAILED")
+        return identities
+
+    def no_listener(self):
+        require(not self.run(["ss", "-Hlnpt", "sport = :8080"], timeout=15).strip(), "8080_LISTENER_PRESENT")
+        with socket.socket() as sock:
+            sock.settimeout(2)
+            require(sock.connect_ex(("127.0.0.1", 8080)) != 0, "8080_ACCEPTS_CONNECTIONS")
+        self.public_probe(stopped=True)
+
+    def drain(self):
+        for name in TIMERS + SERVICES:
+            u = self.unit(name)
+            require(u.get("LoadState") == "loaded" and u.get("ActiveState") == "inactive", "UNIT_NOT_DRAINED")
+            require(u.get("SubState") == "dead", "UNIT_NOT_DEAD")
+            require(
+                u.get("Result", "") in (("", "success", "n/a") if name.endswith(".timer") else ("success", "n/a")),
+                "FAILED_UNIT_REFUSED",
+            )
+            if name.endswith(".service"):
+                require(u.get("MainPID") == "0", "MAINPID_PRESENT")
+                group = u.get("ControlGroup") or self.s["units"][name].get("ControlGroup")
+                if group:
+                    root = Path("/sys/fs/cgroup") / group.lstrip("/")
+                    if root.exists():
+                        require(not any(p.read_text().strip() for p in root.rglob("cgroup.procs")), "CGROUP_NOT_EMPTY")
+        for path in self.c["lock_files"]:
+            p = Path(path)
+            if p.exists():
+                fd = os.open(p, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(fd)
+        # Refuse every other client connection, including idle writers and unknown
+        # attribution. Internal PG workers are inventoried separately, not killed.
+        sessions = self.rows(
+            "SELECT pid,usename,application_name,state,backend_type,xact_start FROM pg_stat_activity "
+            "WHERE datname=current_database() AND pid<>pg_backend_pid()"
+        )
+        self.save_file("drained-sessions.json", json.dumps(sessions, default=str).encode())
+        require(not any(x["backend_type"] == "client backend" for x in sessions), "CLIENT_SESSION_NOT_DRAINED")
+        require(
+            not self.rows(
+                "SELECT l.pid,l.mode,l.granted FROM pg_locks l JOIN pg_class c ON c.oid=l.relation "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('hydro','met','core') "
+                "AND l.pid<>pg_backend_pid()"
+            ),
+            "APPLICATION_LOCK_NOT_DRAINED",
+        )
+        patterns = re.compile(
+            r"workers\.output_parser|node27[_-](?:autopipe|download|raw.retention|frontier.alert|mvt.cache.retention|timeseries|resource.governance)|autopipe\.sh"
+        )
+        for p in _PROCESS_INVENTORY_ROOT.iterdir():
+            if not p.name.isdigit() or int(p.name) in {os.getpid(), os.getppid(), *self.c["yd_pids"]}:
+                continue
+            try:
+                if p.stat().st_uid == os.getuid():
+                    require(
+                        not patterns.search((p / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")),
+                        "DETACHED_WRITER_PRESENT",
+                    )
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        self.no_listener()
+        self.yd()
+
+    def freeze(self):
+        self.phase("FREEZING_TIMERS")
+        self.system("stop", TIMERS)
+        epoch = self.fence_epoch()
+        self.save(stop_mono=self.s.get("stop_mono", time.monotonic()), basic_ready=False)
+        self.phase("STOPPING_SERVICES")
+        self.system("stop", SERVICES)
+        self.save(fenced=False)
+        self.proxy_binding()
+        self.drain()
+        epoch["drains"].append({"at": now(), "public_refusal": self.s["public_probe"]})
+        self.phase("FENCED_DRAINED", fenced=True, fence_epochs=self.s["fence_epochs"])
+
+    def runtime_env(self, repo, credential):
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("PG")
+            and k not in {"PYTHONPATH", "PYTHONHOME", "DATABASE_URL", "UV_PROJECT_ENVIRONMENT"}
+        }
+        env.update(
+            PYTHONPATH=str(repo),
+            PYTHONNOUSERSITE="1",
+            UV_PROJECT_ENVIRONMENT=str(self.repo / ".venv"),
+            DATABASE_URL=os.environ[credential],
+            PGOPTIONS="-c lock_timeout=5s -c statement_timeout=120s",
+            PGAPPNAME="issue1987-window",
+        )
+        return env
+
+    def worker(self, action, *, repo=None, sha=None, timeout=150):
+        repo = Path(repo or self.repo)
+        sha = sha or self.c["new_sha"]
+        credential = "I8_INGEST_DSN" if action == "parse" else "I8_DISPLAY_DSN"
+        if action in {"migrate", "imports"}:
+            credential = "DATABASE_URL"
+        output = self.run(
+            [
+                "uv",
+                "run",
+                "--no-sync",
+                "--project",
+                str(repo),
+                "python",
+                str(Path(__file__).resolve()),
+                "worker",
+                "--state",
+                str(self.root),
+                "--action",
+                action,
+                "--repo",
+                str(repo),
+                "--sha",
+                sha,
+            ],
+            env=self.runtime_env(repo, credential),
+            cwd=repo,
+            timeout=timeout,
+        )
+        return json.loads(output)
+
+    def audit_roles(self):
+        roles = (self.repo / "db/roles/node27_write_roles.sql").read_bytes()
+        self.run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                "nhms-db",
+                "psql",
+                "-X",
+                "-U",
+                "nhms",
+                "-d",
+                "nhms",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-v",
+                "do_roles=off",
+                "-v",
+                "do_ownership=off",
+                "-v",
+                "do_audit=on",
+                "-v",
+                "strict_audit=on",
+            ],
+            data=b"SET lock_timeout='5s'; SET statement_timeout='120s';\n" + roles,
+            timeout=150,
+        )
+
+    def api_proof(self, baseline=False):
+        proof, body = self.http("/api/v1/layers/discharge/cycles?source=gfs")
+        require(proof["status"] == 200, "CYCLES_API_FAILED")
+        data = json.loads(body)["data"]
+        cycle = data["default_cycle"]
+        require(cycle and any(x["cycle_time"] == cycle for x in data["cycles"]), "NO_ACTUAL_GFS_CYCLE")
+        _, body = self.http(
+            "/api/v1/layers/discharge/valid-times?" + urllib.parse.urlencode({"source": "gfs", "cycle": cycle})
+        )
+        times = json.loads(body)["data"]["valid_times"]
+        require(times, "NO_ACTUAL_VALID_TIME")
+        cycle_path = urllib.parse.quote(cycle, safe="")
+        records = [
+            self.http(path)[0] for path in ("/api/v1/layers", "/api/v1/tiles/river-network-national/5/25/12.pbf")
+        ]
+        generated_times = []
+        # A hit from either map.tile_cache or the file tier is not SQL evidence.
+        # Try real discovered pins only; leave both caches and unrelated keys intact.
+        # The response header is emitted after readCached checks BOTH tiers.
+        for template in (
+            "/api/v1/tiles/hydro-national/q_down/{vt}/4/12/6.pbf",
+            "/api/v1/tiles/hydro-national/gfs/" + cycle_path + "/q_down/{vt}/4/12/6.pbf",
+        ):
+            accepted = None
+            for vt in times[:32]:
+                record = self.http(template.format(vt=urllib.parse.quote(vt, safe="")))[0]
+                headers = {k.lower(): v for k, v in record["headers"].items()}
+                if baseline or (
+                    record["status"] == 200
+                    and record["bytes"] > 0
+                    and headers.get("x-tile-cache") in {"miss", "bypass"}
+                    and headers.get("x-tile-cache-key")
+                ):
+                    accepted = record
+                    generated_times.append(vt)
+                    break
+                require(
+                    record["status"] == 200 and headers.get("x-tile-cache") == "hit",
+                    "NATIONAL_GENERATION_RESPONSE_INVALID",
+                )
+            require(accepted is not None, "NO_UNCACHED_REAL_PIN_GENERATION_PROOF")
+            records.append(accepted)
+        if not baseline:
+            require(all(r["status"] == 200 and r["bytes"] > 0 for r in records), "NATIONAL_ROUTE_VALIDATION_FAILED")
+            require(self.c["read_guards"], "READ_GUARD_PRECONDITION_REQUIRED")
+            for guard in self.c["read_guards"]:
+                require(400 <= guard["status"] < 500, "READ_GUARD_EXPECTATION_REQUIRED")
+                require(self.http(guard["path"])[0]["status"] == guard["status"], "READ_GUARD_FAILED")
+        return {"cycle": cycle, "valid_times": generated_times, "routes": records}
+
+    def prepare(self):
+        require(os.getuid() == 1005, "NODE27_USER_REQUIRED")
+        require(
+            self.c["old_sha"] == OLD and self.c["new_sha"] == NEW and str(self.repo) == "/home/nwm/NWM",
+            "FROZEN_IDENTITY_REQUIRED",
+        )
+        require(
+            all(os.environ.get(k) for k in ("DATABASE_URL", "I8_INGEST_DSN", "I8_DISPLAY_DSN")),
+            "PRIVATE_CREDENTIAL_ENV_REQUIRED",
+        )
+        source = json.loads(self.run(["docker", "inspect", "nhms-db"], timeout=30))[0]
+        require(
+            source["Id"] == "5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f"
+            and source["State"]["Running"],
+            "SOURCE_CONTAINER_IDENTITY_MISMATCH",
+        )
+        require(source["Image"].removeprefix("sha256:").startswith("ad39c4fb"), "SOURCE_IMAGE_MISMATCH")
+        pgdata = Path("/home/postgres/pgdata/data")
+        require(
+            any(
+                pgdata.is_relative_to(m["Destination"])
+                and str(Path(m["Source"]) / pgdata.relative_to(m["Destination"])) == "/data/GHDC/nhms-primary/pgdata"
+                for m in source["Mounts"]
+            ),
+            "SOURCE_PGDATA_BINDING_MISMATCH",
+        )
+        self.save(source_container=source["Id"], source_image=source["Image"])
+        require(LOCKS <= set(self.c["lock_files"]), "LOCK_INVENTORY_INCOMPLETE")
+        require(set(self.c["authorized_timers"]) <= set(TIMERS), "TIMER_AUTHORIZATION_INVALID")
+        require(
+            self.c["reads"]["narrow"]["request"]["run_id"] == self.c["parse_run_id"], "PARSE_READ_IDENTITY_MISMATCH"
+        )
+        for kind in ("legacy", "narrow"):
+            require(self.c["reads"][kind]["request"]["variables"] == ["q_down"], "REPRESENTATIVE_Q_DOWN_READ_REQUIRED")
+        require(Path(__file__).resolve().is_relative_to(self.repo) is False, "DRIVER_MUST_SURVIVE_SOURCE_SWITCH")
+        self.clean()
+        require(self.git("rev-parse", "HEAD") == OLD, "OLD_SOURCE_MISMATCH")
+        old_branch = self.git("symbolic-ref", "--short", "HEAD")
+        require(self.c["restore_branch"] != old_branch, "SEPARATE_RESTORE_BRANCH_REQUIRED")
+        require(
+            self.c["restore_ref"].startswith("refs/remotes/") and not self.c["restore_ref"].endswith("/master"),
+            "FIXED_REMOTE_REF_REQUIRED",
+        )
+        for ref in ("refs/heads/" + self.c["restore_branch"], self.c["restore_ref"]):
+            require(self.git("rev-parse", "--verify", ref + "^{commit}") == NEW, "RESTORE_REF_NOT_EXACT_NEW")
+        staged = Path(self.c["staged_new_repo"])
+        require(staged != self.repo and self.git("rev-parse", "HEAD", repo=staged) == NEW, "STAGED_NEW_REQUIRED")
+        require(not self.git("status", "--porcelain=v1", "--untracked-files=all", repo=staged), "STAGED_SOURCE_DIRTY")
+        for key in ("go", "d12", "capacity", "artifacts", "governance"):
+            evidence = self.c["admission"][key]
+            require(
+                digest(safe_path(evidence["path"]).read_bytes()) == evidence["sha256"], "ADMISSION_ARTIFACT_MISMATCH"
+            )
+        public = urllib.parse.urlsplit(self.c["public_base_url"])
+        require(
+            public.scheme == "https"
+            and public.netloc
+            and not public.username
+            and not public.password
+            and not public.query
+            and not public.fragment,
+            "PUBLIC_PROXY_URL_REQUIRED",
+        )
+        self.save(proxy_binding=self.proxy_binding(), fence_epochs=[])
+        self.public_probe()
+        self.run(["systemctl", "--user", "list-unit-files", "--no-pager", "--no-legend"], timeout=30)
+        self.run(["systemctl", "--user", "list-units", "--all", "--no-pager", "--no-legend"], timeout=30)
+        self.run(["systemctl", "--user", "list-timers", "--all", "--no-pager"], timeout=30)
+        units = {u: self.unit(u) for u in TIMERS + SERVICES}
+        for name, u in units.items():
+            require(u.get("LoadState") == "loaded" and u.get("ActiveState") != "failed", "REQUIRED_UNIT_NOT_ADMITTED")
+            require(u.get("Result", "") in ("", "success", "n/a"), "REQUIRED_UNIT_FAILED")
+            require(u.get("UnitFileState") not in ("masked", "masked-runtime"), "FOREIGN_MASK_REFUSED")
+            if name != GOV:
+                require(not u.get("DropInPaths"), "FOREIGN_PIN_REQUIRES_REVIEW")
+            else:
+                require(
+                    all(
+                        Path(p).name == "70-issue1987-governance-reviewed-source.conf"
+                        for p in u.get("DropInPaths", "").split()
+                    ),
+                    "FOREIGN_GOV_PIN_REFUSED",
+                )
+        require(units[DISPLAY]["ActiveState"] == "active", "DISPLAY_BASELINE_NOT_ACTIVE")
+        require(
+            units[GOV].get("Result") == "success" and units[GOV].get("ExecMainStatus") == "0", "GOV_REPAIR_REQUIRED"
+        )
+        require(
+            units["nhms-node27-timeseries-compression.service"]["TimeoutStartUSec"] == "1h 5min 40s",
+            "INSTALLED_COMPRESSION_WALL_CHANGED",
+        )
+        paths = set(self.c["env_files"]) | set(self.c["protected_files"])
+        paths |= {x["path"] for x in self.c["admission"].values()}
+        for u in units.values():
+            paths.add(u["FragmentPath"])
+            paths.update(u.get("DropInPaths", "").split())
+            env_paths = re.findall(r"(/[^ ;]+)\s+\(ignore_errors=", u.get("EnvironmentFiles", ""))
+            require(set(env_paths) <= set(self.c["env_files"]), "ENV_SNAPSHOT_INCOMPLETE")
+        hold = "/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json"
+        require(hold in paths and str(Path(hold).parent / "resume-approved") in paths, "HOLD_SNAPSHOT_REQUIRED")
+        hold_data = json.loads(safe_path(hold).read_text())
+        require(hold_data.get("phase") == "lifted-and-fences-removed", "HOLD_NOT_RELEASED")
+        files = {}
+        for i, path in enumerate(sorted(paths)):
+            p = safe_path(path)
+            data = p.read_bytes()
+            name = f"original-{i:03d}"
+            self.save_file(name, data)
+            files[path] = {"snapshot": name, "sha256": digest(data), "mode": stat.S_IMODE(p.stat().st_mode)}
+        cat = self.catalog()
+        require(
+            len(cat) == 1 and cat[0]["relname"] == "river_timeseries" and cat[0]["oid"] == 24541,
+            "PRE_EXPAND_CATALOG_MISMATCH",
+        )
+        ledger = self.ledger()
+        names = sorted(p.name for p in (staged / "db/migrations").glob("*.sql"))
+        require(
+            [n for n in names if n not in ledger] == [EXPAND],
+            "PENDING_MIGRATIONS_NOT_EXACT",
+        )
+        self.save_file("pending-000059.sql", (staged / "db/migrations" / EXPAND).read_bytes())
+        self.save_file(
+            "migration-inventory.json",
+            json.dumps(
+                {
+                    "files": names,
+                    "ledger": ledger,
+                    "pending": [EXPAND],
+                    "pending_sha256": digest((staged / "db/migrations" / EXPAND).read_bytes()),
+                }
+            ).encode(),
+        )
+        self.save(
+            old_branch=old_branch,
+            units=units,
+            files=files,
+            old_oid=cat[0]["oid"],
+            ledger_before=ledger,
+            config_sha256=digest((self.root / "config.json").read_bytes()),
+            driver_sha256=digest(Path(__file__).read_bytes()),
+            boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            old_sha=OLD,
+            new_sha=NEW,
+        )
+        # pg_dump is schema-only; never dump role passwords or TB fact data.
+        self.run(["docker", "exec", "nhms-db", "pg_dump", "-U", "nhms", "-d", "nhms", "--schema-only"], timeout=180)
+        self.save(schema_snapshot_command=self.s["last_command"])
+        self.audit_roles()
+        self.save_file(
+            "run-metadata.json",
+            json.dumps(
+                self.rows(
+                    "SELECT run_id,run_key,status,parsed_at,output_uri,"
+                    "basin_version_id,scenario_id,model_id,cycle_time "
+                    "FROM hydro.hydro_run ORDER BY run_key"
+                ),
+                default=str,
+            ).encode(),
+        )
+        self.save(
+            legacy_catalog=self.table_metadata("hydro", "river_timeseries"),
+            forcing_catalog=self.table_metadata("met", "forcing_station_timeseries"),
+        )
+        self.save(
+            yd=self.yd(),
+            imports=self.worker("imports", repo=staged),
+            baseline=self.api_proof(baseline=True),
+            legacy_read=self.worker("legacy", repo=self.repo, sha=OLD),
+        )
+        self.phase("PREPARED")
+
+    def table_metadata(self, schema, table):
+        require(
+            (schema, table)
+            in {
+                ("hydro", "river_timeseries"),
+                ("hydro", "river_timeseries_legacy"),
+                ("met", "forcing_station_timeseries"),
+            },
+            "CATALOG_TARGET_REFUSED",
+        )
+        values = {
+            "columns": self.rows(
+                "SELECT attnum,attname,atttypid,attnotnull FROM pg_attribute "
+                f"WHERE attrelid='{schema}.{table}'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum"
+            ),
+            "indexes": self.rows(
+                f"SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='{schema}' "
+                f"AND tablename='{table}' ORDER BY indexname"
+            ),
+            "dimensions": self.rows(
+                "SELECT column_name,column_type,dimension_type,time_interval::text,integer_interval "
+                f"FROM timescaledb_information.dimensions WHERE hypertable_schema='{schema}' "
+                f"AND hypertable_name='{table}' ORDER BY dimension_number"
+            ),
+            "compression": self.rows(
+                "SELECT attname,segmentby_column_index,orderby_column_index,orderby_asc,orderby_nullsfirst "
+                f"FROM timescaledb_information.compression_settings WHERE hypertable_schema='{schema}' "
+                f"AND hypertable_name='{table}' ORDER BY attname"
+            ),
+        }
+        # A relation rename changes pg_get_indexdef's table spelling, not its bytes
+        # of indexed expression, predicate, opclass or owner relationship.
+        return json.loads(json.dumps(values).replace("hydro.river_timeseries_legacy", "hydro.river_timeseries"))
+
+    def validate_expand(self):
+        cat = {r["relname"]: r for r in self.catalog()}
+        require(set(cat) == {"river_timeseries", "river_timeseries_legacy"}, "EXPAND_TABLE_SET")
+        require(
+            cat["river_timeseries_legacy"]["oid"] == self.s["old_oid"]
+            and cat["river_timeseries"]["oid"] != self.s["old_oid"],
+            "EXPAND_OID_MISMATCH",
+        )
+        require(cat["river_timeseries"]["owner"] == "nhms_ingest_rw", "NARROW_OWNER_MISMATCH")
+        require(
+            self.table_metadata("hydro", "river_timeseries_legacy") == self.s["legacy_catalog"],
+            "LEGACY_CATALOG_CHANGED",
+        )
+        require(
+            self.table_metadata("met", "forcing_station_timeseries") == self.s["forcing_catalog"],
+            "FORCING_CATALOG_CHANGED",
+        )
+        columns = self.rows(
+            "SELECT attname,format_type(atttypid,atttypmod) AS type FROM pg_attribute "
+            "WHERE attrelid='hydro.river_timeseries'::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum"
+        )
+        expected = {
+            "run_key": "integer",
+            "basin_version_key": "integer",
+            "river_network_version_key": "integer",
+            "river_segment_key": "integer",
+            "valid_time": "timestamp with time zone",
+            "lead_time_hours": "integer",
+            "variable_e": "hydro.river_variable",
+            "value": "double precision",
+            "unit_e": "hydro.river_unit",
+            "quality_flag_e": "hydro.river_quality_flag",
+            "created_at": "timestamp with time zone",
+        }
+        require({r["attname"]: r["type"] for r in columns} == expected, "NARROW_SHAPE_MISMATCH")
+        dims = self.rows(
+            "SELECT column_name,time_interval::text FROM timescaledb_information.dimensions "
+            "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries'"
+        )
+        require(dims == [{"column_name": "valid_time", "time_interval": "1 day"}], "NARROW_DIMENSION_MISMATCH")
+        indexes = self.rows(
+            "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='hydro' "
+            "AND tablename='river_timeseries' ORDER BY indexname"
+        )
+        require(
+            {r["indexname"] for r in indexes}
+            == {"river_timeseries_narrow_pkey", "river_ts_segment_time_key_idx", "river_ts_run_discovery_key_idx"},
+            "NARROW_INDEX_SET",
+        )
+        expected_index_keys = {
+            "river_timeseries_narrow_pkey": "(run_key, river_segment_key, variable_e, valid_time)",
+            "river_ts_segment_time_key_idx": "(river_segment_key, variable_e, valid_time DESC)",
+            "river_ts_run_discovery_key_idx": (
+                "(run_key, basin_version_key, river_network_version_key, variable_e, valid_time DESC)"
+            ),
+        }
+        require(
+            all(r["indexdef"].endswith(" USING btree " + expected_index_keys[r["indexname"]]) for r in indexes),
+            "NARROW_INDEX_KEYS_MISMATCH",
+        )
+        settings = self.rows(
+            "SELECT attname,segmentby_column_index AS segment,orderby_column_index AS ordering,"
+            "orderby_asc AS ascending,orderby_nullsfirst AS nulls_first "
+            "FROM timescaledb_information.compression_settings WHERE hypertable_schema='hydro' "
+            "AND hypertable_name='river_timeseries' ORDER BY attname"
+        )
+        require(
+            settings
+            == [
+                dict(attname="river_segment_key", segment=2, ordering=None, ascending=None, nulls_first=None),
+                dict(attname="run_key", segment=1, ordering=None, ascending=None, nulls_first=None),
+                dict(attname="valid_time", segment=None, ordering=2, ascending=True, nulls_first=False),
+                dict(attname="variable_e", segment=None, ordering=1, ascending=True, nulls_first=False),
+            ],
+            "COMPRESSION_SETTINGS_MISMATCH",
+        )
+        require(
+            not self.rows(
+                "SELECT run_id FROM hydro.hydro_run WHERE (parsed_at IS NOT NULL OR status IN ('parsed','published')) "
+                "AND timeseries_store<>'legacy' LIMIT 1"
+            ),
+            "LEGACY_ROUTE_MISMATCH",
+        )
+        require(
+            not self.rows(
+                "SELECT run_id FROM hydro.hydro_run WHERE parsed_at IS NULL AND status NOT IN ('parsed','published') "
+                "AND timeseries_store<>'narrow' LIMIT 1"
+            ),
+            "UNPARSED_ROUTE_MISMATCH",
+        )
+        require(
+            self.rows(
+                "SELECT column_default,is_nullable FROM information_schema.columns WHERE table_schema='hydro' "
+                "AND table_name='hydro_run' AND column_name='timeseries_store'"
+            )
+            == [{"column_default": "'narrow'::text", "is_nullable": "NO"}],
+            "NARROW_ROUTE_DEFAULT_MISMATCH",
+        )
+        self.save(
+            narrow_oid=cat["river_timeseries"]["oid"],
+            expand_columns=columns,
+            expand_indexes=indexes,
+            expand_compression=settings,
+        )
+
+    def source_process(self, unit):
+        u = self.unit(unit)
+        require(
+            u.get("WorkingDirectory") == str(self.repo) and str(self.repo) in u.get("ExecStart", ""),
+            "UNIT_SOURCE_MISMATCH",
+        )
+        group = u.get("ControlGroup")
+        require(group, "RUNTIME_CGROUP_MISSING")
+        pids = set()
+        for path in (Path("/sys/fs/cgroup") / group.lstrip("/")).rglob("cgroup.procs"):
+            pids.update(int(p) for p in path.read_text().split())
+        require(pids, "ACTUAL_RUNTIME_PROCESS_REQUIRED")
+        proofs = []
+        for pid in sorted(pids):
+            root = Path(f"/proc/{pid}")
+            try:
+                cwd = str((root / "cwd").resolve(strict=True))
+                argv = (root / "cmdline").read_bytes()
+                env = dict(x.split(b"=", 1) for x in (root / "environ").read_bytes().split(b"\0") if b"=" in x)
+                require(cwd == str(self.repo), "PROCESS_CWD_MISMATCH")
+                if unit == AUTO:
+                    require(
+                        env.get(b"NODE27_AUTOPIPE_REPO", str(self.repo).encode()) == str(self.repo).encode(),
+                        "AUTOPIPE_REPO_MISMATCH",
+                    )
+                require(
+                    env.get(b"PYTHONPATH", str(self.repo).encode()) == str(self.repo).encode(),
+                    "PROCESS_PYTHONPATH_MISMATCH",
+                )
+                proofs.append(
+                    {"pid": pid, "cwd": cwd, "cmd_sha256": digest(argv), "executable": str((root / "exe").resolve())}
+                )
+            except FileNotFoundError:
+                continue
+        require(proofs and self.git("rev-parse", "HEAD") == (OLD if self.recovering else NEW), "RUNTIME_SHA_MISMATCH")
+        return {"unit": unit, "processes": proofs, "execution": u["ExecMainStartTimestampMonotonic"]}
+
+    def start_runtime(self):
+        self.immutable()
+        epoch = self.fence_epoch()
+        require(epoch["drains"], "START_WITHOUT_DRAIN")
+        self.proxy_binding()
+        self.no_listener()
+        epoch["restart_attempts"].append(now())
+        self.phase("STARTING_DISPLAY", fence_epochs=self.s["fence_epochs"])
+        self.system("start", [DISPLAY])
+        require(self.http(self.c["api_health_path"])[0]["status"] == 200, "DISPLAY_HEALTH_FAILED")
+        display = self.source_process(DISPLAY)
+        self.public_probe()
+        epoch["validated_restart"] = {
+            "at": now(),
+            "source": OLD if self.recovering else NEW,
+            "display": display,
+            "public": self.s["public_probe"],
+        }
+        self.save(basic_ready=True, fenced=False, fence_epochs=self.s["fence_epochs"])
+        before = self.unit(AUTO)["ExecMainStartTimestampMonotonic"]
+        self.run(["systemctl", "--user", "start", "--no-block", AUTO], timeout=15)
+        deadline = time.monotonic() + 30
+        autopipe = None
+        while time.monotonic() < deadline:
+            u = self.unit(AUTO)
+            require(u.get("Result") in ("success", "n/a"), "AUTOPIPE_FAILED")
+            if u["ExecMainStartTimestampMonotonic"] != before and u.get("MainPID") != "0":
+                autopipe = self.source_process(AUTO)
+                break
+            time.sleep(0.2)
+        require(autopipe, "AUTOPIPE_ACTUAL_SOURCE_UNOBSERVED")
+        self.save(runtime={"display": display, "autopipe": autopipe})
+        self.yd()
+
+    def restore_timers(self):
+        self.immutable()
+        selected = [
+            u for u in TIMERS if u in self.c["authorized_timers"] and self.s["units"][u]["ActiveState"] == "active"
+        ]
+        selected.sort(key=lambda u: (u == "nhms-node27-download.timer", u))
+        for unit in selected:
+            self.system("start", [unit])
+            require(self.unit(unit)["ActiveState"] == "active", "TIMER_RESTORE_FAILED")
+        self.save(restored_timers=selected)
+
+    def window(self):
+        require(self.args.go == "Danker" and self.s.get("phase") == "PREPARED", "PREPARED_SIGNED_GO_REQUIRED")
+        require(digest((self.root / "config.json").read_bytes()) == self.s["config_sha256"], "PREPARED_CONFIG_CHANGED")
+        self.immutable()
+        require(digest(Path(__file__).read_bytes()) == self.s["driver_sha256"], "DRIVER_CHANGED_AFTER_PREPARE")
+        require(
+            Path("/proc/sys/kernel/random/boot_id").read_text().strip() == self.s["boot_id"],
+            "BOOT_CHANGED_REPREPARE_REQUIRED",
+        )
+        self.clean()
+        require(
+            self.git("rev-parse", "HEAD") == OLD and self.ledger() == self.s["ledger_before"], "PREPARED_STATE_DRIFT"
+        )
+        self.worker("preparse", repo=self.c["staged_new_repo"])
+        self.phase("ADMITTED", t0=now(), t0_mono=time.monotonic())
+        try:
+            self.freeze()
+            self.clean()
+            require(self.git("rev-parse", self.c["restore_ref"] + "^{commit}") == NEW, "REMOTE_REF_MOVED")
+            require(
+                self.git("rev-parse", "refs/heads/" + self.c["restore_branch"] + "^{commit}") == NEW,
+                "RESTORE_BRANCH_MOVED",
+            )
+            self.phase("SWITCHING_NEW")
+            self.git("switch", self.c["restore_branch"])
+            self.git("merge", "--ff-only", self.c["restore_ref"])
+            require(self.git("rev-parse", "HEAD") == NEW, "NEW_SOURCE_MISMATCH")
+            self.worker("imports")
+            self.audit_roles()
+            self.drain()
+            self.phase("MIGRATING")
+            result = self.worker("migrate", timeout=150)
+            self.save(migration=result, ledger_after=self.ledger())
+            require(self.s["ledger_after"] == sorted(self.s["ledger_before"] + [EXPAND]), "POST_LEDGER_MISMATCH")
+            self.validate_expand()
+            self.run(
+                ["bash", "scripts/node27_provision_write_roles.sh", "--max-passes", "1", "--pass-interval", "0"],
+                timeout=150,
+            )
+            self.audit_roles()
+            self.phase("PARSING_REAL_RUN")
+            parsed = self.worker("parse", timeout=180)
+            narrow = self.worker("narrow")
+            legacy = self.worker("legacy")
+            require(legacy["response_sha256"] == self.s["legacy_read"]["response_sha256"], "LEGACY_READER_CHANGED")
+            self.save(readability={"parse": parsed, "narrow": narrow, "legacy": legacy})
+            self.no_listener()
+            self.start_runtime()
+            routes = self.api_proof()
+            self.ingress_audit()
+            self.public_probe()
+            self.save(route_proof=routes)
+            self.restore_timers()
+            self.yd()
+            self.phase(
+                "WINDOW_VALIDATED",
+                milestone_only=True,
+                governance_handoff=(
+                    "Parent must use recorded governance contract to verify ordinary NEW service "
+                    "then remove owned staging pin; executor never removes it."
+                ),
+                remaining=[
+                    "complete-cycle first chunk",
+                    "SHJ-NJ/small-network compressed/uncompressed/legacy P95 and EXPLAIN",
+                    "miss probes/QHH/coverage",
+                    "scheduler registry counts",
+                    "natural dual-table compression/retention ticks",
+                    "three-basin GFS/IFS screenshots C1-C4 and /ops",
+                    "full task 5.2 closure",
+                ],
+            )
+        except BaseException:
+            self.save("FORWARD_FAILED_RECOVERY_REQUIRED")
+            self.recovering = True
+            try:
+                self.recover()
+            except BaseException:
+                self.emergency_fence()
+            raise
+
+    def emergency_fence(self):
+        self.recovering = True
+        try:
+            self.system("stop", TIMERS)
+            self.system("stop", SERVICES)
+            self.freeze()
+            self.save("BLOCKED_FENCED", fenced=True)
+        except BaseException:
+            self.save("BLOCKED_FENCE_UNPROVEN", fenced=False)
+
+    def recovery_ready(self):
+        """Complete recovery inputs, not a phase label or a persisted admission bit."""
+
+        def text(value):
+            return isinstance(value, str) and bool(value.strip())
+
+        def oid(value):
+            return type(value) is int and 0 < value <= 4294967295
+
+        def checksum(value):
+            return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+        state = self.s
+        units, files = state.get("units"), state.get("files")
+        ledger, baseline, epochs = state.get("ledger_before"), state.get("legacy_read"), state.get("fence_epochs")
+        if not (
+            oid(state.get("old_oid"))
+            and (
+                state.get("narrow_oid") is None
+                or (oid(state["narrow_oid"]) and state["narrow_oid"] != state["old_oid"])
+            )
+            and type(self.seq) is int
+            and self.seq >= 0
+            and (state.get("child_pid") is None or oid(state["child_pid"]))
+            and text(state.get("old_branch"))
+            and isinstance(units, dict)
+            and set(units) == set(TIMERS + SERVICES)
+            and all(
+                isinstance(unit, dict)
+                and text(unit.get("ActiveState"))
+                and all(isinstance(unit.get(key, ""), str) for key in (*CONFIG_PROPS, "ControlGroup"))
+                for unit in units.values()
+            )
+            and isinstance(files, dict)
+            and bool(files)
+            and all(
+                text(path) and Path(path).is_absolute() and isinstance(record, dict) and checksum(record.get("sha256"))
+                for path, record in files.items()
+            )
+            and isinstance(ledger, list)
+            and bool(ledger)
+            and all(text(version) for version in ledger)
+            and isinstance(baseline, dict)
+            and checksum(baseline.get("response_sha256"))
+            and isinstance(epochs, list)
+        ):
+            return False
+        for index, epoch in enumerate(epochs):
+            if not (
+                isinstance(epoch, dict)
+                and type(epoch.get("number")) is int
+                and epoch["number"] == index + 1
+                and text(epoch.get("start"))
+                and isinstance(epoch.get("drains"), list)
+                and isinstance(epoch.get("restart_attempts"), list)
+                and all(text(t) for t in epoch["restart_attempts"])
+                and all(
+                    isinstance(drain, dict)
+                    and text(drain.get("at"))
+                    and isinstance(drain.get("public_refusal"), dict)
+                    and drain["public_refusal"].get("status") in (502, 503, 504)
+                    for drain in epoch["drains"]
+                )
+            ):
+                return False
+            restart = epoch.get("validated_restart")
+            if restart is not None:
+                if not (
+                    isinstance(restart, dict)
+                    and text(restart.get("at"))
+                    and restart.get("source") in (OLD, NEW)
+                    and isinstance(restart.get("display"), dict)
+                    and bool(restart["display"])
+                    and isinstance(restart.get("public"), dict)
+                    and restart["public"].get("status") == 200
+                ):
+                    return False
+            elif index != len(epochs) - 1:
+                return False
+        # These are the config inputs consumed by freeze, immutable ingress,
+        # legacy worker and restart. Readiness must not defer a missing input
+        # until after services have stopped.
+        config = self.c
+        reads = config.get("reads")
+        legacy = reads.get("legacy") if isinstance(reads, dict) else None
+        request = legacy.get("request") if isinstance(legacy, dict) else None
+        proxy = config.get("proxy")
+        return bool(
+            isinstance(request, dict)
+            and all(
+                text(request.get(key))
+                for key in (
+                    "run_id",
+                    "model_id",
+                    "basin_version_id",
+                    "river_network_version_id",
+                    "segment_id",
+                    "issue_time",
+                )
+            )
+            and request.get("variables") == ["q_down"]
+            and isinstance(request.get("scenarios"), list)
+            and all(text(v) for v in request["scenarios"])
+            and isinstance(config.get("lock_files"), list)
+            and all(text(path) and Path(path).is_absolute() for path in config["lock_files"])
+            and isinstance(config.get("authorized_timers"), list)
+            and all(timer in TIMERS for timer in config["authorized_timers"])
+            and isinstance(config.get("yd_pids"), list)
+            and all(oid(pid) for pid in config["yd_pids"])
+            and all(text(config.get(key)) for key in ("api_health_path", "yd_health_path", "public_base_url"))
+            and all(config[key].startswith("/") for key in ("api_health_path", "yd_health_path"))
+            and isinstance(proxy, dict)
+            and oid(proxy.get("master_pid"))
+            and isinstance(proxy.get("files"), dict)
+            and bool(proxy["files"])
+            and all(
+                text(path) and Path(path).is_absolute() and checksum(value) for path, value in proxy["files"].items()
+            )
+        )
+
+    def check_recovery_eligibility(self):
+        child = self.s.get("child_pid")
+        require(not child or not Path(f"/proc/{child}").exists(), "OWNED_COMMAND_STILL_RUNNING_INSPECT_SUPERVISOR")
+        require(self.recovery_ready(), "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY")
+
+    def recover(self):
+        self._recovery_active = False
+        require(self.args.go == "Danker", "RECOVERY_GO_REQUIRED")
+        self.check_recovery_eligibility()
+        # Invocation-local authority: a persisted phase cannot admit recovery.
+        # Leave this set on failure so main can fence only this protected segment.
+        self._recovery_active = True
+        self.recovering = True
+        self.freeze()
+        self.immutable()
+        recovery_ledger = self.ledger()
+        require(
+            recovery_ledger in (self.s["ledger_before"], sorted(self.s["ledger_before"] + [EXPAND])),
+            "UNKNOWN_RECOVERY_LEDGER",
+        )
+        cat = {x["relname"]: x for x in self.catalog()}
+        canonical, legacy, rollback = (
+            cat.get(n) for n in ("river_timeseries", "river_timeseries_legacy", "river_timeseries_narrow_rollback")
+        )
+        require(canonical, "CANONICAL_ABSENT_UNKNOWN_RECOVERY")
+        if legacy:
+            require(
+                not rollback and legacy["oid"] == self.s["old_oid"] and canonical["oid"] != self.s["old_oid"],
+                "REVERSE_OID_PRECONDITION",
+            )
+            self.save(narrow_oid=canonical["oid"])
+            self.save_file(
+                "narrow-routes-before-reverse.json",
+                json.dumps(
+                    self.rows(
+                        "SELECT run_id,run_key,status,parsed_at,output_uri,timeseries_store FROM hydro.hydro_run "
+                        "WHERE timeseries_store='narrow' ORDER BY run_key"
+                    ),
+                    default=str,
+                ).encode(),
+            )
+            self.phase("REVERSING_D12")
+            self.sql(
+                "BEGIN; ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_narrow_rollback; "
+                "ALTER TABLE hydro.river_timeseries_legacy RENAME TO river_timeseries; COMMIT;"
+            )
+        else:
+            require(canonical["oid"] == self.s["old_oid"], "UNKNOWN_CANONICAL_PERMUTATION")
+            if rollback:
+                require(rollback["oid"] == self.s.get("narrow_oid"), "UNKNOWN_ROLLBACK_OID")
+            else:
+                require(not self.s.get("narrow_oid") and EXPAND not in recovery_ledger, "RETAINED_NARROW_MISSING")
+        self.clean()
+        require(self.git("rev-parse", "refs/heads/" + self.s["old_branch"] + "^{commit}") == OLD, "OLD_BRANCH_CHANGED")
+        self.phase("RESTORING_OLD")
+        self.git("switch", self.s["old_branch"])
+        require(self.git("rev-parse", "HEAD") == OLD, "OLD_RESTORE_FAILED")
+        has_route = self.rows(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema='hydro' "
+            "AND table_name='hydro_run' AND column_name='timeseries_store'"
+        )
+        if has_route:
+            self.sql("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE timeseries_store<>'legacy';")
+            require(
+                not self.rows("SELECT run_id FROM hydro.hydro_run WHERE timeseries_store<>'legacy' LIMIT 1"),
+                "REVERSE_ROUTE_FAILED",
+            )
+        self.worker("imports", sha=OLD)
+        self.audit_roles()
+        read = self.worker("legacy", sha=OLD)
+        require(read["response_sha256"] == self.s["legacy_read"]["response_sha256"], "OLD_LEGACY_READER_CHANGED")
+        cat = {x["relname"]: x for x in self.catalog()}
+        require(
+            cat["river_timeseries"]["oid"] == self.s["old_oid"] and "river_timeseries_legacy" not in cat,
+            "REVERSE_FINAL_CATALOG",
+        )
+        if "river_timeseries_narrow_rollback" in cat:
+            require(cat["river_timeseries_narrow_rollback"]["oid"] == self.s["narrow_oid"], "RETAINED_NARROW_LOST")
+        require(self.ledger() == recovery_ledger, "RECOVERY_LEDGER_CHANGED")
+        self.save(
+            recovery_legacy_read=read,
+            recovery_catalog=cat,
+            recovery_ledger=self.ledger(),
+            recovery_visibility=(
+                "Former narrow-only runs may be absent in OLD until actual OLD parser reparse; "
+                "retained rollback rows and SHUD artifacts are not deleted."
+            ),
+        )
+        self.no_listener()
+        self.start_runtime()
+        self.ingress_audit()
+        self.public_probe()
+        self.save(fenced=False)
+        self.restore_timers()
+        self.yd()
+        self.phase("RECOVERED_OLD_RETAINED", ledger_preserved=True)
+        self._recovery_active = False
+
+    def recovery_guidance(self):
+        inspection = {
+            "inspection_only": True,
+            "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
+        }
+        if self.running:
+            return inspection
+        try:
+            self.check_recovery_eligibility()
+        except Refusal:
+            return inspection
+        return {
+            "recovery_command": (f"{sys.executable} {Path(__file__).resolve()} recover --state {self.root} --go Danker")
+        }
+
+    def status(self):
+        # Deliberately no mutation/recovery and no credential-bearing live output.
+        receipt = {
+            k: self.s[k]
+            for k in (
+                "phase",
+                "updated_at",
+                "old_sha",
+                "new_sha",
+                "old_oid",
+                "narrow_oid",
+                "ledger_after",
+                "migration",
+                "runtime",
+                "readability",
+                "route_proof",
+                "fence_epochs",
+                "remaining",
+                "governance_handoff",
+                "fenced",
+                "recovery_visibility",
+                "recovery_ledger",
+                "milestone_only",
+                "last_command_rc",
+            )
+            if k in self.s
+        }
+        # Drop arbitrary response headers; bounded identities/status/digests suffice publicly.
+        if "route_proof" in receipt:
+            receipt["route_proof"] = {
+                **receipt["route_proof"],
+                "routes": [
+                    {k: r[k] for k in ("path", "status", "sha256", "bytes", "seconds")}
+                    for r in receipt["route_proof"]["routes"]
+                ],
+            }
+        receipt.update(
+            executor_lock_held=self.running,
+            state=str(self.root),
+            status_is_not_live_health=True,
+        )
+        receipt.update(self.recovery_guidance())
+        encoded = json.dumps(receipt, sort_keys=True)
+        require(len(encoded) < 32768, "PUBLIC_RECEIPT_LIMIT")
+        print(encoded, flush=True)
+
+
+def worker(args):
+    # Fresh interpreter verifies module origins before real parser/reader/migrator.
+    repo = Path(args.repo).resolve()
+    require(Path.cwd().resolve() == repo, "WORKER_CWD")
+    sys.path.insert(0, str(repo))
+    import psycopg2
+    from psycopg2.extensions import cursor as PGCursor
+    from psycopg2.extensions import parse_dsn
+
+    from packages.common import forecast_store, migrate
+    from workers.output_parser import parser as parser_module
+
+    for module in (parser_module, forecast_store, migrate):
+        require(Path(module.__file__).resolve().is_relative_to(repo), "MODULE_ORIGIN_MISMATCH")
+    require(sys.version_info[:3] == (3, 11, 15), "RETAINED_PYTHON_VERSION")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    require(head == args.sha, "WORKER_SHA")
+    c = json.loads(safe_path(Path(args.state) / "config.json", True).read_text())
+    dsn = os.environ["DATABASE_URL"]
+    identity = parse_dsn(dsn)
+    require(
+        identity.get("dbname") == _WORKER_DATABASE
+        and identity.get("host") in {"127.0.0.1", "localhost"}
+        and identity.get("port") == _WORKER_PORT,
+        "DSN_DESTINATION_MISMATCH",
+    )
+    require(not any(k in identity for k in ("options", "service", "passfile")), "DSN_OPTIONS_REFUSED")
+    expected_user = _WORKER_USERS["parse" if args.action == "parse" else "read"]
+    if args.action in {"imports", "migrate"}:
+        expected_user = _WORKER_USERS["admin"]
+    require(identity.get("user") == expected_user, "CREDENTIAL_ROLE_MISMATCH")
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database(),current_user,inet_server_port(),current_setting('server_version')")
+        db, user, port, version = cur.fetchone()
+        require(
+            db == _WORKER_DATABASE and user == expected_user and port == 5432 and version.startswith("15.2"),
+            "LIVE_DB_IDENTITY",
+        )
+    result = {"action": args.action, "sha": head, "python": "3.11.15", "module_origin_verified": True}
+    if args.action in {"parse", "preparse"}:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,parsed_at,output_uri FROM hydro.hydro_run WHERE run_id=%s", (c["parse_run_id"],))
+            row = cur.fetchone()
+            require(row and row[0] == "succeeded" and row[1] is None and row[2], "REAL_UNPARSED_SUCCEEDED_RUN_REQUIRED")
+        if args.action == "parse":
+            parser = parser_module.OutputParser(
+                config=parser_module.OutputParserConfig(
+                    object_store_root=Path(c["artifacts_root"]), object_store_prefix=c["object_store_prefix"]
+                ),
+                repository=parser_module.PsycopgOutputParserRepository(database_url=dsn),
+            )
+            # Parser logging is redirected to private stderr; stdout remains structured.
+            with contextlib.redirect_stdout(sys.stderr):
+                parsed = parser.parse_run(c["parse_run_id"])
+            require(parsed.rows_written > 0 and parsed.qc_passed and parsed.status == "parsed", "ACTUAL_PARSE_FAILED")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT timeseries_store,parsed_at FROM hydro.hydro_run WHERE run_id=%s", (c["parse_run_id"],)
+                )
+                routed = cur.fetchone()
+                require(routed and routed[0] == "narrow" and routed[1] is not None, "PARSED_NARROW_ROUTE_FAILED")
+            result.update(rows_written=parsed.rows_written, status=parsed.status)
+    elif args.action in {"legacy", "narrow"}:
+        spec = c["reads"][args.action]
+        with contextlib.redirect_stdout(sys.stderr):
+            response = forecast_store.PsycopgForecastStore(dsn).forecast_series(**spec["request"])
+        points = [p for series in response["series"] for p in series["points"]]
+        require(points and response["segment_id"] == spec["request"]["segment_id"], "READER_EMPTY_OR_IDENTITY_MISMATCH")
+        request = spec["request"]
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('hydro.river_timeseries_legacy')")
+            expanded = cur.fetchone()[0] is not None
+            table = "river_timeseries_legacy" if args.action == "legacy" and expanded else "river_timeseries"
+            segment = request["segment_id"].replace("_reach_", "_shud_riv_", 1)
+            require(
+                not request.get("include_analysis") and not request.get("run_types"),
+                "FORECAST_ONLY_COMPARATOR_REQUIRED",
+            )
+            cur.execute(
+                "SELECT h.run_key,bv.basin_version_key,rnv.river_network_version_key,s.river_segment_key,h.cycle_time "
+                "FROM hydro.hydro_run h JOIN core.basin_version bv ON bv.basin_version_id=h.basin_version_id "
+                "JOIN core.river_segment s ON s.river_segment_id=%s AND s.river_network_version_id=%s "
+                "JOIN core.river_network_version rnv ON rnv.river_network_version_id=s.river_network_version_id "
+                "WHERE h.run_id=%s AND h.basin_version_id=%s "
+                "AND h.model_id=%s AND h.scenario_id=ANY(%s) AND h.run_type='forecast'",
+                (
+                    segment,
+                    request["river_network_version_id"],
+                    request["run_id"],
+                    request["basin_version_id"],
+                    request["model_id"],
+                    request["scenarios"],
+                ),
+            )
+            identities = cur.fetchall()
+            require(len(identities) == 1, "COMPARATOR_IDENTITY_NOT_UNIQUE")
+            run_key, basin_key, network_key, segment_key, cycle = identities[0]
+            require(
+                request["issue_time"] == "latest"
+                or datetime.fromisoformat(request["issue_time"].replace("Z", "+00:00")) == cycle,
+                "COMPARATOR_CYCLE_MISMATCH",
+            )
+            legacy_aid = (
+                (
+                    " AND t.run_id=%s AND t.basin_version_id=%s AND t.river_network_version_id=%s "
+                    "AND t.river_segment_id=%s"
+                )
+                if args.action == "legacy"
+                else ""
+            )
+            legacy_params = (
+                (request["run_id"], request["basin_version_id"], request["river_network_version_id"], segment)
+                if legacy_aid
+                else ()
+            )
+            cur.execute(
+                f"SELECT (extract(epoch FROM t.valid_time)*1000)::bigint,t.value FROM hydro.{table} t "
+                "WHERE t.run_key=%s AND t.basin_version_key=%s AND t.river_network_version_key=%s "
+                "AND t.river_segment_key=%s AND t.variable_e='q_down'::hydro.river_variable "
+                "AND t.valid_time >= %s AND t.valid_time <= %s + INTERVAL '7 days' "
+                + legacy_aid
+                + " ORDER BY t.valid_time",
+                (run_key, basin_key, network_key, segment_key, cycle, cycle, *legacy_params),
+            )
+            facts = [list(row) for row in cur.fetchall()]
+        require(points == facts, "READER_FACT_VALUES_MISMATCH")
+        result.update(
+            points_verified=len(points),
+            response_sha256=digest(json.dumps(response, sort_keys=True, default=str).encode()),
+        )
+    elif args.action == "migrate":
+        files = sorted(migrate.MIGRATIONS_DIR.glob("*.sql"))
+        with conn.cursor() as cur:
+            cur.execute("SELECT version FROM public.schema_migrations ORDER BY version")
+            ledger = [r[0] for r in cur.fetchall()]
+        require(
+            [p.name for p in files if p.name not in ledger] == [EXPAND],
+            "PENDING_NOT_EXACT_000059",
+        )
+        target = migrate.MIGRATIONS_DIR / EXPAND
+        statements = migrate.split_sql_statements(target.read_text())
+        require(len(statements) == 1, "EXPAND_NOT_SINGLE_DO")
+        # Existing apply_migration, with real cursor execute timing for the one DO.
+        # Timing excludes ledger insertion and connection setup; no imaginary substeps.
+        elapsed = []
+
+        class TimedCursor(PGCursor):
+            def execute(self, query, vars=None):
+                if query == statements[0]:
+                    started = time.monotonic()
+                    try:
+                        return super().execute(query, vars)
+                    finally:
+                        elapsed.append(time.monotonic() - started)
+                return super().execute(query, vars)
+
+        conn.close()
+        conn = psycopg2.connect(dsn, cursor_factory=TimedCursor)
+        conn.autocommit = True
+        started_at = now()
+        started = time.monotonic()
+        migrate.apply_migration(conn, target)
+        require(len(elapsed) == 1, "DO_TIMING_MISSING")
+        result.update(
+            file=EXPAND,
+            do_seconds=elapsed[0],
+            runner_seconds=time.monotonic() - started,
+            started_at=started_at,
+            ended_at=now(),
+        )
+    conn.close()
+    print(json.dumps(result, sort_keys=True), flush=True)
+
+
+def arguments():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("command", choices=("prepare", "window", "status", "recover", "worker"))
+    p.add_argument("--state", required=True)
+    p.add_argument("--config")
+    p.add_argument("--go", choices=("Danker",))
+    p.add_argument("--action", choices=("imports", "preparse", "parse", "legacy", "narrow", "migrate"))
+    p.add_argument("--repo")
+    p.add_argument("--sha")
+    args = p.parse_args()
+    if args.command == "prepare" and not args.config:
+        p.error("prepare requires --config")
+    return args
+
+
+def main():
+    os.umask(0o077)
+    args = arguments()
+    if args.command == "worker":
+        try:
+            worker(args)
+            return 0
+        except BaseException as error:
+            # Exception text may contain DSNs; only private stderr receives it.
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+            print(json.dumps({"error_type": type(error).__name__}), flush=True)
+            return 1
+    executor = None
+    try:
+        executor = Executor(args)
+        if args.command == "prepare":
+            executor.prepare()
+        elif args.command == "window":
+            executor.window()
+        elif args.command == "recover":
+            executor.recover()
+        executor.status()
+        return 0
+    except BaseException as error:
+        failure = {
+            "error_type": type(error).__name__,
+            "check": (
+                str(error) if isinstance(error, Refusal) and re.fullmatch(r"[A-Z][A-Z0-9_]+", str(error)) else None
+            ),
+            "inspection_only": True,
+            "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        }
+        if executor is not None:
+            import traceback
+
+            if args.command == "recover" and executor._recovery_active:
+                executor.emergency_fence()
+            executor.save_file("failure-private.txt", traceback.format_exc().encode())
+            print(
+                json.dumps(
+                    {
+                        **failure,
+                        "phase": executor.s.get("phase", "PREPARATION_FAILED"),
+                        "state": str(executor.root),
+                    }
+                ),
+                flush=True,
+            )
+        else:
+            print(json.dumps({**failure, "phase": "INITIALIZATION_REFUSED"}), flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,55 @@
+{
+  "issue": 2324,
+  "candidate": "091a5a93cfb2f55d3602b855324f53a0586f13d0",
+  "red_command": "oracle-do-before-ledger-091a5a93c-command.json",
+  "receipt": {
+    "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914020611.receipt.json",
+    "case": "do-before-ledger",
+    "returncode": 1,
+    "command": [
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+      "/home/nwm/.local/state/issue1987-tools/091a5a93cfb2f55d3602b855324f53a0586f13d0/window_smoke.py",
+      "--oracle",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+      "--old-repo",
+      "/home/nwm/NWM-i8-oracle-old-a8db554d",
+      "--new-repo",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+      "--container",
+      "nwm-i8-1987-window-volume-6fb30b552",
+      "--state",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914020611-state",
+      "--case",
+      "do-before-ledger"
+    ],
+    "database": "i8_1987_do_before_ledger_6fb30b552_20260914020611",
+    "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914020611-state",
+    "state_exists": true,
+    "records": [
+      {
+        "result": "FAIL",
+        "error_type": "Refusal",
+        "check": "D12_DELETED_HISTORICAL_OR_EXPAND_LEDGER"
+      }
+    ],
+    "logs": {
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914020611.stdout": "235627115b14a91d02d3aae61599e137372e4924e3263b6c35a63eb939f419c4",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_6fb30b552_20260914020611.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executors": {
+      "/home/nwm/.local/state/issue1987-tools/091a5a93cfb2f55d3602b855324f53a0586f13d0/window_smoke.py": "467f63472fd1998033e2c09c4961618cd7e933cbc83660418dc89bf5efa6cb2b",
+      "/home/nwm/.local/state/issue1987-tools/091a5a93cfb2f55d3602b855324f53a0586f13d0/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+    }
+  },
+  "saved_state_facts": {
+    "phase": "RECOVERED_OLD_RETAINED",
+    "ledger_before_count": 59,
+    "recovery_ledger_count": 59,
+    "recovery_equals_before": true,
+    "expand_in_recovery": false
+  },
+  "confirmed_cause": "New oracle unconditionally required EXPAND after do-before-ledger, contradicting the admitted L state. Actual D12 preserved all 59 original entries.",
+  "fix": "Independent phase-aware expected ledger from original L: no committed migration ledger => L; committed expand => L+000059. Keep exact comparison through repeated recovery.",
+  "production_mutations": false,
+  "status": "oracle-only fix and bounded integrity pass delegated; final same-bundle matrix pending"
+}

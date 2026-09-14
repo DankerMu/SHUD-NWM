@@ -1,0 +1,62 @@
+{
+  "issue": 2324,
+  "candidate": "312bf1ad2a988f0d41871d8a01baf07a0e87110a",
+  "red_command": "oracle-happy-command.json",
+  "red_receipt": {
+    "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257.receipt.json",
+    "case": "happy",
+    "returncode": 1,
+    "command": [
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python3",
+      "/home/nwm/.local/state/issue1987-tools/312bf1ad2a988f0d41871d8a01baf07a0e87110a/window_smoke.py",
+      "--oracle",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt",
+      "--old-repo",
+      "/home/nwm/NWM-i8-oracle-old-a8db554d",
+      "--new-repo",
+      "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+      "--container",
+      "nwm-i8-1987-window-volume-6fb30b552",
+      "--state",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257-state",
+      "--case",
+      "happy"
+    ],
+    "database": "i8_1987_happy_6fb30b552_20260914014257",
+    "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257-state",
+    "state_exists": true,
+    "records": [
+      {
+        "result": "FAIL",
+        "error_type": "Refusal",
+        "check": "PREPARE_EXTRA_PENDING_ACCEPTED"
+      }
+    ],
+    "logs": {
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257.stdout": "d1fa4ef2c60a4a2a8a05018647dd1b4b5982798d39e1c9ddb813a18628bc9e3e",
+      "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "executors": {
+      "/home/nwm/.local/state/issue1987-tools/312bf1ad2a988f0d41871d8a01baf07a0e87110a/window_smoke.py": "963901c7a296de4e8adb2c5e8fa756132a2064211df87f36633a8069ac72e1dd",
+      "/home/nwm/.local/state/issue1987-tools/312bf1ad2a988f0d41871d8a01baf07a0e87110a/window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e"
+    }
+  },
+  "inner_observation": {
+    "path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_6fb30b552_20260914014257-state/historical-prepare-extra.stdout",
+    "error_type": "FileExistsError",
+    "check": null,
+    "phase": "INITIALIZATION_REFUSED",
+    "state_directory_observed": "empty",
+    "failure_private_exists": false
+  },
+  "diagnosed_by": "LedgerAdmissionImplementer",
+  "confirmed_cause": "historical invoke_prepare precreates its state directory; original prepare constructor mkdir(exist_ok=False) refuses it before admission.",
+  "source_evidence": [
+    "window_smoke.py invoke_prepare root.mkdir before w.main",
+    "window_execute.py Executor.__init__ requires fresh prepare state",
+    "existing late_prepare does not precreate its prepare root"
+  ],
+  "fix": "Remove oracle precreation only; retain original constructor gate.",
+  "production_operations": false,
+  "status": "fix delegated; full happy rerun pending"
+}

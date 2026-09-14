@@ -1,0 +1,20 @@
+--- f24/window_execute.py
++++ tools/window_execute.py
+@@ -776,7 +776,7 @@
+         ledger = self.ledger()
+         names = sorted(p.name for p in (staged / "db/migrations").glob("*.sql"))
+         require(
+-            set(ledger) <= set(names) and [n for n in names if n not in ledger] == [EXPAND],
++            [n for n in names if n not in ledger] == [EXPAND],
+             "PENDING_MIGRATIONS_NOT_EXACT",
+         )
+         self.save_file("pending-000059.sql", (staged / "db/migrations" / EXPAND).read_bytes())
+@@ -1559,7 +1559,7 @@
+             cur.execute("SELECT version FROM public.schema_migrations ORDER BY version")
+             ledger = [r[0] for r in cur.fetchall()]
+         require(
+-            set(ledger) <= {p.name for p in files} and [p.name for p in files if p.name not in ledger] == [EXPAND],
++            [p.name for p in files if p.name not in ledger] == [EXPAND],
+             "PENDING_NOT_EXACT_000059",
+         )
+         target = migrate.MIGRATIONS_DIR / EXPAND
