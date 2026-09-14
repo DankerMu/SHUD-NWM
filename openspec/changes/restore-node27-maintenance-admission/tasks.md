@@ -14,12 +14,12 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 
 - [x] 2.1 Implement an incident-only private-copy preparation/verification helper; preserve all original files and identity (f53181cd4; real preparation/check and isolated cleanup smoke passed).
 - [x] 2.2 Verify candidate, regeneration safety, timer/lock/process boundaries and actual budget/outer-wall agreement before one enforce (dry receipt selects only river107; actual unit10242s, backend78398 started09:02:51Z).
-- [ ] 2.3 Obtain clean river107 committed receipt and catalog evidence; clean only owned copies and verify protected bytes.
-- [ ] 2.4 Obtain genuine original compression and retention service success with fresh semantic receipts and preserved historical retention receipt; restore captured timer states.
+- [x] 2.3 Obtain clean river107 committed receipt and catalog evidence; clean only owned copies and verify protected bytes (third attempt: 643948429312 -> 29959569408 bytes; catalog compressed; cleanup CLEANED).
+- [x] 2.4 Obtain genuine original compression and retention service success with fresh semantic receipts and preserved historical retention receipt; restore captured timer states (original compression clean/empty at17:24:14Z; retention success preserved; both timers active).
 
 ## 3. Admission and evidence
 
-- [ ] 3.1 Pass a new hash-bound prepare at target415 with never-created state and active/pin unchanged; no T0/window/recover/unstage.
+- [x] 3.1 Pass a new hash-bound prepare at target415 with never-created state and active/pin unchanged; no T0/window/recover/unstage (auth-refresh2 state PREPARED at17:35:34Z; receipts/post-recovery-fresh-prepare.json).
 - [ ] 3.2 Publish incident conclusion, two-lock guidance, authorization/deviation, reviews and exact verification limits.
 
 ## Evidence Floor
@@ -35,14 +35,16 @@ Selected packs: Public API / CLI / script entry (actual wrapper semantics); Conf
 - [x] 4.1 Validate isolated TimescaleDB2.10.2 on/off compression preserves exact row fingerprints (200000 rows each, MD5 75d8bfe99d051fbe7d4881092adc03d5 before/after); do not extrapolate small-data timing.
 - [x] 4.2 Review the amended fixture and bind private-only PGOPTIONS plus manifest scan mode, leaving original env/DSN/global settings unchanged (amendment review/strict validation pass; bb2db64c helper rejects v1 and semantic scan drift).
 - [x] 4.3 Prove the prepared private connection resolves indexscan=off and perform one separately approved comparison with unchanged100-minute ceiling and exact river107 selection (completed with partial/failed_before_mutation after6011.332s; NOT a recovery pass).
-- [ ] 4.4 After successful comparison and original compression service success, immediately restore its timer as explicitly directed; on failure retain the pause and do not retry automatically.
+- [x] 4.4 After successful comparison and original compression service success, immediately restore its timer as explicitly directed; on failure retain the pause and do not retry automatically (second-attempt failure pause retained; third separately authorized success restored scheduling).
 
-The first6000-second attempt failed cleanly before committed mutation; actual owned-copy cleanup passed. Retention service/timer recovered independently with zero drops. Tasks2.3/2.4/3.1 remain incomplete until compression genuinely recovers. A new input bundle exists for tool publication92a5b4350992 with byte-identical executors; its preparation state has not been created or run.
+Historical first-attempt outcome: failed before committed mutation, owned-copy cleanup passed, retention recovered independently. Subsequent recovery is recorded in section5.
 
-The second comparison also timed out before committed mutation. Its private envs were cleaned and retention scheduling restored; compression scheduling remains paused under the explicit user instruction. There was no implicit retry authorization; the subsequent explicit six-hour approval is recorded below. Logged sort temporary files total182.426GiB; this is not a progress percentage or a prediction of completion time. Compression recovery, timer restoration after repair, and fresh prepare remain incomplete.
+Historical second-attempt outcome: failed before committed mutation, private envs cleaned and retention scheduling restored; compression pause retained until separately authorized third-attempt success. Logged sort temporary files total182.426GiB, not a progress percentage.
 
 ## 5. Explicitly approved six-hour window
 
 - [x] 5.1 Review the new authorization and update only the private time budget to21600000/21900/25842, retaining scan-off, bound1 and all memory/authority protections (focused fixture PASS; strict OpenSpec and Ruff PASS; helper5f51312f; node27 smoke rejects old schema/budget, scan drift and unsafe cleanup).
-- [ ] 5.2 Recheck full outer-envelope schedule and capacity, private connection setting and exact dry selection; execute at most one newly approved attempt.
-- [ ] 5.3 Preserve actual terminal outcome and cleanup; on success complete original-service proof, immediate compression-timer restoration and fresh prepare; on failure restore retention scheduling and do not attempt a fourth run.
+- [x] 5.2 Recheck full outer-envelope schedule and capacity, private connection setting and exact dry selection; execute at most one newly approved attempt (started14:01:14Z, completed17:18:46Z; 11851.564s).
+- [x] 5.3 Preserve actual terminal outcome and cleanup; on success complete original-service proof, immediate compression-timer restoration and fresh prepare; on failure restore retention scheduling and do not attempt a fourth run (receipts/extended-window-outcome.json and post-recovery-fresh-prepare.json).
+
+Operational deviations: container initialization password was stale; the launcher now reads the existing verified nhms credential from replay.env without changing any password or formal env. The first corrected-auth prepare hit a15s baseline tile timeout; both exact routes subsequently returned200 in under0.05s and a new-state retry passed without weakening the timeout. Failed prepare states remain preserved.
