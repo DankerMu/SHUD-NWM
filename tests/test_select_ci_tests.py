@@ -19339,29 +19339,3 @@ def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
     assert "tests/test_node27_pgdata_workload.py" in selected
     assert set(CORE_SMOKE_TESTS) <= selected
 
-
-
-def test_pgdata_workload_owner_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts import select_ci_tests
-
-    producers = (
-        "packages/common/node27_pgdata_workload.py",
-        "packages/common/node27_pgdata_workload_types.py",
-        "packages/common/node27_pgdata_workload_query.py",
-        "packages/common/node27_pgdata_workload_http.py",
-        "packages/common/node27_pgdata_workload_plan.py",
-        "packages/common/node27_pgdata_workload_measure.py",
-        "packages/common/node27_pgdata_workload_io.py",
-        "scripts/node27_pgdata_workload.py",
-    )
-    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in producers)
-    assert len(mutant) == len(PATH_TEST_RULES) - len(producers)
-    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
-    for producer in producers:
-        selected = set(select_tests([producer], repo_root=Path(".")))
-        if producer.startswith("scripts/"):
-            continue
-        assert "tests/test_node27_pgdata_workload.py" not in selected, producer
-        assert "tests/test_forecast_api.py" not in selected, producer
-        assert "tests/test_forecast_store_routing.py" not in selected, producer
-

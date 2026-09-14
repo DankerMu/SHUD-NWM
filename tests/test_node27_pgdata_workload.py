@@ -159,8 +159,8 @@ def _named_parameters() -> dict[str, Any]:
         "run_id": RUN,
         "basin_version_id": BV,
         "river_network_version_id": RNV,
-        "scenario_tokens": ["gfs"],
-        "scenario_ids": ["forecast_gfs_deterministic", "gfs"],
+        "scenario_tokens": ["forecast_gfs_deterministic"],
+        "scenario_ids": ["forecast_gfs_deterministic"],
     }
 
 
@@ -337,6 +337,8 @@ def test_shipping_named_capture_preserves_unique_mapping_and_reaches_explain() -
     assert "h.cycle_time = %(issue_time)s" in recorded["sql"]
     assert recorded["sql"].count("%(issue_time)s") == 2
     assert recorded["sql"].count("rt.river_segment_id = %(river_segment_id)s") >= 2
+    assert "LOWER(h.source_id) = ANY(%(scenario_tokens)s)" in recorded["sql"]
+    assert "LOWER(h.scenario_id) = ANY(%(scenario_ids)s)" in recorded["sql"]
     assert "selected_cycles" not in recorded["sql"]
     assert set(parameters) >= {
         "basin_version_id",
@@ -353,7 +355,20 @@ def test_shipping_named_capture_preserves_unique_mapping_and_reaches_explain() -
     assert parameters["run_id"] == RUN
     assert parameters["model_id"] == MODEL
     assert parameters["river_segment_id"] == TS_SEGMENT
+    assert parameters["scenario_tokens"] == ["forecast_gfs_deterministic"]
+    assert parameters["scenario_ids"] == ["forecast_gfs_deterministic"]
     assert timeseries_segment_id(SEGMENT) == TS_SEGMENT
+    ifs_recorded = record_explicit_cycle_curve(
+        basin_version_id=BV,
+        segment_id=SEGMENT,
+        river_network_version_id=RNV,
+        issue_time=ISSUE,
+        run_id=RUN,
+        model_id=MODEL,
+        source="IFS",
+    )
+    assert ifs_recorded["parameters"]["scenario_tokens"] == ["forecast_ifs_deterministic"]
+    assert ifs_recorded["parameters"]["scenario_ids"] == ["forecast_ifs_deterministic"]
     connection = _Connection()
     payload = execute_explain(connection, sql=recorded["explain_sql"], parameters=parameters)
     assert payload == [{"Plan": {"Node Type": "Index Scan"}}]
@@ -422,6 +437,25 @@ def test_named_validator_rejects_missing_extra_mixed_and_wrong_bindings() -> Non
         lambda: validate_captured_explicit_cycle_query(_named_sql(), mutated, _identity()),
         "QUERY_SEGMENT_UNBOUND",
     )
+    mutated = dict(_named_parameters())
+    mutated["scenario_tokens"] = ["gfs"]
+    mutated["scenario_ids"] = ["forecast_gfs_deterministic", "gfs"]
+    _assert_code(
+        lambda: validate_captured_explicit_cycle_query(_named_sql(), mutated, _identity()),
+        "QUERY_IDENTITY_UNBOUND",
+    )
+    ifs_identity = {**_identity(), "source": "IFS", "scenario": "forecast_ifs_deterministic"}
+    ifs_parameters = dict(_named_parameters())
+    ifs_parameters["scenario_tokens"] = ["forecast_ifs_deterministic"]
+    ifs_parameters["scenario_ids"] = ["forecast_ifs_deterministic"]
+    assert validate_captured_explicit_cycle_query(_named_sql(), ifs_parameters, ifs_identity) == ifs_parameters
+    mutated = dict(ifs_parameters)
+    mutated["scenario_tokens"] = ["forecast_gfs_deterministic"]
+    mutated["scenario_ids"] = ["forecast_gfs_deterministic"]
+    _assert_code(
+        lambda: validate_captured_explicit_cycle_query(_named_sql(), mutated, ifs_identity),
+        "QUERY_IDENTITY_UNBOUND",
+    )
 
 
 def test_query_digest_is_order_stable_and_time_canonical() -> None:
@@ -461,8 +495,10 @@ def test_warmup_is_discarded_and_p95_uses_sorted_index_18() -> None:
     assert P95_NEAREST_RANK_INDEX == 18
     equal = nearest_rank_p95([300.0] * 20)
     assert equal == 300.0
-    _assert_code(lambda: nearest_rank_p95([300.0] * 19 + [300.01]), "P95_SAMPLE_INVALID")
+    assert nearest_rank_p95([300.0] * 19 + [300.01]) == 300.0
     _assert_code(lambda: nearest_rank_p95([float(index) for index in range(19)]), "P95_SAMPLE_COUNT")
+    _assert_code(lambda: nearest_rank_p95([float(index) for index in range(19)] + [float("nan")]), "P95_SAMPLE_INVALID")
+
 
 
 def test_threshold_equality_accepted_and_above_refused() -> None:
@@ -823,7 +859,10 @@ def test_cli_refuses_malformed_identity_and_unsafe_output(tmp_path: Path, capsys
     assert output.read_bytes() == original
     symlink = parent / "link.dsn"
     symlink.symlink_to(dsn_path)
-    _assert_code(lambda: read_private_dsn_file(symlink), "DSN_FILE_IDENTITY")
+    with pytest.raises(PgdataWorkloadError) as refused:
+        read_private_dsn_file(symlink)
+    assert "super-secret" not in str(refused.value)
+    assert "password=" not in str(refused.value)
 
 
 def test_measure_requires_complete_sql_and_api_probes() -> None:

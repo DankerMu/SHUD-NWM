@@ -373,8 +373,8 @@ def validate_captured_explicit_cycle_query(
     if not _value_matches_expected(copied.get("end_time"), identity.window_end, issue_time=True):
         refuse("recorded SQL binding does not match canonical identity", code="QUERY_IDENTITY_UNBOUND", stage="query")
 
-    expected_tokens = [identity.source.lower()]
-    expected_ids = sorted({identity.source.lower(), identity.scenario.lower()})
+    expected_tokens = [identity.scenario.lower()]
+    expected_ids = [identity.scenario.lower()]
     tokens = copied.get("scenario_tokens")
     ids = copied.get("scenario_ids")
     if tokens != expected_tokens:
