@@ -125,7 +125,10 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     assert thresholds["mandatory_governance_over_physical_lines"] == 1000
     compatibility_guard = metadata["compatibility_facade_guard"]
     assert isinstance(compatibility_guard, dict)
-    assert compatibility_guard["schema_version"] == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_SCHEMA_VERSION
+    assert (
+        compatibility_guard["schema_version"]
+        == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_SCHEMA_VERSION
+    )
     assert compatibility_guard["mode"] == "report-only"
     assert {
         "comparison_base_ref",
@@ -136,7 +139,10 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     } <= set(compatibility_guard)
     scoped_context = metadata["scoped_agent_context"]
     assert isinstance(scoped_context, dict)
-    assert scoped_context["schema_version"] == audit_repo_entropy.SCOPED_AGENT_CONTEXT_SCHEMA_VERSION
+    assert (
+        scoped_context["schema_version"]
+        == audit_repo_entropy.SCOPED_AGENT_CONTEXT_SCHEMA_VERSION
+    )
     assert scoped_context["mode"] == "report-only"
     assert {
         "governed_scope_count",
@@ -244,7 +250,11 @@ def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings()
     summary_counts = metadata["summary_counts"]
     assert isinstance(summary_counts, dict)
 
-    layer_findings = [finding for finding in report["findings"] if finding["check_id"] == "apps-api-layer-inversion"]
+    layer_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "apps-api-layer-inversion"
+    ]
 
     assert layer_findings == []
     assert summary_counts["by_check_id"].get("apps-api-layer-inversion", 0) == 0
@@ -254,7 +264,9 @@ def test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findi
     report = _repo_report(REPO_ROOT, mode="hard-gate")
     metadata = report["metadata"]
     production_topology_findings = [
-        finding for finding in report["findings"] if str(finding["check_id"]).startswith("production-topology-")
+        finding
+        for finding in report["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
     ]
 
     assert metadata["hard_gate_status"] == "pass"
@@ -308,9 +320,9 @@ def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> No
 
 
 def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
-    inventory_text = (REPO_ROOT / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md").read_text(
-        encoding="utf-8"
-    )
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md"
+    ).read_text(encoding="utf-8")
     guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
     expected_metadata = {
         "scheduler-state-monkeypatch-bindings": (
@@ -379,9 +391,9 @@ def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata
 
 
 def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
-    inventory_text = (REPO_ROOT / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md").read_text(
-        encoding="utf-8"
-    )
+    inventory_text = (
+        REPO_ROOT / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md"
+    ).read_text(encoding="utf-8")
     guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
     metadata_text = guard_text.split("Guard-hook metadata rows required by #721:", maxsplit=1)[1]
     expected_metadata = {
@@ -417,7 +429,8 @@ def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -
         ),
         "chain-tile-publisher-facade": (
             "services.tile_publisher",
-            "uv run pytest -q tests/test_orchestration_chain.py tests/test_pipeline_logs_artifacts.py",
+            "uv run pytest -q tests/test_orchestration_chain.py "
+            "tests/test_pipeline_logs_artifacts.py",
         ),
         "chain-worker-adapter-facade": (
             "workers.canonical_converter.converter",
@@ -479,11 +492,17 @@ def test_scoped_agent_context_current_repo_matches_scoped_instruction_state() ->
         "apps/api/AGENTS.md",
         "apps/frontend/AGENTS.md",
     }
-    configured_paths = {config.instruction_path for config in audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS}
+    configured_paths = {
+        config.instruction_path for config in audit_repo_entropy.SCOPED_AGENT_CONTEXT_CONFIGS
+    }
     assert configured_paths == expected_scoped_instruction_paths
     assert context["governed_scope_count"] == 4
 
-    expected_missing = {path for path in expected_scoped_instruction_paths if not (REPO_ROOT / path).is_file()}
+    expected_missing = {
+        path
+        for path in expected_scoped_instruction_paths
+        if not (REPO_ROOT / path).is_file()
+    }
     actual_missing = {
         str(signal["instruction_path"])
         for signal in signals
@@ -546,7 +565,11 @@ def test_scoped_agent_context_reports_stale_scoped_context(tmp_path: Path) -> No
     )
 
     signals = _scoped_agent_context_signals(tmp_path, "stale-scoped-context")
-    orchestrator = [signal for signal in signals if signal["instruction_path"] == "services/orchestrator/AGENTS.md"]
+    orchestrator = [
+        signal
+        for signal in signals
+        if signal["instruction_path"] == "services/orchestrator/AGENTS.md"
+    ]
 
     assert len(orchestrator) == 1
     missing_items = set(orchestrator[0]["missing_items"])
@@ -577,7 +600,11 @@ def test_scoped_agent_context_reports_missing_glossary_linkage(tmp_path: Path) -
     )
 
     glossary_signals = _scoped_agent_context_signals(tmp_path, "missing-glossary-linkage")
-    api = [signal for signal in glossary_signals if signal["instruction_path"] == "apps/api/AGENTS.md"]
+    api = [
+        signal
+        for signal in glossary_signals
+        if signal["instruction_path"] == "apps/api/AGENTS.md"
+    ]
 
     assert len(api) == 1
     missing_items = set(api[0]["missing_items"])
@@ -774,7 +801,10 @@ def test_structural_file_budget_classifies_tracked_source_thresholds_and_exempti
     assert lockfile["line_count"] == 1001
     assert lockfile["module"] == "apps/frontend"
     assert lockfile["exemption_family"] == "dependency-lockfile"
-    assert lockfile["exemption_reason"] == "well-known dependency lockfile is a machine-readable dependency artifact"
+    assert (
+        lockfile["exemption_reason"]
+        == "well-known dependency lockfile is a machine-readable dependency artifact"
+    )
     assert "apps/frontend/pnpm-lock.yaml" not in oversized
 
     assert budget["mandatory_governance_count"] == 1
@@ -884,7 +914,8 @@ def test_compatibility_facade_guard_reports_scheduler_owner_alias_until_inventor
     scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
     _write(
         scheduler_path,
-        scheduler_path.read_text(encoding="utf-8") + "NewSchedulerAlias = _scheduler_state.NewSchedulerAlias\n",
+        scheduler_path.read_text(encoding="utf-8")
+        + "NewSchedulerAlias = _scheduler_state.NewSchedulerAlias\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
@@ -924,7 +955,8 @@ def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
 
     message_key = "compatibility-facade-growth.new-facade-reexport.inventory-required"
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
@@ -934,7 +966,8 @@ def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
@@ -945,17 +978,20 @@ def test_compatibility_facade_guard_requires_scheduler_alias_inventory_metadata(
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
         tmp_path,
         "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
-        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state retention removal-condition.",
+        "- MetadataRequiredSchedulerAlias owner services.orchestrator.scheduler_state "
+        "retention removal-condition.",
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
@@ -976,7 +1012,8 @@ def test_compatibility_facade_guard_reports_scheduler_annotated_owner_alias_unti
     scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
     _write(
         scheduler_path,
-        scheduler_path.read_text(encoding="utf-8") + "AnnotatedAlias: object = _scheduler_state.AnnotatedAlias\n",
+        scheduler_path.read_text(encoding="utf-8")
+        + "AnnotatedAlias: object = _scheduler_state.AnnotatedAlias\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
@@ -987,7 +1024,8 @@ def test_compatibility_facade_guard_reports_scheduler_annotated_owner_alias_unti
     assert signals[0]["path"] == "services/orchestrator/scheduler.py"
     assert signals[0]["inventory_tokens"] == ["AnnotatedAlias"]
     assert (
-        signals[0]["detail"] == "new owner-module alias `AnnotatedAlias` forwarding to "
+        signals[0]["detail"]
+        == "new owner-module alias `AnnotatedAlias` forwarding to "
         "`services.orchestrator.scheduler_state.AnnotatedAlias`"
     )
     _assert_compatibility_facade_report_only_finding(
@@ -1032,11 +1070,13 @@ def test_compatibility_facade_guard_reports_scheduler_full_module_dotted_aliases
         ["DottedAnnotatedAlias"],
     ]
     assert (
-        signals[0]["detail"] == "new owner-module alias `DottedAlias` forwarding to "
+        signals[0]["detail"]
+        == "new owner-module alias `DottedAlias` forwarding to "
         "`services.orchestrator.scheduler_state.DottedAlias`"
     )
     assert (
-        signals[1]["detail"] == "new owner-module alias `DottedAnnotatedAlias` forwarding to "
+        signals[1]["detail"]
+        == "new owner-module alias `DottedAnnotatedAlias` forwarding to "
         "`services.orchestrator.scheduler_state.DottedAnnotatedAlias`"
     )
     _assert_compatibility_facade_report_only_finding(
@@ -1117,7 +1157,8 @@ def test_compatibility_facade_guard_reports_same_rhs_multi_target_aliases_until_
         ("SameRhsAliasCompat",),
     }
     assert (
-        signals_by_token[("SameRhsAlias",)]["detail"] == "new owner-module alias `SameRhsAlias` forwarding to "
+        signals_by_token[("SameRhsAlias",)]["detail"]
+        == "new owner-module alias `SameRhsAlias` forwarding to "
         "`services.orchestrator.scheduler_state.SameRhsAlias`"
     )
     assert (
@@ -1174,11 +1215,13 @@ def test_compatibility_facade_guard_reports_sequence_owner_aliases_until_invento
         [f"{name_prefix}OtherAlias"],
     ]
     assert (
-        signals[0]["detail"] == f"new owner-module alias `{name_prefix}Alias` forwarding to "
+        signals[0]["detail"]
+        == f"new owner-module alias `{name_prefix}Alias` forwarding to "
         f"`services.orchestrator.scheduler_state.{name_prefix}Alias`"
     )
     assert (
-        signals[1]["detail"] == f"new owner-module alias `{name_prefix}OtherAlias` forwarding to "
+        signals[1]["detail"]
+        == f"new owner-module alias `{name_prefix}OtherAlias` forwarding to "
         f"`services.orchestrator.scheduler_state.{name_prefix}OtherAlias`"
     )
     _assert_compatibility_facade_report_only_finding(
@@ -1240,12 +1283,14 @@ def test_compatibility_facade_guard_requires_chain_alias_verification_metadata(
     chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
     _write(
         chain_path,
-        chain_path.read_text(encoding="utf-8") + "NewChainAlias = chain_manifests.NewChainAlias\n",
+        chain_path.read_text(encoding="utf-8")
+        + "NewChainAlias = chain_manifests.NewChainAlias\n",
     )
 
     message_key = "compatibility-facade-growth.new-facade-reexport.inventory-required"
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1256,7 +1301,8 @@ def test_compatibility_facade_guard_requires_chain_alias_verification_metadata(
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1277,12 +1323,14 @@ def test_compatibility_facade_guard_requires_chain_monkeypatch_alias_verificatio
     chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
     _write(
         chain_path,
-        chain_path.read_text(encoding="utf-8") + "_new_chain_patch = chain_manifests._new_chain_patch\n",
+        chain_path.read_text(encoding="utf-8")
+        + "_new_chain_patch = chain_manifests._new_chain_patch\n",
     )
 
     message_key = "compatibility-facade-growth.new-monkeypatch-alias.inventory-required"
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1293,7 +1341,8 @@ def test_compatibility_facade_guard_requires_chain_monkeypatch_alias_verificatio
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1314,7 +1363,8 @@ def test_compatibility_facade_guard_ignores_inventory_token_outside_guard_hook(
     chain_path = tmp_path / "services" / "orchestrator" / "chain.py"
     _write(
         chain_path,
-        chain_path.read_text(encoding="utf-8") + "from services.orchestrator.persistence import PipelineEvent\n",
+        chain_path.read_text(encoding="utf-8")
+        + "from services.orchestrator.persistence import PipelineEvent\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-facade-reexport")
@@ -1333,7 +1383,8 @@ def test_compatibility_facade_guard_reports_scheduler_monkeypatch_alias(
     scheduler_path = tmp_path / "services" / "orchestrator" / "scheduler.py"
     _write(
         scheduler_path,
-        scheduler_path.read_text(encoding="utf-8") + "_new_scheduler_patch = _scheduler_state._new_scheduler_patch\n",
+        scheduler_path.read_text(encoding="utf-8")
+        + "_new_scheduler_patch = _scheduler_state._new_scheduler_patch\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-monkeypatch-alias")
@@ -1371,7 +1422,7 @@ def test_compatibility_facade_guard_reports_chain_non_forwarding_implementation_
         + "\n"
         + "def new_chain_policy(value: object) -> dict[str, str]:\n"
         + "    normalized = str(value).strip()\n"
-        + '    return {"value": normalized}\n',
+        + "    return {\"value\": normalized}\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
@@ -1424,7 +1475,7 @@ def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
         + "\n"
         + "def metadata_required_chain_policy(value: object) -> dict[str, str]:\n"
         + "    normalized = str(value).strip()\n"
-        + '    return {"value": normalized}\n',
+        + "    return {\"value\": normalized}\n",
     )
 
     message_key = "compatibility-facade-growth.new-non-forwarding-implementation.inventory-required"
@@ -1520,14 +1571,11 @@ def test_compatibility_facade_guard_requires_non_forwarding_inventory_metadata(
         "follow-up issue #999; removal condition after owner extraction.",
     )
 
-    assert (
-        _compatibility_facade_signals(
-            tmp_path,
-            base_ref,
-            "new-non-forwarding-implementation",
-        )
-        == []
-    )
+    assert _compatibility_facade_signals(
+        tmp_path,
+        base_ref,
+        "new-non-forwarding-implementation",
+    ) == []
 
 
 def test_compatibility_facade_guard_reports_async_non_forwarding_implementation(
@@ -1541,7 +1589,7 @@ def test_compatibility_facade_guard_reports_async_non_forwarding_implementation(
         + "\n"
         + "async def new_async_chain_policy(value: object) -> dict[str, str]:\n"
         + "    normalized = str(value).strip()\n"
-        + '    return {"value": normalized}\n',
+        + "    return {\"value\": normalized}\n",
     )
 
     signals = _compatibility_facade_signals(tmp_path, base_ref, "new-non-forwarding-implementation")
@@ -1562,7 +1610,7 @@ def test_compatibility_facade_guard_reports_existing_sync_local_changed_to_forwa
         "\n"
         "def unlisted_existing_local_chain_policy(value: object) -> dict[str, str]:\n"
         "    normalized = str(value).strip()\n"
-        '    return {"value": normalized}\n'
+        "    return {\"value\": normalized}\n"
     )
     _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
     _commit_all(tmp_path, "add unlisted existing local chain policy")
@@ -1616,7 +1664,7 @@ def test_compatibility_facade_guard_reports_existing_async_local_changed_to_forw
         "\n"
         "async def unlisted_existing_async_local_chain_policy(value: object) -> dict[str, str]:\n"
         "    normalized = str(value).strip()\n"
-        '    return {"value": normalized}\n'
+        "    return {\"value\": normalized}\n"
     )
     _write(chain_path, chain_path.read_text(encoding="utf-8") + local_function)
     _commit_all(tmp_path, "add unlisted existing async local chain policy")
@@ -1680,7 +1728,7 @@ def test_compatibility_facade_guard_reports_existing_sync_forwarder_changed_to_n
             "\n"
             "def unlisted_existing_chain_forwarder(value: object) -> dict[str, str]:\n"
             "    normalized = str(value).strip()\n"
-            '    return {"value": normalized}\n',
+            "    return {\"value\": normalized}\n",
         ),
     )
 
@@ -1732,7 +1780,7 @@ def test_compatibility_facade_guard_reports_existing_async_forwarder_changed_to_
             "\n"
             "async def unlisted_existing_async_chain_forwarder(value: object) -> dict[str, str]:\n"
             "    normalized = str(value).strip()\n"
-            '    return {"value": normalized}\n',
+            "    return {\"value\": normalized}\n",
         ),
     )
 
@@ -1775,7 +1823,8 @@ def test_compatibility_facade_guard_requires_import_family_inventory_metadata(
 
     message_key = "compatibility-facade-growth.new-import-family.inventory-required"
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1785,7 +1834,8 @@ def test_compatibility_facade_guard_requires_import_family_inventory_metadata(
     )
 
     assert [
-        signal["message_key"] for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
+        signal["message_key"]
+        for signal in _compatibility_facade_signals(tmp_path, base_ref, "new-import-family")
     ] == [message_key]
 
     _append_inventory_line(
@@ -1870,7 +1920,11 @@ def test_structural_ownership_growth_reports_new_surface_in_oversized_source(
     _write(source_path, base_text + "\n".join(added_lines) + "\n")
 
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
-    signals = [signal for signal in budget["ownership_growth_signals"] if signal["path"] == "services/api/large.py"]
+    signals = [
+        signal
+        for signal in budget["ownership_growth_signals"]
+        if signal["path"] == "services/api/large.py"
+    ]
 
     assert expected_signal in {signal["signal_type"] for signal in signals}
     assert all("inventory" in str(signal["owner_action"]) for signal in signals)
@@ -1893,7 +1947,9 @@ def test_structural_ownership_growth_ignores_nested_python_helper_entrypoint(
     base_ref = _git_rev_parse(tmp_path, "HEAD")
     changed_text = base_text.replace(
         "    return os.name\n",
-        "    def local_helper():\n        return os.name\n    return local_helper()\n",
+        "    def local_helper():\n"
+        "        return os.name\n"
+        "    return local_helper()\n",
     )
     _write(source_path, changed_text)
 
@@ -1990,7 +2046,8 @@ def test_structural_ownership_growth_reports_huge_python_class_method_beyond_con
     _init_git(tmp_path)
     source_path = tmp_path / "services" / "api" / "large.py"
     class_padding = [
-        f"    PAD_{index} = {index}" for index in range(audit_repo_entropy.STRUCTURAL_PYTHON_CONTEXT_MAX_LINES + 25)
+        f"    PAD_{index} = {index}"
+        for index in range(audit_repo_entropy.STRUCTURAL_PYTHON_CONTEXT_MAX_LINES + 25)
     ]
     tail_padding = [f"VALUE_{index} = '{'x' * 1024}'" for index in range(1_030)]
     base_lines = [
@@ -2067,7 +2124,8 @@ def test_structural_ownership_growth_ignores_huge_python_local_helper_beyond_con
     _init_git(tmp_path)
     source_path = tmp_path / "services" / "api" / "large.py"
     function_padding = [
-        f"    value_{index} = {index}" for index in range(audit_repo_entropy.STRUCTURAL_PYTHON_CONTEXT_MAX_LINES + 25)
+        f"    value_{index} = {index}"
+        for index in range(audit_repo_entropy.STRUCTURAL_PYTHON_CONTEXT_MAX_LINES + 25)
     ]
     tail_padding = [f"VALUE_{index} = '{'x' * 1024}'" for index in range(1_030)]
     base_lines = [
@@ -2223,7 +2281,9 @@ def test_structural_ownership_growth_reports_js_ts_public_exports(
 
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
 
-    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [expected_detail]
+    assert _structural_growth_signal_details(budget, relative_path, "public-entrypoint") == [
+        expected_detail
+    ]
 
 
 def test_structural_ownership_growth_reports_cjs_export_after_nested_object(
@@ -2235,12 +2295,12 @@ def test_structural_ownership_growth_reports_cjs_export_after_nested_object(
     base_text = _structural_ts_private_fixture(
         1001,
         "const handler = () => null;",
-        'module.exports = { config: { enabled: true }, "default": handler };',
+        "module.exports = { config: { enabled: true }, \"default\": handler };",
     )
     changed_text = _structural_ts_private_fixture(
         1001,
         "const handler = () => null;",
-        'module.exports = { config: { enabled: true }, "default": handler, handler };',
+        "module.exports = { config: { enabled: true }, \"default\": handler, handler };",
     )
     _write(source_path, base_text)
     _commit_all(tmp_path, "base oversized source")
@@ -2984,7 +3044,13 @@ def test_structural_growth_detects_multiline_and_indented_imports_in_huge_source
     base_ref = _git_rev_parse(tmp_path, "HEAD")
     _write(
         source_path,
-        "import os\nfrom pathlib import (\n    Path,\n)\nif True:\n    import importlib\n" + (huge_line * repeat_count),
+        "import os\n"
+        "from pathlib import (\n"
+        "    Path,\n"
+        ")\n"
+        "if True:\n"
+        "    import importlib\n"
+        + (huge_line * repeat_count),
     )
 
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)
@@ -3136,7 +3202,9 @@ def test_structural_file_budget_report_and_hard_gate_commands_do_not_write_basel
         )
         report = json.loads(result.stdout)
 
-        assert result.returncode == (1 if report["metadata"].get("hard_gate_failing_count", 0) else 0)
+        assert result.returncode == (
+            1 if report["metadata"].get("hard_gate_failing_count", 0) else 0
+        )
         assert report["metadata"]["baseline_written"] is False
         assert report["metadata"]["structural_file_budget"]["mandatory_governance_count"] == 1
         assert not baseline.exists()
@@ -3184,12 +3252,16 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert inventory.total_test_files == _expected_baseline_test_count()
     assert inventory.total_instruction_files == _expected_baseline_instruction_count()
     assert inventory.v1_summary_test_files == _expected_baseline_test_count(v1_summary=True)
-    assert inventory.v1_summary_instruction_files == _expected_baseline_instruction_count(v1_summary=True)
+    assert inventory.v1_summary_instruction_files == _expected_baseline_instruction_count(
+        v1_summary=True
+    )
     assert baseline["summary"]["total_test_files"] == inventory.v1_summary_test_files
     assert baseline["summary"]["total_instruction_files"] == inventory.v1_summary_instruction_files
     assert isinstance(baseline["summary"]["total_test_files"], int)
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("docs/runbooks/live.md")
-    assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("openspec/changes/example/spec.md")
+    assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted(
+        "openspec/changes/example/spec.md"
+    )
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("openapi/nhms.v1.yaml")
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("README.md")
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
@@ -3198,7 +3270,9 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert modules["services/production_closure"]["file_count"] == _expected_module_file_count(
         "services/production_closure"
     )
-    assert modules["services/slurm_gateway"]["file_count"] == _expected_module_file_count("services/slurm_gateway")
+    assert modules["services/slurm_gateway"]["file_count"] == _expected_module_file_count(
+        "services/slurm_gateway"
+    )
     for zero_count_module in (
         "docs/governance",
         "docs/runbooks",
@@ -3225,7 +3299,9 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert baseline["summary"]["modules_with_high_entropy"] >= 2
 
     patterns = {
-        pattern["description"]: pattern for pattern in baseline["high_spread_patterns"] if isinstance(pattern, dict)
+        pattern["description"]: pattern
+        for pattern in baseline["high_spread_patterns"]
+        if isinstance(pattern, dict)
     }
     assert patterns["stale-display-route-token"]["axis"] == "docs alignment"
     assert patterns["stale-display-route-token"]["spread_risk"] == "high"
@@ -3251,7 +3327,8 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
         },
         {
             "target": (
-                "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py"
+                "Stage large decomposition of services/orchestrator/scheduler.py and "
+                "services/orchestrator/chain.py"
             ),
             "impact": "high",
             "effort": "high",
@@ -3986,7 +4063,8 @@ def test_entropy_baseline_writer_rejects_oversized_inventory_before_temp_write(
     baseline_dir.mkdir()
     latest.write_bytes(previous_bytes)
     tracked_paths = [
-        f"apps/api/generated_{index}.py" for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
+        f"apps/api/generated_{index}.py"
+        for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
     ]
 
     monkeypatch.setattr(
@@ -4024,7 +4102,8 @@ def test_entropy_baseline_writer_snapshot_identity_does_not_walk_huge_fallback_t
         nonlocal fallback_calls
         fallback_calls += 1
         return [
-            f"generated/fallback_{index}.py" for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
+            f"generated/fallback_{index}.py"
+            for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
         ]
 
     monkeypatch.setattr(write_entropy_baseline, "_fallback_inventory_relative_paths", huge_fallback_paths)
@@ -4201,7 +4280,9 @@ def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Pa
     assert metadata["hard_gate_status"] == "pass"
     assert metadata["hard_gate_failing_count"] == 0
     assert metadata["gate_eligible_count"] == 0
-    assert not any(finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS for finding in report["findings"])
+    assert not any(
+        finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS for finding in report["findings"]
+    )
     assert "stale-display-route-token" in {finding["check_id"] for finding in report["findings"]}
     stale_finding = next(
         finding for finding in report["findings"] if finding["check_id"] == "stale-display-route-token"
@@ -4243,7 +4324,11 @@ def test_entropy_audit_hard_gate_json_reports_tracked_retired_path_as_report_onl
     assert metadata["hard_gate_failing_count"] == 0
     assert "placeholder-path-exists" not in metadata["hard_gate_gated_check_ids"]
 
-    findings = [finding for finding in report["findings"] if finding["check_id"] == "placeholder-path-exists"]
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
     assert len(findings) == 1
     _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
     assert findings[0]["evidence_path"] == "apps/web/README.md"
@@ -4310,7 +4395,9 @@ def test_entropy_audit_topology_guardrails_flag_node27_reads_node22_active_prima
 
     report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
     findings = [
-        finding for finding in report["findings"] if finding["check_id"] == "production-topology-node22-db-writer"
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "production-topology-node22-db-writer"
     ]
 
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
@@ -4363,7 +4450,6 @@ def test_entropy_audit_topology_guardrails_allow_json_coordinated_negative_node2
     assert report["metadata"]["hard_gate_status"] == "pass"
     assert audit_repo_entropy._exit_code_for_report(report) == 0
 
-
 @pytest.mark.parametrize(
     "statement",
     [
@@ -4387,7 +4473,6 @@ def test_entropy_audit_topology_guardrails_allow_coordinated_negative_node22_db_
     assert topology_findings == []
     assert report["metadata"]["hard_gate_status"] == "pass"
     assert audit_repo_entropy._exit_code_for_report(report) == 0
-
 
 @pytest.mark.parametrize(
     "statement",
@@ -4415,7 +4500,6 @@ def test_entropy_audit_topology_guardrails_flag_non_negating_node22_writer_text(
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
     assert report["metadata"]["hard_gate_status"] == "fail"
     assert audit_repo_entropy._exit_code_for_report(report) == 1
-
 
 def test_entropy_audit_topology_guardrails_do_not_allow_json_positive_after_coordinated_negative(
     tmp_path: Path,
@@ -4468,7 +4552,7 @@ def test_entropy_audit_topology_guardrails_do_not_allow_active_claim_after_neigh
     ]
     assert [(finding["evidence_path"], finding["line"]) for finding in local_pg_findings] == [
         ("docs/runbooks/current-production-ops.md", 3),
-        ("docs/runbooks/current-production-ops.md", 4),
+        ("docs/runbooks/current-production-ops.md", 4)
     ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(writer_findings[0])
     _assert_unallowlisted_budget_counted_gate_eligible_finding(local_pg_findings[0])
@@ -4633,7 +4717,9 @@ def test_entropy_audit_topology_guardrails_normalize_display_env_source_paths(
 
     findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [(relative_path, expected_line)]
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        (relative_path, expected_line)
+    ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
@@ -4650,7 +4736,9 @@ def test_entropy_audit_topology_guardrails_do_not_suppress_writer_command_with_n
 
     findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [("scripts/run-ingest.sh", 1)]
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/run-ingest.sh", 1)
+    ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
@@ -4696,7 +4784,9 @@ def test_entropy_audit_topology_guardrails_flag_node27_writer_entrypoints_after_
 
     findings = _findings_by_check(tmp_path, "production-topology-display-env-writer")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [("scripts/run-writer.sh", 1)]
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        ("scripts/run-writer.sh", 1)
+    ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
@@ -4999,7 +5089,9 @@ def test_entropy_audit_topology_guardrails_do_not_file_allow_key_compatibility_s
 
     findings = _findings_by_check(tmp_path, "production-topology-node22-local-postgres")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [(relative_path, 4)]
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
+        (relative_path, 4)
+    ]
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
@@ -5435,13 +5527,10 @@ def test_entropy_audit_topology_guardrails_allow_historical_baseline_whole_docum
     # The marker's own current_authority.section literal ("Current production
     # operations") sits inside the top region; the whole-document marker must
     # win over the current-production title heuristic, not the reverse.
-    assert (
-        audit_repo_entropy._topology_document_is_non_current(
-            "docs/runbooks/node22-legacy-bringup.md",
-            (tmp_path / "docs/runbooks/node22-legacy-bringup.md").read_text(encoding="utf-8").splitlines(),
-        )
-        is True
-    )
+    assert audit_repo_entropy._topology_document_is_non_current(
+        "docs/runbooks/node22-legacy-bringup.md",
+        (tmp_path / "docs/runbooks/node22-legacy-bringup.md").read_text(encoding="utf-8").splitlines(),
+    ) is True
 
     topology_findings = [
         finding
@@ -5662,13 +5751,10 @@ def test_entropy_audit_topology_guardrails_incomplete_source_marker_cannot_decla
         {"docs/runbooks/current-production-ops.md"}
     )
     assert authority not in audit_repo_entropy._topology_declared_current_authorities(tmp_path)
-    assert (
-        audit_repo_entropy._topology_document_is_non_current(
-            authority,
-            (tmp_path / authority).read_text(encoding="utf-8").splitlines(),
-        )
-        is True
-    )
+    assert audit_repo_entropy._topology_document_is_non_current(
+        authority,
+        (tmp_path / authority).read_text(encoding="utf-8").splitlines(),
+    ) is True
 
     topology_findings = [
         finding
@@ -5698,15 +5784,12 @@ def test_entropy_audit_topology_authority_path_parser_rejects_malformed_and_esca
         "scripts/diagnostic/qhh/README.md",
     )
     # A scalar current_authority value (no list shape) grants nothing.
-    assert (
-        audit_repo_entropy._topology_authority_paths(
-            [
-                "current_authority: docs/governance/DOC_STATUS.md#conflict-resolution-order",
-                "status: historical baseline",
-            ]
-        )
-        == ()
-    )
+    assert audit_repo_entropy._topology_authority_paths(
+        [
+            "current_authority: docs/governance/DOC_STATUS.md#conflict-resolution-order",
+            "status: historical baseline",
+        ]
+    ) == ()
     # The block ends at the next top-level key.
     assert audit_repo_entropy._topology_authority_paths(
         [
@@ -5740,21 +5823,24 @@ def test_entropy_audit_topology_authority_path_parser_rejects_malformed_and_esca
         ".",
         "..",
     ):
-        assert audit_repo_entropy._topology_authority_path_normalize(malformed) is None, malformed
+        assert (
+            audit_repo_entropy._topology_authority_path_normalize(malformed) is None
+        ), malformed
 
     for valid in (
         "docs/runbooks/current-production-ops.md",
         "scripts/diagnostic/qhh/README.md",
         "AGENTS.md",
     ):
-        assert audit_repo_entropy._topology_authority_path_normalize(valid) == valid, valid
+        assert (
+            audit_repo_entropy._topology_authority_path_normalize(valid) == valid
+        ), valid
 
     # Normalization collapses `.` segments and duplicate slashes so the value
     # matches `_rel` spelling exactly.
-    assert (
-        audit_repo_entropy._topology_authority_path_normalize("docs/./runbooks//current-production-ops.md")
-        == "docs/runbooks/current-production-ops.md"
-    )
+    assert audit_repo_entropy._topology_authority_path_normalize(
+        "docs/./runbooks//current-production-ops.md"
+    ) == "docs/runbooks/current-production-ops.md"
 
 
 def test_entropy_audit_topology_guardrails_malformed_declared_authority_is_not_adopted(
@@ -5831,7 +5917,9 @@ def test_entropy_audit_archive_marker_parser_does_not_require_superseded_by_for_
     assert complete.end_line == len(marker_lines(_complete_historical_baseline_front_matter()))
 
     incomplete = audit_repo_entropy._whole_document_archive_status_marker_range(
-        marker_lines(_complete_historical_baseline_front_matter().replace("status_since: 2026-08-24", ""))
+        marker_lines(
+            _complete_historical_baseline_front_matter().replace("status_since: 2026-08-24", "")
+        )
     )
     assert incomplete is None
 
@@ -5844,7 +5932,11 @@ def test_entropy_audit_archive_marker_parser_keeps_superseded_by_required_for_su
 
     for status in ("superseded", "archived"):
         marker = audit_repo_entropy._whole_document_archive_status_marker_range(
-            marker_lines(_complete_archive_status_front_matter("").replace("status: archived", f"status: {status}"))
+            marker_lines(
+                _complete_archive_status_front_matter("").replace(
+                    "status: archived", f"status: {status}"
+                )
+            )
         )
         assert marker is not None, f"complete {status} marker without superseded_by must be recognized"
 
@@ -5996,7 +6088,10 @@ def test_entropy_audit_skips_root_runtime_trees_without_skipping_source_packages
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("VALUE = 1\n", encoding="utf-8")
 
-    scanned = {path.relative_to(root).as_posix() for path in audit_repo_entropy._iter_text_files(root, [root])}
+    scanned = {
+        path.relative_to(root).as_posix()
+        for path in audit_repo_entropy._iter_text_files(root, [root])
+    }
 
     assert "artifacts/runtime.py" not in scanned
     assert "data/runtime.py" not in scanned
@@ -6014,7 +6109,8 @@ def test_entropy_audit_skips_oversized_scanned_text_files(tmp_path: Path) -> Non
     )
 
     scanned = {
-        path.relative_to(tmp_path).as_posix() for path in audit_repo_entropy._iter_text_files(tmp_path, [tmp_path])
+        path.relative_to(tmp_path).as_posix()
+        for path in audit_repo_entropy._iter_text_files(tmp_path, [tmp_path])
     }
     findings = _findings_by_check(tmp_path, "broad-e2e-api-mock")
 
@@ -6213,7 +6309,8 @@ def test_broad_e2e_mock_classifies_live_label_as_high_and_mocked_e2e_as_medium(
     )
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "broad-e2e-api-mock")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "broad-e2e-api-mock")
     }
 
     assert findings["apps/frontend/e2e/live.spec.ts"]["severity"] == "high"
@@ -6261,7 +6358,8 @@ def test_broad_e2e_mock_detects_multiline_live_and_unallowlisted_registrations(
     )
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "broad-e2e-api-mock")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "broad-e2e-api-mock")
     }
 
     assert set(findings) == {
@@ -6273,7 +6371,9 @@ def test_broad_e2e_mock_detects_multiline_live_and_unallowlisted_registrations(
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings["apps/frontend/e2e/live.spec.ts"])
     assert findings["apps/frontend/e2e/route-authority.spec.ts"]["severity"] == "medium"
     assert findings["apps/frontend/e2e/route-authority.spec.ts"]["priority"] == "P2"
-    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings["apps/frontend/e2e/route-authority.spec.ts"])
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(
+        findings["apps/frontend/e2e/route-authority.spec.ts"]
+    )
 
 
 def test_broad_e2e_mock_ignores_route_calls_on_non_page_identifiers(
@@ -6456,7 +6556,8 @@ def test_complete_archive_marker_allowlists_archived_retired_path_tokens_without
     )
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
     }
 
     archived = findings["docs/archived/m22.md"]
@@ -6512,17 +6613,25 @@ def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_wit
     tmp_path: Path,
 ) -> None:
     _write(
-        tmp_path / "openspec" / "changes" / "governance-2-legacy-dead-code-retirement" / "tasks.md",
+        tmp_path
+        / "openspec"
+        / "changes"
+        / "governance-2-legacy-dead-code-retirement"
+        / "tasks.md",
         "Completed evidence keeps apps/web as a retired placeholder path.\n",
     )
     _write(tmp_path / "docs" / "active.md", "Current docs still mention apps/web.\n")
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
     }
 
     governed = findings["openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md"]
-    assert governed["allowlist_reason"] == "governed completed OpenSpec evidence documents retired placeholder paths"
+    assert (
+        governed["allowlist_reason"]
+        == "governed completed OpenSpec evidence documents retired placeholder paths"
+    )
     assert governed["allowlist_key"] == (
         "placeholder-path-token:governed-completed-openspec-retired-placeholder-evidence"
     )
@@ -6543,18 +6652,26 @@ def test_governance_5_e1_fixture_retired_path_tokens_are_allowlisted_without_bud
     tmp_path: Path,
 ) -> None:
     _write(
-        tmp_path / "openspec" / "changes" / "governance-5-e1-entropy-baseline-burndown" / "tasks.md",
+        tmp_path
+        / "openspec"
+        / "changes"
+        / "governance-5-e1-entropy-baseline-burndown"
+        / "tasks.md",
         "Fixture evidence keeps apps/web and workers/sbatch_templates as retired path examples.\n",
     )
     _write(tmp_path / "docs" / "active.md", "Current docs still mention services/tile-publisher.\n")
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
     }
 
-    governed = findings["openspec/changes/governance-5-e1-entropy-baseline-burndown/tasks.md"]
+    governed = findings[
+        "openspec/changes/governance-5-e1-entropy-baseline-burndown/tasks.md"
+    ]
     assert (
-        governed["allowlist_reason"] == "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
+        governed["allowlist_reason"]
+        == "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
     )
     assert governed["allowlist_key"] == (
         "placeholder-path-token:governed-governance-5-e1-fixture-evidence-documents-retired-placeholder-paths"
@@ -6601,7 +6718,8 @@ def test_slurm_gateway_retired_template_source_comment_is_allowlisted(
     )
 
     findings = {
-        str(finding["evidence_path"]): finding for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
     }
 
     source_comment = findings["services/slurm_gateway/config.py"]
@@ -6627,7 +6745,11 @@ def test_tracked_apps_web_file_emits_retired_path_return_finding(
     subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
 
     report = audit_repo_entropy.build_report(tmp_path)
-    findings = [finding for finding in report["findings"] if finding["check_id"] == "placeholder-path-exists"]
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
 
     assert len(findings) == 1
     finding = findings[0]
@@ -6656,12 +6778,17 @@ def test_tracked_file_under_each_retired_prefix_emits_retired_path_return_findin
     subprocess.run(["git", "add", tracked_file], cwd=tmp_path, check=True)
 
     report = audit_repo_entropy.build_report(tmp_path)
-    findings = [finding for finding in report["findings"] if finding["check_id"] == "placeholder-path-exists"]
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
 
     assert len(findings) == 1
     assert findings[0]["evidence_path"] == tracked_file
     assert findings[0]["description"] == (
-        f"Tracked file `{tracked_file}` returned under retired active-tree prefix `{retired_prefix}`."
+        f"Tracked file `{tracked_file}` returned under retired active-tree prefix "
+        f"`{retired_prefix}`."
     )
     _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
     metadata = report["metadata"]
@@ -6727,7 +6854,10 @@ def test_non_git_root_does_not_emit_retired_path_return_false_positive(
 
     report = audit_repo_entropy.build_report(tmp_path)
 
-    assert not any(finding["check_id"] == "placeholder-path-exists" for finding in report["findings"])
+    assert not any(
+        finding["check_id"] == "placeholder-path-exists"
+        for finding in report["findings"]
+    )
 
 
 def test_unavailable_git_metadata_does_not_crash_or_emit_retired_path_return_false_positive(
@@ -6749,7 +6879,10 @@ def test_unavailable_git_metadata_does_not_crash_or_emit_retired_path_return_fal
 
     report = audit_repo_entropy.build_report(tmp_path)
 
-    assert not any(finding["check_id"] == "placeholder-path-exists" for finding in report["findings"])
+    assert not any(
+        finding["check_id"] == "placeholder-path-exists"
+        for finding in report["findings"]
+    )
 
 
 def test_slurm_gateway_route_leakage_finds_direct_business_route_decorators_and_path_literals(
@@ -6772,7 +6905,8 @@ def test_slurm_gateway_route_leakage_finds_direct_business_route_decorators_and_
     )
 
     descriptions = {
-        str(finding["description"]) for finding in _findings_by_check(tmp_path, "slurm-gateway-route-leakage")
+        str(finding["description"])
+        for finding in _findings_by_check(tmp_path, "slurm-gateway-route-leakage")
     }
 
     assert any("direct route decorator" in description for description in descriptions)
@@ -7063,7 +7197,11 @@ def test_entropy_audit_hard_gate_fails_for_each_gated_check_id(
     assert gated_findings
     assert metadata["hard_gate_status"] == "fail"
     assert metadata["hard_gate_failing_count"] == len(
-        [finding for finding in report["findings"] if finding["gate_eligible"]]
+        [
+            finding
+            for finding in report["findings"]
+            if finding["gate_eligible"]
+        ]
     )
     assert all(
         finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS
@@ -7112,7 +7250,11 @@ def test_entropy_audit_apps_api_layer_inversion_remains_standalone_report_only_f
 
     report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
     metadata = report["metadata"]
-    layer_findings = [finding for finding in report["findings"] if finding["check_id"] == "apps-api-layer-inversion"]
+    layer_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "apps-api-layer-inversion"
+    ]
 
     assert len(layer_findings) == 1
     finding = layer_findings[0]
@@ -7381,7 +7523,9 @@ def test_route_authority_evidence_boundary_heading_allowlists_diagnostic_route_r
 
     assert set(by_token) == {"/hydro-met", "/forecast", "/meteorology"}
     for token in ("/hydro-met", "/forecast"):
-        assert by_token[token]["allowlist_key"] == ("stale-display-route-token:historical-plan-or-pre-m26-evidence")
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
     _assert_unallowlisted_budget_counted_report_only_finding(by_token["/meteorology"])
@@ -7406,7 +7550,9 @@ def test_route_authority_evidence_boundary_active_instruction_is_report_only_dri
 
     assert set(by_token) == {"/hydro-met", "/meteorology", "/forecast"}
     for token in ("/hydro-met", "/meteorology"):
-        assert by_token[token]["allowlist_key"] == ("stale-display-route-token:historical-plan-or-pre-m26-evidence")
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
         assert by_token[token]["gate_eligible"] is False
@@ -7448,7 +7594,9 @@ def test_route_authority_evidence_boundary_terse_active_route_is_report_only_dri
 
     assert set(by_token) == {"/hydro-met", "/meteorology", "/forecast"}
     for token in ("/hydro-met", "/meteorology"):
-        assert by_token[token]["allowlist_key"] == ("stale-display-route-token:historical-plan-or-pre-m26-evidence")
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
         assert by_token[token]["gate_eligible"] is False
@@ -7794,7 +7942,7 @@ def test_route_authority_normal_historical_table_does_not_merge_with_blockquoted
             "stale-display-route-token:legacy-route-compatibility-context",
         ),
         (
-            'Compatibility context keeps "${BASE_URL}/forecast" deep links',
+            "Compatibility context keeps \"${BASE_URL}/forecast\" deep links",
             "stale-display-route-token:legacy-route-compatibility-context",
         ),
     ],
@@ -8037,9 +8185,15 @@ def test_route_authority_markdown_table_list_and_wrapped_contexts_allowlist_gove
         "/basins/:id",
         "/segments/:id",
     }
-    assert by_token["/hydro-met"]["allowlist_key"] == ("stale-display-route-token:m26-route-consolidation-or-redirect")
-    assert by_token["/meteorology"]["allowlist_key"] == ("stale-display-route-token:legacy-route-compatibility-context")
-    assert by_token["/basins/:id"]["allowlist_key"] == ("stale-display-route-token:m26-route-consolidation-or-redirect")
+    assert by_token["/hydro-met"]["allowlist_key"] == (
+        "stale-display-route-token:m26-route-consolidation-or-redirect"
+    )
+    assert by_token["/meteorology"]["allowlist_key"] == (
+        "stale-display-route-token:legacy-route-compatibility-context"
+    )
+    assert by_token["/basins/:id"]["allowlist_key"] == (
+        "stale-display-route-token:m26-route-consolidation-or-redirect"
+    )
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
     assert all(finding["budget_counted"] is False for finding in findings)
 
@@ -8077,7 +8231,9 @@ def test_route_authority_wrapped_list_redirect_continuation_allowlists_route_lis
         "/basins/demo",
     }
     for token in ("/hydro-met", "/overview", "/forecast", "/meteorology"):
-        assert by_token[token]["allowlist_key"] == ("stale-display-route-token:m26-route-consolidation-or-redirect")
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:m26-route-consolidation-or-redirect"
+        )
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
     _assert_unallowlisted_budget_counted_report_only_finding(by_token["/basins/demo"])
@@ -8574,7 +8730,9 @@ def test_route_authority_current_runbook_same_token_redirect_first_mixed_line_ke
     assert len(token_findings) == 2
     by_state = {finding["allowlist_state"]: finding for finding in token_findings}
     assert set(by_state) == {"allowlisted", "unallowlisted"}
-    assert by_state["allowlisted"]["allowlist_key"] == ("stale-display-route-token:m26-route-consolidation-or-redirect")
+    assert by_state["allowlisted"]["allowlist_key"] == (
+        "stale-display-route-token:m26-route-consolidation-or-redirect"
+    )
     _assert_unallowlisted_budget_counted_report_only_finding(by_state["unallowlisted"])
 
 
@@ -8664,7 +8822,9 @@ def test_route_authority_m26_references_preserve_expected_allowlist_keys(
     findings = _route_authority_findings(tmp_path)
     by_token = _route_authority_findings_by_token(findings)
 
-    assert by_token["/hydro-met"]["allowlist_key"] == ("stale-display-route-token:m26-route-consolidation-or-redirect")
+    assert by_token["/hydro-met"]["allowlist_key"] == (
+        "stale-display-route-token:m26-route-consolidation-or-redirect"
+    )
     hydro_page = next(finding for finding in findings if "HydroMetPage" in str(finding["description"]))
     assert hydro_page["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
@@ -8716,7 +8876,9 @@ def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_
         token = _route_authority_token_from_finding(finding)
         assert token is not None
         findings.append(finding)
-        actual_token_counts_by_path[evidence_path][token] = actual_token_counts_by_path[evidence_path].get(token, 0) + 1
+        actual_token_counts_by_path[evidence_path][token] = (
+            actual_token_counts_by_path[evidence_path].get(token, 0) + 1
+        )
 
     assert actual_token_counts_by_path == expected_token_counts_by_path
     assert {finding["allowlist_key"] for finding in findings} == {
@@ -8859,7 +9021,10 @@ def test_route_authority_paragraph_structural_context_is_cached_per_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     route_line_count = 60
-    route_lines = [f"Open /forecast for current proof {index} and" for index in range(route_line_count - 1)]
+    route_lines = [
+        f"Open /forecast for current proof {index} and"
+        for index in range(route_line_count - 1)
+    ]
     route_lines.append(f"Open /forecast for current proof {route_line_count - 1}.")
     _write(tmp_path / "docs" / "runbooks" / "current.md", "\n".join(route_lines) + "\n")
     paragraph_call_count = 0
@@ -8889,7 +9054,10 @@ def test_route_authority_blockquote_paragraph_structural_context_is_cached_per_r
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     route_line_count = 60
-    route_lines = [f"> Open /forecast for current proof {index} and" for index in range(route_line_count - 1)]
+    route_lines = [
+        f"> Open /forecast for current proof {index} and"
+        for index in range(route_line_count - 1)
+    ]
     route_lines.append(f"> Open /forecast for current proof {route_line_count - 1}.")
     _write(tmp_path / "docs" / "runbooks" / "current.md", "\n".join(route_lines) + "\n")
     paragraph_call_count = 0
@@ -8920,7 +9088,8 @@ def test_route_authority_route_free_large_markdown_does_not_build_governing_cont
 ) -> None:
     _write(
         tmp_path / "docs" / "runbooks" / "current.md",
-        "\n".join(f"# Current operator procedure {index}\nNo legacy route token here." for index in range(600)) + "\n",
+        "\n".join(f"# Current operator procedure {index}\nNo legacy route token here." for index in range(600))
+        + "\n",
     )
     call_count = 0
     original_line_context = audit_repo_entropy._stale_route_line_context
@@ -9104,7 +9273,11 @@ def _scoped_agent_context_signals(root: Path, signal_type: str) -> list[dict[str
     context = _scoped_agent_context(root)
     signals = context["signals"]
     assert isinstance(signals, list)
-    return [signal for signal in signals if isinstance(signal, dict) and signal["signal_type"] == signal_type]
+    return [
+        signal
+        for signal in signals
+        if isinstance(signal, dict) and signal["signal_type"] == signal_type
+    ]
 
 
 def _scoped_agent_context_scope(root: Path, instruction_path: str) -> dict[str, object]:
@@ -9126,7 +9299,11 @@ def _compatibility_facade_signals(
     guard = _compatibility_facade_guard(root, structural_base_ref)
     signals = guard["signals"]
     assert isinstance(signals, list)
-    return [signal for signal in signals if isinstance(signal, dict) and signal["signal_type"] == signal_type]
+    return [
+        signal
+        for signal in signals
+        if isinstance(signal, dict) and signal["signal_type"] == signal_type
+    ]
 
 
 def _assert_compatibility_facade_report_only_finding(
@@ -9219,7 +9396,9 @@ def _entropy_baseline_snapshot() -> dict[str, object]:
         "latest_bytes": BASELINE.read_bytes(),
         "latest_stat": _stable_file_stat(latest_stat),
         "directory_entries": sorted(
-            path.relative_to(BASELINE_DIR).as_posix() for path in BASELINE_DIR.rglob("*") if path.is_file()
+            path.relative_to(BASELINE_DIR).as_posix()
+            for path in BASELINE_DIR.rglob("*")
+            if path.is_file()
         ),
     }
 
@@ -9405,7 +9584,11 @@ def _structural_records_by_path(records: object) -> dict[str, dict[str, object]]
 def _structural_growth_signal_types(budget: dict[str, object], path: str) -> set[str]:
     signals = budget["ownership_growth_signals"]
     assert isinstance(signals, list)
-    return {str(signal["signal_type"]) for signal in signals if isinstance(signal, dict) and signal["path"] == path}
+    return {
+        str(signal["signal_type"])
+        for signal in signals
+        if isinstance(signal, dict) and signal["path"] == path
+    }
 
 
 def _structural_growth_signal_details(
@@ -9418,7 +9601,9 @@ def _structural_growth_signal_details(
     return [
         str(signal["detail"])
         for signal in signals
-        if isinstance(signal, dict) and signal["path"] == path and signal["signal_type"] == signal_type
+        if isinstance(signal, dict)
+        and signal["path"] == path
+        and signal["signal_type"] == signal_type
     ]
 
 
