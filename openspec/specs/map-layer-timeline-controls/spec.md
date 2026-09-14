@@ -45,7 +45,7 @@ The system SHALL support the GIS design's source/scenario choices for overview a
 
 ### Requirement: Basemap switching is available
 
-The system SHALL support terrain, satellite, and vector basemap choices for the M11 overview and basin maps.
+The system SHALL support terrain, satellite, and vector basemap choices for the M11 overview map.
 
 #### Scenario: Basemap changes map style
 - **WHEN** an operator selects terrain, satellite, or vector basemap
@@ -108,3 +108,4 @@ The system SHALL provide previous, play/pause, next, and speed controls that ope
 #### Scenario: Previous and next respect boundaries
 - **WHEN** the current valid time is first or last in the active list
 - **THEN** unavailable previous or next actions MUST be disabled or handled without selecting an invalid time
+

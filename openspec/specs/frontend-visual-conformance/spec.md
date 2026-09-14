@@ -12,11 +12,6 @@ The system SHALL treat `docs/spec/06_frontend_gis_design.md` and `docs/spec/06B_
 - **THEN** it MUST visually match the effect-image-1 structure: top navigation, left basin/layer panel, central national map, right operational panel, and bottom timeline
 - **AND** the map MUST be the dominant visual subject rather than a card or secondary panel
 
-#### Scenario: Basin detail matches effect image 2 intent
-- **WHEN** basin detail is rendered with representative segment data
-- **THEN** it MUST visually match the effect-image-2 structure: basin/segment list, basin-scoped map, selected segment details, right trend/status content, and timeline/layer controls where applicable
-- **AND** the route MUST clearly preserve the national-to-basin drill-down context
-
 ### Requirement: UI tokens and component proportions follow the design spec
 
 The system SHALL implement the documented visual tokens and component proportions or map them explicitly to existing project tokens.
@@ -37,7 +32,7 @@ The system SHALL implement the documented visual tokens and component proportion
 The system SHALL render loading, empty, error, disabled, and unavailable states according to the UI spec.
 
 #### Scenario: Loading states preserve layout
-- **WHEN** overview or basin detail data is loading
+- **WHEN** overview data is loading
 - **THEN** panels MUST show skeletons or loading indicators sized to the eventual content
 - **AND** the map MUST keep its container dimensions stable
 
@@ -52,7 +47,7 @@ The system SHALL include automated or reviewable evidence that M11 pages remain 
 
 #### Scenario: Agent-browser captures supported viewport screenshots
 - **WHEN** frontend visual checks run
-- **THEN** they MUST use `agent-browser` to capture overview and basin detail screenshots at 1920x1080, 1440x900, and 1280x900 or the project's documented supported viewport set
+- **THEN** they MUST use `agent-browser` to capture overview screenshots at 1920x1080, 1440x900, and 1280x900 or the project's documented supported viewport set
 - **AND** browser launch MUST pass Chromium flags as global arguments before the `open` subcommand, for example `agent-browser --args "--no-sandbox,--disable-dev-shm-usage,--disable-gpu" open <url>`
 - **AND** screenshots MUST be saved with `agent-browser screenshot <path>`
 - **AND** the checks MUST verify that top navigation, side panels, map area, timeline, popups/detail panels, and key controls do not overlap
@@ -60,3 +55,4 @@ The system SHALL include automated or reviewable evidence that M11 pages remain 
 #### Scenario: Visual drift is blocked
 - **WHEN** screenshot or layout assertions show major drift from the effect-image layout or UI design spec
 - **THEN** the related implementation issue MUST remain incomplete until the drift is fixed or explicitly documented as an approved design deviation
+

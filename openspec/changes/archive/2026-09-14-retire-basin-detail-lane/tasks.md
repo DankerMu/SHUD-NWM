@@ -82,7 +82,7 @@ Reference by symbol, not line number.
 - [x] 2.8 Tests: delete `components/m11/__tests__/BasinDetailPanels.test.tsx`, `components/m11/__tests__/BasinDetailValidTimeCorrection.test.tsx`, `stores/__tests__/overviewDataBasinDetail.test.ts`. Strip basin-detail cases/fixtures from `pages/__tests__/OverviewPageValidTimeCorrection.test.tsx`, `stores/__tests__/overviewDataSourceSelection.test.ts`, `test/overviewDataFixture.ts`, `components/map/__tests__/M11FloatingControls.test.tsx`, `lib/__tests__/m11OverviewDataContracts.test.ts`. In `lib/__tests__/m11QueryState.test.ts`: drop `basinId` from the round-trip fixture, delete the #338 `basinId` boundary case, and repoint the `m11QueryHref('/basins/…')` pin to a non-basin path. No national assertion is removed or loosened.
 - [x] 2.9 New pins E1–E3.
 - [x] 2.10 `apps/frontend/e2e/m11-visual-evidence.md`, `e2e/m15-visual-evidence.md`: mark the `/basins/...` rows as retired historical evidence (#2109); do not delete provenance.
-- [ ] 2.11 After merge: close #2110 and #2132 as superseded; comment on #2039 that its frontend half is gone; archive this change (display-v2 and m11-popup stay active).
+- [x] 2.11 After merge: close #2110 and #2132 as superseded; comment on #2039 that its frontend half is gone; archive this change (display-v2 and m11-popup stay active).
 
 ## Evidence Mapping
 

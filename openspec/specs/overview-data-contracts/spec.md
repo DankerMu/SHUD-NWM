@@ -5,16 +5,16 @@ TBD - created by archiving change m11-overview-basin-drilldown. Update Purpose a
 ## Requirements
 ### Requirement: Overview pages consume typed view models
 
-The system SHALL isolate national overview and basin drill-down pages from raw API response shapes through typed adapters or stores.
+The system SHALL isolate the national overview page from raw API response shapes through typed adapters or stores.
 
 #### Scenario: Raw API data is normalized before page rendering
-- **WHEN** overview or basin page components render basin, summary, segment, forecast, or lineage data
+- **WHEN** overview page components or overview popups render basin, summary, segment, or forecast data
 - **THEN** those components MUST consume typed frontend view models
 - **AND** normalization of nullable fields, units, quality flags, timestamps, and display names MUST occur in adapters/stores rather than in leaf UI components
 
 #### Scenario: Adapter tests cover required view models
 - **WHEN** frontend tests run
-- **THEN** they MUST cover normalization for overview basins, overview summaries, layer state, basin detail, segment rows, and selected segment detail
+- **THEN** they MUST cover normalization for overview basins, overview summaries, and layer state
 
 ### Requirement: Existing API contracts are reused first
 
@@ -40,14 +40,9 @@ The system SHALL compose current backend APIs before adding new aggregation endp
 
 The system SHALL preserve domain IDs and version identifiers across view models, routes, and handoff links.
 
-#### Scenario: Basin version is selected
-- **WHEN** a basin detail page chooses a basin version
-- **THEN** the selected `basin_version_id` MUST be visible in state and in the UI where the design calls for it
-- **AND** segment API calls MUST use the selected basin version rather than an implicit global version
-
 #### Scenario: Segment ID is selected
-- **WHEN** a segment is selected from the map, list, or URL query
-- **THEN** the same `river_segment_id` or API-required segment identifier MUST be used consistently for detail, forecast series, lineage, and handoff links
+- **WHEN** a segment is selected from the map
+- **THEN** the same `river_segment_id` or API-required segment identifier MUST be used consistently for the forecast popup's series requests
 
 ### Requirement: Data freshness and unavailable states are represented
 
@@ -63,14 +58,9 @@ The system SHALL distinguish current data, stale data, unavailable data, and par
 - **AND** UI components MUST show a scoped empty/disabled/error state instead of fabricating values
 
 #### Scenario: Compare detail surfaces need aggregation
-- **WHEN** an overview or basin detail query requests `source=compare`
-- **THEN** selected-segment comparison surfaces and lineage MUST NOT be populated from a single run
+- **WHEN** an overview query requests `source=compare`
+- **THEN** selected-segment comparison surfaces MUST NOT be populated from a single run
 - **AND** until a GFS+IFS aggregation/composition endpoint exists, those surfaces MUST expose a scoped unavailable or aggregation-needed state while source availability may still reflect the run set
-
-#### Scenario: URL segment is not in filtered rows
-- **WHEN** a basin detail URL supplies `segmentId`
-- **THEN** selected-segment API identities MUST resolve from a matching filtered row or the selected basin-version feature collection
-- **AND** the resolver MUST NOT fall back to the first filtered row for a supplied but unresolvable segment ID
 
 ### Requirement: Map interactivity is decoupled from enrichment loading
 The system SHALL split the single `loading` flag in `useOverviewDataStore` into two independent flags so that map interactivity (MVT hit-layer registration) is not gated on non-essential enrichment requests. The flags are `mapBootstrapLoading` and `enrichmentLoading`.
@@ -173,3 +163,4 @@ This guarantees that the default `best+discharge` overview renders **every basin
 - **WHEN** `GET /api/v1/layers` is issued (runless) AND the database contains zero display-ready published runs across all basins
 - **THEN** the response `data` MUST be `[]`
 - **AND** the `discharge` entry MUST NOT be synthesized with an empty `metadata.valid_times`; the entire catalog stays empty until at least one basin has a display-ready run, so the frontend layer panel can render an honest "no layers available" state instead of an empty-discharge ghost
+

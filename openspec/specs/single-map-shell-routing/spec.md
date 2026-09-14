@@ -17,15 +17,20 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: 旧展示路由收敛/重定向到单页
 
-`/overview`、`/hydro-met`、`/meteorology`、`/forecast`、`/basins/:basinId`、`/segments/:segmentId` SHALL 重定向到单页 `/`。重定向 MUST 用 `replace`（不污染历史回退栈），且 MUST 保留原始 search query（深链状态不丢），同时附加语义映射参数：`/meteorology`→附加 `metStations=1`、`/basins/:basinId`→附加 `basinId=:basinId`、`/segments/:segmentId`→附加 `segmentId=:segmentId`。同名键冲突时 MUST 以原始 search 的值为准（保留用户既有状态）。
+`/overview`、`/hydro-met`、`/meteorology`、`/forecast`、`/basins/:basinId`、`/segments/:segmentId` SHALL 重定向到单页 `/`。重定向 MUST 用 `replace`（不污染历史回退栈），且 MUST 保留原始 search query（深链状态不丢），同时附加语义映射参数：`/meteorology`→附加 `metStations=1`、`/segments/:segmentId`→附加 `segmentId=:segmentId`。`/basins/:basinId` MUST NOT 附加 `basinId`：流域详情模式已退役（#2109 裁决 B），该路径参数被丢弃，原始 search 里的 `basinId` 键由单页 query 规范化剥离。同名键冲突时 MUST 以原始 search 的值为准（保留用户既有状态）。
 
 #### Scenario: 旧展示路由重定向
 - **WHEN** 用户访问 `/overview`、`/hydro-met`、`/forecast` 任一
 - **THEN** 浏览器 URL 以 `replace` 落到 `/`，渲染单页地图
 
 #### Scenario: 带语义的重定向保留 query
-- **WHEN** 用户访问 `/meteorology`、`/basins/basins_qhh`、`/segments/seg_001`
-- **THEN** 分别落到 `/?metStations=1`、`/?basinId=basins_qhh`、`/?segmentId=seg_001`
+- **WHEN** 用户访问 `/meteorology`、`/segments/seg_001`
+- **THEN** 分别落到 `/?metStations=1`、`/?segmentId=seg_001`
+
+#### Scenario: 旧 basins 路由丢弃路径参数
+- **WHEN** 用户访问 `/basins/basins_qhh?source=ifs`
+- **THEN** query 规范化之前的重定向目标为 `/?source=ifs`
+- **AND** 最终 URL 路径为 `/`、保留 `source=ifs`、不含 `basinId` 键，渲染全国总览
 
 #### Scenario: 深链原始 search 不丢失
 - **WHEN** 用户访问带状态的深链（如 `/meteorology?source=IFS&time=2026-06-05T18:00:00Z`）
@@ -51,3 +56,4 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 - **WHEN** viewer 在 runtime config 同时报告 `service_role=display_readonly` 与 `display_readonly=true` 时访问 `/ops`
 - **THEN** 渲染只读诊断面而不重定向到 `/`
 - **AND** runtime config 缺失、冲突或不是 display_readonly 时仍按既有 RBACGate 拒绝
+
