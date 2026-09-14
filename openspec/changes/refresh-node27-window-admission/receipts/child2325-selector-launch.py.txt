@@ -1,0 +1,86 @@
+"""Read-only qualification of the exact retained selector using immutable415 code."""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from psycopg2.extensions import make_dsn
+
+from packages.common import forecast_store
+
+TARGET = Path("/home/nwm/NWM-i8-target-415cbd1e")
+SHA = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+ROOT = Path("/home/nwm/tmp/i8-window-oracle-6fb30b552")
+CONTAINER = "nwm-i8-1987-window-volume-6fb30b552"
+
+
+def main():
+    os.umask(0o077)
+    raw_input = sys.stdin.buffer.read()
+    contract = json.loads(raw_input)
+    assert contract["qualification_target"] == SHA
+    assert contract["database"] == "i8_1987_small_real_20260913044203"
+    assert subprocess.check_output(["git", "-C", str(TARGET), "rev-parse", "HEAD"], text=True).strip() == SHA
+    reader = Path(forecast_store.__file__).resolve()
+    assert reader == TARGET / "packages/common/forecast_store.py"
+    assert reader.read_bytes() == subprocess.check_output(
+        ["git", "-C", str(TARGET), "show", SHA + ":packages/common/forecast_store.py"]
+    )
+    container = json.loads(subprocess.check_output(["docker", "inspect", CONTAINER]))[0]
+    assert container["Id"] == "a3b94458fbf20d57529f47add0d125529358ba7f7b6de603d7b2ce7f1bd512a1"
+    assert container["Image"] == "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+    assert container["State"]["Running"] and container["Config"]["Labels"]["nhms.i8.disposable"] == "true"
+    assert container["HostConfig"]["NetworkMode"] != "host"
+    assert container["NetworkSettings"]["Ports"]["5432/tcp"] == [{"HostIp": "127.0.0.1", "HostPort": "32771"}]
+    assert len(container["Mounts"]) == 1
+    mount = container["Mounts"][0]
+    assert (
+        mount["Type"] == "volume"
+        and mount["Name"] == "02dd738396b40d7cbd7e2455b7b339154dc3f0456ec832e8da3c69be051d8049"
+    )
+    credentials = json.loads((ROOT / "credentials.json").read_text())
+    dsn = make_dsn(
+        host="127.0.0.1",
+        port="32771",
+        dbname=contract["database"],
+        user=credentials["user"],
+        password=credentials["password"],
+        options="-c default_transaction_read_only=on -c statement_timeout=120000 -c lock_timeout=5000",
+    )
+    response = forecast_store.PsycopgForecastStore(dsn).forecast_series(**contract["request"])
+    points = [point for series in response["series"] for point in series["points"]]
+    body = json.dumps(response, sort_keys=True, default=str).encode()
+    measured = hashlib.sha256(body).hexdigest()
+    assert len(points) == contract["expected"]["points"]
+    assert measured == contract["expected"]["response_sha256"]
+    assert response["segment_id"] == contract["request"]["segment_id"]
+    destination = Path("/home/nwm/tmp/issue2325-selector-b55c7ef9b43e.json")
+    with destination.open("xb") as output:
+        output.write(body)
+    print(
+        json.dumps(
+            dict(
+                result="PASS",
+                deployment_sha=SHA,
+                new_runtime_verified=True,
+                database=contract["database"],
+                request=contract["request"],
+                points=len(points),
+                response_sha256=measured,
+                response_path=str(destination),
+                reader_path=str(reader),
+                reader_sha256=hashlib.sha256(reader.read_bytes()).hexdigest(),
+                input_sha256=hashlib.sha256(raw_input).hexdigest(),
+                readonly_session=True,
+                primary_mutated=False,
+            )
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,164 @@
+"""Create new qualification inputs; preserve historical inputs and staged governance identity."""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+OLD_INPUT = Path("/home/nwm/.local/state/issue1987-window-f24-inputs-v2/inputs.json")
+OLD_INPUT_SHA = "3f6477d5e76a5f2aea2d643259b5499b2bec6bb495fe85d2b06df01f567a8279"
+STATE = Path("/home/nwm/.local/state/issue1987-governance-f24c3fb37/state.json")
+ACTIVE = Path("/home/nwm/NWM")
+RETAINED = "/home/nwm/NWM-governance-reviewed-1a32ebb7"
+TARGET = "/home/nwm/NWM-i8-target-415cbd1e"
+TARGET_SHA = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+OLD_SHA = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def private_write(path, data):
+    with path.open("xb") as stream:
+        stream.write(data)
+
+
+def encode(value):
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def main():
+    os.umask(0o077)
+    qualification = json.load(sys.stdin)
+    assert qualification["deployment_target"] == TARGET_SHA
+    assert qualification["read_only_audit"]["exit"] == 0
+    assert qualification["read_only_audit"]["critical_codes"] == []
+    assert qualification["selector"]["result"] == "PASS"
+    assert len(qualification["matrix"]) == 8 and all(row["exit"] == 0 for row in qualification["matrix"])
+    tool_sha = qualification["tool_commit"]
+    root = Path("/home/nwm/.local/state") / ("issue2325-window-" + tool_sha[:12] + "-inputs")
+    runstate = root.with_name(root.name.removesuffix("-inputs") + "-prepare")
+    assert not root.exists() and not runstate.exists()
+    old_bytes = OLD_INPUT.read_bytes()
+    assert digest(old_bytes) == OLD_INPUT_SHA
+    config = json.loads(old_bytes)
+    assert config["old_sha"] == OLD_SHA
+    assert config["new_sha"] == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+    assert subprocess.check_output(["git", "-C", str(ACTIVE), "rev-parse", "HEAD"], text=True).strip() == OLD_SHA
+    branch = subprocess.check_output(["git", "-C", str(ACTIVE), "symbolic-ref", "--short", "HEAD"], text=True).strip()
+    state_bytes = STATE.read_bytes()
+    staged = json.loads(state_bytes)
+    assert staged["phase"] == "staged" and staged["identity"]["runtime_root"] == RETAINED
+    pin = (
+        Path(staged["identity"]["unit_root"])
+        / "nhms-node27-resource-governance.service.d"
+        / "70-issue1987-governance-reviewed-source.conf"
+    )
+    pin_bytes = pin.read_bytes()
+    assert digest(pin_bytes) == staged["pin_digest"]
+    qualification["original_staged_identity"] = staged["identity"]
+    qualification["original_state_sha256"] = digest(state_bytes)
+    qualification["owned_pin_sha256"] = digest(pin_bytes)
+    qualification["scope"] = (
+        "Candidate fresh prepare only; production T0/window/recover/unstage remain forbidden in this child."
+    )
+    root.mkdir(mode=0o700)
+    (root / "admission").mkdir(mode=0o700)
+    qualification_path = root / "qualification.json"
+    private_write(qualification_path, encode(qualification))
+    config.update(
+        new_sha=TARGET_SHA,
+        staged_new_repo=TARGET,
+        restore_branch="issue1987-reviewed-new-415cbd1e",
+        restore_ref="refs/remotes/origin/issue1987-frozen-new-415cbd1e",
+    )
+    config["protected_files"] = [*config["protected_files"], str(qualification_path)]
+    provenance = {}
+    for key in ("go", "d12", "capacity", "artifacts", "governance"):
+        old_entry = config["admission"][key]
+        raw = Path(old_entry["path"]).read_bytes()
+        assert digest(raw) == old_entry["sha256"]
+        provenance[key] = dict(old_entry)
+        payload = json.loads(raw)
+        if key == "go":
+            payload = dict(
+                operation="prepare",
+                prior_authority=payload,
+                prior_authority_artifact_sha256=old_entry["sha256"],
+                old_sha=OLD_SHA,
+                new_sha=TARGET_SHA,
+                tool_publication=tool_sha,
+                window_executor_sha256=qualification["hashes"]["window_execute.py"],
+                prepare_authority="User-authorized admission change and issue2325 fresh-prepare acceptance.",
+                scope="Prepare only; no T0/window/recover/unstage. No expansion of the prior authority.",
+                review_gate="Current child review and merge remain external gates; not completed by this artifact.",
+                parent_gate="Parent1987 retains conditional T0 authority after all remaining gates.",
+                source_refs=dict(
+                    active_head=OLD_SHA,
+                    active_branch=branch,
+                    restore_branch=config["restore_branch"],
+                    restore_ref=config["restore_ref"],
+                    new_sha=TARGET_SHA,
+                    working_tree_changed=False,
+                ),
+            )
+            raw = encode(payload)
+        elif key == "d12":
+            payload = dict(
+                scope=payload["scope"],
+                prior_d12_artifact=payload,
+                prior_artifact_sha256=old_entry["sha256"],
+                current_runtime=dict(old=OLD_SHA, new=TARGET_SHA),
+                current_interface_evidence=qualification["d4"],
+                current_recovery_matrix=qualification["matrix"],
+                historical_ledger_rule="Keep L pre-commit; L plus000059 post-commit/D12; no ledger deletion.",
+            )
+            raw = encode(payload)
+        elif key == "governance":
+            payload = dict(
+                original_staged_artifact=payload,
+                original_staged_artifact_sha256=old_entry["sha256"],
+                original_staged_identity=staged["identity"],
+                original_state_sha256=digest(state_bytes),
+                owned_pin_sha256=digest(pin_bytes),
+                retained_runtime=RETAINED,
+                target_runtime=TARGET_SHA,
+                handoff_oracle=qualification["governance_handoff"],
+                read_only_target_audit=qualification["read_only_audit"],
+                production_unstage_executed=False,
+            )
+            raw = encode(payload)
+        destination = root / "admission" / (key + ".json")
+        private_write(destination, raw)
+        config["admission"][key] = dict(path=str(destination), sha256=digest(raw))
+    config_bytes = encode(config)
+    private_write(root / "inputs.json", config_bytes)
+    assert STATE.read_bytes() == state_bytes and pin.read_bytes() == pin_bytes
+    assert OLD_INPUT.read_bytes() == old_bytes
+    proof = dict(
+        input_bundle=str(root),
+        config=str(root / "inputs.json"),
+        config_sha256=digest(config_bytes),
+        state=str(runstate),
+        state_not_precreated=True,
+        target=TARGET_SHA,
+        tool_commit=tool_sha,
+        admission=config["admission"],
+        original_admission=provenance,
+        qualification_sha256=digest(qualification_path.read_bytes()),
+        original_state_sha256=digest(state_bytes),
+        owned_pin_sha256=digest(pin_bytes),
+        staged_identity_preserved=True,
+        historical_inputs_preserved=True,
+        credentials_written=False,
+        production_operations=False,
+    )
+    private_write(root / "input-publication.json", encode(proof))
+    print(json.dumps(proof), flush=True)
+
+
+if __name__ == "__main__":
+    main()

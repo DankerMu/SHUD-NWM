@@ -1,0 +1,89 @@
+{
+  "driver_sha256": "163c453a275a637db6c9e4440342f13af5cbbfc86c426d4b0ea3344dc191c316",
+  "events": [
+    {
+      "event": "launched",
+      "operation": "prepare",
+      "pid": 3697646,
+      "start_ticks": "222257395",
+      "command": [
+        "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python",
+        "-B",
+        "/home/nwm/.local/state/issue1987-tools/b55c7ef9b43eceeae439915629383dfaf0b36a3e/window_execute.py",
+        "prepare",
+        "--state",
+        "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-prepare",
+        "--config",
+        "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs/inputs.json"
+      ],
+      "source_sha256": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+      "config_sha256": "13204dae59a2cea9ee677e2fc5e218264974162515c42cfe876a1c5a57c53aa3",
+      "state": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-prepare",
+      "input_bundle": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs",
+      "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+      "credentials_persisted": false,
+      "t0_executed": false
+    },
+    {
+      "event": "completed",
+      "operation": "prepare",
+      "exit": 1,
+      "phase": null,
+      "records": [
+        {
+          "error_type": "Refusal",
+          "check": "REQUIRED_UNIT_NOT_ADMITTED",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-prepare"
+        }
+      ],
+      "state": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-prepare",
+      "input_bundle": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs",
+      "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+      "tool_commit": "b55c7ef9b43eceeae439915629383dfaf0b36a3e",
+      "source_sha256": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+      "config_sha256": "13204dae59a2cea9ee677e2fc5e218264974162515c42cfe876a1c5a57c53aa3",
+      "active_head": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+      "staged_identity_and_pin_preserved": true,
+      "logs": {
+        "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs/prepare.stdout": "9d8881b1a87d53cbe0f755fe9d003c294109a90e13acc9b04a24a77ca6150cb8",
+        "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs/prepare.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "t0_executed": false,
+      "window_executed": false,
+      "recover_executed": false,
+      "unstage_executed": false
+    }
+  ],
+  "observed_failed_units": [
+    {
+      "file": "command-00026.stdout",
+      "sha256": "7f3c0d86945627ac2785730fe600ac4d4bdb647a27b4d24e812fa5c56ca931f7",
+      "properties": {
+        "Result": "exit-code",
+        "ExecMainStatus": "124",
+        "LoadState": "loaded",
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "UnitFileState": "static"
+      }
+    },
+    {
+      "file": "command-00027.stdout",
+      "sha256": "f80f876a12068d20560e1d3fc293e76840ab7cd9dd3a0fa4dafc71386384dd9a",
+      "properties": {
+        "Result": "exit-code",
+        "ExecMainStatus": "1",
+        "LoadState": "loaded",
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service",
+        "UnitFileState": "static"
+      }
+    }
+  ],
+  "status": "BLOCKED; no readiness or T0 claim"
+}

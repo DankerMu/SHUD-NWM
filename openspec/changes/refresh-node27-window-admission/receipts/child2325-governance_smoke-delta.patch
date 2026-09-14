@@ -1,0 +1,612 @@
+--- f24c3fb37be392300052c0d0ebf0ee35366a4599:openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_smoke.py.txt
++++ governance_smoke.py
+@@ -5,27 +5,60 @@
+ Never executes a subprocess, systemctl, Docker, or a network request. The only
+ production seam replaced is the private frozen PGDATA identity, with the actual
+ identity of this smoke's owned directory. No executor CLI/env bypass is added.
++
++Same-tool stage/unstage coverage is retained but is not cross-version proof.
++Handoff cases load hash-verified original f24 bytes to produce staged state,
++then consume it with the changed executor and identical ownership arguments.
++Git/import fakes bind revision plus path and refuse wrong origins.
++
++Oracle-only --original-executor selects the hash-verified f24 producer; it is
++not a production governance_stage argument.
+ """
+ 
+ from __future__ import annotations
+ 
+ import argparse
+ import datetime as dt
++import hashlib
+ import importlib.util
+ import json
+ import os
++import re
+ import stat
+ import subprocess
+ import tempfile
+ from pathlib import Path
+ from unittest.mock import patch
+ 
+-
+-def load(path):
+-    spec = importlib.util.spec_from_file_location("governance_under_smoke", path)
++F24_COMMIT = "f24c3fb37be392300052c0d0ebf0ee35366a4599"
++F24_STAGE_SHA256 = "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c"
++RETAINED = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
++TARGET = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
++F24_STAGE_GIT = (
++    F24_COMMIT
++    + ":openspec/changes/timeseries-narrow-store-expand-contract/"
++    + "receipts/issue-1987-execution-tools/governance_stage.py.txt"
++)
++WRAPPERS = (
++    "scripts/node27_resource_governance_once.sh",
++    "scripts/node27_resource_governance.py",
++)
++PAYLOADS = {
++    "a8db554d6402bec642e9a05627eae64b2b79aec3": "smoke old active source\n",
++    RETAINED: "smoke retained 1a32 runtime\n",
++    TARGET: "smoke target 415 source\n",
++}
++
++
++def load(path, name="governance_under_smoke"):
++    spec = importlib.util.spec_from_file_location(name, str(path))
+     module = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(module)
+     return module
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
+ 
+ 
+ def refuse(gov, operation, code):
+@@ -37,6 +70,32 @@
+         raise AssertionError("expected refusal: " + code)
+ 
+ 
++def original_stage_bytes(path=None):
++    if path is not None:
++        data = Path(path).read_bytes()
++    else:
++        receipt = Path(__file__).resolve().parents[2] / (
++            "timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_stage.py.txt"
++        )
++        if receipt.is_file():
++            data = receipt.read_bytes()
++        else:
++            data = subprocess.check_output(["git", "show", F24_STAGE_GIT])
++    assert digest(data) == F24_STAGE_SHA256, "F24_STAGE_HASH_MISMATCH"
++    return data
++
++
++def load_original(private_parent, path=None):
++    data = original_stage_bytes(path)
++    directory = Path(tempfile.mkdtemp(prefix="issue1987-f24-stage-", dir=private_parent))
++    destination = directory / "governance_stage.py"
++    destination.write_bytes(data)
++    destination.chmod(0o700)
++    module = load(destination, "governance_original_f24")
++    assert module.NEW == RETAINED and module.OLD == "a8db554d6402bec642e9a05627eae64b2b79aec3"
++    return module
++
++
+ class Response:
+     status = 200
+ 
+@@ -51,13 +110,14 @@
+ 
+ 
+ class Boundary:
+-    def __init__(self, gov, args, active, enabled, failure):
++    def __init__(self, gov, args, active, enabled, failure, *, heads, blobs):
+         self.g = gov
+         self.a = args
+         self.active = active
+         self.enabled = enabled
+         self.failure = failure
+-        self.cutover = False
++        self.heads = dict(heads)
++        self.blobs = dict(blobs)
+         self.container_drift = False
+         self.invocation = 0
+         self.commands = []
+@@ -70,6 +130,7 @@
+         self.environment_mode = "nonempty"
+         self.bus_fault = None
+         self.missing_common = False
++        self.runner_busy = False
+         self.bus_units = {
+             gov.SERVICE: "/org/freedesktop/systemd1/unit/smoke_governance",
+             "nhms-display-api.service": "/org/freedesktop/systemd1/unit/smoke_display",
+@@ -84,6 +145,10 @@
+         assert request.full_url in ("http://127.0.0.1:8080/health", "http://127.0.0.1:8081/health")
+         assert timeout == 10
+         return Response()
++
++    def cutover(self, sha):
++        self.heads[self.a.active_root] = sha
++        write_checkout(Path(self.a.active_root), sha)
+ 
+     def receipt(self):
+         pg = Path(self.a.pgdata_root)
+@@ -111,6 +176,8 @@
+             data["working_set"]["working_set_filesystem"]["device_identity"] = "wrong-device"
+         if self.failure == "stale_payload":
+             data["started_at"] = data["finished_at"] = "2000-01-01T00:00:00+00:00"
++        if self.failure == "audit_critical" and not self.pin.exists():
++            data["recommendations"] = [{"code": "AUTOVACUUM_OUTPUT_STALLED", "severity": "critical"}]
+         Path(self.a.log_root, f"resource-governance-{self.invocation}.json").write_text(json.dumps(data))
+         if self.failure == "multiple_receipts":
+             Path(self.a.log_root, f"resource-governance-{self.invocation}-extra.json").write_text(json.dumps(data))
+@@ -120,6 +187,8 @@
+         if argv == ["list-unit-files", "nhms-*", "--no-legend", "--no-pager"]:
+             return "\n".join(unit + " enabled" for unit in self.units)
+         if argv == ["daemon-reload"]:
++            if self.failure == "interrupt_after_remove" and not self.pin.exists():
++                raise g.Refusal("INTERRUPTED")
+             self.loaded_pin = self.pin.exists()
+             return ""
+         if len(argv) == 2 and argv[0] in ("start", "stop"):
+@@ -153,6 +222,8 @@
+                 "ExecMainStartTimestampMonotonic": str(self.invocation * 100),
+                 "ExecMainExitTimestampMonotonic": str(self.invocation * 100 + 1),
+             }
++            if self.runner_busy and unit == g.SERVICE:
++                values.update(ActiveState="active", MainPID="1")
+             if self.failure in ("service", "foreign") and self.invocation:
+                 values.update(Result="exit-code", ExecMainStatus="1")
+             properties = [p.removeprefix("--property=") for p in argv[2:]]
+@@ -202,23 +273,29 @@
+             text = "old failed audit (fake system boundary)"
+         elif argv[:2] == ["git", "-C"] and argv[2] in (a.active_root, a.runtime_root):
+             root = argv[2]
++            if root not in self.heads:
++                raise AssertionError("unbound git root: " + root)
+             if argv[3:] == ["rev-parse", "HEAD"]:
+-                text = g.NEW if root == a.runtime_root or self.cutover else g.OLD
++                text = self.heads[root]
+             elif argv[3:] == ["status", "--porcelain", "--untracked-files=no"]:
+                 text = ""
+             elif len(argv) == 5 and argv[3] == "show":
+                 revision, relative = argv[4].split(":", 1)
+-                assert revision == g.NEW
+-                assert relative in (
+-                    "scripts/node27_resource_governance_once.sh",
+-                    "scripts/node27_resource_governance.py",
+-                )
+-                text = Path(root, relative).read_text()
++                if revision != self.heads[root] or (revision, relative) not in self.blobs:
++                    return subprocess.CompletedProcess(argv, 1, b"", b"wrong origin or revision")
++                text = self.blobs[(revision, relative)]
+             else:
+                 raise AssertionError(argv)
+         elif argv[0] in [str(Path(root, ".venv/bin/python")) for root in (a.active_root, a.runtime_root)]:
++            cwd = kwargs["cwd"]
+             assert len(argv) == 3 and argv[1] == "-c" and "IMPORT_ORIGIN_OK" in argv[2]
+-            assert kwargs["cwd"] in (a.active_root, a.runtime_root)
++            assert cwd in (a.active_root, a.runtime_root)
++            assert argv[0] == str(Path(cwd, ".venv/bin/python"))
++            match = re.search(r"'([0-9a-f]{40}):' \+ relative", argv[2])
++            assert match is not None, "probe SHA literal missing"
++            probe = match.group(1)
++            if probe != g.NEW or probe != self.heads[cwd]:
++                return subprocess.CompletedProcess(argv, 1, b"", b"import origin mismatch")
+             text = "IMPORT_ORIGIN_OK"
+         elif argv[:2] == ["/bin/bash", "-c"]:
+             assert len(argv) == 5 and argv[3:] == ["governance-env", a.env_file]
+@@ -268,7 +345,24 @@
+         return subprocess.CompletedProcess(argv, 0, text.encode(), b"")
+ 
+ 
+-def scenario(g, root, active, enabled, failure):
++def write_checkout(root, sha):
++    payload = PAYLOADS[sha]
++    for relative in WRAPPERS:
++        target = root / relative
++        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
++        target.write_text(payload)
++        target.chmod(0o700)
++    python = root / ".venv/bin/python"
++    python.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
++    python.write_text("smoke system-boundary fixture\n")
++    python.chmod(0o700)
++
++
++def blobs_for(*shas):
++    return {(sha, relative): PAYLOADS[sha] for sha in shas for relative in WRAPPERS}
++
++
++def prepare_tree(g, root):
+     for relative in (
+         "runtime/.venv/bin",
+         "runtime/scripts",
+@@ -282,14 +376,6 @@
+     ):
+         (root / relative).mkdir(parents=True, mode=0o700, exist_ok=True)
+     for checkout in ("runtime", "active"):
+-        for relative in (
+-            ".venv/bin/python",
+-            "scripts/node27_resource_governance_once.sh",
+-            "scripts/node27_resource_governance.py",
+-        ):
+-            target = root / checkout / relative
+-            target.write_text("smoke system-boundary fixture\n")
+-            target.chmod(0o700)
+         (root / checkout / "infra/systemd" / g.SERVICE).write_text("[Service]\nType=oneshot\n")
+     for unit in (g.SERVICE, g.TIMER, "nhms-display-api.service"):
+         (root / "units" / unit).write_text("[Service]\nType=oneshot\n")
+@@ -309,9 +395,43 @@
+     }.items():
+         setattr(a, key, str(root / relative))
+     a.uid, a.gid = os.getuid(), os.getgid()
++    return a
++
++
++def bound(module, boundary, identity):
++    patches = (
++        patch.object(module, "_PGDATA_IDENTITY", identity),
++        patch.object(module.subprocess, "run", boundary.run),
++        patch.object(module.urllib.request, "build_opener", return_value=boundary),
++        patch.object(module.os, "replace", boundary.observe_replace),
++    )
++    return patches[0], patches[1], patches[2], patches[3]
++
++
++def systemctl_user(commands):
++    return [cmd[2:] for cmd in commands if cmd[:2] == ["systemctl", "--user"]]
++
++
++def close(executor):
++    executor.log.close()
++    executor.lock.close()
++
++
++def scenario(g, root, active, enabled, failure):
++    a = prepare_tree(g, root)
++    write_checkout(Path(a.runtime_root), g.NEW)
++    write_checkout(Path(a.active_root), g.OLD)
+     info = Path(a.pgdata_root).stat()
+     identity = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+-    boundary = Boundary(g, a, active, enabled, failure)
++    boundary = Boundary(
++        g,
++        a,
++        active,
++        enabled,
++        failure,
++        heads={a.runtime_root: g.NEW, a.active_root: g.OLD},
++        blobs=blobs_for(g.OLD, g.NEW),
++    )
+     boundary.installed_env.write_bytes(b"INSTALLED_ROUTE=original\n")
+     boundary.installed_env.chmod(0o600)
+     if failure == "old_receipt_only":
+@@ -319,12 +439,8 @@
+         old_receipt = Path(a.log_root, "resource-governance-0.json")
+         old_receipt_bytes = old_receipt.read_bytes()
+     before = {p: p.read_bytes() for p in (root / "env", root / "hold", *list((root / "units").iterdir()))}
+-    with (
+-        patch.object(g, "_PGDATA_IDENTITY", identity),
+-        patch.object(g.subprocess, "run", boundary.run),
+-        patch.object(g.urllib.request, "build_opener", return_value=boundary),
+-        patch.object(g.os, "replace", boundary.observe_replace),
+-    ):
++    pg, run, opener, replace = bound(g, boundary, identity)
++    with pg, run, opener, replace:
+         e = g.Executor(a)
+         try:
+             if failure is None and active == "active":
+@@ -393,10 +509,9 @@
+                 e.execute()
+                 assert e.state["phase"] == "staged" and e.state["outcome"] == "PASS"
+                 assert e.pin.read_bytes() == e.content and boundary.active == active
+-                boundary.cutover = True
++                boundary.cutover(g.NEW)
+                 # Reopen durable state across the authorized active-checkout cutover.
+-                e.log.close()
+-                e.lock.close()
++                close(e)
+                 a.operation = "unstage"
+                 e = g.Executor(a)
+                 e.execute()
+@@ -426,23 +541,259 @@
+                 for cmd in boundary.commands
+                 for action in ("enable", "disable", "mask", "reset-failed")
+             )
+-            return {"timer": [active, enabled], "failure": failure, "phases": boundary.phases}
++            return {"kind": "same_tool", "timer": [active, enabled], "failure": failure, "phases": boundary.phases}
+         finally:
+-            e.log.close()
+-            e.lock.close()
++            close(e)
+             (root / "shared").chmod(0o700)
++
++
++def stage_original(original, changed, root):
++    assert original.NEW == RETAINED and changed.NEW == TARGET
++    assert original.OLD == changed.OLD == "a8db554d6402bec642e9a05627eae64b2b79aec3"
++    a = prepare_tree(original, root)
++    write_checkout(Path(a.runtime_root), RETAINED)
++    write_checkout(Path(a.active_root), original.OLD)
++    info = Path(a.pgdata_root).stat()
++    identity = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
++    boundary = Boundary(
++        original,
++        a,
++        "active",
++        "enabled",
++        None,
++        heads={a.runtime_root: RETAINED, a.active_root: original.OLD},
++        blobs=blobs_for(original.OLD, RETAINED, TARGET),
++    )
++    boundary.installed_env.write_bytes(b"INSTALLED_ROUTE=original\n")
++    boundary.installed_env.chmod(0o600)
++    wrong = boundary.run(
++        ["git", "-C", a.runtime_root, "show", TARGET + ":scripts/node27_resource_governance.py"],
++        cwd=a.runtime_root,
++    )
++    assert wrong.returncode == 1
++    pg, run, opener, replace = bound(original, boundary, identity)
++    with pg, run, opener, replace:
++        producer = original.Executor(a)
++        try:
++            producer.execute()
++            assert producer.state["phase"] == "staged" and producer.state["outcome"] == "PASS"
++            pin = producer.pin.read_bytes()
++            assert pin == producer.content
++            snapshot = json.loads((Path(a.state_dir) / "state.json").read_text())
++            assert snapshot["identity"] == producer.identity
++            assert snapshot["pin_digest"] == original.digest(pin)
++            assert snapshot["identity"]["runtime_root"] == a.runtime_root
++            assert RETAINED not in json.dumps(snapshot["identity"])
++            assert TARGET not in json.dumps(snapshot["identity"])
++        finally:
++            close(producer)
++    return a, boundary, identity, snapshot, pin
++
++
++def consume(changed, a, boundary, identity, operation):
++    a.operation = operation
++    boundary.g = changed
++    pg, run, opener, replace = bound(changed, boundary, identity)
++    with pg, run, opener, replace:
++        executor = changed.Executor(a)
++        try:
++            executor.execute()
++            return json.loads((Path(a.state_dir) / "state.json").read_text()), None
++        except changed.Refusal as exc:
++            if executor.state and executor.state.get("phase") not in ("rolled_back", "staged", "unstaged"):
++                executor.save(executor.state["phase"], outcome="FAIL", failure=str(exc))
++            return json.loads((Path(a.state_dir) / "state.json").read_text()), exc
++        finally:
++            close(executor)
++
++
++def handoff(original, changed, root, case):
++    a, boundary, identity, snapshot, pin = stage_original(original, changed, root)
++    before = pin
++    identity_before = json.loads(json.dumps(snapshot["identity"]))
++    pin_digest = snapshot["pin_digest"]
++    result = {"kind": "handoff", "case": case, "producer_phase": "staged"}
++
++    if case == "pre_cutover":
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "GIT_HEAD_MISMATCH"
++        assert Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).read_bytes() == before
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["phase"] == "staged" and current["identity"] == identity_before
++        assert current["pin_digest"] == pin_digest
++        result.update(refusal="GIT_HEAD_MISMATCH", phase=current["phase"])
++        return result
++
++    boundary.cutover(TARGET)
++    assert boundary.heads[a.runtime_root] == RETAINED
++    assert boundary.heads[a.active_root] == TARGET
++
++    if case == "active_runner":
++        boundary.runner_busy = True
++        commands_before = len(boundary.commands)
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "RUNNER_NOT_IDLE"
++        pin_path = Path(a.unit_root, changed.SERVICE + ".d", changed.PIN)
++        assert pin_path.read_bytes() == before
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["phase"] == "unstage_prepared"
++        assert current["direction"] == "unstage"
++        assert current["outcome"] == "FAIL"
++        assert current["identity"] == identity_before
++        assert current["pin_digest"] == pin_digest
++        assert "unstage_admitted" in boundary.phases
++        assert "unstage_prepared" in boundary.phases
++        assert "unstage_remove_pending" not in boundary.phases
++        assert "unstage_starting" not in boundary.phases
++        assert "unstage_verified" not in boundary.phases
++        assert "unstaged" not in boundary.phases
++        refused_actions = systemctl_user(boundary.commands[commands_before:])
++        assert ["stop", changed.TIMER] in refused_actions
++        assert ["start", changed.SERVICE] not in refused_actions
++        assert ["start", changed.TIMER] not in refused_actions
++        assert boundary.active == "inactive"
++        assert pin_path.exists()
++        boundary.runner_busy = False
++        recovered, recovered_error = consume(changed, a, boundary, identity, "recover")
++        assert recovered_error is None
++        assert recovered["phase"] == "unstaged" and recovered["outcome"] == "PASS"
++        assert recovered["identity"] == identity_before
++        assert recovered["pin_digest"] == pin_digest
++        assert not pin_path.exists()
++        assert boundary.heads[a.active_root] == TARGET
++        assert boundary.heads[a.runtime_root] == RETAINED
++        recover_actions = systemctl_user(boundary.commands)
++        last_stop = max(i for i, item in enumerate(recover_actions) if item == ["stop", changed.TIMER])
++        starts_service = [i for i, item in enumerate(recover_actions) if item == ["start", changed.SERVICE]]
++        starts_timer = [i for i, item in enumerate(recover_actions) if item == ["start", changed.TIMER]]
++        assert starts_service and starts_timer
++        assert last_stop < starts_service[-1] < starts_timer[-1]
++        assert "unstage_remove_pending" in boundary.phases
++        assert "unstage_verified" in boundary.phases
++        assert boundary.phases.index("unstage_verified") < boundary.phases.index("unstaged")
++        result.update(
++            refusal="RUNNER_NOT_IDLE",
++            failed_phase="unstage_prepared",
++            recovered_phase="unstaged",
++            audit_root="active_415",
++        )
++        return result
++
++    if case == "foreign_pin":
++        Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).write_bytes(b"foreign replacement\n")
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "OWNED_DROPIN_DRIFT"
++        assert Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).read_bytes() == b"foreign replacement\n"
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["identity"] == identity_before and current["pin_digest"] == pin_digest
++        result.update(refusal="OWNED_DROPIN_DRIFT", phase=current["phase"])
++        return result
++
++    if case == "foreign_env":
++        Path(a.env_file).write_bytes(b"foreign environment replacement\n")
++        Path(a.env_file).chmod(0o600)
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "ENVIRONMENT_DRIFT"
++        assert Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).read_bytes() == before
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["identity"] == identity_before
++        result.update(refusal="ENVIRONMENT_DRIFT", phase=current["phase"])
++        return result
++
++    if case == "foreign_unit":
++        Path(a.unit_root, changed.SERVICE).write_bytes(b"[Service]\nType=oneshot\nforeign-unit\n")
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "OTHER_CONFIG_DRIFT"
++        assert Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).read_bytes() == before
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["identity"] == identity_before
++        result.update(refusal="OTHER_CONFIG_DRIFT", phase=current["phase"])
++        return result
++
++    if case == "interrupt_after_remove":
++        boundary.failure = "interrupt_after_remove"
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "INTERRUPTED"
++        assert not Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).exists()
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["phase"] == "unstage_remove_pending"
++        assert current["identity"] == identity_before and current["pin_digest"] == pin_digest
++        assert current["direction"] == "unstage"
++        boundary.failure = None
++        recovered, recovered_error = consume(changed, a, boundary, identity, "recover")
++        assert recovered_error is None
++        assert recovered["phase"] == "unstaged" and recovered["outcome"] == "PASS"
++        assert recovered["identity"] == identity_before
++        assert not Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).exists()
++        actions = systemctl_user(boundary.commands)
++        starts_service = [i for i, item in enumerate(actions) if item == ["start", changed.SERVICE]]
++        starts_timer = [i for i, item in enumerate(actions) if item == ["start", changed.TIMER]]
++        assert starts_service[-1] < starts_timer[-1]
++        result.update(interrupted_phase="unstage_remove_pending", recovered_phase="unstaged")
++        return result
++
++    if case == "audit_critical":
++        boundary.failure = "audit_critical"
++        state, error = consume(changed, a, boundary, identity, "unstage")
++        assert isinstance(error, changed.Refusal) and str(error) == "AUDIT_CRITICAL"
++        assert not Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).exists()
++        current = json.loads((Path(a.state_dir) / "state.json").read_text())
++        assert current["phase"] == "unstage_starting" and current["identity"] == identity_before
++        assert current.get("outcome") != "PASS"
++        actions = systemctl_user(boundary.commands)
++        last_stop = max(i for i, item in enumerate(actions) if item == ["stop", changed.TIMER])
++        assert ["start", changed.TIMER] not in actions[last_stop:]
++        assert boundary.active == "inactive"
++        boundary.failure = None
++        recovered, recovered_error = consume(changed, a, boundary, identity, "recover")
++        assert recovered_error is None
++        assert recovered["phase"] == "unstaged" and recovered["outcome"] == "PASS"
++        assert recovered["identity"] == identity_before
++        actions = systemctl_user(boundary.commands)
++        starts_service = [i for i, item in enumerate(actions) if item == ["start", changed.SERVICE]]
++        starts_timer = [i for i, item in enumerate(actions) if item == ["start", changed.TIMER]]
++        assert starts_service[-1] < starts_timer[-1]
++        result.update(
++            refusal="AUDIT_CRITICAL",
++            failed_phase="unstage_starting",
++            recovered_phase="unstaged",
++            critical="AUTOVACUUM_OUTPUT_STALLED",
++        )
++        return result
++
++    state, error = consume(changed, a, boundary, identity, "unstage")
++    assert error is None
++    assert state["phase"] == "unstaged" and state["outcome"] == "PASS"
++    assert state["identity"] == identity_before and state["pin_digest"] == pin_digest
++    assert not Path(a.unit_root, changed.SERVICE + ".d", changed.PIN).exists()
++    assert boundary.heads[a.runtime_root] == RETAINED
++    assert "unstage_verified" in boundary.phases
++    assert boundary.phases.index("unstage_verified") < boundary.phases.index("unstaged")
++    actions = systemctl_user(boundary.commands)
++    starts_service = [i for i, item in enumerate(actions) if item == ["start", changed.SERVICE]]
++    starts_timer = [i for i, item in enumerate(actions) if item == ["start", changed.TIMER]]
++    assert starts_service[-1] < starts_timer[-1], actions
++    result.update(phase="unstaged", audit_before_timer=True, retained_runtime=RETAINED, active=TARGET)
++    return result
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--executor", type=Path, default=Path(__file__).with_name("governance_stage.py"))
+     parser.add_argument("--private-parent", type=Path, required=True)
++    parser.add_argument(
++        "--original-executor",
++        type=Path,
++        help="Oracle-only hash-verified original f24 governance_stage.py; not a production CLI flag",
++    )
+     args = parser.parse_args()
+     assert Path("/proc/self/stat").exists(), "Linux /proc required; no services are contacted"
+     os.umask(0o077)
+     g = load(args.executor)
++    assert g.NEW == TARGET and g.OLD == "a8db554d6402bec642e9a05627eae64b2b79aec3"
+     g.safe(args.private_parent, directory=True)
+-    results = []
++    original = load_original(args.private_parent, args.original_executor)
++    same_tool = []
+     for active, enabled, failure in (
+         ("active", "enabled", None),
+         ("inactive", "disabled", None),
+@@ -456,12 +807,31 @@
+         ("active", "enabled", "config_drift"),
+     ):
+         with tempfile.TemporaryDirectory(prefix="issue1987-governance-smoke-", dir=args.private_parent) as directory:
+-            results.append(scenario(g, Path(directory), active, enabled, failure))
++            same_tool.append(scenario(g, Path(directory), active, enabled, failure))
++    handoff_cases = []
++    for case in (
++        "pre_cutover",
++        "active_runner",
++        "foreign_pin",
++        "foreign_env",
++        "foreign_unit",
++        "interrupt_after_remove",
++        "audit_critical",
++        "happy",
++    ):
++        with tempfile.TemporaryDirectory(prefix="issue1987-governance-handoff-", dir=args.private_parent) as directory:
++            handoff_cases.append(handoff(original, g, Path(directory), case))
+     print(
+         json.dumps(
+             {
+                 "surface": "governance_system_boundary_fakes_real_private_files",
+-                "checks": results,
++                "same_tool": same_tool,
++                "original_state_new_active_handoff": handoff_cases,
++                "original_executor_sha256": F24_STAGE_SHA256,
++                "changed_executor_sha256": digest(Path(args.executor).read_bytes()),
++                "retained": RETAINED,
++                "target": TARGET,
++                "old": g.OLD,
+                 "real_services_exercised": False,
+                 "database_exercised": False,
+             },

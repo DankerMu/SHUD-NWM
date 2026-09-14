@@ -1,0 +1,487 @@
+{
+  "qualification": {
+    "deployment_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "sources": {
+      "scripts/node27_resource_governance.py": "57b25a758678b9d57a325a06c404e951efe0d86bfc3166d614f8f8f652d204d0",
+      "packages/common/node27_resource_governance_collection.py": "871a44f4893a23e02c9aba9c5cf3c0ee9abb81f6fa66d5efd048860b4c68fb06"
+    },
+    "command": [
+      "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python",
+      "-B",
+      "/home/nwm/NWM-i8-target-415cbd1e/scripts/node27_resource_governance.py",
+      "--summary-path",
+      "/home/nwm/tmp/issue2325-audit-b55c7ef9b43e/summary.json",
+      "--quiet"
+    ],
+    "exit": 0,
+    "summary_path": "/home/nwm/tmp/issue2325-audit-b55c7ef9b43e/summary.json",
+    "summary_sha256": "00736162639db2fe51ce74a5729d3f24612bdb8dc56abaede68b9c33bbfb5cbb",
+    "environment_path": "/home/nwm/NWM/infra/env/node27-resource-governance.env",
+    "environment_sha256": "eb8411b7bdb78a342a4b4c1f27cef2a6ce310eb9b2b7f423eabbc5cdf498baef",
+    "environment_unchanged": true,
+    "pgdata_identity": [
+      2304,
+      126746626,
+      1005,
+      1005,
+      448
+    ],
+    "container_id": "5cfa71472de87f926d1fd7c085edc3ff6ab8cea445e899be3b2676bb2d607e5f",
+    "container_image": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+    "status": "completed",
+    "critical_codes": [],
+    "logs": {
+      "/home/nwm/tmp/issue2325-audit-b55c7ef9b43e/stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "/home/nwm/tmp/issue2325-audit-b55c7ef9b43e/stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "service_start_requested": false,
+    "production_mutation": false
+  },
+  "receipt_projection": {
+    "schema_version": "nhms.node27_resource_governance.audit.v1",
+    "status": "completed",
+    "execution_mode": "read_only_audit",
+    "started_at": "2026-09-14T05:22:16Z",
+    "finished_at": "2026-09-14T05:22:27Z",
+    "paths": {
+      "object_store_root": "/home/ghdc/nwm/object-store",
+      "pgdata_root": "/data/GHDC/nhms-primary/pgdata",
+      "repo_root": "/home/nwm/NWM"
+    },
+    "filesystem": {
+      "filesystems": {
+        "cold": {
+          "device_identity": "9:0:7539273700150526131",
+          "free_bytes": 12959695032320,
+          "free_pretty": "11.8 TiB",
+          "path": "/data/GHDC",
+          "reserved_bytes": 800054939648,
+          "status": "ok",
+          "total_bytes": 15873497141248,
+          "total_pretty": "14.4 TiB",
+          "used_bytes": 2113747169280,
+          "used_pct": 13.316,
+          "used_pretty": "1.9 TiB"
+        },
+        "home": {
+          "device_identity": "253:1:11491905541504749415",
+          "free_bytes": 1186842394624,
+          "free_pretty": "1.1 TiB",
+          "path": "/home",
+          "reserved_bytes": 90503221248,
+          "status": "ok",
+          "total_bytes": 1780170539008,
+          "total_pretty": "1.6 TiB",
+          "used_bytes": 502824923136,
+          "used_pct": 28.246,
+          "used_pretty": "468.3 GiB"
+        },
+        "object_store_fs": {
+          "device_identity": "253:1:11491905541504749415",
+          "free_bytes": 1186842394624,
+          "free_pretty": "1.1 TiB",
+          "path": "/home/ghdc/nwm/object-store",
+          "reserved_bytes": 90503221248,
+          "status": "ok",
+          "total_bytes": 1780170539008,
+          "total_pretty": "1.6 TiB",
+          "used_bytes": 502824923136,
+          "used_pct": 28.246,
+          "used_pretty": "468.3 GiB"
+        },
+        "pgdata_root_fs": {
+          "device_identity": "9:0:7539273700150526131",
+          "free_bytes": 12959688921088,
+          "free_pretty": "11.8 TiB",
+          "path": "/data/GHDC/nhms-primary/pgdata",
+          "reserved_bytes": 800054939648,
+          "status": "ok",
+          "total_bytes": 15873497141248,
+          "total_pretty": "14.4 TiB",
+          "used_bytes": 2113753280512,
+          "used_pct": 13.316,
+          "used_pretty": "1.9 TiB"
+        },
+        "repo_root_fs": {
+          "device_identity": "253:1:11491905541504749415",
+          "free_bytes": 1186842394624,
+          "free_pretty": "1.1 TiB",
+          "path": "/home/nwm/NWM",
+          "reserved_bytes": 90503221248,
+          "status": "ok",
+          "total_bytes": 1780170539008,
+          "total_pretty": "1.6 TiB",
+          "used_bytes": 502824923136,
+          "used_pct": 28.246,
+          "used_pretty": "468.3 GiB"
+        },
+        "root": {
+          "device_identity": "253:0:2843952057122256058",
+          "free_bytes": 21820264448,
+          "free_pretty": "20.3 GiB",
+          "path": "/",
+          "reserved_bytes": 5385486336,
+          "status": "ok",
+          "total_bytes": 105089261568,
+          "total_pretty": "97.9 GiB",
+          "used_bytes": 77883510784,
+          "used_pct": 74.112,
+          "used_pretty": "72.5 GiB"
+        }
+      },
+      "inode_usage": {
+        "args": [
+          "df",
+          "-ih",
+          "/",
+          "/home"
+        ],
+        "return_code": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "Filesystem                        Inodes IUsed IFree IUse% Mounted on\n/dev/mapper/ubuntu--vg-ubuntu--lv   6.3M  665K  5.7M   11% /\n/dev/mapper/ubuntu--vg-home         106M  2.1M  104M    2% /home"
+      },
+      "journal_disk_usage": {
+        "args": [
+          "journalctl",
+          "--disk-usage"
+        ],
+        "return_code": 0,
+        "status": "ok",
+        "stderr": "Hint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n      Pass -q to turn off this notice.",
+        "stdout": "Archived and active journals take up 352.1M in the file system."
+      },
+      "path_sizes": {
+        "autopipe_logs": {
+          "bytes": 144519168,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/autopipe-logs",
+          "pretty": "137.8 MiB",
+          "status": "ok"
+        },
+        "autopipe_work": {
+          "bytes": 327098368,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/autopipe-work",
+          "pretty": "311.9 MiB",
+          "status": "ok"
+        },
+        "download_logs": {
+          "bytes": 22568960,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/node27-download-logs",
+          "pretty": "21.5 MiB",
+          "status": "ok"
+        },
+        "object-store/.reset-quarantine": {
+          "bytes": 4096,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/.reset-quarantine",
+          "pretty": "4.0 KiB",
+          "status": "ok"
+        },
+        "object-store/.reset-receipts": {
+          "bytes": 6709248,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/.reset-receipts",
+          "pretty": "6.4 MiB",
+          "status": "ok"
+        },
+        "object-store/forcing": {
+          "bytes": 133466517504,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/forcing",
+          "pretty": "124.3 GiB",
+          "status": "ok"
+        },
+        "object-store/raw": {
+          "bytes": 3047211008,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/raw",
+          "pretty": "2.8 GiB",
+          "status": "ok"
+        },
+        "object-store/runs": {
+          "bytes": 115571130368,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/runs",
+          "pretty": "107.6 GiB",
+          "status": "ok"
+        },
+        "object-store/scheduler": {
+          "bytes": 65032192,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/scheduler",
+          "pretty": "62.0 MiB",
+          "status": "ok"
+        },
+        "object-store/states": {
+          "bytes": 3447029760,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store/states",
+          "pretty": "3.2 GiB",
+          "status": "ok"
+        },
+        "object_store_root": {
+          "bytes": 264312406016,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/ghdc/nwm/object-store",
+          "pretty": "246.2 GiB",
+          "status": "ok"
+        },
+        "pg_wal": {
+          "bytes": 536907776,
+          "device_identity": "9:0:7539273700150526131",
+          "path": "/data/GHDC/nhms-primary/pgdata/pg_wal",
+          "pretty": "512.0 MiB",
+          "status": "ok"
+        },
+        "pgdata_root": {
+          "bytes": 1407128305664,
+          "device_identity": "9:0:7539273700150526131",
+          "path": "/data/GHDC/nhms-primary/pgdata",
+          "pretty": "1.3 TiB",
+          "status": "ok"
+        },
+        "raw_retention_logs": {
+          "bytes": 1507328,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/node27-raw-retention-logs",
+          "pretty": "1.4 MiB",
+          "status": "ok"
+        },
+        "repo/.conda-pkgs": {
+          "path": "/home/nwm/NWM/.conda-pkgs",
+          "status": "missing"
+        },
+        "repo/.nhms-runs": {
+          "path": "/home/nwm/NWM/.nhms-runs",
+          "status": "missing"
+        },
+        "repo/.nhms-work": {
+          "path": "/home/nwm/NWM/.nhms-work",
+          "status": "missing"
+        },
+        "repo/.pgdata": {
+          "path": "/home/nwm/NWM/.pgdata",
+          "status": "missing"
+        },
+        "repo/.venv": {
+          "bytes": 593096704,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/NWM/.venv",
+          "pretty": "565.6 MiB",
+          "status": "ok"
+        },
+        "repo/apps/frontend/dist.bak-20260615-234427": {
+          "path": "/home/nwm/NWM/apps/frontend/dist.bak-20260615-234427",
+          "status": "missing"
+        },
+        "repo/apps/frontend/dist.bak-20260615-235046": {
+          "path": "/home/nwm/NWM/apps/frontend/dist.bak-20260615-235046",
+          "status": "missing"
+        },
+        "repo/artifacts": {
+          "bytes": 881061888,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/NWM/artifacts",
+          "pretty": "840.2 MiB",
+          "status": "ok"
+        },
+        "repo/data": {
+          "path": "/home/nwm/NWM/data",
+          "status": "missing"
+        },
+        "repo_root": {
+          "bytes": 3899375616,
+          "device_identity": "253:1:11491905541504749415",
+          "path": "/home/nwm/NWM",
+          "pretty": "3.6 GiB",
+          "status": "ok"
+        },
+        "tmp": {
+          "error": "du_failed",
+          "path": "/tmp",
+          "status": "unavailable"
+        }
+      }
+    },
+    "working_set": {
+      "daily_ingest_bytes": 85171168402.28572,
+      "next_compressible_at": "2026-09-12T00:00:00+00:00",
+      "projected_peak_bytes": 1357603594240.0,
+      "projection_status": "ok",
+      "uncompressed_bytes": 1357603594240,
+      "watermark": "2026-09-13T00:00:00+00:00",
+      "working_set_filesystem": {
+        "blockers": [],
+        "device_identity": "9:0:7539273700150526131",
+        "path": "/data/GHDC/nhms-primary/pgdata",
+        "status": "ok"
+      },
+      "working_set_free_bytes": 12959688921088
+    },
+    "recommendations": [
+      {
+        "action": "Review the uncompressed working set and compression cadence.",
+        "area": "postgres",
+        "code": "WORKING_SET_ABOVE_WARNING",
+        "evidence": {
+          "daily_ingest_bytes": 85171168402.28572,
+          "next_compressible_at": "2026-09-12T00:00:00+00:00",
+          "projected_peak_bytes": 1357603594240.0,
+          "projection_status": "ok",
+          "uncompressed_bytes": 1357603594240,
+          "watermark": "2026-09-13T00:00:00+00:00",
+          "working_set_filesystem": {
+            "blockers": [],
+            "device_identity": "9:0:7539273700150526131",
+            "path": "/data/GHDC/nhms-primary/pgdata",
+            "status": "ok"
+          },
+          "working_set_free_bytes": 12959688921088
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Add Timescale retention/compression after validating display cold-read path.",
+        "area": "postgres",
+        "code": "DATABASE_SIZE_ABOVE_CRITICAL",
+        "evidence": {
+          "bytes": 1406557061935,
+          "database": "nhms",
+          "pretty": "1.3 TiB"
+        },
+        "severity": "info"
+      },
+      {
+        "action": "Define retention policy after verifying object-store replay evidence.",
+        "area": "postgres",
+        "code": "TIMESCALE_RETENTION_POLICY_MISSING",
+        "evidence": {
+          "hypertable": "hydro.river_timeseries",
+          "num_chunks": 5
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Dry-run compression settings and query plans before enabling.",
+        "area": "postgres",
+        "code": "TIMESCALE_COMPRESSION_POLICY_MISSING",
+        "evidence": {
+          "compression_enabled": true,
+          "compression_job_id": null,
+          "hypertable": "hydro.river_timeseries"
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Define retention policy after verifying object-store replay evidence.",
+        "area": "postgres",
+        "code": "TIMESCALE_RETENTION_POLICY_MISSING",
+        "evidence": {
+          "hypertable": "met.forcing_station_timeseries",
+          "num_chunks": 5
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Dry-run compression settings and query plans before enabling.",
+        "area": "postgres",
+        "code": "TIMESCALE_COMPRESSION_POLICY_MISSING",
+        "evidence": {
+          "compression_enabled": true,
+          "compression_job_id": null,
+          "hypertable": "met.forcing_station_timeseries"
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Audit overlapping display/MVT indexes with EXPLAIN before adding more indexes.",
+        "area": "postgres",
+        "code": "HYPERTABLE_INDEX_RATIO_HIGH",
+        "evidence": {
+          "hypertable": "met.forcing_station_timeseries",
+          "index_to_table_ratio": 2.536,
+          "indexes_bytes": 64923435008,
+          "table_bytes": 25598631936
+        },
+        "severity": "warning"
+      },
+      {
+        "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+        "area": "postgres",
+        "code": "TABLE_ZERO_STATISTICS",
+        "evidence": {
+          "n_live_tup": 18,
+          "n_mod_since_analyze": 19,
+          "relation": "core.basin",
+          "relpages": 0,
+          "reltuples": -1.0
+        },
+        "severity": "info"
+      },
+      {
+        "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+        "area": "postgres",
+        "code": "TABLE_ZERO_STATISTICS",
+        "evidence": {
+          "n_live_tup": 18,
+          "n_mod_since_analyze": 19,
+          "relation": "core.mesh_version",
+          "relpages": 0,
+          "reltuples": -1.0
+        },
+        "severity": "info"
+      },
+      {
+        "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+        "area": "postgres",
+        "code": "TABLE_ZERO_STATISTICS",
+        "evidence": {
+          "n_live_tup": 1,
+          "n_mod_since_analyze": 15,
+          "relation": "_timescaledb_catalog.dimension_slice",
+          "relpages": 0,
+          "reltuples": -1.0
+        },
+        "severity": "info"
+      },
+      {
+        "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+        "area": "postgres",
+        "code": "TABLE_ZERO_STATISTICS",
+        "evidence": {
+          "n_live_tup": 8,
+          "n_mod_since_analyze": 8,
+          "relation": "ops.audit_log",
+          "relpages": 0,
+          "reltuples": -1.0
+        },
+        "severity": "info"
+      },
+      {
+        "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+        "area": "postgres",
+        "code": "TABLE_ZERO_STATISTICS",
+        "evidence": {
+          "n_live_tup": 4,
+          "n_mod_since_analyze": 4,
+          "relation": "public.schema_migrations",
+          "relpages": 0,
+          "reltuples": -1.0
+        },
+        "severity": "info"
+      }
+    ],
+    "safety": {
+      "database_url_redacted": true,
+      "destructive_actions_enabled": false,
+      "notes": [
+        "This receipt is read-only.",
+        "It does not drop chunks, vacuum full, delete object-store artifacts, or modify systemd units."
+      ]
+    }
+  },
+  "projection_note": "Full raw receipt retained on node27 at summary_path/raw SHA; detailed postgres/systemd inventories omitted from this projection, no recommendations omitted."
+}

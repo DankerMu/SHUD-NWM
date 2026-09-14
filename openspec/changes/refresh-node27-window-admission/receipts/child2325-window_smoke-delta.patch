@@ -1,0 +1,279 @@
+--- baed6a47eb1acb261cc9ffd03f79cedad6c1a6a1:openspec/changes/refresh-node27-window-admission/tools/window_smoke.py
++++ window_smoke.py
+@@ -9,11 +9,15 @@
+ Run once per case, with a DIFFERENT fresh database and --state each time:
+   python window_smoke.py --oracle PARENT/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt \
+     --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
+-    --state PRIVATE_ABSOLUTE_NEW_DIR --case happy
++    --state PRIVATE_ABSOLUTE_NEW_DIR --case happy \
++    --original-new-repo ORIGINAL_1A32
+ Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
+ Happy also drives the real main/CLI admission refusals and admitted emergency paths,
+ including window's nested recovery protection and historical-ledger pending-set
+ admission at both prepare and the migration worker; only external boundaries are simulated.
++Oracle-only --original-new-repo is a retained 1a32 checkout for original-f24
++pending-set negatives. It is not a production window_execute flag. Changed
++runtime remains 415; original f24 negatives stay original-source/target qualified.
+ The harness owns no container lifecycle and never deletes a database/volume.
+ All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
+ systemd, process inspection, git selection and HTTP transport are simulated.
+@@ -274,6 +278,12 @@
+     for repo, sha in ((args.old_repo, w.OLD), (args.new_repo, w.NEW)):
+         w.require(
+             subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == sha, "SOURCE_SHA"
++        )
++    if args.original_new_repo:
++        w.require(
++            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=args.original_new_repo, text=True).strip()
++            == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
++            "ORIGINAL_NEW_SOURCE_SHA",
+         )
+     sys.path.insert(0, args.new_repo)
+     from packages.common import migrate
+@@ -651,8 +661,9 @@
+         "F24_EXECUTE_HASH_MISMATCH",
+     )
+     f24 = load(f24_execute, "window_executor_f24")
++    w.require(f24.NEW == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32", "F24_NEW_NOT_RETAINED")
++    w.require(bool(e.fixture.original_new_repo), "ORIGINAL_NEW_REPO_REQUIRED")
+     changed = Path(w.__file__).read_bytes()
+-    w.require(w.digest(changed) != w.digest(f24_bytes), "CHANGED_EXECUTE_STILL_F24")
+     before_catalog, before_ledger = e.catalog(), e.ledger()
+     w.require(
+         all(version in before_ledger for version in RETIRED_LEDGER_VERSIONS) and w.EXPAND not in before_ledger,
+@@ -689,48 +700,78 @@
+             "EXTRA_CURRENT_ROW_NOT_RESTORED",
+         )
+ 
+-    def worker_migrate(module):
+-        saved_worker_db = (
+-            module._WORKER_DATABASE,
+-            module._WORKER_PORT,
+-            dict(module._WORKER_USERS),
+-        )
+-        from psycopg2.extensions import parse_dsn
+-
+-        identity = parse_dsn(e.dsn)
+-        module._WORKER_DATABASE = identity["dbname"]
+-        module._WORKER_PORT = identity["port"]
+-        module._WORKER_USERS = dict.fromkeys(("parse", "read", "admin"), identity["user"])
++    def worker_migrate(module, *, repo=None, sha=None):
++        repo = str(Path(repo or e.fixture.new_repo).resolve())
++        sha = sha or module.NEW
++        python = Path(repo) / ".venv/bin/python"
++        w.require(python.is_file() and os.access(python, os.X_OK), "PRIVATE_PYTHON_MISSING")
++        source = Path(module.__file__).resolve()
++        wrapper = e.root / ("historical-worker-wrapper-" + w.digest(str(source).encode())[:12] + ".py")
++        if not wrapper.exists():
++            w.private_write(
++                wrapper,
++                (
++                    "import importlib.machinery\n"
++                    "import importlib.util\n"
++                    "import os\n"
++                    "import sys\n"
++                    "from psycopg2.extensions import parse_dsn\n"
++                    "source = " + repr(str(source)) + "\n"
++                    "loader = importlib.machinery.SourceFileLoader('historical_worker_under_test', source)\n"
++                    "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
++                    "mod = importlib.util.module_from_spec(spec)\n"
++                    "sys.modules[loader.name] = mod\n"
++                    "loader.exec_module(mod)\n"
++                    "identity = parse_dsn(os.environ['DATABASE_URL'])\n"
++                    "mod._WORKER_DATABASE = identity['dbname']\n"
++                    "mod._WORKER_PORT = identity['port']\n"
++                    "mod._WORKER_USERS = dict.fromkeys(('parse', 'read', 'admin'), identity['user'])\n"
++                    "sys.argv = [source, *sys.argv[1:]]\n"
++                    "raise SystemExit(mod.main())\n"
++                ).encode(),
++            )
+         argv = [
+-            str(Path(module.__file__).resolve()),
++            str(python),
++            str(wrapper),
+             "worker",
+             "--state",
+             str(e.root),
+             "--action",
+             "migrate",
+             "--repo",
+-            e.fixture.new_repo,
++            repo,
+             "--sha",
+-            w.NEW,
++            sha,
+         ]
+-        output = io.StringIO()
+-        errors = io.StringIO()
+-        try:
+-            saved_argv = sys.argv
+-            sys.argv = argv
+-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+-                rc = module.main()
+-        finally:
+-            sys.argv = saved_argv
+-            module._WORKER_DATABASE, module._WORKER_PORT, module._WORKER_USERS = saved_worker_db
+-        stdout = output.getvalue()
+-        stderr = errors.getvalue()
++        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
++        env.pop("PYTHONPATH", None)
++        env.pop("PYTHONHOME", None)
++        env.update(
++            DATABASE_URL=e.dsn,
++            PYTHONDONTWRITEBYTECODE="1",
++            PYTHONNOUSERSITE="1",
++        )
++        proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, timeout=150)
++        stdout = proc.stdout.decode("utf-8", "replace")
++        stderr = proc.stderr.decode("utf-8", "replace")
+         e.seq += 1
+         e.save()
+-        e.save_file(f"historical-worker-{e.seq}.stdout", stdout.encode())
+-        e.save_file(f"historical-worker-{e.seq}.stderr", stderr.encode())
++        stdout_name = f"historical-worker-{e.seq}.stdout"
++        stderr_name = f"historical-worker-{e.seq}.stderr"
++        e.save_file(stdout_name, stdout.encode())
++        e.save_file(stderr_name, stderr.encode())
+         payload = json.loads(stdout) if stdout.strip() else {}
+-        return rc, payload, stderr
++        evidence = {
++            "python": str(python),
++            "cwd": repo,
++            "sha": sha,
++            "source": str(source),
++            "wrapper": str(wrapper),
++            "stdout": stdout_name,
++            "stderr": stderr_name,
++            "returncode": proc.returncode,
++        }
++        return proc.returncode, payload, stderr, evidence
+ 
+     def require_unchanged(code):
+         w.require(e.catalog() == before_catalog and e.ledger() == before_ledger, code)
+@@ -753,25 +794,27 @@
+         extra_removed = True
+         extra_ledger = e.ledger()
+         w.require(extra_current not in extra_ledger and w.EXPAND not in extra_ledger, "EXTRA_PENDING_NOT_CREATED")
+-        rc, payload, stderr = worker_migrate(w)
++        rc, payload, stderr, evidence = worker_migrate(w)
+         require_worker_pending_refusal(rc, payload, stderr, "WORKER_EXTRA_PENDING_ACCEPTED")
+         w.require(e.catalog() == before_catalog and e.ledger() == extra_ledger, "WORKER_EXTRA_PENDING_SIDE_EFFECT")
+-        reports.append({"site": "worker", "pending": "extra", "returncode": rc, "payload": payload})
++        reports.append({"site": "worker", "pending": "extra", "returncode": rc, "payload": payload, "child": evidence})
+         restore_extra_row()
+         e.sql("INSERT INTO public.schema_migrations (version) VALUES ('" + w.EXPAND + "')")
+-        rc, payload, stderr = worker_migrate(w)
++        rc, payload, stderr, evidence = worker_migrate(w)
+         require_worker_pending_refusal(rc, payload, stderr, "WORKER_ZERO_PENDING_ACCEPTED")
+         w.require(
+             e.catalog() == before_catalog and e.ledger() == sorted(before_ledger + [w.EXPAND]),
+             "WORKER_ZERO_PENDING_SIDE_EFFECT",
+         )
+-        reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload})
++        reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload, "child": evidence})
+         e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
+         w.require(e.ledger() == before_ledger, "ZERO_PENDING_LEDGER_NOT_RESTORED")
+-        rc, payload, stderr = worker_migrate(f24)
++        rc, payload, stderr, evidence = worker_migrate(f24, repo=e.fixture.original_new_repo, sha=f24.NEW)
+         require_worker_pending_refusal(rc, payload, stderr, "F24_WORKER_SHOULD_REFUSE_HISTORICAL")
+         require_unchanged("F24_WORKER_HISTORICAL_SIDE_EFFECT")
+-        reports.append({"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload})
++        reports.append(
++            {"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload, "child": evidence}
++        )
+     finally:
+         restore_extra_row()
+         if w.EXPAND in e.ledger() and e.catalog() == before_catalog:
+@@ -801,6 +844,10 @@
+         config["admission"][key] = {"path": str(path), "sha256": w.digest(data)}
+     config_path = e.root / "historical-prepare-config.json"
+     w.private_write(config_path, json.dumps(config).encode())
++    original_config = json.loads(json.dumps(config))
++    original_config.update(new_sha=f24.NEW, staged_new_repo=e.fixture.original_new_repo)
++    original_config_path = e.root / "historical-prepare-original-config.json"
++    w.private_write(original_config_path, json.dumps(original_config).encode())
+     external_units = {}
+     for name in w.TIMERS + w.SERVICES:
+         fragment = assets / name
+@@ -882,10 +929,12 @@
+             return super().run(argv, **kwargs)
+ 
+         def git(self, *args, repo=None):
++            expected_new = self.c["new_sha"]
++            staged = self.c["staged_new_repo"]
+             if repo is not None:
+-                w.require(str(repo) == self.fixture.new_repo, "UNKNOWN_STAGED_GIT_BOUNDARY")
++                w.require(str(repo) == staged, "UNKNOWN_STAGED_GIT_BOUNDARY")
+                 if args == ("rev-parse", "HEAD"):
+-                    return w.NEW
++                    return expected_new
+                 if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+                     return ""
+                 raise w.Refusal("UNKNOWN_STAGED_GIT_BOUNDARY")
+@@ -895,7 +944,7 @@
+                 ("rev-parse", "--verify", "refs/heads/new^{commit}"),
+                 ("rev-parse", "--verify", "refs/remotes/fixture/new^{commit}"),
+             ):
+-                return w.NEW
++                return expected_new
+             return super().git(*args, repo=repo)
+ 
+         def drain(self):
+@@ -949,13 +998,14 @@
+         module.Executor = factory
+         module.safe_path = safe_boundary
+         os.getuid = lambda: 1005
++        selected_config = config_path if module is w else original_config_path
+         sys.argv = [
+             str(Path(module.__file__).resolve()),
+             "prepare",
+             "--state",
+             str(root),
+             "--config",
+-            str(config_path),
++            str(selected_config),
+         ]
+         os.environ.update({key: e.dsn for key in saved_env})
+         output = io.StringIO()
+@@ -1041,6 +1091,12 @@
+                 "f24_execute_sha256": w.digest(f24_bytes),
+                 "changed_execute_sha256": w.digest(changed),
+                 "changed_worker_positive": "deferred-to-happy-path-real-e.worker(migrate)",
++                "worker_protocol": (
++                    "Fresh selected-repo .venv/bin/python child; cwd=repo; argv worker "
++                    "--state/--action migrate/--repo/--sha; DATABASE_URL env-only; "
++                    "no PYTHONPATH/PYTHONHOME; private wrapper only patches "
++                    "_WORKER_DATABASE/_WORKER_PORT/_WORKER_USERS."
++                ),
+                 "cases": reports,
+                 "limitation": (
+                     "Actual prepare control flow with fixture expected-OID substitution, "
+@@ -1587,7 +1643,18 @@
+ def arguments():
+     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     p.add_argument("--worker", action="store_true")
+-    for name in ("oracle", "old-repo", "new-repo", "container", "state", "repo", "sha", "action", "fixture-config"):
++    for name in (
++        "oracle",
++        "old-repo",
++        "new-repo",
++        "container",
++        "state",
++        "repo",
++        "sha",
++        "action",
++        "fixture-config",
++        "original-new-repo",
++    ):
+         p.add_argument("--" + name)
+     p.add_argument(
+         "--case",
+@@ -1611,6 +1678,8 @@
+     )
+     if args.case == "write-budget":
+         required = ("container", "state", "new_repo", "fixture_config")
++    if args.case == "happy":
++        required = required + ("original_new_repo",)
+     for name in required:
+         if not getattr(args, name):
+             p.error("missing --" + name.replace("_", "-"))

@@ -1,0 +1,340 @@
+{
+  "path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-admission.json",
+  "raw_sha256": "8ea7f4a73f6ee67976ba2c8ca0008255c59e9b4ec5ff59b19b59e7a9fb9fb50d",
+  "data": [
+    {
+      "case": "config-only-no-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "RECOVERY_GO_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-config-only-no-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "config-only-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-config-only-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "config-only-status",
+      "receipt": {
+        "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
+        "executor_lock_held": false,
+        "inspection_only": true,
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-config-only-status",
+        "status_is_not_live_health": true
+      },
+      "returncode": 0,
+      "system_actions": []
+    },
+    {
+      "case": "failed-prepare-no-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "RECOVERY_GO_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-failed-prepare-no-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "failed-prepare-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-failed-prepare-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "failed-prepare-status",
+      "receipt": {
+        "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
+        "executor_lock_held": false,
+        "fence_epochs": [],
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-failed-prepare-status",
+        "status_is_not_live_health": true
+      },
+      "returncode": 0,
+      "system_actions": []
+    },
+    {
+      "case": "phase-only-admission",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "FENCED_DRAINED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-phase-only-admission"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "complete-no-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "RECOVERY_GO_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-complete-no-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "owned-child-running",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "OWNED_COMMAND_STILL_RUNNING_INSPECT_SUPERVISOR",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-owned-child-running"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "ownership-refusal",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "PRIVATE_STATE_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "INITIALIZATION_REFUSED"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "actual-failed-prepare",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "FROZEN_IDENTITY_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARATION_FAILED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-actual-failed-prepare"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "window-no-go",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "PREPARED_SIGNED_GO_REQUIRED",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "PREPARED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-window-no-go"
+      },
+      "returncode": 1,
+      "system_actions": []
+    },
+    {
+      "case": "admitted-recovery-failure",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "INJECTED_STOP_FAILURE",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "BLOCKED_FENCED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-admitted-recovery-failure"
+      },
+      "returncode": 1,
+      "system_actions": [
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-display-api.service",
+            "nhms-node27-autopipe.service",
+            "nhms-node27-download.service",
+            "nhms-node27-raw-retention.service",
+            "nhms-node27-frontier-alert.service",
+            "nhms-node27-mvt-cache-retention.service",
+            "nhms-node27-timeseries-compression.service",
+            "nhms-node27-timeseries-retention.service",
+            "nhms-node27-resource-governance.service",
+            "nhms-node27-timeseries-compression-replay.service"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-display-api.service",
+            "nhms-node27-autopipe.service",
+            "nhms-node27-download.service",
+            "nhms-node27-raw-retention.service",
+            "nhms-node27-frontier-alert.service",
+            "nhms-node27-mvt-cache-retention.service",
+            "nhms-node27-timeseries-compression.service",
+            "nhms-node27-timeseries-retention.service",
+            "nhms-node27-resource-governance.service",
+            "nhms-node27-timeseries-compression-replay.service"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "nested-window-recovery-failure",
+      "receipt": {
+        "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        "check": "INJECTED_STOP_FAILURE",
+        "error_type": "Refusal",
+        "inspection_only": true,
+        "phase": "BLOCKED_FENCED",
+        "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/entrypoint-nested-window-recovery-failure"
+      },
+      "returncode": 1,
+      "system_actions": [
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-display-api.service",
+            "nhms-node27-autopipe.service",
+            "nhms-node27-download.service",
+            "nhms-node27-raw-retention.service",
+            "nhms-node27-frontier-alert.service",
+            "nhms-node27-mvt-cache-retention.service",
+            "nhms-node27-timeseries-compression.service",
+            "nhms-node27-timeseries-retention.service",
+            "nhms-node27-resource-governance.service",
+            "nhms-node27-timeseries-compression-replay.service"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-node27-autopipe.timer",
+            "nhms-node27-download.timer",
+            "nhms-node27-raw-retention.timer",
+            "nhms-node27-frontier-alert.timer",
+            "nhms-node27-mvt-cache-retention.timer",
+            "nhms-node27-timeseries-compression.timer",
+            "nhms-node27-timeseries-retention.timer",
+            "nhms-node27-resource-governance.timer"
+          ]
+        },
+        {
+          "action": "stop",
+          "units": [
+            "nhms-display-api.service",
+            "nhms-node27-autopipe.service",
+            "nhms-node27-download.service",
+            "nhms-node27-raw-retention.service",
+            "nhms-node27-frontier-alert.service",
+            "nhms-node27-mvt-cache-retention.service",
+            "nhms-node27-timeseries-compression.service",
+            "nhms-node27-timeseries-retention.service",
+            "nhms-node27-resource-governance.service",
+            "nhms-node27-timeseries-compression-replay.service"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "event": "completed",
+  "operation": "prepare",
+  "exit": 0,
+  "phase": "PREPARED",
+  "records": [
+    {
+      "executor_lock_held": false,
+      "fence_epochs": [],
+      "last_command_rc": 0,
+      "new_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+      "old_oid": 24541,
+      "old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+      "phase": "PREPARED",
+      "recovery_command": "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python /home/nwm/.local/state/issue1987-tools/92a5b4350992e130e6191d35162817d73c1e6454/window_execute.py recover --state /home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare --go Danker",
+      "state": "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare",
+      "status_is_not_live_health": true,
+      "updated_at": "2026-09-14T17:35:34.838897+00:00"
+    }
+  ],
+  "state": "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare",
+  "input_bundle": "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-inputs",
+  "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "tool_commit": "92a5b4350992e130e6191d35162817d73c1e6454",
+  "source_sha256": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+  "config_sha256": "4a26d027c2632fcd330084fda03526c9545e246289e06ed772d04d37a0508627",
+  "active_head": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+  "staged_identity_and_pin_preserved": true,
+  "logs": {
+    "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-inputs/prepare.stdout": "c00978bdd88feb0f418f82798486935ebf7e87093c4f9723da8fc20a264a00a2",
+    "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-inputs/prepare.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "t0_executed": false,
+  "window_executed": false,
+  "recover_executed": false,
+  "unstage_executed": false
+}

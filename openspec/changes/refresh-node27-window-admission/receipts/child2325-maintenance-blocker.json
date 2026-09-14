@@ -1,0 +1,424 @@
+{
+  "issue": 2349,
+  "url": "https://github.com/DankerMu/SHUD-NWM/issues/2349",
+  "prepare_refusal": "REQUIRED_UNIT_NOT_ADMITTED",
+  "prepare_exit": 1,
+  "observed_units": [
+    {
+      "file": "command-00026.stdout",
+      "sha256": "7f3c0d86945627ac2785730fe600ac4d4bdb647a27b4d24e812fa5c56ca931f7",
+      "properties": {
+        "Result": "exit-code",
+        "ExecMainStatus": "124",
+        "LoadState": "loaded",
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "UnitFileState": "static"
+      }
+    },
+    {
+      "file": "command-00027.stdout",
+      "sha256": "f80f876a12068d20560e1d3fc293e76840ab7cd9dd3a0fa4dafc71386384dd9a",
+      "properties": {
+        "Result": "exit-code",
+        "ExecMainStatus": "1",
+        "LoadState": "loaded",
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service",
+        "UnitFileState": "static"
+      }
+    }
+  ],
+  "journal": [
+    {
+      "unit": "nhms-node27-timeseries-compression.service",
+      "exit": 0,
+      "stderr": "",
+      "journal": [
+        {
+          "time": "1787977532315933",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1787977532587006",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788063932315904",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788063932586425",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788150332315488",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788150332573211",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788236732315807",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788236732585157",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788323132315933",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788323132414795",
+          "message": "nhms-node27-timeseries-compression.service: Main process exited, code=exited, status=1/FAILURE"
+        },
+        {
+          "time": "1788323132415657",
+          "message": "nhms-node27-timeseries-compression.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1788323132415882",
+          "message": "Failed to start NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788409532314804",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788409532395738",
+          "message": "nhms-node27-timeseries-compression.service: Main process exited, code=exited, status=1/FAILURE"
+        },
+        {
+          "time": "1788409532395976",
+          "message": "nhms-node27-timeseries-compression.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1788409532396519",
+          "message": "Failed to start NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788495932315436",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788495932400439",
+          "message": "nhms-node27-timeseries-compression.service: Main process exited, code=exited, status=1/FAILURE"
+        },
+        {
+          "time": "1788495932400775",
+          "message": "nhms-node27-timeseries-compression.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1788495932401348",
+          "message": "Failed to start NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788527384189347",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788527384539115",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788582332315937",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788582332679472",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788668732315886",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788668732660760",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788755132315888",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788755263170369",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788841532315958",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788841532693689",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788927932319346",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1788927932682404",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1788975752584410",
+          "message": "Condition check resulted in NHMS node-27 timeseries compression being skipped."
+        },
+        {
+          "time": "1789082650148535",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1789082650515008",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1789100732316087",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1789100732669096",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1789191936437511",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1789191936746460",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1789273532315622",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1789273532649989",
+          "message": "Finished NHMS node-27 timeseries compression."
+        },
+        {
+          "time": "1789359932316107",
+          "message": "Starting NHMS node-27 timeseries compression..."
+        },
+        {
+          "time": "1789363832448550",
+          "message": "nhms-node27-timeseries-compression.service: Main process exited, code=exited, status=124/n/a"
+        },
+        {
+          "time": "1789363832449567",
+          "message": "nhms-node27-timeseries-compression.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1789363832449786",
+          "message": "Failed to start NHMS node-27 timeseries compression."
+        }
+      ]
+    },
+    {
+      "unit": "nhms-node27-timeseries-retention.service",
+      "exit": 0,
+      "stderr": "",
+      "journal": [
+        {
+          "time": "1788412532641502",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788498932315836",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788498933273631",
+          "message": "{\"chunk\": \"_timescaledb_internal._hyper_3_55_chunk\", \"diagnostic\": \"per-chunk drop timing\", \"elapsed_ms\": 574.701, \"outcome\": \"dropped\"}"
+        },
+        {
+          "time": "1788498933392141",
+          "message": "{\"chunk\": \"_timescaledb_internal._hyper_1_52_chunk\", \"diagnostic\": \"per-chunk drop timing\", \"elapsed_ms\": 118.391, \"outcome\": \"dropped\"}"
+        },
+        {
+          "time": "1788498933410726",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788498933453707",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788585332315938",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788585332628080",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788585332655031",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788671732315889",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788671732629505",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788671732656468",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788758132315728",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788758132631999",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788758132664069",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788844532316155",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788844532642923",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788844532670747",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788930932315628",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1788930932642722",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1788930932672195",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1788975752666590",
+          "message": "Condition check resulted in NHMS node-27 timeseries retention (gated drop_chunks) being skipped."
+        },
+        {
+          "time": "1789082650166809",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1789082650381022",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"refused\", \"refusal_reason\": \"RETENTION_CONCURRENT_INVOCATION\"}"
+        },
+        {
+          "time": "1789082650403618",
+          "message": "nhms-node27-timeseries-retention.service: Main process exited, code=exited, status=1/FAILURE"
+        },
+        {
+          "time": "1789082650403818",
+          "message": "nhms-node27-timeseries-retention.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1789082650404219",
+          "message": "Failed to start NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1789082650404321",
+          "message": "nhms-node27-timeseries-retention.service: Triggering OnFailure= dependencies."
+        },
+        {
+          "time": "1789103732316150",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1789103732626819",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1789103732654196",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1789191936441638",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1789191936736080",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1789191936765223",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1789276532315652",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1789276533519635",
+          "message": "{\"chunk\": \"_timescaledb_internal._hyper_3_58_chunk\", \"diagnostic\": \"per-chunk drop timing\", \"elapsed_ms\": 847.292, \"outcome\": \"dropped\"}"
+        },
+        {
+          "time": "1789276533700865",
+          "message": "{\"chunk\": \"_timescaledb_internal._hyper_1_57_chunk\", \"diagnostic\": \"per-chunk drop timing\", \"elapsed_ms\": 181.04, \"outcome\": \"dropped\"}"
+        },
+        {
+          "time": "1789276533717668",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"enforced\"}"
+        },
+        {
+          "time": "1789276533764103",
+          "message": "Finished NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1789362908053261",
+          "message": "Starting NHMS node-27 timeseries retention (gated drop_chunks)..."
+        },
+        {
+          "time": "1789362908269949",
+          "message": "{\"mode\": \"enforce\", \"outcome\": \"refused\", \"refusal_reason\": \"RETENTION_CONCURRENT_INVOCATION\"}"
+        },
+        {
+          "time": "1789362908290904",
+          "message": "nhms-node27-timeseries-retention.service: Main process exited, code=exited, status=1/FAILURE"
+        },
+        {
+          "time": "1789362908291145",
+          "message": "nhms-node27-timeseries-retention.service: Failed with result 'exit-code'."
+        },
+        {
+          "time": "1789362908291451",
+          "message": "Failed to start NHMS node-27 timeseries retention (gated drop_chunks)."
+        },
+        {
+          "time": "1789362908291596",
+          "message": "nhms-node27-timeseries-retention.service: Triggering OnFailure= dependencies."
+        }
+      ]
+    }
+  ],
+  "uncertainty": [
+    "Compression tick hit the3900s wrapper wall; underlying work/DDL cause not established.",
+    "Retention refusal is confirmed; shared lifecycle lock versus singleton lock carrier is not proven.",
+    "Untimestamped old stderr lines are not attributed to this tick."
+  ],
+  "forbidden_without_separate_authority": [
+    "reset-failed",
+    "retention rerun",
+    "timer/drop-in/permissions changes",
+    "lifecycle lock deletion",
+    "production window/recover/unstage"
+  ],
+  "primary_active_unchanged": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+  "identity_and_pin_preserved": true
+}

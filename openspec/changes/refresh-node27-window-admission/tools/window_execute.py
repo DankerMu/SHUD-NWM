@@ -74,7 +74,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
-NEW = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+NEW = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
 _WORKER_DATABASE = "nhms"
 _WORKER_PORT = "55432"
 _WORKER_USERS = {"parse": "nhms_ingest_rw", "read": "nhms_display_ro", "admin": "nhms"}

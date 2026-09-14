@@ -1,0 +1,261 @@
+{
+  "tool_commit": "f648718b75b61591105ae91a7742844c2019604f",
+  "hashes": {
+    "window_execute.py": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "6224fb5b4973996b19da0c6c87e03b0ad6dbeb2c3f4429002a75f6992d03722e"
+  },
+  "command": "umask 077; mkdir /home/nwm/tmp/issue2325-governance-f648718b75b6 && env TMPDIR=/home/nwm/tmp /home/nwm/.local/bin/uv run --no-sync --project /home/nwm/NWM-i8-target-415cbd1e python -B /home/nwm/.local/state/issue1987-tools/f648718b75b61591105ae91a7742844c2019604f/governance_smoke.py --private-parent /home/nwm/tmp/issue2325-governance-f648718b75b6 --executor /home/nwm/.local/state/issue1987-tools/f648718b75b61591105ae91a7742844c2019604f/governance_stage.py --original-executor /home/nwm/tmp/issue2325-governance-aa19a0e9abdb-2/governance_stage.py.txt",
+  "exit": 0,
+  "stdout_sha256": "bafd37e8c994501ea35887fe7b542b4bec450e3c65e80d9410bd8442502607b3",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "receipt": {
+    "changed_executor_sha256": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "database_exercised": false,
+    "old": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "original_executor_sha256": "67bffe238cdf294e89255fa3c8b05303d0a09e2867271d013673f315727c811c",
+    "original_state_new_active_handoff": [
+      {
+        "case": "pre_cutover",
+        "kind": "handoff",
+        "phase": "staged",
+        "producer_phase": "staged",
+        "refusal": "GIT_HEAD_MISMATCH"
+      },
+      {
+        "audit_root": "active_415",
+        "case": "active_runner",
+        "failed_phase": "unstage_prepared",
+        "kind": "handoff",
+        "producer_phase": "staged",
+        "recovered_phase": "unstaged",
+        "refusal": "RUNNER_NOT_IDLE"
+      },
+      {
+        "case": "foreign_pin",
+        "kind": "handoff",
+        "phase": "unstage_admitted",
+        "producer_phase": "staged",
+        "refusal": "OWNED_DROPIN_DRIFT"
+      },
+      {
+        "case": "foreign_env",
+        "kind": "handoff",
+        "phase": "staged",
+        "producer_phase": "staged",
+        "refusal": "ENVIRONMENT_DRIFT"
+      },
+      {
+        "case": "foreign_unit",
+        "kind": "handoff",
+        "phase": "staged",
+        "producer_phase": "staged",
+        "refusal": "OTHER_CONFIG_DRIFT"
+      },
+      {
+        "case": "interrupt_after_remove",
+        "interrupted_phase": "unstage_remove_pending",
+        "kind": "handoff",
+        "producer_phase": "staged",
+        "recovered_phase": "unstaged"
+      },
+      {
+        "case": "audit_critical",
+        "critical": "AUTOVACUUM_OUTPUT_STALLED",
+        "failed_phase": "unstage_starting",
+        "kind": "handoff",
+        "producer_phase": "staged",
+        "recovered_phase": "unstaged",
+        "refusal": "AUDIT_CRITICAL"
+      },
+      {
+        "active": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+        "audit_before_timer": true,
+        "case": "happy",
+        "kind": "handoff",
+        "phase": "unstaged",
+        "producer_phase": "staged",
+        "retained_runtime": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+      }
+    ],
+    "real_services_exercised": false,
+    "retained": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+    "same_tool": [
+      {
+        "failure": null,
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "stage_verified",
+          "staged",
+          "unstage_admitted",
+          "unstage_prepared",
+          "unstage_remove_pending",
+          "unstage_starting",
+          "unstage_verified",
+          "unstaged"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": null,
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "stage_verified",
+          "staged",
+          "unstage_admitted",
+          "unstage_prepared",
+          "unstage_remove_pending",
+          "unstage_starting",
+          "unstage_verified",
+          "unstaged"
+        ],
+        "timer": [
+          "inactive",
+          "disabled"
+        ]
+      },
+      {
+        "failure": "service",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled-runtime"
+        ]
+      },
+      {
+        "failure": "binding",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "inactive",
+          "static"
+        ]
+      },
+      {
+        "failure": "foreign",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rollback_required",
+          "rollback_pending"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": "old_receipt_only",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": "no_receipt",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": "multiple_receipts",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": "stale_payload",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "install_pending",
+          "stage_starting",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      },
+      {
+        "failure": "config_drift",
+        "kind": "same_tool",
+        "phases": [
+          "prepared",
+          "timer_stopped",
+          "rollback_pending",
+          "rolled_back"
+        ],
+        "timer": [
+          "active",
+          "enabled"
+        ]
+      }
+    ],
+    "surface": "governance_system_boundary_fakes_real_private_files",
+    "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+  },
+  "limits": "Original/changed executors and private files real; system/git/import/network boundaries simulated. Not a production unstage receipt."
+}
