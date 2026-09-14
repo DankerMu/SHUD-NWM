@@ -1,0 +1,14 @@
+{
+  "issue2370_merged_pr": 2372,
+  "tool_commit": "1b8b2b5b447d07091af98eb1e4ccbd1884e5b899",
+  "tool_hashes": {
+    "window_execute.py": "70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "05fc989e745f2a5fd4dfd56b2a6ba852979210727cac8351087de664b3772513"
+  },
+  "prepared_state": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+  "previous_failed_window_state_preserved": "/home/nwm/.local/state/issue2325-window-92a5b4350992-auth-refresh2-prepare",
+  "wrapper_sha256": "72cea510dd60c6864f4a380c86739b4b34020100bafbe76c966f7a19f09ed0d3",
+  "scope": "Parent1987 authorized window, then original-state governance handoff; no moving-master adoption"
+}
