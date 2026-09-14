@@ -110,5 +110,8 @@
     "No effective production unit/env/pin/privilege/deployment changes.",
     "Remaining cold-family/G0-G8 source deletion and R4/R5 still pending.",
     "Runtime receipt schema2.1, compression lag policy, bound4 and retention cadence unchanged."
-  ]
+  ],
+  "actual_timeout_cleanup_proof": "retirement-compression-timeout-proof.json",
+  "observed_namespace_proof": "retirement-compression-namespace-proof.json",
+  "canonical_scope": "R2 applies only matching compression/runner selector changes. Still-live cold-governance suite remains in canonical; proposed change delta is future R3 remainder target until actual suite deletion."
 }

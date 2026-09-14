@@ -1045,9 +1045,8 @@ SHALL NOT be covered by this rule (the pin's glob is `*.service`).
 - **THEN** the retention unit still selects exactly
   `["tests/test_node27_timeseries_retention.py"]`, the mvt-cache-retention unit
   still selects both its own suite and the pin's suite, and the
-  resource-governance unit selects `tests/test_node27_resource_governance.py`,
-  its extracted sampling behavior's surviving suites and the lane pin, never
-  deleted `tests/test_node27_cold_governance.py`
+  resource-governance unit still selects `tests/test_node27_cold_governance.py`
+  and `tests/test_node27_resource_governance.py` plus the lane pin
 
 ### Requirement: node-27 unit files with a content-asserting owner suite MUST select that suite
 
