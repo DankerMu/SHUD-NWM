@@ -9,11 +9,15 @@ and NEW clean checkouts and Python 3.11.15 with their installed dependencies.
 Run once per case, with a DIFFERENT fresh database and --state each time:
   python window_smoke.py --oracle PARENT/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt \
     --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
-    --state PRIVATE_ABSOLUTE_NEW_DIR --case happy
+    --state PRIVATE_ABSOLUTE_NEW_DIR --case happy \
+    --original-new-repo ORIGINAL_1A32
 Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
 Happy also drives the real main/CLI admission refusals and admitted emergency paths,
 including window's nested recovery protection and historical-ledger pending-set
 admission at both prepare and the migration worker; only external boundaries are simulated.
+Oracle-only --original-new-repo is a retained 1a32 checkout for original-f24
+pending-set negatives. It is not a production window_execute flag. Changed
+runtime remains 415; original f24 negatives stay original-source/target qualified.
 The harness owns no container lifecycle and never deletes a database/volume.
 All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
 systemd, process inspection, git selection and HTTP transport are simulated.
@@ -274,6 +278,12 @@ def scenario(args):
     for repo, sha in ((args.old_repo, w.OLD), (args.new_repo, w.NEW)):
         w.require(
             subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == sha, "SOURCE_SHA"
+        )
+    if args.original_new_repo:
+        w.require(
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=args.original_new_repo, text=True).strip()
+            == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+            "ORIGINAL_NEW_SOURCE_SHA",
         )
     sys.path.insert(0, args.new_repo)
     from packages.common import migrate
@@ -651,8 +661,9 @@ def historical_ledger_admission(e):
         "F24_EXECUTE_HASH_MISMATCH",
     )
     f24 = load(f24_execute, "window_executor_f24")
+    w.require(f24.NEW == "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32", "F24_NEW_NOT_RETAINED")
+    w.require(bool(e.fixture.original_new_repo), "ORIGINAL_NEW_REPO_REQUIRED")
     changed = Path(w.__file__).read_bytes()
-    w.require(w.digest(changed) != w.digest(f24_bytes), "CHANGED_EXECUTE_STILL_F24")
     before_catalog, before_ledger = e.catalog(), e.ledger()
     w.require(
         all(version in before_ledger for version in RETIRED_LEDGER_VERSIONS) and w.EXPAND not in before_ledger,
@@ -689,7 +700,7 @@ def historical_ledger_admission(e):
             "EXTRA_CURRENT_ROW_NOT_RESTORED",
         )
 
-    def worker_migrate(module):
+    def worker_migrate(module, *, repo=None, sha=None):
         saved_worker_db = (
             module._WORKER_DATABASE,
             module._WORKER_PORT,
@@ -701,6 +712,8 @@ def historical_ledger_admission(e):
         module._WORKER_DATABASE = identity["dbname"]
         module._WORKER_PORT = identity["port"]
         module._WORKER_USERS = dict.fromkeys(("parse", "read", "admin"), identity["user"])
+        repo = repo or e.fixture.new_repo
+        sha = sha or module.NEW
         argv = [
             str(Path(module.__file__).resolve()),
             "worker",
@@ -709,22 +722,40 @@ def historical_ledger_admission(e):
             "--action",
             "migrate",
             "--repo",
-            e.fixture.new_repo,
+            repo,
             "--sha",
-            w.NEW,
+            sha,
         ]
         output = io.StringIO()
         errors = io.StringIO()
         try:
             saved_argv = sys.argv
+            saved_cwd = os.getcwd()
+            saved_path = sys.path[:]
+            saved_modules = {
+                name: sys.modules.pop(name)
+                for name in list(sys.modules)
+                if name == "packages" or name.startswith(("packages.", "workers.", "scripts.", "apps."))
+            }
             sys.argv = argv
+            os.chdir(repo)
+            sys.path = [repo] + [
+                item
+                for item in saved_path
+                if Path(item).resolve() != Path(e.fixture.new_repo).resolve() or repo == e.fixture.new_repo
+            ]
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 rc = module.main()
+            stdout, stderr = output.getvalue(), errors.getvalue()
         finally:
+            os.chdir(saved_cwd)
             sys.argv = saved_argv
+            sys.path[:] = saved_path
+            for name in list(sys.modules):
+                if name == "packages" or name.startswith(("packages.", "workers.", "scripts.", "apps.")):
+                    sys.modules.pop(name, None)
+            sys.modules.update(saved_modules)
             module._WORKER_DATABASE, module._WORKER_PORT, module._WORKER_USERS = saved_worker_db
-        stdout = output.getvalue()
-        stderr = errors.getvalue()
         e.seq += 1
         e.save()
         e.save_file(f"historical-worker-{e.seq}.stdout", stdout.encode())
@@ -768,7 +799,7 @@ def historical_ledger_admission(e):
         reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload})
         e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
         w.require(e.ledger() == before_ledger, "ZERO_PENDING_LEDGER_NOT_RESTORED")
-        rc, payload, stderr = worker_migrate(f24)
+        rc, payload, stderr = worker_migrate(f24, repo=e.fixture.original_new_repo, sha=f24.NEW)
         require_worker_pending_refusal(rc, payload, stderr, "F24_WORKER_SHOULD_REFUSE_HISTORICAL")
         require_unchanged("F24_WORKER_HISTORICAL_SIDE_EFFECT")
         reports.append({"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload})
@@ -801,6 +832,10 @@ def historical_ledger_admission(e):
         config["admission"][key] = {"path": str(path), "sha256": w.digest(data)}
     config_path = e.root / "historical-prepare-config.json"
     w.private_write(config_path, json.dumps(config).encode())
+    original_config = json.loads(json.dumps(config))
+    original_config.update(new_sha=f24.NEW, staged_new_repo=e.fixture.original_new_repo)
+    original_config_path = e.root / "historical-prepare-original-config.json"
+    w.private_write(original_config_path, json.dumps(original_config).encode())
     external_units = {}
     for name in w.TIMERS + w.SERVICES:
         fragment = assets / name
@@ -882,10 +917,12 @@ def historical_ledger_admission(e):
             return super().run(argv, **kwargs)
 
         def git(self, *args, repo=None):
+            expected_new = self.c["new_sha"]
+            staged = self.c["staged_new_repo"]
             if repo is not None:
-                w.require(str(repo) == self.fixture.new_repo, "UNKNOWN_STAGED_GIT_BOUNDARY")
+                w.require(str(repo) == staged, "UNKNOWN_STAGED_GIT_BOUNDARY")
                 if args == ("rev-parse", "HEAD"):
-                    return w.NEW
+                    return expected_new
                 if args == ("status", "--porcelain=v1", "--untracked-files=all"):
                     return ""
                 raise w.Refusal("UNKNOWN_STAGED_GIT_BOUNDARY")
@@ -895,7 +932,7 @@ def historical_ledger_admission(e):
                 ("rev-parse", "--verify", "refs/heads/new^{commit}"),
                 ("rev-parse", "--verify", "refs/remotes/fixture/new^{commit}"),
             ):
-                return w.NEW
+                return expected_new
             return super().git(*args, repo=repo)
 
         def drain(self):
@@ -949,13 +986,14 @@ def historical_ledger_admission(e):
         module.Executor = factory
         module.safe_path = safe_boundary
         os.getuid = lambda: 1005
+        selected_config = config_path if module is w else original_config_path
         sys.argv = [
             str(Path(module.__file__).resolve()),
             "prepare",
             "--state",
             str(root),
             "--config",
-            str(config_path),
+            str(selected_config),
         ]
         os.environ.update({key: e.dsn for key in saved_env})
         output = io.StringIO()
@@ -1587,7 +1625,18 @@ def write_budget(args):
 def arguments():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--worker", action="store_true")
-    for name in ("oracle", "old-repo", "new-repo", "container", "state", "repo", "sha", "action", "fixture-config"):
+    for name in (
+        "oracle",
+        "old-repo",
+        "new-repo",
+        "container",
+        "state",
+        "repo",
+        "sha",
+        "action",
+        "fixture-config",
+        "original-new-repo",
+    ):
         p.add_argument("--" + name)
     p.add_argument(
         "--case",
@@ -1611,6 +1660,8 @@ def arguments():
     )
     if args.case == "write-budget":
         required = ("container", "state", "new_repo", "fixture_config")
+    if args.case == "happy":
+        required = required + ("original_new_repo",)
     for name in required:
         if not getattr(args, name):
             p.error("missing --" + name.replace("_", "-"))
