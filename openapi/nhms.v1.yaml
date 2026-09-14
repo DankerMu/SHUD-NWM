@@ -2304,7 +2304,7 @@ paths:
                 type: string
                 format: binary
         '424':
-          $ref: '#/components/responses/MvtLivePostgisUnavailable'
+          $ref: '#/components/responses/MvtNationalIdentityUnavailable'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -5924,6 +5924,42 @@ components:
                     type: string
                     enum:
                     - MVT_LIVE_POSTGIS_UNAVAILABLE
+                  message:
+                    type: string
+                  details:
+                    type:
+                    - object
+                    - 'null'
+                    additionalProperties: true
+    MvtNationalIdentityUnavailable:
+      description: Live PostGIS MVT is unavailable, or the requested national identity is not covered
+        by every active river network.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - request_id
+            - status
+            - error
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum:
+                - error
+              error:
+                type: object
+                required:
+                - code
+                - message
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - MVT_LIVE_POSTGIS_UNAVAILABLE
+                    - MVT_NATIONAL_IDENTITY_INCOMPLETE
                   message:
                     type: string
                   details:

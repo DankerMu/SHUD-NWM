@@ -1088,7 +1088,19 @@ class _TileResult:
 
 
 class _NationalRouteSession:
-    """Answers both statements the national route issues, and records their binds."""
+    """Answers every statement the national routes issue, and records their SQL and binds.
+
+    #2153 added the per-cycle coverage pair (active set, then coverage rows) to
+    the canonical route's miss path, so statements are classified by the feature
+    that distinguishes each one, in this order: the tile (`ST_AsMVT`), the digest
+    (`geometry_generation` -- `national_river_network_source_version` also
+    mentions `core.model_instance mi`, so this check must precede the active-set
+    one), the coverage rows (their `PARTITION BY`), the active set
+    (`core.model_instance mi` without `hydro.hydro_run`). Anything else -- the
+    per-basin sibling digests -- keeps landing on the digest recorder, as before.
+    The defaults answer active = coverage = `{rnv_a}`, a fully covered identity,
+    so every pre-#2153 200 case keeps its meaning.
+    """
 
     _DIGEST_ROWS = [
         {
@@ -1110,23 +1122,55 @@ class _NationalRouteSession:
         "invalid_properties": None,
     }
 
-    def __init__(self, digest_rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        digest_rows: list[dict[str, Any]] | None = None,
+        *,
+        active_networks: tuple[str, ...] = ("rnv_a",),
+        coverage_networks: tuple[str, ...] = ("rnv_a",),
+        tile_row: dict[str, Any] | None = None,
+    ) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         self.tile_params: list[dict[str, Any]] = []
         self.digest_params: list[dict[str, Any]] = []
+        self.active_params: list[dict[str, Any]] = []
+        self.coverage_params: list[dict[str, Any]] = []
+        # `(kind, sql)` in execution order, so a case can assert statement order.
+        self.statements: list[tuple[str, str]] = []
         # Per instance, never by mutating `_DIGEST_ROWS`: the class attribute is
         # shared by every other case in this file.
         self.digest_rows = self._DIGEST_ROWS if digest_rows is None else digest_rows
+        self.active_networks = active_networks
+        self.coverage_networks = coverage_networks
+        self.tile_row = dict(self._TILE_ROW) if tile_row is None else tile_row
 
     def execute(self, statement: Any, params: Any = None) -> _TileResult:
-        if "ST_AsMVT" in str(statement):
-            self.tile_params.append(dict(params or {}))
-            return _TileResult([dict(self._TILE_ROW)])
-        # The only other statement either national route issues is
-        # `national_discharge_source_version`'s digest; recording its binds is
-        # what lets a case assert the route narrowed it to the requested
-        # identity (the tile binds alone cannot see that call at all).
-        self.digest_params.append(dict(params or {}))
+        sql = str(statement)
+        bound = dict(params or {})
+        if "ST_AsMVT" in sql:
+            self.statements.append(("tile", sql))
+            self.tile_params.append(bound)
+            return _TileResult([dict(self.tile_row)])
+        if "geometry_generation" not in sql:
+            if "PARTITION BY mi.river_network_version_id, h.cycle_time" in sql:
+                self.statements.append(("coverage", sql))
+                self.coverage_params.append(bound)
+                return _TileResult(
+                    [
+                        {"river_network_version_id": network, "cycle_time": bound.get("cycle")}
+                        for network in self.coverage_networks
+                    ]
+                )
+            if "core.model_instance mi" in sql and "hydro.hydro_run" not in sql:
+                self.statements.append(("active", sql))
+                self.active_params.append(bound)
+                return _TileResult([{"river_network_version_id": network} for network in self.active_networks])
+        # Otherwise `national_discharge_source_version`'s digest (or a sibling
+        # route's); recording its binds is what lets a case assert the route
+        # narrowed it to the requested identity (the tile binds alone cannot see
+        # that call at all).
+        self.statements.append(("digest", sql))
+        self.digest_params.append(bound)
         return _TileResult([dict(row) for row in self.digest_rows])
 
     def get_bind(self) -> Any:
@@ -1160,16 +1204,25 @@ def _request_national_identity_tile(
     session: Any,
     monkeypatch: Any,
     tmp_path: Any,
+    *,
+    cached: TileResponse | None = None,
+    live_postgis: bool = True,
+    built: list[bytes] | None = None,
 ) -> tuple[Any, list[TileInput]]:
-    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    if live_postgis:
+        monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    else:
+        monkeypatch.delenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", raising=False)
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
     captured: list[TileInput] = []
 
     def fake_read(_session: object, tile: TileInput) -> TileResponse | None:
         captured.append(tile)
-        return None
+        return cached
 
     def fake_build(_session: object, tile: TileInput, data: bytes) -> TileResponse:
+        if built is not None:
+            built.append(data)
         return TileResponse(
             data=data,
             checksum="checksum",
@@ -1807,7 +1860,7 @@ def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
     ]["get"]
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
-    assert operation["responses"]["424"] == {"$ref": "#/components/responses/MvtLivePostgisUnavailable"}
+    assert operation["responses"]["424"] == {"$ref": "#/components/responses/MvtNationalIdentityUnavailable"}
     assert parameters["variable"]["schema"]["enum"] == ["q_down"]
     assert parameters["source"]["schema"]["enum"] == ["gfs", "ifs"]
     assert parameters["z"]["schema"]["maximum"] == 14
@@ -3906,3 +3959,293 @@ def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
     assert "AND timeseries_store = 'narrow'" in sql
     assert set(text(sql)._bindparams) <= bound.keys()
     assert all(bound[key] == value for key, value in params.items())
+
+
+# ---------------------------------------------------------------------------
+# #2153: the canonical source/cycle national tile refuses a partially covered
+# identity, on a cache miss, with the per-cycle valid-times coverage rule.
+#
+# The helper is reached through the module objects, never imported by name at
+# the top of this file: the red proof runs these cases against a tree where it
+# does not exist yet, and a top-level import would fail the whole module's
+# collection instead of failing the cases that need it.
+# ---------------------------------------------------------------------------
+
+_PARTIAL_IDENTITY_URL = _national_identity_url("gfs", "2026-09-02T12:00:00Z")
+_INCOMPLETE_CODE = "MVT_NATIONAL_IDENTITY_INCOMPLETE"
+
+
+def _statement_kinds(session: _NationalRouteSession) -> list[str]:
+    return [kind for kind, _sql in session.statements]
+
+
+def test_canonical_national_tile_refuses_a_partially_covered_identity(monkeypatch: Any, tmp_path: Any) -> None:
+    """E1: two of three active networks cover `(gfs, C)` -> 424, no tile SQL, nothing built.
+
+    Pre-#2153 this was a 200 carrying the two networks' features, cached under
+    the identity's key: a national map whose third network looks like "no flow".
+    """
+    session = _NationalRouteSession(active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b"))
+    built: list[bytes] = []
+
+    response, _captured = _request_national_identity_tile(
+        _PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path, built=built
+    )
+
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == _INCOMPLETE_CODE
+    # Counts, never the network ids: the route is public.
+    assert error["details"] == {
+        "layer_id": "discharge",
+        "source": "gfs",
+        "cycle": "2026-09-02T12:00:00Z",
+        "covered_network_count": 2,
+        "active_network_count": 3,
+    }
+    assert "tile" not in _statement_kinds(session)
+    assert session.tile_params == []
+    assert built == []
+
+
+def test_canonical_national_tile_refuses_an_equal_size_membership_mismatch(monkeypatch: Any, tmp_path: Any) -> None:
+    """E4: the two-statement race at equal cardinality fails closed (matrix 40b's tile twin)."""
+    session = _NationalRouteSession(
+        active_networks=("rn-b", "rn-c1", "rn-c2"), coverage_networks=("rn-a", "rn-c1", "rn-c2")
+    )
+
+    response, _captured = _request_national_identity_tile(_PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path)
+
+    # Non-vacuity: equal sizes, different members, so a cardinality compare would serve it.
+    assert len(session.active_networks) == len(session.coverage_networks) == 3
+    assert set(session.active_networks) != set(session.coverage_networks)
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == _INCOMPLETE_CODE
+    assert (error["details"]["covered_network_count"], error["details"]["active_network_count"]) == (3, 3)
+    assert "tile" not in _statement_kinds(session)
+
+
+def test_canonical_national_tile_keeps_the_no_run_verdict_for_an_uncovered_identity(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """E3: covered = empty falls through to the tile SQL's own 424, byte-identical to before."""
+    session = _NationalRouteSession(
+        active_networks=("rn-a", "rn-b"),
+        coverage_networks=(),
+        tile_row={**_NationalRouteSession._TILE_ROW, "source_identity_count": 0},
+    )
+
+    response, _captured = _request_national_identity_tile(
+        _national_identity_url("ifs", "2026-09-02T12:00:00Z"), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert error["message"] == "Live PostGIS MVT query returned no source rows for the requested identity."
+    assert error["details"] == {
+        "layer_id": "discharge",
+        "z": _NATIONAL_TILE_Z,
+        "x": _NATIONAL_TILE_X,
+        "y": _NATIONAL_TILE_Y,
+    }
+    assert len(session.tile_params) == 1
+
+
+def test_canonical_national_tile_cache_hit_issues_no_coverage_statement(monkeypatch: Any, tmp_path: Any) -> None:
+    """E6, hit half: a cached tile is served before the producer, so the check costs nothing."""
+    session = _NationalRouteSession(active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b"))
+    cached = TileResponse(
+        data=b"cached-pbf",
+        checksum="cached-checksum",
+        etag='W/"cached"',
+        cache_key="cached-key",
+        cache_status="hit",
+        layer_id="discharge",
+    )
+
+    response, _captured = _request_national_identity_tile(
+        _PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path, cached=cached
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"cached-pbf"
+    assert _statement_kinds(session) == ["digest"]
+
+
+def test_canonical_national_tile_with_live_postgis_disabled_issues_no_coverage_statement(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """E6, disabled half: the live-PostGIS gate precedes the coverage pair, same 424 as before."""
+    session = _NationalRouteSession(active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b"))
+
+    response, _captured = _request_national_identity_tile(
+        _PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path, live_postgis=False
+    )
+
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert error["message"] == "Live PostGIS MVT is required for canonical .pbf tile routes and is not enabled."
+    assert error["details"] == {"layer_id": "hydro-national", "required_env": "NHMS_ENABLE_LIVE_POSTGIS_MVT=true"}
+    assert _statement_kinds(session) == ["digest"]
+
+
+def test_legacy_national_tile_never_evaluates_the_identity_coverage_rule(monkeypatch: Any, tmp_path: Any) -> None:
+    """E7: the source-less alias is mixed-cycle by design and binds no identity to check."""
+    session = _NationalRouteSession(active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b"))
+
+    response, _captured = _request_national_identity_tile(_legacy_national_url(), session, monkeypatch, tmp_path)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"pbf-bytes"
+    assert _statement_kinds(session) == ["digest", "tile"]
+    assert (session.tile_params[0]["source"], session.tile_params[0]["cycle"]) == (None, None)
+
+
+def test_valid_times_and_the_tile_route_read_one_coverage_helper(monkeypatch: Any, tmp_path: Any) -> None:
+    """E5: both call sites go through `national_discharge_cycle_coverage`, so they cannot drift.
+
+    The replacement reports an incomplete identity for data that is really fully
+    covered; each surface must then refuse. `hydro_display` imports the helper by
+    name, so it is patched in both modules.
+    """
+    full = _NationalDiscoverySession(_full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b")))
+    # Non-vacuity: unpatched, this very session yields a non-empty timeline.
+    assert national_discharge_valid_times(full, source="gfs", cycle=_CYCLE).valid_times
+
+    incomplete = mvt_module.NationalCycleCoverage(
+        rows=[],
+        covered_networks=frozenset({"rn-a"}),
+        active_networks=frozenset({"rn-a", "rn-b"}),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _incomplete_coverage(_session: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return incomplete
+
+    monkeypatch.setattr(mvt_module, "national_discharge_cycle_coverage", _incomplete_coverage)
+    monkeypatch.setattr(hydro_display, "national_discharge_cycle_coverage", _incomplete_coverage)
+
+    assert national_discharge_valid_times(full, source="gfs", cycle=_CYCLE).valid_times == []
+    assert calls == [{"source": "gfs", "cycle": _CYCLE}]
+
+    session = _NationalRouteSession()
+    response, _captured = _request_national_identity_tile(_PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path)
+
+    assert response.status_code == 424, response.text
+    assert response.json()["error"]["code"] == _INCOMPLETE_CODE
+    assert calls[1:] == [{"source": "gfs", "cycle": _NATIONAL_CYCLE}]
+    assert "tile" not in _statement_kinds(session)
+
+
+@pytest.mark.parametrize(
+    ("case", "covering", "active", "complete"),
+    [
+        ("partial", ("rn-a", "rn-b"), ["rn-a", "rn-b", "rn-c"], False),
+        ("full", ("rn-a", "rn-b", "rn-c"), ["rn-a", "rn-b", "rn-c"], True),
+        ("empty", (), ["rn-a", "rn-b"], False),
+        ("equal-size-mismatch", ("rn-a", "rn-c1", "rn-c2"), ["rn-b", "rn-c1", "rn-c2"], False),
+    ],
+)
+def test_national_cycle_coverage_helper_compares_sets_like_the_per_cycle_valid_times(
+    case: str, covering: tuple[str, ...], active: list[str], complete: bool
+) -> None:
+    """E5: the helper's verdict IS the per-cycle valid-times verdict, on the same inputs.
+
+    `_PREVIOUS_CYCLE` rows for every active network are mixed in so the `:cycle`
+    bind, not the fixture, is what keeps them out of the covered set.
+    """
+    rows = _full_coverage_rows(_CYCLE, networks=covering) + _full_coverage_rows(
+        _PREVIOUS_CYCLE, networks=tuple(active)
+    )
+    helper_session = _NationalDiscoverySession(rows, active_networks=active)
+
+    coverage = mvt_module.national_discharge_cycle_coverage(helper_session, source="gfs", cycle=_CYCLE)
+
+    assert coverage.covered_networks == frozenset(covering), case
+    assert coverage.active_networks == frozenset(active), case
+    assert coverage.complete is complete, case
+    assert [row["river_network_version_id"] for row in coverage.rows] == list(covering), case
+    # The same two statements, with the same binds, the valid-times branch always issued.
+    assert [params for _sql, params in helper_session.executions] == [
+        None,
+        {"source": "gfs", "cycle": _CYCLE, "since": None},
+    ], case
+
+    discovery = national_discharge_valid_times(
+        _NationalDiscoverySession(rows, active_networks=active), source="gfs", cycle=_CYCLE
+    )
+    assert bool(discovery.valid_times) is complete, case
+
+
+def test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_route_only() -> None:
+    """E8: the new code is documented where it can be emitted, and nowhere else."""
+    schema = main.create_app().openapi()
+    canonical = "/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf"
+    siblings = (
+        "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+    )
+
+    def _code_enum(name: str) -> list[str]:
+        response = schema["components"]["responses"][name]
+        return response["content"]["application/json"]["schema"]["properties"]["error"]["properties"]["code"]["enum"]
+
+    assert schema["paths"][canonical]["get"]["responses"]["424"] == {
+        "$ref": "#/components/responses/MvtNationalIdentityUnavailable"
+    }
+    for path in siblings:
+        assert schema["paths"][path]["get"]["responses"]["424"] == {
+            "$ref": "#/components/responses/MvtLivePostgisUnavailable"
+        }, path
+    assert _code_enum("MvtNationalIdentityUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE", _INCOMPLETE_CODE]
+    assert _code_enum("MvtLivePostgisUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE"]
+
+
+# Captured on the pre-#2153 tree (origin/master 015423c71) for exactly this
+# request and fake session, never recomputed from the module under test: the
+# refusal must leave a fully covered identity's cache key and tile binds alone.
+_PRE_2153_FULL_COVERAGE_CACHE_KEY = "f408b0dfaa543ad513cd11a9c9bb231c2b1d2cdebf98e2c20fda26c72da47141"
+_PRE_2153_FULL_COVERAGE_TILE_BINDS: dict[str, Any] = {
+    "variable": "q_down",
+    "valid_time": datetime(2026, 9, 3, 0, 0, tzinfo=UTC),
+    "source": "gfs",
+    "cycle": datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+    "z": 4,
+    "x": 13,
+    "y": 6,
+    "feature_limit": 10000,
+    "feature_coordinate_limit": 50000,
+    "collection_coordinate_limit": 50000,
+    "max_coordinate_dimensions": 3,
+    "extent": 4096,
+    "buffer": 64,
+    "simplification_tolerance_m": 256.0,
+}
+
+
+def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monkeypatch: Any, tmp_path: Any) -> None:
+    """E2: every active network covers `(gfs, C)` -> 200 with the pre-#2153 key and binds.
+
+    The coverage pair runs once each, bound to the requested identity, between the
+    digest and the tile SQL. Byte-level sameness on real rows is E11's job.
+    """
+    session = _NationalRouteSession(
+        active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b", "rn-c")
+    )
+
+    response, _captured = _request_national_identity_tile(_PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"pbf-bytes"
+    assert _statement_kinds(session) == ["digest", "active", "coverage", "tile"]
+    assert len(session.active_params) == 1
+    assert session.coverage_params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE, "since": None}]
+    assert response.headers["X-Tile-Cache-Key"] == _PRE_2153_FULL_COVERAGE_CACHE_KEY
+    assert session.tile_params == [_PRE_2153_FULL_COVERAGE_TILE_BINDS]

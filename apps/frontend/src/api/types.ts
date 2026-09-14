@@ -1964,6 +1964,27 @@ export interface components {
                 };
             };
         };
+        /** @description Live PostGIS MVT is unavailable, or the requested national identity is not covered by every active river network. */
+        MvtNationalIdentityUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "MVT_LIVE_POSTGIS_UNAVAILABLE" | "MVT_NATIONAL_IDENTITY_INCOMPLETE";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
         /** @description Error response */
         Error: {
             headers: {
@@ -3539,7 +3560,7 @@ export interface operations {
                     "application/x-protobuf": string;
                 };
             };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
+            424: components["responses"]["MvtNationalIdentityUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
