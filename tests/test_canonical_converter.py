@@ -601,6 +601,34 @@ def test_canonical_readiness_blocks_legacy_rows_missing_required_lineage() -> No
     assert result.evidence["source_object_identity_matched"] is False
 
 
+def test_canonical_readiness_zero_rows_with_expected_identity_is_not_identity_mismatch() -> None:
+    # #2042: production GFS 2026090312 shape -- a fresh cycle with no canonical rows yet
+    # must report missing variables, not a policy/source-object identity conflict.
+    scheduler_candidates = importlib.import_module("services.orchestrator.scheduler_candidates")
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=parse_cycle_time("2026090312"),
+        products=[],
+        forecast_hours=(0, 3),
+        policy_identity={"source": "gfs", "forecast_hours": [0, 3]},
+        source_object_identity={"source": "gfs", "manifest_object_key": "raw/gfs/2026090312/manifest.json"},
+        canonical_product_id="canon_gfs_2026090312",
+        model_id="hekouzhen_zhi_longmen",
+        basin_id="hekouzhen_zhi_longmen",
+    )
+
+    evidence = result.evidence
+    assert result.ready is False
+    assert evidence["ready"] is False
+    assert evidence["status"] == "canonical_incomplete"
+    assert evidence["candidate_row_count"] == 0
+    assert evidence["identity_rejected_row_count"] == 0
+    assert evidence["reason"] == "missing_canonical_variables"
+    assert evidence["missing_variables"] == list(GFS_REQUIRED_STANDARD_VARIABLES)
+    assert scheduler_candidates._canonical_evidence_is_fresh_zero_row(evidence) is True
+
+
 def test_unit_conversion_boundaries() -> None:
     assert convert_units("tmp2m", [233.15]) == pytest.approx((-40.0,))
     assert convert_units("apcp", [0.0], [0.0]) == pytest.approx((0.0,))

@@ -520,6 +520,47 @@ invocation 至多一张：后面的 stage 检查或更多 veto basin 都不覆�
 4. **验证**：把 `veto_cause` 指出的那一关修好后，下一个自然 pass 该 basin 转合格，
    cohort 全合格时 gate 回 `True` 且**记录消失**——记录只在混合 cohort 出现。
 
+## `canonical_identity_mismatch`
+
+### 含义
+
+`evaluate_canonical_readiness`（`workers/canonical_converter/converter.py`）的
+canonical readiness reason，挂在候选的 `state_evidence.canonical_readiness.reason`
+上。它只表示：**该 cycle 已有 canonical 行**，但这些行 lineage 上的 policy identity
+或 source-object identity 与本 cycle 期望的 identity 对不上（换过 policy、换过源
+对象、部分行缺 identity）。行上完全缺 lineage 的旧行报的是
+`canonical_lineage_missing`，不是本 reason。
+
+零行新鲜周期（还没 ingest 任何 canonical 行）**不是**本 reason：自 #2042 起它报
+`missing_canonical_variables`（有 required 变量时）。此前零行周期因"没有任何
+identity 可匹配"被误报为 `canonical_identity_mismatch`。
+
+### 现场区分
+
+看同一份 `canonical_readiness` evidence：
+
+| 字段 | 有行 identity 冲突 | 零行新鲜周期 |
+|---|---|---|
+| `candidate_row_count` | `> 0` | `0` |
+| `identity_rejected_row_count` | 通常 `> 0` | `0` |
+| `policy_identity_matched` / `source_object_identity_matched` | 至少一个 `false` | 期望 identity 非空时为 `false`（没有行可匹配，不是冲突） |
+| `reason` | `canonical_identity_mismatch` | `missing_canonical_variables` |
+
+`*_identity_matched=false` 单独不能判定冲突，必须结合 `candidate_row_count`。
+
+### 处置
+
+1. **有行 mismatch**（`candidate_row_count > 0`）：scheduler 硬 block，候选进
+   `blocked_candidates[]`。按 lineage 修复处理——查清旧 canonical 行来自哪个
+   policy / 源对象，重转或清理后再让下一个自然 pass 重新判定。不要为了放行去改
+   期望 identity。
+2. **零行新鲜周期**（`candidate_row_count == 0`）：正常新鲜 ingest，scheduler 的
+   fresh-zero-row 判定照常送 convert / forecast，无需处置。
+3. **旧冻结 index**：#2042 之前写入的 forecast_index（如 node-22 上
+   `gfs_2026090312` 的 `forecast_index_*.json`）里零行候选仍带旧的假
+   `canonical_identity_mismatch`；这些文件不回写，按上表用
+   `candidate_row_count == 0` 识别为零行即可。
+
 ## 相关文档
 
 - [`current-production-ops.md`](current-production-ops.md) — 当前生产值守手册。

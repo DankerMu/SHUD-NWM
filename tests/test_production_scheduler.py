@@ -2466,7 +2466,8 @@ def _fresh_zero_row_readiness_provider(
 
     ``evaluate_canonical_readiness`` over an empty product set yields
     ``ready=False`` with ``candidate_row_count == 0`` -> fresh full-chain
-    ingestion (M23 §255), not a corrupt/partial canonical block.
+    ingestion (M23 §255), not a corrupt/partial canonical block. Its reason is
+    ``missing_canonical_variables``, never ``canonical_identity_mismatch`` (#2042).
     """
 
     return FakeCanonicalReadinessProvider(
@@ -2616,6 +2617,9 @@ def test_fresh_zero_canonical_with_nfs_raw_ready_restarts_at_convert(tmp_path: P
     assert state_evidence["raw_manifest_reuse"]["source"] == "node27_nfs_raw_manifest"
     assert state_evidence["nfs_raw_manifest"]["status"] == "ready"
     assert state_evidence["canonical_readiness"]["candidate_row_count"] == 0
+    # #2042: a zero-row fresh cycle is missing variables, not an identity conflict.
+    assert state_evidence["canonical_readiness"]["identity_rejected_row_count"] == 0
+    assert state_evidence["canonical_readiness"]["reason"] == "missing_canonical_variables"
 
 
 def test_nfs_raw_ready_candidate_stages_raw_before_convert_submit(

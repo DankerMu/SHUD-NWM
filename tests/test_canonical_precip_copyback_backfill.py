@@ -269,6 +269,155 @@ def test_backfill_refuses_to_mirror_a_symlinked_entry(
     assert not (copyback_root / "canonical/gfs/2026090212/prcp_rate_or_amount/linked.nc").exists()
 
 
+def _seed_nested_prcp_files(source_root: Path, storage_source: str, cycle_token: str) -> dict[str, bytes]:
+    """Files one and two levels below `prcp_rate_or_amount/` (#2061)."""
+
+    prcp_relative = f"canonical/{storage_source}/{cycle_token}/prcp_rate_or_amount"
+    payloads: dict[str, bytes] = {}
+    for relative in ("members/m01.nc", "members/m02.nc", "members/deep/m03.nc"):
+        path = source_root / prcp_relative / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = f"nested:{storage_source}:{cycle_token}:{relative}".encode("utf-8")
+        path.write_bytes(payload)
+        payloads[f"{prcp_relative}/{relative}"] = payload
+    return payloads
+
+
+def test_backfill_mirrors_a_nested_tree_to_the_matching_destination_paths(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sub-directories below a tree root are recursed into, not dropped (#2061).
+
+    The two-source store has 14 files at tree-root level; three more sit one and
+    two levels below `gfs/2026090212/prcp_rate_or_amount/`. Every one of them
+    must land on the identical relative path, and a rerun skips all 17.
+    """
+
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    nested = _seed_nested_prcp_files(source_root, "gfs", "2026090212")
+    payloads.update(nested)
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    entry = next(
+        cycle for cycle in summary["cycles"] if cycle["source"] == "gfs" and cycle["cycle_token"] == "2026090212"
+    )
+    assert (entry["status"], entry["copied"], entry["skipped"], entry["failed"]) == ("ok", 3 + 3, 0, 0)
+    assert summary["totals"] == {"copied": 17, "skipped": 0, "failed": 0}
+
+    rerun_exit = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    rerun = json.loads(capsys.readouterr().out)
+
+    assert rerun_exit == 0
+    rerun_entry = next(
+        cycle for cycle in rerun["cycles"] if cycle["source"] == "gfs" and cycle["cycle_token"] == "2026090212"
+    )
+    assert (rerun_entry["copied"], rerun_entry["skipped"], rerun_entry["failed"]) == (0, 6, 0)
+    assert rerun["totals"] == {"copied": 0, "skipped": 17, "failed": 0}
+
+
+@pytest.mark.parametrize("cycle_name", ["20260905", "abcdefghij"])
+def test_backfill_ignores_a_cycle_directory_that_is_not_a_ten_digit_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    cycle_name: str,
+) -> None:
+    """A real directory holding a full prcp tree is still not a cycle unless `^\\d{10}$`.
+
+    `20260905` fails only the length half of the rule, `abcdefghij` only the
+    digit half; the name never reaches the summary and nothing is mirrored.
+    """
+
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    _seed_cycle(source_root, "gfs", cycle_name)
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert [cycle for cycle in summary["cycles"] if cycle["cycle_token"] == cycle_name] == []
+    assert len(summary["cycles"]) == 4
+    assert summary["totals"] == {"copied": 14, "skipped": 0, "failed": 0}
+    assert not (copyback_root / "canonical" / "gfs" / cycle_name).exists()
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+
+
+def test_backfill_records_a_same_size_directory_at_the_destination_leaf_as_a_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only a *regular* same-size destination is skipped (`_mirror_file`'s `S_ISREG`).
+
+    The source file is written with exactly the destination directory's
+    `st_size`, so a size-only comparison would count it `skipped` and leave the
+    mirror holding a directory where the product belongs. The copy is attempted
+    instead, `os.replace` onto the directory fails, and the failure is recorded.
+    """
+
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    relative = "canonical/gfs/2026090212/prcp_rate_or_amount/gfs_2026090212_prcp_rate_or_amount_f003.nc"
+    blocking_dir = copyback_root / relative
+    blocking_dir.mkdir(parents=True)
+    (blocking_dir / "occupant").write_bytes(b"x")
+    source_file = source_root / relative
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"p" * blocking_dir.lstat().st_size)
+    assert source_file.stat().st_size == blocking_dir.lstat().st_size
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    entry = next(cycle for cycle in summary["cycles"] if cycle["cycle_token"] == "2026090212")
+    assert (entry["status"], entry["copied"], entry["skipped"], entry["failed"]) == ("failed", 0, 0, 1)
+    assert any(str(blocking_dir) in message for message in entry["errors"])
+    assert blocking_dir.is_dir() and (blocking_dir / "occupant").read_bytes() == b"x"
+    assert [path.name for path in blocking_dir.parent.iterdir() if ".backfill." in path.name] == []
+
+
+def test_backfill_replaces_a_same_size_symlink_at_the_destination_leaf(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The destination probe is `lstat`: a symlink to a same-size file is not a mirrored product.
+
+    Following it (`stat`) would count the leaf `skipped` and leave node-27
+    reading through a link to a file outside the mirror. `os.replace` swaps the
+    link itself, so the link's target is left untouched.
+    """
+
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    payloads = _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+    ((key, payload),) = payloads.items()
+    outside = tmp_path / "outside.nc"
+    outside_bytes = b"o" * len(payload)
+    outside.write_bytes(outside_bytes)
+    leaf = copyback_root / key
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(outside)
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert summary["totals"] == {"copied": 1, "skipped": 0, "failed": 0}
+    assert not leaf.is_symlink()
+    assert leaf.read_bytes() == payload
+    assert outside.read_bytes() == outside_bytes
+
+
 # --------------------------------------------------------------------------- #
 # Symlinked tree ROOTS. The per-entry rule above only covers entries *inside* a
 # tree: `canonical/`, `canonical/<S>/grid/` and
@@ -1002,6 +1151,56 @@ def test_backfill_missing_root_exits_two(tmp_path: Path, missing: str) -> None:
     exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
 
     assert exit_code == 2
+
+
+def _plant_regular_file_root(tmp_path: Path, which: str) -> tuple[Path, Path, Path]:
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    planted = source_root if which == "source" else copyback_root
+    (copyback_root if which == "source" else source_root).mkdir()
+    planted.write_bytes(b"a regular file where a root directory belongs")
+    return source_root, copyback_root, planted
+
+
+def _assert_usage_refusal(
+    capsys: pytest.CaptureFixture[str], exit_code: int, *, label: str, planted: Path
+) -> None:
+    """Refused by `resolve_roots` itself: stderr names the flag, stdout carries no summary.
+
+    Exit code alone does not pin the root check: a regular-file `--source-root`
+    that slipped past it still exits 2, through `backfill()`'s `root_error`
+    branch, which prints a JSON summary to stdout.
+    """
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert f"error: {label} is not an existing directory: {planted}" in captured.err
+    assert planted.read_bytes() == b"a regular file where a root directory belongs"
+
+
+def test_backfill_source_root_that_is_a_regular_file_exits_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root, copyback_root, planted = _plant_regular_file_root(tmp_path, "source")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+
+    _assert_usage_refusal(capsys, exit_code, label="--source-root", planted=planted)
+    assert list(copyback_root.iterdir()) == []
+
+
+def test_backfill_copyback_root_that_is_a_regular_file_exits_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root, copyback_root, planted = _plant_regular_file_root(tmp_path, "copyback")
+    _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+
+    _assert_usage_refusal(capsys, exit_code, label="--copyback-root", planted=planted)
 
 
 def test_backfill_overlapping_roots_exit_two(tmp_path: Path) -> None:

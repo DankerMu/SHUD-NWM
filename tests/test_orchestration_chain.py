@@ -1159,6 +1159,9 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 # resubmit veto receipt; additive with a default so positional
                 # constructors stay valid.
                 ("forced_resubmit_veto", None),
+                # #2076: invocation-local last canonical precipitation mirror
+                # status, read by the chain-exit recovery; additive with a default.
+                ("canonical_precip_mirror_status", None),
             ],
         ),
         "ModelRunAssembly": (
@@ -4124,6 +4127,632 @@ def test_canonical_precip_mirror_survives_a_cycle_whose_state_save_qc_never_subm
     events = _precip_mirror_events(repository)
     assert [event["status_to"] for event in events] == ["ok"]
     assert events[0]["details"]["precip_mirror"]["cycle"] == "2026050100"
+
+
+# --------------------------------------------------------------------------- #
+# #2070 / #2076: the mirror runs after the `convert` entry's cycle-status write,
+# and `_run_cycle_chain` re-runs it once at chain exit for a pass that skipped
+# `convert` (downstream restart) or whose mirror recorded `failed`. Every test
+# below drives `orchestrate_cycle` / `_after_cycle_stage_terminal` and reads the
+# receipts; none calls `_mirror_canonical_precip` directly.
+# --------------------------------------------------------------------------- #
+_PRECIP_HOOK_MESSAGE = "Canonical precipitation mirror ran after convert."
+_PRECIP_RECOVERY_MESSAGE = "Canonical precipitation mirror recovered at chain exit."
+
+
+def _downstream_restart_basins(restart_stage: str = "forecast") -> list[dict[str, Any]]:
+    basins = _basins(2)
+    for basin in basins:
+        basin["restart_stage"] = restart_stage
+    return basins
+
+
+def _precip_chain_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repository: FakeCycleRepository,
+    client: FakeCycleSlurmClient,
+    *,
+    copyback_root: Path | None,
+) -> ForecastOrchestrator:
+    """node-22's live shape: the chain ends at `state_save_qc`, whose sibling
+    run-tree copyback is stubbed so only the canonical lane touches the root."""
+
+    from services.orchestrator import chain_forecast_execution
+
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+    if copyback_root is None:
+        monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    monkeypatch.setattr(
+        chain_forecast_execution,
+        "copyback_run_trees",
+        lambda **kwargs: {"status": "copied", "run_ids": list(kwargs["run_ids"])},
+    )
+    return orchestrator
+
+
+def _mirrored_files(copyback_root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(copyback_root)): path.read_bytes()
+        for path in copyback_root.rglob("*")
+        if path.is_file() and path.name != COPYBACK_BATCH_LOCK_NAME
+    }
+
+
+def test_canonical_precip_mirror_downstream_restart_pass_recovers_a_missing_mirror_at_chain_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2076 scenario 1: a `restart_stage == "forecast"` pass skips `convert` at the
+    `stage_index < start_stage_index` guard, so the terminal hook never fires; the
+    chain-exit recovery is the only thing that can mirror the cycle."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert result.status == "succeeded"
+    # `convert` was neither submitted nor resumed on this pass.
+    assert "convert" not in {submission["stage"] for submission in client.submissions}
+    assert "convert" not in {stage.stage for stage in result.stages}
+    assert not any(job.get("stage") == "convert" for job in repository.jobs.values())
+    assert _mirrored_files(copyback_root) == payloads
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("ok", _PRECIP_RECOVERY_MESSAGE)]
+    assert events[0]["entity_id"] == "gfs_2026050100"
+    mirror = events[0]["details"]["precip_mirror"]
+    assert set(events[0]["details"]) == {"precip_mirror"}
+    assert mirror["status"] == "ok"
+    assert mirror["storage_source"] == "gfs"
+    assert mirror["cycle"] == "2026050100"
+    assert mirror["file_count"] == len(payloads)
+
+
+def test_canonical_precip_mirror_chain_exit_recovery_probes_the_normalized_ifs_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2076 on IFS: the recovery's local-tree probe must use the normalized
+    `IFS` segment, not the lowercase `ifs` the cycle id carries. On case-sensitive
+    Linux a lowercase probe misses `canonical/IFS/...` and the cycle is never
+    recovered. macOS is case-insensitive, so the probe's argument is recorded and
+    its path parts are asserted directly -- that is what makes this test bite here."""
+
+    from packages.common import safe_fs
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    object_store_root = Path(orchestrator.config.object_store_root)
+    payloads = _seed_canonical_precip_tree(object_store_root, storage_source="IFS", cycle_token="2026050100")
+    probed: list[Path] = []
+
+    def recording_verify_directory_no_follow(path: Any, *args: Any, **kwargs: Any) -> Any:
+        probed.append(Path(path))
+        return safe_fs.verify_directory_no_follow(path, *args, **kwargs)
+
+    monkeypatch.setattr(chain_forecast_execution, "verify_directory_no_follow", recording_verify_directory_no_follow)
+
+    result = orchestrator.orchestrate_cycle("ifs", "2026050100", _downstream_restart_basins("forecast"))
+
+    assert result.status == "succeeded"
+    assert "convert" not in {submission["stage"] for submission in client.submissions}
+    assert probed == [object_store_root / "canonical" / "IFS" / "2026050100" / "prcp_rate_or_amount"]
+    assert "IFS" in probed[0].parts
+    assert "ifs" not in probed[0].parts
+    assert _mirrored_files(copyback_root) == payloads
+    # Entry names, not `Path.exists()`: macOS would answer True for `canonical/ifs`.
+    assert [entry.name for entry in (copyback_root / "canonical").iterdir()] == ["IFS"]
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("ok", _PRECIP_RECOVERY_MESSAGE)]
+    assert events[0]["entity_id"] == "ifs_2026050100"
+    mirror = events[0]["details"]["precip_mirror"]
+    assert mirror["storage_source"] == "IFS"
+    assert mirror["cycle"] == "2026050100"
+    assert sorted(tree["object_key"] for tree in mirror["trees"]) == [
+        "canonical/IFS/2026050100/prcp_rate_or_amount",
+        "canonical/IFS/grid/ifs_0p25",
+    ]
+
+
+def test_canonical_precip_mirror_downstream_restart_pass_skips_an_identical_mirror_without_rewriting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The accepted per-pass cost (#2076): an already-identical tree still yields one
+    `skipped` (`trees_already_mirrored`) receipt, and no destination byte is rewritten."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    object_store_root = Path(orchestrator.config.object_store_root)
+    payloads = _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+    # Both trees -- the cycle and the grid -- or the grid tree plans a copy and the
+    # receipt reads `ok`.
+    shutil.copytree(object_store_root / "canonical", copyback_root / "canonical")
+    before = {
+        key: ((copyback_root / key).stat().st_ino, (copyback_root / key).stat().st_mtime_ns)
+        for key in payloads
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert result.status == "succeeded"
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("skipped", _PRECIP_RECOVERY_MESSAGE)]
+    mirror = events[0]["details"]["precip_mirror"]
+    assert mirror["reason"] == "trees_already_mirrored"
+    assert {tree["action"] for tree in mirror["trees"]} == {"skip"}
+    after = {
+        key: ((copyback_root / key).stat().st_ino, (copyback_root / key).stat().st_mtime_ns)
+        for key in payloads
+    }
+    assert after == before
+    assert _mirrored_files(copyback_root) == payloads
+
+
+def test_canonical_precip_mirror_failed_hook_is_healed_by_a_later_downstream_restart_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2076 scenario 2. Pass 1 runs the full chain with the mirror faulted: the
+    `convert` hook records `failed` and its same-pass chain-exit retry fails too.
+    Pass 2 enters downstream of `convert` after the fault clears and heals it."""
+
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+    real_publisher = chain_forecast_execution.TilePublisher
+    fault = {"active": True}
+
+    class FlakyPublisher(real_publisher):  # type: ignore[misc, valid-type]
+        def copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+            if fault["active"]:
+                raise OSError("copyback mount stalled")
+            return super().copyback_canonical_precip(source, cycle)
+
+    monkeypatch.setattr(chain_forecast_execution, "TilePublisher", FlakyPublisher)
+
+    first = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert first.status == "succeeded"
+    assert "convert" in {submission["stage"] for submission in client.submissions}
+    first_events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in first_events] == [
+        ("failed", _PRECIP_HOOK_MESSAGE),
+        ("failed", _PRECIP_RECOVERY_MESSAGE),
+    ]
+    assert _mirrored_files(copyback_root) == {}
+
+    fault["active"] = False
+    submissions_before = len(client.submissions)
+    second = orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert second.status == "succeeded"
+    assert "convert" not in {submission["stage"] for submission in client.submissions[submissions_before:]}
+    events = _precip_mirror_events(repository)
+    assert len(events) == 3
+    healed = events[2]
+    assert healed["message"] == _PRECIP_RECOVERY_MESSAGE
+    assert healed["status_to"] == "ok"
+    assert _mirrored_files(copyback_root) == payloads
+
+
+def test_canonical_precip_mirror_full_chain_ok_hook_runs_no_chain_exit_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "succeeded"
+    assert [(event["status_to"], event["message"]) for event in _precip_mirror_events(repository)] == [
+        ("ok", _PRECIP_HOOK_MESSAGE)
+    ]
+    assert _mirrored_files(copyback_root) == payloads
+
+
+def test_canonical_precip_mirror_full_chain_skipped_hook_runs_no_chain_exit_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only `failed` is retried at chain exit: a full pass whose `convert` hook finds
+    the destination already identical records `skipped`, and that is final."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    object_store_root = Path(orchestrator.config.object_store_root)
+    payloads = _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+    shutil.copytree(object_store_root / "canonical", copyback_root / "canonical")
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "succeeded"
+    assert "convert" in {submission["stage"] for submission in client.submissions}
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("skipped", _PRECIP_HOOK_MESSAGE)]
+    assert events[0]["details"]["precip_mirror"]["reason"] == "trees_already_mirrored"
+    assert _mirrored_files(copyback_root) == payloads
+
+
+def test_canonical_precip_mirror_failed_hook_with_a_failed_receipt_write_is_still_recovered_at_chain_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The hook's `failed` outcome reaches the chain-exit recovery even when the
+    hook's own receipt write raises: the status is recorded on the context before
+    that write, so the recovery retries and heals the cycle in the same pass."""
+
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+    real_publisher = chain_forecast_execution.TilePublisher
+    mirror_attempts: list[str] = []
+
+    class FirstAttemptFailsPublisher(real_publisher):  # type: ignore[misc, valid-type]
+        def copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+            mirror_attempts.append(cycle)
+            if len(mirror_attempts) == 1:
+                raise OSError("copyback mount stalled")
+            return super().copyback_canonical_precip(source, cycle)
+
+    monkeypatch.setattr(chain_forecast_execution, "TilePublisher", FirstAttemptFailsPublisher)
+    real_insert = repository.insert_pipeline_event
+    receipt_writes: list[tuple[str, str]] = []
+
+    def first_receipt_write_raises(**kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("event_type") == "canonical_precip_mirror":
+            receipt_writes.append((str(kwargs.get("status_to")), str(kwargs.get("message"))))
+            if len(receipt_writes) == 1:
+                raise OrchestratorError("PIPELINE_EVENT_FAILED", "event write failed")
+        return real_insert(**kwargs)
+
+    monkeypatch.setattr(repository, "insert_pipeline_event", first_receipt_write_raises)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "succeeded"
+    assert "convert" in {submission["stage"] for submission in client.submissions}
+    assert mirror_attempts == ["2026050100", "2026050100"]
+    assert receipt_writes == [("failed", _PRECIP_HOOK_MESSAGE), ("ok", _PRECIP_RECOVERY_MESSAGE)]
+    assert [(event["status_to"], event["message"]) for event in _precip_mirror_events(repository)] == [
+        ("ok", _PRECIP_RECOVERY_MESSAGE)
+    ]
+    assert _mirrored_files(copyback_root) == payloads
+
+
+def test_canonical_precip_mirror_convert_reached_without_a_terminal_entry_runs_no_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The pass reached `convert` but its submit failed before the hook call site
+    (`submission_failed`), so nothing ran and there is nothing to retry."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+    real_submit_job = client.submit_job
+
+    def failing_convert_submit(payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["manifest"]["stage"] == "convert":
+            raise RuntimeError("convert submission failed")
+        return real_submit_job(payload)
+
+    monkeypatch.setattr(client, "submit_job", failing_convert_submit)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "failed"
+    assert [stage.status for stage in result.stages] == ["submission_failed"]
+    assert _precip_mirror_events(repository) == []
+    assert not (copyback_root / "canonical").exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["tree_absent", "symlinked_leaf", "symlinked_ancestor", "no_copyback_root"],
+)
+def test_canonical_precip_mirror_chain_exit_recovery_needs_a_local_unsymlinked_tree_and_a_copyback_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """The recovery predicate refuses a symlink at ANY component of
+    `canonical/<S>/<cycle>/prcp_rate_or_amount` (not just the leaf), treats an
+    absent tree as nothing to recover (a retention-pruned cycle), and is fenced by
+    `NHMS_OBJECT_STORE_COPYBACK_ROOT` -- in every case no receipt is appended."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(
+        monkeypatch,
+        tmp_path,
+        repository,
+        client,
+        copyback_root=None if case == "no_copyback_root" else copyback_root,
+    )
+    object_store_root = Path(orchestrator.config.object_store_root)
+    cycle_dir = object_store_root / "canonical/gfs/2026050100"
+    if case == "tree_absent":
+        # Grid only: the source tree the recovery keys on was pruned.
+        _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+        shutil.rmtree(cycle_dir)
+    elif case == "symlinked_leaf":
+        outside = tmp_path / "outside"
+        _seed_canonical_precip_tree(outside, storage_source="gfs", cycle_token="2026050100")
+        _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+        shutil.rmtree(cycle_dir / "prcp_rate_or_amount")
+        (cycle_dir / "prcp_rate_or_amount").symlink_to(outside / "canonical/gfs/2026050100/prcp_rate_or_amount")
+        assert (cycle_dir / "prcp_rate_or_amount").is_dir()
+    elif case == "symlinked_ancestor":
+        outside = tmp_path / "outside"
+        _seed_canonical_precip_tree(outside, storage_source="gfs", cycle_token="2026050100")
+        _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+        shutil.rmtree(cycle_dir)
+        cycle_dir.symlink_to(outside / "canonical/gfs/2026050100")
+        # The leaf itself is a real directory; only its parent is a link.
+        assert not (cycle_dir / "prcp_rate_or_amount").is_symlink()
+        assert (cycle_dir / "prcp_rate_or_amount").is_dir()
+    else:
+        _seed_canonical_precip_tree(object_store_root, storage_source="gfs", cycle_token="2026050100")
+    from packages.common import safe_fs
+    from services.orchestrator import chain_forecast_execution
+
+    probed: list[Path] = []
+
+    def recording_verify_directory_no_follow(path: Any, *args: Any, **kwargs: Any) -> Any:
+        probed.append(Path(path))
+        return safe_fs.verify_directory_no_follow(path, *args, **kwargs)
+
+    monkeypatch.setattr(chain_forecast_execution, "verify_directory_no_follow", recording_verify_directory_no_follow)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert result.status == "succeeded"
+    assert _precip_mirror_events(repository) == []
+    assert not (copyback_root / "canonical").exists()
+    # The recovery's own fence, not just the mirror's: without a copyback root the
+    # local tree is never even probed.
+    expected_probes = [] if case == "no_copyback_root" else [cycle_dir / "prcp_rate_or_amount"]
+    assert probed == expected_probes
+
+
+def _downstream_restart_outcome(result: Any) -> tuple[str, tuple[tuple[str, str], ...]]:
+    return result.status, tuple((stage.stage, stage.status) for stage in result.stages)
+
+
+@pytest.mark.parametrize("fault", ["publisher_raises", "mirror_raises", "receipt_write_raises"])
+def test_canonical_precip_mirror_chain_exit_recovery_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    """#2076 scenario 4: whatever the recovery's mirror or receipt write raises,
+    `_run_cycle_chain` returns what it would have returned without the recovery."""
+
+    from services.orchestrator import chain_forecast_execution
+
+    baseline_repository = FakeCycleRepository()
+    baseline = _precip_chain_orchestrator(
+        monkeypatch, tmp_path / "baseline", baseline_repository, FakeCycleSlurmClient(), copyback_root=None
+    ).orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    repository = FakeCycleRepository()
+    copyback_root = tmp_path / "faulted" / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(
+        monkeypatch, tmp_path / "faulted", repository, FakeCycleSlurmClient(), copyback_root=copyback_root
+    )
+    _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+    attempts: list[str] = []
+    if fault == "publisher_raises":
+
+        class ExplodingPublisher:
+            def __init__(self, **kwargs: Any) -> None:
+                del kwargs
+
+            def copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+                attempts.append(cycle)
+                raise RuntimeError("mirror exploded")
+
+        monkeypatch.setattr(chain_forecast_execution, "TilePublisher", ExplodingPublisher)
+    elif fault == "mirror_raises":
+
+        def exploding_mirror(self: Any, context: Any, **kwargs: Any) -> None:
+            attempts.append(str(kwargs.get("message")))
+            raise RuntimeError("mirror entry exploded")
+
+        monkeypatch.setattr(chain_forecast_execution, "_mirror_canonical_precip", exploding_mirror)
+    else:
+        real_insert = repository.insert_pipeline_event
+
+        def failing_insert_pipeline_event(**kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("event_type") == "canonical_precip_mirror":
+                attempts.append(str(kwargs.get("message")))
+                raise OrchestratorError("PIPELINE_EVENT_FAILED", "event write failed")
+            return real_insert(**kwargs)
+
+        monkeypatch.setattr(repository, "insert_pipeline_event", failing_insert_pipeline_event)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert _downstream_restart_outcome(result) == _downstream_restart_outcome(baseline)
+    # The recovery really ran into the fault -- otherwise a green here proves nothing.
+    assert len(attempts) == 1
+    if fault == "publisher_raises":
+        events = _precip_mirror_events(repository)
+        assert [(event["status_to"], event["message"]) for event in events] == [
+            ("failed", _PRECIP_RECOVERY_MESSAGE)
+        ]
+        assert events[0]["details"]["precip_mirror"]["error_type"] == "RuntimeError"
+    elif fault == "receipt_write_raises":
+        assert attempts == [_PRECIP_RECOVERY_MESSAGE]
+        assert _precip_mirror_events(repository) == []
+        assert (copyback_root / "canonical/gfs/2026050100/prcp_rate_or_amount").is_dir()
+
+
+def test_canonical_precip_mirror_chain_exit_recovery_runs_when_a_downstream_stage_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every exit counts: a stage raising `OrchestratorError` on a downstream-restart
+    pass still gets the recovery, and the original exception is what propagates."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    copyback_root = tmp_path / "shared-object-store"
+    orchestrator = _precip_chain_orchestrator(monkeypatch, tmp_path, repository, client, copyback_root=copyback_root)
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100"
+    )
+    raised = OrchestratorError("STAGE_EXPLODED", "forecast stage exploded")
+    stages_entered: list[str] = []
+
+    def exploding_stage(stage: StageDefinition, context: Any, **kwargs: Any) -> Any:
+        del context, kwargs
+        stages_entered.append(stage.stage)
+        raise raised
+
+    monkeypatch.setattr(orchestrator, "_submit_and_wait_cycle_stage", exploding_stage)
+
+    with pytest.raises(OrchestratorError) as error_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _downstream_restart_basins())
+
+    assert error_info.value is raised
+    assert stages_entered == ["forecast"]
+    events = _precip_mirror_events(repository)
+    assert [(event["status_to"], event["message"]) for event in events] == [("ok", _PRECIP_RECOVERY_MESSAGE)]
+    assert _mirrored_files(copyback_root) == payloads
+
+
+class _CallOrderCycleRepository(FakeCycleRepository):
+    """`events` and `cycle_statuses` are separate lists on the base fake, so their
+    relative order is unrecoverable; this one writes both into one recorder."""
+
+    def __init__(self, calls: list[tuple[str, str]], *, fail_status_write: bool = False) -> None:
+        super().__init__()
+        self.calls = calls
+        self.fail_status_write = fail_status_write
+
+    def update_forecast_cycle_status(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("cycle_status", str(kwargs["status"])))
+        if self.fail_status_write:
+            raise _CycleStatusWriteFailed("cycle status write failed")
+        return super().update_forecast_cycle_status(**kwargs)
+
+
+class _CycleStatusWriteFailed(Exception):
+    pass
+
+
+def _record_mirror_start(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -> None:
+    from services.orchestrator import chain_forecast_execution
+
+    real_publisher = chain_forecast_execution.TilePublisher
+
+    class RecordingPublisher(real_publisher):  # type: ignore[misc, valid-type]
+        def copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+            calls.append(("mirror_start", cycle))
+            return super().copyback_canonical_precip(source, cycle)
+
+    monkeypatch.setattr(chain_forecast_execution, "TilePublisher", RecordingPublisher)
+
+
+@pytest.mark.parametrize("result_status", ["succeeded", "failed"])
+def test_canonical_precip_mirror_runs_after_the_entry_cycle_status_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    result_status: str,
+) -> None:
+    """#2070: a stalled copyback mount must not delay the `convert` entry's own
+    cycle-status write, so that write is recorded before the mirror starts -- on
+    `succeeded` and on the failure tail alike."""
+
+    calls: list[tuple[str, str]] = []
+    repository = _CallOrderCycleRepository(calls)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="IFS", cycle_token="2026050100"
+    )
+    _record_mirror_start(monkeypatch, calls)
+
+    orchestrator._after_cycle_stage_terminal(
+        _PRECIP_CONVERT_STAGE, _precip_context(), result_status, {"status": result_status}, None
+    )
+
+    expected_status = (
+        _PRECIP_CONVERT_STAGE.success_cycle_status
+        if result_status == "succeeded"
+        else _PRECIP_CONVERT_STAGE.failure_cycle_status
+    )
+    assert calls == [("cycle_status", expected_status), ("mirror_start", "2026050100")]
+    assert [event["status_to"] for event in _precip_mirror_events(repository)] == ["ok"]
+
+
+@pytest.mark.parametrize("result_status", ["succeeded", "failed"])
+def test_canonical_precip_mirror_still_runs_when_the_entry_cycle_status_write_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    result_status: str,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    repository = _CallOrderCycleRepository(calls, fail_status_write=True)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient(), terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    payloads = _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root), storage_source="IFS", cycle_token="2026050100"
+    )
+    _record_mirror_start(monkeypatch, calls)
+
+    with pytest.raises(_CycleStatusWriteFailed, match="cycle status write failed"):
+        orchestrator._after_cycle_stage_terminal(
+            _PRECIP_CONVERT_STAGE, _precip_context(), result_status, {"status": result_status}, None
+        )
+
+    assert [name for name, _ in calls] == ["cycle_status", "mirror_start"]
+    assert [event["status_to"] for event in _precip_mirror_events(repository)] == ["ok"]
+    assert _mirrored_files(copyback_root) == payloads
 
 
 def test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest(tmp_path: Path) -> None:
@@ -19622,22 +20251,25 @@ def test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """E11: the cycle survives with a `failed` receipt -- and nothing retries the mirror.
+    """E11: the cycle survives with a `failed` receipt; the hook itself does not retry.
 
-    The receipt is the whole recovery surface. The layer that actually swallows
+    The receipt is what the retry keys on. The layer that actually swallows
     this `CopybackLockTimeout` is `_copyback_canonical_precip`'s own
-    `except Exception` (`publisher.py:1376`), which turns it into a
+    `except Exception`, which turns it into a
     `status: "failed"` summary and RETURNS it. `_mirror_canonical_precip`'s
-    outer `except Exception` (`chain_forecast_execution.py:1046`) never sees it;
+    outer `except Exception` never sees it;
     that net is there for what runs *outside* the publisher's own try -- the
-    `format_cycle_time` call, the `TilePublisher(...)` construction, and an
-    `OSError` from the `finally`'s `release_copyback_batch_lock`
-    (`publisher.py:1411-1413`). Either way the cycle proceeds past
-    `convert`, so this cycle's mirror is **not** re-attempted on any later pass;
-    it is an operator action item recovered by running
+    `format_cycle_time` call and the `TilePublisher(...)` construction. The
+    publisher's `finally` calls `release_copyback_batch_lock`, which logs and
+    swallows its own `OSError`s and never raises. Either way the cycle proceeds past
+    `convert`. The retry is the chain-exit recovery (#2076): `_run_cycle_chain`
+    re-runs the mirror once at the exit of this same pass (the field recording
+    `failed`), and again on every later downstream-restart pass for the cycle.
+    Only a cycle that receives no further pass still needs
     `scripts/canonical_precip_copyback_backfill.py`
     (`docs/runbooks/current-production-ops.md` §5.3). Saying it "defers to the
-    next cycle" would be false and would hide a silent data gap.
+    next cycle" would still be false: the retry rides passes for THIS cycle.
+    This test calls the hook directly, so it sees only the hook's own receipt.
     """
 
     repository = FakeCycleRepository()
@@ -19778,22 +20410,25 @@ def test_canonical_precip_mirror_lock_timeout_still_advances_the_cycle_stage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The canonical mirror's timeout does NOT hold the stage back -- so nothing retries it.
+    """The canonical mirror's timeout does NOT hold the stage back -- the retry lives elsewhere.
 
     Same injected failure, opposite outcome from the run-tree lane above. The
     canonical lane swallows in TWO places, and this exception is stopped by the
     first: `_copyback_canonical_precip`'s own `except Exception`
-    (`publisher.py:1376`) turns every failure -- `CopybackLockTimeout` included
+    turns every failure -- `CopybackLockTimeout` included
     -- into a `status: "failed"` summary and RETURNS it, so
     `_mirror_canonical_precip`'s outer `except Exception`
-    (`chain_forecast_execution.py:1046`) never sees it; that outer net only
+    never sees it; that outer net only
     fires for what runs outside the publisher's try (`format_cycle_time`, the
-    `TilePublisher(...)` construction, an `OSError` from the `finally`'s
-    `release_copyback_batch_lock`). Either way control returns to
+    `TilePublisher(...)` construction; the `finally`'s
+    `release_copyback_batch_lock` never raises). Either way control returns to
     `_after_cycle_stage_terminal` and the `succeeded` branch advances the cycle
-    to `convert`'s success status. Once that write lands, no later pass
-    re-enters `convert`, which is exactly why the runbook's only recovery for
-    this receipt is the manual backfill CLI.
+    to `convert`'s success status (the mirror now runs after that write, #2070).
+    Once that write lands, a downstream-restart pass does not re-enter `convert`;
+    the `failed` mirror is instead retried by the chain-exit recovery (#2076) --
+    once at the exit of the same pass and on every later downstream-restart pass
+    for the cycle -- and the manual backfill CLI is only for a cycle that gets no
+    further pass.
 
     Both halves are asserted: the receipt proves the timeout really happened
     (without it, a green here could just mean the mirror never ran), and

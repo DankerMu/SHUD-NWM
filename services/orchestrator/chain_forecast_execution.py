@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from packages.common.safe_fs import verify_directory_no_follow
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
@@ -70,6 +71,11 @@ _NESTED_RETRY_DEFER_TERMINALS: dict[str, str] = {
     "reconcile_unverified": "reconciling",
 }
 NESTED_RETRY_DEFER_STATUSES = frozenset(_NESTED_RETRY_DEFER_TERMINALS)
+
+# #2076: the two triggers of the canonical precipitation mirror share one receipt
+# shape (`event_type`, `status_to`, `details`); only the message tells them apart.
+_CANONICAL_PRECIP_MIRROR_HOOK_MESSAGE = "Canonical precipitation mirror ran after convert."
+_CANONICAL_PRECIP_MIRROR_RECOVERY_MESSAGE = "Canonical precipitation mirror recovered at chain exit."
 
 AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
@@ -153,6 +159,16 @@ def _utcnow(*args, **kwargs):
 
 
 def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
+    # #2076: every exit -- return or raise -- gets one chance at the canonical
+    # precipitation mirror recovery. The recovery swallows its own failures, so
+    # the chain's result or exception passes through unchanged.
+    try:
+        return _run_cycle_chain_stages(self, context)
+    finally:
+        _recover_canonical_precip_mirror_at_chain_exit(self, context)
+
+
+def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> PipelineResult:
     stage_results: list[StageRunResult] = []
     start_stage_index = _restart_stage_index(context.restart_stage, self.stages)
     existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
@@ -852,47 +868,55 @@ def _after_cycle_stage_terminal(
     )
     if stage.stage == "forecast" and aggregation is not None and not accepted_submit_projection:
         _update_array_forecast_hydro_statuses(self, context, aggregation)
-    if _stage_should_mirror_canonical_precip(self, stage):
-        _mirror_canonical_precip(self, context)
-    if result_status == "succeeded":
-        if _stage_should_copyback_run_trees(self, stage):
-            _copyback_stage_run_trees(self, context, stage=stage.stage)
-        status = self._success_cycle_status(stage, context)
-        if not (stage.stage == "publish" and context.had_partial):
-            self.repository.update_forecast_cycle_status(
-                source_id=context.source_id,
-                cycle_time=context.cycle_time,
-                status=status,
-            )
-        elif context.last_partial_status is not None:
+    # #2070: the canonical precipitation mirror runs AFTER this entry's cycle-status
+    # write in every arm (the `finally` below), so a stalled copyback mount cannot
+    # delay that write; if the write raises, the mirror still runs and the write's
+    # exception propagates unchanged (the mirror swallows everything of its own).
+    # `_copyback_stage_run_trees` stays before the `succeeded` write: its gate is
+    # `parse`/`state_save_qc` only, never `convert`, so the two never coincide.
+    try:
+        if result_status == "succeeded":
+            if _stage_should_copyback_run_trees(self, stage):
+                _copyback_stage_run_trees(self, context, stage=stage.stage)
+            status = self._success_cycle_status(stage, context)
+            if not (stage.stage == "publish" and context.had_partial):
+                self.repository.update_forecast_cycle_status(
+                    source_id=context.source_id,
+                    cycle_time=context.cycle_time,
+                    status=status,
+                )
+            elif context.last_partial_status is not None:
+                self.repository.update_forecast_cycle_status(
+                    source_id=context.source_id,
+                    cycle_time=context.cycle_time,
+                    status=context.last_partial_status,
+                )
+            return
+
+        if result_status == "partially_failed" and aggregation is not None:
+            context.had_partial = True
+            context.last_partial_status = self._partial_cycle_status(stage)
             self.repository.update_forecast_cycle_status(
                 source_id=context.source_id,
                 cycle_time=context.cycle_time,
                 status=context.last_partial_status,
+                error_code=None,
+                error_message=None,
             )
-        return
+            return
 
-    if result_status == "partially_failed" and aggregation is not None:
-        context.had_partial = True
-        context.last_partial_status = self._partial_cycle_status(stage)
+        error_code = terminal.get("error_code") or f"{stage.job_type.upper()}_{result_status.upper()}"
+        error_message = terminal.get("error_message") or f"Stage {stage.stage} ended with {result_status}."
         self.repository.update_forecast_cycle_status(
             source_id=context.source_id,
             cycle_time=context.cycle_time,
-            status=context.last_partial_status,
-            error_code=None,
-            error_message=None,
+            status=stage.failure_cycle_status,
+            error_code=error_code,
+            error_message=error_message,
         )
-        return
-
-    error_code = terminal.get("error_code") or f"{stage.job_type.upper()}_{result_status.upper()}"
-    error_message = terminal.get("error_message") or f"Stage {stage.stage} ended with {result_status}."
-    self.repository.update_forecast_cycle_status(
-        source_id=context.source_id,
-        cycle_time=context.cycle_time,
-        status=stage.failure_cycle_status,
-        error_code=error_code,
-        error_message=error_message,
-    )
+    finally:
+        if _stage_should_mirror_canonical_precip(self, stage):
+            _mirror_canonical_precip(self, context)
 
 
 def _update_array_forecast_hydro_statuses(
@@ -993,12 +1017,25 @@ def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
     return stage.stage == "convert"
 
 
-def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
+def _mirror_canonical_precip(
+    self,
+    context: CycleOrchestrationContext,
+    *,
+    message: str = _CANONICAL_PRECIP_MIRROR_HOOK_MESSAGE,
+) -> None:
     """Mirror the cycle's canonical precipitation products and record a receipt.
 
     Bound to the ``convert`` stage's terminal entry (#2069), not to the chain's
     forecast terminal stage: ``convert`` is what writes the products, so
     "products exist" and "this hook ran" coincide within a pass that runs it.
+    Within that entry it runs after the entry's cycle-status write (#2070).
+
+    Its second caller is the chain-exit recovery (#2076,
+    ``_recover_canonical_precip_mirror_at_chain_exit``), which re-runs it for a
+    pass that skipped ``convert`` or whose mirror recorded ``failed``; only the
+    receipt ``message`` differs. The outcome ``status`` is stored on
+    ``context.canonical_precip_mirror_status`` before the receipt write, so a
+    failed receipt write does not hide it from the recovery.
 
     That terminal entry includes ``convert``'s failure tail, and one arm of it
     can still have a live writer. ``record_cycle_stage_poll_timeout`` gives up on
@@ -1054,20 +1091,68 @@ def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
         }
     if summary is None:
         return
+    status = str(summary.get("status") or "failed")
+    context.canonical_precip_mirror_status = status
     try:
         self.repository.insert_pipeline_event(
             entity_type="forecast_cycle",
             entity_id=context.cycle_id,
             event_type="canonical_precip_mirror",
             status_from=None,
-            status_to=str(summary.get("status") or "failed"),
-            message="Canonical precipitation mirror ran after convert.",
+            status_to=status,
+            message=message,
             details=_safe_pipeline_event_details({"precip_mirror": summary}),
         )
     except Exception:
         # `insert_pipeline_event` raises `FileOrchestrationJournalError` on the
         # DB-free profile, a sibling of `OrchestratorError` rather than a
         # subclass, so the swallow cannot be narrowed to either one.
+        return
+
+
+def _recover_canonical_precip_mirror_at_chain_exit(self, context: CycleOrchestrationContext) -> None:
+    """Re-run the canonical precipitation mirror once at chain exit (#2076).
+
+    Runs when a copyback root is configured, the chain has a ``convert`` stage,
+    and either this pass's restart index skipped ``convert`` (a downstream-restart
+    pass never reaches the terminal hook) or the mirror already ran in this
+    invocation and recorded ``failed``. It never runs when the hook recorded a
+    non-``failed`` outcome, nor when ``convert`` was reached without a terminal
+    entry (the field is still ``None``).
+
+    The local ``prcp_rate_or_amount`` tree must be a directory reached with no
+    symlink at ANY path component -- the same no-follow walk the publisher's
+    ``_collect_copyback_source_tree`` does from the store root -- and a check that
+    raises counts as absent, so a retention-pruned cycle emits no receipt. No
+    ``object_store_prefix`` is involved: the publisher's tree keys carry none.
+    Every exception is swallowed; this must never alter the chain's outcome.
+    """
+
+    try:
+        if not os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip():
+            return
+        convert_index = next(
+            (index for index, stage in enumerate(self.stages) if _stage_should_mirror_canonical_precip(self, stage)),
+            None,
+        )
+        if convert_index is None:
+            return
+        skipped_convert = convert_index < _restart_stage_index(context.restart_stage, self.stages)
+        if not (skipped_convert or context.canonical_precip_mirror_status == "failed"):
+            return
+        local_tree = (
+            Path(self.config.object_store_root)
+            / "canonical"
+            / context.source_id
+            / format_cycle_time(context.cycle_time)
+            / "prcp_rate_or_amount"
+        )
+        try:
+            verify_directory_no_follow(local_tree)
+        except Exception:
+            return
+        _mirror_canonical_precip(self, context, message=_CANONICAL_PRECIP_MIRROR_RECOVERY_MESSAGE)
+    except Exception:
         return
 
 

@@ -3046,6 +3046,79 @@ def test_copyback_canonical_precip_skips_when_copyback_root_is_the_object_store_
     }
 
 
+def test_copyback_canonical_precip_skips_alias_root_reporting_one_filesystem_identity(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two different path strings, one filesystem identity (#2061): skipped, nothing written.
+
+    Under a resolved-path string comparison the pair reads as two disjoint
+    roots and the canonical trees get mirrored onto the alias.
+    """
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    copyback_root.mkdir()
+    assert copyback_root.resolve() != Path(publisher.object_store.root).resolve()
+    _inject_alias_identity(monkeypatch, Path(publisher.object_store.root), copyback_root)
+
+    mirror = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert mirror == {
+        "root": str(copyback_root.resolve()),
+        "storage_source": "gfs",
+        "cycle": COMPACT_TIME,
+        "status": "skipped",
+        "reason": "copyback_root_matches_object_store_root",
+    }
+    # The guard precedes the batch lock: no `canonical/`, no lock file.
+    assert list(copyback_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("cycle", ["20260905", "abcdefghij"])
+def test_copyback_canonical_precip_rejects_a_cycle_that_is_not_a_ten_digit_token(
+    tmp_path: Any,
+    cycle: str,
+) -> None:
+    """`_CANONICAL_CYCLE_DIR_RE` is `^\\d{10}$`: anything else fails before any root is touched.
+
+    The source tree for the bad token is seeded complete, so a looser pattern
+    would carry the call all the way to an `ok` mirror.
+    """
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, cycle=cycle, leads=(3, 6))
+
+    mirror = publisher.copyback_canonical_precip("gfs", cycle)
+
+    assert mirror == {
+        "root": str(copyback_root),
+        "status": "failed",
+        "error": f"Unsupported canonical precipitation cycle directory: {cycle!r}",
+        "error_type": "ValueError",
+    }
+    assert not copyback_root.exists()
+
+
+def test_copyback_canonical_precip_error_message_names_the_canonical_product_label(tmp_path: Any) -> None:
+    """The canonical tree label reaches operators through a real refusal message (#2061)."""
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    prcp_key = _prcp_tree_key("gfs", COMPACT_TIME)
+    prcp_dir = Path(publisher.object_store.root) / prcp_key
+    (prcp_dir / "linked.nc").symlink_to(prcp_dir / f"gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc")
+
+    mirror = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert mirror is not None
+    assert mirror["status"] == "failed"
+    assert mirror["error"] == f"Canonical precipitation product entry must not be a symlink: {prcp_key}/linked.nc"
+
+
 # --------------------------------------------------------------------------- #
 # The q_down publish path itself (#2068). The mirror call site is gone from
 # `_publish_qdown_from_database`, so a publish produces no `precip_mirror`
@@ -3223,6 +3296,9 @@ def test_copyback_tree_key_whitelist_accepts_supported_shapes(tmp_path: Any, key
         "canonical/gfs/grid",
         "canonical/gfs/grid/gfs_0p25/grid.json",
         "canonical/gfs/2024060112/prcp_rate_or_amount_other",
+        # right shape, but a segment `_SAFE_ID_RE` rejects (#2061)
+        f"canonical/.hidden/{COMPACT_TIME}/prcp_rate_or_amount",
+        "canonical/gfs/grid/.hidden",
     ],
 )
 def test_copyback_tree_key_whitelist_rejects_unsupported_shapes(tmp_path: Any, key: str) -> None:

@@ -251,6 +251,12 @@ class CycleOrchestrationContext:
     #: candidate outcome of the vetoing basin.  Never a process-global or
     #: orchestrator attribute, so concurrent cohort workers cannot race it.
     forced_resubmit_veto: dict[str, Any] | None = None
+    #: Invocation-local status of the last canonical precipitation mirror run in
+    #: this invocation (#2076): the receipt summary's ``status`` (``failed`` when
+    #: the mirror's exception was swallowed), set before the receipt write; ``None``
+    #: when no mirror ran.  Read by the chain-exit recovery only.  Never persisted
+    #: and never an orchestrator attribute, so concurrent cohort workers cannot race it.
+    canonical_precip_mirror_status: str | None = None
 
 
 @dataclass(frozen=True)
