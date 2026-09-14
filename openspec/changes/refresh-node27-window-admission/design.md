@@ -236,3 +236,32 @@ recovery. No new generic abstraction or production CLI surface is required; orac
 
 None for either child implementation. Actual maintenance-window timing, post-cutover runtime receipts and parent
 performance/C4 evidence remain parent execution work, not unimplemented child features.
+
+## D6. Stable systemd configuration (#2370)
+
+Expanded fixture; selected risks: persisted state compatibility, immutable configuration, systemd integration and
+evidence. Not selected: migration SQL, application behavior, permissions, governance handoff changes; those bytes stay
+unchanged. Minimal slice: window snapshot/comparison and its focused oracle together.
+
+Resolve object paths with Manager.LoadUnit and typed busctl JSON. Unlike GetUnit, it also reads installed inactive
+units not currently loaded by the manager; it loads configuration only, never starts the unit. Real node27 replay-unit
+GetUnit refusal and successful LoadUnit/property read are preserved as evidence. Service ExecStart has signature
+`a(sasbttttuii)`: compare each ordered command's executable path, complete argv and ignore_errors; discard only the
+runtime timestamp/PID/result tail. Timer TimersCalendar has signature `a(sst)`: compare each base/expression pair;
+discard only next-elapse. Validate signature, row shapes and types; malformed/unsupported data refuses. Multiple
+commands/calendar entries are valid when represented unambiguously and completely; never compare only the first.
+
+Snapshot stable semantics from typed properties, not regex stripping the human-readable show output. Keep all other
+CONFIG_PROPS and protected-file hashes enforced. Service-only properties are never fetched on timers or vice versa.
+Prefer retaining the current state field shape with canonical stable strings, plus an explicit snapshot-format marker
+if needed. Existing failed/PREPARED state is not migrated or rewritten: refuse old-format state before any window
+mutation and require a new prepare. Existing driver/config/source/ledger/ownership guards remain independent.
+
+Invariant matrix: volatile rerun/deadline changes -> same configuration and admitted; path/argv/ignore_errors/calendar
+changes -> UNIT_CONFIG_CHANGED; env/file/path/timeout changes -> original refusal; typed malformed -> fail closed;
+old snapshot -> explicit new-state-required refusal and no writes to it; new fresh prepare -> pre-T0 checks intact.
+
+Evidence uses actual node27 typed payloads and recorded before/current drift. Focused smoke must fail on original
+raw-string comparison and pass after repair, exercise real comparison/window admission in isolation, and preserve
+governance sibling source hashes. Main performs a read-only live semantic comparison and fresh production prepare;
+child never performs T0. Parent uses the new immutable published executor only after child merge.

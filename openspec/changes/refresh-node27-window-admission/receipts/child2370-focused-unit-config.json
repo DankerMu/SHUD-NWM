@@ -1,0 +1,147 @@
+{
+  "case": "unit-config",
+  "reports": [
+    {
+      "case": "runtime-metadata",
+      "result": "pass"
+    },
+    {
+      "case": "installed-unloaded",
+      "result": "pass",
+      "unit": "nhms-node27-timeseries-compression-replay.service"
+    },
+    {
+      "case": "exec-path",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "exec-complete-argv",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "exec-ignore-errors",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "exec-command-order",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "calendar-expression",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "calendar-base",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "calendar-order",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "environment",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "environment-files",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "environment-files-ignore-errors",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "fragment-path",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "drop-in-paths",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "working-directory",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "unit-file-state",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "timeout",
+      "check": "UNIT_CONFIG_CHANGED"
+    },
+    {
+      "case": "protected-file",
+      "check": "UNIT_ENV_HOLD_OR_FOREIGN_FILE_CHANGED"
+    },
+    {
+      "case": "malformed-resolution",
+      "check": "SYSTEMD_UNIT_RESOLUTION_INVALID"
+    },
+    {
+      "case": "malformed-signature",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-envelope",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-timer-arity",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-timer-bool-next",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-exec-arity",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-exec-bool-metadata",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-exec-argv-nonstring",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "malformed-exec-ignore-errors-int",
+      "check": "SYSTEMD_TYPED_PROPERTY_INVALID"
+    },
+    {
+      "case": "old-prepared",
+      "check": "FRESH_TYPED_UNIT_SNAPSHOT_REQUIRED",
+      "state_unchanged": true
+    },
+    {
+      "case": "old-failed",
+      "check": "FRESH_TYPED_UNIT_SNAPSHOT_REQUIRED",
+      "state_unchanged": true
+    },
+    {
+      "case": "window-runtime-metadata",
+      "check": "UNIT_CONFIG_WINDOW_GATE_PASSED",
+      "state_unchanged": true,
+      "system_actions": [],
+      "worker_calls": [
+        "preparse"
+      ]
+    },
+    {
+      "case": "window-path-drift",
+      "check": "UNIT_CONFIG_CHANGED",
+      "state_unchanged": true,
+      "system_actions": [],
+      "worker_calls": []
+    },
+    {
+      "case": "original-volatile-red",
+      "check": "UNIT_CONFIG_CHANGED"
+    }
+  ],
+  "result": "PASS",
+  "scope": "typed unit comparator and pre-T0 admission only; no database or production operation",
+  "state": "/home/nwm/tmp/issue2370-unit-config-1b8b2b5b"
+}

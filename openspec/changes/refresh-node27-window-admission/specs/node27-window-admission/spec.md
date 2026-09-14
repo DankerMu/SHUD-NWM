@@ -97,3 +97,25 @@ repair or production pin removal, or claim T0 and parent completion.
 - **WHEN** the child merge gate is completed
 - **THEN** parent #1987 still owns production window execution, immediate post-cutover owned unstage and full task 5.2
   evidence, and #2280 still requires actual uncached four-route validation
+
+### Requirement: Window immutable checks compare stable unit semantics
+
+Window preparation and subsequent immutable checks SHALL retain all stable unit and protected-file checks while
+excluding only typed execution metadata from ExecStart and next-elapse from TimersCalendar.
+
+#### Scenario: Normal service execution and timer rescheduling
+
+- **WHEN** path, complete argv, ignore_errors and calendar expressions are unchanged but execution metadata or
+  next-elapse advances
+- **THEN** immutable configuration comparison succeeds without bypassing source, ledger, ownership or file checks
+
+#### Scenario: Real or unreadable configuration changes
+
+- **WHEN** any stable command/calendar/environment/path/timeout field or protected file changes, or typed property data
+  is malformed or unsupported
+- **THEN** admission refuses before window mutation; every ordered command and calendar entry remains covered
+
+#### Scenario: Prior snapshot format is presented
+
+- **WHEN** a prior raw-display snapshot is consumed by the changed executor
+- **THEN** it refuses with an explicit fresh-state requirement before mutating that state; no phase-only bypass occurs
