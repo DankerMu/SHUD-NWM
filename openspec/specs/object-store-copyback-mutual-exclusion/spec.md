@@ -17,18 +17,23 @@ A lane whose planning reads only the source object store MAY perform that
 planning before acquiring: it observes nothing a competitor can change under the
 copyback root.
 
-Planning that reads the destination — deciding that a tree is already mirrored
-there and need not be promoted — MAY also be performed before acquiring, but its
-result is then advisory: a competitor may promote into, or roll back out of,
-that target between the read and the moment the lane reports on it, and on the
-skip path the lane never acquires at all, so a tree it reports as already
-present was never observed under the mutex.
-`services/tile_publisher/forcing_copyback_backfill.py` is such a lane;
-narrowing it is tracked as issue #2236 and is not in this change's scope. What
-this requirement guarantees is that every tree a lane reports as promoted was
-promoted inside the critical section, and that no promotion overlaps another
-writer's
-backup-to-promote window.
+A lane that writes SHALL take its destination-dependent decisions — including
+deciding that a tree is already mirrored and need not be promoted — inside the
+same critical section as the promotion that decision gates, so a tree it reports
+as already present was observed under the mutex exactly as a tree it reports as
+promoted. A mode that provably writes nothing MAY read the destination without
+acquiring, because creating the lock file is itself a write; every
+destination-dependent conclusion it reports SHALL then be marked as not observed
+under the mutex.
+
+The mutex SHALL be taken with a lock primitive that every other acquirer on the
+same copyback root contends with, from whichever host it runs on. A host that
+reaches the root over an NFS client mount SHALL use `flock`; the host that
+exports the root from its local filesystem SHALL use a POSIX record lock,
+because a local `flock` there does not exclude an NFS client's `flock` (receipt
+of 2026-09-14). A POSIX record lock is per process, so an acquirer using it
+SHALL be single-threaded with respect to the mutex and SHALL NOT open the lock
+file through any other descriptor while holding it.
 
 A writer that cannot acquire the mutex within its configured deadline SHALL fail
 loudly with a distinct error and SHALL NOT promote any tree.
@@ -71,15 +76,35 @@ loudly with a distinct error and SHALL NOT promote any tree.
   acquire, because creating the lock file is itself a write under the copyback
   root.
 
+#### Scenario: the forcing backfill observes an already-present package under the mutex
+
+- **WHEN** the forcing copyback backfill runs with `--apply`
+- **AND** a competitor, holding the mutex, promotes a package tree into a target
+  that did not previously exist and then rolls it back before releasing
+- **THEN** the backfill MUST NOT report that package as already present
+- **AND** for each package the destination inspection, the skip decision, the
+  source validation, the copy and the commit or rollback MUST happen within one
+  acquisition of the mutex, taken once per package that reads the destination, whether that package
+  is then copied, skipped or failed; a package rejected by checksum grouping
+  before any destination read takes none
+- **AND** a failure to acquire MUST be recorded as that package's failure and
+  MUST NOT abort the run.
+
+#### Scenario: the forcing backfill plan mode is marked advisory
+
+- **WHEN** the forcing copyback backfill runs without `--apply`
+- **THEN** it MUST NOT acquire the mutex and MUST NOT create the lock file
+- **AND** every package record and the report MUST state that its destination
+  observations were not made under the mutex.
+
 #### Scenario: the run-tree copyback lane is covered by the same adjudication
 
 - **WHEN** `services/orchestrator/run_tree_copyback` replaces a run tree under
   the shared copyback root
 - **THEN** it MUST hold the same mutex
 - **AND** its guarded recovery branch — which restores its backup only when the
-  target is absent, and therefore never removed a competitor's tree — MUST remain
-  documented in place as a benign spurious-failure terminal state rather than a
-  lost update
+  target is absent, and therefore never removes a competitor's tree — MUST remain
+  in place
 - **AND** the state-snapshot index merge it performs in the same call MUST run
   after the mutex has been released, per the per-file exemption below; its
   presence in the call's returned summary is reporting, not a promote held open
@@ -113,6 +138,7 @@ its promotes and exempt for that write.
   error carrying a copyback-lock-unsafe code, so an operator can tell a tampered
   lock file from a busy one
 - **AND** no copyback tree MAY be promoted
+- **AND** these checks MUST be identical for every lock primitive
 - **WHEN** the lock file does not exist yet and the effective user is not the
   copyback root's owner
 - **THEN** acquisition MUST refuse *before* creating it, because the lock file is
@@ -128,6 +154,16 @@ its promotes and exempt for that write.
   under the copyback root each of them already resolved
 - **AND** two distinct copyback roots MUST NOT contend with each other.
 
+#### Scenario: the exporting host and an NFS client contend on one lock
+
+- **WHEN** an acquirer on the host exporting the copyback root holds the mutex
+  with the POSIX record-lock primitive
+- **AND** an acquirer on a host mounting that root over NFS attempts it with
+  `flock`, or the other way round
+- **THEN** the attempt MUST block
+- **AND** an acquirer on the exporting host MUST NOT use `flock`, because that
+  combination was measured not to exclude in either direction.
+
 #### Scenario: acquisition deadline is bounded and observable
 
 - **WHEN** the mutex is held by another writer for longer than the configured
@@ -136,7 +172,11 @@ its promotes and exempt for that write.
 - **AND** it MUST NOT fall back to an unsynchronized promote
 - **AND** where the caller already records a failure receipt instead of
   propagating — as the `convert`-stage canonical precipitation mirror does — the
-  surrounding cycle MUST survive with that receipt.
+  surrounding cycle MUST survive with that receipt
+- **WHEN** a configured timeout — whether passed explicitly or read from the
+  environment — is not a positive finite number of seconds
+- **THEN** acquisition MUST refuse with a configuration error before touching
+  the filesystem, and no lock file MAY be created.
 
 #### Scenario: the timeout surfaces as each lane's own error type
 
@@ -159,11 +199,13 @@ its promotes and exempt for that write.
 ### Requirement: Destructive removal of a copyback directory tree holds the same mutex
 
 A process SHALL hold the copyback root's batch mutex for the whole of any
-removal of a directory tree under that shared object-store copyback root. The
-capability's other requirement binds the writers that promote trees; this one
-binds the deleters, because a removal that lands inside a writer's
-rename-to-backup-to-promote window destroys that writer's rollback material just
-as surely as a competing promote would.
+removal of a directory tree under that shared object-store copyback root that
+lies in a key space a mutex-holding writer promotes into — `runs/`, `forcing/`
+and `canonical/`. The capability's other requirement binds the writers that
+promote trees; this one binds the deleters, because a removal that lands inside
+a writer's rename-to-backup-to-promote window destroys that writer's rollback
+material just as surely as a competing promote would. A key space no acquirer
+promotes into — `raw/` — has no window to protect and SHALL NOT be locked.
 
 The mutex SHALL be taken per removed tree, not once for a whole retention pass:
 a pass's planning walk sizes every candidate on the shared mount, and holding
@@ -173,24 +215,22 @@ depend on.
 The obligation is scoped to the **copyback** root. A run-workspace root that is
 not shared SHALL NOT be locked — creating a lock file there buys no mutual
 exclusion and adds a fail-closed ownership check to a lane that has no second
-party. Nor SHALL a root be locked in the configuration where the copyback root
-and the process's own primary object store are the same directory; that root's
-aged run trees SHALL still be removed there, unlocked.
-
-One implementation is known to violate this requirement and is not brought into
-compliance by the change that adds it: `scripts/node27_raw_retention.py` removes
-directory trees without taking the mutex, on node-27, under the very directory
-node-22 mounts as the shared copyback root. It is recorded here rather than
-excluded by narrowing the requirement to the scheduler's own retention pass,
-which would make the requirement true by construction and leave the gap
-unrecorded. It is tracked by issue #2252, which must first settle whether a
-lock taken on the NFS server's local filesystem excludes one taken by an NFS
-client at all.
+party. Nor SHALL a root be locked in the configuration where a process on an NFS
+client host has the copyback root and its own primary object store resolve to
+the same directory; that root's aged run trees SHALL still be removed there,
+unlocked. On the host that exports the copyback root, the object-store root
+*is* the shared root and SHALL be locked, with the POSIX record-lock primitive
+the other requirement prescribes for that host: `scripts/node27_raw_retention.py`
+is such a deleter for `canonical/`.
 
 Failure to acquire SHALL be recorded as that pass's own per-entry failure and
 SHALL NOT abort the pass or propagate out of the removal, because the mutex's
 error type is a `RuntimeError` rather than an `OSError` and every retention
-caller's contract is that one entry's failure never interrupts the sweep.
+caller's contract is that one entry's failure never interrupts the sweep. The
+recorded failure SHALL name which of three shapes occurred — the guard's
+deadline expired, the lock was unsafe or could not be opened, or the pass's own
+wait budget was already spent — and each pass receipt SHALL carry a per-shape
+count that survives receipt compaction.
 
 This requirement covers the *overlap* between a removal and a promotion. It does
 **not** make a removal conditional on what a writer did after the pass planned
@@ -198,8 +238,8 @@ it: see the non-guarantee scenario below.
 
 #### Scenario: a removal on the copyback root cannot enter a writer's promote window
 
-- **WHEN** a retention pass removes one run directory under the shared copyback
-  root's `runs/`
+- **WHEN** a retention pass removes one tree under the shared copyback root in
+  `runs/` or `canonical/`
 - **AND** a copyback writer holds that root's batch mutex for its
   promote-and-commit critical section
 - **THEN** the removal MUST block until that writer's batch has committed or
@@ -207,21 +247,31 @@ it: see the non-guarantee scenario below.
 - **AND** the writer's backup tree MUST NOT be partially removed while it is
   still the writer's rollback material
 - **AND** conversely, while the removal holds the mutex, a writer MUST NOT be
-  able to promote into that same target.
+  able to promote into that same target
+- **AND** this MUST hold when the removal runs on the host exporting the root and
+  the writer on an NFS client host.
 
 #### Scenario: only the shared copyback root is locked
 
 - **WHEN** the same pass removes trees under an additional run-workspace root,
-  or under its own primary object store, in the same sweep as copyback-root
-  removals
+  or under its own primary object store on an NFS client host, in the same sweep
+  as copyback-root removals
 - **THEN** those removals MUST proceed without acquiring the mutex
 - **AND** no lock file MAY be created under either of those roots
 - **AND** a configuration in which the run-workspace root and the copyback root
   resolve to the same directory MUST lock that single root, because it *is* the
   shared one
 - **AND** a configuration in which the copyback root and the primary object
-  store resolve to the same directory MUST still remove that root's aged run
-  trees and MUST NOT lock them.
+  store resolve to the same directory on an NFS client host MUST still remove
+  that root's aged run trees and MUST NOT lock them.
+
+#### Scenario: the exporting host locks only the promoted key space
+
+- **WHEN** the node-27 raw retention removes aged trees under its object-store
+  root
+- **THEN** each `canonical/<storage-source>/<cycle>` removal MUST hold the mutex
+- **AND** each `raw/<source>/<cycle>` removal and each precipitation-cache
+  removal MUST proceed without acquiring it.
 
 #### Scenario: the mutex is acquired per removed tree
 
@@ -242,18 +292,22 @@ it: see the non-guarantee scenario below.
   alone multiply by the tree count and a periodic sweep that outlasts its own
   cadence is an outage of its own
 - **AND** once that budget is spent, each remaining tree on the copyback root
-  MUST be recorded as a failure without any further acquisition attempt
-- **AND** the pass MUST still return normally, with the other roots' removals
-  unaffected.
+  MUST be recorded as a budget-exhausted failure without any further acquisition
+  attempt
+- **AND** the pass MUST still return normally, with the other roots' and lanes'
+  removals unaffected.
 
 #### Scenario: an unavailable mutex is a recorded failure, never an aborted pass
 
 - **WHEN** the mutex cannot be acquired within the deadline, or the lock file
-  fails the protocol's fail-closed identity checks
+  fails the protocol's fail-closed identity checks or cannot be opened
 - **THEN** the tree MUST NOT be removed
-- **AND** the pass MUST record that entry as a failure carrying the error text,
-  leave it out of the deleted set and out of the freed-bytes total, continue
-  with the remaining entries, and return normally
+- **AND** the pass MUST record that entry as a failure carrying the error text
+  and its failure shape — timeout, unsafe, or budget exhausted — leave it out of
+  the deleted set and out of the freed-bytes total, continue with the remaining
+  entries, and return normally
+- **AND** the pass receipt MUST carry a count for each of the three shapes, zero
+  included, and that block MUST remain in a compacted receipt
 - **AND** neither the timeout error nor the unsafe-lock error MAY escape the
   removal, because the surrounding scheduler collapses its whole pass receipt to
   an error status on any escaping exception and the command-line sweep aborts
@@ -261,7 +315,8 @@ it: see the non-guarantee scenario below.
 
 #### Scenario: a pass that provably removes nothing acquires nothing
 
-- **WHEN** retention is disabled, or is in dry-run, so no removal executes
+- **WHEN** retention is disabled, is in dry-run, or is preflight-blocked, so no
+  removal executes
 - **THEN** the mutex MUST NOT be acquired and no lock file MAY be created under
   the copyback root, because creating the lock file is itself a write there
 - **WHEN** the additional-root gate is closed, so the copyback root is not swept
@@ -274,6 +329,7 @@ it: see the non-guarantee scenario below.
 - **THEN** the pass MAY still remove that tree when it later acquires the mutex:
   this requirement serializes the two operations, it does not re-adjudicate the
   removal predicate under the lock
+- **AND** this tolerated window MUST be pinned by a test
 - **AND** the removal predicate — which trees are selected, the retention
   window, the frontier bound, the published-artifact protection — MUST be
   identical with and without the mutex: nothing is re-adjudicated under the
@@ -290,15 +346,52 @@ it: see the non-guarantee scenario below.
 
 - **WHEN** the lock file sits at its fixed name directly under the copyback root
 - **THEN** no retention enumeration MAY select it, on the copyback root or on
-  any other root: every enumeration descends into `runs/` or into a
-  cycle-scoped prefix before it collects anything — the primary root is walked
-  by both — and each level keeps directory entries only, so no walk both
-  reaches a regular file sitting directly under the root and admits it
+  any other root: every enumeration descends into a lane or `runs/` prefix
+  before it collects anything, and each level keeps directory entries only, so
+  no walk both reaches a regular file sitting directly under the root and
+  admits it
 - **AND** this MUST be enforced by test rather than left as an inherited
   argument, because removing the lock file under a live holder splits the mutex:
-  that holder keeps its `flock` on the detached inode while the next acquirer
+  that holder keeps its lock on the detached inode while the next acquirer
   creates and locks a fresh file, so the two run unserialised for the rest of
-  that hold. The root converges again once the stale holder exits, so the damage
-  is a window rather than a permanent poisoning — and a window of exactly the
-  interval this requirement exists to serialise.
+  that hold.
+
+### Requirement: A run-tree replacement never destroys its only backup on a failure path
+
+The run-tree copyback lane SHALL delete a replaced target's backup only once the
+target is known to be in place, whenever `services/orchestrator/run_tree_copyback`
+replaces an existing run tree or individual file by renaming it to a backup and
+promoting a temporary copy: either the promotion succeeded, or the backup was restored to the
+target. A failure to clean up the temporary copy SHALL NOT prevent the restore
+from being attempted. When the backup is neither promoted over nor restored, it
+SHALL be left on disk and the raised run-tree copyback error SHALL name its
+path.
+
+#### Scenario: promotion and restore both fail
+
+- **WHEN** the old target has been renamed to its backup
+- **AND** promoting the temporary copy fails
+- **AND** restoring the backup to the target also fails
+- **THEN** the backup MUST still exist
+- **AND** the raised run-tree copyback error MUST carry the backup path in its
+  details.
+
+#### Scenario: temporary-copy cleanup fails after a failed promotion
+
+- **WHEN** promoting the temporary copy fails
+- **AND** removing the temporary copy raises
+- **THEN** the restore MUST still be attempted
+- **AND** the target MUST NOT be left absent with its backup deleted.
+
+#### Scenario: a successful restore is not undone
+
+- **WHEN** promotion fails and the backup is restored to the target
+- **THEN** nothing MAY be deleted from the restored target afterwards
+- **AND** no backup name MAY remain.
+
+#### Scenario: a successful replacement leaves no residue
+
+- **WHEN** promotion succeeds
+- **THEN** the target holds the new content
+- **AND** neither the backup nor the temporary copy MAY remain.
 
