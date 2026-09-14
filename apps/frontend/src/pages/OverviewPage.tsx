@@ -290,8 +290,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   //
   // `layers.length === 0` 是唯一的 `'unknown'`：`onQueryChange` 之后、`loadOverview` 的 effect 执行
   // 之前那一帧，快照属上一 query，`layers` 已经是 `[]`——那一帧被这里兜住，靠的就是空数组本身。
-  // 反过来，`mapBootstrapLoading` **不**是可用性的证据：validTime-only 重载（时间轴步进/播放）
-  // 期间目录仍在手、栅格与图例照画，把它当「未就绪」就是已知冒充未知（IS-7）。
+  // 反过来，`mapBootstrapLoading` **不**是可用性的证据：同一身份的重载（重挂载、换源/周期之外的
+  // 同 query 刷新）期间目录仍在手、栅格与图例照画，把它当「未就绪」就是已知冒充未知（IS-7）。
+  // 时间轴步进/播放（validTime-only）自 #2127 起只在 store 内重派生，根本不进 loading。
   const precipCatalog = useMemo<{ status: M11PrecipAvailability; layer: LayerState | null }>(() => {
     if (layers.length === 0) return { status: 'unknown', layer: null }
     const entry = layers.find((item) => item.layerId === 'precip') ?? null
@@ -453,6 +454,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // bootstrap reject 时 mapBootstrapLoading=false / bootstrapError !=null / overview.bootstrap=null →
   //   surfaceSettling=false → emptyBasinReason 走 bootstrapError 分支诚实告知失败（spec scenario
   //   "Map bootstrap rejection"：renders bootstrap failed state rather than indefinite spinner）。
+  //   bootstrap 失败**不看流域数**（#2139）：阶段 2 的重试常把流域清单救回非空，旧闸门
+  //   `basins.length === 0` 会把 bootstrapError 唯一的渲染面整个藏掉。enrichment `error` 仍按
+  //   流域数闸（spec 只要求它出现在受影响的面板上）。测试 id 沿用 `m11-overview-empty`（C4 证据工具读它）。
   const surfaceSettling = mapBootstrapLoading || (!overview?.bootstrap && !bootstrapError)
   // 有已发布 run 的流域（latestForecastTime != null ⟺ 河段进了流量 MVT）的静态河流须剔除，规避双线；
   // 无 run 的流域（如 heihe）不在 MVT 中，保留其静态河流。
@@ -461,7 +465,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     [basins],
   )
   const emptyBasinReason =
-    !surfaceSettling && basins.length === 0
+    !surfaceSettling && (basins.length === 0 || bootstrapError !== null)
       ? bootstrapError ??
         error ??
         (summary?.totalBasins === 0
@@ -506,7 +510,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       ) : precipOverlay.notice ? (
         // 链位钉死在**链尾**（fixture 决策 9，round-1 更正）：`emptyBasinReason` 是本组件里
         // `bootstrapError` / enrichment `error` 的**唯一**渲染面（`overview-data-contracts` spec
-        // 要求 bootstrap 失败必须如实呈现），而降水提示可以是持久的（`?source=compare` 的提示 A、
+        // 要求 bootstrap 失败必须如实呈现；bootstrap 失败时不论流域数都会点亮它），而降水提示可以是持久的（`?source=compare` 的提示 A、
         // 镜像滞后的提示 C）——排在它前面会把硬失败永久盖掉。降水是装饰层信息，让位于任何硬失败。
         // 所有 M11FloatingNotice 同坐标绝对定位，并列挂两条会像素重叠，故必须留在这条互斥链上。
         <M11FloatingNotice testId="m11-precip-notice">{precipOverlay.notice}</M11FloatingNotice>

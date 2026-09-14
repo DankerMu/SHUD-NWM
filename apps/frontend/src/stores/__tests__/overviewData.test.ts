@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { buildM11RegisteredOverlay } from '@/components/map/m11MapBuilders'
 import {
@@ -7,20 +7,31 @@ import {
   pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
 import { resolveM11NationalValidTimeCorrection, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
-import { clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
+import {
+  clearOverviewDataCache,
+  overviewSnapshotMatchesQuery,
+  useOverviewDataStore,
+  type OverviewDataSnapshot,
+} from '@/stores/overviewData'
 import {
   CYCLES_PATH,
   VALID_TIMES_PATH,
   PRECIP_INDEX_PATH,
   DEFAULT_CYCLE,
   OTHER_CYCLE,
+  IFS_CYCLE,
   query,
   success,
+  basin,
   nationalDischargeMetadata,
   layer,
   precipIndex,
   mockApi,
+  ifsQuery,
+  cyclesPayload,
+  decodedTilePath,
   resetOverviewDataTestState,
+  type MockOptions,
 } from '@/test/overviewDataFixture'
 
 vi.mock('@/api/client', () => ({
@@ -397,5 +408,261 @@ describe('overview data store discharge loading', () => {
     clearOverviewDataCache()
 
     expect(useOverviewDataStore.getState().layerTimeEnrichmentSkipped).toBe(false)
+  })
+})
+
+// #2127（design D1）：validTime 不是取数身份。时间轴步进/播放（最高 4 Hz）只重派生，不重载。
+describe('overview data store validTime-only re-derivation', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** 订阅 store 的每一次写入：请求计数不是红证（`cached()` 本就去重），状态转移才是。 */
+  function recordStoreWrites() {
+    const seen: Array<{ mapBootstrapLoading: boolean; enrichmentLoading: boolean; error: string | null; bootstrapError: string | null }> = []
+    const unsubscribe = useOverviewDataStore.subscribe((state) => {
+      seen.push({
+        mapBootstrapLoading: state.mapBootstrapLoading,
+        enrichmentLoading: state.enrichmentLoading,
+        error: state.error,
+        bootstrapError: state.bootstrapError,
+      })
+    })
+    return { seen, unsubscribe }
+  }
+
+  const dischargeOf = () => (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+  const defaultPairQuery = { ...query, cycle: null, validTime: '2026-05-18T00:00:00.000Z' }
+  const T2 = '2026-05-18T06:00:00.000Z'
+  const T3 = '2026-05-18T03:00:00.000Z'
+
+  it('issues no request and touches no loading, error or layer-time state on a settled timeline step', async () => {
+    const calls = mockApi()
+    await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+    const before = useOverviewDataStore.getState()
+    const settledCallCount = calls.length
+    const recorder = recordStoreWrites()
+
+    await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T2 })
+    const last = await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T3 })
+    recorder.unsubscribe()
+
+    const after = useOverviewDataStore.getState()
+    expect(calls).toHaveLength(settledCallCount)
+    expect(recorder.seen.some((state) => state.mapBootstrapLoading || state.enrichmentLoading)).toBe(false)
+    expect(recorder.seen.every((state) => state.error === before.error && state.bootstrapError === before.bootstrapError)).toBe(true)
+    expect(after.cyclesBySource).toBe(before.cyclesBySource)
+    expect(after.validTimesByCycle).toBe(before.validTimesByCycle)
+    expect(after.precipIndexByCycle).toBe(before.precipIndexByCycle)
+    expect(after.layerTimeEnrichmentSkipped).toBe(before.layerTimeEnrichmentSkipped)
+    // 消费面跟随最新 validTime：图层时次、bootstrap 快照、请求作用域。
+    expect(dischargeOf()?.currentValidTime).toBe(T3)
+    expect(after.overview?.bootstrap?.currentLayerValidTime).toBe(T3)
+    expect(overviewSnapshotMatchesQuery(after.overview, { ...defaultPairQuery, validTime: T3 })).toBe(true)
+    expect(last).toBe(after.overview)
+  })
+
+  it('keeps in-flight layer-time enrichment landing and derives it with the latest validTime', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const gated = (payload: (options: MockOptions) => unknown) => async (options: MockOptions) => {
+      await gate
+      return payload(options)
+    }
+    const calls = mockApi({
+      [CYCLES_PATH]: gated((options) => cyclesPayload(options.params?.query?.source)),
+      [VALID_TIMES_PATH]: gated((options) =>
+        success({ layer_id: 'discharge', valid_times: [options.params?.query?.cycle, '2026-05-17T15:00:00Z', '2026-05-17T18:00:00Z'] }),
+      ),
+      [PRECIP_INDEX_PATH]: gated(() => success(precipIndex)),
+    })
+    const q1 = { ...ifsQuery, validTime: '2026-05-17T15:00:00.000Z' }
+    const q2 = { ...ifsQuery, validTime: '2026-05-17T18:00:00.000Z' }
+
+    const first = useOverviewDataStore.getState().loadOverview(q1)
+    await vi.waitFor(() => {
+      expect(calls.some((call) => call.path === CYCLES_PATH)).toBe(true)
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+    const recorder = recordStoreWrites()
+    const second = useOverviewDataStore.getState().loadOverview(q2)
+    release()
+    await Promise.all([first, second])
+    recorder.unsubscribe()
+
+    const state = useOverviewDataStore.getState()
+    expect(recorder.seen.some((entry) => entry.mapBootstrapLoading || entry.enrichmentLoading)).toBe(false)
+    expect(state.cyclesBySource.ifs?.status).toBe('available')
+    expect(state.validTimesByCycle[`ifs|${IFS_CYCLE}`]?.status).toBe('available')
+    expect(state.precipIndexByCycle[`ifs|${IFS_CYCLE}`]?.status).toBe('available')
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(1)
+    expect(dischargeOf()?.available).toBe(true)
+    expect(dischargeOf()?.currentValidTime).toBe('2026-05-17T18:00:00.000Z')
+    expect(overviewSnapshotMatchesQuery(state.overview, q2)).toBe(true)
+  })
+
+  it('keeps an enrichment partial error and does not re-send the failing endpoint on a timeline step', async () => {
+    const calls = mockApi({
+      '/api/v1/pipeline/status': () => {
+        throw new Error('pipeline down')
+      },
+    })
+    await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+    const error = useOverviewDataStore.getState().error
+    // 前置条件：partial error 确实已写入，且失败条目已被 `cached()` 删除（下一轮会重发）。
+    expect(error).not.toBeNull()
+    const pipelineCalls = () => calls.filter((call) => call.path === '/api/v1/pipeline/status')
+    expect(pipelineCalls()).toHaveLength(1)
+    const recorder = recordStoreWrites()
+
+    await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T2 })
+    recorder.unsubscribe()
+
+    expect(pipelineCalls()).toHaveLength(1)
+    expect(useOverviewDataStore.getState().error).toBe(error)
+    expect(recorder.seen.every((entry) => entry.error === error)).toBe(true)
+  })
+
+  describe('equivalence with a fresh load (fixed clock)', () => {
+    // `isStale` 读 `Date.now()`：钉住时钟，且让 T1 已过期（10h）而 T2 未过期（4h），freshness 对 validTime 敏感。
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-05-18T10:00:00Z'))
+    })
+
+    async function freshOverviewFor(target: typeof defaultPairQuery) {
+      clearOverviewDataCache()
+      useOverviewDataStore.setState({ overview: null, mapBootstrapLoading: false, enrichmentLoading: false, bootstrapError: null, error: null })
+      await useOverviewDataStore.getState().loadOverview(target)
+      return useOverviewDataStore.getState().overview
+    }
+
+    function expectOverlayOnT2(overview: OverviewDataSnapshot | null) {
+      const q2 = { ...defaultPairQuery, validTime: T2 }
+      expect(overviewSnapshotMatchesQuery(overview, q2)).toBe(true)
+      expect(decodedTilePath(buildM11RegisteredOverlay(q2, overview?.layers ?? []))).toBe(
+        `/api/v1/tiles/hydro-national/gfs/${DEFAULT_CYCLE}/q_down/2026-05-18T06:00:00Z/{z}/{x}/{y}.pbf`,
+      )
+    }
+
+    it('equals a fresh load of the final query after a settled timeline step', async () => {
+      mockApi()
+      await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+      const beforeStep = useOverviewDataStore.getState().overview
+      await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T2 })
+      const rederived = useOverviewDataStore.getState().overview
+      // 前置条件：步进确实改了 validTime 敏感字段（否则等价性什么也不鉴别）。
+      expect(rederived?.summary.freshness.isStale).not.toBe(beforeStep?.summary.freshness.isStale)
+
+      const fresh = await freshOverviewFor({ ...defaultPairQuery, validTime: T2 })
+
+      expect(rederived).toEqual(fresh)
+      expect(rederived?.bootstrap?.currentLayerValidTime).toBe(T2)
+      expectOverlayOnT2(rederived)
+    })
+
+    it('equals a fresh load when the step lands after enrichment returned while bootstrap is still blocked', async () => {
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const calls = mockApi({
+        // 只闸 runless 目录：阶段 2 有已发布 run，走 run-scoped 键，不与阶段 1 共享这条在途 promise。
+        '/api/v1/layers': async (options) => {
+          if (options.params?.query?.run_id === undefined) await gate
+          return success([layer])
+        },
+      })
+
+      const first = useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+      await vi.waitFor(() => expect(calls.some((call) => call.path === '/api/v1/pipeline/status')).toBe(true))
+      // 让阶段 2 跑到 `await bootstrapPromise`。
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(true)
+      const second = useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T2 })
+      release()
+      const [firstResult] = await Promise.all([first, second])
+      const rederived = useOverviewDataStore.getState().overview
+      expect(firstResult).toBe(rederived)
+
+      const fresh = await freshOverviewFor({ ...defaultPairQuery, validTime: T2 })
+
+      expect(rederived).toEqual(fresh)
+      expectOverlayOnT2(rederived)
+    })
+  })
+
+  const identityChanges = [
+    { label: 'cycle', patch: { cycle: '2026-05-17T12:00:00.000Z' }, expectedPath: VALID_TIMES_PATH },
+    { label: 'source', patch: { source: 'ifs' as const }, expectedPath: CYCLES_PATH },
+  ]
+
+  it.each(identityChanges)('starts a new request generation when the $label changes', async ({ patch, expectedPath }) => {
+    const calls = mockApi({ [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source) })
+    await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+    const settledCallCount = calls.length
+
+    const next = useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, ...patch })
+    // 同步读：新一轮的起始 set 已发生。
+    expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(true)
+    expect(useOverviewDataStore.getState().enrichmentLoading).toBe(true)
+    await next
+
+    const newCalls = calls.slice(settledCallCount)
+    expect(newCalls.some((call) => call.path === expectedPath)).toBe(true)
+  })
+
+  it('reloads an identical query after settle and retries a failed bootstrap', async () => {
+    let basinsCalls = 0
+    mockApi({
+      '/api/v1/basins': () => {
+        basinsCalls += 1
+        if (basinsCalls === 1) throw new Error('basins down')
+        return success([basin])
+      },
+    })
+    await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+    expect(useOverviewDataStore.getState().bootstrapError).not.toBeNull()
+
+    // 重挂载（例如从 /ops 返回）：同一 query 必须开新一轮，而不是被当作步进短路。
+    const next = useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery })
+    expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(true)
+    await next
+
+    expect(basinsCalls).toBeGreaterThan(1)
+    expect(useOverviewDataStore.getState().bootstrapError).toBeNull()
+    expect(useOverviewDataStore.getState().overview?.bootstrap).not.toBeNull()
+  })
+
+  it('re-derives a later timeline step from the generation an identical-query reload started', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let pipelineRound = 0
+    mockApi({
+      '/api/v1/pipeline/status': () => {
+        pipelineRound += 1
+        return success(
+          pipelineRound === 1
+            ? { cycle_time: DEFAULT_CYCLE, updated_at: '2026-05-18T00:30:00Z', job_counts: { succeeded: 1, running: 0, failed: 0, pending: 0 } }
+            : { cycle_time: DEFAULT_CYCLE, updated_at: '2026-05-19T00:00:00Z', job_counts: { succeeded: 5, running: 0, failed: 0, pending: 0 } },
+        )
+      },
+    })
+    await useOverviewDataStore.getState().loadOverview(defaultPairQuery)
+    expect(useOverviewDataStore.getState().overview?.summary.completedCyclesToday).toBe(1)
+
+    // 推过 store 的缓存 TTL，让同一 query 的重载真的重取 pipeline。
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery })
+    expect(pipelineRound).toBe(2)
+
+    await useOverviewDataStore.getState().loadOverview({ ...defaultPairQuery, validTime: T2 })
+
+    const summary = useOverviewDataStore.getState().overview?.summary
+    expect(summary?.completedCyclesToday).toBe(5)
+    expect(summary?.latestUpdate).toBe('2026-05-19T00:00:00.000Z')
+    expect(summary?.sourceSelection.validTime).toBe(T2)
+    expect(pipelineRound).toBe(2)
   })
 })

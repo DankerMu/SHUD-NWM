@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildM11RegisteredOverlay } from '@/components/map/m11MapBuilders'
 import {
   activeCycleValidTimesErrorDisabledReason,
+  cycleNotListedDischargeDisabledReason,
   failClosedDischargeDisabledReason,
   isFailClosedDischargeMetadata,
+  isM11ActiveCycleValidTimesUnresolved,
   mergeLayerStates,
   pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
@@ -23,6 +25,7 @@ import {
   success,
   nationalDischargeMetadata,
   layer,
+  model,
   apiError,
   mockApi,
   ifsQuery,
@@ -415,6 +418,203 @@ describe('overview data store discharge loading', () => {
     const runCalls = calls.filter((call) => call.path === '/api/v1/runs')
     expect(runCalls).not.toHaveLength(0)
     expect(runCalls.every((call) => call.query?.source === 'GFS')).toBe(true)
+  })
+
+  // #2131（design D2）：URL 周期不在该源自己的周期列表里（跨源书签 / 伪造周期），后端对
+  // `(source, cycle)` 回 200 + 空列表。那一源**有**时次，只是不在这个周期——'Layer has no valid
+  // times.' 是假话，必须换成点名源与周期的文案。
+  const emptyValidTimes = () => success({ layer_id: 'discharge', valid_times: [] })
+  const existingDischargeReasons = [
+    'Layer has no valid times.',
+    failClosedDischargeDisabledReason,
+    pendingActiveCycleValidTimesDisabledReason,
+    activeCycleValidTimesErrorDisabledReason,
+  ]
+
+  it('names the source and cycle when a GFS-only cycle is requested for IFS and its list is empty', async () => {
+    const calls = mockApi({
+      [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source),
+      [VALID_TIMES_PATH]: emptyValidTimes,
+    })
+    const cycleQuery = { ...ifsQuery, cycle: DEFAULT_CYCLE }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const state = useOverviewDataStore.getState()
+    // 前置条件：IFS 列表健康且不含该周期；该对的 valid-times 确实发出且回了空列表。
+    expect(state.cyclesBySource.ifs?.status).toBe('available')
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH).map((call) => call.query)).toEqual([
+      { source: 'ifs', cycle: DEFAULT_CYCLE },
+    ])
+    expect(state.validTimesByCycle).toEqual({ [`ifs|${DEFAULT_CYCLE}`]: { status: 'available', validTimes: [] } })
+
+    const layers = state.overview?.layers ?? []
+    const discharge = layers.find((item) => item.layerId === 'discharge')
+    expect(discharge?.available).toBe(false)
+    expect(discharge?.validTimes).toEqual([])
+    expect(discharge?.disabledReason).toContain('IFS')
+    expect(discharge?.disabledReason).toContain(DEFAULT_CYCLE)
+    expect(discharge?.disabledReason).toBe(cycleNotListedDischargeDisabledReason('ifs', DEFAULT_CYCLE))
+    for (const reason of existingDischargeReasons) expect(discharge?.disabledReason).not.toBe(reason)
+    expect(buildM11RegisteredOverlay(cycleQuery, layers)).toBeNull()
+    // 终态、非未定态：validTime 校正照常进行（与 fail-closed 同形），不暂缓。
+    expect(resolveM11NationalValidTimeCorrection({ ...cycleQuery, validTime: '2026-05-18T06:00:00.000Z' }, layers)).toBeNull()
+    // 条与图同源：控制条显示的周期就是 store 盖在图层上的活动周期（URL 周期），不被改写。
+    const model = deriveM11ControlBarModel({
+      state: cycleQuery,
+      layers,
+      metadata: nationalDischargeMetadata as never,
+      cyclesBySource: state.cyclesBySource,
+      sourceSelection: null,
+    })
+    expect(discharge?.activeNationalCycle).toBe(DEFAULT_CYCLE)
+    expect(model.cycle).toBe(discharge?.activeNationalCycle)
+  })
+
+  const unlistedCycleCases = [
+    { label: 'an IFS-only cycle requested for GFS', cycle: IFS_CYCLE },
+    { label: 'a fabricated cycle', cycle: '1999-01-01T00:00:00Z' },
+  ]
+
+  it.each(unlistedCycleCases)('uses the same cycle-not-listed reason for $label', async ({ cycle }) => {
+    mockApi({
+      [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source),
+      [VALID_TIMES_PATH]: emptyValidTimes,
+    })
+    const cycleQuery = { ...query, source: 'gfs' as const, cycle, validTime: null }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const layers = useOverviewDataStore.getState().overview?.layers ?? []
+    const discharge = layers.find((item) => item.layerId === 'discharge')
+    expect(discharge?.available).toBe(false)
+    expect(discharge?.disabledReason).toContain('GFS')
+    expect(discharge?.disabledReason).toContain(cycle)
+    expect(discharge?.disabledReason).toBe(cycleNotListedDischargeDisabledReason('gfs', cycle))
+    for (const reason of existingDischargeReasons) expect(discharge?.disabledReason).not.toBe(reason)
+    expect(buildM11RegisteredOverlay(cycleQuery, layers)).toBeNull()
+  })
+
+  const genericNoValidTimesCases = [
+    {
+      label: 'the cycle is listed for the source',
+      cycles: () => success({ source: 'gfs', cycles: [{ cycle_time: OTHER_CYCLE }], default_cycle: DEFAULT_CYCLE }),
+    },
+    {
+      label: 'the source cycle list could not be loaded',
+      cycles: () => {
+        throw new Error('cycles down')
+      },
+    },
+    {
+      // 信封是裸 `as T`：变形列表 = 成员身份未知，不得断言「未列出」。
+      label: 'the source cycle list is malformed',
+      cycles: () => success({ source: 'gfs', cycles: null, default_cycle: DEFAULT_CYCLE }),
+    },
+  ]
+
+  it.each(genericNoValidTimesCases)('keeps the generic no-valid-times reason when $label', async ({ cycles }) => {
+    mockApi({ [CYCLES_PATH]: cycles, [VALID_TIMES_PATH]: emptyValidTimes })
+    const cycleQuery = { ...query, cycle: OTHER_CYCLE, validTime: null }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const discharge = (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(useOverviewDataStore.getState().validTimesByCycle[`gfs|${OTHER_CYCLE}`]).toEqual({ status: 'available', validTimes: [] })
+    expect(discharge?.available).toBe(false)
+    expect(discharge?.disabledReason).toBe('Layer has no valid times.')
+  })
+
+  it('renders an unlisted cycle exactly as before when its valid-times list is non-empty', async () => {
+    // 老书签：周期已滑出 12 天回看窗口（不在 `cycles[]` 里），但覆盖仍在——照旧可渲染。
+    mockApi({ [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source) })
+    const cycleQuery = { ...query, cycle: IFS_CYCLE, validTime: null }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const layers = useOverviewDataStore.getState().overview?.layers ?? []
+    const discharge = layers.find((item) => item.layerId === 'discharge')
+    expect(discharge?.available).toBe(true)
+    expect(discharge?.disabledReason).toBeNull()
+    expect(discharge?.validTimes).toEqual([
+      '2026-05-17T06:00:00.000Z',
+      '2026-05-17T15:00:00.000Z',
+      '2026-05-17T18:00:00.000Z',
+    ])
+    expect(buildM11RegisteredOverlay(cycleQuery, layers)).not.toBeNull()
+  })
+
+  it('stays pending while membership is unknown and re-derives once the source cycle list arrives', async () => {
+    // 默认源不等 `/cycles`：空列表可能先到。此时「未列出」尚不可知，pending 才是诚实文案；
+    // `writeCycles` 的重算边负责把它换成终态。
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockApi({
+      [CYCLES_PATH]: async (options) => {
+        await gate
+        return cyclesPayload(options.params?.query?.source)
+      },
+      [VALID_TIMES_PATH]: emptyValidTimes,
+    })
+    const cycleQuery = { ...query, cycle: IFS_CYCLE, validTime: null }
+
+    const load = useOverviewDataStore.getState().loadOverview(cycleQuery)
+    await vi.waitFor(() => {
+      expect(useOverviewDataStore.getState().validTimesByCycle[`gfs|${IFS_CYCLE}`]).toEqual({ status: 'available', validTimes: [] })
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+    expect(useOverviewDataStore.getState().cyclesBySource.gfs).toBeUndefined()
+    const pendingDischarge = (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(pendingDischarge?.disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+
+    release()
+    await load
+
+    const settledDischarge = (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(settledDischarge?.disabledReason).toContain('GFS')
+    expect(settledDischarge?.disabledReason).toContain(IFS_CYCLE)
+    expect(settledDischarge?.disabledReason).toBe(cycleNotListedDischargeDisabledReason('gfs', IFS_CYCLE))
+  })
+
+  it('settles an empty list with unknowable membership to the generic reason when bootstrap failure skips the layer-time chain', async () => {
+    // 前一代已写入 `(gfs, C)` 的空列表，但 gfs `/cycles` 被身份切换 fence 掉；本代 bootstrap 失败 →
+    // 阶段 3 跳过，`/cycles` 永远不会到达。「成员身份尚不可知 → pending」在此是谎报，
+    // 必须与 cycles-error 臂同口径落到 'Layer has no valid times.'（design D2）。
+    useOverviewDataStore.setState({
+      validTimesByCycle: { [`gfs|${IFS_CYCLE}`]: { status: 'available', validTimes: [] } },
+    })
+    let layersCalls = 0
+    const calls = mockApi({
+      '/api/v1/layers': () => {
+        layersCalls += 1
+        if (layersCalls === 1) throw new Error('runless layer catalog down')
+        return success([layer])
+      },
+      // 阶段 2 的目录请求必须晚于阶段 1 的 reject 落地，否则命中同一个被拒 promise。
+      '/api/v1/models': async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return success({ items: [model], total: 1, limit: 200, offset: 0 })
+      },
+      [VALID_TIMES_PATH]: emptyValidTimes,
+    })
+    const cycleQuery = { ...query, source: 'gfs' as const, cycle: IFS_CYCLE, validTime: null }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const state = useOverviewDataStore.getState()
+    // 前置条件：bootstrap 确实失败、阶段 3 确实跳过、gfs cycles 记录确实缺席、种子记录未被清掉。
+    expect(state.bootstrapError).not.toBeNull()
+    expect(state.layerTimeEnrichmentSkipped).toBe(true)
+    expect(state.cyclesBySource.gfs).toBeUndefined()
+    expect(calls.filter((call) => call.path === CYCLES_PATH)).toHaveLength(0)
+    expect(state.validTimesByCycle[`gfs|${IFS_CYCLE}`]).toEqual({ status: 'available', validTimes: [] })
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge).toBeDefined()
+    expect(discharge?.disabledReason).not.toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(discharge?.disabledReason).toBe('Layer has no valid times.')
+    expect(isM11ActiveCycleValidTimesUnresolved(discharge)).toBe(false)
   })
 
   it('does not re-request anything when only the precipitation toggle changes', async () => {

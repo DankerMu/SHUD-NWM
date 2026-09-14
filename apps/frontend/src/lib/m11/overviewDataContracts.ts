@@ -453,13 +453,26 @@ export function resolveLayerValidTimesFromMetadata(metadata: ApiLayer['metadata'
  *   同样是终态，但什么都没有加载失败，故文案取 `failClosedDischargeDisabledReason`，
  *   与目录 metadata 判定的 fail-closed 落在**同一分支等级**上。
  *
- * 三者一律解析为空列表（`available: false`，overlay 为 null，零瓦片请求），各自对应一条独立文案。
+ * - `cycle-not-listed`：该对的列表**已到达且为空**，而该源已到达的周期列表里**没有**这个周期
+ *   （跨源书签 `?source=ifs&cycle=<GFS 周期>`、伪造周期；后端对未覆盖对回 200 + 空列表）。
+ *   终态；文案点名源与周期（#2131 / design D2），因为该源**有**时次，只是不在这个周期。
+ *
+ * 以上一律解析为空列表（`available: false`，overlay 为 null，零瓦片请求），各自对应一条独立文案。
  */
 export type ActiveCycleValidTimesOverride =
   | { status: 'available'; validTimes: string[] }
   | { status: 'pending' }
   | { status: 'error' }
   | { status: 'fail-closed' }
+  | { status: 'cycle-not-listed'; source: string; cycle: string }
+
+/**
+ * 「该源不列出这个周期」的禁用文案：点名源（大写）与周期。必须与 `'Layer has no valid times.'`
+ * （保留给「列出的周期没有覆盖」）以及 fail-closed / pending / error 三条文案都不相等。
+ */
+export function cycleNotListedDischargeDisabledReason(source: string, cycle: string): string {
+  return `Cycle ${cycle} is not listed for ${source.toUpperCase()}, so it has no valid times for this layer.`
+}
 
 /**
  * 活动周期的时次列表尚未取回时的禁用文案。必须与 `'Layer has no valid times.'` 和
@@ -476,7 +489,7 @@ export const activeCycleValidTimesErrorDisabledReason =
 /**
  * 活动周期列表处于**未定**态（pending / error）：调用方据此暂缓 validTime 自动校正，保住 URL 状态。
  * `fail-closed` **刻意不在**其中：那是终态，不会再有列表到来，校正照常进行——与目录 metadata
- * 判定的 fail-closed 行为一致（两者产出同一条 `disabledReason`）。
+ * 判定的 fail-closed 行为一致（两者产出同一条 `disabledReason`）。`cycle-not-listed` 同理是终态，也不在其中。
  */
 export function isM11ActiveCycleValidTimesUnresolved(layer: LayerState | null | undefined): boolean {
   return (
@@ -564,9 +577,11 @@ export function normalizeLayerStates(input: {
                 ? pendingActiveCycleValidTimesDisabledReason
                 : activeCycleOverrideStatus === 'error'
                   ? activeCycleValidTimesErrorDisabledReason
-                  : validTimes.length === 0
-                    ? 'Layer has no valid times.'
-                    : null,
+                  : activeCycleOverride?.status === 'cycle-not-listed'
+                    ? cycleNotListedDischargeDisabledReason(activeCycleOverride.source, activeCycleOverride.cycle)
+                    : validTimes.length === 0
+                      ? 'Layer has no valid times.'
+                      : null,
       freshness: createFreshnessMetadata({
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
@@ -1066,6 +1081,27 @@ function pickCurrentValidTime(validTimes: string[], queryValidTime: string | nul
   const normalizedQuery = normalizeIsoString(queryValidTime)
   if (normalizedQuery && validTimes.includes(normalizedQuery)) return normalizedQuery
   return validTimes[0]
+}
+
+/**
+ * 只把新的 `validTime` 重新套到既有 LayerState 上（#2127 / design D1）：`currentValidTime` 与
+ * `normalizeLayerStates` 同一条 `pickCurrentValidTime`，freshness 与之同一条规则（时次 + 过期判定 +
+ * 缺时次文案）；其余字段（列表、禁用文案、周期章）原样保留。用于冻结的 bootstrap 快照——它不得
+ * 从活的 cycles / valid-times 记录重建。`createFreshnessMetadata` 对已归一的字段是幂等的。
+ */
+export function retimeLayerStates(layerStates: LayerState[], validTime: string | null): LayerState[] {
+  return layerStates.map((layer) => {
+    const currentValidTime = pickCurrentValidTime(layer.validTimes, validTime)
+    return {
+      ...layer,
+      currentValidTime,
+      freshness: createFreshnessMetadata({
+        ...layer.freshness,
+        validTime: currentValidTime,
+        unavailableReason: currentValidTime ? null : 'No valid-time metadata is available.',
+      }),
+    }
+  })
 }
 
 function layerGroup(layer: ApiLayer | undefined, layerId: string): LayerState['group'] {
