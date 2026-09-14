@@ -135,7 +135,7 @@ budget fields. Real launcher and collection/survivor proofs are required.
 
 ## R2 — Detach normal compression while preserving safety
 
-- [ ] R2.1 Change `infra/systemd/nhms-node27-timeseries-compression.service`,
+- [x] R2.1 Change `infra/systemd/nhms-node27-timeseries-compression.service`,
   `scripts/node27_timeseries_compression_once.sh`,
   `scripts/node27_timeseries_budget_preflight.py`,
   `scripts/node27_timeseries_compression.py`,
@@ -145,17 +145,22 @@ budget fields. Real launcher and collection/survivor proofs are required.
   assembly fields and the cold `ExecStart`; migrate every
   `timeseries_compression_receipt` schema/example/consumer affected by paired
   fields. No compatibility aliases or mechanical restoration of old literals.
-- [ ] R2.2 Derive a consistent single-compression budget: statement plus cleanup
+- [x] R2.2 Derive a consistent single-compression budget: statement plus cleanup
   must fit the wrapper, and systemd must retain the required outer safety margin.
   Preserve descriptor-bound mode-0600/no-symlink inert env parsing, import-origin
   validation, argv execution, bounded timeout, secret-safe refusal and fixed
   lifecycle mutex before local/DB locks. Preserve ordinary compression,
   retention windows, discovery/lag and maintenance scheduling safety.
-- [ ] R2.3 Migrate launcher/compression/retention tests, CI selectors and docs
+- [x] R2.3 Migrate launcher/compression/retention tests, CI selectors and docs
   atomically. Real wrapper/CLI smoke must launch normal compression without any
   cold env and refuse malformed/unsafe compression configuration. Prove finite
   timeout/cleanup and lifecycle-lock contention behavior on surviving paths;
   do not infer effective production units from repository templates.
+  Implementation and isolated verification:
+  `evidence/retirement-compression-verification.json`; guard mutation proof:
+  `evidence/retirement-compression-budget-mutants.json`.
+  This completes only the dependent R3 runner/paired-budget/cold-env rewrite
+  closure; remaining cold families and R5 effective deployment are not complete.
 
 ## R3 — Delete cold-only runtime and old G0-G8 delivery surfaces
 
