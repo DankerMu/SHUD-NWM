@@ -2733,10 +2733,11 @@ def test_valid_times_route_serves_the_requested_identity_in_the_pinned_spelling(
 def test_valid_times_route_without_arguments_keeps_serving_the_national_list(monkeypatch: Any) -> None:
     """The no-argument branch is a live route, not just an internal default.
 
-    The frontend's `fetchLayerValidTimes` fallback still calls it with no
-    arguments (`apps/frontend/src/stores/overviewData.ts`), so making
-    `source`/`cycle` mandatory would break it. `scripts/node27_mvt_prewarm.py`
-    no longer calls it -- since #2013 it always passes `source` and `cycle`.
+    The frontend's only valid-times fetch, `fetchLayerValidTimesForCycle`
+    (`apps/frontend/src/stores/overviewData.ts`), always passes `source` and
+    `cycle`, and so does `scripts/node27_mvt_prewarm.py` since #2013. The branch
+    stays part of the public route contract, so making `source`/`cycle`
+    mandatory would still be an API break.
     """
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())

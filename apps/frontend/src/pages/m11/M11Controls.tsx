@@ -247,7 +247,7 @@ export function M11Timeline({
   )
 
   // 纯自派生（finding D3）：全国路径上调用方传下来的聚合位与这条恒等——`M11Layer` 是单成员
-  // 类型，`buildLayerStates` 既不传 `validTimesByLayerId` 也不传 `derivedValidTimes`，
+  // 类型，`buildLayerStates` 不传 `validTimesByLayerId`，
   // `normalizeLayerStates` 里唯一能造出「validTimes 非空且 disabledReason 非空」的 `!apiLayer`
   // 分支在全国不可达，控制条又恒传 `onQueryChange`。加一个恒等的可选形参 = 不可证伪的契约。
   const disabled = model.validTimes.length === 0 || !onQueryChange

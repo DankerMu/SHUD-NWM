@@ -3561,7 +3561,7 @@ basinId 查表回填，而 basinId 来自 `has_display_product=true`；river 那
 `basin_version` → `model_instance` → `hydro_run` 一起删，会毁掉血缘和上面的复活路径。
 裸 `/api/v1/basins`（不带 `has_display_product`）就是 `core.basin` 原始目录，
 含已退役流域**属预期**；前端走的是 `has_display_product=true`
-（[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
+（[`stores/overviewData.ts`](../../apps/frontend/src/stores/overviewData.ts) 的 `fetchBasins`）。
 
 ### 7.2 2026-08-25：zhaochen 系列退出业务化（#1701，owner 裁定不建后继）
 

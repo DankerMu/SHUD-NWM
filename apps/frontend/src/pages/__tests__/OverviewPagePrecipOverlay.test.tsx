@@ -12,17 +12,21 @@ import { overviewSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/ove
 import { installMaplibreStubMap } from '@/test/maplibreStub'
 import {
   DEFAULT_CYCLE,
+  OTHER_CYCLE,
   PRECIP_INDEX_PATH,
   VALID_TIMES_PATH,
   apiError,
   layer,
   mockApi,
   model,
+  nationalDischargeMetadata,
   precipIndex,
   precipLayer,
   precipLegend,
   resetOverviewDataTestState,
+  run,
   success,
+  type MockOptions,
 } from '@/test/overviewDataFixture'
 
 vi.mock('@/api/client', () => ({
@@ -175,6 +179,39 @@ describe('OverviewPage precipitation overlay mount seam', () => {
       .filter((node) => node.getAttribute('data-source-type') === 'image')
     expect(imageSources.map((node) => node.getAttribute('data-source-url'))).toEqual([EXPECTED_URL])
     expect(screen.queryByTestId('m11-precip-notice')).toBeNull()
+    expectPrecipFacesAgree()
+  })
+
+  it('resolves the overlay against the runless default cycle when the run-scoped catalog flipped it', async () => {
+    // #2140：同一代里 runless 目录报 C1、run-scoped 目录报 C2。阶段 3 按 runless 写 `gfs|C1` 的 index 键，
+    // 叠加层若按 run-scoped 的 C2 去读，键永远缺席 → 静默停在 index_pending 且无提示。
+    const scopedLayer = {
+      ...layer,
+      metadata: {
+        ...nationalDischargeMetadata,
+        default_cycle: OTHER_CYCLE,
+        valid_times: [OTHER_CYCLE, '2026-05-17T15:00:00Z', '2026-05-17T18:00:00Z'],
+      },
+    }
+    // 前置条件：runless 列表的 lead 0 在 C1 的 index 里，否则解析器停在 window_incomplete，什么也不鉴别。
+    expect(nationalDischargeMetadata.default_cycle).toBe(DEFAULT_CYCLE)
+    expect(precipIndex.valid_times).toContain(nationalDischargeMetadata.valid_times[0])
+    const calls = mockApi({
+      '/api/v1/layers': (options: MockOptions) =>
+        success(options.params?.query?.run_id === undefined ? [layer, precipLayer] : [scopedLayer, precipLayer]),
+    })
+    renderOverview()
+    await settled()
+
+    expect(calls.filter((call) => call.path === '/api/v1/layers').map((call) => call.query?.run_id)).toEqual([
+      undefined,
+      run.run_id,
+    ])
+    await waitFor(() =>
+      expect(useOverviewDataStore.getState().precipIndexByCycle[`gfs|${DEFAULT_CYCLE}`]?.status).toBe('available'),
+    )
+    await waitFor(() => expect(surface().getAttribute('data-precip-hidden-reason')).not.toBe('index_pending'))
+    await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(EXPECTED_URL))
     expectPrecipFacesAgree()
   })
 
