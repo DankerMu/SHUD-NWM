@@ -53,7 +53,7 @@ export interface M11PrecipOverlayInput {
   precip: boolean
   /**
    * 已解析的**具体**源。本函数**不**自行解析 `best`：全国调用点传
-   * `nationalConcreteSource(state.source)`，流域详情将来传 `resolveSelectedSource` 的结果。
+   * `nationalConcreteSource(state.source)`。
    * `null` = `compare` 或未解析出具体源 ⇒ 隐藏 + 提示 A（绝不拼 `/api/v1/precip/best|compare/…`）。
    */
   concreteSource: 'gfs' | 'ifs' | null

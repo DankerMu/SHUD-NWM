@@ -4,7 +4,6 @@ import type { M11Layer } from '@/lib/m11/queryState'
 import type { M11RegisteredOverlay } from '@/components/map/m11MapBuilders'
 import {
   M11_BASIN_FILL_LAYER_ID,
-  M11_BASIN_RIVER_LINE_LAYER_ID,
   MET_STATION_CLUSTER_LAYER_ID,
   MET_STATION_POINT_LAYER_ID,
   MET_STATION_SOURCE_ID,
@@ -12,7 +11,7 @@ import {
 } from '@/components/map/m11MapPrimitives'
 
 export interface M11MapOverlayInteraction {
-  layerId: M11Layer | 'met-stations' | 'basin-boundaries' | 'basin-river-segments'
+  layerId: M11Layer | 'met-stations' | 'basin-boundaries'
   event: MapLayerMouseEvent
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
@@ -23,49 +22,35 @@ interface M11InteractionContext {
   mapRef: MapRef | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
-  setHoveredRiverSegmentId?: (segmentId: string | null) => void
 }
 
 export function buildM11InteractiveLayerIds({
   showStationLayer,
-  hasBasinRiverFeatures,
   hasBasinFeatures,
   renderableOverlay,
 }: {
   showStationLayer: boolean
-  hasBasinRiverFeatures: boolean
   hasBasinFeatures: boolean
   renderableOverlay: M11RegisteredOverlay | null
 }): string[] {
   return [
     ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
-    ...(hasBasinRiverFeatures ? [M11_BASIN_RIVER_LINE_LAYER_ID] : []),
     ...(hasBasinFeatures ? [M11_BASIN_FILL_LAYER_ID] : []),
     ...(renderableOverlay ? [m11RegisteredOverlayHitLayerId(renderableOverlay)] : []),
   ]
 }
 
 export function handleM11MapMouseMove(event: MapLayerMouseEvent, context: M11InteractionContext) {
-  const { showStationLayer, renderableOverlay, mapRef, onOverlayHover, setHoveredRiverSegmentId } = context
+  const { showStationLayer, renderableOverlay, mapRef, onOverlayHover } = context
   if (showStationLayer) {
     const stationFeature =
       findRenderedFeature(event, mapRef, MET_STATION_POINT_LAYER_ID) ??
       findRenderedFeature(event, mapRef, MET_STATION_CLUSTER_LAYER_ID)
     if (stationFeature) {
-      setHoveredRiverSegmentId?.(null)
       onOverlayHover?.(null)
       event.target.getCanvas().style.cursor = 'pointer'
       return
     }
-  }
-
-  const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
-  if (riverFeature) {
-    const riverSegmentId = featureStringProperty(riverFeature, 'river_segment_id') ?? featureStringProperty(riverFeature, 'segment_id')
-    setHoveredRiverSegmentId?.(riverSegmentId)
-    onOverlayHover?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-    event.target.getCanvas().style.cursor = 'pointer'
-    return
   }
 
   const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
@@ -77,22 +62,19 @@ export function handleM11MapMouseMove(event: MapLayerMouseEvent, context: M11Int
 
   const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
   if (basinFeature) {
-    setHoveredRiverSegmentId?.(null)
     onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
     event.target.getCanvas().style.cursor = 'pointer'
     return
   }
 
-  setHoveredRiverSegmentId?.(null)
   onOverlayHover?.(null)
   event.target.getCanvas().style.cursor = ''
 }
 
 export function handleM11MapMouseLeave(
   event: MapLayerMouseEvent,
-  context: Pick<M11InteractionContext, 'onOverlayHover' | 'setHoveredRiverSegmentId'>,
+  context: Pick<M11InteractionContext, 'onOverlayHover'>,
 ) {
-  context.setHoveredRiverSegmentId?.(null)
   context.onOverlayHover?.(null)
   event.target.getCanvas().style.cursor = ''
 }
@@ -111,12 +93,6 @@ export function handleM11MapClick(event: MapLayerMouseEvent, context: M11Interac
       onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
       return
     }
-  }
-
-  const riverFeature = findEventFeature(event, M11_BASIN_RIVER_LINE_LAYER_ID)
-  if (riverFeature) {
-    onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
-    return
   }
 
   const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
@@ -177,7 +153,22 @@ function findRenderedFeature(event: MapLayerMouseEvent, mapRef: MapRef | null, l
   }
 }
 
-function featureStringProperty(feature: NonNullable<MapLayerMouseEvent['features']>[number], key: string) {
-  const value = feature.properties?.[key]
+/** 取地图要素的非空字符串属性；缺失 / 非字符串 / 空串一律 null。 */
+export function mapFeatureStringProperty(feature: M11MapOverlayInteraction['feature'], key: string) {
+  const value = feature?.properties?.[key]
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** 弹窗锚点：点要素取其坐标，否则回落到点击事件的经纬度；都不可用时返回 null。 */
+export function popupAnchorFromInteraction(interaction: M11MapOverlayInteraction): [number, number] | null {
+  const geometry = interaction.feature?.geometry
+  if (geometry && geometry.type === 'Point' && Array.isArray(geometry.coordinates)) {
+    const [lon, lat] = geometry.coordinates as number[]
+    if (Number.isFinite(lon) && Number.isFinite(lat)) return [lon, lat]
+  }
+  const lngLat = (interaction.event as { lngLat?: { lng?: number; lat?: number } }).lngLat
+  if (lngLat && Number.isFinite(lngLat.lng) && Number.isFinite(lngLat.lat)) {
+    return [lngLat.lng as number, lngLat.lat as number]
+  }
+  return null
 }

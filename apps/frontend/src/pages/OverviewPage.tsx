@@ -1,15 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import {
   M11MapLibreSurface,
   type M11MapCameraFit,
   type M11MapOverlayInteraction,
-  type M11MapPopupSlot,
   type M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
 import {
-  M11BackToOverviewButton,
   M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
@@ -18,8 +16,9 @@ import {
   type M11PrecipAvailability,
 } from '@/components/map/M11FloatingControls'
 import { resolveNationalOverlayCycle } from '@/components/map/m11MapBuilders'
+import { mapFeatureStringProperty, popupAnchorFromInteraction } from '@/components/map/m11MapInteractions'
 import { resolveM11PrecipOverlay, type M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
-import { bboxToMapFit, mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
+import { bboxToMapFit } from '@/components/map/m11MapRuntime'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
@@ -54,7 +53,7 @@ const OPERATOR_ROLES = ['operator', 'model_admin', 'sys_admin']
 
 /**
  * 单页全屏地图展示端（M26）：整个展示端 = 一张铺满视口的地图 + 玻璃质感浮层。
- * 删去左/右/底所有边栏；按 query 内 basinId 双模式：null=全国总览 / 非null=流域详情。
+ * 删去左/右/底所有边栏；只有全国总览一种模式（流域详情通道已下线，#2109 裁决 B）。
  * 图层切换走左上浮层；图例走右下浮层；河段/代站详情走玻璃弹窗。
  */
 export function OverviewPage() {
@@ -77,32 +76,11 @@ export function OverviewPage() {
     navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
   }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
 
-  // 刷新/直达带 basinId 的 URL：仅首挂载剥离 basinId（`replace`），落到全国总览主页。剥离期间同步
-  // 按总览渲染（绝不挂 BasinDetailMode），否则详情副作用会把 basinId 回写 URL、盖掉剥离形成竞态。
-  // 闸门只认「首挂载是否带 basinId」，basinId 真正消失后即关闭，此后挂载期内写入的 basinId 不受影响。
-  // 现状：本 build 里没有任何「挂载后写非空 basinId」的路径 —— 两处写 basinId 的调用点写的都是 null
-  // （BasinDetailPanels.tsx `backToOverview`、本文件的剥离 effect），全国视图点流域只做相机 fit
-  // （见 handleMapOverlayClick）。因此 BasinDetailMode 目前只对未来新增的写入方可达。
-  const initialBasinStripRef = useRef(Boolean(state.basinId))
-  const strippingInitialBasin = initialBasinStripRef.current && Boolean(state.basinId)
-  useEffect(() => {
-    if (!initialBasinStripRef.current) return
-    if (!state.basinId) {
-      initialBasinStripRef.current = false
-      return
-    }
-    const next = serializeM11QueryState({ ...state, basinId: null })
-    navigate({ pathname: location.pathname, search: next ? `?${next}` : '' }, { replace: true })
-  }, [state, location.pathname, navigate])
-
+  // 旧 `?basinId=` / `/basins/:basinId` 深链：`basinId` 已不属于 M11QueryState，属未知键，由上面的
+  // query 归一（`replace`）剥离，落到全国总览。
   if (needsQueryReplacement) return null
 
-  const effectiveBasinId = strippingInitialBasin ? null : state.basinId
-  return effectiveBasinId ? (
-    <BasinDetailMode basinId={effectiveBasinId} state={state} onQueryChange={handleQueryChange} />
-  ) : (
-    <OverviewMode state={state} onQueryChange={handleQueryChange} />
-  )
+  return <OverviewMode state={state} onQueryChange={handleQueryChange} />
 }
 
 /**
@@ -113,14 +91,11 @@ function M11FullscreenMap({
   layers,
   basins,
   visibleBasinIds,
-  basinSegments,
   nationalRiverGeo,
   meshRiverBasinIds,
   selectedSegmentId,
-  selectedSegmentGeometry,
   selectedStationId,
   stationFeatureCollection,
-  popup,
   precipOverlay,
   precipAvailability,
   precipLegend,
@@ -138,18 +113,12 @@ function M11FullscreenMap({
   layers: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
-  basinSegments?: import('@/lib/m11/overviewDataContracts').BasinSegmentRow[]
   nationalRiverGeo?: import('geojson').FeatureCollection | null
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
-  selectedSegmentGeometry?:
-    | import('@/api/types').components['schemas']['GeoJsonLineString']
-    | import('@/api/types').components['schemas']['GeoJsonMultiLineString']
-    | null
   selectedStationId?: string | null
   stationFeatureCollection?: M11StationFeatureCollection | null
-  popup?: M11MapPopupSlot | null
-  /** 已解析的降水叠加模型；不传 = 无叠加（流域详情模式，blocked by #2109）。 */
+  /** 已解析的降水叠加模型；不传 = 无叠加。 */
   precipOverlay?: M11PrecipOverlayModel | null
   /** 目录里有没有 `precip` 条目的**三值**事实；不传 = `'absent'` = 降水开关禁用并标「未实现」。 */
   precipAvailability?: M11PrecipAvailability
@@ -159,7 +128,7 @@ function M11FullscreenMap({
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   mapLabel: string
-  /** 底部控制条模型（全国模式）。null / 不传 = 不渲染任何控制条 DOM（流域详情模式）。 */
+  /** 底部控制条模型。null / 不传 = 不渲染任何控制条 DOM。 */
   controlBar?: M11BottomControlBarProps | null
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -181,14 +150,11 @@ function M11FullscreenMap({
         layers={layers}
         basins={basins}
         visibleBasinIds={visibleBasinIds}
-        basinSegments={basinSegments}
         nationalRiverGeo={nationalRiverGeo}
         meshRiverBasinIds={meshRiverBasinIds}
         selectedSegmentId={selectedSegmentId}
-        selectedSegmentGeometry={selectedSegmentGeometry}
         selectedStationId={selectedStationId}
         stationFeatureCollection={stationFeatureCollection}
-        popup={popup}
         precipOverlay={precipOverlay}
         loading={loading}
         boundaryLoading={boundaryLoading}
@@ -210,54 +176,6 @@ function M11FullscreenMap({
       <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
       </section>
     </div>
-  )
-}
-
-function BasinDetailMode({
-  basinId,
-  state,
-  onQueryChange,
-}: {
-  basinId: string
-  state: M11QueryState
-  onQueryChange: (patch: M11QueryPatch) => void
-}) {
-  const detail = useBasinDetailMode({ basinId, state, onQueryChange })
-
-  return (
-    <M11FullscreenMap
-      state={state}
-      layers={detail.layers}
-      basins={detail.basins}
-      visibleBasinIds={detail.visibleBasinIds}
-      basinSegments={detail.basinSegments}
-      nationalRiverGeo={detail.nationalRiverGeo}
-      meshRiverBasinIds={detail.meshRiverBasinIds}
-      selectedSegmentId={detail.selectedSegmentId}
-      selectedSegmentGeometry={detail.selectedSegmentGeometry}
-      selectedStationId={detail.selectedStationId}
-      stationFeatureCollection={detail.stationFeatureCollection}
-      popup={detail.popup}
-      loading={detail.surfaceSettling}
-      boundaryLoading={detail.boundaryLoading}
-      fitTo={detail.fitTo}
-      mapLabel={detail.mapLabel}
-      onQueryChange={onQueryChange}
-      onOverlayHover={detail.onMapOverlayHover}
-      onOverlayClick={detail.onMapOverlayClick}
-    >
-      <M11BackToOverviewButton onClick={detail.backToOverview} />
-      {detail.riverPanel}
-      {detail.basinNotFoundReason ? (
-        <M11FloatingNotice testId="m11-basin-not-found">
-          未找到流域 {basinId}：{detail.basinNotFoundReason}
-        </M11FloatingNotice>
-      ) : detail.error ? (
-        <M11FloatingNotice testId="m11-basin-error">{detail.error}</M11FloatingNotice>
-      ) : detail.stationStatusNote ? (
-        <M11FloatingNotice testId="m11-met-station-status">{detail.stationStatusNote}</M11FloatingNotice>
-      ) : null}
-    </M11FullscreenMap>
   )
 }
 
@@ -283,7 +201,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
-      basinId: null,
       segmentId: state.segmentId,
       q: state.q,
     }),
@@ -580,7 +497,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       {riverForecastPanel}
       {stationForecastPanel}
       {state.metStations && stationLayer.statusNote ? (
-        // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
+        // 代站图层的 honest 状态优先。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
       ) : surfaceSettling ? (
         <M11FloatingNotice testId="m11-overview-loading">总览数据加载中</M11FloatingNotice>

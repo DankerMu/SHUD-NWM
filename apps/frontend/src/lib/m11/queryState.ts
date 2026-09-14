@@ -16,7 +16,6 @@ export interface M11QueryState {
   basemap: M11Basemap
   basinVersionId: string | null
   riverNetworkVersionId: string | null
-  basinId: string | null
   segmentId: string | null
   q: string | null
 }
@@ -32,7 +31,7 @@ const legacyMetStationsLayer = 'met-stations'
 
 export const defaultM11QueryState: M11QueryState = {
   // 全国尺度默认源为 GFS（spec map-layer-timeline-controls「Source selector renders required choices」）。
-  // `best` 仍是合法可解析值（流域详情 Best Available），但不再是默认值；`best → gfs` 的归一
+  // `best` 仍是合法可解析值（Best Available），但不再是默认值；`best → gfs` 的归一
   // 属于 selection 层（`createSourceScenarioSelection` 的 national scale），不在本 parser 内。
   source: 'gfs',
   cycle: null,
@@ -43,7 +42,6 @@ export const defaultM11QueryState: M11QueryState = {
   basemap: 'vector',
   basinVersionId: null,
   riverNetworkVersionId: null,
-  basinId: null,
   segmentId: null,
   q: null,
 }
@@ -152,7 +150,6 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
     basemap: isOneOf(basemap, basemaps) ? basemap : defaultM11QueryState.basemap,
     basinVersionId: normalizeM11Identifier(params.get('basinVersionId')),
     riverNetworkVersionId: normalizeM11Identifier(params.get('riverNetworkVersionId')),
-    basinId: normalizeM11Identifier(params.get('basinId')),
     segmentId: normalizeM11Identifier(params.get('segmentId')),
     q: normalizeSearch(params.get('q')),
   }
@@ -187,7 +184,6 @@ export function serializeM11QueryState(state: M11QueryPatch) {
   if (normalized.basemap !== defaultM11QueryState.basemap) params.set('basemap', normalized.basemap)
   if (normalized.basinVersionId) params.set('basinVersionId', normalized.basinVersionId)
   if (normalized.riverNetworkVersionId) params.set('riverNetworkVersionId', normalized.riverNetworkVersionId)
-  if (normalized.basinId) params.set('basinId', normalized.basinId)
   if (normalized.segmentId) params.set('segmentId', normalized.segmentId)
   if (normalized.q) params.set('q', normalized.q)
 

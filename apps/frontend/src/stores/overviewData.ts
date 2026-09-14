@@ -6,39 +6,26 @@ import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
-  createEmptyBasinDetail,
   createEmptyOverviewSummary,
   decideAggregationEndpoint,
-  filterBasinSegmentRows,
   mergeLayerCatalogs,
-  normalizeBasinDetail,
-  normalizeBasinSegmentRows,
   normalizeLayerStates,
   normalizeOverviewBasins,
   normalizeOverviewSummary,
-  normalizeSelectedSegmentDetail,
   resolveNationalScaleSource,
   type ActiveCycleValidTimesOverride,
   type AggregationEndpointDecision,
   type ApiBasin,
   type ApiBasinVersion,
-  type ApiForecastPayload,
   type ApiHydroRun,
   type ApiHydroRunPage,
   type ApiLayer,
-  type ApiLineageResponse,
   type ApiModelInstance,
   type ApiPipelineStatus,
   type ApiQueueDepth,
-  type ApiRiverFeature,
-  type ApiRiverFeatureCollection,
-  type ApiRiverSegment,
-  type BasinDetail,
-  type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
   type OverviewSummary,
-  type SelectedSegmentDetail,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 import { isDisplayReadonlyRuntimeConfig, useMonitoringStore } from '@/stores/monitoring'
@@ -59,11 +46,6 @@ export interface M11SnapshotRequestScope {
 
 export interface M11OverviewRequestScope extends M11SnapshotRequestScope {
   kind: 'overview'
-}
-
-export interface M11BasinRequestScope extends M11SnapshotRequestScope {
-  kind: 'basin-detail'
-  basinId: string
 }
 
 type ModelInstancePage = components['schemas']['ModelInstancePage']
@@ -134,17 +116,8 @@ export interface OverviewDataSnapshot {
   basinVersionToBasinId: Record<string, string>
 }
 
-export interface BasinDataSnapshot {
-  requestScope: M11BasinRequestScope
-  detail: BasinDetail
-  segments: BasinSegmentRow[]
-  selectedSegment: SelectedSegmentDetail | null
-  layers: LayerState[]
-}
-
 interface OverviewDataState {
   overview: OverviewDataSnapshot | null
-  basinDetail: BasinDataSnapshot | null
   // 拆分自旧 `loading: boolean` 闸门（spec D2 / scenario "Map interactivity is decoupled from enrichment loading"）。
   // - mapBootstrapLoading：地图可交互快路径（basins + runless layers + 当前 layer 的 valid_time）。
   // - enrichmentLoading：runs/models/queue/pipeline/summary/per-basin versions 等背景；阶段 2 单点 reject
@@ -152,12 +125,10 @@ interface OverviewDataState {
   // 初始 (false, false, null) 视为「尚未 bootstrap」，不是「ready / empty」。
   mapBootstrapLoading: boolean
   enrichmentLoading: boolean
-  basinLoading: boolean
   // 阶段 1 失败专属：basins / runless layers reject 时写入；与 enrichment 阶段的 partial error
   // 路径解耦（scenario "Map bootstrap rejection"）。
   bootstrapError: string | null
   error: string | null
-  basinError: string | null
   // 以下三项一律是 enrichment（`mapBootstrapLoading` 落 false **之后**才发出的非阻塞请求），
   // 失败只产 scoped 状态，绝不写 bootstrapError / mapBootstrapLoading
   // （spec overview-data-contracts「Cycles and precipitation index requests stay off the
@@ -177,7 +148,6 @@ interface OverviewDataState {
    */
   layerTimeEnrichmentSkipped: boolean
   loadOverview: (query: M11QueryState) => Promise<OverviewDataSnapshot>
-  loadBasinDetail: (basinId: string, query: M11QueryState) => Promise<BasinDataSnapshot>
   clearCache: () => void
 }
 
@@ -198,58 +168,12 @@ type OverviewRequestPlan = {
   shouldFetchVersions: boolean
 }
 
-type ResolvedSegmentIdentifiers = {
-  requestedId: string
-  riverSegmentId: string
-  riverNetworkVersionId: string
-  segmentId: string
-  detailEndpointSegmentId: string
-  detailEndpointRiverNetworkVersionId: string
-  forecastSegmentId: string
-  lineageSegmentId: string
-  feature: ApiRiverFeature | null
-  row: BasinSegmentRow | null
-}
-
-type BasinVersionRunFetchResult = {
-  page: ApiHydroRunPage | null
-  reachedCap: boolean
-  failed: boolean
-}
-
 type ReadyRunStatusPages = Partial<Record<ReadyRunStatus, ApiHydroRunPage>>
 
 type ReadyRunPage = ApiHydroRunPage & {
   readyStatusPages?: ReadyRunStatusPages
 }
 
-type ReadyRunCursor = {
-  status: ReadyRunStatus
-  offset: number
-  total: number
-}
-
-type RiverSegmentFetchResult = {
-  collection: ApiRiverFeatureCollection
-  reachedCap: boolean
-  truncated: boolean
-  /** 全量翻页因 MAX_PAGES/MAX_ITEMS 提前停止，河网不完整（诚实标注用）。 */
-  incomplete: boolean
-}
-
-type BasinActiveRiverNetwork = {
-  model: ApiModelInstance | null
-  riverNetworkVersionId: string | null
-}
-
-const COMPARE_LINEAGE_UNAVAILABLE = '对比模式河段追溯需要 GFS+IFS 聚合端点'
-const RUN_LOOKUP_PAGE_LIMIT = 200
-const RUN_LOOKUP_MAX_EXTRA_PAGES = 5
-const RUN_LOOKUP_MAX_RETAINED_ITEMS = 1_000
-const RIVER_SEGMENT_PAGE_LIMIT = 500
-const RIVER_SEGMENT_MIN_PAGE_LIMIT = 125
-const RIVER_SEGMENT_MAX_PAGES = 10
-const RIVER_SEGMENT_MAX_ITEMS = 10_000
 const READY_RUN_STATUSES = ['published'] as const
 type ReadyRunStatus = (typeof READY_RUN_STATUSES)[number]
 
@@ -258,11 +182,8 @@ const CACHE_TTL_MS = 60_000
 const CACHE_MAX_ENTRIES = 64
 const OVERVIEW_INITIAL_REQUEST_THRESHOLD = 8
 const overviewLoads = new Map<string, Promise<OverviewDataSnapshot>>()
-const basinLoads = new Map<string, Promise<BasinDataSnapshot>>()
 let overviewRequestNonce = 0
-let basinRequestNonce = 0
 let activeOverviewRequestKey: string | null = null
-let activeBasinRequestKey: string | null = null
 let cacheGeneration = 0
 
 export function clearOverviewDataCache() {
@@ -271,11 +192,8 @@ export function clearOverviewDataCache() {
     deleteCacheEntry(key)
   }
   overviewLoads.clear()
-  basinLoads.clear()
   overviewRequestNonce += 1
-  basinRequestNonce += 1
   activeOverviewRequestKey = null
-  activeBasinRequestKey = null
   // 三个 layer-time 缓存与 HTTP `cache` 同寿（tasks.md「由 clearOverviewDataCache() / clearCache()
   // 清除」）：留着它们会让下一轮加载在新 nonce 下读到上一轮的 `(source, cycle)` 列表 / index。
   // 调用一律发生在模块初始化之后，故此处对 `useOverviewDataStore` 的前向引用在运行时安全。
@@ -302,12 +220,9 @@ function dataIdentityQuery(query: M11QueryState): M11QueryState {
 }
 
 function requestScopeQueryKey(query: M11QueryState) {
-  // basinId 由 requestScope.basinId 单独匹配，故从序列化键中剔除：
-  // 加 basinId 字段后键的输出与改动前字节完全一致，零缓存 churn（R1 缓解）。
   return serializeM11QueryState({
     ...dataIdentityQuery(query),
     metStations: false,
-    basinId: null,
     basemap: defaultM11QueryState.basemap,
     validTime: null,
   })
@@ -317,13 +232,8 @@ function requestScopeDataKey(query: M11QueryState) {
   return serializeM11QueryState({
     ...dataIdentityQuery(query),
     metStations: false,
-    basinId: null,
     basemap: defaultM11QueryState.basemap,
   })
-}
-
-function basinRequestIdentityQuery(query: M11QueryState): M11QueryState {
-  return { ...dataIdentityQuery(query), q: null }
 }
 
 function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
@@ -343,40 +253,12 @@ function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
   }
 }
 
-function basinRequestScope(basinId: string, query: M11QueryState): M11BasinRequestScope {
-  return {
-    ...overviewRequestScope(query),
-    kind: 'basin-detail',
-    basinId,
-  }
-}
-
 export function overviewSnapshotMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
   return snapshot?.requestScope?.dataKey === requestScopeDataKey(query)
 }
 
 export function overviewSnapshotMetadataMatchesQuery(snapshot: OverviewDataSnapshot | null | undefined, query: M11QueryState) {
   return snapshot?.requestScope?.queryKey === requestScopeQueryKey(query)
-}
-
-export function basinSnapshotMatchesQuery(
-  snapshot: BasinDataSnapshot | null | undefined,
-  basinId: string,
-  query: M11QueryState,
-) {
-  return snapshot?.requestScope?.kind === 'basin-detail' &&
-    snapshot.requestScope.basinId === basinId &&
-    snapshot.requestScope.dataKey === requestScopeDataKey(basinRequestIdentityQuery(query))
-}
-
-export function basinSnapshotMetadataMatchesQuery(
-  snapshot: BasinDataSnapshot | null | undefined,
-  basinId: string,
-  query: M11QueryState,
-) {
-  return snapshot?.requestScope?.kind === 'basin-detail' &&
-    snapshot.requestScope.basinId === basinId &&
-    snapshot.requestScope.queryKey === requestScopeQueryKey(basinRequestIdentityQuery(query))
 }
 
 function deleteCacheEntry(key: string) {
@@ -482,23 +364,6 @@ function mergeRunPages(
   }
 }
 
-function latestPublishedRunForBasinVersion(
-  runs: ApiHydroRunPage | null,
-  basinVersionId: string | null | undefined,
-  query: M11QueryState | undefined,
-): ApiHydroRun | null {
-  if (!basinVersionId) return null
-  return latestPublishedRun(
-    {
-      items: (runs?.items ?? []).filter((run) => run.basin_version_id === basinVersionId),
-      total: runs?.total ?? 0,
-      limit: runs?.limit ?? 0,
-      offset: runs?.offset ?? 0,
-    },
-    query,
-  )
-}
-
 function shouldUseSingleRunSurfaces(query: M11QueryState) {
   return query.source !== 'compare'
 }
@@ -523,45 +388,8 @@ function concreteQueryForSurfaces(query: M11QueryState, run: ApiHydroRun | null)
   return source ? { ...query, source } : query
 }
 
-function hasResolvedSurfaceSource(query: M11QueryState, run: ApiHydroRun | null): boolean {
-  return query.source !== 'best' || Boolean(concreteSourceFromRun(run))
-}
-
-function resolveActiveRiverNetwork(models: ApiModelInstance[], latestRun: ApiHydroRun | null): BasinActiveRiverNetwork {
-  const runModel = latestRun?.model_id ? models.find((model) => model.model_id === latestRun.model_id) : null
-  const selectedModel = runModel ?? models[0] ?? null
-  return {
-    model: selectedModel,
-    riverNetworkVersionId: selectedModel?.river_network_version_id ?? null,
-  }
-}
-
-async function resolveBasinRiverNetwork(
-  models: ApiModelInstance[],
-  latestRun: ApiHydroRun | null,
-  errors: string[],
-): Promise<BasinActiveRiverNetwork> {
-  const runModel = latestRun?.model_id ? models.find((model) => model.model_id === latestRun.model_id) : null
-  if (runModel || !latestRun?.model_id) return resolveActiveRiverNetwork(models, latestRun)
-
-  try {
-    const exactRunModel = await fetchModel(latestRun.model_id)
-    return {
-      model: exactRunModel,
-      riverNetworkVersionId: exactRunModel.river_network_version_id ?? null,
-    }
-  } catch {
-    errors.push(safeM11ErrorMessage('model detail'))
-    return resolveActiveRiverNetwork(models, latestRun)
-  }
-}
-
 function runsForSourceSelection(query: M11QueryState, runs: ApiHydroRun[], latestRun: ApiHydroRun | null): ApiHydroRun[] {
   return query.source === 'best' ? (latestRun ? [latestRun] : []) : runs
-}
-
-function layerIdsForOverview(query: M11QueryState) {
-  return [query.layer]
 }
 
 function pipelineRequestParams(query: M11QueryState, run: ApiHydroRun | null = null): { source: string; cycle: string } | null {
@@ -603,13 +431,6 @@ function buildOverviewRequestPlan(
     missingRequiredFields,
     shouldFetchVersions,
   }
-}
-
-function scenariosForQuery(source: M11QueryState['source']) {
-  if (source === 'ifs') return 'forecast_ifs_deterministic'
-  if (source === 'compare') return 'forecast_gfs_deterministic,forecast_ifs_deterministic'
-  if (source === 'best') return null
-  return 'forecast_gfs_deterministic'
 }
 
 /**
@@ -771,18 +592,6 @@ async function fetchModels(basinVersionId?: string) {
   )
 }
 
-async function fetchModel(modelId: string) {
-  return cached(
-    cacheKey('/api/v1/models/{model_id}', { modelId }),
-    () =>
-      getApi<ApiModelInstance>(
-        '/api/v1/models/{model_id}',
-        { params: { path: { model_id: modelId } } },
-        '获取模型资产详情失败',
-      ),
-  )
-}
-
 async function fetchRunsPageByStatus(
   query: M11QueryState,
   basinId: string | undefined,
@@ -827,90 +636,6 @@ async function fetchRunsPage(query: M11QueryState, basinId: string | undefined, 
 
 async function fetchRuns(query: M11QueryState, basinId?: string) {
   return fetchRunsPage(query, basinId, 20, 0)
-}
-
-async function fetchRunsForBasinVersion(
-  query: M11QueryState,
-  basinId: string,
-  basinVersionId: string | null | undefined,
-  initialPage: ReadyRunPage | null,
-): Promise<BasinVersionRunFetchResult> {
-  if (!basinVersionId || !initialPage) return { page: initialPage, reachedCap: false, failed: false }
-
-  const initialStatusPages = initialPage.readyStatusPages ?? { published: initialPage }
-  const byRunId = new Map<string, ApiHydroRun>()
-  const addPageItems = (page: ApiHydroRunPage) => {
-    for (const run of page.items) {
-      if (run.basin_version_id !== basinVersionId) continue
-      if (byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS && !byRunId.has(run.run_id)) break
-      byRunId.set(run.run_id, run)
-    }
-  }
-  READY_RUN_STATUSES.forEach((status) => {
-    const page = initialStatusPages[status]
-    if (page) addPageItems(page)
-  })
-  const pageFromItems = (offset = initialPage.offset ?? 0): ApiHydroRunPage => ({
-    items: [...byRunId.values()],
-    total: Math.max(...READY_RUN_STATUSES.map((status) => initialStatusPages[status]?.total ?? 0), byRunId.size),
-    limit: byRunId.size,
-    offset,
-  })
-  const cursors: ReadyRunCursor[] = READY_RUN_STATUSES.flatMap((status) => {
-    const page = initialStatusPages[status]
-    if (!page) return []
-    const pageOffset = page.offset ?? 0
-    const fetched = page.limit || page.items.length || 20
-    return [
-      {
-        status,
-        offset: pageOffset + fetched,
-        total: page.total ?? page.items.length,
-      },
-    ]
-  })
-  let page: ApiHydroRunPage = {
-    ...pageFromItems(),
-  }
-  if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
-
-  let extraPages = 0
-  let reachedCap = false
-
-  while (
-    cursors.some((cursor) => cursor.offset < cursor.total) &&
-    extraPages < RUN_LOOKUP_MAX_EXTRA_PAGES &&
-    byRunId.size < RUN_LOOKUP_MAX_RETAINED_ITEMS
-  ) {
-    let nextPages: Array<{ cursor: ReadyRunCursor; page: ApiHydroRunPage }>
-    try {
-      nextPages = await Promise.all(
-        cursors
-          .filter((cursor) => cursor.offset < cursor.total)
-          .map(async (cursor) => ({
-            cursor,
-            page: await fetchRunsPageByStatus(query, basinId, RUN_LOOKUP_PAGE_LIMIT, cursor.offset, cursor.status),
-          })),
-      )
-    } catch {
-      return { page, reachedCap: false, failed: true }
-    }
-    extraPages += 1
-    nextPages.forEach(({ cursor, page: statusPage }) => {
-      addPageItems(statusPage)
-      cursor.total = statusPage.total ?? cursor.total
-      const fetched = statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT
-      cursor.offset += fetched
-    })
-    page = pageFromItems()
-    if (latestPublishedRunForBasinVersion(page, basinVersionId, query)) return { page, reachedCap: false, failed: false }
-    if (nextPages.every(({ page: statusPage }) => (statusPage.limit || statusPage.items.length || RUN_LOOKUP_PAGE_LIMIT) <= 0)) break
-  }
-
-  reachedCap =
-    cursors.some((cursor) => cursor.offset < cursor.total) &&
-    (extraPages >= RUN_LOOKUP_MAX_EXTRA_PAGES || byRunId.size >= RUN_LOOKUP_MAX_RETAINED_ITEMS)
-  return { page, reachedCap, failed: false }
 }
 
 async function fetchPipelineStatus(query: M11QueryState, run: ApiHydroRun | null = null) {
@@ -962,285 +687,16 @@ async function fetchLayers(runId?: string | null) {
   )
 }
 
-async function fetchLayerValidTimes(layerId: string, runId?: string | null) {
-  return cached(
-    cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, runId: runId ?? null }),
-    () =>
-      getApi<components['schemas']['LayerValidTimes'] | string[]>(
-        '/api/v1/layers/{layer_id}/valid-times',
-        { params: { path: { layer_id: layerId }, query: { run_id: runId ?? undefined } } },
-        '获取图层有效时间失败',
-      )
-        .then(normalizeLayerValidTimesResponse)
-        .catch(async () => {
-          const params = new URLSearchParams()
-          if (runId) params.set('run_id', runId)
-          const suffix = params.size > 0 ? `?${params.toString()}` : ''
-          const response = await apiFetch(`/api/v1/layers/${encodeURIComponent(layerId)}/valid-times${suffix}`)
-          if (!response.ok) throw new Error('获取图层有效时间失败')
-          return normalizeLayerValidTimesResponse(
-            unwrapApiData<components['schemas']['LayerValidTimes'] | string[]>(
-              await response.json(),
-              '获取图层有效时间失败',
-            ),
-          )
-        }),
-  )
-}
-
 function normalizeLayerValidTimesResponse(value: components['schemas']['LayerValidTimes'] | string[]): string[] {
   return Array.isArray(value) ? value : value.valid_times
 }
 
-async function fetchRiverSegmentsPage(
-  basinVersionId: string,
-  riverNetworkVersionId: string | null,
-  limit: number,
-  offset: number,
-) {
-  return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments', {
-      basinVersionId,
-      riverNetworkVersionId: riverNetworkVersionId ?? 'all',
-      limit,
-      offset,
-    }),
-    () =>
-      getApi<ApiRiverFeatureCollection>(
-        '/api/v1/basin-versions/{basin_version_id}/river-segments',
-        {
-          params: {
-            path: { basin_version_id: basinVersionId },
-            query: { river_network_version_id: riverNetworkVersionId ?? undefined, limit, offset },
-          },
-        },
-        '获取河段列表失败',
-      ),
-  )
-}
-
-function containsSegment(collection: ApiRiverFeatureCollection, segmentId: string | null): boolean {
-  return Boolean(
-    segmentId &&
-      collection.features.some(
-        (feature) => feature.properties.river_segment_id === segmentId || feature.properties.segment_id === segmentId,
-      ),
-  )
-}
-
-// 服务端 GeoJSON 预算 413（RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED）：减半 limit 重试。
-function isRiverSegmentBudgetError(error: unknown): boolean {
-  return error instanceof Error && /budget exceeded/i.test(error.message)
-}
-
-async function fetchRiverSegmentsPageAdaptive(
-  basinVersionId: string,
-  riverNetworkVersionId: string | null,
-  limit: number,
-  offset: number,
-) {
-  let pageLimit = limit
-  for (;;) {
-    try {
-      return await fetchRiverSegmentsPage(basinVersionId, riverNetworkVersionId, pageLimit, offset)
-    } catch (error) {
-      if (!isRiverSegmentBudgetError(error) || pageLimit <= RIVER_SEGMENT_MIN_PAGE_LIMIT) throw error
-      pageLimit = Math.max(RIVER_SEGMENT_MIN_PAGE_LIMIT, Math.floor(pageLimit / 2))
-    }
-  }
-}
-
-async function fetchRiverSegments(
-  basinVersionId: string,
-  riverNetworkVersionId: string | null,
-  segmentId: string | null,
-): Promise<RiverSegmentFetchResult> {
-  const firstPage = await fetchRiverSegmentsPageAdaptive(basinVersionId, riverNetworkVersionId, RIVER_SEGMENT_PAGE_LIMIT, 0)
-  const total = firstPage.total ?? firstPage.feature_total ?? firstPage.features.length
-  const firstPageFeatures = firstPage.features.slice(0, RIVER_SEGMENT_MAX_ITEMS)
-  const truncated = firstPage.features.length > firstPageFeatures.length
-  const features = [...firstPageFeatures]
-  let collection: ApiRiverFeatureCollection = {
-    ...firstPage,
-    features,
-    total,
-    feature_total: firstPage.feature_total ?? total,
-    limit: features.length,
-    offset: 0,
-  }
-  let reportedTotal = total
-  // 本河网版本的真实要素数（feature_total）优先；total 可能含其它 river network 版本的行。
-  let reportedFeatureTotal = firstPage.feature_total ?? total
-  let offset = (firstPage.offset ?? 0) + (firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT)
-  let pages = 1
-
-  // 剩余页并行取齐（首屏提速）：首页已给出 feature_total 与实际页宽 stride，
-  // 逐页串行等待会把 qhh（4 页 × ~850KB）的河网首显时间翻倍以上。
-  // 某页因 413 减半短返会在 stride 网格上留缺口 → 丢弃其后的并行结果，
-  // 交给下方串行循环按真实 offset 诚实补齐（保持原分页语义与上限保护）。
-  const stride = firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT
-  const plannedOffsets: number[] = []
-  if (stride > 0) {
-    let plannedOffset = offset
-    let plannedCount = features.length
-    while (
-      plannedCount < Math.min(reportedFeatureTotal, RIVER_SEGMENT_MAX_ITEMS) &&
-      plannedOffset < reportedTotal &&
-      pages + plannedOffsets.length < RIVER_SEGMENT_MAX_PAGES
-    ) {
-      plannedOffsets.push(plannedOffset)
-      plannedOffset += stride
-      plannedCount += stride
-    }
-  }
-  if (plannedOffsets.length > 0) {
-    const parallelPages = await Promise.all(
-      plannedOffsets.map((pageOffset) =>
-        fetchRiverSegmentsPageAdaptive(basinVersionId, riverNetworkVersionId, stride, pageOffset),
-      ),
-    )
-    for (const nextPage of parallelPages) {
-      pages += 1
-      const remaining = RIVER_SEGMENT_MAX_ITEMS - features.length
-      features.push(...nextPage.features.slice(0, remaining))
-      reportedTotal = nextPage.total ?? nextPage.feature_total ?? reportedTotal
-      reportedFeatureTotal = nextPage.feature_total ?? reportedFeatureTotal
-      collection = {
-        ...nextPage,
-        features,
-        total: reportedTotal,
-        feature_total: nextPage.feature_total ?? reportedTotal,
-        limit: features.length,
-        offset: 0,
-      }
-      const fetched = nextPage.limit || nextPage.features.length || stride
-      offset += Math.max(fetched, 0)
-      // 该页实取宽 ≠ stride（413 减半短返等）：其后并行页的 offset 网格失准，丢弃并交串行兜底。
-      if (fetched !== stride) break
-    }
-  }
-
-  // 串行兜底循环：并行批未覆盖/出现缺口时按真实 offset 取齐整个河网；
-  // MAX_PAGES / MAX_ITEMS 上限保护客户端。
-  while (
-    features.length < Math.min(reportedFeatureTotal, RIVER_SEGMENT_MAX_ITEMS) &&
-    offset < reportedTotal &&
-    pages < RIVER_SEGMENT_MAX_PAGES
-  ) {
-    const nextPage = await fetchRiverSegmentsPageAdaptive(basinVersionId, riverNetworkVersionId, RIVER_SEGMENT_PAGE_LIMIT, offset)
-    pages += 1
-    const remaining = RIVER_SEGMENT_MAX_ITEMS - features.length
-    features.push(...nextPage.features.slice(0, remaining))
-    reportedTotal = nextPage.total ?? nextPage.feature_total ?? reportedTotal
-    reportedFeatureTotal = nextPage.feature_total ?? reportedFeatureTotal
-    collection = {
-      ...nextPage,
-      features,
-      total: reportedTotal,
-      feature_total: nextPage.feature_total ?? reportedTotal,
-      limit: features.length,
-      offset: 0,
-    }
-
-    const fetched = nextPage.limit || nextPage.features.length || RIVER_SEGMENT_PAGE_LIMIT
-    offset += fetched
-    if (fetched <= 0) break
-  }
-
-  const shouldFindRequestedSegment = Boolean(segmentId)
-  const reachedCap =
-    shouldFindRequestedSegment &&
-    (offset < reportedTotal || truncated) &&
-    !containsSegment(collection, segmentId) &&
-    (pages >= RIVER_SEGMENT_MAX_PAGES || features.length >= RIVER_SEGMENT_MAX_ITEMS)
-  const incomplete = features.length < reportedFeatureTotal
-  return { collection, reachedCap, truncated, incomplete }
-}
-
-async function fetchRiverSegment(basinVersionId: string, riverNetworkVersionId: string, segmentId: string) {
-  return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}', {
-      basinVersionId,
-      riverNetworkVersionId,
-      segmentId,
-    }),
-    () =>
-      getApi<ApiRiverSegment>(
-        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}',
-        {
-          params: {
-            path: { basin_version_id: basinVersionId, segment_id: segmentId },
-            query: { river_network_version_id: riverNetworkVersionId },
-          },
-        },
-        '获取河段详情失败',
-      ),
-  )
-}
-
-async function fetchForecast(basinVersionId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
-  const scenarios = scenariosForQuery(query.source)
-  if (!scenarios) return null
-
-  return cached(
-    cacheKey('/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series', {
-      basinVersionId,
-      riverNetworkVersionId,
-      segmentId,
-      source: query.source,
-      cycle: query.cycle ?? 'latest',
-    }),
-    () =>
-      getApi<ApiForecastPayload>(
-        '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series',
-        {
-          params: {
-            path: { basin_version_id: basinVersionId, segment_id: segmentId },
-            query: {
-              river_network_version_id: riverNetworkVersionId,
-              issue_time: query.cycle ?? 'latest',
-              variables: 'q_down',
-              scenarios,
-              include_analysis: true,
-            },
-          },
-        },
-        '获取河段预报失败',
-      ),
-  )
-}
-
-async function fetchLineage(runId: string, riverNetworkVersionId: string, segmentId: string, query: M11QueryState) {
-  return cached(
-    cacheKey('/api/v1/lineage/river-point', { runId, riverNetworkVersionId, segmentId, validTime: query.validTime, variable: 'q_down' }),
-    () =>
-      getApi<ApiLineageResponse>(
-        '/api/v1/lineage/river-point',
-        {
-          params: {
-            query: {
-              run_id: runId,
-              river_network_version_id: riverNetworkVersionId,
-              segment_id: segmentId,
-              valid_time: query.validTime ?? undefined,
-              variable: 'q_down',
-            },
-          },
-        },
-        '获取河段追溯失败',
-      ),
-  )
-}
-
 export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   overview: null,
-  basinDetail: null,
   mapBootstrapLoading: false,
   enrichmentLoading: false,
-  basinLoading: false,
   bootstrapError: null,
   error: null,
-  basinError: null,
   cyclesBySource: {},
   validTimesByCycle: {},
   precipIndexByCycle: {},
@@ -1635,295 +1091,4 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       if (overviewLoads.get(requestKey) === load) overviewLoads.delete(requestKey)
     }
   },
-  loadBasinDetail: async (basinId, inputQuery) => {
-    const query = dataIdentityQuery(inputQuery)
-    const requestQuery = basinRequestIdentityQuery(query)
-    const requestKey = cacheKey('basin-detail', { basinId, query: requestQuery })
-    const existingLoad = basinLoads.get(requestKey)
-    if (existingLoad && activeBasinRequestKey === requestKey) return existingLoad
-
-    const requestNonce = ++basinRequestNonce
-    activeBasinRequestKey = requestKey
-    set({ basinLoading: true, basinError: null })
-
-    const load = (async () => {
-      const partialErrors: string[] = []
-      // 投机预热 run-less 图层目录：latestRun 缺失时后续 fetchLayers(null) 直接命中前端 cached()
-      // 同 key，省去一次串行慢请求；latestRun 存在时该预热只多付一次幂等 GET。
-      void fetchLayers(null).catch(() => undefined)
-      const [basinsResult, versionsResult, runsResult] = await Promise.allSettled([
-        fetchBasins(),
-        fetchBasinVersions(basinId),
-        fetchRuns(requestQuery, basinId),
-      ])
-      const basinLookupAvailable = basinsResult.status === 'fulfilled'
-      const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
-      const basin = basins.find((item) => item.basin_id === basinId) ?? null
-      const versions = settledValue(versionsResult, partialErrors, 'basin versions') ?? []
-      const runPage = settledValue(runsResult, partialErrors, 'runs')
-      const selectedVersion =
-        versions.find((version) => version.basin_version_id === query.basinVersionId) ??
-        versions.find((version) => version.active_flag) ??
-        versions[0] ??
-        null
-      const versionRunsResult = await fetchRunsForBasinVersion(requestQuery, basinId, selectedVersion?.basin_version_id, runPage)
-      const versionCompleteRunPage = versionRunsResult.page
-      const latestRun = latestPublishedRunForBasinVersion(
-        versionCompleteRunPage,
-        selectedVersion?.basin_version_id,
-        requestQuery,
-      )
-      const concreteSurfaceQuery = concreteQueryForSurfaces(requestQuery, latestRun)
-      const useSingleRunSurfaces = shouldUseSingleRunSurfaces(requestQuery)
-      const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunSurfaces ? latestRun?.run_id : null)])
-      const layers = settledValue(layersResult, partialErrors, 'layers') ?? []
-      const canFetchConcreteSurface =
-        requestQuery.source === 'compare' ? true : Boolean(latestRun && hasResolvedSurfaceSource(requestQuery, latestRun))
-      if (versionRunsResult.reachedCap && selectedVersion && !latestRun) {
-        partialErrors.push(
-          `runs: Stopped same-version run lookup after ${RUN_LOOKUP_MAX_EXTRA_PAGES} extra pages or ${RUN_LOOKUP_MAX_RETAINED_ITEMS} retained runs.`,
-        )
-      }
-      if (versionRunsResult.failed && selectedVersion && !latestRun) {
-        partialErrors.push('runs: Same-version run lookup failed before resolving the selected basin version run.')
-      }
-
-      let models: ApiModelInstance[] = []
-      if (selectedVersion) {
-        const [modelsResult] = await Promise.allSettled([fetchModels(selectedVersion.basin_version_id)])
-        models = (settledValue(modelsResult, partialErrors, 'models')?.items ?? []) as ApiModelInstance[]
-      }
-      const activeRiverNetwork = await resolveBasinRiverNetwork(models, latestRun, partialErrors)
-      const [segmentsResult, ...validTimeResults] = await Promise.allSettled([
-        selectedVersion
-          ? fetchRiverSegments(selectedVersion.basin_version_id, activeRiverNetwork.riverNetworkVersionId, query.segmentId)
-          : Promise.resolve(null),
-        ...layerIdsForOverview(requestQuery).map((layerId) =>
-          fetchLayerValidTimes(layerId, useSingleRunSurfaces ? latestRun?.run_id : null),
-        ),
-      ])
-
-      const segmentFetch = settledValue(segmentsResult, partialErrors, 'river segments')
-      const segments = segmentFetch?.collection ?? null
-      if (segmentFetch?.truncated) {
-        partialErrors.push(
-          `river segments: Retained only the first ${RIVER_SEGMENT_MAX_ITEMS} features from an oversized river-segment page; basin segment rows are partial.`,
-        )
-      }
-      if (segmentFetch?.reachedCap) {
-        partialErrors.push(
-          `river segments: Stopped segment lookup after ${RIVER_SEGMENT_MAX_PAGES} pages or ${RIVER_SEGMENT_MAX_ITEMS} features before the requested segment was found.`,
-        )
-      }
-      if (segmentFetch?.incomplete && !segmentFetch.truncated) {
-        partialErrors.push(
-          `river segments: Loaded ${segmentFetch.collection.features.length} of ${segmentFetch.collection.feature_total ?? segmentFetch.collection.total ?? 'unknown'} reaches before hitting client paging caps; the map river network is partial.`,
-        )
-      }
-      const validTimesByLayerId: Record<string, string[]> = {}
-      layerIdsForOverview(requestQuery).forEach((layerId, index) => {
-        validTimesByLayerId[layerId] = settledValue(validTimeResults[index], partialErrors, `layer ${layerId} valid times`) ?? []
-      })
-
-      const detail = normalizeBasinDetail({
-        query,
-        basin,
-        basinLookupAvailable,
-        versions,
-        models,
-        segments,
-        latestRun: useSingleRunSurfaces ? latestRun : null,
-        runs: runsForSourceSelection(
-          requestQuery,
-          selectedVersion
-            ? (versionCompleteRunPage?.items ?? []).filter((run) => run.basin_version_id === selectedVersion.basin_version_id)
-            : [],
-          latestRun,
-        ),
-        partialErrors,
-      })
-      const rows = normalizeBasinSegmentRows({ query: concreteSurfaceQuery, featureCollection: segments })
-      const selectedIdentifiers = resolveSelectedSegmentIdentifiers(
-        query.segmentId,
-        filterBasinSegmentRows(rows, query),
-        segments,
-        Boolean(segmentFetch?.reachedCap || segmentFetch?.truncated),
-        activeRiverNetwork.riverNetworkVersionId,
-      )
-      let selectedSegment: SelectedSegmentDetail | null = null
-
-      if (selectedVersion && selectedIdentifiers) {
-        if (!useSingleRunSurfaces) {
-          partialErrors.push(`lineage: ${COMPARE_LINEAGE_UNAVAILABLE}`)
-        } else if (!latestRun) {
-          partialErrors.push('lineage: No same-version concrete run is available for this basin/source.')
-        }
-        const [segmentResult, forecastResult] = await Promise.allSettled([
-          fetchRiverSegment(
-            selectedVersion.basin_version_id,
-            selectedIdentifiers.detailEndpointRiverNetworkVersionId,
-            selectedIdentifiers.detailEndpointSegmentId,
-          ),
-          canFetchConcreteSurface
-            ? fetchForecast(
-                selectedVersion.basin_version_id,
-                selectedIdentifiers.detailEndpointRiverNetworkVersionId,
-                selectedIdentifiers.forecastSegmentId,
-                concreteSurfaceQuery,
-              )
-            : Promise.resolve(null),
-        ])
-        const segment = settledValue(segmentResult, partialErrors, 'river segment detail')
-        const forecast = settledValue(forecastResult, partialErrors, 'forecast series')
-        let lineage: ApiLineageResponse | null = null
-        let lineageError: string | null = null
-        const lineageUnavailableReason = useSingleRunSurfaces ? null : COMPARE_LINEAGE_UNAVAILABLE
-        if (latestRun && useSingleRunSurfaces) {
-          try {
-            lineage = await fetchLineage(
-              latestRun.run_id,
-              selectedIdentifiers.riverNetworkVersionId,
-              selectedIdentifiers.lineageSegmentId,
-              query,
-            )
-          } catch (error) {
-            lineageError = '河段追溯暂不可用'
-            partialErrors.push(`lineage: ${lineageError}`)
-          }
-        }
-        selectedSegment = normalizeSelectedSegmentDetail({
-          query,
-          basin,
-          basinVersionId: selectedVersion.basin_version_id,
-          segmentId: selectedIdentifiers.requestedId,
-          segment,
-          feature: selectedIdentifiers.feature,
-          model: activeRiverNetwork.model,
-          forecast,
-          lineage,
-          lineageError,
-          lineageUnavailableReason,
-          resolvedRun: useSingleRunSurfaces ? latestRun : null,
-          resolvedQuery: concreteSurfaceQuery,
-        })
-      }
-
-      // 流域详情同样落在**全国** discharge 模板上：后端对 run-scoped `/api/v1/layers?run_id=` 也合并
-      // `_NATIONAL_DISCHARGE_METADATA`（`services/tiles/mvt.py`），于是 `isNationalOverlayMetadata` 为真、
-      // `{source}`/`{cycle}` 由 URL 状态代入，而 `metadata.valid_times` 只是目录**默认对**的列表。
-      // 非默认对必须与全国分支同样顶掉，否则会拼出「用默认对的时次去请求另一身份瓦片」的良构错身份 URL
-      // （spec frontend-mvt-layer-consumption「Basin detail renders the national discharge overlay only
-      // for the catalog default pair」）。
-      // 活动对按 `requestQuery` 解析（全国口径 `best`→`gfs`），与 `buildM11RegisteredOverlay` 里
-      // `resolveNationalScaleSource(state.source)` 代入的身份同源；用 `concreteSurfaceQuery`（可能把
-      // `best` 解析成 run 的具体源）解析会变成「校验一个身份、代入另一个身份」。
-      // 记录缺席一律落 `error` 终态：流域详情的时间轴来自选中的 run，**不发**任何 per-cycle
-      // valid-times（决策 9 / spec map-layer-timeline-controls），既无请求在途也不会再有终态覆盖，
-      // `pending`（"还在取"）就是谎报。共享的 `validTimesByCycle` 已被全国总览填过则直接复用。
-      // 活动对按源分叉后（决策 13），非默认源在该源 cycles 缺席时解不出对；流域详情**不发**
-      // cycles，故这一态在这里是终态，同样必须传显式覆盖——否则 `normalizeLayerStates` 会拿
-      // 目录默认对（GFS）的 `metadata.valid_times` 当它的时次渲染。
-      const nationalCyclesBySource = get().cyclesBySource
-      const nationalPair = nationalDischargeActivePair(requestQuery, layers, nationalCyclesBySource)
-      const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
-        nationalPair && !nationalPair.isDefault
-          ? {
-              discharge: get().validTimesByCycle[m11SourceCycleKey(nationalPair.source, nationalPair.cycle)] ?? {
-                status: 'error',
-              },
-            }
-          : nationalDischargeSourceUnresolved(requestQuery, layers, nationalCyclesBySource)
-            ? { discharge: { status: 'error' } }
-            : undefined
-      const layerStates = normalizeLayerStates({
-        query: concreteSurfaceQuery,
-        layers,
-        validTimesByLayerId,
-        activeCycleValidTimes,
-        // 与全国那侧同一枚章、同一个 `nationalDischargeActivePair`：流域详情的 discharge 目录条目
-        // 同样是 `{source}/{cycle}` 全国模板（后端对 run-scoped `/layers` 合并同一份 metadata），
-        // 所以它的叠加层也必须按这枚章拼 URL；解不出对即 null → 不注册（既有的失败闭合行为）。
-        // 注意用 `requestQuery`（URL 的全国口径源），不是 `concreteSurfaceQuery`（按 run 解析的源）：
-        // 与 `activeCycleValidTimes` 上方 `nationalPair` 的解析入参保持同一份。
-        activeNationalCycle: nationalPair?.cycle ?? null,
-        resolvedRun: useSingleRunSurfaces ? latestRun : null,
-      })
-      const snapshot: BasinDataSnapshot = {
-        requestScope: basinRequestScope(basinId, requestQuery),
-        detail,
-        segments: rows,
-        selectedSegment,
-        layers: layerStates,
-      }
-      if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
-        set({ basinDetail: snapshot, basinLoading: false, basinError: partialErrors[0] ?? null })
-      }
-      return snapshot
-    })()
-
-    basinLoads.set(requestKey, load)
-
-    try {
-      return await load
-    } catch (error) {
-      if (requestNonce === basinRequestNonce && activeBasinRequestKey === requestKey) {
-        const message = '加载流域数据失败'
-        const fallback: BasinDataSnapshot = {
-          requestScope: basinRequestScope(basinId, requestQuery),
-          detail: createEmptyBasinDetail(basinId, query),
-          segments: [],
-          selectedSegment: null,
-          layers: [],
-        }
-        set({ basinDetail: fallback, basinLoading: false, basinError: message })
-      }
-      throw error
-    } finally {
-      if (basinLoads.get(requestKey) === load) basinLoads.delete(requestKey)
-    }
-  },
 }))
-
-function findFeature(collection: ApiRiverFeatureCollection | null, segmentId: string): ApiRiverFeature | null {
-  return (
-    collection?.features.find(
-      (feature) => feature.properties.river_segment_id === segmentId || feature.properties.segment_id === segmentId,
-    ) ?? null
-  )
-}
-
-function resolveSelectedSegmentIdentifiers(
-  querySegmentId: string | null,
-  rows: BasinSegmentRow[],
-  collection: ApiRiverFeatureCollection | null,
-  segmentCollectionPartial = false,
-  scopedRiverNetworkVersionId: string | null = null,
-): ResolvedSegmentIdentifiers | null {
-  const row = querySegmentId
-    ? rows.find((item) => item.segmentId === querySegmentId || item.riverSegmentId === querySegmentId) ?? null
-    : rows[0] ?? null
-  const requestedId = querySegmentId ?? row?.riverSegmentId ?? null
-  if (!requestedId) return null
-
-  const feature = findFeature(collection, requestedId) ?? (!querySegmentId && row ? findFeature(collection, row.riverSegmentId) : null)
-  if (querySegmentId && !row && !feature && !segmentCollectionPartial) return null
-
-  const riverSegmentId = row?.riverSegmentId ?? feature?.properties.river_segment_id ?? requestedId
-  const observedRiverNetworkVersionId = row?.riverNetworkVersionId ?? feature?.properties.river_network_version_id ?? null
-  const riverNetworkVersionId = scopedRiverNetworkVersionId ?? observedRiverNetworkVersionId
-  if (!riverNetworkVersionId) return null
-  const segmentId = row?.segmentId ?? feature?.properties.segment_id ?? requestedId
-
-  return {
-    requestedId,
-    riverSegmentId,
-    riverNetworkVersionId,
-    segmentId,
-    detailEndpointSegmentId: riverSegmentId,
-    detailEndpointRiverNetworkVersionId: riverNetworkVersionId,
-    forecastSegmentId: riverSegmentId,
-    lineageSegmentId: riverSegmentId,
-    feature,
-    row,
-  }
-}

@@ -20,8 +20,8 @@ const ModelAssetsPage = lazy(() =>
  * - 保留原始 search query（深链状态不丢）；
  * - 附加语义参数时同名键以原始 search 的值为准（用户既有状态优先）。
  *
- * `param` 把路径参数（basinId/segmentId）映射为语义查询键；
- * `extraParams` 是静态语义参数（layer / overlay 等）。
+ * `param` 把路径参数映射为语义查询键（今天只剩 `segmentId`；`/basins/:basinId` 已随流域详情
+ * 通道下线，#2109 裁决 B，不再映射路径参数）；`extraParams` 是静态语义参数（layer / overlay 等）。
  */
 export function LegacyRedirect({
   param,
@@ -50,53 +50,58 @@ export function LegacyRedirect({
   return <Navigate replace to={query ? `/?${query}` : '/'} />
 }
 
+/** 路由表：由 `App` 挂在 `BrowserRouter` 内；单独导出以便在 `MemoryRouter` 中钉住路由声明。 */
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<OverviewPage />} />
+      <Route path="/overview" element={<LegacyRedirect />} />
+      <Route path="/hydro-met" element={<LegacyRedirect />} />
+      <Route path="/forecast" element={<LegacyRedirect />} />
+      <Route
+        path="/meteorology"
+        element={<LegacyRedirect extraParams={{ metStations: '1' }} />}
+      />
+      {/* 旧流域详情书签：落到全国总览，丢弃路径参数、保留其余 query（#2109 裁决 B）。 */}
+      <Route path="/basins/:basinId" element={<LegacyRedirect />} />
+      <Route
+        path="/segments/:segmentId"
+        element={<LegacyRedirect param={{ name: 'segmentId', queryKey: 'segmentId' }} />}
+      />
+      <Route
+        path="/monitoring"
+        element={
+          <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
+            <MonitoringPage mode="monitoring" />
+          </RBACGate>
+        }
+      />
+      <Route
+        path="/ops"
+        element={
+          <RBACGate roles={['operator', 'model_admin', 'sys_admin']} allowDisplayReadonly>
+            <MonitoringPage mode="ops" />
+          </RBACGate>
+        }
+      />
+      <Route
+        path="/system/model-assets"
+        element={
+          <RBACGate roles={['model_admin', 'sys_admin']}>
+            <ModelAssetsPage />
+          </RBACGate>
+        }
+      />
+    </Routes>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <AppShell>
         <Suspense fallback={<div>加载中...</div>}>
-          <Routes>
-            <Route path="/" element={<OverviewPage />} />
-            <Route path="/overview" element={<LegacyRedirect />} />
-            <Route path="/hydro-met" element={<LegacyRedirect />} />
-            <Route path="/forecast" element={<LegacyRedirect />} />
-            <Route
-              path="/meteorology"
-              element={<LegacyRedirect extraParams={{ metStations: '1' }} />}
-            />
-            <Route
-              path="/basins/:basinId"
-              element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
-            />
-            <Route
-              path="/segments/:segmentId"
-              element={<LegacyRedirect param={{ name: 'segmentId', queryKey: 'segmentId' }} />}
-            />
-            <Route
-              path="/monitoring"
-              element={
-                <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
-                  <MonitoringPage mode="monitoring" />
-                </RBACGate>
-              }
-            />
-            <Route
-              path="/ops"
-              element={
-                <RBACGate roles={['operator', 'model_admin', 'sys_admin']} allowDisplayReadonly>
-                  <MonitoringPage mode="ops" />
-                </RBACGate>
-              }
-            />
-            <Route
-              path="/system/model-assets"
-              element={
-                <RBACGate roles={['model_admin', 'sys_admin']}>
-                  <ModelAssetsPage />
-                </RBACGate>
-              }
-            />
-          </Routes>
+          <AppRoutes />
         </Suspense>
       </AppShell>
     </BrowserRouter>

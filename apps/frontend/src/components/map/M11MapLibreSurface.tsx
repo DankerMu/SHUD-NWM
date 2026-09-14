@@ -8,12 +8,10 @@ import Map, {
 import type { FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
-import type { components } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { formatUnitForDisplay } from '@/lib/format'
 import {
   buildBasinFeatureCollection,
-  buildBasinRiverFeatureCollection,
   buildM11RegisteredOverlay,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
@@ -31,23 +29,16 @@ import {
 import {
   M11BasinLabelMarkers,
   M11BasinPrimitive,
-  M11BasinRiverPrimitive,
   M11NationalRiverPrimitive,
   M11OverlayPrimitive,
   M11PrecipOverlayPrimitive,
-  M11SelectedSegmentPrimitive,
   M11StationClusterPrimitive,
   M11_NATIONAL_RIVER_LINE_LAYER_ID,
   m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
 import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
-import {
-  M11MapPopupSlotPrimitive,
-  m11SelectionDataAttributes,
-  resolveM11SelectedSegmentMapState,
-  type M11MapPopupSlot,
-} from '@/components/map/m11MapSelection'
+import { m11SelectionDataAttributes, resolveM11SelectedSegmentMapState } from '@/components/map/m11MapSelection'
 import {
   M11MapStatusOverlays,
   m11MapSourceErrorResetKey,
@@ -66,11 +57,7 @@ import {
   selectRenderedRiverFeature,
   type RiverClickHookSelectionInput,
 } from '@/lib/riverClickEvidence/hook'
-import {
-  type BasinSegmentRow,
-  type LayerState,
-  type OverviewBasin,
-} from '@/lib/m11/overviewDataContracts'
+import { type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
 import { buildMvtTileUrlTemplate, isMvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 
@@ -93,7 +80,6 @@ export {
 } from '@/components/map/m11MapBuilders'
 export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo } from '@/components/map/m11MapRuntime'
-export type { M11MapPopupSlot } from '@/components/map/m11MapSelection'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
@@ -107,26 +93,20 @@ interface M11MapLibreSurfaceProps {
   layers: LayerState[]
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
-  basinSegments?: BasinSegmentRow[]
   /** 常态河网底图（来自 basin shp，WGS84，按 Type 分级）。null 则 honest 降级不画。 */
   nationalRiverGeo?: FeatureCollection | null
   /** 已被动态 mesh 河网层覆盖的流域 id：这些流域的静态河流从 national 底图剔除，规避双线。 */
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
-  selectedSegmentGeometry?:
-    | components['schemas']['GeoJsonLineString']
-    | components['schemas']['GeoJsonMultiLineString']
-    | null
   selectedStationId?: string | null
   metStations?: boolean
   stationFeatureCollection?: M11StationFeatureCollection | null
-  popup?: M11MapPopupSlot | null
   /**
    * 已解析的降水叠加模型（`resolveM11PrecipOverlay` 的输出）。
-   * 不传 / null = 无叠加（流域详情模式）：绝不在本组件里造第二条解析路径。
+   * 不传 / null = 无叠加：绝不在本组件里造第二条解析路径。
    */
   precipOverlay?: M11PrecipOverlayModel | null
-  /** 数据加载中（overview/basin 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
+  /** 数据加载中（overview 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
   loading?: boolean
   /** 静态底图几何加载中：额外抑制"流域边界未就绪"瞬态（静态边界回填晚于 overview 接口时）。 */
   boundaryLoading?: boolean
@@ -142,14 +122,11 @@ export function M11MapLibreSurface({
   layers,
   basins = [],
   visibleBasinIds,
-  basinSegments = [],
   nationalRiverGeo = null,
   selectedSegmentId = null,
-  selectedSegmentGeometry = null,
   selectedStationId = null,
   metStations,
   stationFeatureCollection = null,
-  popup = null,
   precipOverlay = null,
   loading = false,
   boundaryLoading = false,
@@ -163,15 +140,10 @@ export function M11MapLibreSurface({
   const initialViewState = useM11MapCamera({ fitTo, flyTo, mapRef })
   const [overlayData, setOverlayData] = useState<FeatureCollection | null>(null)
   const [overlayUnavailableReason, setOverlayUnavailableReason] = useState<string | null>(null)
-  const [hoveredRiverSegmentId, setHoveredRiverSegmentId] = useState<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
   const basinFeatureCollection = useMemo(
     () => buildBasinFeatureCollection(basins, visibleBasinIds),
     [basins, visibleBasinIds],
-  )
-  const basinRiverFeatureCollection = useMemo(
-    () => buildBasinRiverFeatureCollection(basinSegments, state.layer),
-    [basinSegments, state.layer],
   )
   const skippedBasinGeometryCount = useMemo(
     () => countSkippedBasinGeometries(basins, visibleBasinIds),
@@ -193,27 +165,25 @@ export function M11MapLibreSurface({
       maxzoom: metadata.max_zoom ?? 14,
     }
   }, [layers])
-  const selectedSegmentFeatureCollection = useMemo(
-    () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
-    [selectedSegmentGeometry, selectedSegmentId],
+  // 全国总览不携带选中河段几何：选中态只靠已注册的叠加层高亮，缺叠加层时诚实提示几何不可用。
+  const selectedSegmentUnavailableReason = useMemo(
+    () => buildSelectedSegmentFeatureCollection(selectedSegmentId, null).unavailableReason,
+    [selectedSegmentId],
   )
   const selectedSegmentMapState = resolveM11SelectedSegmentMapState({
     selectedSegmentId,
-    hasSelectedSegmentGeometry: selectedSegmentFeatureCollection.features.length > 0,
     hasRenderableOverlay: Boolean(renderableOverlay),
-    hasBasinRiverFeatures: basinRiverFeatureCollection.features.length > 0,
   })
   const unavailableReason = useMemo(
     () =>
       overlayUnavailableReason ??
-      m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData, basinRiverFeatureCollection.features.length > 0),
-    [basinRiverFeatureCollection.features.length, layers, overlay, overlayData, overlayUnavailableReason, state],
+      m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData),
+    [layers, overlay, overlayData, overlayUnavailableReason, state],
   )
   // 代站图层由独立 overlay 状态控制，有非空 features 时渲染/注册（关闭 overlay 不注册 source/layer）。
   const showStationLayer = (metStations ?? state.metStations) && (stationFeatureCollection?.features.length ?? 0) > 0
   const interactiveLayerIds = buildM11InteractiveLayerIds({
     showStationLayer,
-    hasBasinRiverFeatures: basinRiverFeatureCollection.features.length > 0,
     hasBasinFeatures: basinFeatureCollection.features.length > 0,
     renderableOverlay,
   })
@@ -272,7 +242,7 @@ export function M11MapLibreSurface({
           throw new Error('river-click hook callback dispatch failed')
         }
         callback({
-          layerId: dispatch.layerId as M11Layer | 'met-stations' | 'basin-boundaries' | 'basin-river-segments',
+          layerId: dispatch.layerId as M11Layer | 'met-stations' | 'basin-boundaries',
           event: dispatch.event as MapLayerMouseEvent,
           feature: dispatch.feature as NonNullable<MapLayerMouseEvent['features']>[number],
         })
@@ -299,7 +269,6 @@ export function M11MapLibreSurface({
         renderableOverlay,
         mapRef: mapRef.current,
         onOverlayHover,
-        setHoveredRiverSegmentId,
       })
     },
     [onOverlayHover, renderableOverlay, showStationLayer],
@@ -307,7 +276,7 @@ export function M11MapLibreSurface({
 
   const handleMouseLeave = useCallback(
     (event: MapLayerMouseEvent) => {
-      handleM11MapMouseLeave(event, { onOverlayHover, setHoveredRiverSegmentId })
+      handleM11MapMouseLeave(event, { onOverlayHover })
     },
     [onOverlayHover],
   )
@@ -333,12 +302,7 @@ export function M11MapLibreSurface({
       {...(renderableOverlay ? { 'data-registered-overlays': renderableOverlay.layerId } : {})}
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
-      data-basin-river-feature-count={basinRiverFeatureCollection.features.length}
-      data-basin-river-skipped-count={basinRiverFeatureCollection.skippedCount}
-      data-basin-river-coordinate-count={basinRiverFeatureCollection.coordinateCount}
-      data-basin-river-serialized-bytes={basinRiverFeatureCollection.serializedBytes}
       {...m11SelectionDataAttributes({ selectedSegmentId, selectedSegmentMapState, selectedStationId })}
-      data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
       data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
@@ -368,7 +332,7 @@ export function M11MapLibreSurface({
             tiles={nationalRiverVectorSource.tiles}
             minzoom={nationalRiverVectorSource.minzoom}
             maxzoom={nationalRiverVectorSource.maxzoom}
-            dimmed={Boolean(renderableOverlay) || basinRiverFeatureCollection.features.length > 0}
+            dimmed={Boolean(renderableOverlay)}
             satellite={state.basemap === 'satellite'}
           />
         ) : null}
@@ -390,27 +354,12 @@ export function M11MapLibreSurface({
             <M11BasinLabelMarkers collection={basinFeatureCollection} />
           </>
         ) : null}
-        {basinRiverFeatureCollection.features.length > 0 ? (
-          <M11BasinRiverPrimitive
-            collection={basinRiverFeatureCollection}
-            selectedSegmentId={selectedSegmentId}
-            hoveredSegmentId={hoveredRiverSegmentId}
-            subdued={Boolean(renderableOverlay)}
-          />
-        ) : null}
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} selectedSegmentId={selectedSegmentId} /> : null}
-        {selectedSegmentFeatureCollection.features.length > 0 ? (
-          <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
-        ) : null}
         {showStationLayer && stationFeatureCollection ? (
           <M11StationClusterPrimitive collection={stationFeatureCollection} selectedStationId={selectedStationId} />
         ) : null}
-        <M11MapPopupSlotPrimitive popup={popup} />
       </Map>
 
-      {hoveredRiverSegmentId ? (
-        <M11RiverTooltip feature={basinRiverFeatureCollection.features.find((feature) => feature.properties.river_segment_id === hoveredRiverSegmentId || feature.properties.segment_id === hoveredRiverSegmentId) ?? null} />
-      ) : null}
       <M11MapStatusOverlays
         loading={loading}
         boundaryLoading={boundaryLoading}
@@ -419,9 +368,9 @@ export function M11MapLibreSurface({
         basinFeatureCount={basinFeatureCollection.features.length}
         skippedBasinGeometryCount={skippedBasinGeometryCount}
         unavailableReason={unavailableReason}
-        basinRiverUnavailableReason={basinRiverFeatureCollection.unavailableReason}
+        basinRiverUnavailableReason={null}
         selectedSegmentMapState={selectedSegmentMapState}
-        selectedSegmentUnavailableReason={selectedSegmentFeatureCollection.unavailableReason}
+        selectedSegmentUnavailableReason={selectedSegmentUnavailableReason}
         mapSourceError={mapSourceError}
       />
     </div>

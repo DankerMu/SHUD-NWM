@@ -14,7 +14,7 @@ import type { M11Layer } from '@/lib/m11/queryState'
 describe('M11 query state helpers', () => {
   it('round-trips supported values', () => {
     const state = parseM11QueryState(
-      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=discharge&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basins_qhh&segmentId=seg-009&q=%E5%B9%B2%E6%B5%81',
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=discharge&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&q=%E5%B9%B2%E6%B5%81',
     )
 
     expect(state).toEqual({
@@ -27,7 +27,6 @@ describe('M11 query state helpers', () => {
       basemap: 'satellite',
       basinVersionId: 'bv-001',
       riverNetworkVersionId: 'rn-v1',
-      basinId: 'basins_qhh',
       segmentId: 'seg-009',
       q: '干流',
     })
@@ -50,19 +49,6 @@ describe('M11 query state helpers', () => {
     expect(serializeM11QueryState(state)).toBe('')
     expect(needsM11QueryReplacement('?source=unknown&basemap=bad')).toBe(true)
     expect(needsM11QueryReplacement('')).toBe(false)
-  })
-
-  it('rejects reserved-character basinId and keeps a valid basinId single-valued (#338 boundary)', () => {
-    // basinId 进 query 后由 normalizeM11Identifier 白名单把关：含 / ? # % 的 id 被拒、不写入 URL，
-    // 杜绝伪造/越权流域上下文；合法 basinId 经 parse→serialize 单值往返。
-    const rejected = parseM11QueryState('basinId=basin%2Fdemo%3Fbranch%23run%2525')
-    expect(rejected.basinId).toBeNull()
-    expect(serializeM11QueryState(rejected)).not.toContain('basinId=')
-
-    const accepted = parseM11QueryState('basinId=basins_qhh&basinId=basins_heihe')
-    expect(accepted.basinId).toBe('basins_qhh')
-    const serialized = serializeM11QueryState(accepted)
-    expect(new URLSearchParams(serialized).getAll('basinId')).toEqual(['basins_qhh'])
   })
 
   it('omits empty or unsupported values on serialization', () => {
@@ -88,7 +74,7 @@ describe('M11 query state helpers', () => {
     expect(serializeM11QueryState({ ...defaultM11QueryState, source: 'best' })).toBe('source=best')
     expect(needsM11QueryReplacement('source=gfs')).toBe(true)
     expect(needsM11QueryReplacement('source=best')).toBe(false)
-    // `best` 仍是合法可解析值（流域详情 Best Available 要用），parser 绝不把它改写成 gfs。
+    // `best` 仍是合法可解析值，parser 绝不把它改写成 gfs。
     expect(parseM11QueryState('source=best').source).toBe('best')
   })
 
@@ -235,8 +221,8 @@ describe('M11 query state helpers', () => {
       'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-a&riverNetworkVersionId=rn-a&segmentId=seg-a&q=mainstem',
     )
 
-    expect(m11QueryHref('/basins/basin-b', state, { basinVersionId: 'bv-b', riverNetworkVersionId: null, segmentId: null })).toBe(
-      '/basins/basin-b?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-b&q=mainstem',
+    expect(m11QueryHref('/ops', state, { basinVersionId: 'bv-b', riverNetworkVersionId: null, segmentId: null })).toBe(
+      '/ops?source=ifs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-b&q=mainstem',
     )
   })
 })

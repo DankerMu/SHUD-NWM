@@ -222,13 +222,10 @@ beforeEach(() => {
   clearOverviewDataCache()
   useOverviewDataStore.setState({
     overview: null,
-    basinDetail: null,
     mapBootstrapLoading: false,
     enrichmentLoading: false,
-    basinLoading: false,
     bootstrapError: null,
     error: null,
-    basinError: null,
     cyclesBySource: {},
     validTimesByCycle: {},
     precipIndexByCycle: {},
@@ -320,6 +317,28 @@ describe('OverviewPage validTime auto-correction gate', () => {
     )
     // 终态再钉一次：T 存活与 DOM 翻转必须同时成立（迟到的校正不得在上面那次断言之后把 T 抹掉）。
     expect(currentValidTime()).toBe(sharedValidTime)
+  })
+})
+
+describe('OverviewPage legacy basin deep link', () => {
+  it('strips ?basinId= and renders the national overview (#2109 decision B)', async () => {
+    // 流域详情通道已下线：`basinId` 不再属于 M11QueryState，旧深链里的它是未知键，由 query 归一
+    // `replace` 剥离；页面只渲染全国总览，没有「返回总览」按钮。
+    mockApiWithSourceScopedCycles()
+    const router = createMemoryRouter([{ path: '/', element: <OverviewPage /> }], {
+      initialEntries: ['/?basinId=basins_qhh&layer=discharge'],
+    })
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => expect(router.state.location.search).not.toContain('basinId'))
+    expect(router.state.location.pathname).toBe('/')
+    expect(new URLSearchParams(router.state.location.search).has('basinId')).toBe(false)
+    const map = await screen.findByTestId('m11-fullscreen-map')
+    expect(map).toHaveAttribute('aria-label', '全国总览地图')
+    // split-string sentinel：让 E4 的 grep oracle（retire-basin-detail-lane tasks.md）在源码树里保持零匹配。
+    const retiredBackButtonTestId = 'm11-back-to-' + 'overview'
+    expect(screen.queryByTestId(retiredBackButtonTestId)).toBeNull()
+    await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
   })
 })
 

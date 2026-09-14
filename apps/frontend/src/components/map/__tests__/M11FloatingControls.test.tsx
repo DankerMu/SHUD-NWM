@@ -4,7 +4,6 @@ import { BrowserRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
-  M11BackToOverviewButton,
   M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
@@ -313,17 +312,12 @@ describe('M11FloatingLegend', () => {
 /**
  * spec map-layer-timeline-controls「Floating controls clear the control bar」：
  * `M11BottomControlBar` 自身 `bottom-4` + 固定 `h-16`（64px）占据 16–80px 这一带，
- * 三个浮层必须整体抬到它上面。
+ * 浮层必须整体抬到它上面。
  */
 describe('floating controls clear the bottom control bar', () => {
   it('lifts the legend from bottom-12 to bottom-24', () => {
     render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
     expectBottomOffset(screen.getByTestId('m11-floating-legend'), 'bottom-24', 'bottom-12')
-  })
-
-  it('lifts the back-to-overview button from bottom-4 to bottom-24', () => {
-    render(<M11BackToOverviewButton onClick={vi.fn()} />)
-    expectBottomOffset(screen.getByTestId('m11-back-to-overview'), 'bottom-24', 'bottom-4')
   })
 
   it('lifts the floating notice from bottom-20 to bottom-40', () => {
@@ -332,7 +326,7 @@ describe('floating controls clear the bottom control bar', () => {
   })
 })
 
-describe('M11OpsLink + M11BackToOverviewButton', () => {
+describe('M11OpsLink', () => {
   it('hides the ops link for non-operator roles', () => {
     const { rerender } = render(
       <BrowserRouter>
@@ -347,13 +341,5 @@ describe('M11OpsLink + M11BackToOverviewButton', () => {
       </BrowserRouter>,
     )
     expect(screen.getByTestId('m11-ops-link')).toHaveAttribute('href', '/ops')
-  })
-
-  it('invokes the back-to-overview handler', async () => {
-    const onClick = vi.fn()
-    const user = userEvent.setup()
-    render(<M11BackToOverviewButton onClick={onClick} />)
-    await user.click(screen.getByTestId('m11-back-to-overview'))
-    expect(onClick).toHaveBeenCalledTimes(1)
   })
 })

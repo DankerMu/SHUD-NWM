@@ -417,21 +417,6 @@ describe('overview data store discharge loading', () => {
     expect(runCalls.every((call) => call.query?.source === 'GFS')).toBe(true)
   })
 
-  it('keeps the untouched default query on GFS in basin detail too', async () => {
-    // AC4 附加 (b)：全局默认 gfs 同样适用于流域详情（`best` 只在 URL/用户显式选择时生效）；
-    // 流域详情的周期仍来自 /api/v1/runs，不走 cycles 端点（fixture 决策 9）。
-    const calls = mockApi()
-
-    await useOverviewDataStore.getState().loadBasinDetail('basin-demo', defaultM11QueryState)
-
-    const runCalls = calls.filter((call) => call.path === '/api/v1/runs')
-    expect(runCalls).not.toHaveLength(0)
-    expect(runCalls.every((call) => call.query?.source === 'GFS')).toBe(true)
-    const forecastCall = calls.find((call) => call.path.endsWith('/forecast-series'))
-    expect(forecastCall?.query?.scenarios).toBe('forecast_gfs_deterministic')
-    expect(calls.filter((call) => call.path === CYCLES_PATH)).toHaveLength(0)
-  })
-
   it('does not re-request anything when only the precipitation toggle changes', async () => {
     // precip 是纯渲染开关：进了取数身份就会整轮重载并作废在途 enrichment。
     const calls = mockApi()
