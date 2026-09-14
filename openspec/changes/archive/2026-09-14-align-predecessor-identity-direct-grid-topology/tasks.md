@@ -32,7 +32,7 @@ Minimal mergeable slice: atomic for Part 2 — producer and §8.6 consumer must 
 - [x] 3.1 `uv run ruff check .`
 - [x] 3.2 `uv run pytest -q tests/test_scheduler_generation.py tests/test_scheduler_backfill_predecessor.py`
 - [x] 3.3 `uv run pytest -q tests/ -k "generation or state_index or predecessor"`
-- [ ] 3.4 node-27 exact-head: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_scheduler_backfill_predecessor.py`
+- [x] 3.4 node-27 exact-head: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_scheduler_backfill_predecessor.py`
 - [x] 3.5 `openspec validate align-predecessor-identity-direct-grid-topology --strict --no-interactive`
 
 ## 4. Live ops (outside diff, receipts on issues)

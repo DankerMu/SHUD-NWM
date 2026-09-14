@@ -208,7 +208,7 @@ uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistenc
 ### 5.2 OpenSpec / OpenAPI / 前端类型
 
 ```bash
-openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive 2>&1 \
+openspec validate --all --strict --no-interactive 2>&1 \
   | tee "$MVP_E2E_EVIDENCE_ROOT/openspec_m21.log"
 
 npx --yes @redocly/cli@1.25.13 lint openapi/nhms.v1.yaml --skip-rule no-unused-components 2>&1 \

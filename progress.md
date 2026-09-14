@@ -82,7 +82,7 @@ cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产
 
   ```bash
   uv run ruff check . && uv run pytest -q
-  openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive
+  openspec validate --all --strict --no-interactive  # m21-qhh-hydro-met-ops-mvp is archived
   (cd apps/frontend && corepack pnpm test && corepack pnpm build)
   uv run nhms-pipeline plan-production --dry-run --source gfs --source IFS
   uv run nhms-monitor          # 实时生产健康快照（需 DATABASE_URL）

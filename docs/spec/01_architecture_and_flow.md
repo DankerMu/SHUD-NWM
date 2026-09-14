@@ -122,24 +122,27 @@ discovered
 ### 5.2 hydro_run 状态
 
 ```text
-created → staged → submitted → running → succeeded → parsed → frequency_done → published
+created → staged → submitted → running → succeeded → parsed → published
 ```
 
 异常状态：`failed`、`cancelled`、`superseded`。
 
+重试再入：人工重试把 `failed` / `cancelled` run 置为 `pending`（retry job 排队中，`db/migrations/000013_enum_remediation.sql`），运行时重新登记时回到 `created` 再走上面的主线。枚举成员以 `000003_enums.sql` + `000013` 为准；`frequency_done` 已随频率展示管线退役（`b97c16e2`），不是账本成员，但仍残留在 node-27 live 枚举中。
+
 ### 5.3 状态机与监控 UI 阶段映射
 
-前端产品监控页面将 forecast_cycle 状态机映射为七个流水线阶段卡片。映射关系如下：
+前端产品监控页面将 forecast_cycle 状态机映射为六个流水线阶段卡片（与 `apps/frontend/src/lib/constants.ts` 的 `STAGE_NAMES` 一致）。映射关系如下：
 
 | 监控 UI 阶段 | forecast_cycle 状态 | hydro_run 状态 | 失败状态 |
 |---|---|---|---|
 | 资料下载 | discovered, downloading, raw_complete | — | failed_download |
 | 标准化转换 | canonical_ready | — | failed_convert |
 | Forcing 生产 | forcing_ready_partial, forcing_ready | — | failed_forcing |
-| 模型运行 | forecast_running | created, staged, submitted, running, succeeded | failed_run |
-| 输出解析 | parsed_partial | parsed | failed_parse |
-| 频率计算 | complete | frequency_done | — |
+| 模型运行 | forecast_running | created, staged, pending, submitted, running, succeeded | failed_run |
+| 输出解析 | parsed_partial, complete | parsed | failed_parse |
 | 产品发布 | published | published | failed_publish |
+
+`complete` 是 `met.cycle_status` 的成员（与 `hydro.run_status` 是两个不同枚举）：表示全量流域解析完成（部分流域为 `parsed_partial`），原“频率计算”阶段退役后归入“输出解析”行。
 
 映射规则：
 - 监控 UI 阶段的状态取所有关联流域的最差状态（任一流域失败则该阶段显示"部分失败"）

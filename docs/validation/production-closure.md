@@ -164,7 +164,8 @@ Local #148 verification uses these fast regression commands:
 ```bash
 # #1912/#1903: the publication corpus is seven partitioned suites; the core path alone is
 # no longer the corpus and must never be used as shorthand for it.
-openspec validate m10-production-closure --strict --no-interactive
+# m10-production-closure is archived (name no longer resolves); validate its promoted capability spec.
+openspec validate production-object-store-migration --type spec --strict --no-interactive
 .venv/bin/ruff check \
   services/production_closure \
   workers/model_registry \
@@ -177,8 +178,9 @@ openspec validate m10-production-closure --strict --no-interactive
   tests/test_basins_package_publication_refusal.py \
   tests/test_basins_package_publication_rivseg.py \
   tests/test_basins_package_publication_toctou.py \
-  tests/basins_package_helpers.py \
-  docs/validation/production-closure.md
+  tests/basins_package_helpers.py
+# Ruff does not lint Markdown; this doc is covered by the CI Markdown Lint form:
+npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
 .venv/bin/pytest -q \
   tests/test_production_object_store_validation.py \
   tests/test_basins_migration_report.py \
@@ -321,9 +323,12 @@ to a later production executor.
 Local #149 verification uses these fast regression commands:
 
 ```bash
-openspec validate m10-production-closure --strict --no-interactive
+openspec validate live-meteorology-ingestion --type spec --strict --no-interactive
 uv run ruff check .
-.venv/bin/ruff check services/production_closure tests/test_production_met_validation.py docs/validation/production-closure.md progress.md
+.venv/bin/ruff check services/production_closure tests/test_production_met_validation.py
+# Ruff does not lint Markdown. docs/ is covered by the CI Markdown Lint form below;
+# progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
+npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
 .venv/bin/pytest -q tests/test_production_met_validation.py tests/test_production_slurm_validation.py tests/test_canonical_converter.py tests/test_forcing_producer.py tests/test_source_identity.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_era5_adapter.py
 ```
 
@@ -458,8 +463,11 @@ evidence.
 Local #150 verification uses these fast regression commands:
 
 ```bash
-openspec validate m10-production-closure --strict --no-interactive
-.venv/bin/ruff check services/production_closure tests/test_production_e2e_validation.py docs/validation/production-closure.md progress.md
+openspec validate staging-end-to-end-closure --type spec --strict --no-interactive
+.venv/bin/ruff check services/production_closure tests/test_production_e2e_validation.py
+# Ruff does not lint Markdown. docs/ is covered by the CI Markdown Lint form below;
+# progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
+npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
 .venv/bin/pytest -q tests/test_production_e2e_validation.py tests/test_production_slurm_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_output_parser.py tests/test_flood_frequency.py tests/test_api_contract.py
 ```
 
@@ -569,9 +577,12 @@ threshold failures block readiness. After a local smoke, remove
 Local #151 verification uses these fast regression commands:
 
 ```bash
-openspec validate m10-production-closure --strict --no-interactive
+openspec validate national-scale-performance --type spec --strict --no-interactive
 uv run ruff check .
-uv run ruff check services/production_closure tests/test_production_scale_validation.py docs/validation/production-closure.md progress.md
+uv run ruff check services/production_closure tests/test_production_scale_validation.py
+# Ruff does not lint Markdown. docs/ is covered by the CI Markdown Lint form below;
+# progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
+npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
 uv run pytest -q tests/test_production_scale_validation.py
 uv run pytest -q tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_flood_alerts_api.py tests/test_openapi_drift.py
 ```

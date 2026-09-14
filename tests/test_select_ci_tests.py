@@ -19017,6 +19017,11 @@ def test_registry_partition_live_commands_name_all_seven_suites() -> None:
     validation = Path("docs/VALIDATION.md").read_text(encoding="utf-8")
     smoke = validation.split("NHMS_RUN_REAL_BASINS_IMPORT=1", 1)[1].split("```", 1)[0]
     assert "tests/test_basins_registry_import_db.py" in smoke, smoke
+    # #2059: the smoke is an integration item; conftest skips it (rc 0) unless the
+    # canonical integration gate is set, and a bare DATABASE_URL is ignored.
+    assert "NHMS_RUN_INTEGRATION=1" in smoke, smoke
+    assert "NHMS_INTEGRATION_DATABASE_URL=" in smoke, smoke
+    assert re.search(r"(?<![A-Z_])DATABASE_URL=", smoke) is None, smoke
     assert oracle["bug008_command"] == ("uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count")
     # The retained-core BUG-008 command is still a live, correct recipe: it collects and
     # passes exactly the two frozen cases (proven in the execution-semantics row above).
