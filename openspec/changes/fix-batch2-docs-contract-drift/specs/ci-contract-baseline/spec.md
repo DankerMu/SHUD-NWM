@@ -25,8 +25,7 @@ dependents.
   suites)
 - **AND** the selected tests also contain every `CORE_SMOKE_TESTS` member,
   because `packages/common/**` Python sources retain the core-smoke
-  baseline by policy (#1744 path B); measured 2026-09-14: 16 selected
-  targets, 5 of 5 core-smoke suites included,
+  baseline by policy (#1744 path B), and the selector reports
   `collection_smoke_required=false`
 
 #### Scenario: The transitive dependent is derived, not grepped
@@ -175,9 +174,9 @@ in the diff.
 - **AND** when the diff's only backend change is instead
   `scripts/select_ci_tests.py`, the selection is not collapsed: it
   also contains the supplemental invariant suites routed from
-  `scripts/**` (measured 2026-09-14: 3 targets —
-  `tests/test_river_segment_write_surface_scan.py`,
-  `tests/test_select_ci_tests.py`,
+  `scripts/**` (the selection includes `tests/test_select_ci_tests.py`
+  plus supplemental invariant suites such as
+  `tests/test_river_segment_write_surface_scan.py` and
   `tests/test_timescale_write_guard_wire_site_invariant.py`), so
   `meta_guard_only=false` as "non-collapsed selections suppress the
   flag" requires, while `collection_smoke_required=true` still runs

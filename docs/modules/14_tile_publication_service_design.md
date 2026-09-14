@@ -58,17 +58,25 @@
 ### 6.1 Issue #122 release behavior
 
 Forecast M3 发布阶段使用 `nhms-pipeline publish-tiles --cycle-id <cycle_id>`。本版本不生成完整全国
-MVT/PBF 金字塔；最小发布产物是洪水重现期 GeoJSON delivery metadata：
+MVT/PBF 金字塔；当前唯一发布产物是 q_down 河段时序 display manifest。原洪水重现期 GeoJSON delivery
+metadata（`flood.return_period_result`、`layer_id=flood_return_period_<run_id>`、
+`/api/v1/tiles/flood-return-period` 及其 `metadata.json`）已随频率展示管线退役于 `b97c16e2`，本文件中
+相关条目（§2 上游/存储表、§3 职责边界、§6 接口、§9 验收标准）仅为历史记录。现行行为以
+`services/tile_publisher/publisher.py` 为准（`TilePublisher.publish_cycle` → `publish_qdown_cycle`）：
 
-- 从 `hydro.hydro_run` + `flood.return_period_result` 中发现指定 cycle 的 `published`
-  forecast run（原 `frequency_done` 已退役于 `b97c16e2`，不是迁移账本成员，仅残留在 node-27 live 枚举中）。
-- 以确定性 `layer_id=flood_return_period_<run_id>` upsert `map.tile_layer`，`tile_format=geojson`，
-  `tile_uri_template=/api/v1/tiles/flood-return-period?run_id=<run_id>&duration={duration}&valid_time={valid_time}`。
+- `_discover_qdown_runs` 从 `hydro.hydro_run` + `hydro.river_timeseries` 中发现指定 cycle 的
+  `status IN ('succeeded', 'parsed', 'published')` 且存在 `q_down` 行的 forecast run（与
+  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 不是迁移账本成员，
+  仅残留在 node-27 live 枚举中）。
+- `_upsert_qdown_layer` 以确定性 `layer_id=q_down_<run_id>_<river_network_version_id>` upsert
+  `map.tile_layer`，`layer_type=q_down_timeseries`，`tile_format=geojson_timeseries`，
+  `tile_uri_template` 为 `tiles/hydro/<cycle_id>/q-down/<run_id>/<river_network_version_id>/manifest.json`
+  的 manifest URI。
 - 重复执行同一 cycle 必须返回相同 logical layer，不产生重复 `map.tile_layer` 或冲突 cache row。
 - 成功后 run 可标记为 `published`；M3 cycle 仍保持既有最终语义：全量成功为 `complete`，上游部分流域成功为
   `parsed_partial`。
-- 找不到产品、缺少 `DATABASE_URL` 且对象存储中也没有
-  `tiles/hydro/<cycle_id>/flood-return-period/metadata.json` 时，CLI 返回非 0 JSON：
+- 找不到可发布 q_down 产品（`NO_PUBLISHABLE_QDOWN_PRODUCTS`）、schema 缺失或全部 run identity 不完整时，CLI 返回非 0 JSON（CLI 缺少
+  `DATABASE_URL` 时改为 `status=deferred_to_node27_ingest` 退出 0，见 `services/orchestrator/cli.py` `_publish_tiles`）：
   `status=failed_publish`、稳定 `error_code`/`error_message`。Slurm 模板不吞掉该失败，编排器映射为
   `failed_publish`。
 
