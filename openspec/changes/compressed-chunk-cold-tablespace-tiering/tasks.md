@@ -111,12 +111,16 @@ budget fields. Real launcher and collection/survivor proofs are required.
   `fixtures/retirement-c4-acceptance-owner.md`. Original-record drift refuses
   after binder execution; real Node CLI proof uses synthetic C4 receipts and
   does not activate production or complete R1.4.
-- [ ] R1.6a Repair the post-merge static topology guard's false classification
+- [x] R1.6a Repair the post-merge static topology guard's false classification
   of the approved C4 evidence's coordinated negative scope limit. Preserve
   affirmative/neighbor/wrapped controls and original evidence; no allowlist or
   weaker hard gate. Fixture:
   `fixtures/retirement-c4-topology-negative-boundary.md`. Require red/green
   public-report proof, the full entropy suite on node-27, and fresh master CI.
+  Delivered via PR #2330. Fresh master CI `34800157640` at merge
+  `6635891df2aba26ef9e542877b7f0e19908dca38` passed the full unit job:
+  20238 passed, 19 skipped, 315 deselected. Receipt:
+  `evidence/receipts/retirement-c4-topology-master-ci.json`.
 
 ## R2 — Detach normal compression while preserving safety
 
