@@ -6,6 +6,7 @@ import {
   cycleNotListedDischargeDisabledReason,
   failClosedDischargeDisabledReason,
   isFailClosedDischargeMetadata,
+  isM11ActiveCycleValidTimesUnresolved,
   mergeLayerStates,
   pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
@@ -24,6 +25,7 @@ import {
   success,
   nationalDischargeMetadata,
   layer,
+  model,
   apiError,
   mockApi,
   ifsQuery,
@@ -574,6 +576,45 @@ describe('overview data store discharge loading', () => {
     expect(settledDischarge?.disabledReason).toContain('GFS')
     expect(settledDischarge?.disabledReason).toContain(IFS_CYCLE)
     expect(settledDischarge?.disabledReason).toBe(cycleNotListedDischargeDisabledReason('gfs', IFS_CYCLE))
+  })
+
+  it('settles an empty list with unknowable membership to the generic reason when bootstrap failure skips the layer-time chain', async () => {
+    // 前一代已写入 `(gfs, C)` 的空列表，但 gfs `/cycles` 被身份切换 fence 掉；本代 bootstrap 失败 →
+    // 阶段 3 跳过，`/cycles` 永远不会到达。「成员身份尚不可知 → pending」在此是谎报，
+    // 必须与 cycles-error 臂同口径落到 'Layer has no valid times.'（design D2）。
+    useOverviewDataStore.setState({
+      validTimesByCycle: { [`gfs|${IFS_CYCLE}`]: { status: 'available', validTimes: [] } },
+    })
+    let layersCalls = 0
+    const calls = mockApi({
+      '/api/v1/layers': () => {
+        layersCalls += 1
+        if (layersCalls === 1) throw new Error('runless layer catalog down')
+        return success([layer])
+      },
+      // 阶段 2 的目录请求必须晚于阶段 1 的 reject 落地，否则命中同一个被拒 promise。
+      '/api/v1/models': async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return success({ items: [model], total: 1, limit: 200, offset: 0 })
+      },
+      [VALID_TIMES_PATH]: emptyValidTimes,
+    })
+    const cycleQuery = { ...query, source: 'gfs' as const, cycle: IFS_CYCLE, validTime: null }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const state = useOverviewDataStore.getState()
+    // 前置条件：bootstrap 确实失败、阶段 3 确实跳过、gfs cycles 记录确实缺席、种子记录未被清掉。
+    expect(state.bootstrapError).not.toBeNull()
+    expect(state.layerTimeEnrichmentSkipped).toBe(true)
+    expect(state.cyclesBySource.gfs).toBeUndefined()
+    expect(calls.filter((call) => call.path === CYCLES_PATH)).toHaveLength(0)
+    expect(state.validTimesByCycle[`gfs|${IFS_CYCLE}`]).toEqual({ status: 'available', validTimes: [] })
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge).toBeDefined()
+    expect(discharge?.disabledReason).not.toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(discharge?.disabledReason).toBe('Layer has no valid times.')
+    expect(isM11ActiveCycleValidTimesUnresolved(discharge)).toBe(false)
   })
 
   it('does not re-request anything when only the precipitation toggle changes', async () => {

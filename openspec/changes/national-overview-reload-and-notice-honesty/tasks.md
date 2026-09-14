@@ -52,7 +52,7 @@ Evidence floor:
 - The four existing disabled reasons, their ladder order, and `resolveM11NationalValidTimeCorrection` deferral on pending/error.
 - Identity-changing queries (source, cycle, layer, version ids, segment, q) reload exactly as today, including stale-write fencing.
 - Notice chain order: met-station status → loading → overview-empty → precipitation; one notice at a time.
-- All existing assertions of `OverviewPagePrecipOverlay.test.tsx` except the two notice lines rewritten under D4.
+- All existing assertions of `OverviewPagePrecipOverlay.test.tsx` except the two notice lines rewritten under D4 and the approved IS-7 split (implementation deviation, orchestrator ruling): "keeps the toggle live while a validTime-only reload is in flight…" keeps every during-window assertion but is triggered by an identical-query reload (D1 removed the validTime-only reload), its post-release URL assertion becomes `EXPECTED_URL`, and a new page-level timeline-step test pins no loading / no catalog re-request / URL advances.
 
 ## Seams under test
 
@@ -89,7 +89,7 @@ Implementation order: 2 (#2139) → 3 (#2131) → 4 (#2127). Reference by symbol
 ### 5. Close-out
 
 - [ ] 5.1 PR closes #2127, #2131, #2139, #2103; #2103 closing note per design D5 (AC4 superseded by #2014 decision 13, sub-case → #2140).
-- [x] 5.2 E12 pre-deploy attempt recorded (no timeline on the deployed bundle); post-deploy capture recorded as follow-up if not deployed at merge time.
+- [x] 5.2 E12 pre-deploy attempt recorded (no timeline on the deployed bundle); post-deploy capture tracked by #2336.
 - [ ] 5.3 After merge: archive this change.
 
 ## Evidence Mapping
@@ -107,6 +107,6 @@ Implementation order: 2 (#2139) → 3 (#2131) → 4 (#2127). Reference by symbol
 | E9 | store equivalence, fixed clock, default pair | (a) settled Q(T1) then Q(T2); (b) Q(T1) with only the runless `/api/v1/layers` (no `run_id`) blocked and the mock returning at least one published run so phase 2's catalog uses the run-scoped key (phase 2 shares `fetchBasins()` and, without a run, the runless key with phase 1), phase 2 returned, then Q(T2), then release | `overview` deep-equal to `clearCache` + fresh load of Q(T2) (layers, bootstrap, requestScope, summary); `overviewSnapshotMatchesQuery(overview, Q(T2))` true; in (b) the promise returned by the Q(T1) call resolves to that overview; `buildM11RegisteredOverlay(Q(T2), layers)` tile URL has T2 as its valid_time segment |
 | E10 | store | settled Q, then Q with a different `cycle` or `source` | a new request generation starts (loading flags set, requests issued as today) |
 | E11 | red proof | pre-change tree | E1 red (notice null); E2/E3 red (`'Layer has no valid times.'`); E6/E7 red (loading flag re-set / error cleared); E8 red (pipeline re-sent); mutant: `writeValidTimes` rebuilds from a `layerStateInputs.query` that ignores the held current query → E7 red; mutant: short-circuit identical queries too → E14 red. Record each red run and revert |
-| E12 | live display (node-27 C4 browser lane) | agent-browser on `https://test.nwm.ac.cn/` playback and `?source=ifs&cycle=<GFS-only cycle>` | pre-deploy attempt 2026-09-13 (`.workplans/issue-2127/evidence/e12-baseline.txt`): the deployed bundle predates #2125 and has no timeline, so no per-step baseline exists. Post-deploy capture: zero requests per timeline step (4x and 1x), cycle-not-listed text, and a ruling on the "loading notice flicker" open item of #2127. Deploy is an operator action; the capture is a follow-up when not deployed at merge |
-| E13 | toolchain + regression | full frontend suite | `pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm check:types && pnpm test && pnpm build` green; baseline 955 tests on `origin/master` 177e08dd7, no existing assertion removed or loosened except D4 |
+| E12 | live display (node-27 C4 browser lane) | agent-browser on `https://test.nwm.ac.cn/` playback and `?source=ifs&cycle=<GFS-only cycle>` | pre-deploy attempt 2026-09-13 (`.workplans/issue-2127/evidence/e12-baseline.txt`): the deployed bundle predates #2125 and has no timeline, so no per-step baseline exists. Post-deploy capture: zero requests per timeline step (4x and 1x), cycle-not-listed text, and a ruling on the "loading notice flicker" open item of #2127. Deploy is an operator action; the capture is tracked by #2336 |
+| E13 | toolchain + regression | full frontend suite | `pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm check:types && pnpm test && pnpm build` green; baseline 955 tests on `origin/master` 177e08dd7, no existing assertion removed or loosened except D4 and the IS-7 split recorded under Must preserve |
 | E14 | store request log | settled load of Q then `loadOverview` with an identical Q (remount); settled failed bootstrap then identical Q | a new request generation starts; the failed bootstrap request is retried; after the identical-query reload settles (mock returns a different pipeline `updated_at` on the second round), a Q(T2) call re-derives from the new generation's inputs (summary carries the second `updated_at`) |

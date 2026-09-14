@@ -818,7 +818,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
           : { status: 'pending' }
       // 该对的列表**到达且为空**时要先问「该源列不列出这个周期」（#2131 / design D2）：
       //   - 该源 cycles 记录缺席（默认源不等 `/cycles`）→ 成员身份尚不可知 → `pending`，
-      //     `writeCycles` 到达后重算；
+      //     `writeCycles` 到达后重算；阶段 3 被跳过时 `/cycles` 永不到达 → 成员身份不可知，原样传空列表；
       //   - 记录 `available`、列表是数组且不含该周期（秒精度）→ `cycle-not-listed` 终态；
       //   - 列出了 / 记录 `error` / 列表变形（裸 `as T`，成员身份未知）→ 原样传空列表，
       //     仍是 'Layer has no valid times.'（真实覆盖缺口或不可知）。
@@ -827,7 +827,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         if (!record) return missingRecord
         if (record.status !== 'available' || record.validTimes.length > 0) return record
         const cyclesRecord = cyclesBySource[target.source]
-        if (!cyclesRecord) return { status: 'pending' }
+        if (!cyclesRecord) return layerTimeEnrichmentSkipped ? record : { status: 'pending' }
         if (cyclesRecord.status !== 'available' || !Array.isArray(cyclesRecord.cycles?.cycles)) return record
         const listed = cyclesRecord.cycles.cycles.some((entry) => toSecondsPrecisionInstant(entry?.cycle_time) === target.cycle)
         return listed ? record : { status: 'cycle-not-listed', source: target.source, cycle: target.cycle }
