@@ -11,7 +11,7 @@ Run once per case, with a DIFFERENT fresh database and --state each time:
     --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
     --state PRIVATE_ABSOLUTE_NEW_DIR --case happy \
     --original-new-repo ORIGINAL_1A32
-Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
+Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart, unit-config.
 Happy also drives the real main/CLI admission refusals and admitted emergency paths,
 including window's nested recovery protection and historical-ledger pending-set
 admission at both prepare and the migration worker; only external boundaries are simulated.
@@ -22,6 +22,14 @@ The harness owns no container lifecycle and never deletes a database/volume.
 All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
 systemd, process inspection, git selection and HTTP transport are simulated.
 Keep private state + stdout as evidence. No PASS until the entire case ends.
+
+Focused typed-unit oracle needs no database:
+  python window_smoke.py --case unit-config --state PRIVATE_ABSOLUTE_NEW_DIR
+Expected-original-red uses only a private baseline copy:
+  git show 46786b04b:openspec/changes/refresh-node27-window-admission/tools/window_execute.py \
+    > PRIVATE/original-window_execute.py
+  python window_smoke.py --case unit-config --state PRIVATE_ABSOLUTE_NEW_DIR \
+    --original-executor PRIVATE/original-window_execute.py
 
 Small real write-budget entrypoint, AFTER copying the actual LH-YLJ artifact
 and its complete authoritative run/model/segment metadata into the isolated
@@ -124,6 +132,45 @@ class BoundaryExecutor(w.Executor):
         self.starts = 0
         self.system_actions = []
         self.stop_failures = 0
+        self.reset_systemd_fixture()
+
+    def reset_systemd_fixture(self):
+        self.bus_paths = {name: self.bus_path(name) for name in self.units}
+        self.bus_semantics = {
+            name: (
+                [
+                    [
+                        "/bin/bash",
+                        ["/bin/bash", "/fixture/" + name.removesuffix(".service") + ".sh"],
+                        False,
+                    ],
+                    [
+                        "/usr/bin/env",
+                        ["/usr/bin/env", "FIXTURE_SECOND=1", "/fixture/second-command"],
+                        True,
+                    ],
+                ]
+                if name == w.DISPLAY
+                else [
+                    [
+                        "/bin/bash",
+                        ["/bin/bash", "/fixture/" + name.removesuffix(".service") + ".sh"],
+                        False,
+                    ]
+                ]
+                if name.endswith(".service")
+                else [
+                    ["OnCalendar", "*-*-* *:00/30:00"],
+                    ["OnCalendar", "Mon *-*-* 04:00:00"],
+                ]
+                if name == w.TIMERS[0]
+                else [["OnCalendar", "*-*-* 01:00:00"]],
+            )
+            for name in self.units
+        }
+        self.bus_tick = 0
+        self.show_tick = 0
+        self.bus_fault = None
 
     def sql(self, query):
         import psycopg2
@@ -146,9 +193,89 @@ class BoundaryExecutor(w.Executor):
                     else ""
                 )
 
+    def bus_path(self, name):
+        return w._SYSTEMD_UNIT_PREFIX + "".join(character if character.isalnum() else "_" for character in name)
+
     def unit(self, name):
         w.require(name in self.units, "UNKNOWN_UNIT")
-        return dict(self.units[name])
+        value = dict(self.units[name])
+        self.show_tick += 1
+        if name.endswith(".service"):
+            entries = []
+            for path, argv, ignore_errors in self.bus_semantics[name]:
+                entries.append(
+                    "{ path="
+                    + path
+                    + " ; argv[]="
+                    + " ".join(argv)
+                    + " ; ignore_errors="
+                    + ("yes" if ignore_errors else "no")
+                    + " ; start_time="
+                    + str(self.show_tick)
+                    + " ; stop_time="
+                    + str(self.show_tick + 1)
+                    + " ; pid="
+                    + str(1000 + self.show_tick)
+                    + " ; code=exited ; status=0 }"
+                )
+            value["ExecStart"] = " ; ".join(entries)
+        else:
+            value["TimersCalendar"] = " ; ".join(
+                "{ " + base + "=" + expression + " ; next_elapse=" + str(self.show_tick) + " }"
+                for base, expression in self.bus_semantics[name]
+            )
+        return value
+
+    def bus_property(self, name, property_name):
+        self.bus_tick += 1
+        if property_name == "ExecStart":
+            value = {
+                "type": w._EXEC_START_SIGNATURE,
+                "data": [
+                    [
+                        path,
+                        list(argv),
+                        ignore_errors,
+                        self.bus_tick,
+                        self.bus_tick + 1,
+                        self.bus_tick + 2,
+                        self.bus_tick + 3,
+                        self.bus_tick + 4,
+                        self.bus_tick + 5,
+                        self.bus_tick + 6,
+                    ]
+                    for path, argv, ignore_errors in self.bus_semantics[name]
+                ],
+            }
+            if self.bus_fault == "signature":
+                value["type"] = "a(ss)"
+            elif self.bus_fault == "envelope":
+                value["extra"] = True
+            elif self.bus_fault == "exec-arity":
+                value["data"][0] = value["data"][0][:-1]
+            elif self.bus_fault == "exec-bool-metadata":
+                value["data"][0][3] = True
+            elif self.bus_fault == "exec-argv-nonstring":
+                value["data"][0][1][0] = 1
+            elif self.bus_fault == "exec-ignore-errors-int":
+                value["data"][0][2] = 1
+            return value
+        value = {
+            "type": w._TIMERS_CALENDAR_SIGNATURE,
+            "data": [
+                [base, expression, self.bus_tick + index]
+                for index, (base, expression) in enumerate(self.bus_semantics[name])
+            ],
+        }
+        if self.bus_fault == "signature":
+            value["type"] = "a(ss)"
+        elif self.bus_fault == "envelope":
+            value["extra"] = True
+        elif self.bus_fault == "timer-arity":
+            value["data"][0] = value["data"][0][:-1]
+        elif self.bus_fault == "timer-bool-next":
+            value["data"][0][2] = True
+        return value
 
     def system(self, action, names):
         self.system_actions.append({"action": action, "units": list(names)})
@@ -171,7 +298,43 @@ class BoundaryExecutor(w.Executor):
             self.inject = None
             self.crash_boundary()
 
+    def bus_run(self, argv):
+        if argv[:4] == ["busctl", "--user", "--json=short", "call"]:
+            w.require(
+                argv[4:9] == [w._SYSTEMD, w._SYSTEMD_MANAGER_PATH, w._SYSTEMD + ".Manager", "GetUnit", "s"]
+                and len(argv) == 10
+                and argv[9] in self.bus_paths,
+                "UNKNOWN_BUSCTL_BOUNDARY",
+            )
+            if self.bus_fault == "resolution":
+                return json.dumps({"type": "s", "data": ["not-an-object-path"]}).encode()
+            return json.dumps({"type": "o", "data": [self.bus_paths[argv[9]]]}).encode()
+        if argv[:4] != ["busctl", "--user", "--json=short", "get-property"]:
+            return None
+        w.require(
+            len(argv) == 8 and argv[4] == w._SYSTEMD and argv[5] in self.bus_paths.values(),
+            "UNKNOWN_BUSCTL_BOUNDARY",
+        )
+        names = [name for name, path in self.bus_paths.items() if path == argv[5]]
+        w.require(len(names) == 1, "AMBIGUOUS_BUS_UNIT")
+        name = names[0]
+        interface, property_name = argv[6:]
+        if name.endswith(".service"):
+            w.require(
+                (interface, property_name) == (w._SYSTEMD + ".Service", "ExecStart"),
+                "BUS_PROPERTY_INTERFACE_MISMATCH",
+            )
+        else:
+            w.require(
+                (interface, property_name) == (w._SYSTEMD + ".Timer", "TimersCalendar"),
+                "BUS_PROPERTY_INTERFACE_MISMATCH",
+            )
+        return json.dumps(self.bus_property(name, property_name)).encode()
+
     def run(self, argv, **kwargs):
+        bus = self.bus_run(argv)
+        if bus is not None:
+            return bus
         if argv[:6] == ["docker", "exec", "-i", "nhms-db", "psql", "-X"]:
             from psycopg2.extensions import parse_dsn
 
@@ -396,9 +559,21 @@ def scenario(args):
     # One authorized timer was inactive at admission and must never be started.
     units[w.TIMERS[1]]["ActiveState"] = "inactive"
     w.private_write(
-        root / "state.json", json.dumps(dict(units=units, files=files, old_branch="old", fence_epochs=[])).encode()
+        root / "state.json",
+        json.dumps(
+            dict(
+                units=units,
+                files=files,
+                old_branch="old",
+                fence_epochs=[],
+                unit_config_snapshot=w.UNIT_CONFIG_SNAPSHOT,
+            )
+        ).encode(),
     )
     e = BoundaryExecutor(args, dsn)
+    for name, unit in e.s["units"].items():
+        unit.update(e.stable_unit_config(name))
+    e.save(units=e.s["units"])
     roles = (Path(args.new_repo) / "db/roles/node27_write_roles.sql").read_bytes()
     e.run(
         [
@@ -629,6 +804,294 @@ def scenario(args):
             default=str,
         )
     )
+
+
+def unit_config_oracle(args):
+    """Exercise typed immutable comparison without a database or systemd host."""
+
+    root = Path(args.state).resolve()
+    root.mkdir(mode=0o700, parents=False, exist_ok=False)
+    reports = []
+
+    def fixture(name, *, raw_snapshot=False, phase="PREPARED"):
+        case_root = root / name
+        case_root.mkdir(mode=0o700)
+        repo = case_root / "repo"
+        config = {"repo": str(repo), "staged_new_repo": str(repo / "staged")}
+        config_bytes = json.dumps(config).encode()
+        w.private_write(case_root / "config.json", config_bytes)
+        protected = case_root / "protected.conf"
+        w.private_write(protected, b"stable protected fixture\n")
+        units = {
+            unit: {
+                "LoadState": "loaded",
+                "ActiveState": "active",
+                "SubState": "running",
+                "Result": "success",
+                "MainPID": "1",
+                "ControlGroup": "",
+                "UnitFileState": "enabled",
+                "FragmentPath": str(repo / "units" / unit),
+                "DropInPaths": "",
+                "WorkingDirectory": str(repo),
+                "ExecStart": "",
+                "Environment": "FIXTURE_ENV=stable",
+                "EnvironmentFiles": "/fixture/stable.env (ignore_errors=no)",
+                "TimeoutStartUSec": "1min",
+                "TimersCalendar": "",
+                "ExecMainStartTimestampMonotonic": "0",
+                "ExecMainStatus": "0",
+                "ConditionResult": "yes",
+            }
+            for unit in w.TIMERS + w.SERVICES
+        }
+        state = {
+            "phase": phase,
+            "units": units,
+            "files": {str(protected): {"sha256": w.digest(protected.read_bytes())}},
+            "old_branch": "old",
+            "fence_epochs": [],
+            "unit_config_snapshot": w.UNIT_CONFIG_SNAPSHOT,
+            "config_sha256": w.digest(config_bytes),
+            "driver_sha256": w.digest(Path(w.__file__).read_bytes()),
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "ledger_before": ["fixture"],
+        }
+        w.private_write(case_root / "state.json", json.dumps(state, sort_keys=True).encode())
+        executor = BoundaryExecutor(SimpleNamespace(state=str(case_root)), "unused")
+        snapshot = {unit: executor.unit(unit) for unit in units}
+        if not raw_snapshot:
+            for unit, record in snapshot.items():
+                record.update(executor.stable_unit_config(unit))
+        executor.save(units=snapshot)
+        return executor, case_root, protected
+
+    def close(executor):
+        os.close(executor.lock)
+
+    def expect_immutable_refusal(name, expected, mutate):
+        executor, _, protected = fixture(name)
+        try:
+            mutate(executor, protected)
+            try:
+                executor.immutable()
+            except w.Refusal as error:
+                w.require(str(error) == expected, "UNIT_CONFIG_ORACLE_WRONG_REFUSAL")
+            else:
+                raise w.Refusal("UNIT_CONFIG_ORACLE_ACCEPTED_DRIFT")
+            reports.append({"case": name, "check": expected})
+        finally:
+            close(executor)
+
+    executor, _, _ = fixture("runtime-metadata")
+    try:
+        executor.immutable()
+        reports.append({"case": "runtime-metadata", "result": "pass"})
+    finally:
+        close(executor)
+
+    def command_path(executor, _):
+        executor.bus_semantics[w.DISPLAY][0][0] = "/fixture/changed-command"
+
+    def command_argv(executor, _):
+        executor.bus_semantics[w.DISPLAY][1][1][-1] = "/fixture/changed-argv"
+
+    def command_ignore_errors(executor, _):
+        executor.bus_semantics[w.DISPLAY][1][2] = False
+
+    def command_order(executor, _):
+        executor.bus_semantics[w.DISPLAY].reverse()
+
+    def calendar_expression(executor, _):
+        executor.bus_semantics[w.TIMERS[0]][1][1] = "Tue *-*-* 05:00:00"
+
+    def calendar_base(executor, _):
+        executor.bus_semantics[w.TIMERS[0]][1][0] = "OnStartupSec"
+
+    def calendar_order(executor, _):
+        executor.bus_semantics[w.TIMERS[0]].reverse()
+
+    for name, mutate in (
+        ("exec-path", command_path),
+        ("exec-complete-argv", command_argv),
+        ("exec-ignore-errors", command_ignore_errors),
+        ("exec-command-order", command_order),
+        ("calendar-expression", calendar_expression),
+        ("calendar-base", calendar_base),
+        ("calendar-order", calendar_order),
+    ):
+        expect_immutable_refusal(name, "UNIT_CONFIG_CHANGED", mutate)
+
+    def property_drift(key, value):
+        def mutate(executor, _):
+            executor.units[w.DISPLAY][key] = value
+
+        return mutate
+
+    for name, key, value in (
+        ("environment", "Environment", "FIXTURE_ENV=changed"),
+        ("environment-files", "EnvironmentFiles", "/fixture/changed.env (ignore_errors=no)"),
+        ("environment-files-ignore-errors", "EnvironmentFiles", "/fixture/stable.env (ignore_errors=yes)"),
+        ("fragment-path", "FragmentPath", "/fixture/changed.service"),
+        ("drop-in-paths", "DropInPaths", "/fixture/changed.conf"),
+        ("working-directory", "WorkingDirectory", "/fixture/changed-root"),
+        ("unit-file-state", "UnitFileState", "disabled"),
+        ("timeout", "TimeoutStartUSec", "2min"),
+    ):
+        expect_immutable_refusal(name, "UNIT_CONFIG_CHANGED", property_drift(key, value))
+
+    def protected_file(_, path):
+        w.private_write(path, b"changed protected fixture\n")
+
+    expect_immutable_refusal("protected-file", "UNIT_ENV_HOLD_OR_FOREIGN_FILE_CHANGED", protected_file)
+
+    def bus_fault(fault):
+        def mutate(executor, _):
+            executor.bus_fault = fault
+
+        return mutate
+
+    for fault, expected in (
+        ("resolution", "SYSTEMD_UNIT_RESOLUTION_INVALID"),
+        ("signature", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("envelope", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("timer-arity", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("timer-bool-next", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("exec-arity", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("exec-bool-metadata", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("exec-argv-nonstring", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+        ("exec-ignore-errors-int", "SYSTEMD_TYPED_PROPERTY_INVALID"),
+    ):
+        expect_immutable_refusal("malformed-" + fault, expected, bus_fault(fault))
+
+    def invoke_main(case_root, command, factory):
+        original_executor, original_argv = w.Executor, sys.argv
+        w.Executor = factory
+        sys.argv = [str(Path(w.__file__).resolve()), command, "--state", str(case_root), "--go", "Danker"]
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                returncode = w.main()
+        finally:
+            w.Executor, sys.argv = original_executor, original_argv
+        return returncode, json.loads(output.getvalue())
+
+    def old_snapshot_refusal(name, command, phase):
+        executor, case_root, _ = fixture(name, phase=phase)
+        state_path = case_root / "state.json"
+        old = json.loads(state_path.read_text())
+        del old["unit_config_snapshot"]
+        old["phase"] = phase
+        w.private_write(state_path, json.dumps(old, sort_keys=True).encode())
+        before = state_path.read_bytes()
+        close(executor)
+        instances = []
+
+        def factory(cli_args):
+            instance = BoundaryExecutor(SimpleNamespace(state=str(case_root)), "unused", cli_args=cli_args)
+            instances.append(instance)
+            return instance
+
+        returncode, receipt = invoke_main(case_root, command, factory)
+        for instance in instances:
+            close(instance)
+        w.require(
+            returncode == 1
+            and receipt["check"] == "FRESH_TYPED_UNIT_SNAPSHOT_REQUIRED"
+            and receipt["phase"] == "INITIALIZATION_REFUSED"
+            and not instances
+            and state_path.read_bytes() == before,
+            "OLD_UNIT_SNAPSHOT_REWRITTEN_OR_ACCEPTED",
+        )
+        reports.append({"case": name, "check": receipt["check"], "state_unchanged": True})
+
+    old_snapshot_refusal("old-prepared", "window", "PREPARED")
+    old_snapshot_refusal("old-failed", "recover", "FORWARD_FAILED_RECOVERY_REQUIRED")
+
+    class AdmissionExecutor(BoundaryExecutor):
+        def __init__(self, fixture_args, dsn, *, cli_args=None):
+            super().__init__(fixture_args, dsn, cli_args=cli_args)
+            self.window_worker_calls = []
+
+        def ledger(self):
+            return list(self.s["ledger_before"])
+
+        def worker(self, action, **_):
+            self.window_worker_calls.append(action)
+            raise w.Refusal("UNIT_CONFIG_WINDOW_GATE_PASSED")
+
+    def window_gate(name, expected, mutate=None, expect_worker=False):
+        executor, case_root, protected = fixture(name)
+        try:
+            if mutate is not None:
+                mutate(executor, protected)
+            external_units = json.loads(json.dumps(executor.units))
+            semantics = json.loads(json.dumps(executor.bus_semantics))
+            state_path = case_root / "state.json"
+            before = state_path.read_bytes()
+        finally:
+            close(executor)
+        instances = []
+
+        def factory(cli_args):
+            instance = AdmissionExecutor(SimpleNamespace(state=str(case_root)), "unused", cli_args=cli_args)
+            instance.units = json.loads(json.dumps(external_units))
+            instance.reset_systemd_fixture()
+            instance.bus_semantics = json.loads(json.dumps(semantics))
+            instances.append(instance)
+            return instance
+
+        returncode, receipt = invoke_main(case_root, "window", factory)
+        for instance in instances:
+            close(instance)
+        actions = instances[0].system_actions if instances else []
+        worker_calls = instances[0].window_worker_calls if instances else []
+        w.require(
+            returncode == 1
+            and receipt["check"] == expected
+            and actions == []
+            and worker_calls == (["preparse"] if expect_worker else [])
+            and state_path.read_bytes() == before,
+            "WINDOW_UNIT_CONFIG_GATE_MUTATED",
+        )
+        reports.append(
+            {
+                "case": name,
+                "check": expected,
+                "worker_calls": worker_calls,
+                "state_unchanged": True,
+                "system_actions": actions,
+            }
+        )
+
+    window_gate("window-runtime-metadata", "UNIT_CONFIG_WINDOW_GATE_PASSED", expect_worker=True)
+    window_gate("window-path-drift", "UNIT_CONFIG_CHANGED", command_path)
+
+    if args.original_executor:
+        original = Path(args.original_executor).resolve()
+        w.require(original.is_file(), "ORIGINAL_EXECUTOR_REQUIRED")
+        baseline = load(original, "window_executor_original_unit_config")
+        executor, _, _ = fixture("original-volatile-red", raw_snapshot=True)
+        try:
+            try:
+                baseline.Executor.immutable(executor)
+            except BaseException as error:
+                w.require(str(error) == "UNIT_CONFIG_CHANGED", "ORIGINAL_VOLATILE_WRONG_REFUSAL")
+            else:
+                raise w.Refusal("ORIGINAL_VOLATILE_METADATA_ACCEPTED")
+            reports.append({"case": "original-volatile-red", "check": "UNIT_CONFIG_CHANGED"})
+        finally:
+            close(executor)
+
+    receipt = {
+        "case": "unit-config",
+        "result": "PASS",
+        "state": str(root),
+        "reports": reports,
+        "scope": "typed unit comparator and pre-T0 admission only; no database or production operation",
+    }
+    w.private_write(root / "unit-config-oracle.json", json.dumps(receipt, sort_keys=True).encode())
+    print(json.dumps(receipt, sort_keys=True))
 
 
 def historical_ledger_admission(e):
@@ -989,6 +1452,7 @@ def historical_ledger_admission(e):
             fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
             instance = executor_cls(fixture, e.dsn, cli_args=cli_args)
             instance.units = json.loads(json.dumps(external_units))
+            instance.reset_systemd_fixture()
             instances.append(instance)
             return instance
 
@@ -1275,6 +1739,7 @@ def late_prepare_admission(e):
             fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
             instance = LatePrepareExecutor(fixture, e.dsn, cli_args=cli_args)
             instance.units = external_units
+            instance.reset_systemd_fixture()
             instance.dump_invocations = 0
             instances.append(instance)
             return instance
@@ -1324,7 +1789,19 @@ def late_prepare_admission(e):
         persisted = (root / "state.json").read_bytes()
         snapshot = json.loads(persisted)
         w.require(
-            all(key in snapshot for key in ("old_oid", "units", "files", "ledger_before", "old_branch", "fence_epochs"))
+            all(
+                key in snapshot
+                for key in (
+                    "old_oid",
+                    "units",
+                    "files",
+                    "ledger_before",
+                    "old_branch",
+                    "fence_epochs",
+                    "unit_config_snapshot",
+                )
+            )
+            and snapshot.get("unit_config_snapshot") == w.UNIT_CONFIG_SNAPSHOT
             and "legacy_read" not in snapshot
             and snapshot.get("child_pid") is None
             and snapshot.get("last_command_rc") == 23,
@@ -1394,6 +1871,7 @@ def entrypoint_admission(e):
             fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
             instance = BoundaryExecutor(fixture, e.dsn, cli_args=cli_args)
             instance.units = json.loads(json.dumps(external_units))
+            instance.reset_systemd_fixture()
             instance.stop_failures = stop_failures
             instances.append(instance)
             return instance
@@ -1434,7 +1912,11 @@ def entrypoint_admission(e):
         reports.append({"case": name, "returncode": rc, "receipt": receipt, "system_actions": actions})
         return rc, receipt
 
-    partial = {"phase": "PREPARATION_FAILED", "fence_epochs": []}
+    partial = {
+        "phase": "PREPARATION_FAILED",
+        "fence_epochs": [],
+        "unit_config_snapshot": w.UNIT_CONFIG_SNAPSHOT,
+    }
     for name, state in (("config-only", None), ("failed-prepare", partial)):
         for go in (False, True):
             rc, receipt = invoke(name + ("-go" if go else "-no-go"), state, go=go)
@@ -1474,6 +1956,7 @@ def reopen(e):
     os.close(e.lock)
     restored = BoundaryExecutor(args, dsn)
     restored.units, restored.selected, restored.starts = units, selected, starts
+    restored.reset_systemd_fixture()
     return restored
 
 
@@ -1656,6 +2139,7 @@ def arguments():
         "original-new-repo",
     ):
         p.add_argument("--" + name)
+    p.add_argument("--original-executor")
     p.add_argument(
         "--case",
         choices=(
@@ -1668,18 +2152,22 @@ def arguments():
             "source",
             "restart",
             "write-budget",
+            "unit-config",
         ),
     )
     args = p.parse_args()
-    required = (
-        ("container", "state", "repo", "sha", "action")
-        if args.worker
-        else ("oracle", "old_repo", "new_repo", "container", "state", "case")
-    )
-    if args.case == "write-budget":
+    if args.worker:
+        required = ("container", "state", "repo", "sha", "action")
+    elif args.case == "unit-config":
+        required = ("state",)
+    elif args.case == "write-budget":
         required = ("container", "state", "new_repo", "fixture_config")
-    if args.case == "happy":
-        required = required + ("original_new_repo",)
+    else:
+        required = ("oracle", "old_repo", "new_repo", "container", "state", "case")
+        if args.case == "happy":
+            required = required + ("original_new_repo",)
+    if args.original_executor and args.case != "unit-config":
+        p.error("--original-executor requires --case unit-config")
     for name in required:
         if not getattr(args, name):
             p.error("missing --" + name.replace("_", "-"))
@@ -1692,6 +2180,8 @@ if __name__ == "__main__":
     try:
         if args.worker:
             worker(args)
+        elif args.case == "unit-config":
+            unit_config_oracle(args)
         elif args.case == "write-budget":
             write_budget(args)
         else:

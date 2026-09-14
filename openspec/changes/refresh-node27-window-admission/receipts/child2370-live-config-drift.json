@@ -1,0 +1,31 @@
+{
+  "phase": "PREPARED",
+  "t0": null,
+  "fence_epochs": [],
+  "drifts": [
+    {
+      "unit": "nhms-node27-autopipe.service",
+      "property": "ExecStart",
+      "before": "{ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_autopipe_cron.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 01:31:58 CST] ; stop_time=[Tue 2026-09-15 01:32:09 CST] ; pid=279287 ; code=exited ; status=0 }",
+      "current": "{ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_autopipe_cron.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 02:25:40 CST] ; stop_time=[n/a] ; pid=366412 ; code=(null) ; status=0/0 }"
+    },
+    {
+      "unit": "nhms-node27-download.service",
+      "property": "ExecStart",
+      "before": "{ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_download_once.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 01:22:16 CST] ; stop_time=[Tue 2026-09-15 01:22:34 CST] ; pid=247684 ; code=exited ; status=0 }",
+      "current": "{ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_download_once.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 02:23:40 CST] ; stop_time=[Tue 2026-09-15 02:24:00 CST] ; pid=357107 ; code=exited ; status=0 }"
+    },
+    {
+      "unit": "nhms-node27-frontier-alert.service",
+      "property": "ExecStart",
+      "before": "{ path=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 01:30:32 CST] ; stop_time=[Tue 2026-09-15 01:30:32 CST] ; pid=277572 ; code=exited ; status=0 }",
+      "current": "{ path=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh ; ignore_errors=no ; start_time=[Tue 2026-09-15 02:30:00 CST] ; stop_time=[Tue 2026-09-15 02:30:00 CST] ; pid=385376 ; code=exited ; status=0 }"
+    },
+    {
+      "unit": "nhms-node27-frontier-alert.timer",
+      "property": "TimersCalendar",
+      "before": "{ OnCalendar=*-*-* *:00/30:00 ; next_elapse=Tue 2026-09-15 02:00:00 CST }",
+      "current": "{ OnCalendar=*-*-* *:00/30:00 ; next_elapse=Tue 2026-09-15 03:00:00 CST }"
+    }
+  ]
+}

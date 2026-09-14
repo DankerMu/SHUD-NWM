@@ -133,6 +133,12 @@ CONFIG_PROPS = (
     "TimeoutStartUSec",
     "TimersCalendar",
 )
+UNIT_CONFIG_SNAPSHOT = "typed-v1"
+_SYSTEMD = "org.freedesktop.systemd1"
+_SYSTEMD_MANAGER_PATH = "/org/freedesktop/systemd1"
+_SYSTEMD_UNIT_PREFIX = "/org/freedesktop/systemd1/unit/"
+_EXEC_START_SIGNATURE = "a(sasbttttuii)"
+_TIMERS_CALENDAR_SIGNATURE = "a(sst)"
 
 
 class Refusal(Exception):
@@ -202,6 +208,12 @@ class Executor:
             self.running = True
         self.state_file = self.root / "state.json"
         self.s = json.loads(safe_path(self.state_file, True).read_text()) if self.state_file.exists() else {}
+        if args.command in ("window", "recover") and self.s:
+            require(
+                self.s.get("unit_config_snapshot") == UNIT_CONFIG_SNAPSHOT,
+                "FRESH_TYPED_UNIT_SNAPSHOT_REQUIRED",
+            )
+
         self.seq = self.s.get("seq", 0)
         self.recovering = args.command == "recover"
         self._recovery_active = False
@@ -318,6 +330,96 @@ class Executor:
             "('river_timeseries','river_timeseries_legacy','river_timeseries_narrow_rollback') ORDER BY c.relname"
         )
 
+    def typed_bus(self, argv, code):
+        try:
+            value = json.loads(self.run(argv, timeout=30).decode("utf-8", "strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise Refusal(code)
+        require(type(value) is dict and set(value) == {"type", "data"}, code)
+        return value
+
+    def unit_object(self, name):
+        value = self.typed_bus(
+            [
+                "busctl",
+                "--user",
+                "--json=short",
+                "call",
+                _SYSTEMD,
+                _SYSTEMD_MANAGER_PATH,
+                _SYSTEMD + ".Manager",
+                "GetUnit",
+                "s",
+                name,
+            ],
+            "SYSTEMD_UNIT_RESOLUTION_INVALID",
+        )
+        data = value["data"]
+        require(value["type"] == "o" and type(data) is list and len(data) == 1, "SYSTEMD_UNIT_RESOLUTION_INVALID")
+        path = data[0]
+        suffix = path.removeprefix(_SYSTEMD_UNIT_PREFIX) if type(path) is str else ""
+        require(
+            bool(suffix)
+            and path.startswith(_SYSTEMD_UNIT_PREFIX)
+            and all(
+                character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" for character in suffix
+            ),
+            "SYSTEMD_UNIT_RESOLUTION_INVALID",
+        )
+        return path
+
+    def stable_unit_config(self, name):
+        object_path = self.unit_object(name)
+        if name.endswith(".service"):
+            interface, property_name, signature = _SYSTEMD + ".Service", "ExecStart", _EXEC_START_SIGNATURE
+        elif name.endswith(".timer"):
+            interface, property_name, signature = _SYSTEMD + ".Timer", "TimersCalendar", _TIMERS_CALENDAR_SIGNATURE
+        else:
+            raise Refusal("SYSTEMD_UNIT_KIND_INVALID")
+        value = self.typed_bus(
+            ["busctl", "--user", "--json=short", "get-property", _SYSTEMD, object_path, interface, property_name],
+            "SYSTEMD_TYPED_PROPERTY_INVALID",
+        )
+        rows = value["data"]
+        require(value["type"] == signature and type(rows) is list, "SYSTEMD_TYPED_PROPERTY_INVALID")
+        if property_name == "ExecStart":
+            require(bool(rows), "SYSTEMD_TYPED_PROPERTY_INVALID")
+            stable = []
+            for row in rows:
+                require(type(row) is list and len(row) == 10, "SYSTEMD_TYPED_PROPERTY_INVALID")
+                path, argv, ignore_errors, *metadata = row
+                require(
+                    type(path) is str
+                    and bool(path)
+                    and type(argv) is list
+                    and bool(argv)
+                    and all(type(argument) is str for argument in argv)
+                    and type(ignore_errors) is bool,
+                    "SYSTEMD_TYPED_PROPERTY_INVALID",
+                )
+                require(
+                    all(type(field) is int for field in metadata)
+                    and all(0 <= field <= 2**64 - 1 for field in metadata[:4])
+                    and 0 <= metadata[4] <= 2**32 - 1
+                    and all(-(2**31) <= field <= 2**31 - 1 for field in metadata[5:]),
+                    "SYSTEMD_TYPED_PROPERTY_INVALID",
+                )
+                stable.append([path, argv, ignore_errors])
+            return {"ExecStart": json.dumps(stable, separators=(",", ":"))}
+        stable = []
+        for row in rows:
+            require(type(row) is list and len(row) == 3, "SYSTEMD_TYPED_PROPERTY_INVALID")
+            base, expression, next_elapse = row
+            require(
+                type(base) is str
+                and type(expression) is str
+                and type(next_elapse) is int
+                and 0 <= next_elapse <= 2**64 - 1,
+                "SYSTEMD_TYPED_PROPERTY_INVALID",
+            )
+            stable.append([base, expression])
+        return {"TimersCalendar": json.dumps(stable, separators=(",", ":"))}
+
     def unit(self, name):
         raw = self.run(
             ["systemctl", "--user", "show", name, "--no-pager", *[f"--property={p}" for p in PROPS]], timeout=30
@@ -339,6 +441,7 @@ class Executor:
             require(digest(safe_path(path).read_bytes()) == record["sha256"], "UNIT_ENV_HOLD_OR_FOREIGN_FILE_CHANGED")
         for name, before in self.s["units"].items():
             current = self.unit(name)
+            current.update(self.stable_unit_config(name))
             require(all(current.get(k, "") == before.get(k, "") for k in CONFIG_PROPS), "UNIT_CONFIG_CHANGED")
 
     def public_probe(self, stopped=False):
@@ -742,6 +845,8 @@ class Executor:
                     ),
                     "FOREIGN_GOV_PIN_REFUSED",
                 )
+        for name, u in units.items():
+            u.update(self.stable_unit_config(name))
         require(units[DISPLAY]["ActiveState"] == "active", "DISPLAY_BASELINE_NOT_ACTIVE")
         require(
             units[GOV].get("Result") == "success" and units[GOV].get("ExecMainStatus") == "0", "GOV_REPAIR_REQUIRED"
@@ -802,6 +907,7 @@ class Executor:
             boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
             old_sha=OLD,
             new_sha=NEW,
+            unit_config_snapshot=UNIT_CONFIG_SNAPSHOT,
         )
         # pg_dump is schema-only; never dump role passwords or TB fact data.
         self.run(["docker", "exec", "nhms-db", "pg_dump", "-U", "nhms", "-d", "nhms", "--schema-only"], timeout=180)
@@ -1154,6 +1260,8 @@ class Executor:
             return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
         state = self.s
+        if state.get("unit_config_snapshot") != UNIT_CONFIG_SNAPSHOT:
+            return False
         units, files = state.get("units"), state.get("files")
         ledger, baseline, epochs = state.get("ledger_before"), state.get("legacy_read"), state.get("fence_epochs")
         if not (
