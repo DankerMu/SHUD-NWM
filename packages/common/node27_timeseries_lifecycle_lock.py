@@ -1,8 +1,8 @@
 """Process mutex for node-27 timeseries lifecycle mutation (#1893).
 
-One fixed flock serializes recurring compression, cold residency, retention,
-and manual decompression/replay. Autopipe stays outside this mutex: it cannot
-write an eligible compressed group and is fenced by transactional revalidation.
+One fixed flock serializes recurring compression, retention, and manual
+decompression/replay. Autopipe stays outside this mutex: it cannot write an
+eligible compressed group and is fenced by transactional revalidation.
 """
 
 from __future__ import annotations

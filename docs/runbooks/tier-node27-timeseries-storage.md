@@ -4841,35 +4841,25 @@ check cannot flake on autovacuum or parallel-worker noise.
 
 ### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
 
-**Retirement transition (R2, implementation pending):** normal compression and
-bounded catch-up survive, but the paired cold-env assembly described below is
-withdrawn as a deployment recipe. R2 must replace it with a compression-owned
-budget/launcher and update this procedure atomically, preserving safe parsing,
-timeouts, cleanup margin, secret safety and lifecycle locking. Do not provision
-cold env or run the cold leg to make compression work; do not remove an effective
-env dependency before the separately approved source/deployment handoff. Existing
-timeout/lock/refusal safety limits are not waived.
-
-Archive status:
-- status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R2)
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-13
-- archive_scope: section's paired cold-env budget and override commands only
-- retained_for: historical coupling and measured compression/catch-up safety evidence
+Normal compression and bounded catch-up use **one compression env** and a
+single compression launch leg. There is no cold env requirement, no
+`--cold-env` preflight, and no paired cold wrapper/service wall. Statement
+timeout plus 300 s cleanup must fit the wrapper; the wrapper plus the
+existing strict systemd margin (`> wrapper + 40 s`) must fit the service.
+Defaults are wrapper `3900` s and committed service `3941` s (`3900 + 40 +
+1`). Template `3941` is the repository unit declaration; it does not claim
+the currently observed live `TimeoutStartUSec` has changed. Retention stays
+scheduled at 06:36 UTC; this section does not retighten that cadence.
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
 automated lane, and because selection is oldest-first (`ORDER BY range_end
 ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. The two mode-0600
-lane env files are one sequential assembly input: the shared preflight reads
-both as inert data before compression or cold residency starts. A catch-up is a
-bounded two-file override window, not a manual `statement_timeout = 0` DDL.
+tick and burns the whole tick, blocking everything behind it. A catch-up is a
+bounded one-file override window, not a manual `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**
 `#1352` resized the compression statement/wrapper pair to `3600000` ms /
-`3900` s. The sequential compression-then-cold oneshot wall is `7842` s
-(`3900 + 3901 + 40 + 1`) against measured
+`3900` s. The compression-only oneshot wall is `3941` s against measured
 node-27 numbers: compressing `hydro.river_timeseries` chunk
 `_hyper_3_32_chunk` (268 GB) took 1607 s on 2026-08-10, i.e. **~6.0 s/GB**, and
 `chunk_compression_stats` puts steady-state weekly chunks of that hypertable at
@@ -4881,28 +4871,27 @@ chunk that measures beyond that envelope — first estimate it as
 
 **Runner wall ≠ supervisor wall.** This section tunes the *recurring runner*
 lane: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`, resolved by the
-shared preflight and passed to its pinned `/usr/bin/timeout` launch, plus
+compression preflight and passed to its pinned `/usr/bin/timeout` launch, plus
 `nhms-node27-timeseries-compression.service`'s `TimeoutStartSec`. The
 `--wall-seconds 900` on `nhms-node27-timeseries-compression-replay.service` and
 the supervisor's own hard wall (§4.0.1) are a *different* lane with a different
 knob; nothing here changes them, and they do not follow this env file.
 
-**The paired declarations** (both files mode 0600):
+**The compression-only declarations** (the env file mode 0600):
 
 |file and variable|catch-up value|rule|receipt echo (schema 2.1+)|
 |---|---|---|---|
 |compression env: `NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (for example `5400000`)|minimum 1000; above `3600000` requires bound `1`|`budget.compress_timeout_ms`|
 |compression env: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|at least `ceil(timeout_ms/1000)+300` (for example `5700`)|actual compression wrapper; defaults to `3900`|`budget.wrapper_wall_seconds`|
 |compression env: `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|mandatory when the compression timeout is raised|`per_tick_bound`|
-|both envs: their `...SYSTEMD_WALL_SECONDS` declarations|the same larger integer, strictly above compression wrapper + cold wrapper + `40` (for example `9642` for `5700 + 3901 + 40 + 1`)|must agree exactly and match the already-installed larger drop-in|`budget.systemd_wall_seconds`|
-|cold env: `NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS`|usually retain `3901`|at least `ceil(cold_timeout_ms/1000)+300`|cold receipt budget|
+|compression env: `NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|strictly above wrapper + `40` (for example `5741` for `5700 + 40 + 1`)|must match the already-installed larger drop-in|`budget.systemd_wall_seconds`|
 
-The shared preflight rejects a malformed, duplicate, unsafe, mismatched or
-insufficient pair before either DB runner launches. It reads both files once as
-inert descriptor-bound maps, builds the child environment from that exact read,
-and emits no secret values. Thin wrappers never source either lane env; Python
-runners cross-check the exported assembly values rather than guessing a sibling
-wall.
+The compression preflight rejects a malformed, duplicate, unsafe or
+insufficient env before the DB runner launches. It reads the one file as an
+inert descriptor-bound map, builds the child environment from that exact read,
+and emits no secret values. The thin wrapper never sources the env; the Python
+runner cross-checks the exported assembly values. Absent cold env and absent
+cold pair keys succeed. Removed `--cold-env` / `--launch cold` flags refuse.
 
 **Every tick's receipt records the configuration that tick resolved** (issue
 `#1351`, receipt `schema_version` `"2.1"`): the `budget` object plus
@@ -4915,7 +4904,7 @@ Read each field for what it is worth:
   tick — the timeout as the per-chunk `SET statement_timeout`, the bound as the
   selection cap.
 - `budget.wrapper_wall_seconds` is **parsed and invariant-checked** by the
-  Python runner and is also the exact value the shared preflight passes to its
+  Python runner and is also the exact value the preflight passes to its
   pinned `timeout` process from the same inert env-file read; the receipt shows
   what the runner received through that assembled child environment.
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
@@ -4923,6 +4912,8 @@ Read each field for what it is worth:
   the receipt only proves what the env file declared. Check 2 below
   (`systemctl --user show -p TimeoutStartUSec`) is the only step that queries
   the user unit manager for the installed wall (scope fixed per issue `#1387`).
+  That query is an operator check of the drop-in just installed; it is not a
+  claim that production's currently observed timeout has already moved.
 
 The only receipt without a `budget` block is the config tombstone
 (`outcome: "failed"`, `failure.stage: "config"`), written when the
@@ -4933,13 +4924,12 @@ display-watermark resolution, two 10-second `git` lineage probes, catalog
 enumeration, size measurements before and after compression, reconciliation,
 receipt publication and process cleanup. The non-compress budget can reach
 roughly 300 seconds under lock contention. Therefore the resolver requires
-`ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or more, and applies the same 300-second
-floor to cold residency. The shared service wall must then be strictly larger
-than both actual wrappers plus 40 seconds.
+`ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or more. The service wall must then be
+strictly larger than that wrapper plus 40 seconds.
 
 **Mandatory ordering.** The preflight validates declarations; it cannot inspect
 systemd's actual `TimeoutStartSec`. The steps therefore prevent a larger env
-pair from reaching a smaller real service wall.
+from reaching a smaller real service wall.
 
 1. **Stop and mask the timer first** for the full window, and keep replay or
    supervisor lanes out of it:
@@ -4950,10 +4940,9 @@ pair from reaching a smaller real service wall.
    systemctl --user stop nhms-node27-timeseries-compression.service
    ```
 
-2. **Install the matching larger systemd drop-in before changing either env.**
-   Choose a shared wall strictly greater than both wrappers plus 40; for a
-   `5400000` ms compression timeout, wrapper `5700`, unchanged cold wrapper
-   `3901`, use `9642` seconds.
+2. **Install the matching larger systemd drop-in before changing the env.**
+   Choose a service wall strictly greater than wrapper plus 40; for a
+   `5400000` ms compression timeout and wrapper `5700`, use `5741` seconds.
 
    ```bash
    DROPIN_DIR="$HOME/.config/systemd/user/nhms-node27-timeseries-compression.service.d"
@@ -4966,36 +4955,31 @@ pair from reaching a smaller real service wall.
    if test -e "$DROPIN_DIR/override.conf"; then
      cp -p "$DROPIN_DIR/override.conf" "$DROPIN_BACKUP"
    fi
-   printf '[Service]\nTimeoutStartSec=9642\n' > "$DROPIN_DIR/override.conf"
+   printf '[Service]\nTimeoutStartSec=5741\n' > "$DROPIN_DIR/override.conf"
    systemctl --user daemon-reload
    systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
    ```
 
    Verify the displayed wall before any env edit. The committed default is
-   `TimeoutStartSec=7842`; no process introspects this setting. This is a
+   `TimeoutStartSec=3941`; no process introspects this setting. This is a
    user-scope unit: do not use a system-scope drop-in or `systemctl` without
-   `--user`.
+   `--user`. Template `3941` is not proof that the live unit already matches.
 
-3. **Snapshot both env files, then edit them coherently.** Keep mode 0600 and
-   ownership, and never print either DSN.
+3. **Snapshot the compression env file, then edit it.** Keep mode 0600 and
+   ownership, and never print the DSN. Do not provision or require a cold env.
 
    ```bash
    cp -p /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
      ~/node27-compression-env.pre-catchup
-   cp -p /home/nwm/NWM/infra/env/node27-cold-residency.env \
-     ~/node27-cold-residency-env.pre-catchup
    ```
 
-   Set compression timeout `5400000`, compression wrapper `5700`, and
-   compression bound `1`; set `NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=9642`
-   in the compression env **and**
-   `NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=9642` in the cold env. Cold
-   wrapper may remain `3901`. Run the shared preflight before the dry run:
+   Set compression timeout `5400000`, compression wrapper `5700`, compression
+   bound `1`, and `NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=5741`.
+   Run the compression preflight before the dry run:
 
    ```bash
    /home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py \
-     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
-     --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check
+     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env --check
    ```
 
 4. **Dry-run, then enforce, then clean up — in that order.** Run 4a and 4b
@@ -5015,12 +4999,13 @@ pair from reaching a smaller real service wall.
      --receipt-path /home/nwm/node27-compression-catchup-enforce.json
    ```
 
-   Cleanup is fail-safe: stop the service if it remains active, restore **both**
-   env declarations coherently while it cannot run, run the shared preflight on
-   the restored pair, then remove or restore the drop-in and reload. Only after
-   `TimeoutStartUSec` verifies the default `7842`-second wall may the timer be
-   unmasked and started. There must be no interval in which the service can
-   launch with an env wrapper wall larger than the installed systemd wall.
+   Cleanup is fail-safe: stop the service if it remains active, restore the
+   compression env declaration while it cannot run, run the compression
+   preflight on the restored file, then remove or restore the drop-in and
+   reload. Only after `TimeoutStartUSec` verifies the default `3941`-second
+   wall may the timer be unmasked and started. There must be no interval in
+   which the service can launch with an env wrapper wall larger than the
+   installed systemd wall.
 
    ```bash
    DROPIN_DIR="$HOME/.config/systemd/user/nhms-node27-timeseries-compression.service.d"
@@ -5028,11 +5013,8 @@ pair from reaching a smaller real service wall.
    systemctl --user stop nhms-node27-timeseries-compression.service || true
    cp -p ~/node27-compression-env.pre-catchup \
      /home/nwm/NWM/infra/env/node27-timeseries-compression.env
-   cp -p ~/node27-cold-residency-env.pre-catchup \
-     /home/nwm/NWM/infra/env/node27-cold-residency.env
    /home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py \
-     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
-     --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check
+     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env --check
    if test -e "$DROPIN_BACKUP"; then
      cp -p "$DROPIN_BACKUP" "$DROPIN_DIR/override.conf"
    else
@@ -5045,7 +5027,7 @@ pair from reaching a smaller real service wall.
    CLEANUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ); printf '%s\n' "$CLEANUP_AT"
    ```
 
-   Do not remove the larger drop-in or unmask the timer while either larger env
+   Do not remove the larger drop-in or unmask the timer while the larger env
    declaration remains. The catch-up is unfinished while any override residue
    exists. A wall longer than the normal timer window must be run manually
    outside that window; retention remains scheduled at 06:36 UTC.
@@ -5133,7 +5115,7 @@ pair from reaching a smaller real service wall.
    assert budget == {
        "compress_timeout_ms": 3600000,
        "wrapper_wall_seconds": 3900,
-       "systemd_wall_seconds": 7842,
+       "systemd_wall_seconds": 3941,
    }, "catch-up budget still in force"
    assert receipt.get("per_tick_bound") == 4, "catch-up budget still in force"
    PY
@@ -5158,7 +5140,7 @@ provenance and no bounded lock, and it is what this section exists to avoid.
 
 **What a wall leaves behind, and how to clear it.** Whichever of the three
 walls trips — the `statement_timeout` on the DDL, the real systemd
-`TimeoutStartSec` taking `TERM` mid-DDL, or the shared preflight's pinned
+`TimeoutStartSec` taking `TERM` mid-DDL, or the preflight's pinned
 `/usr/bin/timeout` — the tick exits nonzero, and
 because `nhms-node27-timeseries-compression.service` is `Type=oneshot` with no
 `Restart=`, the unit is left `failed/failed` with `MainPID=0`. It stays that way

@@ -1,0 +1,44 @@
+{
+  "source_sha": "ac38be18e5fead70120256112f65447d58bfa7b4",
+  "mutants_killed": 6,
+  "source_restored": true,
+  "results": [
+    {
+      "case": "service-margin",
+      "test": "test_service_equality_at_wrapper_plus_margin_is_refused",
+      "exit_code": 1,
+      "output_tail": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_service_equality_at_wrapper_plus_margin_is_refused ____________\n\n    def test_service_equality_at_wrapper_plus_margin_is_refused() -> None:\n>       with pytest.raises(budget.CompressionBudgetError, match=\"exceed wrapper wall plus systemd margin\"):\nE       Failed: DID NOT RAISE <class 'packages.common.node27_timeseries_compression_budget.CompressionBudgetError'>\n\ntests/test_node27_timeseries_compression_budget.py:157: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_service_equality_at_wrapper_plus_margin_is_refused\n1 failed in 0.43s"
+    },
+    {
+      "case": "cleanup-bound",
+      "test": "test_resolver_refuses_invalid_compression_contract",
+      "exit_code": 1,
+      "output_tail": "            ),\n            _compression_env(\n                NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=\"5400000\",\n                NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=\"5700\",\n                NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=\"5741\",\n                NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=\"2\",\n            ),\n        ],\n    )\n    def test_resolver_refuses_invalid_compression_contract(values: dict[str, str]) -> None:\n>       with pytest.raises(budget.CompressionBudgetError):\nE       Failed: DID NOT RAISE <class 'packages.common.node27_timeseries_compression_budget.CompressionBudgetError'>\n\ntests/test_node27_timeseries_compression_budget.py:152: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_resolver_refuses_invalid_compression_contract[values1]\nFAILED tests/test_node27_timeseries_compression_budget.py::test_resolver_refuses_invalid_compression_contract[values2]\n2 failed, 2 passed in 0.43s"
+    },
+    {
+      "case": "private-mode",
+      "test": "test_preflight_refuses_unsafe_or_ambiguous_input_without_leaking_secrets[wrong-mode]",
+      "exit_code": 1,
+      "output_tail": "        else:\n            raise AssertionError(unsafe_kind)\n    \n        result = _preflight(\n            \"--compression-env\",\n            str(compression_env),\n            \"--lane\",\n            \"compression\",\n        )\n    \n>       assert result.returncode != 0\nE       AssertionError: assert 0 != 0\nE        +  where 0 = CompletedProcess(args=['/home/nwm/tmp/epic1891-retirement-20260914/checkout/.venv/bin/python', '/home/nwm/tmp/epic1891...e/test_preflight_refuses_unsafe_0/compression.env', '--lane', 'compression'], returncode=0, stdout='3900\\n', stderr='').returncode\n\ntests/test_node27_timeseries_compression_budget.py:317: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_preflight_refuses_unsafe_or_ambiguous_input_without_leaking_secrets[wrong-mode]\n1 failed in 0.73s"
+    },
+    {
+      "case": "declaration-forgery",
+      "test": "test_assembled_runner_values_allow_coherent_catch_up_and_refuse_declaration_mismatch",
+      "exit_code": 1,
+      "output_tail": "\n    def test_assembled_runner_values_allow_coherent_catch_up_and_refuse_declaration_mismatch() -> None:\n        resolved = budget.resolve_runner_budget(_assembled_env())\n        assert resolved.budget == budget.CompressionServiceBudget(5700, 5741, 40)\n        mismatched = {\n            **_assembled_env(),\n            \"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS\": \"3900\",\n            \"NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS\": \"5400000\",\n            \"NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND\": \"1\",\n            \"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS\": \"5741\",\n        }\n>       with pytest.raises(budget.CompressionBudgetError, match=\"runner declarations\"):\nE       Failed: DID NOT RAISE <class 'packages.common.node27_timeseries_compression_budget.CompressionBudgetError'>\n\ntests/test_node27_timeseries_compression_budget.py:402: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_assembled_runner_values_allow_coherent_catch_up_and_refuse_declaration_mismatch\n1 failed in 0.41s"
+    },
+    {
+      "case": "retired-pair",
+      "test": "test_resolver_refuses_retired_cold_or_sequential_pair_keys",
+      "exit_code": 1,
+      "output_tail": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_resolver_refuses_retired_cold_or_sequential_pair_keys __________\n\n    def test_resolver_refuses_retired_cold_or_sequential_pair_keys() -> None:\n>       with pytest.raises(budget.CompressionBudgetError, match=\"retired cold or sequential pair keys\"):\nE       Failed: DID NOT RAISE <class 'packages.common.node27_timeseries_compression_budget.CompressionBudgetError'>\n\ntests/test_node27_timeseries_compression_budget.py:192: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_resolver_refuses_retired_cold_or_sequential_pair_keys\n1 failed in 0.41s"
+    },
+    {
+      "case": "partial-assembly",
+      "test": "test_partial_assembly_fields_without_marker_are_refused",
+      "exit_code": 1,
+      "output_tail": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_partial_assembly_fields_without_marker_are_refused ____________\n\n    def test_partial_assembly_fields_without_marker_are_refused() -> None:\n>       with pytest.raises(budget.CompressionBudgetError, match=\"require the assembly marker\"):\nE       Failed: DID NOT RAISE <class 'packages.common.node27_timeseries_compression_budget.CompressionBudgetError'>\n\ntests/test_node27_timeseries_compression_budget.py:457: Failed\n=========================== short test summary info ============================\nFAILED tests/test_node27_timeseries_compression_budget.py::test_partial_assembly_fields_without_marker_are_refused\n1 failed in 0.41s"
+    }
+  ],
+  "evidence_root": "/home/nwm/tmp/epic1891-retirement-20260914/compression-red-_rynlxry"
+}

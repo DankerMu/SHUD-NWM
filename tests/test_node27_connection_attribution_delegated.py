@@ -27,7 +27,6 @@ import pytest
 import tests.test_node27_connection_attribution as attribution
 from packages.common import display_coverage, display_watermark
 from scripts import (
-    node27_cold_residency,
     node27_raw_retention,
     node27_refresh_coverage,
     node27_timeseries_compression,
@@ -204,12 +203,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         ATTRIBUTED,
         "fetch_display_watermark",
     ),
-    (
-        "scripts/node27_cold_residency.py",
-        "packages/common/display_watermark.py",
-        ATTRIBUTED,
-        "fetch_display_watermark",
-    ),
 )
 
 # The keyword every delegated helper exposes so a caller can inject its own
@@ -359,7 +352,6 @@ def test_attributed_connect_wrapper_stamps_the_component_identity(
         "scripts/node27_timeseries_retention.py": node27_timeseries_retention,
         "scripts/node27_timeseries_compression.py": node27_timeseries_compression,
         "scripts/node27_raw_retention.py": node27_raw_retention,
-        "scripts/node27_cold_residency.py": node27_cold_residency,
     }[component]
     probe = _probe_psycopg2_connect(monkeypatch)
 

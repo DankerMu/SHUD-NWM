@@ -1,4 +1,4 @@
-"""Public-contract tests for node-27's sequential compression/cold budget."""
+"""Public-contract tests for node-27's ordinary compression budget owner."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from packages.common import node27_timeseries_sequential_budget as budget
+from packages.common import node27_timeseries_compression_budget as budget
 from scripts import node27_timeseries_compression as compression
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -27,17 +27,7 @@ def _compression_env(**overrides: str) -> dict[str, str]:
         "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "3600000",
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "4",
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
-        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
-    }
-    values.update(overrides)
-    return values
-
-
-def _cold_env(**overrides: str) -> dict[str, str]:
-    values = {
-        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
-        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
-        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "3941",
     }
     values.update(overrides)
     return values
@@ -61,49 +51,46 @@ def _preflight(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_resolver_accepts_default_pair_and_coherent_enlarged_catch_up() -> None:
-    default = budget.resolve_lane_env_pair(_compression_env(), _cold_env())
-    assert default.budget == budget.SequentialServiceBudget(3900, 3901, 7842, 40)
+def test_resolver_accepts_default_env_and_coherent_enlarged_catch_up() -> None:
+    default = budget.resolve_compression_env(_compression_env())
+    assert default.budget == budget.CompressionServiceBudget(3900, 3941, 40)
     assert default.compression_statement_timeout_ms == 3_600_000
-    assert default.cold_statement_timeout_ms == 3_600_000
     assert default.compression_per_tick_bound == 4
-    assert default.budget.compression_wrapper_wall_seconds == 3_600 + budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
+    assert default.budget.wrapper_wall_seconds == 3_600 + budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
+    assert default.budget.service_wall_seconds == 3_900 + 40 + 1
 
-    catch_up = budget.resolve_lane_env_pair(
+    catch_up = budget.resolve_compression_env(
         _compression_env(
             NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
             NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="1",
             NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5700",
-            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="9642",
-        ),
-        _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="9642"),
+            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="5741",
+        )
     )
-    assert catch_up.budget == budget.SequentialServiceBudget(5700, 3901, 9642, 40)
+    assert catch_up.budget == budget.CompressionServiceBudget(5700, 5741, 40)
     assert catch_up.compression_statement_timeout_ms == 5_400_000
     assert catch_up.compression_per_tick_bound == 1
 
 
-def test_canonical_compression_receipt_example_matches_the_cold_default_pair() -> None:
+def test_canonical_compression_receipt_example_matches_the_default_budget() -> None:
     example = json.loads(_COMPRESSION_RECEIPT_EXAMPLE.read_text(encoding="utf-8"))
     schema = json.loads(_COMPRESSION_RECEIPT_SCHEMA.read_text(encoding="utf-8"))
 
     jsonschema.validate(example, schema)
-    resolved = budget.resolve_lane_env_pair(
+    resolved = budget.resolve_compression_env(
         _compression_env(
             NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=str(example["budget"]["compress_timeout_ms"]),
             NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=str(example["per_tick_bound"]),
             NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=str(example["budget"]["wrapper_wall_seconds"]),
             NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=str(example["budget"]["systemd_wall_seconds"]),
-        ),
-        _cold_env(
-            NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=str(example["budget"]["systemd_wall_seconds"])
-        ),
+        )
     )
 
+    assert example["schema_version"] == "2.1"
     assert example["budget"]["cleanup_margin_seconds"] == budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
-    assert resolved.budget == budget.SequentialServiceBudget(3900, 3901, 7842, 40)
+    assert example["budget"]["systemd_wall_seconds"] == 3941
+    assert resolved.budget == budget.CompressionServiceBudget(3900, 3941, 40)
     assert resolved.compression_statement_timeout_ms == 3_600_000
-    assert resolved.cold_statement_timeout_ms == 3_600_000
     assert resolved.compression_per_tick_bound == 1
 
 
@@ -139,48 +126,50 @@ def test_compression_receipt_records_the_shared_cleanup_margin(tmp_path: Path) -
     assert budget.COMPRESSION_CLEANUP_MARGIN_SECONDS == 300
     assert receipt["budget"]["cleanup_margin_seconds"] == budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
     assert compression._CLEANUP_MARGIN_SECONDS is budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
+    assert config.systemd_wall_seconds == 3941
 
 
 @pytest.mark.parametrize(
-    ("compression", "cold"),
+    "values",
     [
-        (
-            _compression_env(NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="7841"),
-            _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="7841"),
+        _compression_env(NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="3940"),
+        _compression_env(NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="3899"),
+        _compression_env(
+            NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
+            NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5699",
+            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="5741",
+            NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="1",
         ),
-        (
-            _compression_env(),
-            _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="7843"),
-        ),
-        (
-            _compression_env(NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="3899"),
-            _cold_env(),
-        ),
-        (
-            _compression_env(
-                NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
-                NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5699",
-                NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="9642",
-                NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="1",
-            ),
-            _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="9642"),
-        ),
-        (
-            _compression_env(
-                NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
-                NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5700",
-                NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="9642",
-                NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="2",
-            ),
-            _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="9642"),
+        _compression_env(
+            NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
+            NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5700",
+            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="5741",
+            NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="2",
         ),
     ],
 )
-def test_resolver_refuses_invalid_sequential_contract(
-    compression: dict[str, str], cold: dict[str, str]
-) -> None:
-    with pytest.raises(budget.SequentialBudgetError):
-        budget.resolve_lane_env_pair(compression, cold)
+def test_resolver_refuses_invalid_compression_contract(values: dict[str, str]) -> None:
+    with pytest.raises(budget.CompressionBudgetError):
+        budget.resolve_compression_env(values)
+
+
+def test_service_equality_at_wrapper_plus_margin_is_refused() -> None:
+    with pytest.raises(budget.CompressionBudgetError, match="exceed wrapper wall plus systemd margin"):
+        budget.validate_actual_compression_walls(
+            wrapper_wall_seconds=3900,
+            service_wall_seconds=3940,
+            statement_seconds=3600,
+        )
+
+
+def test_wrapper_minimum_equality_is_accepted() -> None:
+    resolved = budget.validate_actual_compression_walls(
+        wrapper_wall_seconds=3900,
+        service_wall_seconds=3941,
+        statement_seconds=3600,
+    )
+    assert resolved.wrapper_wall_seconds == 3900
+    assert resolved.service_wall_seconds == 3941
 
 
 @pytest.mark.parametrize(
@@ -195,26 +184,28 @@ def test_resolver_refuses_invalid_sequential_contract(
     ],
 )
 def test_resolver_refuses_ambiguous_budget_integer_forms(name: str, raw: str) -> None:
-    compression = _compression_env(**{name: raw})
-    with pytest.raises(budget.SequentialBudgetError):
-        budget.resolve_lane_env_pair(compression, _cold_env())
+    with pytest.raises(budget.CompressionBudgetError):
+        budget.resolve_compression_env(_compression_env(**{name: raw}))
 
 
-def test_resolver_refuses_mirrored_compression_wall_disagreement() -> None:
-    cold = _cold_env(NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="3901")
-    with pytest.raises(budget.SequentialBudgetError):
-        budget.resolve_lane_env_pair(_compression_env(), cold)
+def test_resolver_refuses_retired_cold_or_sequential_pair_keys() -> None:
+    with pytest.raises(budget.CompressionBudgetError, match="retired cold or sequential pair keys"):
+        budget.resolve_compression_env(
+            _compression_env(NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS="3901")
+        )
+    with pytest.raises(budget.CompressionBudgetError, match="retired cold or sequential pair keys"):
+        budget.resolve_runner_budget({"NODE27_TIMESERIES_SEQUENTIAL_BUDGET_ASSEMBLED": "1"})
 
 
-def test_preflight_reads_mode_0600_pair_and_emits_only_canonical_lane_wall(tmp_path: Path) -> None:
-    compression = _write_env(tmp_path / "compression.env", _compression_env())
-    cold = _write_env(tmp_path / "cold.env", _cold_env())
+def test_preflight_reads_mode_0600_env_without_a_cold_file_and_emits_only_wrapper_wall(
+    tmp_path: Path,
+) -> None:
+    compression_env = _write_env(tmp_path / "compression.env", _compression_env())
+    assert not (tmp_path / "cold.env").exists()
 
     result = _preflight(
         "--compression-env",
-        str(compression),
-        "--cold-env",
-        str(cold),
+        str(compression_env),
         "--lane",
         "compression",
     )
@@ -224,9 +215,7 @@ def test_preflight_reads_mode_0600_pair_and_emits_only_canonical_lane_wall(tmp_p
     assert result.stderr == ""
     checked = _preflight(
         "--compression-env",
-        str(compression),
-        "--cold-env",
-        str(cold),
+        str(compression_env),
         "--check",
     )
     assert checked.returncode == 0, checked.stderr
@@ -234,78 +223,93 @@ def test_preflight_reads_mode_0600_pair_and_emits_only_canonical_lane_wall(tmp_p
     assert checked.stderr == ""
 
 
-@pytest.mark.parametrize("lane", ["compression", "cold"])
-def test_preflight_assembly_output_is_bounded_canonical_nonsecret_integers(tmp_path: Path, lane: str) -> None:
-    compression = _write_env(
+def test_preflight_assembly_output_is_bounded_canonical_nonsecret_integers(tmp_path: Path) -> None:
+    compression_env = _write_env(
         tmp_path / "compression.env",
         _compression_env(
             NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS="5400000",
             NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="1",
             NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS="5700",
-            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="9642",
+            NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS="5741",
         ),
-    )
-    cold = _write_env(
-        tmp_path / "cold.env",
-        _cold_env(NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS="9642"),
     )
 
     result = _preflight(
         "--compression-env",
-        str(compression),
-        "--cold-env",
-        str(cold),
+        str(compression_env),
         "--lane",
-        lane,
+        "compression",
         "--format",
         "assembly",
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "5700,3901,9642,5400000,3600000,1\n"
+    assert result.stdout == "5700,5741,5400000,1\n"
     assert result.stderr == ""
+    assert _SECRET_DSN not in result.stdout
+    assert "super-secret-password" not in result.stdout
+
+
+def test_preflight_refuses_removed_cold_flags(tmp_path: Path) -> None:
+    compression_env = _write_env(tmp_path / "compression.env", _compression_env())
+    result = _preflight(
+        "--compression-env",
+        str(compression_env),
+        "--cold-env",
+        str(tmp_path / "missing-cold.env"),
+        "--check",
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "invalid arguments" in result.stderr
+    launched = _preflight(
+        "--compression-env",
+        str(compression_env),
+        "--launch",
+        "cold",
+    )
+    assert launched.returncode == 2
+    assert launched.stdout == ""
+    assert "invalid arguments" in launched.stderr
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "wrong-mode", "directory", "oversized", "command", "duplicate"])
 def test_preflight_refuses_unsafe_or_ambiguous_input_without_leaking_secrets(
     tmp_path: Path, unsafe_kind: str
 ) -> None:
-    compression = _write_env(tmp_path / "compression.env", _compression_env())
-    cold = _write_env(tmp_path / "cold.env", _cold_env())
+    compression_env = _write_env(tmp_path / "compression.env", _compression_env())
     if unsafe_kind == "symlink":
         target = tmp_path / "compression-target.env"
-        compression.rename(target)
-        compression.symlink_to(target)
+        compression_env.rename(target)
+        compression_env.symlink_to(target)
     elif unsafe_kind == "wrong-mode":
-        compression.chmod(0o640)
+        compression_env.chmod(0o640)
     elif unsafe_kind == "directory":
-        compression.unlink()
-        compression.mkdir()
+        compression_env.unlink()
+        compression_env.mkdir()
     elif unsafe_kind == "oversized":
-        compression.write_bytes(b"A" * (128 * 1024))
-        compression.chmod(0o600)
+        compression_env.write_bytes(b"A" * (128 * 1024))
+        compression_env.chmod(0o600)
     elif unsafe_kind == "command":
-        compression.write_text(
+        compression_env.write_text(
             f"DATABASE_URL='{_SECRET_DSN}'\n"
             "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=$(id)\n",
             encoding="utf-8",
         )
-        compression.chmod(0o600)
+        compression_env.chmod(0o600)
     elif unsafe_kind == "duplicate":
-        compression.write_text(
-            compression.read_text(encoding="utf-8")
+        compression_env.write_text(
+            compression_env.read_text(encoding="utf-8")
             + "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900\n",
             encoding="utf-8",
         )
-        compression.chmod(0o600)
+        compression_env.chmod(0o600)
     else:
         raise AssertionError(unsafe_kind)
 
     result = _preflight(
         "--compression-env",
-        str(compression),
-        "--cold-env",
-        str(cold),
+        str(compression_env),
         "--lane",
         "compression",
     )
@@ -318,20 +322,17 @@ def test_preflight_refuses_unsafe_or_ambiguous_input_without_leaking_secrets(
 
 
 def test_preflight_rejects_relevant_whitespace_and_missing_compression_bound(tmp_path: Path) -> None:
-    compression = _write_env(
+    compression_env = _write_env(
         tmp_path / "compression.env",
         _compression_env(
             NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="",
             NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=" 3900",
         ),
     )
-    cold = _write_env(tmp_path / "cold.env", _cold_env())
 
     result = _preflight(
         "--compression-env",
-        str(compression),
-        "--cold-env",
-        str(cold),
+        str(compression_env),
         "--lane",
         "compression",
     )
@@ -342,15 +343,12 @@ def test_preflight_rejects_relevant_whitespace_and_missing_compression_bound(tmp
 
 
 def test_preflight_requires_absolute_lane_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    compression = _write_env(tmp_path / "compression.env", _compression_env())
-    cold = _write_env(tmp_path / "cold.env", _cold_env())
+    compression_env = _write_env(tmp_path / "compression.env", _compression_env())
     monkeypatch.chdir(tmp_path)
 
     result = _preflight(
         "--compression-env",
-        compression.name,
-        "--cold-env",
-        str(cold),
+        compression_env.name,
         "--check",
     )
 
@@ -360,14 +358,11 @@ def test_preflight_requires_absolute_lane_paths(tmp_path: Path, monkeypatch: pyt
 
 
 def test_preflight_hides_secret_like_absolute_path_on_read_refusal(tmp_path: Path) -> None:
-    cold = _write_env(tmp_path / "cold.env", _cold_env())
     secret_path = f"/missing/{_SECRET_DSN}"
 
     result = _preflight(
         "--compression-env",
         secret_path,
-        "--cold-env",
-        str(cold),
         "--check",
     )
 
@@ -381,102 +376,55 @@ def test_preflight_hides_secret_like_absolute_path_on_read_refusal(tmp_path: Pat
 def _assembled_env(
     *,
     compression_wall: str = "5700",
-    cold_wall: str = "3901",
-    service_wall: str = "9642",
+    service_wall: str = "5741",
     compression_timeout: str = "5400000",
-    cold_timeout: str = "3600000",
     bound: str = "1",
 ) -> dict[str, str]:
     return {
-        "NODE27_TIMESERIES_SEQUENTIAL_BUDGET_ASSEMBLED": "1",
-        "NODE27_TIMESERIES_SEQUENTIAL_COMPRESSION_WRAPPER_WALL_SECONDS": compression_wall,
-        "NODE27_TIMESERIES_SEQUENTIAL_COLD_WRAPPER_WALL_SECONDS": cold_wall,
-        "NODE27_TIMESERIES_SEQUENTIAL_SERVICE_WALL_SECONDS": service_wall,
-        "NODE27_TIMESERIES_SEQUENTIAL_COMPRESSION_STATEMENT_TIMEOUT_MS": compression_timeout,
-        "NODE27_TIMESERIES_SEQUENTIAL_COLD_STATEMENT_TIMEOUT_MS": cold_timeout,
-        "NODE27_TIMESERIES_SEQUENTIAL_COMPRESSION_PER_TICK_BOUND": bound,
+        "NODE27_TIMESERIES_COMPRESSION_BUDGET_ASSEMBLED": "1",
+        "NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_WRAPPER_WALL_SECONDS": compression_wall,
+        "NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_SERVICE_WALL_SECONDS": service_wall,
+        "NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_STATEMENT_TIMEOUT_MS": compression_timeout,
+        "NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_PER_TICK_BOUND": bound,
     }
 
 
 def test_assembled_runner_values_allow_coherent_catch_up_and_refuse_declaration_mismatch() -> None:
-    resolved = budget.resolve_runner_budget(_assembled_env(), lane="compression")
-    assert resolved.budget == budget.SequentialServiceBudget(5700, 3901, 9642, 40)
+    resolved = budget.resolve_runner_budget(_assembled_env())
+    assert resolved.budget == budget.CompressionServiceBudget(5700, 5741, 40)
     mismatched = {
         **_assembled_env(),
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
         "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "5400000",
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "1",
-        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "9642",
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "5741",
     }
-    with pytest.raises(budget.SequentialBudgetError, match="runner declarations"):
-        budget.resolve_runner_budget(mismatched, lane="compression")
+    with pytest.raises(budget.CompressionBudgetError, match="runner declarations"):
+        budget.resolve_runner_budget(mismatched)
 
 
-def test_partial_assembly_and_direct_nondefault_sibling_declaration_fail_closed() -> None:
-    with pytest.raises(budget.SequentialBudgetError, match="incomplete"):
-        budget.resolve_runner_budget(
-            {"NODE27_TIMESERIES_SEQUENTIAL_BUDGET_ASSEMBLED": "1"}, lane="cold"
-        )
-    with pytest.raises(budget.SequentialBudgetError, match="full pair"):
-        budget.resolve_runner_budget(
-            {"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "5700"}, lane="cold"
-        )
+def test_partial_assembly_and_direct_partial_declaration_fail_closed() -> None:
+    with pytest.raises(budget.CompressionBudgetError, match="incomplete"):
+        budget.resolve_runner_budget({"NODE27_TIMESERIES_COMPRESSION_BUDGET_ASSEMBLED": "1"})
+    with pytest.raises(budget.CompressionBudgetError, match="full set"):
+        budget.resolve_runner_budget({"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "5700"})
 
 
-@pytest.mark.parametrize(
-    ("changed_path", "required_suites"),
-    [
-        (
-            "infra/env/node27-timeseries-compression.example",
-            {
-                "tests/test_node27_timeseries_compression.py",
-                "tests/test_node27_timeseries_sequential_budget.py",
-                "tests/test_node27_timeseries_sequential_runner_config.py",
-                "tests/test_node27_timeseries_sequential_wrappers.py",
-                "tests/test_node27_lifecycle_contract.py",
-            },
-        ),
-        (
-            "infra/env/node27-cold-residency.example",
-            {
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_timeseries_sequential_budget.py",
-                "tests/test_node27_timeseries_sequential_runner_config.py",
-                "tests/test_node27_timeseries_sequential_wrappers.py",
-            },
-        ),
-        (
-            "docs/runbooks/tier-node27-timeseries-storage.md",
-            {
-                "tests/test_node27_timeseries_compression.py",
-                "tests/test_node27_cold_residency.py",
-                "tests/test_node27_timeseries_sequential_budget.py",
-                "tests/test_node27_timeseries_sequential_runner_config.py",
-                "tests/test_node27_timeseries_sequential_wrappers.py",
-                "tests/test_node27_lifecycle_contract.py",
-            },
-        ),
-        (
-            "schemas/examples/timeseries_compression_receipt.example.json",
-            {
-                "tests/test_node27_timeseries_compression.py",
-                "tests/test_node27_timeseries_sequential_budget.py",
-            },
-        ),
-    ],
-)
-def test_pair_owned_paths_select_contract_suites(
-    changed_path: str, required_suites: set[str]
-) -> None:
-    from scripts.select_ci_tests import select_tests
-
-    selected = select_tests([changed_path], repo_root=_ROOT)
-
-    assert selected
-    assert required_suites <= set(selected)
+def test_quoted_inert_values_remain_data_and_cannot_execute(tmp_path: Path) -> None:
+    marker = tmp_path / "must-not-run"
+    compression_env = _write_env(
+        tmp_path / "compression.env",
+        {
+            **_compression_env(),
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": f"'$(touch {marker})'",
+        },
+    )
+    parsed = budget.read_compression_env_data(compression_env)
+    assert parsed.compression_env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"] == f"$(touch {marker})"
+    assert not marker.exists()
 
 
-def test_systemd_preflight_precedes_both_sequential_execstarts_and_matches_default() -> None:
+def test_systemd_preflight_precedes_the_single_compression_execstart_and_matches_default() -> None:
     service = (_ROOT / "infra/systemd/nhms-node27-timeseries-compression.service").read_text(encoding="utf-8")
     lines = service.splitlines()
     preflight_index = next(
@@ -485,10 +433,45 @@ def test_systemd_preflight_precedes_both_sequential_execstarts_and_matches_defau
         if line.startswith("ExecStartPre=") and "node27_timeseries_budget_preflight.py" in line
     )
     starts = [index for index, line in enumerate(lines) if line.startswith("ExecStart=")]
-    assert len(starts) == 2
-    assert preflight_index < starts[0] < starts[1]
+    assert len(starts) == 1
+    assert preflight_index < starts[0]
     assert "--compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env" in service
-    assert "--cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check" in service
+    assert "--cold-env" not in service
+    assert "node27_cold_residency_once.sh" not in service
     configured_wall = int(next(line for line in lines if line.startswith("TimeoutStartSec=")).split("=", 1)[1])
-    assert configured_wall == 7842
-    assert budget.resolve_lane_env_pair(_compression_env(), _cold_env()).budget.service_wall_seconds == configured_wall
+    assert configured_wall == 3941
+    assert budget.resolve_compression_env(_compression_env()).budget.service_wall_seconds == configured_wall
+    assert budget.SERVICE_WALL_SECONDS == 3941
+
+
+def test_forged_assembly_marker_without_matching_walls_is_refused() -> None:
+    forged = {
+        **_assembled_env(),
+        "NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_SERVICE_WALL_SECONDS": "3940",
+    }
+    with pytest.raises(budget.CompressionBudgetError, match="service wall"):
+        budget.resolve_runner_budget(forged)
+
+
+def test_partial_assembly_fields_without_marker_are_refused() -> None:
+    with pytest.raises(budget.CompressionBudgetError, match="require the assembly marker"):
+        budget.resolve_runner_budget(
+            {"NODE27_TIMESERIES_COMPRESSION_ASSEMBLED_WRAPPER_WALL_SECONDS": "5700"}
+        )
+
+
+def test_absent_cold_keys_succeed_for_single_compression_env() -> None:
+    env = _compression_env()
+    assert all(not name.startswith("NODE27_COLD_") for name in env)
+    resolved = budget.resolve_compression_env(env)
+    assert resolved.budget.service_wall_seconds == 3941
+    assert resolved.budget.wrapper_wall_seconds == 3900
+
+
+def test_unsafe_noncanonical_path_is_refused_before_parse(tmp_path: Path) -> None:
+    relative = Path("compression.env")
+    with pytest.raises(budget.CompressionBudgetError, match="absolute"):
+        budget.read_compression_env_data(relative)
+    with pytest.raises(budget.CompressionBudgetError, match="unavailable or unsafe"):
+        budget.read_compression_env_data(tmp_path / "missing.env")
+

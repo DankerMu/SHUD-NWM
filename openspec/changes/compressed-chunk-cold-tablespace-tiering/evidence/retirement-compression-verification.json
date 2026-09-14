@@ -1,0 +1,117 @@
+{
+  "scope": "R2 single compression plus dependent R3 cold runner/env rewrite deletion; not full epic or deployment",
+  "runtime_source_sha": "954a21ba930839d15545f8f5efc638162d2f196a",
+  "targeted": {
+    "source_sha": "ac38be18e5fead70120256112f65447d58bfa7b4",
+    "passed": 2190,
+    "skipped": 3,
+    "duration_seconds": 356.56
+  },
+  "env_closure_targeted": {
+    "source_sha": "954a21ba930839d15545f8f5efc638162d2f196a",
+    "passed": 1008,
+    "duration_seconds": 228.32
+  },
+  "guard_mutants": {
+    "source_sha": "ac38be18e5fead70120256112f65447d58bfa7b4",
+    "killed": 6,
+    "source_restored": true,
+    "receipt": "retirement-compression-budget-mutants.json"
+  },
+  "native_wrapper": {
+    "actual": {
+      "case": "actual-enforce",
+      "cleanup": "owned cluster and work root removed before case return",
+      "container": "nhms-1895-comp-72992be200f8",
+      "head_sha": "954a21ba930839d15545f8f5efc638162d2f196a",
+      "producer_receipt": {
+        "budget": {
+          "cleanup_margin_seconds": 300,
+          "compress_timeout_ms": 3600000,
+          "systemd_wall_seconds": 3941,
+          "wrapper_wall_seconds": 3900
+        },
+        "deferred": [],
+        "generated_at": "2026-09-14T18:07:39.425176Z",
+        "head_sha": "954a21ba930839d15545f8f5efc638162d2f196a",
+        "lag_seconds": 86400,
+        "mode": "enforce",
+        "now_utc": "2026-07-11T12:00:00Z",
+        "outcome": "clean",
+        "per_table_totals": {
+          "hydro.river_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          },
+          "met.forcing_station_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          }
+        },
+        "per_tick_bound": 4,
+        "schema_version": "2.1",
+        "selected": [
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_1_1_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "river_timeseries",
+            "hypertable_schema": "hydro",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          },
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_2_2_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "forcing_station_timeseries",
+            "hypertable_schema": "met",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          }
+        ],
+        "skipped": []
+      },
+      "receipt": "/home/nwm/tmp/nhms-1895-comp-72992be200f8-9wd_wjfv/private/node27_timeseries_compression.json",
+      "returncode": 0
+    },
+    "refused": {
+      "case": "unsafe-env-refusal",
+      "returncode": 1,
+      "stderr": "{\"status\":\"failed\",\"reason\":\"compression budget preflight failed\"}"
+    },
+    "status": "ok"
+  },
+  "namespace": "unshare user+mount namespace, private /tmp bind, unchanged fixed mutex path; disposable DB tmpfs, no production namespace/lock/DB operations",
+  "full": {
+    "status": "PASS",
+    "source_sha": "954a21ba930839d15545f8f5efc638162d2f196a",
+    "passed": 19967,
+    "skipped": 338,
+    "warnings": 1,
+    "duration_seconds": 3571.34,
+    "command": "uv run --all-extras pytest -q",
+    "boundary": "Skipped opt-in/unsupported lanes not claimed PASS; ecCodes library warning."
+  },
+  "deviations": [
+    "Fresh fixture role census and cold env rewrite consumer closure amendments independently reviewed and strict-validated.",
+    "Deleted invalid source/prose pins rather than repinning; preserved target identity acceptance/refusal and lag validator negative assertions.",
+    "Canonical delta-only heading removed from main spec; requirement/scenario text unchanged.",
+    "Prepared smoke driver initially used nonexistent per-chunk outcome field and host bind PGDATA; Main corrected to schema mutation_state=committed and disposable tmpfs. Owned failed residue removed.",
+    "Two workers ran unrequested local collect/compile checks; not counted as required backend oracle."
+  ],
+  "limits": [
+    "No effective production unit/env/pin/privilege/deployment changes.",
+    "Remaining cold-family/G0-G8 source deletion and R4/R5 still pending.",
+    "Runtime receipt schema2.1, compression lag policy, bound4 and retention cadence unchanged."
+  ],
+  "actual_timeout_cleanup_proof": "retirement-compression-timeout-proof.json",
+  "observed_namespace_proof": "retirement-compression-namespace-proof.json",
+  "canonical_scope": "R2 applies only matching compression/runner selector changes. Still-live cold-governance suite remains in canonical; proposed change delta is future R3 remainder target until actual suite deletion."
+}

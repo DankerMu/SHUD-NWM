@@ -1,0 +1,23 @@
+{
+  "head": "34678cbcbac2cb4624c6cfa921d5bea59792d8ca",
+  "fixture": "openspec/changes/compressed-chunk-cold-tablespace-tiering/fixtures/retirement-compression-cutover.md",
+  "prior_approval_head": "015423c7143d4f4e3841a9911d7a416458bcbda5",
+  "required_additions": [],
+  "residual_risks": [
+    "Baseline CI (run 34866062681) has not reached terminal status; fixture qualification is static and independent of it, but integration must not claim baseline green until the watch reports terminal success.",
+    "The prepared patch is based at the old base 015423c; its rebase onto 34678cbcb must absorb the merged pgdata-workload selector rules/expected-map additions and the test_node27_timeseries_compression_live_evidence.py distinct-inode correction without dropping them.",
+    "Template TimeoutStartSec=3941 asserts nothing about the live installed unit (observed 3940 in the 2026-09-13 unpin receipt); effective unit/dropin/env disposition stays gated under R5.2.",
+    "Watermark constants COMPRESSION_WRAPPER/TIMER_FRAGMENT/SERVICE_FRAGMENT go dead when assert_systemd_invocation_facts retires; covered by the fixture's 'used only by retired systemd facts' deletion logic and clean-cutover norms, not a finding."
+  ],
+  "round": "revise1 amendment verification",
+  "summary": "The revise1 amendment adds the missing write_roles census requirement as a fifth bullet in the 'Mixed-import closure in this merge' section (fixture lines 50-56). It matches the required correction exactly: the deleted scripts/node27_cold_residency.py entry is removed from _RECURRING_ENTRYPOINTS and therefore the derived _CONVERTED_LANE_SOURCES in this merge; the remaining cold-package/grant/SET TABLESPACE rows are explicitly preserved for the remaining-deletion fixture (matching fixtures/retirement-cold-family-deletion.md:41 ownership); and the proof requirement is the existing role suite plus active-reference audit with no new incidental source-text absence test. Placement inside the explicit mixed-consumer census is consistent with the fixture's enumeration convention (same reference class as the connection_attribution registry edge). No contradictions with the rest of the fixture; no new gaps introduced. The full fresh-base qualification from the prior round stands unchanged — all other axes (atomic paired-API census, budget equations 3900/3941, descriptor/origin/child-cleanup/lifecycle, schema/selector/manual closure, survivor boundaries and isolated wrapper proof, workload-rule preservation) were verified pass.",
+  "verdict": "pass",
+  "verification_gaps": "Read-only amendment re-review: no tests, selector runs, OpenSpec validation, lint or builds executed; verified the amended text against the revise1 required addition and its consistency with the deletion fixture's write_roles partition.",
+  "verified_pass": [
+    "Amendment fidelity: fixture bullet requires removing the scripts/node27_cold_residency.py entry from _RECURRING_ENTRYPOINTS and derived _CONVERTED_LANE_SOURCES in this merge — exactly the required addition; covers tests/test_node27_write_roles.py:398 and its :1947/:2305 consumers.",
+    "Boundary partition correct: amendment preserves the cold-package _CONVERTED_LANE_SOURCES entries, nhms_cold grant positive test and SET TABLESPACE source-scan for the remaining-deletion merge, matching fixtures/retirement-cold-family-deletion.md:41 scope; no ownership overlap or gap between the two fixtures.",
+    "Proof bar correct: existing role suite execution plus active-reference audit, explicitly forbidding a new incidental source-text absence pin — consistent with the fixture's 'remove obsolete pins, never repin/add wording pins' doctrine.",
+    "No regression: amendment introduces no changes to other fixture sections; the prior round's verified_pass axes (atomic census, 3900/3941 equations, descriptor/origin/timeout/lifecycle, schema 2.1/selector/manual closure, survivor boundaries, workload-rule preservation) are unaffected and stand.",
+    "masterCI observation refreshed: independent run 34866062681 for merge 34678cbcb remains in_progress ('Unit Tests (full)' still running); no baseline green assumed or required for this static qualification."
+  ]
+}

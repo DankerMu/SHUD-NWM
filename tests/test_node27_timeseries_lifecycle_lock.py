@@ -129,7 +129,6 @@ def test_path_fd_identity_is_rechecked_after_open(tmp_path: Path) -> None:
 
 
 def test_env_override_cannot_split_lifecycle_lanes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts import node27_cold_residency as cold
     from scripts import node27_timeseries_compression as compression
     from scripts import node27_timeseries_decompression_replay as replay
     from scripts import node27_timeseries_retention as retention
@@ -145,18 +144,6 @@ def test_env_override_cannot_split_lifecycle_lanes(tmp_path: Path, monkeypatch: 
     ]
     for value in foreign:
         monkeypatch.setenv("NODE27_TIMESERIES_LIFECYCLE_LOCK_PATH", value)
-        with pytest.raises(cold.ColdResidencyConfigError, match="cannot override"):
-            cold.config_from_args(
-                _args(enforce=False),
-                {
-                    "DATABASE_URL": "postgresql://user:secretpw@127.0.0.1:55432/nhms",
-                    "NODE27_COLD_RESIDENCY_RECEIPT_PATH": str(tmp_path / "receipt.json"),
-                    "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
-                    "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
-                    "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
-                    "NODE27_TIMESERIES_LIFECYCLE_LOCK_PATH": value,
-                },
-            )
         with pytest.raises(compression.CompressionConfigError, match="cannot override"):
             compression.config_from_args(
                 _args(enforce=False, receipt_path=None, lock_path=None),

@@ -395,7 +395,6 @@ _RECURRING_ENTRYPOINTS = (
     "scripts/node27_download_cycles.py",
     "scripts/node27_timeseries_compression.py",
     "scripts/node27_timeseries_retention.py",
-    "scripts/node27_cold_residency.py",
 )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and safely launch node-27's sequential timeseries lane runners."""
+"""Validate and safely launch node-27's ordinary timeseries compression runner."""
 
 from __future__ import annotations
 
@@ -19,17 +19,15 @@ _CHECKOUT_ROOT = Path(__file__).parent.parent
 sys.path[:] = [entry for entry in sys.path if entry != str(_CHECKOUT_ROOT)]
 sys.path.insert(0, str(_CHECKOUT_ROOT))
 
-from packages.common.node27_timeseries_sequential_budget import (  # noqa: E402
-    ASSEMBLY_COLD_STATEMENT_KEY,
-    ASSEMBLY_COLD_WRAPPER_KEY,
+from packages.common.node27_timeseries_compression_budget import (  # noqa: E402
     ASSEMBLY_COMPRESSION_BOUND_KEY,
     ASSEMBLY_COMPRESSION_STATEMENT_KEY,
     ASSEMBLY_COMPRESSION_WRAPPER_KEY,
     ASSEMBLY_MARKER_KEY,
     ASSEMBLY_SERVICE_WALL_KEY,
-    ParsedLaneEnvPair,
-    SequentialBudgetError,
-    read_lane_env_pair_data,
+    CompressionBudgetError,
+    ParsedCompressionEnv,
+    read_compression_env_data,
 )
 
 _DEFAULT_REPO_ROOT = "/home/nwm/NWM"
@@ -60,20 +58,11 @@ raise SystemExit(0 if valid else 1)
 """
 
 _LANE_OPTIONS = {
-    "compression": {
-        "repo_root": "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT",
-        "python": "NODE27_TIMESERIES_COMPRESSION_PYTHON",
-        "script": "NODE27_TIMESERIES_COMPRESSION_SCRIPT",
-        "entrypoint": "node27_timeseries_compression.py",
-        "entrypoint_failure": "compression entrypoint is unavailable or a symlink",
-    },
-    "cold": {
-        "repo_root": "NODE27_COLD_RESIDENCY_REPO_ROOT",
-        "python": "NODE27_COLD_RESIDENCY_PYTHON",
-        "script": "NODE27_COLD_RESIDENCY_SCRIPT",
-        "entrypoint": "node27_cold_residency.py",
-        "entrypoint_failure": "cold residency entrypoint is unavailable or a symlink",
-    },
+    "repo_root": "NODE27_TIMESERIES_COMPRESSION_REPO_ROOT",
+    "python": "NODE27_TIMESERIES_COMPRESSION_PYTHON",
+    "script": "NODE27_TIMESERIES_COMPRESSION_SCRIPT",
+    "entrypoint": "node27_timeseries_compression.py",
+    "entrypoint_failure": "compression entrypoint is unavailable or a symlink",
 }
 
 
@@ -91,11 +80,10 @@ class _LaunchError(RuntimeError):
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--compression-env", required=True)
-    parser.add_argument("--cold-env", required=True)
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--lane", choices=("compression", "cold"))
+    action.add_argument("--lane", choices=("compression",))
     action.add_argument("--check", action="store_true")
-    action.add_argument("--launch", choices=("compression", "cold"))
+    action.add_argument("--launch", choices=("compression",))
     parser.add_argument("--format", choices=("wall", "assembly"), default="wall")
     return parser
 
@@ -113,11 +101,11 @@ def _parse_args(argv: Sequence[str] | None) -> tuple[argparse.Namespace, list[st
     return args, runner_args
 
 
-def _output_for_lane(*, lane: str, output_format: str, values: tuple[int, int, int, int, int, int]) -> str:
-    compression_wall, cold_wall, _service_wall, _compression_statement, _cold_statement, _bound = values
+def _output_for_lane(*, output_format: str, values: tuple[int, int, int, int]) -> str:
+    wrapper_wall, _service_wall, _statement, _bound = values
     if output_format == "assembly":
         return ",".join(str(value) for value in values)
-    return str(compression_wall if lane == "compression" else cold_wall)
+    return str(wrapper_wall)
 
 
 def _failure(reason: str) -> int:
@@ -135,10 +123,8 @@ def _absolute_path(raw: str, *, failure: str) -> Path:
     return path
 
 
-def _runner_root(
-    options: Mapping[str, str], own_env: Mapping[str, str], caller_env: Mapping[str, str]
-) -> Path:
-    root_key = options["repo_root"]
+def _runner_root(own_env: Mapping[str, str], caller_env: Mapping[str, str]) -> Path:
+    root_key = _LANE_OPTIONS["repo_root"]
     raw = own_env[root_key] if root_key in own_env else caller_env.get(root_key)
     root = _absolute_path(raw or _DEFAULT_REPO_ROOT, failure="repository root must be absolute")
     if ":" in str(root):
@@ -148,19 +134,16 @@ def _runner_root(
 
 def _runner_paths(
     *,
-    lane: str,
     own_env: Mapping[str, str],
     caller_env: Mapping[str, str],
 ) -> tuple[Path, Path, Path]:
-    options = _LANE_OPTIONS[lane]
-    root = _runner_root(options, own_env, caller_env)
-    caller_python = caller_env.get(options["python"]) or None
-    caller_script = caller_env.get(options["script"]) or None
-    # The legacy wrappers captured process overrides before sourcing the lane
-    # file.  A lane-file Python or script assignment remains inert child data;
-    # it never selects the executable or entrypoint for this launch.
+    root = _runner_root(own_env, caller_env)
+    caller_python = caller_env.get(_LANE_OPTIONS["python"]) or None
+    caller_script = caller_env.get(_LANE_OPTIONS["script"]) or None
+    # A lane-file Python or script assignment remains inert child data; it never
+    # selects the executable or entrypoint for this launch.
     python_raw = caller_python or str(root / ".venv/bin/python")
-    script_raw = caller_script or str(root / "scripts" / options["entrypoint"])
+    script_raw = caller_script or str(root / "scripts" / _LANE_OPTIONS["entrypoint"])
     python_bin = _absolute_path(python_raw, failure="wrapper paths must be absolute")
     script = _absolute_path(script_raw, failure="wrapper paths must be absolute")
     try:
@@ -172,24 +155,22 @@ def _runner_paths(
     try:
         script_mode = os.lstat(script).st_mode
     except (OSError, ValueError):
-        raise _LaunchError(options["entrypoint_failure"]) from None
+        raise _LaunchError(_LANE_OPTIONS["entrypoint_failure"]) from None
     if stat.S_ISLNK(script_mode) or not stat.S_ISREG(script_mode):
-        raise _LaunchError(options["entrypoint_failure"])
+        raise _LaunchError(_LANE_OPTIONS["entrypoint_failure"])
     return root, python_bin, script
 
 
 def _child_environment(
     *,
-    lane: str,
-    pair: ParsedLaneEnvPair,
+    parsed: ParsedCompressionEnv,
     caller_env: Mapping[str, str],
     runner_root: Path,
 ) -> dict[str, str]:
-    own_env = pair.compression_env if lane == "compression" else pair.cold_env
+    own_env = parsed.compression_env
     child_env = dict(caller_env)
     child_env.update(own_env)
-    options = _LANE_OPTIONS[lane]
-    for key in (options["python"], options["script"]):
+    for key in (_LANE_OPTIONS["python"], _LANE_OPTIONS["script"]):
         caller_value = caller_env.get(key)
         if caller_value:
             child_env[key] = caller_value
@@ -198,17 +179,13 @@ def _child_environment(
     child_env["PYTHONPATH"] = (
         f"{runner_root}:{caller_pythonpath}" if caller_pythonpath else str(runner_root)
     )
-    compression_wall, cold_wall, service_wall, compression_timeout, cold_timeout, bound = (
-        pair.resolved.assembly_values()
-    )
+    wrapper_wall, service_wall, statement_timeout, bound = parsed.resolved.assembly_values()
     child_env.update(
         {
             ASSEMBLY_MARKER_KEY: "1",
-            ASSEMBLY_COMPRESSION_WRAPPER_KEY: str(compression_wall),
-            ASSEMBLY_COLD_WRAPPER_KEY: str(cold_wall),
+            ASSEMBLY_COMPRESSION_WRAPPER_KEY: str(wrapper_wall),
             ASSEMBLY_SERVICE_WALL_KEY: str(service_wall),
-            ASSEMBLY_COMPRESSION_STATEMENT_KEY: str(compression_timeout),
-            ASSEMBLY_COLD_STATEMENT_KEY: str(cold_timeout),
+            ASSEMBLY_COMPRESSION_STATEMENT_KEY: str(statement_timeout),
             ASSEMBLY_COMPRESSION_BOUND_KEY: str(bound),
         }
     )
@@ -231,12 +208,11 @@ def _verify_scripts_import_origin(*, python_bin: Path, root: Path, script: Path,
         raise _LaunchError("scripts import origin is outside repository root")
 
 
-def _launch(*, lane: str, pair: ParsedLaneEnvPair, caller_env: Mapping[str, str], runner_args: Sequence[str]) -> int:
-    own_env = pair.compression_env if lane == "compression" else pair.cold_env
-    root, python_bin, script = _runner_paths(lane=lane, own_env=own_env, caller_env=caller_env)
+def _launch(*, parsed: ParsedCompressionEnv, caller_env: Mapping[str, str], runner_args: Sequence[str]) -> int:
+    own_env = parsed.compression_env
+    root, python_bin, script = _runner_paths(own_env=own_env, caller_env=caller_env)
     child_env = _child_environment(
-        lane=lane,
-        pair=pair,
+        parsed=parsed,
         caller_env=caller_env,
         runner_root=root,
     )
@@ -248,11 +224,7 @@ def _launch(*, lane: str, pair: ParsedLaneEnvPair, caller_env: Mapping[str, str]
     )
     if not os.path.isfile("/usr/bin/timeout") or not os.access("/usr/bin/timeout", os.X_OK):
         raise _LaunchError("timeout launcher is unavailable")
-    wall = (
-        pair.resolved.budget.compression_wrapper_wall_seconds
-        if lane == "compression"
-        else pair.resolved.budget.cold_wrapper_wall_seconds
-    )
+    wall = parsed.resolved.budget.wrapper_wall_seconds
     timeout_args = [
         "/usr/bin/timeout",
         "--signal=TERM",
@@ -273,38 +245,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, runner_args = _parse_args(argv)
     try:
         compression_path = Path(args.compression_env)
-        cold_path = Path(args.cold_env)
     except (TypeError, ValueError):
         if args.launch:
-            return _failure("sequential budget preflight failed")
-        print("node27-timeseries-budget-preflight: invalid lane env pair", file=sys.stderr)
+            return _failure("compression budget preflight failed")
+        print("node27-timeseries-budget-preflight: invalid compression env", file=sys.stderr)
         return 1
-    if not compression_path.is_absolute() or not cold_path.is_absolute():
+    if not compression_path.is_absolute():
         if args.launch:
-            return _failure("sequential budget preflight failed")
-        print("node27-timeseries-budget-preflight: invalid lane env pair", file=sys.stderr)
+            return _failure("compression budget preflight failed")
+        print("node27-timeseries-budget-preflight: invalid compression env", file=sys.stderr)
         return 1
     try:
-        pair = read_lane_env_pair_data(compression_path, cold_path)
-    except SequentialBudgetError:
+        parsed = read_compression_env_data(compression_path)
+    except CompressionBudgetError:
         if args.launch:
-            return _failure("sequential budget preflight failed")
-        print("node27-timeseries-budget-preflight: invalid lane env pair", file=sys.stderr)
+            return _failure("compression budget preflight failed")
+        print("node27-timeseries-budget-preflight: invalid compression env", file=sys.stderr)
         return 1
     if args.check:
         return 0
     if args.launch:
         try:
             return _launch(
-                lane=args.launch,
-                pair=pair,
+                parsed=parsed,
                 caller_env=dict(os.environ),
                 runner_args=runner_args,
             )
         except _LaunchError as error:
             return _failure(str(error))
-    assert args.lane is not None
-    print(_output_for_lane(lane=args.lane, output_format=args.format, values=pair.resolved.assembly_values()))
+    assert args.lane == "compression"
+    print(_output_for_lane(output_format=args.format, values=parsed.resolved.assembly_values()))
     return 0
 
 
