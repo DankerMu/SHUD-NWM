@@ -13,6 +13,7 @@ import {
   normalizeOverviewBasins,
   normalizeOverviewSummary,
   resolveNationalScaleSource,
+  retimeLayerStates,
   type ActiveCycleValidTimesOverride,
   type AggregationEndpointDecision,
   type ApiBasin,
@@ -184,6 +185,16 @@ const OVERVIEW_INITIAL_REQUEST_THRESHOLD = 8
 const overviewLoads = new Map<string, Promise<OverviewDataSnapshot>>()
 let overviewRequestNonce = 0
 let activeOverviewRequestKey: string | null = null
+/**
+ * 活动请求代的重派生句柄（#2127 / design D1）。`validTime` 不参与取数身份：同一身份只换
+ * `validTime` 的调用经它就地重派生，不发请求、不开新一代。每一代加载（含同 query 的重载）都会
+ * 替换它，`clearOverviewDataCache` 清空它；经它的写入仍受该代 `isCurrentRequest()` 守卫。
+ */
+type OverviewRederiveHandle = {
+  currentValidTime: () => string | null
+  rederive: (query: M11QueryState) => Promise<OverviewDataSnapshot>
+}
+let activeOverviewRederive: OverviewRederiveHandle | null = null
 let cacheGeneration = 0
 
 export function clearOverviewDataCache() {
@@ -194,6 +205,7 @@ export function clearOverviewDataCache() {
   overviewLoads.clear()
   overviewRequestNonce += 1
   activeOverviewRequestKey = null
+  activeOverviewRederive = null
   // 三个 layer-time 缓存与 HTTP `cache` 同寿（tasks.md「由 clearOverviewDataCache() / clearCache()
   // 清除」）：留着它们会让下一轮加载在新 nonce 下读到上一轮的 `(source, cycle)` 列表 / index。
   // 调用一律发生在模块初始化之后，故此处对 `useOverviewDataStore` 的前向引用在运行时安全。
@@ -217,6 +229,25 @@ function cacheKey(path: string, params?: unknown) {
  */
 function dataIdentityQuery(query: M11QueryState): M11QueryState {
   return query.precip === defaultM11QueryState.precip ? query : { ...query, precip: defaultM11QueryState.precip }
+}
+
+/**
+ * 请求身份 = 归一后的取数 query 去掉 `validTime`（与 `requestScopeQueryKey` / `requestScopeDataKey`
+ * 的切分同形）。`loadOverview` 里没有任何一条请求以 `validTime` 为键：把它带进身份，时间轴每步
+ * 都会整轮重载（nonce 递增、清错误、作废在途 enrichment、重发失败端点——#2127）。
+ */
+function overviewRequestIdentityKey(query: M11QueryState) {
+  return cacheKey('overview', { ...query, validTime: null })
+}
+
+/** 冻结的 bootstrap 快照只换 `validTime`，绝不从活的 cycles / valid-times 记录重建（design D1）。 */
+function retimeBootstrapSnapshot(snapshot: OverviewBootstrapSnapshot, query: M11QueryState): OverviewBootstrapSnapshot {
+  const layerStates = retimeLayerStates(snapshot.layerStates, query.validTime)
+  return {
+    ...snapshot,
+    layerStates,
+    currentLayerValidTime: layerStates.find((state) => state.layerId === query.layer)?.currentValidTime ?? null,
+  }
 }
 
 function requestScopeQueryKey(query: M11QueryState) {
@@ -704,7 +735,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   clearCache: clearOverviewDataCache,
   loadOverview: async (inputQuery) => {
     const query = dataIdentityQuery(inputQuery)
-    const requestKey = cacheKey('overview', query)
+    const requestKey = overviewRequestIdentityKey(query)
+    // 同一身份、只换 `validTime`（在途或已落定）→ 重派生，不重载：必须在 nonce 递增与任何
+    // loading / error 写入之前短路。**完全相同**的 query 不走这里：在途时照旧并入，落定后照旧
+    // 开新一代（重挂载要能刷新过期数据、重试失败的 bootstrap）。
+    const rederiveHandle = activeOverviewRederive
+    if (rederiveHandle && activeOverviewRequestKey === requestKey && rederiveHandle.currentValidTime() !== query.validTime) {
+      return rederiveHandle.rederive(query)
+    }
     const existingLoad = overviewLoads.get(requestKey)
     if (existingLoad && activeOverviewRequestKey === requestKey) return existingLoad
 
@@ -733,6 +771,13 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     // 本轮阶段 3 已确定被跳过（bootstrap 失败 → 一条 per-cycle valid-times 请求都不会发）。
     // 此时「记录缺席」不再是「还在取」，把派生的 pending 顶成 error 终态。
     let layerTimeEnrichmentSkipped = false
+    // 本代持有的当前 query：只有 `validTime` 会被重派生替换（身份相同）。所有读 `validTime` 的
+    // 派生点（layer 状态、summary、requestScope、空 summary）一律读它，而不是外层 `query`。
+    let currentQuery = query
+    // 阶段 2 的 summary 入参（除 query 外）：重派生据此重算 summary，不发请求。
+    let summaryInputs: Omit<Parameters<typeof normalizeOverviewSummary>[0], 'query'> | null = null
+    // catch 兜底快照已写入：其 layers / summary 的来源与正常快照不同，重派生沿用同一来源。
+    let wroteFallback = false
 
     // 单一构造路径：活动 `(source, cycle)` 非默认对时，用 store 已取回的 per-cycle 列表顶掉
     // 目录里默认周期的 metadata.valid_times（fixture 决策 4：LayerState 本身必须是活动周期的列表）。
@@ -771,17 +816,33 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         : layerTimeEnrichmentSkipped
           ? { status: 'error' }
           : { status: 'pending' }
+      // 该对的列表**到达且为空**时要先问「该源列不列出这个周期」（#2131 / design D2）：
+      //   - 该源 cycles 记录缺席（默认源不等 `/cycles`）→ 成员身份尚不可知 → `pending`，
+      //     `writeCycles` 到达后重算；
+      //   - 记录 `available`、列表是数组且不含该周期（秒精度）→ `cycle-not-listed` 终态；
+      //   - 列出了 / 记录 `error` / 列表变形（裸 `as T`，成员身份未知）→ 原样传空列表，
+      //     仍是 'Layer has no valid times.'（真实覆盖缺口或不可知）。
+      const pairRecord = (target: NationalDischargePair): ActiveCycleValidTimesOverride => {
+        const record = get().validTimesByCycle[m11SourceCycleKey(target.source, target.cycle)]
+        if (!record) return missingRecord
+        if (record.status !== 'available' || record.validTimes.length > 0) return record
+        const cyclesRecord = cyclesBySource[target.source]
+        if (!cyclesRecord) return { status: 'pending' }
+        if (cyclesRecord.status !== 'available' || !Array.isArray(cyclesRecord.cycles?.cycles)) return record
+        const listed = cyclesRecord.cycles.cycles.some((entry) => toSecondsPrecisionInstant(entry?.cycle_time) === target.cycle)
+        return listed ? record : { status: 'cycle-not-listed', source: target.source, cycle: target.cycle }
+      }
       const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
         pair && !pair.isDefault
-          ? {
-              discharge: get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] ?? missingRecord,
-            }
+          ? { discharge: pairRecord(pair) }
           : // 活动对解不出来但源是非默认源：绝不回落目录 metadata（那是 GFS 的列表）。
             sourceUnresolved
             ? { discharge: missingRecord }
             : undefined
       return normalizeLayerStates({
-        query: inputs.query,
+        // 时次一律取本代**当前** query（阶段 2 的具体源 query 只换 `validTime`、保留具体源）：
+        // 迟到的 enrichment 重算与重派生都据此落在最新的时间轴位置上。
+        query: { ...inputs.query, validTime: currentQuery.validTime },
         layers: inputs.layers,
         activeCycleValidTimes,
         // 与上面那份列表同批盖章：地图侧不再自行解析周期，直接读这枚章拼瓦片 URL 的 cycle 段
@@ -831,6 +892,41 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       if (!inputs) return
       const layers = buildLayerStates(inputs)
       set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
+    }
+
+    // validTime-only 调用的重派生（design D1）：只用本代已持有的输入，零请求；nonce、loading、
+    // 错误、三个 layer-time map 与跳过标记一概不碰。本代尚未写过 overview（`layerStateInputs`
+    // 为 null）时 store 里是上一代的快照，不得给它盖新 requestScope——只换 `currentQuery`，
+    // 之后本代的每次 `set` 自会读到它。
+    activeOverviewRederive = {
+      currentValidTime: () => currentQuery.validTime,
+      rederive: (nextQuery) => {
+        currentQuery = nextQuery
+        const inputs = layerStateInputs
+        if (isCurrentRequest() && inputs) {
+          const retimedBootstrap = bootstrapSnapshot ? retimeBootstrapSnapshot(bootstrapSnapshot, nextQuery) : null
+          bootstrapSnapshot = retimedBootstrap
+          const layers = wroteFallback ? (retimedBootstrap?.layerStates ?? []) : buildLayerStates(inputs)
+          const summary =
+            wroteFallback || !summaryInputs
+              ? createEmptyOverviewSummary(nextQuery)
+              : normalizeOverviewSummary({ ...summaryInputs, query: nextQuery })
+          set((state) =>
+            state.overview
+              ? {
+                  overview: {
+                    ...state.overview,
+                    requestScope: overviewRequestScope(nextQuery),
+                    bootstrap: retimedBootstrap,
+                    layers,
+                    summary,
+                  },
+                }
+              : {},
+          )
+        }
+        return overviewLoads.get(requestKey) ?? Promise.resolve(get().overview as OverviewDataSnapshot)
+      },
     }
 
     // 阶段 1（mapBootstrap critical path）：basins + runless layers + 当前 layer 的 valid_time。
@@ -890,10 +986,10 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         const placeholderOverview: OverviewDataSnapshot = currentOverview && overviewSnapshotMetadataMatchesQuery(currentOverview, query)
           ? { ...currentOverview, bootstrap: snapshot, layers: bootstrapLayerStates, basins: placeholderBasins }
           : {
-              requestScope: overviewRequestScope(query),
+              requestScope: overviewRequestScope(currentQuery),
               bootstrap: snapshot,
               basins: placeholderBasins,
-              summary: createEmptyOverviewSummary(query),
+              summary: createEmptyOverviewSummary(currentQuery),
               layers: bootstrapLayerStates,
               aggregationDecision: decideAggregationEndpoint({
                 initialRequestCount: 0,
@@ -956,15 +1052,6 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         models: models as ApiModelInstance[],
         runs: runs?.items ?? [],
       })
-      const summary = normalizeOverviewSummary({
-        query,
-        basins: overviewBasins,
-        pipeline,
-        queue,
-        latestRun: useSingleRunSurfaces ? latestRun : null,
-        runs: runsForSourceSelection(query, runs?.items ?? [], latestRun),
-        partialErrors,
-      })
       const aggregationDecision = decideAggregationEndpoint(requestPlan)
       const basinVersionToBasinId: Record<string, string> = {}
       for (const model of models as ApiModelInstance[]) {
@@ -978,13 +1065,24 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
       // 本块从 `await bootstrapPromise` 到 `set` 之间没有 await，故与 enrichment 的写入互斥：
       // 列表先到 → 这里读得到；列表后到 → enrichment 在本快照之上原地重算。
+      // 所有读 `validTime` 的值（layer 状态、summary、requestScope、bootstrap）都必须在这个同步块里
+      // 算（design D1）：await 期间可能来过 validTime-only 调用，提前算好的值会带着旧时次落进快照。
       layerStateInputs = { query: concreteSurfaceQuery, layers, resolvedRun: useSingleRunSurfaces ? latestRun : null }
+      summaryInputs = {
+        basins: overviewBasins,
+        pipeline,
+        queue,
+        latestRun: useSingleRunSurfaces ? latestRun : null,
+        runs: runsForSourceSelection(query, runs?.items ?? [], latestRun),
+        partialErrors,
+      }
       const layerStates = buildLayerStates(layerStateInputs)
       const finalSnapshot: OverviewDataSnapshot = {
-        requestScope: overviewRequestScope(query),
-        bootstrap: bootstrapForSnapshot,
+        requestScope: overviewRequestScope(currentQuery),
+        // 读持有的变量而非 promise 的 resolve 值：重派生会替换它（只换 validTime 的冻结快照）。
+        bootstrap: bootstrapSnapshot,
         basins: overviewBasins,
-        summary,
+        summary: normalizeOverviewSummary({ ...summaryInputs, query: currentQuery }),
         layers: layerStates,
         aggregationDecision,
         basinVersionToBasinId,
@@ -1055,7 +1153,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         enrichmentPromise,
         layerTimeEnrichmentPromise,
       ])
-      if (enrichmentResult.status === 'fulfilled') return enrichmentResult.value
+      // 仍是当前代 → 交出 store 的 overview（在途期间的 validTime-only 调用方拿到最新时次与迟到的
+      // enrichment 重算）；已被接管 → 交出本代自己构造的快照。
+      if (enrichmentResult.status === 'fulfilled') {
+        return isCurrentRequest() ? (get().overview ?? enrichmentResult.value) : enrichmentResult.value
+      }
       throw enrichmentResult.reason
     })()
 
@@ -1072,10 +1174,10 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         // 要求 fallback layers 用 bootstrap 的 layerStates 而非空数组）。
         const settledBootstrap = bootstrapSnapshot as OverviewBootstrapSnapshot | null
         const fallback: OverviewDataSnapshot = {
-          requestScope: overviewRequestScope(query),
+          requestScope: overviewRequestScope(currentQuery),
           bootstrap: settledBootstrap,
           basins: [],
-          summary: createEmptyOverviewSummary(query),
+          summary: createEmptyOverviewSummary(currentQuery),
           layers: settledBootstrap?.layerStates ?? [],
           aggregationDecision: decideAggregationEndpoint({
             initialRequestCount: 0,
@@ -1084,6 +1186,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
           }),
           basinVersionToBasinId: {},
         }
+        wroteFallback = true
         set({ overview: fallback, mapBootstrapLoading: false, enrichmentLoading: false, error: message })
       }
       throw error

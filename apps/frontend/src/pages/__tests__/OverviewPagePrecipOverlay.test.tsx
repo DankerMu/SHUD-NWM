@@ -1,15 +1,14 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   M11_PRECIP_NOTICE_CYCLE_NOT_MIRRORED,
-  M11_PRECIP_NOTICE_INDEX_ERROR,
   M11_PRECIP_NOTICE_NO_CONCRETE_SOURCE,
 } from '@/components/map/m11PrecipOverlay'
-import { defaultM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
+import { defaultM11QueryState, parseM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
 import { OverviewPage } from '@/pages/OverviewPage'
-import { useOverviewDataStore } from '@/stores/overviewData'
+import { overviewSnapshotMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 import { installMaplibreStubMap } from '@/test/maplibreStub'
 import {
   DEFAULT_CYCLE,
@@ -337,12 +336,12 @@ describe('OverviewPage precipitation overlay mount seam', () => {
     expectPrecipFacesAgree()
   })
 
-  it('keeps the toggle live while a validTime-only reload is in flight over the same catalog', async () => {
-    // IS-7（round-3，与 IS-2/IS-4 同一条不变量的**反方向**）：时间轴步进/播放派发的是
-    // validTime-only 重载，而 `loadOverview` 的起始 `set` 只置 `mapBootstrapLoading: true`，
-    // **不清** `overview` / `precipIndexByCycle`。于是目录明明在手、栅格与图例照画，闸门里的
-    // `mapBootstrapLoading` 臂却把它判成「目录未就绪」并把开关按死——已知冒充未知。
-    // 冷缓存（距上次阶段 1 取数 ≥ TTL）下**每一次**步进都落在这一格。
+  it('keeps the toggle live while an identical-query reload is in flight over the same catalog', async () => {
+    // IS-7（round-3，与 IS-2/IS-4 同一条不变量的**反方向**）：`loadOverview` 的起始 `set` 只置
+    // `mapBootstrapLoading: true`，**不清** `overview` / `precipIndexByCycle`。于是目录明明在手、栅格与
+    // 图例照画，闸门里的 `mapBootstrapLoading` 臂却把它判成「目录未就绪」并把开关按死——已知冒充未知。
+    // 触发方式随 #2127 design D1 更换：时间轴步进不再重载（只在 store 内重派生，见下一条用例），
+    // 而同一 query 的重载（重新挂载 / 重试，E14 那条路径）仍会进这个窗口，所以改由它来制造。
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let releaseLayers: () => void = () => undefined
     let layersGate: Promise<void> | null = null
@@ -362,18 +361,32 @@ describe('OverviewPage precipitation overlay mount seam', () => {
     await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(EXPECTED_URL))
     expectPrecipFacesAgree()
 
+    // 与页面 `dataLoadState` 同构的取数 query：走同一条 URL 解析（validTime 归一成 `.000Z`），
+    // 再按页面把 `precip` / `basemap` 钉回默认、`metStations` 置 false。validTime 字面若与本代持有的
+    // 不同，这一轮会走 D1 重派生而不是重载——下面 `mapBootstrapLoading` 的前置条件会当场报错。
+    const pageQuery = {
+      ...parseM11QueryState(serializeM11QueryState({ ...defaultM11QueryState, validTime: LEAD_ZERO_VALID_TIME })),
+      precip: defaultM11QueryState.precip,
+      basemap: defaultM11QueryState.basemap,
+      metStations: false,
+    }
+    expect(overviewSnapshotMatchesQuery(useOverviewDataStore.getState().overview, pageQuery)).toBe(true)
+
     // 阶段 1 的 `cached()` 条目按 TTL 定时驱逐 → 下一轮真的走网络往返，不是暖缓存微任务。
     await vi.advanceTimersByTimeAsync(CACHE_EVICTION_ADVANCE_MS)
-    const callsBeforeStep = layersCalls
+    const callsBeforeReload = layersCalls
     layersGate = new Promise<void>((resolve) => {
       releaseLayers = resolve
     })
 
-    fireEvent.click(screen.getByRole('button', { name: '下一个有效时刻' }))
+    let reload: Promise<unknown> = Promise.resolve()
+    await act(async () => {
+      reload = useOverviewDataStore.getState().loadOverview(pageQuery).catch(() => undefined)
+    })
 
     await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(true))
     // 前置条件 1：这一轮确实闸在网络上（缓存真的冷了），否则窗口是假的、本用例什么也不鉴别。
-    await waitFor(() => expect(layersCalls).toBeGreaterThan(callsBeforeStep))
+    await waitFor(() => expect(layersCalls).toBeGreaterThan(callsBeforeReload))
     // 前置条件 2：目录快照没被清掉——这正是「已知」的证据，也是三面矛盾成立的前提。
     expect(useOverviewDataStore.getState().overview).not.toBeNull()
     expect(useOverviewDataStore.getState().overview?.layers.some((entry) => entry.layerId === 'precip')).toBe(true)
@@ -389,13 +402,60 @@ describe('OverviewPage precipitation overlay mount seam', () => {
     expect(screen.getByTestId('m11-floating-legend-precip')).toBeInTheDocument()
     expectPrecipFacesAgree()
 
-    releaseLayers()
-    layersGate = null
+    await act(async () => {
+      releaseLayers()
+      layersGate = null
+      await reload
+    })
     await settled()
 
-    // 放行后这一步确实改了时次（否则上面的「URL 没变」可以被「点击根本没生效」骗过）。
-    await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(NEXT_URL))
+    // 放行后时次没变（同一 query），栅格仍画同一张。
+    await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(EXPECTED_URL))
     expectPrecipFacesAgree()
+  })
+
+  it('steps the timeline without entering loading or re-requesting the catalog', async () => {
+    // #2127 design D1 的页面层落点：时间轴步进只在 store 内按新 validTime 重派生，零请求、
+    // 不碰 `mapBootstrapLoading`。冷缓存（距上次阶段 1 取数 ≥ TTL）下旧实现每一步都会重载目录，
+    // 这里推过 TTL 就是让这种回退当场表现为 `layersCalls` 增长与 loading 置 true。
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let layersCalls = 0
+    mockApi({
+      '/api/v1/layers': () => {
+        layersCalls += 1
+        return success([layer, precipLayer])
+      },
+    })
+    renderOverview({ validTime: LEAD_ZERO_VALID_TIME })
+    await settled()
+
+    await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(EXPECTED_URL))
+    expectPrecipFacesAgree()
+
+    await vi.advanceTimersByTimeAsync(CACHE_EVICTION_ADVANCE_MS)
+    const callsBeforeStep = layersCalls
+    const loadingSeen: boolean[] = []
+    const unsubscribe = useOverviewDataStore.subscribe((state) => {
+      loadingSeen.push(state.mapBootstrapLoading)
+    })
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: '下一个有效时刻' }))
+
+      await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(NEXT_URL))
+      // 前置条件：步进确实写进了 store（订阅确实观测到了写入），否则「从未 loading」不鉴别任何事。
+      expect(loadingSeen.length).toBeGreaterThan(0)
+      expect(loadingSeen).not.toContain(true)
+      expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false)
+      expect(layersCalls).toBe(callsBeforeStep)
+
+      const toggle = precipToggle()
+      expect(toggle.disabled).toBe(false)
+      expect(toggle.getAttribute('aria-pressed')).toBe('true')
+      expectPrecipFacesAgree()
+    } finally {
+      unsubscribe()
+    }
   })
 
   it('threads the catalog precip legend into the floating legend card', async () => {
@@ -543,11 +603,14 @@ describe('OverviewPage precipitation overlay mount seam', () => {
       (item) => item.layerId === 'discharge',
     )
     expect(discharge?.available).toBe(true)
-    expect(screen.queryByTestId('m11-overview-empty')).toBeNull()
+    // #2139：bootstrap 失败的渲染面不再依赖流域数（阶段 2 救回的非空清单曾把它整个藏掉），
+    // 只剩一条把锅甩给降水子系统的提示。硬失败必须如实呈现，并压过降水提示（互斥链）。
+    const bootstrapError = useOverviewDataStore.getState().bootstrapError
+    expect(screen.getByTestId('m11-overview-empty').textContent).toBe(bootstrapError)
 
     await waitFor(() => expect(surface().getAttribute('data-precip-hidden-reason')).toBe('index_error'))
     expect(surface().hasAttribute('data-precip-url')).toBe(false)
-    expect(screen.getByTestId('m11-precip-notice').textContent).toBe(M11_PRECIP_NOTICE_INDEX_ERROR)
+    expect(screen.queryByTestId('m11-precip-notice')).toBeNull()
     expectPrecipFacesAgree()
   })
 })
