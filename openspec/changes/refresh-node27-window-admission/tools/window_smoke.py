@@ -1428,15 +1428,19 @@ def display_ready_oracle(args):
         time.sleep = sleep
         executor.recording = True
         try:
+            started = time.monotonic()
             try:
                 executor.start_runtime()
             except w.Refusal as error:
                 w.require(str(error) == expected, "DISPLAY_READY_WRONG_REFUSAL")
             else:
                 raise w.Refusal("DISPLAY_READY_ACCEPTED_FAILURE")
+            elapsed = time.monotonic() - started
             w.require(executor.s.get("basic_ready") is not True, "DISPLAY_READY_WROTE_BASIC_READY")
             w.require(executor.s.get("fenced") is not False, "DISPLAY_READY_RELEASED_FENCE")
             w.require(not executor.s["fence_epochs"][-1].get("validated_restart"), "DISPLAY_READY_WROTE_VALIDATED")
+            w.require(executor.source_ready is None, "DISPLAY_READY_REACHED_SOURCE")
+            w.require(executor.public_ready is None, "DISPLAY_READY_REACHED_PUBLIC")
             starts = [row for row in executor.system_actions if row["action"] == "start" and w.DISPLAY in row["units"]]
             w.require(len(starts) == (1 if expect_start else 0), "DISPLAY_READY_START_COUNT")
             autopipe = [row for row in executor.system_actions if w.AUTO in row["units"] and row["action"] == "start"]
@@ -1450,7 +1454,7 @@ def display_ready_oracle(args):
                     "case": name,
                     "check": expected,
                     "probes": executor.health_probes,
-                    "unit_timeouts": executor.unit_timeouts,
+                    "elapsed": elapsed,
                     "http_timeouts": executor.http_timeouts,
                     "slept": executor.slept,
                 }
@@ -1469,11 +1473,9 @@ def display_ready_oracle(args):
 
     never_ready = expect_refusal("never-ready", "DISPLAY_READINESS_TIMEOUT", refuse_first=100, t0_remaining=1.2)
     w.require(never_ready["probes"] >= 1, "NEVER_READY_NO_PROBE")
+    w.require(never_ready["elapsed"] < 1.2 + 0.5, "NEVER_READY_BUDGET_RESET")
     w.require(
-        all(
-            value <= 1.2 for value in never_ready["http_timeouts"] + never_ready["unit_timeouts"] + never_ready["slept"]
-        ),
-        "NEVER_READY_BUDGET_RESET",
+        all(value <= 1.2 for value in never_ready["http_timeouts"] + never_ready["slept"]), "NEVER_READY_PROBE_RESET"
     )
 
     clipped = expect_refusal(
@@ -1483,10 +1485,9 @@ def display_ready_oracle(args):
         t0_remaining=20,
         stop_remaining=0.8,
     )
-    w.require(
-        all(value <= 0.8 for value in clipped["http_timeouts"] + clipped["unit_timeouts"] + clipped["slept"]),
-        "STOP_BUDGET_NOT_CLIPPED",
-    )
+    w.require(clipped["probes"] >= 1, "STOP_BUDGET_NO_PROBE")
+    w.require(clipped["elapsed"] < 0.8 + 0.5, "STOP_BUDGET_NOT_CLIPPED")
+    w.require(all(value <= 0.8 for value in clipped["http_timeouts"] + clipped["slept"]), "STOP_BUDGET_PROBE_RESET")
     expect_refusal("failed-unit", "DISPLAY_SERVICE_FAILED", refuse_first=100, fail_after_start=1)
     expect_refusal("permanent-http", "DISPLAY_HEALTH_FAILED", refuse_first=0, status=500)
     expect_refusal("trickle-timeout", "DISPLAY_READINESS_TIMEOUT", refuse_first=0, trickle=True, t0_remaining=1.0)
