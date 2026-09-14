@@ -53,6 +53,7 @@ from scripts.select_ci_tests import (
     ISSUE1895_READINESS_STORAGE_TESTS,
     ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
+    NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     ORIGIN_CHUNK_PARITY_TESTS,
@@ -1238,6 +1239,9 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             *CORE_SMOKE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            "tests/test_node27_pgdata_workload.py",
+            "tests/test_node27_pgdata_workload_plan.py",
+            "tests/test_node27_pgdata_workload_io.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
@@ -19311,3 +19315,33 @@ def test_c4_production_acceptance_owner_rules_red_when_removed(monkeypatch: pyte
             continue
         assert "tests/test_node27_c4_production_acceptance.py" not in selected, producer
         assert "tests/test_node27_c4_production_acceptance_boundaries.py" not in selected, producer
+
+
+def test_pgdata_workload_owners_select_their_suite() -> None:
+    expected = set(NODE27_PGDATA_WORKLOAD_TESTS)
+    for producer in (
+        "packages/common/node27_pgdata_workload.py",
+        "packages/common/node27_pgdata_workload_types.py",
+        "packages/common/node27_pgdata_workload_query.py",
+        "packages/common/node27_pgdata_workload_http.py",
+        "packages/common/node27_pgdata_workload_plan.py",
+        "packages/common/node27_pgdata_workload_measure.py",
+        "packages/common/node27_pgdata_workload_io.py",
+        "scripts/node27_pgdata_workload.py",
+        "tests/test_node27_pgdata_workload.py",
+        "tests/test_node27_pgdata_workload_plan.py",
+        "tests/test_node27_pgdata_workload_io.py",
+    ):
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert expected <= selected, f"{producer} lost PGDATA workload suite: {sorted(expected - selected)}"
+
+
+def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
+    selected = set(select_tests(["packages/common/forecast_store.py"], repo_root=Path(".")))
+    assert "tests/test_forecast_api.py" in selected
+    assert "tests/test_forecast_store_routing.py" in selected
+    assert "tests/test_node27_pgdata_workload.py" in selected
+    assert "tests/test_node27_pgdata_workload_plan.py" in selected
+    assert "tests/test_node27_pgdata_workload_io.py" in selected
+    assert set(CORE_SMOKE_TESTS) <= selected
+

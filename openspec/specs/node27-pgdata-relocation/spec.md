@@ -157,3 +157,24 @@ and durable first-write boundary; negative guards against incompatible old cold 
 
 - **WHEN** rollback is requested after the durable writes-released marker
 - **THEN** the surviving relocation owner refuses switchback to the stale original, including after an interrupted release
+
+### Requirement: Retained SQL performance evidence SHALL keep query identity
+
+The PGDATA workload owner SHALL retain the minimum capture, canonical-parameter
+validation, native named EXPLAIN binding and deterministic query identity needed
+by its explicit-cycle before/after performance evidence before deleting the old
+G7 recorder. The owner SHALL reject binding drift before execution or acceptance.
+Equivalent mapping order SHALL preserve identity; changed semantic bindings
+SHALL change identity or refuse. Shipping forecast SQL alone SHALL NOT substitute
+for the workload's evidence producer. Synthetic positional compatibility and the
+four-lane cold rollout protocol are not required survivors.
+
+#### Scenario: A manual workload still needs the retiring recorder
+
+- **WHEN** R3 removes the old recorder used by retained PGDATA SQL measurements
+- **THEN** its necessary evidence behavior, real entrypoint and assertion-bearing tests already belong to the PGDATA workload owner, with no old exports or dangling manual instructions
+
+#### Scenario: Captured SQL has drifted from the frozen workload
+
+- **WHEN** a required cycle/run/model/segment binding differs from canonical workload inputs
+- **THEN** the retained owner refuses before live EXPLAIN or PASS; mapping insertion order alone does not change the accepted query identity

@@ -2567,8 +2567,12 @@ def test_pending_failure_intent_rejects_tampering(
         document["payload"]["failure"]["stage"] = "token=not-a-real-token"
         intent_path.write_bytes(_canonical(document))
     else:
-        intent_path.unlink()
-        intent_path.write_bytes(raw)
+        original = intent_path.stat()
+        replacement = intent_path.with_name("replacement.json")
+        replacement.write_bytes(raw)
+        replacement.chmod(0o600)
+        assert replacement.stat().st_ino != original.st_ino
+        os.replace(replacement, intent_path)
     assert not evidence._publish_terminal_failure(
         output,
         stage="original",

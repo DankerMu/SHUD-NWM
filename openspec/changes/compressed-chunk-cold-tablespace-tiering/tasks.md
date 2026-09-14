@@ -66,7 +66,7 @@ budget fields. Real launcher and collection/survivor proofs are required.
   `fixtures/retirement-governance-owner-transfer.md`. The R3.7 cold governance
   env-template block also retires here; ordinary readonly live audit is not
   effective service-source handoff.
-- [ ] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
+- [x] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
   procedure in `docs/runbooks/tier-node27-timeseries-storage.md` must own its
   generic SQL/API/browser/ingest workload and evidence instructions rather than
   refer to old C1-C4/G0-G8 sections or `node27_issue1895_*` exits. Retain genuinely
@@ -81,6 +81,16 @@ budget fields. Real launcher and collection/survivor proofs are required.
   with behavioral proof before R3.6. Preserve meaning, not synthetic positional
   compatibility or the four-lane cold protocol. A shipping query API alone is
   not the replacement performance recorder or its identity validation.
+  Fresh implementation fixture: `fixtures/retirement-pgdata-workload.md`;
+  approved full SQL/API measurement, named binding, plan and identity behavior.
+  Implementation evidence: `evidence/retirement-workload-verification.json`;
+  real isolated SQL/API measurement and owned cleanup receipt:
+  `evidence/receipts/retirement-pgdata-workload-smoke.json`.
+  Typed serialization, refusal/publication and capture/identity mutation proof:
+  `evidence/retirement-workload-boundary-proof.json`; surviving compression
+  same-byte/new-inode fixture correction:
+  `evidence/retirement-workload-compression-fixture-proof.json`.
+  This is not effective production deployment or global retirement completion.
 - [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,
   pre-write restoration, no stale post-write rollback, bounded commands and
@@ -93,7 +103,8 @@ budget fields. Real launcher and collection/survivor proofs are required.
   consumes C4, not the reverse. Generic readonly survives old C2's removal.
   C4 extraction evidence: `evidence/retirement-c4-verification.json`; targeted
   owner/selector, real Node binder, CLI refusal and post-binder mutation proof.
-  Remaining workload/compression/deletion test transfers are still pending.
+  Workload capture/native-plan/CLI and producer-selector tests now follow their
+  PGDATA owner. Remaining compression/deletion test transfers are still pending.
 - [x] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
   SHA-256/file-identity recheck from G0/C3 to the existing display deployment
   owner's **Bringup-C4 production acceptance** seam. R1 must ship and record its
@@ -239,6 +250,11 @@ retired test container changes owner.
   R5 deployment boundaries. Historical cold fixture approvals do not authorize
   these edits. Require fresh independent review, finding verification, Gap
   Sweep, regression evidence and exact-head CI before merge.
+  Remaining-slice fixture review record:
+  `evidence/retirement-remaining-fixture-reviews.json`. Workload, compression and
+  remaining deletion fixtures have independent approval. Implementation review,
+  regression and deployment
+  requirements are not completed by fixture approval.
 - [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
   surviving-spec updates and the G7-only REMOVED delta but never promotes withdrawn
   cold-enabling ADDED requirements. There is no canonical

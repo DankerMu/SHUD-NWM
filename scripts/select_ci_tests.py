@@ -831,6 +831,18 @@ C4_PRODUCTION_ACCEPTANCE_TESTS: tuple[str, ...] = (
     "tests/test_node27_c4_production_acceptance_boundaries.py",
 )
 
+# #1895 R1.4 retained PGDATA SQL/API workload owner. Producer, CLI, capture,
+# plan and IO modules share one assertion-bearing suite plus the shipping
+# forecast named-binding and selector meta suites.
+NODE27_PGDATA_WORKLOAD_TESTS: tuple[str, ...] = (
+    "tests/test_node27_pgdata_workload.py",
+    "tests/test_node27_pgdata_workload_plan.py",
+    "tests/test_node27_pgdata_workload_io.py",
+    "tests/test_forecast_api.py",
+    "tests/test_forecast_store_routing.py",
+    "tests/test_select_ci_tests.py",
+)
+
 # #2224: production parity is one closure across the catalog SQL owner, the
 # movement owner, the read-only G1 census, post-target observer and G0/G1
 # runbook fence. The integration suite is intentionally present even where its
@@ -1040,6 +1052,22 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         C4_PRODUCTION_ACCEPTANCE_TESTS,
         stop_on_match=True,
     ),
+    PathTestRule(
+        "tests/test_node27_pgdata_workload.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_workload_plan.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_workload_io.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+
     PathTestRule(
         "tests/test_orchestration_chain.py",
         FILE_JOURNAL_READ_STATE_TESTS,
@@ -2335,6 +2363,46 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        "packages/common/node27_pgdata_workload.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_types.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_query.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_http.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_plan.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_measure.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_workload_io.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "scripts/node27_pgdata_workload.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
         # of which are production-closure suites that other rules happened to own
         # (real_backend.py, forcing_producer, the readonly-db script). The
@@ -2435,6 +2503,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            "tests/test_node27_pgdata_workload.py",
+            "tests/test_node27_pgdata_workload_plan.py",
+            "tests/test_node27_pgdata_workload_io.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",

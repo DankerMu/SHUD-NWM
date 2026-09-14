@@ -688,17 +688,43 @@ manufacture a selective-cold sample. Preserve SQL/API/browser one-warm-up plus
 decompression; normal `DecompressChunk` of its own candidate is allowed. Buffer
 accounting is root Plan Shared Hit+Read, not summed parent/child counters.
 Missing DB/browser evidence remains pending, never mocked PASS.
-The retained manual SQL workload also needs capture/parameter validation, native
-EXPLAIN execution and deterministic query identity. R1.4 transfers the minimum
-needed behavior and tests from the old recorder before its deletion; shipping
-`forecast_series()` alone is not a replacement recorder. Its synthetic positional
-compatibility and four-lane G7 protocol need not survive.
 
-The old G7 C1/C2/C3/performance CLIs below are real manual consumers, not an
-exemption from retirement. R1 must transfer any still-required observation,
-identity/content binding and performance producer/validator with schema/tests
-to its actual PGDATA/display/readonly owner and repoint this guidance **before**
-R3 deletes its old exit. Independent C4's local producer/binder remains. The
+SQL/API measurement is owned by the PGDATA workload CLI. It captures the
+shipping explicit-cycle `forecast_series()` named query once, then discards
+one warmup and accepts 20 serial SQL EXPLAIN and local forecast-series API
+samples. Isolated receipts never imply live acceptance. Published
+`query.parameters` is the existing `query_digest` typed representation
+(`{mapping:...}`, datetime `{datetime:UTC ISO}`, sequence `{sequence:[...]}`);
+an independent SHA-256 of compact sorted JSON `{sql,parameters}` must equal
+the recorded digest. General redaction still applies; only that validated
+parameter block is restored. Receipts are written through a private staged
+sibling and exclusive publication so the final path is mode-0600 from the
+first byte and a pre-publish write/fsync failure leaves no partial final.
+Reader credentials use a descriptor-bound mode-0600 nonsymlink private DSN
+file for `nhms_display_ro` (not `display.env` or shell sourcing). Invalid UTF-8
+DSN bytes refuse `DSN_FILE_INVALID`. Repeat the same frozen inputs for
+representative uncompressed and compressed windows already present. Browser
+click P95 remains independent C4/river-click (`<2s`). Readonly DB remains
+`scripts/validate_readonly_db_boundary.py`. Controlled ingest remains PGDATA
+§D under the hold owner's separate authorization. Do not point operators at
+withdrawn `node27_issue1895_performance_oracle.py`.
+
+```bash
+uv run --no-sync python scripts/node27_pgdata_workload.py measure \
+  --reader-dsn-file "$READER_DSN_FILE" \
+  --api-origin "$API_ORIGIN" \
+  --basin-version-id "$BASIN_VERSION_ID" \
+  --river-network-version-id "$RIVER_NETWORK_VERSION_ID" \
+  --segment-id "$SEGMENT_ID" \
+  --issue-time "$ISSUE_TIME" \
+  --run-id "$RUN_ID" \
+  --model-id "$MODEL_ID" \
+  --source "$SOURCE" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --output "$WORKLOAD_RECEIPT"
+```
+
+Independent C4's local producer/binder remains. The
 outer reviewed-SHA/exact-byte digest and file-identity guarantee is owned by
 Bringup-C4 production acceptance:
 
@@ -758,8 +784,8 @@ uv run --no-sync python scripts/node27_c4_production_acceptance.py verify \
 - Missing/mismatched SHA, source swap, or changed C4 bytes/file identity
   refuse. Local C4 CLI PASS cannot replace outer acceptance or independent
   C1-C3 evidence. The C4 closed schema/CLI remains unchanged.
-- This registers the R1.6 owner only. It does not claim C1-C3, remaining
-  R1.4 SQL/API workload transfer, R1.5, or the epic is done.
+- This registers the R1.6 C4 owner and the R1.4 SQL/API measure command. It
+  does not claim C1-C3, remaining R1.5, or the epic is done.
 Existing controlled-ingest/natural-tick and pre/post-write rollback obligations
 stay in PGDATA §D, subject to the actual hold owner's separate authorization.
 

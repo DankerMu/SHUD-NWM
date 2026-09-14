@@ -1,0 +1,30 @@
+{
+  "scope": "Fresh fixture approval for remaining mandatory retirement; not implementation, CI or deployment proof",
+  "source_base_sha": "015423c7143d4f4e3841a9911d7a416458bcbda5",
+  "workload": {
+    "fixture": "fixtures/retirement-pgdata-workload.md",
+    "reviewer": "WorkloadFixtureReview",
+    "repair_iterations": 2,
+    "verdict": "pass",
+    "resolved_axes": ["retained full SQL/API measurement", "concrete owner and CLI", "independent error type and old caller disposition", "selector producer edges", "matrix and evidence floor consistency", "sorted nearest-rank P95"],
+    "limits": "Read-only fixture approval only; subsequent implementation proof is recorded separately in retirement-workload-verification.json"
+  },
+  "remaining_deletion": {
+    "fixture": "fixtures/retirement-cold-family-deletion.md",
+    "reviewer": "DeletionFixtureReview",
+    "repair_iterations": 1,
+    "verdict": "pass",
+    "resolved_axes": ["mixed attribution/schema/role/selector consumer census", "current database container installer guidance withdrawal"],
+    "limits": "Read-only fixture review; deletion implementation, source regression and effective deployment pending"
+  },
+  "compression": {
+    "fixture": "fixtures/retirement-compression-cutover.md",
+    "reviewer": "CompressionFixtureReview",
+    "repair_iterations": 2,
+    "verdict": "pass",
+    "resolved_axes": ["atomic paired-API and mixed importer closure", "derived strict single-lane budget", "exact timer and lifecycle selectors", "public config/origin/timeout/lock scenarios", "current guidance versus history"],
+    "limits": "Read-only fixture review; implementation, runtime regression and effective deployment pending"
+  },
+  "production_authorized": false,
+  "epic_complete": false
+}
