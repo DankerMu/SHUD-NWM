@@ -1,0 +1,66 @@
+{
+  "state": "SUCCEEDED",
+  "run_id": 34797419682,
+  "head_sha": "9b1e8068bdfa4cdc0405abc00b6ebd72e86a18dc",
+  "exact_head_verdict": "MATCH",
+  "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34797419682",
+  "started": "2026-09-14T01:54:28Z",
+  "ended": "2026-09-14T02:03:11Z",
+  "elapsed": "8m43s",
+  "run_conclusion": "success",
+  "jobs": {
+    "executed": [
+      {
+        "id": 103833109972,
+        "name": "Detect changed areas",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 103833134120,
+        "name": "Unit Tests",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ],
+    "skipped": [
+      {
+        "id": 103833134786,
+        "name": "Markdown Lint",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 103833134957,
+        "name": "Unit Tests (full)",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 103833134984,
+        "name": "Frontend Build",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 103833134990,
+        "name": "OpenAPI Validate",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 103833134995,
+        "name": "JSON Schema Validate",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 103833135043,
+        "name": "SQL Migration Dry Run",
+        "status": "completed",
+        "conclusion": "skipped"
+      }
+    ]
+  },
+  "failures": []
+}

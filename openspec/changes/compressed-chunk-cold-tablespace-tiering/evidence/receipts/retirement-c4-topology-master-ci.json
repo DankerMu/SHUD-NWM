@@ -1,0 +1,213 @@
+{
+  "conclusion": "success",
+  "createdAt": "2026-09-14T02:43:26Z",
+  "headSha": "6635891df2aba26ef9e542877b7f0e19908dca38",
+  "jobs": [
+    {
+      "completedAt": "2026-09-14T02:43:35Z",
+      "conclusion": "success",
+      "databaseId": 103841060441,
+      "name": "Detect changed areas",
+      "startedAt": "2026-09-14T02:43:28Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-14T02:43:29Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-14T02:43:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:34Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-14T02:43:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:34Z",
+          "conclusion": "success",
+          "name": "Run dorny/paths-filter@v3",
+          "number": 3,
+          "startedAt": "2026-09-14T02:43:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:34Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 6,
+          "startedAt": "2026-09-14T02:43:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:34Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 7,
+          "startedAt": "2026-09-14T02:43:34Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841060441"
+    },
+    {
+      "completedAt": "2026-09-14T03:25:09Z",
+      "conclusion": "success",
+      "databaseId": 103841083133,
+      "name": "Unit Tests (full)",
+      "startedAt": "2026-09-14T02:43:37Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-14T02:43:38Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-14T02:43:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:47Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-14T02:43:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:43:48Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 3,
+          "startedAt": "2026-09-14T02:43:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:44:25Z",
+          "conclusion": "success",
+          "name": "Install dependencies",
+          "number": 4,
+          "startedAt": "2026-09-14T02:43:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T02:44:25Z",
+          "conclusion": "success",
+          "name": "Prepare scratch evidence root",
+          "number": 5,
+          "startedAt": "2026-09-14T02:44:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T03:25:07Z",
+          "conclusion": "success",
+          "name": "Run full unit test suite",
+          "number": 6,
+          "startedAt": "2026-09-14T02:44:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T03:25:07Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 11,
+          "startedAt": "2026-09-14T03:25:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T03:25:08Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 12,
+          "startedAt": "2026-09-14T03:25:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-14T03:25:08Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 13,
+          "startedAt": "2026-09-14T03:25:08Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841083133"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841083646,
+      "name": "Frontend Build",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841083646"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841083724,
+      "name": "OpenAPI Validate",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841083724"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841083866,
+      "name": "JSON Schema Validate",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841083866"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841084017,
+      "name": "Markdown Lint",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841084017"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841084235,
+      "name": "Unit Tests",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841084235"
+    },
+    {
+      "completedAt": "2026-09-14T02:43:36Z",
+      "conclusion": "skipped",
+      "databaseId": 103841084239,
+      "name": "SQL Migration Dry Run",
+      "startedAt": "2026-09-14T02:43:36Z",
+      "status": "completed",
+      "steps": [],
+      "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640/job/103841084239"
+    }
+  ],
+  "status": "completed",
+  "updatedAt": "2026-09-14T03:25:10Z",
+  "url": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34800157640",
+  "full_pytest": {
+    "passed": 20238,
+    "skipped": 19,
+    "deselected": 315,
+    "warnings": 2,
+    "seconds": 2434.39,
+    "source": "Monitor captured full job103841083133 terminal log; exact run status independently queried.",
+    "command": "pytest tests/ -q --tb=short --durations=25 -m \"not e2e and not grib and not integration\""
+  }
+}

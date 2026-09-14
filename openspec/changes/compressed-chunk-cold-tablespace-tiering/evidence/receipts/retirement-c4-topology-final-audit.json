@@ -1,0 +1,8 @@
+{
+  "head": "9b1e8068bdfa4cdc0405abc00b6ebd72e86a18dc",
+  "command": "uv run python .workplans/pr-2321/topology-repro.py",
+  "exit": 0,
+  "seconds": 18.41,
+  "hard_gate_status": "pass",
+  "hard_gate_failing_count": 0
+}
