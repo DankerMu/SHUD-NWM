@@ -81,6 +81,9 @@ budget fields. Real launcher and collection/survivor proofs are required.
   with behavioral proof before R3.6. Preserve meaning, not synthetic positional
   compatibility or the four-lane cold protocol. A shipping query API alone is
   not the replacement performance recorder or its identity validation.
+  Fresh implementation fixture: `fixtures/retirement-pgdata-workload.md`;
+  approved full SQL/API measurement, named binding, plan and identity behavior.
+  Fixture approval is not implementation or deployment proof.
 - [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,
   pre-write restoration, no stale post-write rollback, bounded commands and
@@ -239,6 +242,11 @@ retired test container changes owner.
   R5 deployment boundaries. Historical cold fixture approvals do not authorize
   these edits. Require fresh independent review, finding verification, Gap
   Sweep, regression evidence and exact-head CI before merge.
+  Remaining-slice fixture review record:
+  `evidence/retirement-remaining-fixture-reviews.json`. Workload, compression and
+  remaining deletion fixtures have independent approval. Implementation review,
+  regression and deployment
+  requirements are not completed by fixture approval.
 - [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
   surviving-spec updates and the G7-only REMOVED delta but never promotes withdrawn
   cold-enabling ADDED requirements. There is no canonical
