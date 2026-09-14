@@ -71,6 +71,7 @@
 
 ### D8. 时间轴控制条复用 `M11Timeline`
 - **Superseded by #2014（2026-09-07）**：本节「流域详情模式共用控制条，周期来自该流域 run 列表、时次来自 run metadata（**现有逻辑**）」的括注前提在两条轴上都不成立——(i) run 周期在仓内**无任何透出面**（`BasinDataSnapshot` 无该字段，且 `fetchRunsPageByStatus` 按 URL `cycle` 过滤 run 列表），(ii) run 的时次列表虽由 `fetchLayerValidTimes('discharge', <run_id>)` 取回，但 `normalizeLayerStates` 恒消费 `metadata.valid_times`（全国合并保证其为数组）而将其丢弃（issue #2110）。更根本地，整条流域详情车道在当前构建里按构造不可达（issue #2109，未裁决）。**落地范围裁定（用户拍板）**：#2014 只交付本节的**全国半边**（起报时次 `<select>` + GFS/IFS 分段 + `M11Timeline` 复用 + `+{lead}h` 刻度 + fail-closed 禁用态）；**流域详情半边 blocked by #2109**，待裁决后按裁决方向重新切片（裁「删除」则本节该半边与相关 spec scenario 一并消失）。口径以 `tasks.md` 的 `### #2014` 节为准（**共享 change 纪律：原文保留不原地改写**）。
+- **Superseded by #2109 裁决 B（2026-09-13）**：流域详情车道整体退役（删除而非接通），上一条「流域详情半边 blocked by #2109」随之消解为**不做**；本节与 D8 下一行里「流域详情模式共用控制条…（现有逻辑）」一句不再是需求。规范文本已在本 change 的 spec delta 中同步删去（`map-layer-timeline-controls` 源选择/时间轴两条 requirement 的流域详情条款、`frontend-mvt-layer-consumption` 的流域详情 scenario、`precipitation-raster-overlay` 的 `best`/`compare` 措辞、`frontend-visual-conformance` / `map-first-layout-conformance` 的流域详情与返回按钮字样）——spec delta 是待归档的规范源，与 `retire-basin-detail-lane` 分担同一批 requirement 会在归档时互相覆盖，故就地改 delta、prose 只加注（见该 change `design.md` D4）。
 - 底部居中玻璃条：起报时次 `<select>` + GFS/IFS 分段 + `M11Timeline`。`pickCurrentValidTime` 默认改为首项（lead=0）。全国尺度 URL `source=best` 解析为 `gfs`。流域详情模式共用控制条，周期来自该流域 run 列表、时次来自 run metadata（现有逻辑）。
 - 浮层位移：图例/返回按钮 `bottom-4`→`bottom-24`，notices `bottom-20`→`bottom-40`。
 

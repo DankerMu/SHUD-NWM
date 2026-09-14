@@ -2,8 +2,8 @@
 
 ### Requirement: URL query restores shareable state
 
-The system SHALL encode shareable overview and basin detail state in URL query
-parameters. The active hydrology product layer SHALL be encoded separately from
+The system SHALL encode shareable overview state in URL query parameters
+(basin-detail state is retired, #2109 decision B). The active hydrology product layer SHALL be encoded separately from
 the meteorological-station overlay. Station overlay visibility SHALL be encoded
 as `metStations=1` when enabled and omitted when disabled. Stale
 `layer=met-stations` URLs SHALL be accepted as a legacy alias and normalized to
@@ -17,14 +17,6 @@ a valid hydrology layer plus `metStations=1`.
   parameters
 - **AND** a valid hydrology `layer` MUST continue to drive hydrology MVT source
   selection independently of station overlay visibility.
-
-#### Scenario: Basin detail query is restored
-
-- **WHEN** an operator opens a basin detail URL containing valid
-  `basinVersionId`, `segmentId`, `source`, `cycle`, `validTime`, `layer`,
-  `metStations`, `warningLevel`, or search query
-- **THEN** the basin detail page MUST initialize the selected version, segment,
-  filters, station overlay state, and data requests from those parameters.
 
 #### Scenario: Legacy met-stations layer query is normalized
 
