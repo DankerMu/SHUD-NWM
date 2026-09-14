@@ -1,0 +1,144 @@
+"""Verification-only driver: frozen 415 code, inherited disposable container, fresh DB/state."""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extensions import make_dsn
+
+ROOT = Path("/home/nwm/tmp/i8-window-oracle-6fb30b552")
+NEW = Path("/home/nwm/NWM-i8-target-415cbd1e")
+RETAINED = Path("/home/nwm/NWM-governance-reviewed-1a32ebb7")
+OLD = Path("/home/nwm/NWM-i8-oracle-old-a8db554d")
+ORACLE = (
+    RETAINED
+    / "openspec/changes/timeseries-narrow-store-expand-contract"
+    / "receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt"
+)
+ORACLE_SHA = "162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2"
+CONTAINER = "nwm-i8-1987-window-volume-6fb30b552"
+IMAGE = "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+CONTAINER_ID = "a3b94458fbf20d57529f47add0d125529358ba7f7b6de603d7b2ce7f1bd512a1"
+VOLUME = "02dd738396b40d7cbd7e2455b7b339154dc3f0456ec832e8da3c69be051d8049"
+CASES = ("happy", "stop", "session", "fence", "do-before-ledger", "rename", "source", "restart")
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--case", choices=CASES, required=True)
+    args = parser.parse_args()
+    manifest = json.loads(args.manifest.read_text())
+    bundle = Path(manifest["bundle"])
+    assert bundle == Path("/home/nwm/.local/state/issue1987-tools") / manifest["tool_commit"]
+    for name, expected in manifest["hashes"].items():
+        assert sha(bundle / name) == expected, name
+    for root, expected in (
+        (NEW, "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"),
+        (RETAINED, "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"),
+        (OLD, "a8db554d6402bec642e9a05627eae64b2b79aec3"),
+    ):
+        assert subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip() == expected
+    assert sha(ORACLE) == ORACLE_SHA
+    container = json.loads(subprocess.check_output(["docker", "inspect", CONTAINER]))[0]
+    assert container["Id"] == CONTAINER_ID and container["Image"] == IMAGE
+    assert container["State"]["Running"] and container["Config"]["Labels"]["nhms.i8.disposable"] == "true"
+    assert container["HostConfig"]["NetworkMode"] != "host"
+    assert len(container["Mounts"]) == 1
+    mount = container["Mounts"][0]
+    assert mount["Type"] == "volume" and mount["Name"] == VOLUME and mount["Destination"] == "/home/postgres/pgdata"
+    assert container["NetworkSettings"]["Ports"]["5432/tcp"] == [{"HostIp": "127.0.0.1", "HostPort": "32771"}]
+    credentials = json.loads((ROOT / "credentials.json").read_text())
+    dbname = (
+        "i8_1987_"
+        + args.case.replace("-", "_")
+        + "_"
+        + manifest["tool_commit"][:8]
+        + "_"
+        + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    )
+    assert len(dbname) <= 63
+    connection = dict(host="127.0.0.1", port="32771", user=credentials["user"], password=credentials["password"])
+    conn = psycopg2.connect(dbname="postgres", **connection)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+    finally:
+        conn.close()
+    state = ROOT / (dbname + "-state")
+    command = [
+        sys.executable,
+        str(bundle / "window_smoke.py"),
+        "--oracle",
+        str(ORACLE),
+        "--old-repo",
+        str(OLD),
+        "--new-repo",
+        str(NEW),
+        "--original-new-repo",
+        str(RETAINED),
+        "--container",
+        CONTAINER,
+        "--state",
+        str(state),
+        "--case",
+        args.case,
+    ]
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("PG") and key not in {"DATABASE_URL", "I8_REHEARSAL_DSN"}
+    }
+    environment.update(
+        I8_REHEARSAL_DSN=make_dsn(dbname=dbname, **connection),
+        TMPDIR="/home/nwm/tmp",
+        PATH="/home/nwm/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    )
+    stdout_path, stderr_path = ROOT / (dbname + ".stdout"), ROOT / (dbname + ".stderr")
+    with stdout_path.open("xb") as out, stderr_path.open("xb") as err:
+        result = subprocess.run(command, cwd=NEW, env=environment, stdout=out, stderr=err, timeout=1800)
+    records = []
+    for line in stdout_path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        records.append({key: record[key] for key in ("result", "error_type", "check") if key in record})
+    receipt = dict(
+        case=args.case,
+        returncode=result.returncode,
+        command=command,
+        database=dbname,
+        state=str(state),
+        records=records,
+        tool_commit=manifest["tool_commit"],
+        deployment_sha=manifest["deployment_target"],
+        driver_sha256=sha(Path(__file__)),
+        manifest_sha256=sha(args.manifest),
+        oracle_sha256=ORACLE_SHA,
+        executors=manifest["hashes"],
+        logs={str(path): sha(path) for path in (stdout_path, stderr_path)},
+        production_operations=False,
+    )
+    receipt_path = ROOT / (dbname + ".receipt.json")
+    with receipt_path.open("x") as stream:
+        json.dump(receipt, stream, indent=2)
+    print(json.dumps(dict(receipt_path=str(receipt_path), **receipt)), flush=True)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

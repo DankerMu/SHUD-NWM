@@ -1,0 +1,238 @@
+{
+  "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "revisions": {
+    "old": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "retained": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+    "previous_assessment": "4df9bae14b2fda03fc421a1e40fd9cff1f599e82",
+    "target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+  },
+  "blobs": {
+    "old": {
+      ".python-version": "2c0733315e415bfb5e5b353f9996ecd964d395b2",
+      "apps/api/display_cache.py": "c6b201b785f9502dc276e6e17641ae9272e0dd78",
+      "apps/api/routes/forecast.py": "21eb04ec1066d5e1972138a21de4c12417f3d91f",
+      "apps/api/routes/hydro_display.py": "afb634f1c7a5d3785d7f767a104a5332ab323f8e",
+      "db/roles/node27_write_roles.sql": "5c7888d25b2aa9d5280807e69f20f66016e24c9a",
+      "packages/common/forecast_store.py": "5b47041e905e63cbdbaec8c8db565ea6829755de",
+      "packages/common/migrate.py": "fafa7c87fe20fc7021063e62f0fbd8e663c4cd67",
+      "packages/common/object_store.py": "a3f0087c38c298198861f62e7175b84966f64615",
+      "packages/common/redaction.py": "c26c8c88fac7e51ab4694b4894528751f3609c0d",
+      "packages/common/river_ts_render.py": "71a05bae0053c244800a2ce27ddd183646ecb6cb",
+      "packages/common/safe_fs.py": "71306a4b73c481fe60fb6c0e7515108b55231530",
+      "packages/common/storage.py": "9d8df4db47f8848a9b866971b27b0f726595111f",
+      "packages/common/timescale_write_guard.py": "b5b1b8ca5739b4a6e363fe838e65754f661845b6",
+      "pyproject.toml": "cf9798cc9363311db795ed6e6f3c64c6d8dc973a",
+      "scripts/node27_provision_write_roles.sh": "16edc432394a5c0900958d6aa7e8596451273922",
+      "scripts/node27_resource_governance.py": "fddde70bdabd86709bdbe54556ffd3b58ecf3f50",
+      "scripts/node27_resource_governance_once.sh": "bff77ef415c6e85503af8d6674c9a27cfd660358",
+      "services/tiles/mvt.py": "6c552329bebc2b29410929a23ccf1ce5cf9a9dd1",
+      "uv.lock": "8e2e70958ee72598cf18296a641e14cca52be034",
+      "workers/output_parser/__init__.py": "73a711e48e893abebe6ca70a3146966054c5ed6c",
+      "workers/output_parser/cli.py": "4abb20f8d0ed2a4ead2a46b2a1be335d4c4cb40e",
+      "workers/output_parser/parser.py": "6516e66519e4e6dc99bee8b5e3218f36ddc201b6"
+    },
+    "retained": {
+      ".python-version": "2c0733315e415bfb5e5b353f9996ecd964d395b2",
+      "apps/api/display_cache.py": "c6b201b785f9502dc276e6e17641ae9272e0dd78",
+      "apps/api/routes/forecast.py": "21eb04ec1066d5e1972138a21de4c12417f3d91f",
+      "apps/api/routes/hydro_display.py": "aee208dcd2ef1c23275db7e07590036961f9f07d",
+      "db/migrations/000059_river_timeseries_narrow_expand.sql": "ef3bfca1c798e51611c2e65fb6f290dad78358e5",
+      "db/roles/node27_write_roles.sql": "5c7888d25b2aa9d5280807e69f20f66016e24c9a",
+      "packages/common/forecast_store.py": "a2bdf298ed526a9bcd7ad637172a695847a15e6e",
+      "packages/common/migrate.py": "fafa7c87fe20fc7021063e62f0fbd8e663c4cd67",
+      "packages/common/object_store.py": "a3f0087c38c298198861f62e7175b84966f64615",
+      "packages/common/redaction.py": "c26c8c88fac7e51ab4694b4894528751f3609c0d",
+      "packages/common/river_ts_render.py": "71a05bae0053c244800a2ce27ddd183646ecb6cb",
+      "packages/common/safe_fs.py": "71306a4b73c481fe60fb6c0e7515108b55231530",
+      "packages/common/storage.py": "9d8df4db47f8848a9b866971b27b0f726595111f",
+      "packages/common/timescale_write_guard.py": "b5b1b8ca5739b4a6e363fe838e65754f661845b6",
+      "pyproject.toml": "99d74a17caf98e8b5556be997c9bc6bd10485ad8",
+      "scripts/node27_provision_write_roles.sh": "16edc432394a5c0900958d6aa7e8596451273922",
+      "scripts/node27_resource_governance.py": "eb291e6478e8bdca1e94d1996a0094ed3541a59c",
+      "scripts/node27_resource_governance_once.sh": "bff77ef415c6e85503af8d6674c9a27cfd660358",
+      "services/tiles/mvt.py": "991ff25abab73e43d90d23f8218bea1e408cde7a",
+      "uv.lock": "f4f667dc58dd95adb7649c339dafc6c9ffdc539a",
+      "workers/output_parser/__init__.py": "73a711e48e893abebe6ca70a3146966054c5ed6c",
+      "workers/output_parser/cli.py": "227f5fed1020592c9eb05279e0b3306473d4f5f2",
+      "workers/output_parser/parser.py": "5c8cfaf574f5bb1ad0fd10c205f8283c45dc0e7a"
+    },
+    "previous_assessment": {
+      ".python-version": "2c0733315e415bfb5e5b353f9996ecd964d395b2",
+      "apps/api/display_cache.py": "c6b201b785f9502dc276e6e17641ae9272e0dd78",
+      "apps/api/routes/forecast.py": "09216579455d99ec4fe313505b6321c91e1daae3",
+      "apps/api/routes/hydro_display.py": "aee208dcd2ef1c23275db7e07590036961f9f07d",
+      "db/migrations/000059_river_timeseries_narrow_expand.sql": "ef3bfca1c798e51611c2e65fb6f290dad78358e5",
+      "db/roles/node27_write_roles.sql": "5c7888d25b2aa9d5280807e69f20f66016e24c9a",
+      "packages/common/forecast_store.py": "a2bdf298ed526a9bcd7ad637172a695847a15e6e",
+      "packages/common/migrate.py": "22379ec6fe5b7c061df2c09ab2143cd9d405cad5",
+      "packages/common/object_store.py": "a3f0087c38c298198861f62e7175b84966f64615",
+      "packages/common/redaction.py": "c26c8c88fac7e51ab4694b4894528751f3609c0d",
+      "packages/common/river_ts_render.py": "71a05bae0053c244800a2ce27ddd183646ecb6cb",
+      "packages/common/safe_fs.py": "71306a4b73c481fe60fb6c0e7515108b55231530",
+      "packages/common/storage.py": "9d8df4db47f8848a9b866971b27b0f726595111f",
+      "packages/common/timescale_write_guard.py": "b5b1b8ca5739b4a6e363fe838e65754f661845b6",
+      "pyproject.toml": "99d74a17caf98e8b5556be997c9bc6bd10485ad8",
+      "scripts/node27_provision_write_roles.sh": "16edc432394a5c0900958d6aa7e8596451273922",
+      "scripts/node27_resource_governance.py": "9d8ec5476298bfe64e8d22f2ff751a5ac7061f91",
+      "scripts/node27_resource_governance_once.sh": "bff77ef415c6e85503af8d6674c9a27cfd660358",
+      "services/tiles/mvt.py": "991ff25abab73e43d90d23f8218bea1e408cde7a",
+      "uv.lock": "f4f667dc58dd95adb7649c339dafc6c9ffdc539a",
+      "workers/output_parser/__init__.py": "73a711e48e893abebe6ca70a3146966054c5ed6c",
+      "workers/output_parser/cli.py": "227f5fed1020592c9eb05279e0b3306473d4f5f2",
+      "workers/output_parser/parser.py": "5c8cfaf574f5bb1ad0fd10c205f8283c45dc0e7a"
+    },
+    "target": {
+      ".python-version": "2c0733315e415bfb5e5b353f9996ecd964d395b2",
+      "apps/api/display_cache.py": "c6b201b785f9502dc276e6e17641ae9272e0dd78",
+      "apps/api/routes/forecast.py": "09216579455d99ec4fe313505b6321c91e1daae3",
+      "apps/api/routes/hydro_display.py": "aee208dcd2ef1c23275db7e07590036961f9f07d",
+      "db/migrations/000059_river_timeseries_narrow_expand.sql": "ef3bfca1c798e51611c2e65fb6f290dad78358e5",
+      "db/roles/node27_write_roles.sql": "5c7888d25b2aa9d5280807e69f20f66016e24c9a",
+      "packages/common/forecast_store.py": "a2bdf298ed526a9bcd7ad637172a695847a15e6e",
+      "packages/common/migrate.py": "22379ec6fe5b7c061df2c09ab2143cd9d405cad5",
+      "packages/common/node27_resource_governance_collection.py": "c47d1b567ea8089a66f2dea3c120da7b20ecc01d",
+      "packages/common/object_store.py": "a3f0087c38c298198861f62e7175b84966f64615",
+      "packages/common/redaction.py": "c26c8c88fac7e51ab4694b4894528751f3609c0d",
+      "packages/common/river_ts_render.py": "71a05bae0053c244800a2ce27ddd183646ecb6cb",
+      "packages/common/safe_fs.py": "71306a4b73c481fe60fb6c0e7515108b55231530",
+      "packages/common/storage.py": "9d8df4db47f8848a9b866971b27b0f726595111f",
+      "packages/common/timescale_write_guard.py": "b5b1b8ca5739b4a6e363fe838e65754f661845b6",
+      "pyproject.toml": "99d74a17caf98e8b5556be997c9bc6bd10485ad8",
+      "scripts/node27_c4_production_acceptance.py": "fc8697a9815277eace10c25e6d6363ca469a408a",
+      "scripts/node27_provision_write_roles.sh": "16edc432394a5c0900958d6aa7e8596451273922",
+      "scripts/node27_resource_governance.py": "ce9e15c6c20de036567d8c212eff52508a2eaf9f",
+      "scripts/node27_resource_governance_once.sh": "bff77ef415c6e85503af8d6674c9a27cfd660358",
+      "services/production_closure/c4_production_acceptance.py": "e3117a1f50fe9ce7b49df3797df950f70820b42e",
+      "services/production_closure/c4_production_acceptance_io.py": "5ddad84a9a02efbd444a6a4ee3c2fe3ebe51468e",
+      "services/tiles/mvt.py": "991ff25abab73e43d90d23f8218bea1e408cde7a",
+      "uv.lock": "f4f667dc58dd95adb7649c339dafc6c9ffdc539a",
+      "workers/output_parser/__init__.py": "73a711e48e893abebe6ca70a3146966054c5ed6c",
+      "workers/output_parser/cli.py": "227f5fed1020592c9eb05279e0b3306473d4f5f2",
+      "workers/output_parser/parser.py": "5c8cfaf574f5bb1ad0fd10c205f8283c45dc0e7a"
+    }
+  },
+  "consumed_migration_ast_equal": {
+    "split_sql_statements": true,
+    "ensure_schema_migrations_table": true,
+    "migration_has_been_applied": true,
+    "record_migration": true,
+    "apply_migration": true
+  },
+  "actual_4df_to415_delta": "M\tpackages/common/node27_cold_governance_collection.py\nA\tpackages/common/node27_resource_governance_collection.py\nA\tscripts/node27_c4_production_acceptance.py\nM\tscripts/node27_resource_governance.py\nA\tservices/production_closure/c4_production_acceptance.py\nA\tservices/production_closure/c4_production_acceptance_io.py",
+  "surfaces": [
+    {
+      "surface": "worker imports",
+      "paths": [
+        "workers/output_parser/parser.py",
+        "workers/output_parser/__init__.py",
+        "workers/output_parser/cli.py",
+        "packages/common/forecast_store.py",
+        "packages/common/migrate.py",
+        "packages/common/river_ts_render.py",
+        "packages/common/object_store.py",
+        "packages/common/storage.py",
+        "packages/common/timescale_write_guard.py",
+        "packages/common/safe_fs.py",
+        "packages/common/redaction.py",
+        ".python-version",
+        "pyproject.toml",
+        "uv.lock"
+      ],
+      "evidence": "Actual415 worker paths in eight-case matrix; original1a32 negative worker runs its own interpreter; exact blob inventory."
+    },
+    {
+      "surface": "preparse",
+      "paths": [
+        "workers/output_parser/parser.py"
+      ],
+      "evidence": "Immutable parser blob; bounded real-sample path in415 window oracle. Actual fresh prepare is blocked before completing admission."
+    },
+    {
+      "surface": "parse",
+      "paths": [
+        "workers/output_parser/parser.py"
+      ],
+      "evidence": "Actual isolated415 parser write/route/rows under complete window matrix; no production parse."
+    },
+    {
+      "surface": "narrow reader",
+      "paths": [
+        "packages/common/forecast_store.py",
+        "packages/common/river_ts_render.py"
+      ],
+      "evidence": "Actual415 exact retained selector168/hash84a95266 plus isolated matrix fact equality."
+    },
+    {
+      "surface": "legacy reader",
+      "paths": [
+        "packages/common/forecast_store.py"
+      ],
+      "evidence": "OLDa8db response preserved through expand/D12; separate old and target blobs recorded."
+    },
+    {
+      "surface": "migrate worker",
+      "paths": [
+        "packages/common/migrate.py",
+        "db/migrations/000059_river_timeseries_narrow_expand.sql"
+      ],
+      "evidence": "Five consumed function ASTs identical1a32->415; main changed but not invoked. Actual isolated415 commit and ledger retention verified."
+    },
+    {
+      "surface": "cycles and national tiles",
+      "paths": [
+        "apps/api/routes/hydro_display.py",
+        "apps/api/display_cache.py",
+        "services/tiles/mvt.py"
+      ],
+      "evidence": "Immutable blobs unchanged1a32->415; real uncached four-route acceptance remains parent1987/2280, not claimed here."
+    },
+    {
+      "surface": "forecast selector guards",
+      "paths": [
+        "apps/api/routes/forecast.py"
+      ],
+      "evidence": "Changed hindcast-role handling accounted by source map; configured404 identity mismatch/422 unsupported variable remain distinct. Parent live route proof not claimed."
+    },
+    {
+      "surface": "unit/process drain",
+      "paths": [
+        "openspec/changes/refresh-node27-window-admission/tools/window_execute.py",
+        "scripts/node27_provision_write_roles.sh",
+        "db/roles/node27_write_roles.sql"
+      ],
+      "evidence": "Source-bound inherited drain and simulated boundary cases retained. Actualprepare refused two failed maintenance units; no drain or service repair executed."
+    },
+    {
+      "surface": "governance audit",
+      "paths": [
+        "scripts/node27_resource_governance.py",
+        "packages/common/node27_resource_governance_collection.py",
+        "scripts/node27_resource_governance_once.sh"
+      ],
+      "evidence": "Actual415 readonly audit, unchanged privateenv and real primary device binding, exit0/critical[]. All recommendations retained in projection."
+    },
+    {
+      "surface": "governance unstage",
+      "paths": [
+        "openspec/changes/refresh-node27-window-admission/tools/governance_stage.py"
+      ],
+      "evidence": "Original f24 creates stagedstate;8 discriminating handoff cases +10 inherited cases. Real pin/identity hashes unchanged around actualprepare; production unstage not executed."
+    },
+    {
+      "surface": "downstream C4 owner",
+      "paths": [
+        "scripts/node27_c4_production_acceptance.py",
+        "services/production_closure/c4_production_acceptance.py",
+        "services/production_closure/c4_production_acceptance_io.py"
+      ],
+      "evidence": "Exact415 blobs bound; three new C4 owners explicitly parent-only. No C4 implementation or production acceptance claim."
+    }
+  ],
+  "correction_to_scout_summary": "Parent Git-object evidence, not the earlier two-owner summary, is authoritative: cold collection modification and three new C4 owners are also present.",
+  "tool_hashes": {
+    "window_execute.py": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "1336af63bc3549a295586b70d972446625258353bb62616d25c70ca1b59afc56"
+  }
+}

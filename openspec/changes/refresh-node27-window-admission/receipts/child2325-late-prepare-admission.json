@@ -1,0 +1,88 @@
+{
+  "path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/late-prepare-admission.json",
+  "raw_sha256": "3e36f430dc4d4f071b9b05167147ce4af0a9aa16e756b08b54aa98b385faa057",
+  "data": {
+    "binding": {
+      "original_expected_oid": 24541,
+      "fixture_expected_oid": 132947,
+      "transformed_constant_count": 1,
+      "source_sha256": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+      "limitation": "Actual prepare control flow with fixture expected-OID substitution, not byte-identical execution."
+    },
+    "cases": [
+      {
+        "case": "prepare-no-go",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "COMMAND_FAILED",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/late-prepare"
+        },
+        "system_actions": [],
+        "dump_invocations": 1,
+        "serving_unchanged": true,
+        "catalog_unchanged": true,
+        "ledger_unchanged": true
+      },
+      {
+        "case": "recover-no-go",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "RECOVERY_GO_REQUIRED",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/late-prepare"
+        },
+        "system_actions": [],
+        "dump_invocations": 0,
+        "serving_unchanged": true,
+        "catalog_unchanged": true,
+        "ledger_unchanged": true
+      },
+      {
+        "case": "status-no-go",
+        "returncode": 0,
+        "receipt": {
+          "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
+          "executor_lock_held": false,
+          "fence_epochs": [],
+          "inspection_only": true,
+          "last_command_rc": 23,
+          "new_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+          "old_oid": 132947,
+          "old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/late-prepare",
+          "status_is_not_live_health": true,
+          "updated_at": "2026-09-14T05:14:48.160530+00:00"
+        },
+        "system_actions": [],
+        "dump_invocations": 0,
+        "serving_unchanged": true,
+        "catalog_unchanged": true,
+        "ledger_unchanged": true
+      },
+      {
+        "case": "recover-go",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/late-prepare"
+        },
+        "system_actions": [],
+        "dump_invocations": 0,
+        "serving_unchanged": true,
+        "catalog_unchanged": true,
+        "ledger_unchanged": true
+      }
+    ]
+  }
+}

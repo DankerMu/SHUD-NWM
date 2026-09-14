@@ -1,0 +1,47 @@
+{
+  "governance_failure_candidate": "aa19a0e9abdb3262059e8e161fc342de23b102bd",
+  "governance_failure": "active_runner expected staged but real protocol had durably admitted unstage_prepared and stopped timer; fixed oracle to prove failure plus same-state recovery ordering",
+  "governance_fix_commit": "f648718b75b61591105ae91a7742844c2019604f",
+  "window_failure_candidate": "f648718b75b61591105ae91a7742844c2019604f",
+  "observed_origin": {
+    "probe": "DEBUG-i2325-origin",
+    "module": "workers.output_parser.parser",
+    "module_file": "/home/nwm/NWM-i8-target-415cbd1e/workers/output_parser/parser.py",
+    "expected_repo": "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+    "executable": "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python3",
+    "retained_root_already_first_in_sys_path": true,
+    "target_site_packages_and_editable_path_hook_present": true,
+    "guard": "MODULE_ORIGIN_MISMATCH",
+    "source": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_f648718b_20260914050336941522.stdout",
+    "published_code_changed": false,
+    "assertions_changed": false,
+    "runtime_acceptance_evidence": false
+  },
+  "window_fix_commit": "b55c7ef9b43eceeae439915629383dfaf0b36a3e",
+  "window_fix": "Fresh selected-repo interpreter; no origin gate relaxation, no module path spoofing. Actual original pending refusal proven after fix.",
+  "launch_only_correction": "First governance launch lacked repository cwd for optional git fallback; used existing --original-executor with an immutable hash-checked f24 file. No executor change.",
+  "local_hygiene_correction": "Removed unused outer DSN parse after process isolation; targeted Ruff passed.",
+  "diagnostic_runs_are_not_acceptance_pass": true,
+  "drivers": {
+    "window-oracle-launch": {
+      "receipt": "child2325-window-oracle-launch.py.txt",
+      "sha256": "68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230"
+    },
+    "readonly-audit-launch": {
+      "receipt": "child2325-readonly-audit-launch.py.txt",
+      "sha256": "3056ffa497dfd7233460efe5468456634e8a3f43e024d4b8d23a4e9654a137ba"
+    },
+    "selector-launch": {
+      "receipt": "child2325-selector-launch.py.txt",
+      "sha256": "db02ed1c472bec6bc7ae5339d322c9e8330366fb6c9eb6221b49ddcc30c5edfb"
+    },
+    "prepare-inputs": {
+      "receipt": "child2325-prepare-inputs.py.txt",
+      "sha256": "07fe96d80102afa37be57986c8b2bb008ea0808c5691752bd2b555aab646e5d0"
+    },
+    "prepare-launch": {
+      "receipt": "child2325-prepare-launch.py.txt",
+      "sha256": "163c453a275a637db6c9e4440342f13af5cbbfc86c426d4b0ea3344dc191c316"
+    }
+  }
+}

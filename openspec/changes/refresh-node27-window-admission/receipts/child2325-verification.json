@@ -1,0 +1,127 @@
+{
+  "schema_version": "issue2325.frozen-runtime-qualification.v1",
+  "issue": 2325,
+  "status": "BLOCKED",
+  "task_2_1_complete": false,
+  "deployment_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+  "tool_commit": "b55c7ef9b43eceeae439915629383dfaf0b36a3e",
+  "tool_hashes": {
+    "window_execute.py": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "1336af63bc3549a295586b70d972446625258353bb62616d25c70ca1b59afc56"
+  },
+  "effective_fixture_tier": "high",
+  "previous_pr_three_seat_exception_inherited": false,
+  "proofs": {
+    "window": {
+      "status": "PASS",
+      "cases": 8,
+      "receipt": "child2325-window-matrix.json"
+    },
+    "historical_ledger": {
+      "status": "PASS",
+      "real_original_worker_interpreter": "retained1a32",
+      "changed_worker_interpreter": "target415",
+      "receipt": "child2325-historical-ledger-admission.json"
+    },
+    "cli": {
+      "status": "PASS",
+      "cases": 14,
+      "receipt": "child2325-entrypoint-admission.json"
+    },
+    "late_prepare": {
+      "status": "PASS",
+      "cases": 4,
+      "receipt": "child2325-late-prepare-admission.json"
+    },
+    "governance_handoff": {
+      "status": "PASS",
+      "same_tool_cases": 10,
+      "handoff_cases": 8,
+      "executed_tool_commit": "f648718b75b61591105ae91a7742844c2019604f",
+      "governance_hashes_identical_to_current": true,
+      "rerun_on_current_commit_claimed": false,
+      "receipt": "child2325-governance-handoff.json"
+    },
+    "actual_readonly_audit": {
+      "status": "PASS",
+      "exit": 0,
+      "critical_codes": [],
+      "receipt": "child2325-readonly-audit.json"
+    },
+    "exact_selector": {
+      "status": "PASS",
+      "points": 168,
+      "response_sha256": "84a95266f402a20d9f26834bba5f16972266f1075e6859798eea37b82738b483",
+      "receipt": "child2325-selector.json"
+    },
+    "actual_fresh_prepare": {
+      "status": "REFUSED",
+      "exit": 1,
+      "check": "REQUIRED_UNIT_NOT_ADMITTED",
+      "receipt": "child2325-prepare-result.json",
+      "blocker": "https://github.com/DankerMu/SHUD-NWM/issues/2349"
+    }
+  },
+  "source_interfaces": "child2325-source-evidence.json",
+  "input_publication": "child2325-input-publication.json",
+  "drivers": {
+    "window-oracle-launch": {
+      "receipt": "child2325-window-oracle-launch.py.txt",
+      "sha256": "68d139d0c7f327c6b397145c01c945fb0c6754697fded385bb5a31928b25c230"
+    },
+    "readonly-audit-launch": {
+      "receipt": "child2325-readonly-audit-launch.py.txt",
+      "sha256": "3056ffa497dfd7233460efe5468456634e8a3f43e024d4b8d23a4e9654a137ba"
+    },
+    "selector-launch": {
+      "receipt": "child2325-selector-launch.py.txt",
+      "sha256": "db02ed1c472bec6bc7ae5339d322c9e8330366fb6c9eb6221b49ddcc30c5edfb"
+    },
+    "prepare-inputs": {
+      "receipt": "child2325-prepare-inputs.py.txt",
+      "sha256": "07fe96d80102afa37be57986c8b2bb008ea0808c5691752bd2b555aab646e5d0"
+    },
+    "prepare-launch": {
+      "receipt": "child2325-prepare-launch.py.txt",
+      "sha256": "163c453a275a637db6c9e4440342f13af5cbbfc86c426d4b0ea3344dc191c316"
+    }
+  },
+  "diagnostics": "child2325-diagnostics.json",
+  "hygiene": {
+    "targeted_tool_ruff": "PASS",
+    "driver_ruff": "PASS",
+    "strict_openspec": "PASS after blocked-status evidence update",
+    "tasks_markdownlint": "PASS, 0 issues"
+  },
+  "review": {
+    "shared_fixture_review": "fixture-review-2.json PASS covers both children; issue-alignment.json CLEAN",
+    "comprehensive_rounds": 0,
+    "final_review_completed": false,
+    "merge_eligible": false,
+    "reason": "Mandatory Phase2 actual prepare criterion is blocked, not silently deferred."
+  },
+  "scope_limits": [
+    "Governance system/Git/import/network boundaries simulated; actual415 audit is separate, not production unstage.",
+    "Window unit/process/network boundaries are simulated; isolated actual prepare uses one expected-OID substitution, not byte-identical production prepare.",
+    "PostgreSQL/parser/reader and window ledger/OIDs are real in disposable container; expected prepare OID substitution in isolated oracle remains disclosed.",
+    "Prior large-write timing is not rerun or relabelled as415 timing.",
+    "Private preparation logs/snapshots may contain credentials and stay private; only public results and filtered unit evidence are exported.",
+    "New inputs preserve prior authority as historical payload; they authorize only candidate prepare, not T0."
+  ],
+  "retained_assets": {
+    "remote_target_checkout": "/home/nwm/NWM-i8-target-415cbd1e",
+    "bundle": "/home/nwm/.local/state/issue1987-tools/b55c7ef9b43eceeae439915629383dfaf0b36a3e",
+    "failed_state": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-prepare",
+    "input_bundle": "/home/nwm/.local/state/issue2325-window-b55c7ef9b43e-inputs",
+    "cleanup_trigger": "Retain for authorized maintenance recovery and new qualification; shared change/archive only after parent window/handoff ends."
+  },
+  "remaining": [
+    "Resolve2349 with separately authorized operations; do not mask unit failure or remove locks.",
+    "Use a NEW state and hash-bound inputs for a successful fresh prepare; preserve failed state and original ownership.",
+    "Then complete task2.1, standard high-tier four-seat review, independent final review, CI and merge gates.",
+    "Accountability PR2341 gets its own log entry alongside next implementation merge.",
+    "Parent1987/2280 execution gates remain separate; no T0/window/recover/unstage performed."
+  ]
+}

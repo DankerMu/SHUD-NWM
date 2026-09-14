@@ -1,0 +1,189 @@
+{
+  "path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-ledger-admission.json",
+  "raw_sha256": "579826f24ba398d01a233d591608f04833475b7d4fedc05c2a8311390f3e84a7",
+  "data": {
+    "retired": [
+      "000007_flood.sql",
+      "000015_flood_return_period_identity_indexes.sql",
+      "000017_return_period_max_over_window_identity.sql",
+      "000020_valid_time_discovery_indexes.sql",
+      "000031_search_discovery_return_period_performance.sql",
+      "000034_return_period_run_quality_materialization.sql",
+      "000036_run_product_quality_explicit_source.sql"
+    ],
+    "ledger_before": [
+      "000001_extensions.sql",
+      "000002_schemas.sql",
+      "000003_enums.sql",
+      "000004_core.sql",
+      "000005_met.sql",
+      "000006_hydro.sql",
+      "000007_flood.sql",
+      "000008_map.sql",
+      "000009_ops.sql",
+      "000010_indexes.sql",
+      "000011_pipeline_job_model_id.sql",
+      "000012_pipeline_job_array_task.sql",
+      "000013_enum_remediation.sql",
+      "000014_best_available_lineage.sql",
+      "000015_flood_return_period_identity_indexes.sql",
+      "000016_river_segment_pagination_indexes.sql",
+      "000017_return_period_max_over_window_identity.sql",
+      "000018_tile_cache_m16_contract.sql",
+      "000019_hydro_mvt_identity_lookup_idx.sql",
+      "000020_valid_time_discovery_indexes.sql",
+      "000021_latest_ready_run_discovery_idx.sql",
+      "000022_model_asset_lifecycle.sql",
+      "000023_interp_weight_grid_signature.sql",
+      "000024_qhh_latest_display_product_indexes.sql",
+      "000025_active_manual_retry_guard.sql",
+      "000026_ops_strict_identity_indexes.sql",
+      "000027_cycle_status_canonical_incomplete.sql",
+      "000028_state_lineage.sql",
+      "000029_pipeline_reservation.sql",
+      "000030_qhh_latest_display_parsed_status_index.sql",
+      "000031_search_discovery_performance.sql",
+      "000031_search_discovery_return_period_performance.sql",
+      "000032_source_specific_state_snapshot.sql",
+      "000033_station_mvt_active_source_index.sql",
+      "000034_return_period_run_quality_materialization.sql",
+      "000035_qhh_display_coverage_materialization.sql",
+      "000036_run_product_quality_explicit_source.sql",
+      "000037_river_segment_multilinestring.sql",
+      "000038_direct_grid_interp_weight_constraints.sql",
+      "000039_crosswalk_external_identity.sql",
+      "000040_display_ready_succeeded_status_index.sql",
+      "000041_drop_redundant_river_qhh_latest_window_idx.sql",
+      "000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+      "000043_canonical_grid_snapshot.sql",
+      "000044_canonical_grid_snapshot_identity_unique.sql",
+      "000045_hydro_run_type_hindcast.sql",
+      "000046_state_snapshot_clone_provenance.sql",
+      "000047_hypertable_compression_settings.sql",
+      "000048_river_segment_stream_type.sql",
+      "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql",
+      "000050_river_identity_normalization.sql",
+      "000051_river_ts_surrogate_key_read_index.sql",
+      "000052_authority_stats_hygiene_trgm_expression_index.sql",
+      "000053_state_snapshot_clone_gate_kind.sql",
+      "000054_met_station_trgm_expression_index.sql",
+      "000055_ops_ingest_recompute_decline.sql",
+      "000056_hydro_run_parsed_at.sql",
+      "000057_river_network_version_geometry_generation.sql",
+      "000058_hot_timeseries_chunk_interval_3d.sql"
+    ],
+    "f24_execute_sha256": "75450451c063e8731d66fd02c64cb73a52e96fa785b0d4e434653698be13e83b",
+    "changed_execute_sha256": "a62aac06db72f7eaabbf81a54f0706c4fc803fbbebb58099532c7f078c1f6eb5",
+    "changed_worker_positive": "deferred-to-happy-path-real-e.worker(migrate)",
+    "worker_protocol": "Fresh selected-repo .venv/bin/python child; cwd=repo; argv worker --state/--action migrate/--repo/--sha; DATABASE_URL env-only; no PYTHONPATH/PYTHONHOME; private wrapper only patches _WORKER_DATABASE/_WORKER_PORT/_WORKER_USERS.",
+    "cases": [
+      {
+        "site": "worker",
+        "pending": "extra",
+        "returncode": 1,
+        "payload": {
+          "error_type": "Refusal"
+        },
+        "child": {
+          "python": "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python",
+          "cwd": "/home/nwm/NWM-i8-target-415cbd1e",
+          "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+          "source": "/home/nwm/.local/state/issue1987-tools/b55c7ef9b43eceeae439915629383dfaf0b36a3e/window_execute.py",
+          "wrapper": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-worker-wrapper-e975ee999ffe.py",
+          "stdout": "historical-worker-4.stdout",
+          "stderr": "historical-worker-4.stderr",
+          "returncode": 1
+        }
+      },
+      {
+        "site": "worker",
+        "pending": "zero",
+        "returncode": 1,
+        "payload": {
+          "error_type": "Refusal"
+        },
+        "child": {
+          "python": "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python",
+          "cwd": "/home/nwm/NWM-i8-target-415cbd1e",
+          "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+          "source": "/home/nwm/.local/state/issue1987-tools/b55c7ef9b43eceeae439915629383dfaf0b36a3e/window_execute.py",
+          "wrapper": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-worker-wrapper-e975ee999ffe.py",
+          "stdout": "historical-worker-5.stdout",
+          "stderr": "historical-worker-5.stderr",
+          "returncode": 1
+        }
+      },
+      {
+        "site": "worker-f24",
+        "pending": "historical",
+        "returncode": 1,
+        "payload": {
+          "error_type": "Refusal"
+        },
+        "child": {
+          "python": "/home/nwm/NWM-governance-reviewed-1a32ebb7/.venv/bin/python",
+          "cwd": "/home/nwm/NWM-governance-reviewed-1a32ebb7",
+          "sha": "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32",
+          "source": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/f24-window_execute.py",
+          "wrapper": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-worker-wrapper-a661c8c713c2.py",
+          "stdout": "historical-worker-6.stdout",
+          "stderr": "historical-worker-6.stderr",
+          "returncode": 1
+        }
+      },
+      {
+        "site": "prepare",
+        "pending": "extra",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "PENDING_MIGRATIONS_NOT_EXACT",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-prepare-extra"
+        }
+      },
+      {
+        "site": "prepare",
+        "pending": "zero",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "PENDING_MIGRATIONS_NOT_EXACT",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-prepare-zero"
+        }
+      },
+      {
+        "site": "prepare-f24",
+        "pending": "historical",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "PENDING_MIGRATIONS_NOT_EXACT",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-prepare-f24-historical"
+        }
+      },
+      {
+        "site": "prepare",
+        "pending": "historical",
+        "returncode": 1,
+        "receipt": {
+          "error_type": "Refusal",
+          "check": "PREPARE_REACHED_POST_PENDING_DUMP",
+          "inspection_only": true,
+          "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+          "phase": "PREPARATION_FAILED",
+          "state": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_b55c7ef9_20260914051442444099-state/historical-prepare-historical"
+        }
+      }
+    ],
+    "limitation": "Actual prepare control flow with fixture expected-OID substitution, not byte-identical execution. Worker identity gates remain production constants. Changed-worker historical accept is the later real committed expand on this catalog, not an apply_migration interceptor."
+  }
+}

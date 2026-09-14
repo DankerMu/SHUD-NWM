@@ -44,6 +44,22 @@ local Mac.
 - [ ] 2.1 Bind and qualify target `415cbd1e9d0eee39ba0dfb623a586b02cbb340f2` across window execution and owned
       governance handoff, preserving the existing staged ownership state and proving fresh pre-T0 readiness.
 
+Current qualification status (2026-09-14): **BLOCKED**, not complete. Tool commit
+`b55c7ef9b43eceeae439915629383dfaf0b36a3e` passed the frozen-415 eight-case window matrix; source-identical governance
+tools have ten same-tool and eight original-state handoff cases. Actual 415 read-only audit returned no critical
+recommendations, and the retained exact selector returned the required 168 points/digest.
+
+Actual fresh prepare was attempted with new hash-bound inputs and refused `REQUIRED_UNIT_NOT_ADMITTED`: compression was
+`failed`/124 and retention was `failed`/1 (`RETENTION_CONCURRENT_INVOCATION`). Original staged identity/pin and active
+a8db remained unchanged. No reset-failed, retention rerun, window, recover or unstage was executed. Preserve the failed
+state; separately authorized maintenance recovery and a new fresh prepare are required. Evidence and remaining gates are
+in `receipts/child2325-verification.json`; do not treat partial qualification as task 2.1 completion or parent T0
+authority.
+
+Maintenance recovery requires separate authorization and is tracked in
+[#2349](https://github.com/DankerMu/SHUD-NWM/issues/2349). Its resolution is not a waiver of the fresh-prepare criterion
+or the existing failed-unit gate.
+
 Depends on task 1.1. Scope: the four executables in this change's `tools/`, their target/qualification evidence and
 fixture; adopt the two governance tools from f24 with provenance. No application/library changes or historical receipt
 edits.

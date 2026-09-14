@@ -1,0 +1,20 @@
+--- f24c3fb37be392300052c0d0ebf0ee35366a4599:openspec/changes/timeseries-narrow-store-expand-contract/receipts/issue-1987-execution-tools/governance_stage.py.txt
++++ governance_stage.py
+@@ -26,7 +26,7 @@
+ import urllib.request
+ from pathlib import Path
+ 
+-NEW = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
++NEW = "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+ OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
+ SERVICE = "nhms-node27-resource-governance.service"
+ TIMER = "nhms-node27-resource-governance.timer"
+@@ -340,7 +340,7 @@
+         relative = str(path.relative_to(root))
+         expected = subprocess.check_output(
+             ['git', '-C', str(root), 'show',
+-             '1a32ebb7b536873e6403f3faeb6eb8d83ef24d32:' + relative],
++             '415cbd1e9d0eee39ba0dfb623a586b02cbb340f2:' + relative],
+             stderr=subprocess.DEVNULL,
+         )
+         assert path.read_bytes() == expected
