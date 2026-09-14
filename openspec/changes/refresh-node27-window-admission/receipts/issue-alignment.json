@@ -1,0 +1,61 @@
+{
+  "verdict": "clean",
+  "stage": "5.5-issue-change-alignment",
+  "change": "refresh-node27-window-admission",
+  "fixture_snapshot": "aa7bae6185d702e7f8054f755bcd57334639136c",
+  "issues": [
+    {
+      "number": 2324,
+      "task": "1.1",
+      "depends_on": [
+        "#2100"
+      ],
+      "part_of": 1987
+    },
+    {
+      "number": 2325,
+      "task": "2.1",
+      "depends_on": [
+        "#2324"
+      ],
+      "part_of": 1987
+    }
+  ],
+  "gaps": [],
+  "p0_p1_candidates": [],
+  "per_axis": {
+    "missing-coverage": {
+      "status": "clean",
+      "evidence": "tasks.md has 1.1, 2.1, and parent-only section 3. #2324 covers 1.1; #2325 covers 2.1. Section 3 is explicitly not a child implementation task and stays on parent #1987."
+    },
+    "wrong-boundary": {
+      "status": "clean",
+      "evidence": "#2324 owns only window admission + isolated oracle (two window tools). #2325 owns the four I8 execution tools' coupled target/handoff, matching design D2 atomic slice rather than mixing application/library/SQL modules."
+    },
+    "over-broad": {
+      "status": "clean",
+      "evidence": "#2324 Minimal mergeable slice is atomic: both admission sites plus one window oracle; no Width exception required. #2325 is atomic with Width exception multi-path copied from tasks.md: window+governance oracles jointly prove one handoff; finer cut has no delivery value."
+    },
+    "wrong-dependency": {
+      "status": "clean",
+      "evidence": "tasks.md 2.1 depends on 1.1; #2325 Depends on #2324. #2324 Depends on closed #2100 is an extra completed parent-window predecessor, not inverted child order; Child 1 isolated oracle does not wait on open work. User-authorized two-child DAG is #2324 then #2325."
+    },
+    "scope-mismatch": {
+      "status": "clean",
+      "evidence": "#2324 In/Out of Scope match task 1.1 (admission+oracle; no re-pin/governance/production window). #2325 In/Out of Scope match task 2.1 (frozen 415 target, owned handoff, D5, pre-T0 qualify; no production unstage/#2280/5.2)."
+    },
+    "missing-reference": {
+      "status": "clean",
+      "evidence": "Both cite refresh-node27-window-admission proposal/design/tasks/spec. #2324 required reading covers D1, f24-baseline, parent I8/f24 receipts, project-profile. #2325 covers D3-D5, f24-baseline, small-selector-oracle.json, prerequisite child, parent I8, project-profile."
+    },
+    "content-drift": {
+      "status": "clean",
+      "evidence": "D12 retains L+000059 with no ledger DELETE; seven versions via design D1; captured inventory consumed without a new production query; selector digest 84a95266\u2026 pinned; original f24-produced state vs independently bound OLD/1a32/415; production unstage remains parent; f24 five-round history not reset."
+    }
+  },
+  "non_blocking_notes": [
+    "#2324 names the captured inventory in prose rather than receipts/historical-ledger-input.json; D1 plus the no-requery acceptance still bind the implementer.",
+    "#2324 verification names existing launcher loopback :32771; fixture says original guarded disposable launcher without a port literal. Consistent with inherited oracle identity, not a new contract.",
+    "#2324 Depends on closed #2100 is lineage of parent-window admission, not a Child 1 work item."
+  ]
+}

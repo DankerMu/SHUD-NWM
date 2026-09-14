@@ -1,0 +1,28 @@
+{
+  "issue": 2324,
+  "status": "local hygiene passed; runtime verification pending",
+  "tool_hashes": {
+    "window_execute.py": "625268aaed2be595fbf0c319fbee6f380901e76fb64a9dce43a5fce0f921738e",
+    "window_smoke.py": "963901c7a296de4e8adb2c5e8fa756132a2064211df87f36633a8069ac72e1dd"
+  },
+  "executor_delta": "Full Git-blob/filesystem comparison confirms only two ledger-subset conjuncts removed. D12 and all runtime identity gates unchanged.",
+  "initial_oracle_repair": {
+    "ruff_failure": "F821 undefined migrate",
+    "removed_before_publication": [
+      "internal migration apply/module fake",
+      "temporary SQL-file write in retained NEW runtime checkout"
+    ],
+    "replacement": "Extra pending is a temporary guarded disposable-ledger row perturbation with exact-row restoration; changed-worker positive is real committed expand.",
+    "remote_execution_of_rejected_oracle": false
+  },
+  "local_checks": [
+    "targeted Ruff format: 1 file reformatted, 1 unchanged",
+    "targeted Ruff check: All checks passed"
+  ],
+  "deviations": [
+    "Oracle initial no-deviations claim corrected by implementer; both unsuitable choices removed before publication.",
+    "Leaf performed py_compile/AST despite requested no-validation boundary; no behavioral or remote validation claimed.",
+    "Candidate must be committed/pushed before node27-only oracle verification; no PR or production activation at this point."
+  ],
+  "comparison_note": "Discarded truncated reader-text comparison; replaced it with complete Git blob and filesystem diff."
+}
