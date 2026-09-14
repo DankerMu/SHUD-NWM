@@ -109,13 +109,34 @@ the first `unlink` is denied and the target is recorded in `failed[]` with
 rollout order SHALL `prcp_rate_or_amount/` be writable by the retention
 account while `<cycle>/` is not.
 
+Directory permissions are necessary but no longer sufficient: every canonical
+removal holds the copyback batch mutex, whose lock file is mode `0600` and owned
+by the copyback root's owner. A retention account that is not that owner cannot
+take the mutex, so its canonical removals fail closed with a lock failure of
+shape `lock_unsafe` and zero bytes removed, while its raw and
+precipitation-cache removals are unaffected. Canonical pruning is effective
+only when the retention unit runs as the copyback root's owner.
+
 #### Scenario: a production tick prunes aged canonical cycles
 
-- **WHEN** the retention unit runs in `production_execute` mode after the sweep
-  with aged canonical cycles under `canonical/gfs` and `canonical/IFS`
+- **WHEN** the retention unit runs in `production_execute` mode after the sweep,
+  as the copyback root's owner, with aged canonical cycles under `canonical/gfs`
+  and `canonical/IFS`
 - **THEN** those cycles appear in `deleted[]` with reason
   `canonical_cycle_aged_out`, `freed_bytes` is greater than zero
 - **AND** `failed[]` is empty and the unit ends with `Result=success`
+
+#### Scenario: a retention account that does not own the copyback root
+
+- **WHEN** the retention unit runs in `production_execute` mode as an account
+  other than the copyback root's owner, with aged canonical cycles
+- **THEN** each aged canonical cycle is recorded in `failed[]` with
+  `lock_failure` `lock_unsafe` and no file beneath it is removed
+- **AND** no lock file is created when none existed
+- **AND** aged raw cycles are still removed and appear in `deleted[]`
+- **AND** the summary's `copyback_lock_failures.lock_unsafe` equals the number
+  of those canonical entries
+- **AND** the process exits `1`
 
 #### Scenario: a freshly mirrored cycle stays deletable
 
@@ -123,8 +144,8 @@ account while `<cycle>/` is not.
   `canonical/<storage_source>/`
 - **THEN** `canonical/<storage_source>/<cycle>/` and its
   `prcp_rate_or_amount/` are `2775` with group gid 1107
-- **AND** a later tick that finds the cycle aged deletes it without a
-  `PermissionError`
+- **AND** a later tick that finds the cycle aged, run by the copyback root's
+  owner, deletes it without a `PermissionError`
 
 #### Scenario: an unswept storage source fails closed
 

@@ -17,7 +17,7 @@ NFS server 本地文件系统上的锁，能不能排斥 NFS client 在同一文
 ## 实测结论
 
 2026-09-14 在 node-27（server，5.15）与 node-22（client，6.8）上对同一个探针文件逐对测试，
-完整矩阵见 `openspec/changes/harden-copyback-mutex-residuals/evidence/lock-interop-20260914.md`：
+完整矩阵见 `openspec/changes/archive/2026-09-14-harden-copyback-mutex-residuals/evidence/lock-interop-20260914.md`：
 
 1. **node-27 `flock` 与 node-22 `flock` 双向不互斥。** 原封不动地在 node-27 调用现有 guard，
    得到的是一把「看起来持有、实际什么都不串行化」的锁。
