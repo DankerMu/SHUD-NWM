@@ -701,21 +701,38 @@ def historical_ledger_admission(e):
         )
 
     def worker_migrate(module, *, repo=None, sha=None):
-        saved_worker_db = (
-            module._WORKER_DATABASE,
-            module._WORKER_PORT,
-            dict(module._WORKER_USERS),
-        )
-        from psycopg2.extensions import parse_dsn
-
-        identity = parse_dsn(e.dsn)
-        module._WORKER_DATABASE = identity["dbname"]
-        module._WORKER_PORT = identity["port"]
-        module._WORKER_USERS = dict.fromkeys(("parse", "read", "admin"), identity["user"])
-        repo = repo or e.fixture.new_repo
+        repo = str(Path(repo or e.fixture.new_repo).resolve())
         sha = sha or module.NEW
+        python = Path(repo) / ".venv/bin/python"
+        w.require(python.is_file() and os.access(python, os.X_OK), "PRIVATE_PYTHON_MISSING")
+        source = Path(module.__file__).resolve()
+        wrapper = e.root / ("historical-worker-wrapper-" + w.digest(str(source).encode())[:12] + ".py")
+        if not wrapper.exists():
+            w.private_write(
+                wrapper,
+                (
+                    "import importlib.machinery\n"
+                    "import importlib.util\n"
+                    "import os\n"
+                    "import sys\n"
+                    "from psycopg2.extensions import parse_dsn\n"
+                    "source = " + repr(str(source)) + "\n"
+                    "loader = importlib.machinery.SourceFileLoader('historical_worker_under_test', source)\n"
+                    "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+                    "mod = importlib.util.module_from_spec(spec)\n"
+                    "sys.modules[loader.name] = mod\n"
+                    "loader.exec_module(mod)\n"
+                    "identity = parse_dsn(os.environ['DATABASE_URL'])\n"
+                    "mod._WORKER_DATABASE = identity['dbname']\n"
+                    "mod._WORKER_PORT = identity['port']\n"
+                    "mod._WORKER_USERS = dict.fromkeys(('parse', 'read', 'admin'), identity['user'])\n"
+                    "sys.argv = [source, *sys.argv[1:]]\n"
+                    "raise SystemExit(mod.main())\n"
+                ).encode(),
+            )
         argv = [
-            str(Path(module.__file__).resolve()),
+            str(python),
+            str(wrapper),
             "worker",
             "--state",
             str(e.root),
@@ -726,42 +743,35 @@ def historical_ledger_admission(e):
             "--sha",
             sha,
         ]
-        output = io.StringIO()
-        errors = io.StringIO()
-        try:
-            saved_argv = sys.argv
-            saved_cwd = os.getcwd()
-            saved_path = sys.path[:]
-            saved_modules = {
-                name: sys.modules.pop(name)
-                for name in list(sys.modules)
-                if name == "packages" or name.startswith(("packages.", "workers.", "scripts.", "apps."))
-            }
-            sys.argv = argv
-            os.chdir(repo)
-            sys.path = [repo] + [
-                item
-                for item in saved_path
-                if Path(item).resolve() != Path(e.fixture.new_repo).resolve() or repo == e.fixture.new_repo
-            ]
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                rc = module.main()
-            stdout, stderr = output.getvalue(), errors.getvalue()
-        finally:
-            os.chdir(saved_cwd)
-            sys.argv = saved_argv
-            sys.path[:] = saved_path
-            for name in list(sys.modules):
-                if name == "packages" or name.startswith(("packages.", "workers.", "scripts.", "apps.")):
-                    sys.modules.pop(name, None)
-            sys.modules.update(saved_modules)
-            module._WORKER_DATABASE, module._WORKER_PORT, module._WORKER_USERS = saved_worker_db
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+        env.update(
+            DATABASE_URL=e.dsn,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONNOUSERSITE="1",
+        )
+        proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, timeout=150)
+        stdout = proc.stdout.decode("utf-8", "replace")
+        stderr = proc.stderr.decode("utf-8", "replace")
         e.seq += 1
         e.save()
-        e.save_file(f"historical-worker-{e.seq}.stdout", stdout.encode())
-        e.save_file(f"historical-worker-{e.seq}.stderr", stderr.encode())
+        stdout_name = f"historical-worker-{e.seq}.stdout"
+        stderr_name = f"historical-worker-{e.seq}.stderr"
+        e.save_file(stdout_name, stdout.encode())
+        e.save_file(stderr_name, stderr.encode())
         payload = json.loads(stdout) if stdout.strip() else {}
-        return rc, payload, stderr
+        evidence = {
+            "python": str(python),
+            "cwd": repo,
+            "sha": sha,
+            "source": str(source),
+            "wrapper": str(wrapper),
+            "stdout": stdout_name,
+            "stderr": stderr_name,
+            "returncode": proc.returncode,
+        }
+        return proc.returncode, payload, stderr, evidence
 
     def require_unchanged(code):
         w.require(e.catalog() == before_catalog and e.ledger() == before_ledger, code)
@@ -784,25 +794,27 @@ def historical_ledger_admission(e):
         extra_removed = True
         extra_ledger = e.ledger()
         w.require(extra_current not in extra_ledger and w.EXPAND not in extra_ledger, "EXTRA_PENDING_NOT_CREATED")
-        rc, payload, stderr = worker_migrate(w)
+        rc, payload, stderr, evidence = worker_migrate(w)
         require_worker_pending_refusal(rc, payload, stderr, "WORKER_EXTRA_PENDING_ACCEPTED")
         w.require(e.catalog() == before_catalog and e.ledger() == extra_ledger, "WORKER_EXTRA_PENDING_SIDE_EFFECT")
-        reports.append({"site": "worker", "pending": "extra", "returncode": rc, "payload": payload})
+        reports.append({"site": "worker", "pending": "extra", "returncode": rc, "payload": payload, "child": evidence})
         restore_extra_row()
         e.sql("INSERT INTO public.schema_migrations (version) VALUES ('" + w.EXPAND + "')")
-        rc, payload, stderr = worker_migrate(w)
+        rc, payload, stderr, evidence = worker_migrate(w)
         require_worker_pending_refusal(rc, payload, stderr, "WORKER_ZERO_PENDING_ACCEPTED")
         w.require(
             e.catalog() == before_catalog and e.ledger() == sorted(before_ledger + [w.EXPAND]),
             "WORKER_ZERO_PENDING_SIDE_EFFECT",
         )
-        reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload})
+        reports.append({"site": "worker", "pending": "zero", "returncode": rc, "payload": payload, "child": evidence})
         e.sql("DELETE FROM public.schema_migrations WHERE version='" + w.EXPAND + "'")
         w.require(e.ledger() == before_ledger, "ZERO_PENDING_LEDGER_NOT_RESTORED")
-        rc, payload, stderr = worker_migrate(f24, repo=e.fixture.original_new_repo, sha=f24.NEW)
+        rc, payload, stderr, evidence = worker_migrate(f24, repo=e.fixture.original_new_repo, sha=f24.NEW)
         require_worker_pending_refusal(rc, payload, stderr, "F24_WORKER_SHOULD_REFUSE_HISTORICAL")
         require_unchanged("F24_WORKER_HISTORICAL_SIDE_EFFECT")
-        reports.append({"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload})
+        reports.append(
+            {"site": "worker-f24", "pending": "historical", "returncode": rc, "payload": payload, "child": evidence}
+        )
     finally:
         restore_extra_row()
         if w.EXPAND in e.ledger() and e.catalog() == before_catalog:
@@ -1079,6 +1091,12 @@ def historical_ledger_admission(e):
                 "f24_execute_sha256": w.digest(f24_bytes),
                 "changed_execute_sha256": w.digest(changed),
                 "changed_worker_positive": "deferred-to-happy-path-real-e.worker(migrate)",
+                "worker_protocol": (
+                    "Fresh selected-repo .venv/bin/python child; cwd=repo; argv worker "
+                    "--state/--action migrate/--repo/--sha; DATABASE_URL env-only; "
+                    "no PYTHONPATH/PYTHONHOME; private wrapper only patches "
+                    "_WORKER_DATABASE/_WORKER_PORT/_WORKER_USERS."
+                ),
                 "cases": reports,
                 "limitation": (
                     "Actual prepare control flow with fixture expected-OID substitution, "
