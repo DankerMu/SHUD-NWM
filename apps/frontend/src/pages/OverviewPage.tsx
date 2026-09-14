@@ -86,7 +86,8 @@ export function OverviewPage() {
 
 /**
  * 控制条模型在**控制条区域内**派生（#2347 D3）：`deriveM11ControlBarModel` 在 render 里抛错时
- * （例如 `/cycles` 的 `cycles` 数组里混进 `null`）只落进控制条的边界，不拖垮整张地图。
+ * 只落进控制条的边界，不拖垮整张地图。变形的 `/cycles` 载荷已由 store 侧形状守卫拒收（#2129 D1），
+ * 这道边界是兜底。
  * 与区域边界同一次提交渲染，挂载接缝 `m11-bottom-control-bar` 仍是首帧同步可见。
  */
 function M11BottomControlBarRegion({
@@ -260,6 +261,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // enrichment 错误透出对应面板，但不阻塞 map（spec scenario "Enrichment failure does not block map"）。
   const error = useOverviewDataStore((store) => store.error)
   const bootstrapError = useOverviewDataStore((store) => store.bootstrapError)
+  // 本轮加载里被形状守卫拒收的端点标签（#2129 裁决 B / design D2）。
+  const dataAnomalies = useOverviewDataStore((store) => store.dataAnomalies)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   // 起报时次列表是 enrichment（bootstrap 之后才到）：控制条只读它，尚未到达时回落 default_cycle。
   const cyclesBySource = useOverviewDataStore((store) => store.cyclesBySource)
@@ -563,6 +566,12 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         <M11FloatingNotice testId="m11-overview-loading">总览数据加载中</M11FloatingNotice>
       ) : emptyBasinReason ? (
         <M11FloatingNotice testId="m11-overview-empty">{emptyBasinReason}</M11FloatingNotice>
+      ) : dataAnomalies.length > 0 ? (
+        // 数据异常（design D2）：排在硬失败之后（bootstrap 失败文案里已点名数据异常），排在装饰性的
+        // 降水提示之前——变形的降水索引应当显示为数据异常，而不是泛化的索引取回失败。
+        <M11FloatingNotice testId="m11-data-anomaly">
+          {`数据异常：${dataAnomalies.join('、')}返回格式不符，已按不可用处理`}
+        </M11FloatingNotice>
       ) : precipOverlay.notice ? (
         // 链位钉死在**链尾**（fixture 决策 9，round-1 更正）：`emptyBasinReason` 是本组件里
         // `bootstrapError` / enrichment `error` 的**唯一**渲染面（`overview-data-contracts` spec

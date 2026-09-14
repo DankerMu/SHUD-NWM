@@ -12,6 +12,15 @@ vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
 }))
 
+// #2129 裁决 B（D4）：`/cycles` 变形载荷已由 store 侧形状守卫拒收、不再抛进渲染，故渲染期抛错的
+// 触发改为直接让控制条模型派生抛出（真实模块的其余导出原样保留）。
+vi.mock('@/pages/m11/M11BottomControlBar', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/pages/m11/M11BottomControlBar')>()),
+  deriveM11ControlBarModel: () => {
+    throw new Error('control bar derivation failed')
+  },
+}))
+
 vi.mock('react-map-gl/maplibre', async () => {
   const { MaplibreMapStub, MaplibreControlStub, MaplibreSourceStub, MaplibreLayerStub, MaplibreMarkerStub } = await import(
     '@/test/maplibreStub'
@@ -75,11 +84,10 @@ const dischargeLayer = {
 type MockOptions = { params?: { query?: Record<string, unknown> } }
 
 /**
- * 默认 `/`（gfs = 目录默认源）下 `/cycles` 回一个含 `null` 元素的数组、`default_cycle` 仍合法：
- * store 侧消费者全部 null 安全，唯一的渲染期消费者是控制条派生（`entry.cycle_time` 在 render 里抛），
- * 触达路径见 design D3。`?source=ifs` 无合法 default_cycle 时走 fail-closed、不抛，故不用它。
+ * 默认 `/`（gfs = 目录默认源）下全部端点回合法载荷：渲染期抛错只来自上面 mock 掉的
+ * `deriveM11ControlBarModel`。记录 `/cycles` 的源，钉住控制条确实在默认源上派生。
  */
-function mockApiWithNullCycleEntry() {
+function mockApiWithValidPayloads() {
   const cycleRequests: Array<unknown> = []
   vi.mocked(client.GET).mockImplementation((async (path: string, options?: MockOptions) => {
     if (path === '/api/v1/basins') return success([basin])
@@ -91,7 +99,7 @@ function mockApiWithNullCycleEntry() {
       cycleRequests.push(options?.params?.query?.source)
       return success({
         source: options?.params?.query?.source,
-        cycles: [null, { cycle_time: DEFAULT_CYCLE, valid_time_start: DEFAULT_CYCLE, valid_time_end: '2026-05-18T03:00:00Z' }],
+        cycles: [{ cycle_time: DEFAULT_CYCLE, valid_time_start: DEFAULT_CYCLE, valid_time_end: '2026-05-18T03:00:00Z' }],
         default_cycle: DEFAULT_CYCLE,
       })
     }
@@ -159,14 +167,14 @@ afterEach(() => {
 
 describe('OverviewPage region error boundaries', () => {
   it('contains a control bar derivation throw to the control bar region on the default page', async () => {
-    const cycleRequests = mockApiWithNullCycleEntry()
+    const cycleRequests = mockApiWithValidPayloads()
     const router = createMemoryRouter([{ path: '/', element: <OverviewPage /> }], { initialEntries: ['/'] })
     render(<RouterProvider router={router} />)
 
     const fallback = await screen.findByTestId('region-error-control-bar')
     expect(fallback).toHaveAttribute('role', 'alert')
     expect(fallback).toHaveTextContent('此区域加载失败')
-    // 前置条件：确实是默认源 gfs 的 `/cycles` 载荷进了 store（不是别的路径抛的）。
+    // 前置条件：默认源 gfs 的合法 `/cycles` 载荷已进 store（抛错只来自派生 mock，不是数据）。
     expect(cycleRequests).toContain('gfs')
     expect(useOverviewDataStore.getState().cyclesBySource.gfs?.status).toBe('available')
 

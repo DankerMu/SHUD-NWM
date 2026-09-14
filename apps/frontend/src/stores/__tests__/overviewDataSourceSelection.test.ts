@@ -507,8 +507,8 @@ describe('overview data store discharge loading', () => {
       },
     },
     {
-      // 信封是裸 `as T`：变形列表 = 成员身份未知，不得断言「未列出」。
-      label: 'the source cycle list is malformed',
+      // 变形列表被形状守卫拒收为 scoped `error`（#2129 D1）：成员身份未知，不得断言「未列出」。
+      label: 'the source cycle list is malformed and rejected by the shape guard',
       cycles: () => success({ source: 'gfs', cycles: null, default_cycle: DEFAULT_CYCLE }),
     },
   ]

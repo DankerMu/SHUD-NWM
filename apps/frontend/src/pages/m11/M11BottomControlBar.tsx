@@ -103,8 +103,8 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
    * 故不受这道闸影响 —— 那是起报时次 `<select>` 唯一的自救通道。
    */
   const failClosed = activeLayer?.disabledReason === failClosedDischargeDisabledReason
-  // `unwrapApiData` 是裸 `as T` 断言、零运行时校验：变形响应会带着 `cycles: undefined` 进来，
-  // 不守卫则 `.map` 在 render 里抛，而这条路径上没有 error boundary（整页白屏）。
+  // 变形的 `/cycles` 响应已由 store 侧形状守卫（#2129 D1）拒收为 scoped `'error'`，不会以 `available`
+  // 进来；这里的 `Array.isArray` 是纵深防御，#2347 的控制条区域边界是渲染期抛错的兜底。
   const cycles = failClosed
     ? []
     : cyclesState?.status === 'available' && Array.isArray(cyclesState.cycles?.cycles)

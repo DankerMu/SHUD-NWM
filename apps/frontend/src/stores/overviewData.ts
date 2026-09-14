@@ -28,6 +28,16 @@ import {
   type OverviewBasin,
   type OverviewSummary,
 } from '@/lib/m11/overviewDataContracts'
+import {
+  isDataShapeError,
+  validateBasins,
+  validateDischargeCycles,
+  validateLayers,
+  validateLayerValidTimes,
+  validatePrecipIndex,
+  validateRunsPage,
+  type DataShapeError,
+} from '@/lib/m11/overviewShapeGuards'
 import { defaultM11QueryState, serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
 import { isDisplayReadonlyRuntimeConfig, useMonitoringStore } from '@/stores/monitoring'
 
@@ -130,6 +140,11 @@ interface OverviewDataState {
   // 路径解耦（scenario "Map bootstrap rejection"）。
   bootstrapError: string | null
   error: string | null
+  /**
+   * 本轮 `loadOverview` 里被形状守卫拒收的端点标签（#2129 裁决 B / design D2）：去重、按首次出现
+   * 排序；新一轮加载开始时与 `bootstrapError` / `error` 一同清空，`clearOverviewDataCache` 不清。
+   */
+  dataAnomalies: string[]
   // 以下三项一律是 enrichment（`mapBootstrapLoading` 落 false **之后**才发出的非阻塞请求），
   // 失败只产 scoped 状态，绝不写 bootstrapError / mapBootstrapLoading
   // （spec overview-data-contracts「Cycles and precipitation index requests stay off the
@@ -348,10 +363,25 @@ function safeM11ErrorMessage(label: string, fallback = '暂不可用') {
   return `${label}: ${fallback}`
 }
 
-function settledValue<T>(result: PromiseSettledResult<T>, errors: string[], label: string): T | null {
+function settledValue<T>(
+  result: PromiseSettledResult<T>,
+  errors: string[],
+  label: string,
+  onShapeError?: (error: DataShapeError) => void,
+): T | null {
   if (result.status === 'fulfilled') return result.value
+  if (isDataShapeError(result.reason)) {
+    errors.push(safeM11ErrorMessage(label, '数据异常'))
+    onShapeError?.(result.reason)
+    return null
+  }
   errors.push(safeM11ErrorMessage(label))
   return null
+}
+
+/** bootstrap 单侧失败的措辞：形状错误 = 数据异常，其余（API / 网络）照旧 = 暂不可用。 */
+function bootstrapFailureWord(result: PromiseSettledResult<unknown>): string {
+  return result.status === 'rejected' && isDataShapeError(result.reason) ? '数据异常' : '暂不可用'
 }
 
 function latestPublishedRun(runs: ApiHydroRunPage | null, query: M11QueryState | undefined): ApiHydroRun | null {
@@ -485,9 +515,8 @@ function nationalDischargeDefaultSource(layers: ApiLayer[]): string {
  * 某个源自己声明的默认周期（`/api/v1/layers/discharge/cycles?source=` 的 `default_cycle`）。
  * 解不出来（记录缺席 / 非 available / `default_cycle` 为空）一律返回 null；**记录本身的状态**
  * 由调用方另行区分（`buildLayerStates` 的三态分类），本函数只回答「有没有周期」。
- * `unwrapApiData` 是裸 `as T` 断言、零运行时校验，变形响应会带着 `cycles: undefined` 进来，
- * 故这里宽松判空而不是让 `.default_cycle` 在取数链里抛——响应已到达但畸形时，它与「到达且为空」
- * 归入同一个终态（都不会再有第二次到达）。
+ * 变形响应已在 `fetchDischargeCycles` 的 loader 内被形状守卫拒收（design D1），落成 scoped `'error'`
+ * 记录，不会以 `available` 进来；这里的宽松判空只是纵深防御。
  */
 function dischargeCyclesDefaultCycle(state: DischargeCyclesState | undefined): string | null {
   if (!state || state.status !== 'available') return null
@@ -552,17 +581,21 @@ function apiErrorCode(error: unknown): string | null {
 
 async function fetchDischargeCycles(source: 'gfs' | 'ifs') {
   return cached(cacheKey('/api/v1/layers/discharge/cycles', { source }), () =>
-    getApi<DischargeCycles>('/api/v1/layers/discharge/cycles', { params: { query: { source } } }, '获取起报时次失败'),
+    getApi<unknown>('/api/v1/layers/discharge/cycles', { params: { query: { source } } }, '获取起报时次失败').then(
+      validateDischargeCycles,
+    ),
   )
 }
 
 async function fetchLayerValidTimesForCycle(layerId: string, source: 'gfs' | 'ifs', cycle: string) {
   return cached(cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, source, cycle }), () =>
-    getApi<components['schemas']['LayerValidTimes'] | string[]>(
+    getApi<unknown>(
       '/api/v1/layers/{layer_id}/valid-times',
       { params: { path: { layer_id: layerId }, query: { source, cycle } } },
       '获取图层有效时间失败',
-    ).then(normalizeLayerValidTimesResponse),
+    )
+      .then(validateLayerValidTimes)
+      .then(normalizeLayerValidTimesResponse),
   )
 }
 
@@ -583,7 +616,8 @@ async function fetchPrecipIndex(source: 'gfs' | 'ifs', cycle: string): Promise<P
       if (code === 'PRECIP_WINDOW_INCOMPLETE') return { status: 'error' }
       throw new Error(getApiErrorMessage(error, '获取降水索引失败'))
     }
-    return { status: 'available', index: unwrapApiData<PrecipIndex>(data, '获取降水索引失败') }
+    // 只校验成功分支：上面 code-aware 的 `not_mirrored` / `error` 返回不变。
+    return { status: 'available', index: validatePrecipIndex(unwrapApiData<unknown>(data, '获取降水索引失败')) }
   })
 }
 
@@ -591,11 +625,11 @@ async function fetchBasins() {
   return cached(
     cacheKey('/api/v1/basins', { limit: 200, offset: 0, hasDisplayProduct: true }),
     () =>
-      getApi<ApiBasin[]>(
+      getApi<unknown>(
         '/api/v1/basins',
         { params: { query: { limit: 200, offset: 0, has_display_product: true } } },
         '获取流域列表失败',
-      ),
+      ).then(validateBasins),
   )
 }
 
@@ -634,7 +668,7 @@ async function fetchRunsPageByStatus(query: M11QueryState, limit: number, offset
       offset,
     }),
     () =>
-      getApi<ApiHydroRunPage>(
+      getApi<unknown>(
         '/api/v1/runs',
         {
           params: {
@@ -648,7 +682,7 @@ async function fetchRunsPageByStatus(query: M11QueryState, limit: number, offset
           },
         },
         '获取运行列表失败',
-      ),
+      ).then(validateRunsPage),
   )
 }
 
@@ -694,19 +728,22 @@ async function fetchLayers(runId?: string | null) {
   return cached(
     cacheKey('/api/v1/layers', query),
     () =>
-      getApi<ApiLayer[]>(
+      getApi<unknown>(
         '/api/v1/layers',
         { params: { query: { limit: 100, offset: 0, run_id: runId ?? undefined } } },
         '获取图层列表失败',
-      ).catch(
-        async () => {
-          const params = new URLSearchParams({ limit: '100', offset: '0' })
-          if (runId) params.set('run_id', runId)
-          const response = await apiFetch(`/api/v1/layers?${params.toString()}`)
-          if (!response.ok) throw new Error('获取图层列表失败')
-          return unwrapApiData<ApiLayer[]>(await response.json(), '获取图层列表失败')
-        },
-      ),
+      )
+        .catch(
+          async () => {
+            const params = new URLSearchParams({ limit: '100', offset: '0' })
+            if (runId) params.set('run_id', runId)
+            const response = await apiFetch(`/api/v1/layers?${params.toString()}`)
+            if (!response.ok) throw new Error('获取图层列表失败')
+            return unwrapApiData<unknown>(await response.json(), '获取图层列表失败')
+          },
+        )
+        // 校验整条链的结果、只校验一次：主分支的形状错误不得触发 apiFetch 兜底，两条分支都受检。
+        .then(validateLayers),
   )
 }
 
@@ -720,6 +757,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   enrichmentLoading: false,
   bootstrapError: null,
   error: null,
+  dataAnomalies: [],
   cyclesBySource: {},
   validTimesByCycle: {},
   precipIndexByCycle: {},
@@ -746,12 +784,22 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       enrichmentLoading: true,
       bootstrapError: null,
       error: null,
+      dataAnomalies: [],
       // 新一轮加载：阶段 3 还没被判跳过，键缺席重新只意味着「还没取」。
       layerTimeEnrichmentSkipped: false,
     })
 
     // 共享谓词：写 set 前要求 nonce 仍匹配（stale 防御），否则丢弃。
     const isCurrentRequest = () => requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey
+    // 形状守卫拒收的端点标签（design D2）：只记当前代，去重、保持首次出现顺序。
+    const recordDataAnomaly = (label: string) => {
+      if (!isCurrentRequest()) return
+      set((state) => (state.dataAnomalies.includes(label) ? {} : { dataAnomalies: [...state.dataAnomalies, label] }))
+    }
+    const recordShapeError = (error: DataShapeError) => recordDataAnomaly(error.label)
+    const recordIfShapeError = (reason: unknown) => {
+      if (isDataShapeError(reason)) recordDataAnomaly(reason.label)
+    }
     const writePrecipIndex = (key: string, value: PrecipIndexState) => {
       if (!isCurrentRequest()) return
       set((state) => ({ precipIndexByCycle: { ...state.precipIndexByCycle, [key]: value } }))
@@ -812,8 +860,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       //   - 该源 cycles 记录缺席（默认源不等 `/cycles`）→ 成员身份尚不可知 → `pending`，
       //     `writeCycles` 到达后重算；阶段 3 被跳过时 `/cycles` 永不到达 → 成员身份不可知，原样传空列表；
       //   - 记录 `available`、列表是数组且不含该周期（秒精度）→ `cycle-not-listed` 终态；
-      //   - 列出了 / 记录 `error` / 列表变形（裸 `as T`，成员身份未知）→ 原样传空列表，
-      //     仍是 'Layer has no valid times.'（真实覆盖缺口或不可知）。
+      //   - 列出了 / 记录 `error`（含形状守卫拒收的变形列表，design D1）→ 原样传空列表，
+      //     仍是 'Layer has no valid times.'（真实覆盖缺口或不可知）。下面的 `Array.isArray` 只是纵深防御。
       const pairRecord = (target: NationalDischargePair): ActiveCycleValidTimesOverride => {
         const record = get().validTimesByCycle[m11SourceCycleKey(target.source, target.cycle)]
         if (!record) return missingRecord
@@ -928,14 +976,21 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
       if (basinsResult.status === 'rejected' || runlessLayersResult.status === 'rejected') {
         // scoped bootstrap error，与 enrichment partial error 不共流（spec scenario "Map bootstrap rejection"）。
-        const which =
+        // 每侧措辞按成因分：形状错误 = 数据异常，其余 = 暂不可用（design D2）。
+        const basinsWord = bootstrapFailureWord(basinsResult)
+        const layersWord = bootstrapFailureWord(runlessLayersResult)
+        const bootstrapError =
           basinsResult.status === 'rejected' && runlessLayersResult.status === 'rejected'
-            ? 'basins + layers'
+            ? basinsWord === layersWord
+              ? safeM11ErrorMessage('basins + layers', basinsWord)
+              : `${safeM11ErrorMessage('basins', basinsWord)}；${safeM11ErrorMessage('layers', layersWord)}`
             : basinsResult.status === 'rejected'
-              ? 'basins'
-              : 'layers'
+              ? safeM11ErrorMessage('basins', basinsWord)
+              : safeM11ErrorMessage('layers', layersWord)
         if (isCurrentRequest()) {
-          set({ mapBootstrapLoading: false, bootstrapError: safeM11ErrorMessage(which) })
+          set({ mapBootstrapLoading: false, bootstrapError })
+          if (basinsResult.status === 'rejected') recordIfShapeError(basinsResult.reason)
+          if (runlessLayersResult.status === 'rejected') recordIfShapeError(runlessLayersResult.reason)
         }
         return null
       }
@@ -1006,14 +1061,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         fetchRuns(query),
         fetchQueueDepth(),
       ])
-      const basins = settledValue(basinsResult, partialErrors, 'basins') ?? []
-      const models = settledValue(modelsResult, partialErrors, 'models')?.items ?? []
-      const runs = settledValue(runsResult, partialErrors, 'runs')
+      const basins = settledValue(basinsResult, partialErrors, 'basins', recordShapeError) ?? []
+      const models = settledValue(modelsResult, partialErrors, 'models', recordShapeError)?.items ?? []
+      const runs = settledValue(runsResult, partialErrors, 'runs', recordShapeError)
       const latestRun = latestPublishedRun(runs, query)
       const useSingleRunSurfaces = shouldUseSingleRunSurfaces(query)
       const [layersResult] = await Promise.allSettled([fetchLayers(useSingleRunSurfaces ? latestRun?.run_id : null)])
-      const scopedLayers = settledValue(layersResult, partialErrors, 'layers') ?? []
-      const queue = settledValue(queueResult, partialErrors, 'queue')
+      const scopedLayers = settledValue(layersResult, partialErrors, 'layers', recordShapeError) ?? []
+      const queue = settledValue(queueResult, partialErrors, 'queue', recordShapeError)
       const requestPlan = buildOverviewRequestPlan(
         query,
         basins.length,
@@ -1027,12 +1082,17 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         ...(requestPlan.shouldFetchVersions ? basins.map((basin) => fetchBasinVersions(basin.basin_id)) : []),
       ])
 
-      const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline')
+      const pipeline = settledValue(pipelineResult, partialErrors, 'pipeline', recordShapeError)
       const versionsByBasinId: Record<string, ApiBasinVersion[]> = {}
       if (requestPlan.shouldFetchVersions) {
         basins.forEach((basin, index) => {
           versionsByBasinId[basin.basin_id] =
-            settledValue(versionResults[index] as PromiseSettledResult<ApiBasinVersion[]>, partialErrors, 'basin versions') ?? []
+            settledValue(
+              versionResults[index] as PromiseSettledResult<ApiBasinVersion[]>,
+              partialErrors,
+              'basin versions',
+              recordShapeError,
+            ) ?? []
         })
       }
 
@@ -1116,8 +1176,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
       const cyclesTask = fetchDischargeCycles(source).then(
         (cycles) => writeCycles(source, { status: 'available', cycles }),
-        // scoped 降级：周期选择器限于默认周期，不是 bootstrap 错误。
-        () => writeCycles(source, { status: 'error' }),
+        // scoped 降级：周期选择器限于默认周期，不是 bootstrap 错误。形状错误另记「数据异常」。
+        (reason) => {
+          writeCycles(source, { status: 'error' })
+          recordIfShapeError(reason)
+        },
       )
 
       // 非默认源的活动周期**只能**来自这条 cycles 响应（目录的 default_cycle 是 GFS 专有事实），
@@ -1134,14 +1197,20 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         pair && !pair.isDefault
           ? fetchLayerValidTimesForCycle('discharge', pair.source, pair.cycle).then(
               (validTimes) => writeValidTimes(m11SourceCycleKey(pair.source, pair.cycle), { status: 'available', validTimes }),
-              // scoped 降级：该周期不可用（禁用态 + 独立文案），不是 bootstrap 错误。
-              () => writeValidTimes(m11SourceCycleKey(pair.source, pair.cycle), { status: 'error' }),
+              // scoped 降级：该周期不可用（禁用态 + 独立文案），不是 bootstrap 错误。形状错误另记「数据异常」。
+              (reason) => {
+                writeValidTimes(m11SourceCycleKey(pair.source, pair.cycle), { status: 'error' })
+                recordIfShapeError(reason)
+              },
             )
           : Promise.resolve()
 
       const precipTask = pair
         ? fetchPrecipIndex(pair.source, pair.cycle)
-            .catch((): PrecipIndexState => ({ status: 'error' }))
+            .catch((reason): PrecipIndexState => {
+              recordIfShapeError(reason)
+              return { status: 'error' }
+            })
             .then((precipState) => writePrecipIndex(m11SourceCycleKey(pair.source, pair.cycle), precipState))
         : Promise.resolve()
 
