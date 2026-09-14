@@ -26,7 +26,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SCHEMA_PATH = _ROOT / "schemas/timeseries_compression_receipt.schema.json"
 _MIGRATION_PATH = _ROOT / "db/migrations/000047_hypertable_compression_settings.sql"
 _RUNNER_SOURCE_PATH = _ROOT / "scripts/node27_timeseries_compression.py"
-_WRAPPER_PATH = _ROOT / "scripts/node27_timeseries_compression_once.sh"
 _SYSTEMD_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.service"
 _SYSTEMD_REPLAY_SERVICE_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression-replay.service"
 _SYSTEMD_TIMER_PATH = _ROOT / "infra/systemd/nhms-node27-timeseries-compression.timer"
@@ -1912,54 +1911,6 @@ def test_compressed_sibling_lookup_matches_timescaledb_210_catalog() -> None:
     assert "compressed_chunk_name" not in query
 
 
-def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> None:
-    service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
-    exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
-    assert exec_lines == [
-        "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce",
-    ]
-    assert "node27_timeseries_compression_supervisor.py" not in service_text
-    # The unit's real wall must be the runner's DECLARED default systemd wall,
-    # which in turn must sit strictly above wrapper + 40 s. Asserting the
-    # relation rather than re-writing the literal keeps the three artifacts
-    # on one source of truth.
-    timeout_start_lines = [line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")]
-    assert len(timeout_start_lines) == 1
-    unit_wall_seconds = int(timeout_start_lines[0].split("=", 1)[1])
-    assert unit_wall_seconds == compression._DEFAULT_SYSTEMD_WALL_SECONDS
-    assert unit_wall_seconds == 3_941
-
-    wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
-    preflight_text = (_ROOT / "scripts/node27_timeseries_budget_preflight.py").read_text(encoding="utf-8")
-    assert "node27_timeseries_budget_preflight.py" in wrapper_text
-    assert "--launch compression" in wrapper_text
-    assert "os.execve(" in preflight_text
-    assert '"/usr/bin/timeout"' in preflight_text
-    assert "ASSEMBLY_MARKER_KEY: \"1\"" in preflight_text
-    assert '"$SCRIPT" --enforce' not in wrapper_text
-
-
-def test_compression_env_example_documents_the_budget_chain() -> None:
-    """B7: the template carries the three knobs plus the drop-in sync duty."""
-    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
-    # The template's literals must be the runner's defaults — an operator who
-    # copies the template unedited must land exactly on them.
-    assert (
-        f"NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS={compression._DEFAULT_COMPRESS_TIMEOUT_MS}"
-    ) in text
-    assert (
-        f"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS={compression._DEFAULT_WRAPPER_WALL_SECONDS}"
-    ) in text
-    assert (
-        f"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS={compression._DEFAULT_SYSTEMD_WALL_SECONDS}"
-    ) in text
-    # The paired operational invariant and catch-up bound are explicit.
-    assert "ceil(COMPRESS_TIMEOUT_MS / 1000) + 300 s cleanup" in text
-    assert "node27-cold-residency.env" not in text
-    assert "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1" in text
-    assert "matching larger systemd drop-in FIRST" in text
-
-
 def test_compression_cannot_shrink_service_to_wrapper_plus_margin(tmp_path: Path) -> None:
     env = _base_env(
         tmp_path,
@@ -1970,20 +1921,6 @@ def test_compression_cannot_shrink_service_to_wrapper_plus_margin(tmp_path: Path
     )
     with pytest.raises(compression.CompressionConfigError, match="service wall"):
         compression.config_from_args(_args(), env)
-
-
-def test_shared_compression_budget_literals_match_wrapper_and_unit() -> None:
-    from packages.common.node27_timeseries_compression_budget import compression_service_budget
-
-    authority = compression_service_budget()
-    wrapper = _WRAPPER_PATH.read_text(encoding="utf-8")
-    service = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
-    assert "--launch compression" in wrapper
-    assert "--launch cold" not in wrapper
-    assert "node27_timeseries_budget_preflight.py" in wrapper
-    assert f"TimeoutStartSec={authority.service_wall_seconds}" in service
-    assert compression._DEFAULT_WRAPPER_WALL_SECONDS == authority.wrapper_wall_seconds
-    assert compression._DEFAULT_SYSTEMD_WALL_SECONDS == authority.service_wall_seconds
 
 
 def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:

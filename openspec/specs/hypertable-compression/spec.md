@@ -1413,9 +1413,6 @@ its tablespace SHALL NOT be recurring maintenance requirements.
 - **WHEN** a migration creates a compression-capable hypertable owned by `nhms`
 - **THEN** the provision audit reports the owner drift until the script is re-run
 
-
-## ADDED Requirements
-
 ### Requirement: Normal compression SHALL launch safely without cold configuration
 
 The compression unit/wrapper/preflight/budget owner SHALL use only compression

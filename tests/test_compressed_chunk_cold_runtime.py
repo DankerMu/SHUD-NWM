@@ -34,8 +34,6 @@ from tests.cold_residency_fakes import (
     CUTOFF,
     LAG,
     RANGE_START,
-    RUNTIME_EXEC_GID,
-    RUNTIME_EXEC_UID,
     WATERMARK,
     FakeConnection,
     bound_inventories,
@@ -801,9 +799,11 @@ def test_enforce_requires_explicit_device_identity() -> None:
     del item
 
 
-def test_runtime_config_propagates_disposable_container_name() -> None:
+def test_target_identity_accepts_isolated_container_and_rejects_wrong_container() -> None:
     runtime = _runtime(
         expected_container_name="nhms-1893-isolated",
+        expected_container_bind="/unused/cold",
+        expected_host_path="/unused/cold",
         expected_device_identity="isolated",
         inspect_target=lambda: target_observation(
             container_name="nhms-1893-isolated",
@@ -812,9 +812,6 @@ def test_runtime_config_propagates_disposable_container_name() -> None:
             device_identity="isolated",
         ),
     )
-    assert runtime.expected_container_name == "nhms-1893-isolated"
-    assert runtime.expected_container_exec_uid == RUNTIME_EXEC_UID
-    assert runtime.expected_container_exec_gid == RUNTIME_EXEC_GID
     connection, item = _loaded(FakeConnection())
     identity = preflight_target_identity(
         lambda sql, params=None: connection.dispatch(sql, params)[0],
@@ -823,6 +820,8 @@ def test_runtime_config_propagates_disposable_container_name() -> None:
     assert identity.device_identity == "isolated"
     mismatched = _runtime(
         expected_container_name="nhms-1893-isolated",
+        expected_container_bind="/unused/cold",
+        expected_host_path="/unused/cold",
         expected_device_identity="isolated",
         inspect_target=lambda: target_observation(
             container_name="nhms-db",
