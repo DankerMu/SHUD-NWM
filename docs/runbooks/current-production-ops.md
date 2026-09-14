@@ -2593,24 +2593,31 @@ ssh -p 32099 nwm@210.77.77.27 \
        时为 `null`）。target 可能是 `runs/<run_id>`、run 引用的对象树，或一个 extra object 文件。
      - **含义**：`backup_path` 里是 target 的**旧内容**，而且很可能是唯一一份。target 要么
        不存在（回滚 rename 失败），要么已被别的东西占住（没有尝试回滚）。
-     - **没有任何东西会回收它**：node-22 retention 把 `runs/` 下点开头的名字记成 `unparseable_run_cycle`
-       跳过（`runs/` 之外的 backup 根本不枚举），下一次 copyback 直接 promote、不看它。
+     - **没有任何东西会回收它**，两条 lane 分开看：`runs/` 下的 backup 是点开头的名字，node-22
+       retention 记成 `unparseable_run_cycle` 跳过；`forcing/**` 引用树与 extra object 旁的
+       backup 不在任何 retention 目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫
+       `runs/`（`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
+       node-27 `scripts/node27_raw_retention.py` 明确不碰 `forcing`、`runs`。下一次 copyback 直接 promote、不看它。
      - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
        `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
-       batch mutex，期间不在这个 copyback root 下做别的。锁文件此时必然已存在（留下 backup
-       的那次 copyback 就是持锁跑的），`flock(1)` 不会以 umask 模式新建它。两条命令都在锁内
-       复核 target 状态，状态不符就什么都不做：
+       batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
+       处置删掉；锁文件不存在时 `flock(1)` 会以 `0666 & umask` 新建它，之后每个 copyback 写者都
+       fail closed（`copyback batch lock must have mode 0600`）。所以两条命令都先核对锁文件存在、
+       是普通文件且为 `600` + uid 1103，不符就拒绝执行、绝不新建；再在锁内复核 target 状态，
+       状态不符就什么都不做：
 
        ```bash
        ssh -p 32099 frd_muziyao@210.77.77.22
        L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock
        T='<target>'; B='<backup_path>'   # 取自事件 details.details.* 或 OrchestratorError .details.*
        # target 不存在：把 backup 放回原名（mv -T 防止 target 期间出现时被搬进去）
-       flock -w 900 "$L" sh -c 'test ! -e "$1" && mv -T "$2" "$1"' _ "$T" "$B" \
-         || echo "lock timeout or target present, nothing done"
+       test -f "$L" && [ "$(stat -c '%F %a %u' "$L")" = "regular file 600 1103" ] \
+         && flock -w 900 "$L" sh -c 'test ! -e "$1" && mv -T "$2" "$1"' _ "$T" "$B" \
+         || echo "lock file missing/wrong identity, lock timeout, or target present; nothing done"
        # target 已存在且已确认是更新的成功 copyback（见下）：删 backup
-       flock -w 900 "$L" sh -c 'test -e "$1" && rm -rf -- "$2"' _ "$T" "$B" \
-         || echo "lock timeout or target absent, nothing done"
+       test -f "$L" && [ "$(stat -c '%F %a %u' "$L")" = "regular file 600 1103" ] \
+         && flock -w 900 "$L" sh -c 'test -e "$1" && rm -rf -- "$2"' _ "$T" "$B" \
+         || echo "lock file missing/wrong identity, lock timeout, or target absent; nothing done"
        ```
 
        删之前先确认 target 是一次**更新的、成功的** copyback 写出的（同一 run 之后有

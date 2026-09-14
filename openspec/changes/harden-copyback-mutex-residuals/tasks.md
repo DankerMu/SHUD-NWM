@@ -173,7 +173,7 @@ Each item names input → expected output. "Red" = fails on the pre-change sourc
       `uv run ruff check .` locally.
       Done at `75556204f`: 12 files 1643 passed / 1 skipped; new files plus
       `test_retention*`, `test_scheduler_evidence*`, `test_production_scheduler*`,
-      `test_cli_cleanup*` 2279 passed / 0 skipped.
+      `test_cli_cleanup*` 2279 passed / 0 skipped. Local `uv run ruff check .` clean.
 - [x] EF-18 node-27 live receipt: one real `production_execute` pass of the
       branch code as `nwm` through `scripts/node27_raw_retention_once.sh` with
       `NODE27_RAW_RETENTION_REPO` pointing at an isolated checkout (so the
