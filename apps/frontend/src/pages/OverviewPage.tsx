@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { RegionErrorBoundary } from '@/components/layout/RegionErrorBoundary'
 import {
   M11MapLibreSurface,
   type M11MapCameraFit,
@@ -36,7 +37,7 @@ import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
 import {
   M11BottomControlBar,
   deriveM11ControlBarModel,
-  type M11BottomControlBarProps,
+  type M11ControlBarInput,
 } from '@/pages/m11/M11BottomControlBar'
 import { resolveM11NationalValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
@@ -84,7 +85,24 @@ export function OverviewPage() {
 }
 
 /**
+ * 控制条模型在**控制条区域内**派生（#2347 D3）：`deriveM11ControlBarModel` 在 render 里抛错时
+ * （例如 `/cycles` 的 `cycles` 数组里混进 `null`）只落进控制条的边界，不拖垮整张地图。
+ * 与区域边界同一次提交渲染，挂载接缝 `m11-bottom-control-bar` 仍是首帧同步可见。
+ */
+function M11BottomControlBarRegion({
+  input,
+  onQueryChange,
+}: {
+  input: M11ControlBarInput
+  onQueryChange: (patch: M11QueryPatch) => void
+}) {
+  const model = useMemo(() => deriveM11ControlBarModel(input), [input])
+  return <M11BottomControlBar {...model} onQueryChange={onQueryChange} />
+}
+
+/**
  * 全屏地图外壳：地图铺满视口，浮层切换器/图例/运维链接 + 自定义浮层。
+ * 每个区域各有一道渲染期错误边界（#2347 D3）；fallback 沿用该区域原来的定位类，落在原处。
  */
 function M11FullscreenMap({
   state,
@@ -103,7 +121,7 @@ function M11FullscreenMap({
   boundaryLoading,
   fitTo,
   mapLabel,
-  controlBar,
+  controlBarInput,
   onQueryChange,
   onOverlayHover,
   onOverlayClick,
@@ -128,8 +146,8 @@ function M11FullscreenMap({
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   mapLabel: string
-  /** 底部控制条模型。null / 不传 = 不渲染任何控制条 DOM。 */
-  controlBar?: M11BottomControlBarProps | null
+  /** 底部控制条的派生入参（模型在控制条区域内派生）。null / 不传 = 不渲染任何控制条 DOM。 */
+  controlBarInput?: M11ControlBarInput | null
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -145,35 +163,57 @@ function M11FullscreenMap({
         aria-label={mapLabel}
         data-testid="m11-fullscreen-map"
       >
-      <M11MapLibreSurface
-        state={state}
-        layers={layers}
-        basins={basins}
-        visibleBasinIds={visibleBasinIds}
-        nationalRiverGeo={nationalRiverGeo}
-        meshRiverBasinIds={meshRiverBasinIds}
-        selectedSegmentId={selectedSegmentId}
-        selectedStationId={selectedStationId}
-        stationFeatureCollection={stationFeatureCollection}
-        precipOverlay={precipOverlay}
-        loading={loading}
-        boundaryLoading={boundaryLoading}
-        fitTo={fitTo}
-        onOverlayHover={onOverlayHover}
-        onOverlayClick={onOverlayClick}
-      />
-      <M11FloatingLayerSwitcher
-        layer={state.layer}
-        metStations={state.metStations}
-        precip={state.precip}
-        precipAvailability={precipAvailability}
-        onQueryChange={onQueryChange}
-      />
-      <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
-      <M11OpsLink visible={opsVisible} />
+      <RegionErrorBoundary region="地图" testId="region-error-map" resetKeys={[]} className="absolute inset-0 justify-center">
+        <M11MapLibreSurface
+          state={state}
+          layers={layers}
+          basins={basins}
+          visibleBasinIds={visibleBasinIds}
+          nationalRiverGeo={nationalRiverGeo}
+          meshRiverBasinIds={meshRiverBasinIds}
+          selectedSegmentId={selectedSegmentId}
+          selectedStationId={selectedStationId}
+          stationFeatureCollection={stationFeatureCollection}
+          precipOverlay={precipOverlay}
+          loading={loading}
+          boundaryLoading={boundaryLoading}
+          fitTo={fitTo}
+          onOverlayHover={onOverlayHover}
+          onOverlayClick={onOverlayClick}
+        />
+      </RegionErrorBoundary>
+      <RegionErrorBoundary
+        region="地图控件"
+        testId="region-error-map-controls"
+        resetKeys={[]}
+        className="absolute left-4 top-4 z-[120]"
+      >
+        <M11FloatingLayerSwitcher
+          layer={state.layer}
+          metStations={state.metStations}
+          precip={state.precip}
+          precipAvailability={precipAvailability}
+          onQueryChange={onQueryChange}
+        />
+        <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
+        <M11OpsLink visible={opsVisible} />
+      </RegionErrorBoundary>
       {children}
-      {controlBar ? <M11BottomControlBar {...controlBar} onQueryChange={onQueryChange} /> : null}
-      <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
+      {controlBarInput ? (
+        // 只按源/周期复位：时间轴步进不重挂已崩溃的控制条。
+        <RegionErrorBoundary
+          region="起报时次与时间轴"
+          testId="region-error-control-bar"
+          resetKeys={[state.source, state.cycle]}
+          className="absolute bottom-4 left-1/2 z-[115] -translate-x-1/2"
+        >
+          <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} />
+        </RegionErrorBoundary>
+      ) : null}
+      {/* `state.layer` 恒为 'discharge'，拿它当 key 永远不会复位，故只靠「重试」。 */}
+      <RegionErrorBoundary region="图例" testId="region-error-legend" resetKeys={[]} className="absolute bottom-24 right-4 z-[120]">
+        <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
+      </RegionErrorBoundary>
       </section>
     </div>
   )
@@ -267,15 +307,16 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const summary = currentOverview?.summary ?? mapOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
   // 底部控制条：全部派生自上面这组只读快照，零新增请求、零 store 写入。
-  const controlBar = useMemo(
-    () =>
-      deriveM11ControlBarModel({
-        state,
-        layers,
-        metadata: layers.find((layer) => layer.layerId === state.layer)?.metadata ?? null,
-        cyclesBySource,
-        sourceSelection,
-      }),
+  // 这里只备入参（依赖与原先的模型 memo 相同，派生频率不变）；模型在控制条区域内派生，
+  // 派生抛错只落进控制条的边界（#2347 D3）。
+  const controlBarInput = useMemo<M11ControlBarInput>(
+    () => ({
+      state,
+      layers,
+      metadata: layers.find((layer) => layer.layerId === state.layer)?.metadata ?? null,
+      cyclesBySource,
+      sourceSelection,
+    }),
     [cyclesBySource, layers, sourceSelection, state],
   )
   // 降水叠加：三元组与流量层**逐字同源**——具体源走 store 的 `nationalConcreteSource`，
@@ -475,6 +516,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
             : '流域清单暂不可用')
       : null
 
+  const selectedSegmentId = riverPopup?.segment.river_segment_id ?? null
+  const selectedStationId = stationPopup?.station.station_id ?? null
+
   return (
     <M11FullscreenMap
       state={state}
@@ -483,8 +527,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       visibleBasinIds={visibleBasinIdList}
       nationalRiverGeo={nationalGeo.river}
       meshRiverBasinIds={meshRiverBasinIds}
-      selectedSegmentId={riverPopup?.segment.river_segment_id ?? null}
-      selectedStationId={stationPopup?.station.station_id ?? null}
+      selectedSegmentId={selectedSegmentId}
+      selectedStationId={selectedStationId}
       stationFeatureCollection={stationLayer.featureCollection}
       precipOverlay={precipOverlay}
       precipAvailability={precipCatalog.status}
@@ -493,13 +537,25 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       boundaryLoading={nationalGeo.loading}
       fitTo={basinFit}
       mapLabel="全国总览地图"
-      controlBar={controlBar}
+      controlBarInput={controlBarInput}
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
       onOverlayClick={handleMapOverlayClick}
     >
-      {riverForecastPanel}
-      {stationForecastPanel}
+      {/*
+        只包两个预报面板：浮层提示链留在边界外，面板崩溃也不会藏掉 `bootstrapError` 的唯一渲染面。
+        面板是绝对定位浮窗，fallback 同样浮在地图上（普通流式卡片会被地图画布压住）；
+        选中另一个河段/代站即复位重试。
+      */}
+      <RegionErrorBoundary
+        region="预报面板"
+        testId="region-error-map-panels"
+        resetKeys={[selectedSegmentId, selectedStationId]}
+        className="absolute left-1/2 top-24 z-[130] -translate-x-1/2"
+      >
+        {riverForecastPanel}
+        {stationForecastPanel}
+      </RegionErrorBoundary>
       {state.metStations && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>

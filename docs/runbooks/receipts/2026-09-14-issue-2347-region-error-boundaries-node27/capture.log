@@ -1,0 +1,14 @@
+captured_at=2026-09-14T06:28:43.900Z base=https://test.nwm.ac.cn
+## a-unmodified-default
+url=https://test.nwm.ac.cn/?validTime=2026-09-13T00%3A00%3A00.000Z injected=0
+fallbacks=[]
+header=1 fullscreen-map=1 control-bar=1 canvas=1
+hydro-national tiles: total=6 200=6 other=[]
+boundary console.error lines=0
+[b-injected-null-cycle] injected null into /api/v1/layers/discharge/cycles?source=gfs (default_cycle=2026-09-13T00:00:00Z, cycles=23)
+## b-injected-null-cycle
+url=https://test.nwm.ac.cn/?validTime=2026-09-13T00%3A00%3A00.000Z injected=1
+fallbacks=["region-error-control-bar:此区域加载失败重试"]
+header=1 fullscreen-map=1 control-bar=0 canvas=1
+hydro-national tiles: total=6 200=6 other=[]
+boundary console.error lines=1

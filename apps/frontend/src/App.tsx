@@ -1,8 +1,9 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { RBACGate } from '@/components/layout/RBACGate'
+import { RegionErrorBoundary } from '@/components/layout/RegionErrorBoundary'
 
 const OverviewPage = lazy(() =>
   import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })),
@@ -96,14 +97,42 @@ export function AppRoutes() {
   )
 }
 
-export default function App() {
+/**
+ * 路由级边界（#2347 D2）：位于 `Suspense` **外**，懒加载 chunk 被拒时 React 把拒绝抛到这里；
+ * 位于 `AppShell` **内**，站点页头不随页面崩溃卸载。按 pathname + search 复位：换路由或改 query 即重试。
+ * 注意 `React.lazy` 缓存被拒的 import：chunk 失败时「重试」/回到同一路由会再抛，只有「刷新页面」能恢复。
+ */
+function RouteErrorBoundary({ children }: { children: ReactNode }) {
+  const location = useLocation()
   return (
-    <BrowserRouter>
-      <AppShell>
+    <RegionErrorBoundary
+      variant="page"
+      testId="route-error-fallback"
+      region="页面"
+      resetKeys={[location.pathname, location.search]}
+    >
+      {children}
+    </RegionErrorBoundary>
+  )
+}
+
+/** 与路由器无关的生产组合：`App` 挂在 `BrowserRouter` 内，测试挂在 `MemoryRouter` 内。 */
+export function AppFrame() {
+  return (
+    <AppShell>
+      <RouteErrorBoundary>
         <Suspense fallback={<div>加载中...</div>}>
           <AppRoutes />
         </Suspense>
-      </AppShell>
+      </RouteErrorBoundary>
+    </AppShell>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppFrame />
     </BrowserRouter>
   )
 }

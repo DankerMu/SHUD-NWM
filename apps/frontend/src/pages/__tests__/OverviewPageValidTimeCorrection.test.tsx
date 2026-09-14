@@ -339,6 +339,8 @@ describe('OverviewPage legacy basin deep link', () => {
     const retiredBackButtonTestId = 'm11-back-to-' + 'overview'
     expect(screen.queryByTestId(retiredBackButtonTestId)).toBeNull()
     await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
+    // #2347 Must preserve：happy path 上没有任何区域/路由边界 fallback。
+    expect(screen.queryAllByTestId(/^region-error-|^route-error-fallback$/)).toHaveLength(0)
   })
 })
 
