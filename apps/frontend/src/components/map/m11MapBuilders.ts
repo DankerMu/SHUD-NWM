@@ -14,10 +14,7 @@ import {
 import {
   getM11BasinGeometryBudgetStatus,
   getM11SelectedSegmentGeometryBudgetStatus,
-  m11BasinRiverCollectionBudget,
-  m11BasinRiverLayerColor,
   resolveNationalScaleSource,
-  type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
@@ -64,36 +61,6 @@ export interface BasinFeatureCollection {
 // 产品口径：全国地图不展示流域边界，也不展示依附该边界的流域名称标记。
 // bbox 仍由 overview 数据保留，用于相机定位，不参与此 GeoJSON collection。
 export const m11BasinBoundaryOverlayEnabled = false
-
-export interface BasinRiverFeatureProperties {
-  segment_id: string
-  river_segment_id: string
-  basin_version_id: string
-  river_network_version_id: string
-  segment_name: string
-  q_value: number | null
-  q_unit: string
-  layer_color: string
-}
-
-export interface BasinRiverFeature {
-  type: 'Feature'
-  geometry: components['schemas']['GeoJsonLineString'] | components['schemas']['GeoJsonMultiLineString']
-  properties: BasinRiverFeatureProperties
-}
-
-export interface BasinRiverFeatureCollection {
-  type: 'FeatureCollection'
-  features: BasinRiverFeature[]
-  sourceData: {
-    type: 'FeatureCollection'
-    features: BasinRiverFeature[]
-  }
-  skippedCount: number
-  coordinateCount: number
-  serializedBytes: number
-  unavailableReason: string | null
-}
 
 export interface SelectedSegmentFeature {
   type: 'Feature'
@@ -296,79 +263,6 @@ export function countSkippedBasinGeometries(basins: OverviewBasin[], visibleBasi
   }).length
 }
 
-export function buildBasinRiverFeatureCollection(
-  rows: BasinSegmentRow[],
-  layer: M11Layer,
-): BasinRiverFeatureCollection {
-  let skippedCount = 0
-  let coordinateCount = 0
-  let featureSerializedBytes = 0
-  let serializedBytes = serializedByteLength({ type: 'FeatureCollection', features: [] })
-  const features: BasinRiverFeature[] = []
-
-  for (const row of rows) {
-    const geometryStatus = getM11SelectedSegmentGeometryBudgetStatus(row.geometry)
-    if (!geometryStatus.sanitizedGeometry) {
-      skippedCount += 1
-      continue
-    }
-
-    const candidate: BasinRiverFeature = {
-      type: 'Feature',
-      geometry: geometryStatus.sanitizedGeometry,
-      properties: {
-        segment_id: row.segmentId,
-        river_segment_id: row.riverSegmentId,
-        basin_version_id: row.basinVersionId,
-        river_network_version_id: row.riverNetworkVersionId,
-        segment_name: row.displayName,
-        q_value: row.currentQ,
-        q_unit: row.qUnit,
-        layer_color: m11BasinRiverLayerColor(row, layer),
-      },
-    }
-    const candidateSerializedBytes = serializedByteLength(candidate)
-    const nextFeatureCount = features.length + 1
-    const nextCoordinateCount = coordinateCount + geometryStatus.coordinateCount
-    const nextSerializedBytes =
-      serializedByteLength({ type: 'FeatureCollection', features: [] }) +
-      featureSerializedBytes +
-      candidateSerializedBytes +
-      Math.max(0, nextFeatureCount - 1)
-
-    if (
-      nextFeatureCount > m11BasinRiverCollectionBudget.maxFeatures ||
-      nextCoordinateCount > m11BasinRiverCollectionBudget.maxCoordinates ||
-      nextSerializedBytes > m11BasinRiverCollectionBudget.maxSerializedBytes
-    ) {
-      skippedCount += 1
-      continue
-    }
-
-    features.push(candidate)
-    coordinateCount = nextCoordinateCount
-    featureSerializedBytes += candidateSerializedBytes
-    serializedBytes = nextSerializedBytes
-  }
-
-  const sourceData = { type: 'FeatureCollection' as const, features }
-
-  return {
-    type: 'FeatureCollection',
-    features,
-    sourceData,
-    skippedCount,
-    coordinateCount,
-    serializedBytes,
-    unavailableReason:
-      rows.length > 0 && features.length === 0
-        ? '当前流域河段几何缺失或整体河网超过客户端渲染预算，地图不会注册过大的河网源。'
-        : skippedCount > 0
-          ? `${skippedCount} 条河段缺少可渲染几何或超出整体河网预算，已从地图河网中省略。`
-          : null,
-  }
-}
-
 export function buildM11RenderedNationalRiverCollection(
   nationalRiverGeo: FeatureCollection | null,
   meshRiverBasinIds: string[],
@@ -417,12 +311,8 @@ export function m11SelectedLayerUnavailableReason(
   layers: LayerState[],
   overlay: M11RegisteredOverlay | null,
   overlayData: FeatureCollection | null,
-  hasBasinRiverNetwork = false,
 ) {
   if (overlay && (overlay.source.type === 'vector' || overlayData)) return null
-  if (hasBasinRiverNetwork && state.layer === 'discharge') {
-    return null
-  }
   if (overlay) return '水文地图数据正在加载或已被客户端预算拦截，地图暂不显示该叠加层。'
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer) return '当前图层尚未由 /api/v1/layers 注册，地图不会渲染该叠加层。'
@@ -510,8 +400,4 @@ function selectedSegmentUnavailableReason(reason: string | null | undefined) {
   }
   if (reason.includes('at least two')) return '选中河段几何少于两个坐标点，地图不会绘制河段高亮。'
   return '选中河段几何格式无效，地图不会绘制河段高亮。'
-}
-
-function serializedByteLength(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length
 }

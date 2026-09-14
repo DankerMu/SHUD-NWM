@@ -2,13 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildBasinFeatureCollection,
-  buildBasinRiverFeatureCollection,
   buildM11RegisteredOverlay,
   countSkippedBasinGeometries,
   m11BasinBoundaryOverlayEnabled,
   m11VectorSourceKey,
 } from '@/components/map/M11MapLibreSurface'
-import type { BasinSegmentRow, LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
@@ -74,30 +73,6 @@ const dischargeLayer: LayerState = {
     unavailableReason: null,
   },
   legend: [],
-}
-
-const basinSegment: BasinSegmentRow = {
-  riverSegmentId: 'river-001',
-  riverNetworkVersionId: 'rn-001',
-  segmentId: 'seg-001',
-  displayName: 'Demo River',
-  basinVersionId: 'bv-001',
-  streamOrder: 2,
-  lengthM: 1000,
-  currentQ: 25,
-  qUnit: 'm3/s',
-  source: 'GFS',
-  cycleTime: state.cycle,
-  validTime: state.validTime,
-  hasGeometry: true,
-  geometry: {
-    type: 'LineString',
-    coordinates: [
-      [100, 30],
-      [101, 31],
-    ],
-  },
-  unavailableReason: null,
 }
 
 describe('M11 discharge shell contracts', () => {
@@ -258,17 +233,6 @@ describe('M11 discharge shell contracts', () => {
     expect(m11VectorSourceKey({ ...base, source: 'ifs' })).not.toBe(key)
     expect(m11VectorSourceKey({ ...base, cycle: '2026-05-18T12:00:00Z' })).not.toBe(key)
     expect(m11VectorSourceKey({ ...base, validTime: '2026-05-18T09:00:00Z' })).not.toBe(key)
-  })
-
-  it('builds basin river feature properties from discharge rows only', () => {
-    const collection = buildBasinRiverFeatureCollection([basinSegment], 'discharge')
-
-    expect(collection.features).toHaveLength(1)
-    expect(collection.features[0].properties).toMatchObject({
-      river_segment_id: 'river-001',
-      q_value: 25,
-      q_unit: 'm3/s',
-    })
   })
 
   it('suppresses every basin boundary and its map label source', () => {

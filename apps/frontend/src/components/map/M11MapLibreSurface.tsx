@@ -9,7 +9,6 @@ import type { FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 import { cn } from '@/lib/cn'
-import { formatUnitForDisplay } from '@/lib/format'
 import {
   buildBasinFeatureCollection,
   buildM11RegisteredOverlay,
@@ -17,7 +16,6 @@ import {
   countSkippedBasinGeometries,
   m11BasinBoundaryOverlayEnabled,
   m11SelectedLayerUnavailableReason,
-  type BasinRiverFeature,
 } from '@/components/map/m11MapBuilders'
 import {
   buildM11InteractiveLayerIds,
@@ -63,7 +61,6 @@ import { buildMvtTileUrlTemplate, isMvtLayerMetadata } from '@/lib/mvtLayerMetad
 
 export {
   buildBasinFeatureCollection,
-  buildBasinRiverFeatureCollection,
   buildM11RegisteredOverlay,
   buildM11RenderedNationalRiverCollection,
   buildSelectedSegmentFeatureCollection,
@@ -74,14 +71,12 @@ export {
   m11VectorSourceKey,
   segmentFilter,
   type BasinFeatureCollection,
-  type BasinRiverFeatureCollection,
   type M11RegisteredOverlay,
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
 export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo } from '@/components/map/m11MapRuntime'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
-export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
 // Monotonic token source and the token of the currently installed hook.
 // Cleanup deletes only when both object identity and the installed token match.
@@ -368,33 +363,10 @@ export function M11MapLibreSurface({
         basinFeatureCount={basinFeatureCollection.features.length}
         skippedBasinGeometryCount={skippedBasinGeometryCount}
         unavailableReason={unavailableReason}
-        basinRiverUnavailableReason={null}
         selectedSegmentMapState={selectedSegmentMapState}
         selectedSegmentUnavailableReason={selectedSegmentUnavailableReason}
         mapSourceError={mapSourceError}
       />
-    </div>
-  )
-}
-
-// Exported so the river popup's rendered text has a behavioural oracle; it is a
-// pure presentational component and is not part of this module's runtime API.
-export function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
-  if (!feature) return null
-  const props = feature.properties
-  return (
-    <div
-      className="pointer-events-none absolute right-5 top-24 z-[110] w-72 rounded-md border border-neutral-300 bg-white/95 p-3 text-xs text-neutral-700 shadow-lg"
-      role="tooltip"
-      data-testid="m11-river-tooltip"
-    >
-      <div className="truncate text-sm font-semibold text-neutral-900">{props.segment_name || props.river_segment_id}</div>
-      <dl className="mt-2 grid grid-cols-[5rem_minmax(0,1fr)] gap-x-2 gap-y-1">
-        <dt>河段 ID</dt>
-        <dd className="min-w-0 truncate font-mono text-neutral-900">{props.river_segment_id}</dd>
-        <dt>当前流量</dt>
-        <dd>{props.q_value === null ? '无数据' : `${props.q_value.toLocaleString('en-US')} ${formatUnitForDisplay(props.q_unit)}`}</dd>
-      </dl>
     </div>
   )
 }

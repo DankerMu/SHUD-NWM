@@ -228,30 +228,6 @@ describe('M11 overview data contracts', () => {
     expect(pendingActiveCycleValidTimesDisabledReason).not.toBe(activeCycleValidTimesErrorDisabledReason)
   })
 
-  it('does not let derivedValidTimes resurrect an unresolved active cycle list', () => {
-    // cand-01 的旁路封堵：未定态必须**同时**清空 api 与 derived 两路，不能经
-    // `apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes` 复活 available。
-    const layers = normalizeLayerStates({
-      query: { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null },
-      layers: [
-        {
-          layer_id: 'discharge',
-          layer_name: 'Discharge',
-          layer_type: 'hydrology',
-          variables: ['q_down'],
-          metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
-        },
-      ],
-      activeCycleValidTimes: { discharge: { status: 'pending' } },
-      derivedValidTimes: { discharge: ['2026-05-18T09:00:00Z'] },
-    })
-
-    expect(layers[0].validTimes).toEqual([])
-    expect(layers[0].available).toBe(false)
-    expect(layers[0].validTimeSource).toBe('none')
-    expect(layers[0].disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
-  })
-
   it('marks an empty discharge list with a null default cycle as fail-closed, not time-less', () => {
     // spec「Discharge with an empty list is fail-closed, not time-less」：disabledReason 必须与
     // 'Layer has no valid times.' 不相等，供 I11/I12 出「无周期覆盖全部流域」文案。

@@ -13,7 +13,6 @@ function renderStatusOverlays(basinBoundaryOverlayEnabled: boolean) {
       basinFeatureCount={0}
       skippedBasinGeometryCount={0}
       unavailableReason={null}
-      basinRiverUnavailableReason={null}
       selectedSegmentMapState="idle"
       selectedSegmentUnavailableReason={null}
       mapSourceError={null}

@@ -4657,7 +4657,7 @@ spec-compliance 与 integration 各一项；主要收益是遗漏的必需证据
 ### Revisit 2026-09-14（post PR #2330 / issue #1895）
 
 追加 #2330 与 bookkeeping PR #2322，并保留并行合入的其他记录后实测
-663 行、653 merged、10 terminal；219 个多轮样本，later-round catches
+664 行、654 merged、10 terminal；219 个多轮样本，later-round catches
 core=282、rotated=270、phase=60、skipped=15。#2330 compact 单轮双席
 clean，最终 Gap Sweep 无新候选；#2322 none 零轮，不新增轮换样本。
 本次额外教训是 evidence-only 后继也会改变仓库治理 reader 的输入集：

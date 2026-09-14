@@ -33,14 +33,6 @@ export const m11SelectedSegmentGeometryBudget = {
   maxSerializedBytes: 250_000,
 } as const
 
-// 按真实流域校准（qhh 全河网 1839 段 / ~77k 坐标 / ~1.8MB 序列化）：预算需容纳单流域
-// 全河段渲染，同时仍拦截病态超大 payload。MapLibre 对该量级 GeoJSON 渲染无压力。
-export const m11BasinRiverCollectionBudget = {
-  maxFeatures: 5_000,
-  maxCoordinates: 250_000,
-  maxSerializedBytes: 6_000_000,
-} as const
-
 const m11RiverDischargeLegend: LayerLegendEntry[] = [
   { label: '<1 m³/s', color: '#7FB8DC', max: 1 },
   { label: '1-10 m³/s', color: '#4292C6', min: 1, max: 10 },
@@ -153,7 +145,7 @@ export interface LayerState {
   metadata: components['schemas']['Layer']['metadata'] | null
   validTimes: string[]
   currentValidTime: string | null
-  validTimeSource: 'api' | 'derived' | 'none'
+  validTimeSource: 'api' | 'none'
   disabledReason: string | null
   /**
    * store 为**活动源**解析出的全国起报时次（`nationalDischargeActivePair().cycle`），解不出即 null。
@@ -167,27 +159,6 @@ export interface LayerState {
   activeNationalCycle: string | null
   freshness: FreshnessMetadata
   legend: LayerLegendEntry[]
-}
-
-export interface BasinSegmentRow {
-  riverSegmentId: string
-  riverNetworkVersionId: string
-  segmentId: string
-  displayName: string
-  basinVersionId: string
-  streamOrder: number | null
-  lengthM: number | null
-  currentQ: number | null
-  qUnit: string
-  source: M11ResolvedSource | null
-  cycleTime: string | null
-  validTime: string | null
-  hasGeometry: boolean
-  geometry:
-    | components['schemas']['GeoJsonLineString']
-    | components['schemas']['GeoJsonMultiLineString']
-    | null
-  unavailableReason: string | null
 }
 
 export type AggregationEndpointDecisionReason =
@@ -513,7 +484,6 @@ export function normalizeLayerStates(input: {
   // 不参与本函数任何既有字段的计算）。解析规则只有 store 的 `nationalDischargeActivePair` 一处，
   // 这里既不推算也不回落；不传 = null = 调用方没有解出周期 → 下游不注册全国叠加层。
   activeNationalCycle?: string | null
-  derivedValidTimes?: Record<string, string[] | undefined>
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
   const apiLayersById = new Map(input.layers.map((layer) => [layer.layer_id, layer]))
@@ -527,9 +497,8 @@ export function normalizeLayerStates(input: {
     // metadata 已是数组（含空数组）→ 完全忽略 fallback 覆盖；metadata 缺失才用调用方注入的 fallback。
     const fallbackValidTimes = requiresFallback ? normalizeValidTimes(input.validTimesByLayerId?.[layerId]) : []
     const activeCycleOverride = input.activeCycleValidTimes?.[layerId]
-    // 非 available 的三态（pending / error / fail-closed）一律清空两路时次来源：不能落回 metadata
-    // （默认周期的列表），也不能经 `apiValidTimes.length > 0 ? … : derivedValidTimes` 从 derived
-    // 复活 `available: true`。**状态本身**（不是「是/否未定」这个布尔）向下传给文案分支。
+    // 非 available 的三态（pending / error / fail-closed）一律清空时次来源：不能落回 metadata
+    // （默认周期的列表）复活 `available: true`。**状态本身**（不是「是/否未定」这个布尔）向下传给文案分支。
     const activeCycleOverrideStatus =
       activeCycleOverride && activeCycleOverride.status !== 'available' ? activeCycleOverride.status : null
     const apiValidTimes = activeCycleOverrideStatus
@@ -539,8 +508,7 @@ export function normalizeLayerStates(input: {
         : requiresFallback
           ? fallbackValidTimes
           : metadataValidTimes
-    const derivedValidTimes = activeCycleOverrideStatus ? [] : normalizeValidTimes(input.derivedValidTimes?.[layerId])
-    const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
+    const validTimes = apiValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
     const renderable = isM11RenderableLayer(layerId)
@@ -556,7 +524,7 @@ export function normalizeLayerStates(input: {
       metadata: apiLayer?.metadata ?? null,
       validTimes,
       currentValidTime,
-      validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',
+      validTimeSource: apiValidTimes.length > 0 ? 'api' : 'none',
       activeNationalCycle: input.activeNationalCycle ?? null,
       disabledReason: available
         ? null
@@ -709,10 +677,6 @@ function numberOrNull(value: unknown): number | null {
 
 function finiteNumberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function numberOrZero(value: unknown): number {
-  return numberOrNull(value) ?? 0
 }
 
 function sumNullable(values: Array<number | null>): number | null {
@@ -1115,10 +1079,6 @@ function layerGroup(layer: ApiLayer | undefined, layerId: string): LayerState['g
 function layerLegend(layerId: string): LayerLegendEntry[] {
   if (layerId === 'discharge') return m11RiverDischargeLegend.map((entry) => ({ ...entry }))
   return []
-}
-
-export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ'>, _layer: M11Layer) {
-  return m11DischargeColor(row.currentQ)
 }
 
 // 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同源（ColorBrewer 蓝系、log 阶分桶）。

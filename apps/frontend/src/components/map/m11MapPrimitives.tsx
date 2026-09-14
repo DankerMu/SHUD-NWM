@@ -7,10 +7,8 @@ import {
   segmentFilter,
   zoomScaledValueWidth,
   type BasinFeatureCollection,
-  type BasinRiverFeatureCollection,
   type M11LineLayerProps,
   type M11RegisteredOverlay,
-  type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
 import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 
@@ -24,16 +22,6 @@ export const M11_NATIONAL_RIVER_LINE_LAYER_ID = 'm11-national-river-line'
 export const M11_BASIN_BOUNDARIES_SOURCE_ID = 'm11-basin-boundaries-source'
 export const M11_BASIN_FILL_LAYER_ID = 'm11-basin-fill'
 export const M11_BASIN_OUTLINE_LAYER_ID = 'm11-basin-outline'
-export const M11_BASIN_RIVER_SOURCE_ID = 'm11-basin-river-source'
-export const M11_BASIN_RIVER_CASING_LAYER_ID = 'm11-basin-river-casing'
-export const M11_BASIN_RIVER_LINE_LAYER_ID = 'm11-basin-river-line'
-export const M11_BASIN_RIVER_HOVER_HALO_LAYER_ID = 'm11-basin-river-hover-halo'
-export const M11_BASIN_RIVER_SELECTED_HALO_LAYER_ID = 'm11-basin-river-selected-halo'
-export const M11_BASIN_RIVER_HOVER_LINE_LAYER_ID = 'm11-basin-river-hover-line'
-export const M11_BASIN_RIVER_SELECTED_LINE_LAYER_ID = 'm11-basin-river-selected-line'
-export const M11_SELECTED_SEGMENT_SOURCE_ID = 'm11-selected-segment-source'
-export const M11_SELECTED_SEGMENT_HALO_LAYER_ID = 'm11-selected-segment-halo'
-export const M11_SELECTED_SEGMENT_LINE_LAYER_ID = 'm11-selected-segment-line'
 export const M11_PRECIP_SOURCE_ID = 'm11-precip-image'
 export const M11_PRECIP_RASTER_LAYER_ID = 'm11-precip-raster'
 export const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
@@ -327,120 +315,6 @@ export function M11BasinLabelMarkers({ collection }: { collection: BasinFeatureC
         )
       })}
     </>
-  )
-}
-
-export function M11BasinRiverPrimitive({
-  collection,
-  selectedSegmentId,
-  hoveredSegmentId,
-  subdued = false,
-}: {
-  collection: BasinRiverFeatureCollection
-  selectedSegmentId?: string | null
-  hoveredSegmentId?: string | null
-  subdued?: boolean
-}) {
-  return (
-    <Source id={M11_BASIN_RIVER_SOURCE_ID} type="geojson" data={collection.sourceData} promoteId="river_segment_id">
-      <Layer
-        id={M11_BASIN_RIVER_CASING_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.6, 9, 3.8, 12, 5.2],
-          'line-opacity': subdued ? 0.25 : 0.8,
-        }}
-      />
-      <Layer
-        id={M11_BASIN_RIVER_LINE_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        paint={{
-          'line-color': ['get', 'layer_color'],
-          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 1.6, 9, 2.6, 12, 3.6],
-          'line-opacity': subdued ? 0.18 : 0.92,
-        }}
-      />
-      <Layer
-        id={M11_BASIN_RIVER_HOVER_HALO_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(hoveredSegmentId)}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 8.5,
-          'line-opacity': 0.62,
-        }}
-      />
-      <Layer
-        id={M11_BASIN_RIVER_SELECTED_HALO_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(selectedSegmentId)}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 9.5,
-          'line-opacity': 0.68,
-        }}
-      />
-      <Layer
-        id={M11_BASIN_RIVER_HOVER_LINE_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(hoveredSegmentId)}
-        paint={{
-          'line-color': ['get', 'layer_color'],
-          'line-width': 4.8,
-          'line-opacity': 0.98,
-        }}
-      />
-      <Layer
-        id={M11_BASIN_RIVER_SELECTED_LINE_LAYER_ID}
-        type="line"
-        source={M11_BASIN_RIVER_SOURCE_ID}
-        layout={M11_ROUND_LINE_LAYOUT}
-        filter={segmentFilter(selectedSegmentId)}
-        paint={{
-          'line-color': '#F97316',
-          'line-width': 5.5,
-          'line-opacity': 1,
-        }}
-      />
-    </Source>
-  )
-}
-
-export function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegmentFeatureCollection }) {
-  return (
-    <Source id={M11_SELECTED_SEGMENT_SOURCE_ID} type="geojson" data={collection} promoteId="segment_id">
-      <Layer
-        id={M11_SELECTED_SEGMENT_HALO_LAYER_ID}
-        type="line"
-        source={M11_SELECTED_SEGMENT_SOURCE_ID}
-        paint={{
-          'line-color': '#FFFFFF',
-          'line-width': 8,
-          'line-opacity': 0.7,
-        }}
-      />
-      <Layer
-        id={M11_SELECTED_SEGMENT_LINE_LAYER_ID}
-        type="line"
-        source={M11_SELECTED_SEGMENT_SOURCE_ID}
-        paint={{
-          'line-color': '#F97316',
-          'line-width': 5,
-          'line-opacity': 0.95,
-        }}
-      />
-    </Source>
   )
 }
 
