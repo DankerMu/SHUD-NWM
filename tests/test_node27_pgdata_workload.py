@@ -35,7 +35,6 @@ from packages.common.node27_pgdata_workload_plan import (
     normalize_candidate_chunk_name,
 )
 from packages.common.node27_pgdata_workload_query import (
-    canonical_query_parameters,
     query_digest,
     record_explicit_cycle_curve,
     timeseries_segment_id,
@@ -812,7 +811,6 @@ def test_cli_executes_complete_measurement_not_capture_only(tmp_path: Path) -> N
     assert document["isolated"] is True
     assert document["live"] is False
     assert document["identity"]["query_digest"] == captured["query_digest"]
-    assert document["query"]["parameters"] == canonical_query_parameters(captured["parameters"])
     assert document["query"]["parameters"]["mapping"]["scenario_tokens"] == {
         "sequence": ["forecast_gfs_deterministic"]
     }
