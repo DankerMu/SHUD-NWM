@@ -1351,6 +1351,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
         stop_on_match=True,
     ),
+    # C4 reads pinned evidence through evidence_io's descriptor-bound
+    # byte/JSON identity primitives. This exact owner has no same-name suite,
+    # so route the surviving C4 acceptance partitions without pulling retired
+    # C1/C2/C3 suites; shared core/invariant riders remain additive outside
+    # PATH_TEST_RULES.
+    PathTestRule(
+        "packages/common/evidence_io.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+    ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[1],
         FILE_JOURNAL_READ_STATE_TESTS,
@@ -2766,6 +2775,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_node22_refresh_timer_health.py",
         ),
+    ),
+    # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
+    # After cold-family retirement that consumer contract is gone, while the
+    # node-22 refresh-timer probe still copies `DEFAULT_MAX_MANIFEST_AGE_HOURS`
+    # as its own `CONSUMER_MAX_MANIFEST_AGE_HOURS` (D4 forbids the probe importing
+    # repo packages) and derives both threshold ceilings from it. The probe suite
+    # asserts the two constants are equal, so a drop in the consumer's bound must
+    # run it -- otherwise the probe keeps grading `ok` for a manifest the consumer
+    # has already fail-closed on.
+    PathTestRule(
+        "services/orchestrator/scheduler_file_providers.py",
+        ("tests/test_node22_refresh_timer_health.py",),
     ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;

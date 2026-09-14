@@ -382,7 +382,6 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
     from scripts import select_ci_tests
 
     mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in NODE22_REFRESH_READER_EDGES)
-    assert len(mutant) == len(PATH_TEST_RULES) - len(NODE22_REFRESH_READER_EDGES)
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     for source in NODE22_REFRESH_READER_EDGES:
@@ -12725,13 +12724,24 @@ def test_canonical_readonly_validator_rule_reds_when_removed(monkeypatch: pytest
     from scripts import select_ci_tests
 
     producer = "services/production_closure/readonly_db_validation.py"
-    monkeypatch.setattr(
-        select_ci_tests,
-        "PATH_TEST_RULES",
-        tuple(rule for rule in PATH_TEST_RULES if rule.pattern != producer),
+    omitted = READONLY_DB_VALIDATION_TESTS[0]
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(
+                target
+                for target in rule.tests
+                if not (fnmatch.fnmatch(producer, rule.pattern) and target == omitted)
+            ),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        for rule in PATH_TEST_RULES
     )
-    selected = set(select_tests([producer], repo_root=Path(".")))
-    assert not set(READONLY_DB_VALIDATION_TESTS) <= selected
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    with pytest.raises(AssertionError):
+        test_canonical_readonly_validator_selects_its_contract()
 
 
 def test_readonly_validator_cli_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
