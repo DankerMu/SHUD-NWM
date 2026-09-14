@@ -1,0 +1,39 @@
+# #2336 receipt capture 2026-09-14T03:51:20.754Z
+url: https://test.nwm.ac.cn/?validTime=2026-09-13T00%3A00%3A00.000Z
+bundle: https://test.nwm.ac.cn/assets/index-CYsR5Fwk.js
+initial requests: api=9 tile=12
+  API GET https://test.nwm.ac.cn/api/v1/runtime/config
+  API GET https://test.nwm.ac.cn/api/v1/basins?limit=200&offset=0&has_display_product=true
+  API GET https://test.nwm.ac.cn/api/v1/layers?limit=100&offset=0
+  API GET https://test.nwm.ac.cn/api/v1/models?active=true&limit=200&offset=0
+  API GET https://test.nwm.ac.cn/api/v1/runs?source=GFS&status=published&limit=20&offset=0
+  API GET https://test.nwm.ac.cn/api/v1/layers?limit=100&offset=0&run_id=fcst_gfs_2026091300_dg_fed73a15ec9ff9b7c4cba8dd644d5458
+  API GET https://test.nwm.ac.cn/api/v1/layers/discharge/cycles?source=gfs
+  API GET https://test.nwm.ac.cn/api/v1/precip/gfs/2026-09-13T00%3A00%3A00Z/index
+  API GET https://test.nwm.ac.cn/api/v1/pipeline/status?source=GFS&cycle_time=2026-09-13T00%3A00%3A00Z
+hydro-national tile responses: 6 (status counts: {"200":6})
+non-2xx api/tile responses: 1
+  404 https://test.nwm.ac.cn/api/v1/precip/gfs/2026-09-13T00%3A00%3A00Z/index
+disabled reason: null
+slider range: min=0 max=55 value=0
+## 02-play-1x
+slider index: 0 -> 6
+loading notice appearances (MutationObserver): 0
+new /api (non-tile) requests: 0
+new tile requests: 36 across 6 valid_time(s)
+tile sample: https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T03%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T03%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T03%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d
+## 03-play-4x
+slider index: 6 -> 18
+loading notice appearances (MutationObserver): 0
+new /api (non-tile) requests: 0
+new tile requests: 72 across 12 valid_time(s)
+tile sample: https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T21%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T21%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-13T21%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d
+## 04-slider
+slider index: 18 -> 4
+loading notice appearances (MutationObserver): 0
+new /api (non-tile) requests: 0
+new tile requests: 66 across 11 valid_time(s)
+tile sample: https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-15T03%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-15T03%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d | https://test.nwm.ac.cn/api/v1/tiles/hydro-national/gfs/2026-09-13T00%3A00%3A00Z/q_down/2026-09-15T03%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=e44d8010f8c7f9aaa5ed177a8758343cbfd4ef7bfbacc53f50d2fa669097ca7d
+## 05-ifs-unlisted-cycle
+url: https://test.nwm.ac.cn/?source=ifs&cycle=1999-01-01T00%3A00%3A00.000Z
+disabled reason: Cycle 1999-01-01T00:00:00Z is not listed for IFS, so it has no valid times for this layer.

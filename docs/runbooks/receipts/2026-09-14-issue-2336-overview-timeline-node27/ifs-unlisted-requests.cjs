@@ -1,0 +1,10 @@
+const { chromium } = require(process.cwd() + '/apps/frontend/node_modules/@playwright/test')
+;(async () => {
+  const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 1440, height: 900 } })
+  const reqs = []; p.on('request', (r) => { const u = r.url(); if (u.includes('/api/') || /\.(pbf|json)(\?|$)/.test(u)) reqs.push(u) })
+  await p.goto('https://test.nwm.ac.cn/?source=ifs&cycle=1999-01-01T00:00:00Z'); await p.waitForTimeout(15000)
+  for (const u of reqs) console.log(decodeURIComponent(u).slice(0, 170))
+  const layers = await p.evaluate(() => { const m = window.__m11Map || null; return m ? m.getStyle().layers.map((l) => l.id) : 'no map handle' })
+  console.log(JSON.stringify(layers))
+  await b.close()
+})()
