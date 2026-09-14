@@ -307,6 +307,7 @@ def scenario(args):
             cur.execute("SELECT version FROM public.schema_migrations ORDER BY version")
             seeded = [row[0] for row in cur.fetchall()]
     w.require(all(version in seeded for version in retired), "HISTORICAL_LEDGER_NOT_SEEDED")
+    original_ledger = list(seeded)
     artifacts = root / "artifacts"
     artifacts.mkdir()
     with contextlib.closing(psycopg2.connect(dsn)) as conn:
@@ -479,11 +480,13 @@ def scenario(args):
                     default=str,
                 ).encode(),
             )
-        if args.case != "do-before-ledger":
+        if args.case in {"happy", "rename", "source", "restart"}:
             w.require(
-                all(version in e.ledger() for version in RETIRED_LEDGER_VERSIONS) and w.EXPAND in e.ledger(),
+                e.ledger() == sorted(original_ledger + [w.EXPAND]),
                 "EXPAND_DID_NOT_PRESERVE_HISTORICAL_LEDGER",
             )
+        else:
+            w.require(e.ledger() == original_ledger, "PRE_COMMIT_LEDGER_NOT_ORIGINAL_L")
         e.validate_expand()
         e.sql(
             "INSERT INTO hydro.hydro_run (run_id,run_type,scenario_id,model_id,basin_version_id,"
@@ -526,7 +529,14 @@ def scenario(args):
             e.start_runtime()
             e.ingress_audit()
             cache_boundary(e)
+    expected_ledger = (
+        sorted(original_ledger + [w.EXPAND])
+        if args.case in {"happy", "rename", "source", "restart"}
+        else list(original_ledger)
+    )
+    w.require(e.ledger() == expected_ledger, "PRE_RECOVERY_LEDGER_NOT_TRANSITION")
     ledger = e.ledger()
+    w.require(ledger == expected_ledger, "CAPTURED_LEDGER_NOT_EXPECTED")
     narrow_oid = e.s.get("narrow_oid")
     retained = (
         e.rows("SELECT * FROM hydro.river_timeseries ORDER BY valid_time,river_segment_key") if narrow_oid else None
@@ -548,11 +558,7 @@ def scenario(args):
     else:
         e.recover()
     for _ in range(2):
-        if args.case not in {"stop", "session", "fence"}:
-            w.require(
-                all(version in e.ledger() for version in RETIRED_LEDGER_VERSIONS) and w.EXPAND in e.ledger(),
-                "D12_DELETED_HISTORICAL_OR_EXPAND_LEDGER",
-            )
+        w.require(e.ledger() == expected_ledger, "D12_DELETED_HISTORICAL_OR_EXPAND_LEDGER")
         prior_epochs = json.loads(json.dumps(e.s["fence_epochs"]))
         e = reopen(e)
         e.recover()
@@ -986,7 +992,6 @@ def historical_ledger_admission(e):
         receipt = json.loads(output.getvalue()) if output.getvalue().strip() else {}
         e.save_file("historical-prepare-" + state_name + ".stdout", output.getvalue().encode())
         return rc, receipt
-
 
     try:
         rc, receipt = invoke_prepare("extra", ChangedHistoricalPrepareExecutor, w, extra_pending=True)
