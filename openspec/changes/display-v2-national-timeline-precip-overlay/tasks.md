@@ -303,7 +303,7 @@ Evidence Floor（#2068）：本地 `uv run ruff check .` + `uv run pytest tests/
   - 恢复镜像抛异常 / 回执写抛异常 → `_run_cycle_chain` 返回值与无恢复时一致、不抛
   - chain 内某 stage 抛 `OrchestratorError` + 下游 restart → 恢复仍跑，原异常透传
   - convert `succeeded` 与失败尾各一：`update_forecast_cycle_status` 调用先于镜像（调用序断言）；状态写抛异常 → 镜像仍跑、该异常透传
-  - 未改兄弟面：`test_canonical_precip_mirror_*`（`tests/test_orchestration_chain.py:3446-4089, 19621-19777`）全绿；`reconcile_unverified` 仍不镜像；非 convert stage 仍不镜像；`_copyback_stage_run_trees` 失败仍 raise
+  - 未改兄弟面：`tests/test_orchestration_chain.py` 中既有的 `test_canonical_precip_mirror_*`（含两条 lock-timeout 用例）全绿；`reconcile_unverified` 仍不镜像；非 convert stage 仍不镜像；`_copyback_stage_run_trees` 失败仍 raise
   - #2061 各变异（删递归 / `==`→字符串比较 / 去 `isdigit` 等）→ 对应新测试 FAIL
 
 Boundary-surface checklist（4.23–4.27）:
