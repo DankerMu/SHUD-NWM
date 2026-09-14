@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { RegionErrorBoundary } from '@/components/layout/RegionErrorBoundary'
 import { JobsTable } from '@/components/monitoring/JobsTable'
 import { StageList } from '@/components/monitoring/StageList'
 import { SummaryBar } from '@/components/monitoring/SummaryBar'
@@ -103,6 +104,8 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const dataUnavailableReason = runtimeConfigUnavailableReason ?? routeError ?? routeContextUnavailableReason
   const visibleSource = isOpsMode && routeSource ? routeSource : source
   const visibleCycleTime = isOpsMode && routeCycle ? routeCycle : cycleTime
+  // 面板边界按元素比较（Object.is），每次 render 新建数组无妨。
+  const regionResetKeys = [visibleSource, visibleCycleTime]
   const visibleStrictIdentity = routeStrictIdentity
   const hasVisibleCyclePayload = !isOpsMode || monitoringContextMatches(cycleContext, visibleSource, visibleCycleTime, visibleStrictIdentity)
   const hasVisibleJobsPayload = !isOpsMode || monitoringContextMatches(jobsContext, visibleSource, visibleCycleTime, visibleStrictIdentity)
@@ -277,53 +280,63 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         </div>
       ) : null}
 
-      <SummaryBar
-        source={visibleSource}
-        cycleTime={visibleCycleTime}
-        cycle={visibleCycle}
-        queue={visibleQueue}
-        queueError={visibleQueueError}
-        queueReadonlyUnavailable={isDisplayReadonly && queueReadonlyUnavailable}
-        isRefreshing={isOperationalDataReady && (manualRefreshing || isPolling)}
-        onRefresh={() => void handleManualRefresh()}
-        disabled={!isOperationalDataReady}
-      />
+      {/* 四个面板各一道渲染期错误边界（#2347 D4）：一个面板崩溃不拖垮其余三个；换 source/cycle 即复位。 */}
+      <RegionErrorBoundary region="概要" testId="region-error-summary" resetKeys={regionResetKeys}>
+        <SummaryBar
+          source={visibleSource}
+          cycleTime={visibleCycleTime}
+          cycle={visibleCycle}
+          queue={visibleQueue}
+          queueError={visibleQueueError}
+          queueReadonlyUnavailable={isDisplayReadonly && queueReadonlyUnavailable}
+          isRefreshing={isOperationalDataReady && (manualRefreshing || isPolling)}
+          onRefresh={() => void handleManualRefresh()}
+          disabled={!isOperationalDataReady}
+        />
+      </RegionErrorBoundary>
 
       <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem]">
-        <StageList
-          diagnosticContext={{
-            sourceId: visibleStrictIdentity?.source ?? visibleSource,
-            cycleTime: visibleStrictIdentity?.cycleTime ?? normalizeMonitoringCycleTime(visibleCycleTime),
-            runId: visibleStrictIdentity?.runId ?? null,
-            modelId: visibleStrictIdentity?.modelId ?? null,
-          }}
-          diagnosticsDisplayReadonly={isDisplayReadonly}
-          diagnosticsEnabled={isOpsMode}
-          stages={visibleStages}
-          unavailableReason={stageListUnavailableReason}
-          showPendingPlaceholders={!isOpsMode}
-        />
-        <JobsTable
-          autoFetch={isOperationalDataReady}
-          cancelControlsEnabled={!isOpsMode && controlMutationsEnabled && isOperationalDataReady}
-          clearOnFailure={isOpsMode}
-          diagnosticsDisplayReadonly={isDisplayReadonly}
-          diagnosticsEnabled={isOpsMode}
-          displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
-          fetchEnabled={isOperationalDataReady}
-          logControlsEnabled={isOperationalDataReady}
-          retryControlsEnabled={controlMutationsEnabled && isOperationalDataReady}
-          strictIdentity={visibleStrictIdentity}
-          unavailableReason={dataUnavailableReason ?? jobsPayloadUnavailableReason}
-        />
-        <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">
-          <TrendPanel
-            fetchEnabled={isOperationalDataReady}
-            refreshKey={trendRefreshKey}
-            source={visibleSource}
-            scenario={jobFilters.scenario ?? null}
-            unavailableReason={dataUnavailableReason}
+        <RegionErrorBoundary region="阶段" testId="region-error-stages" resetKeys={regionResetKeys}>
+          <StageList
+            diagnosticContext={{
+              sourceId: visibleStrictIdentity?.source ?? visibleSource,
+              cycleTime: visibleStrictIdentity?.cycleTime ?? normalizeMonitoringCycleTime(visibleCycleTime),
+              runId: visibleStrictIdentity?.runId ?? null,
+              modelId: visibleStrictIdentity?.modelId ?? null,
+            }}
+            diagnosticsDisplayReadonly={isDisplayReadonly}
+            diagnosticsEnabled={isOpsMode}
+            stages={visibleStages}
+            unavailableReason={stageListUnavailableReason}
+            showPendingPlaceholders={!isOpsMode}
           />
+        </RegionErrorBoundary>
+        <RegionErrorBoundary region="作业" testId="region-error-jobs" resetKeys={regionResetKeys}>
+          <JobsTable
+            autoFetch={isOperationalDataReady}
+            cancelControlsEnabled={!isOpsMode && controlMutationsEnabled && isOperationalDataReady}
+            clearOnFailure={isOpsMode}
+            diagnosticsDisplayReadonly={isDisplayReadonly}
+            diagnosticsEnabled={isOpsMode}
+            displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
+            fetchEnabled={isOperationalDataReady}
+            logControlsEnabled={isOperationalDataReady}
+            retryControlsEnabled={controlMutationsEnabled && isOperationalDataReady}
+            strictIdentity={visibleStrictIdentity}
+            unavailableReason={dataUnavailableReason ?? jobsPayloadUnavailableReason}
+          />
+        </RegionErrorBoundary>
+        {/* 边界放在网格项**内**：fallback 出现时 col-span 仍在。 */}
+        <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">
+          <RegionErrorBoundary region="趋势" testId="region-error-trend" resetKeys={regionResetKeys}>
+            <TrendPanel
+              fetchEnabled={isOperationalDataReady}
+              refreshKey={trendRefreshKey}
+              source={visibleSource}
+              scenario={jobFilters.scenario ?? null}
+              unavailableReason={dataUnavailableReason}
+            />
+          </RegionErrorBoundary>
         </div>
       </div>
     </div>
