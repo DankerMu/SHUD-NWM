@@ -1,0 +1,151 @@
+{
+  "tool_commit": "5c840cbcf2c7aff2d24a87e014af3d313ed4f96e",
+  "hashes": {
+    "window_execute.py": "20d44baf91d2caacc748bd6369c63f9b45e69a2d2f986d0fda42d472b8927196",
+    "governance_stage.py": "7b0dae69f27b1815e3b819c826e9552d5d58bc9357576eaaedcbfc065613a59d",
+    "governance_smoke.py": "6b6ccdf951dfd643f9b55b94562caaea831a67b212935a82f35329bb64e59c86",
+    "window_smoke.py": "0f81cb8983adb767f26340cb7afb125a6cd344822538d56370d6a5219f79ecd2"
+  },
+  "command": [
+    "env",
+    "TMPDIR=/home/nwm/tmp",
+    "/home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python",
+    "-B",
+    "/home/nwm/.local/state/issue1987-tools/5c840cbcf2c7aff2d24a87e014af3d313ed4f96e/window_smoke.py",
+    "--case",
+    "display-ready",
+    "--state",
+    "/home/nwm/tmp/issue2373-display-ready-5c840cbc",
+    "--original-executor",
+    "/home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/window_execute.py"
+  ],
+  "baseline_executor_sha256": "70598ef0a8edfc16b2a6c481814a1e878224ae1ad7510178fa75d83c4f5f76b5",
+  "exit": 0,
+  "result": {
+    "case": "display-ready",
+    "reports": [
+      {
+        "case": "forward-delayed",
+        "probes": 2,
+        "recovering": false,
+        "result": "pass",
+        "starts": 1
+      },
+      {
+        "case": "recovery-delayed",
+        "probes": 2,
+        "recovering": true,
+        "result": "pass",
+        "starts": 1
+      },
+      {
+        "case": "late-recovery-delayed",
+        "probes": 2,
+        "recovering": true,
+        "result": "pass",
+        "starts": 1
+      },
+      {
+        "case": "never-ready",
+        "check": "DISPLAY_READINESS_TIMEOUT",
+        "elapsed": 1.1954572480171919,
+        "http_timeouts": [
+          1.190566283185035,
+          0.9900241433642805,
+          0.7894288855604827,
+          0.5888919834978878,
+          0.38818704057484865,
+          0.18751988327130675
+        ],
+        "probes": 6,
+        "slept": [
+          0.2,
+          0.2,
+          0.2,
+          0.2,
+          0.2,
+          0.1871138042770326
+        ]
+      },
+      {
+        "case": "clipped-stop-budget",
+        "check": "DISPLAY_READINESS_TIMEOUT",
+        "elapsed": 0.7935052481479943,
+        "http_timeouts": [
+          0.7866762019693851,
+          0.5859807599335909,
+          0.3852220908738673,
+          0.1845007138326764
+        ],
+        "probes": 4,
+        "slept": [
+          0.2,
+          0.2,
+          0.2,
+          0.18407611967995763
+        ]
+      },
+      {
+        "case": "failed-unit",
+        "check": "DISPLAY_SERVICE_FAILED",
+        "elapsed": 0.0048114340752363205,
+        "http_timeouts": [
+          15
+        ],
+        "probes": 1,
+        "slept": []
+      },
+      {
+        "case": "permanent-http",
+        "check": "DISPLAY_HEALTH_FAILED",
+        "elapsed": 0.00569968530908227,
+        "http_timeouts": [
+          15
+        ],
+        "probes": 1,
+        "slept": []
+      },
+      {
+        "case": "trickle-timeout",
+        "check": "DISPLAY_READINESS_TIMEOUT",
+        "elapsed": 0.9960160083137453,
+        "http_timeouts": [
+          0.9914655010215938
+        ],
+        "probes": 1,
+        "slept": [
+          5
+        ]
+      },
+      {
+        "case": "expired-forward",
+        "check": "WINDOW_DEADLINE",
+        "elapsed": 0.006809763144701719,
+        "http_timeouts": [],
+        "probes": 0,
+        "slept": []
+      },
+      {
+        "case": "forward-then-recovery",
+        "forward_probes": 2,
+        "recovery_probes": 2,
+        "result": "pass"
+      },
+      {
+        "case": "original-delayed-red-forward",
+        "check": "<urlopen error [Errno 111] Connection refused>",
+        "error_type": "URLError",
+        "recovering": false
+      },
+      {
+        "case": "original-delayed-red-recovery",
+        "check": "<urlopen error [Errno 111] Connection refused>",
+        "error_type": "URLError",
+        "recovering": true
+      }
+    ],
+    "result": "PASS",
+    "scope": "shared start_runtime health readiness only; no database or production operation",
+    "state": "/home/nwm/tmp/issue2373-display-ready-5c840cbc"
+  }
+}
