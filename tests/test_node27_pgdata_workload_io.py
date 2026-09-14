@@ -273,7 +273,7 @@ def test_malformed_api_scalars_use_existing_field_codes() -> None:
         "API_MODEL_MISMATCH",
     )
     source_list = json.loads(json.dumps(_ok_series()))
-    source_list["series"][0]["source_id"] = []
+    source_list["series"][0]["source_id"] = ["GFS"]
     _assert_code(lambda: validate_river_series_response(source_list, **kwargs), "API_SOURCE_INVALID")
     variable_list = json.loads(json.dumps(_ok_series()))
     variable_list["series"][0]["variable"] = ["q_down"]
