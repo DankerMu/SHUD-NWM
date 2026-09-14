@@ -2603,19 +2603,21 @@ ssh -p 32099 nwm@210.77.77.27 \
        batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
        处置删掉；锁文件不存在时 `flock(1)` 会以 `0666 & umask` 新建它，之后每个 copyback 写者都
        fail closed（`copyback batch lock must have mode 0600`）。所以两条命令都先核对锁文件存在、
-       是普通文件且为 `600` + uid 1103，不符就拒绝执行、绝不新建；再在锁内复核 target 状态，
-       状态不符就什么都不做：
+       不是符号链接（`! -L`；`-f` 与 `stat` 都跟随符号链接）、是普通文件（`-f`）且为 `600` + uid 1103，
+       不符就拒绝执行、绝不新建；再在锁内复核 target 状态，状态不符就什么都不做。不用 `stat -c %F`
+       判类型：锁文件是 0 字节，GNU stat 对它报 `regular empty file` 而非 `regular file`（2026-09-14
+       node-22 实测 `stat -c '%F %a %u' "$L"` -> `regular empty file 600 1103`）：
 
        ```bash
        ssh -p 32099 frd_muziyao@210.77.77.22
        L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock
        T='<target>'; B='<backup_path>'   # 取自事件 details.details.* 或 OrchestratorError .details.*
        # target 不存在：把 backup 放回原名（mv -T 防止 target 期间出现时被搬进去）
-       test -f "$L" && [ "$(stat -c '%F %a %u' "$L")" = "regular file 600 1103" ] \
+       [ ! -L "$L" ] && [ -f "$L" ] && [ "$(stat -c '%a %u' "$L")" = "600 1103" ] \
          && flock -w 900 "$L" sh -c 'test ! -e "$1" && mv -T "$2" "$1"' _ "$T" "$B" \
          || echo "lock file missing/wrong identity, lock timeout, or target present; nothing done"
        # target 已存在且已确认是更新的成功 copyback（见下）：删 backup
-       test -f "$L" && [ "$(stat -c '%F %a %u' "$L")" = "regular file 600 1103" ] \
+       [ ! -L "$L" ] && [ -f "$L" ] && [ "$(stat -c '%a %u' "$L")" = "600 1103" ] \
          && flock -w 900 "$L" sh -c 'test -e "$1" && rm -rf -- "$2"' _ "$T" "$B" \
          || echo "lock file missing/wrong identity, lock timeout, or target absent; nothing done"
        ```
