@@ -298,6 +298,7 @@ Evidence Floor（#2068）：本地 `uv run ruff check .` + `uv run pytest tests/
   - `restart_stage="forecast"` pass + 本地 prcp 存在 + NFS 缺 → pass 结束后 NFS 树与源一致，恰 1 条恢复 receipt；convert 未被提交/resume（驱动 `_run_cycle_chain`，不直接调 `_mirror_canonical_precip`）
   - pass1 全链、convert 终态镜像注入失败（chain-exit 重试同样失败）→ pass2 `restart_stage="forecast"`、故障解除 → NFS 一致、receipt 非 failed
   - 全链 pass、hook 记 `ok` → 无恢复、receipt 数不变
+  - 全链 pass、copyback 树已一致使 hook 记 `skipped` → 无恢复、恰 1 条 hook `skipped` 回执（Phase 4.5 cand-R2-F1；判据变异为 `in {"failed","skipped"}` 须变红）
   - 本地 prcp 目录缺失 / 为 symlink / copyback root 未配 → 无恢复、无回执
   - 恢复镜像抛异常 / 回执写抛异常 → `_run_cycle_chain` 返回值与无恢复时一致、不抛
   - chain 内某 stage 抛 `OrchestratorError` + 下游 restart → 恢复仍跑，原异常透传
