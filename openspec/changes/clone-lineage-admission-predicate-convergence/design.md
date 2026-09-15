@@ -232,12 +232,21 @@ preflight 与解析之间的 TOCTOU（索引在窗口内被删），以及任何
 ## D5 — 失败不缓存的成本上界，以及为什么不选「每 pass 清缓存」
 
 - **失败不缓存的成本（DB 面）**：同一个 pass 内，一个失败的 `(model_id, source_id)` 会被重试**每次被
-  问到的次数**（discovery / candidates / backfill 三个消费点，各自可能问一次）。上界
-  `O(models × sources × 消费点数)`，且**只在已经出错的路径上发生**。稳态（无失败）零额外查询。
+  问到的次数**。**这个次数按 cycle 放大，不是「三个消费点各一次」**——`_completion_scope`
+  （`services/orchestrator/scheduler_discovery.py`）收的是单个 `CycleDiscovery`、内部逐 model 调
+  resolver，而它自己又被 `cycle_completion_status` 与 `lineage_scoped_out_evidence` 逐 cycle 各调一次；
+  `scheduler_candidates.py` 同样按 `(model, discovery)` 调。所以上界是
+  `O(models × cycles × 车道)`（cycles 已经把 sources 这一维含进去了），不是
+  `O(models × sources × 3)`。按 `max_cycles_per_source` 的常见量级，这比「每 pair 三次」高一到两个
+  数量级——缓存原本正是把这些吸收成每 pair 一次。**仍然接受**：它只在已经出错的路径上发生，稳态
+  （无失败）零额外查询，而被换掉的是一个跨整个进程生命周期的静默错答案。
+  （这条式子第一版写成 `O(models × sources × 消费点数)`，漏了 cycles 因子，由 Phase 7 复核纠正；
+  留着这句是因为 #1740 验收项 4 要的就是「代价被显式记录」，记错了等于没记。）
 - **失败不缓存的成本（db-free 面，逐条记明，#1740 验收项 4）**：文件面的失败不是逐 key 偶发，而是
   **整面同时**——索引一旦坏掉，每个 pair 都 blocked。叠加两条放大器：(1) `_load_index_snapshot` 只在
   成功时写缓存（`_load_index_snapshot` 末尾），失败路径**每次重读并重校验整份索引文件**；(2) D6 不做
-  warn 去重。于是索引损坏期间每 pass 产生 `O(models × sources × 3)` 次整索引读取与同量 warn 行。
+  warn 去重。于是索引损坏期间每 pass 产生 `O(models × cycles × 车道)` 次整索引读取与同量 warn 行——
+  与上一条同因，同样按 cycle 放大。
   **明确接受这个代价**，三条理由：(a) D4a 已经把最常见也最良性的那一类（索引从未发布）划出失败，
   剩下的都是索引真的坏了——那时 scheduler 已经处于降级态，重复读取的绝对成本远小于「静默按无血缘调度」
   的代价；(b) node-22 的生产 scheduler 是 oneshot timer（`docs/runbooks/current-production-ops.md`），
