@@ -364,8 +364,7 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 唯一的回补执行槽，其后的 gap 全部停在 `backfill_deferred_waiting_for_prior_cycle`
 （`services/orchestrator/scheduler_discovery.py` 的回补选槽段），直到回补脚本把它清掉。
 这与此前一个失败 rerun 占槽的行为相同，不是回归。这是已接受的成本，裁决与对 #1843 三条否决理由的
-逐条回应见 [design D3](../../openspec/changes/model-swap-forcing-witness-completion/design.md)
-（归档后位于 `openspec/changes/archive/<归档日期>-model-swap-forcing-witness-completion/`）。
+逐条回应见 [design D3](../../openspec/changes/archive/2026-09-15-model-swap-forcing-witness-completion/design.md)。
 
 回补脚本排空的 `blocked` 有两个来源，排空通道**按车道分**：
 

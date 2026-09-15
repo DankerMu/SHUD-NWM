@@ -4694,3 +4694,12 @@ Phase 6.2 不变量审计（`contract-doc-accuracy` 跨 round 1/2 重复），�
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
+
+### Revisit 2026-09-15（post PR #2395 / issues #1844 + #2254 + #1846）
+
+追加 PR #2395（expanded，单轮 clean）与 #1845 descoped 终态行后实测 677 行、
+665 merged、12 terminal。单轮 PR 不进入多轮样本，rotation attribution 数字
+（223 个多轮样本，core=287、rotated=270、phase=61、skipped=15）与上次 revisit 相同，
+没有新证据。
+
+记录 deferral：keep/cut 仍待维护者决策；现行 keep、座位上限不变。
