@@ -128,16 +128,20 @@ def _write_pass(
     blocked: list[dict[str, Any]] | None = None,
     source_cycles: list[dict[str, Any]] | None = None,
     candidate_lists: str | None = None,
+    status: str = "blocked",
 ) -> Path:
     payload: dict[str, Any] = {
         "schema_version": "nhms.production_scheduler.pass_evidence.v1",
         "pass_id": Path(name).name.removesuffix(".json"),
+        "status": status,
         "limit": {"max_evidence_bytes": 5_000_000},
         "blocked_candidates": list(blocked or []),
         "source_cycles": list(source_cycles or []),
     }
     if candidate_lists is not None:
-        payload["limit"]["candidate_lists"] = candidate_lists
+        # The size fallback rewrites the status and keeps the pass's own one.
+        payload["status"] = "resource_limit_blocked"
+        payload["limit"].update({"candidate_lists": candidate_lists, "pre_limit_status": status})
     path = root / name
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.utime(path, (mtime, mtime))
@@ -445,6 +449,112 @@ def test_no_action_with_dropped_candidate_lists_is_undecidable_and_exits_three(
     assert payload is not None
     assert payload["operator_actions"] == []
     assert payload["candidate_lists_dropped_passes"] == ["scheduler_2026052112_bbbbbbbbbbbb.json"]
+
+
+def test_a_window_of_non_evaluating_passes_is_undecidable_even_with_an_older_action(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """round 1 cand-03 (a): the window never reaches back past non-evaluating passes."""
+
+    _write_pass(tmp_path, "scheduler_2026052106_000000000000.json", mtime=1_000, blocked=[_permanent_failure_row()])
+    names = [f"scheduler_2026052112_{index:012d}.json" for index in range(1, 7)]
+    for index, name in enumerate(names, start=1):
+        _write_pass(
+            tmp_path,
+            name,
+            mtime=1_000 + index,
+            status="lock_contended" if index % 2 else "preflight_blocked",
+        )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["passes_scanned"] == 6
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == [
+        {"pass": name, "status": "lock_contended" if index % 2 else "preflight_blocked"}
+        for index, name in enumerate(names, start=1)
+    ]
+
+
+def test_a_window_of_unreadable_passes_is_undecidable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """round 1 cand-03 (b)."""
+
+    for index in range(2):
+        corrupt = tmp_path / f"scheduler_2026052112_{index:012d}.json"
+        corrupt.write_text("{not json", encoding="utf-8")
+        os.utime(corrupt, (1_000 + index, 1_000 + index))
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["unreadable_passes"] == [
+        "scheduler_2026052112_000000000000.json",
+        "scheduler_2026052112_000000000001.json",
+    ]
+    assert payload["non_evaluating_passes"] == []
+
+
+def test_an_empty_evidence_root_is_undecidable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """#2399: an existing but empty root (for example a drifted env) is not "nothing waits"."""
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["passes_scanned"] == 0
+    assert payload["operator_actions"] == []
+
+
+def test_one_clean_evaluating_pass_in_the_window_decides_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """round 1 cand-03 (c): non-evaluating neighbours do not taint an evaluating pass."""
+
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
+    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
+    # A size-fallback artifact is judged by the status it kept.
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_cccccccccccc.json",
+        mtime=3_000,
+        status="submitted",
+        candidate_lists="summarized",
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 0
+    assert payload is not None
+    assert payload["non_evaluating_passes"] == [
+        {"pass": "scheduler_2026052112_bbbbbbbbbbbb.json", "status": "lock_contended"}
+    ]
+
+
+def test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set() -> None:
+    """Membership pin: every status here is written only after ``_build_candidates`` ran."""
+
+    from services.orchestrator import operator_action_listing
+
+    assert operator_action_listing.EVALUATING_PASS_STATUSES == {
+        "planned",
+        "blocked",
+        "unavailable",
+        "submitted",
+        "submitted_partial",
+        "slurm_status_synced",
+        "slurm_status_sync_failed",
+        "slurm_cancelled",
+        "slurm_partially_cancelled",
+        "slurm_cancellation_blocked",
+        "restart_reconciled",
+        "restart_reconcile_unknown",
+    }
+    # Written before (or without) candidate construction, or ambiguous: never evaluating.
+    for status in ("lock_contended", "preflight_blocked", "lease_lost", "resource_limit_blocked", None):
+        assert status not in operator_action_listing.EVALUATING_PASS_STATUSES
 
 
 def test_bounded_candidate_summary_retains_every_retry_policy_key_including_false_and_zero() -> None:

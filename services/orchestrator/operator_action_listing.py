@@ -11,9 +11,13 @@ flag: a bounded-summarized pass keeps ``decision`` (and, since #1186, the
 breaker-released backfill cycle never reaches candidate construction, so its
 models are read from the not-selected ``source_cycles`` entry instead.
 
-Evidence only, never the journal: the journal carries no decisions.  Exit codes:
-``1`` actions listed, ``0`` none, ``3`` none but a scanned pass dropped its
-candidate lists (undecidable), ``2`` evidence root missing or unreadable.
+Evidence only, never the journal: the journal carries no decisions.  A pass
+only answers "nothing waits" when candidate construction ran in it: its status
+(or, for a size-fallback artifact, ``limit.pre_limit_status``) must be in
+:data:`EVALUATING_PASS_STATUSES`.  Exit codes: ``1`` actions listed, ``0`` none,
+``3`` none but undecidable (a scanned pass dropped its candidate lists, or no
+scanned pass is readable and evaluating -- including an empty root), ``2``
+evidence root missing or unreadable.
 """
 
 from __future__ import annotations
@@ -34,6 +38,31 @@ DEFAULT_PASSES = 6
 
 BREAKER_DECISION = "blocked_journal_predecessor_identity_quarantine"
 BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_breaker_engaged"
+#: Terminal pass statuses written only AFTER ``_build_candidates`` ran
+#: (``scheduler_runtime.py`` main path), so an empty action list is an answer.
+#: Positive and closed: ``lock_contended``, ``lease_lost``, the exception-path
+#: ``resource_limit_blocked`` and every unknown status are non-evaluating;
+#: ``preflight_blocked`` is written both before candidate construction (root,
+#: runtime, lock-side preflights) and after it, and the status alone can not
+#: tell which, so it is non-evaluating too.
+EVALUATING_PASS_STATUSES = frozenset(
+    (
+        "planned",
+        "blocked",
+        "unavailable",
+        "submitted",
+        "submitted_partial",
+        "slurm_status_synced",
+        "slurm_status_sync_failed",
+        "slurm_cancelled",
+        "slurm_partially_cancelled",
+        "slurm_cancellation_blocked",
+        "restart_reconciled",
+        "restart_reconcile_unknown",
+    )
+)
+_SIZE_FALLBACK_STATUS = "resource_limit_blocked"
+
 OPERATOR_ACTION_DECISIONS = frozenset(
     (
         "permanent_failure",
@@ -48,9 +77,12 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "cancelled_manual_retry_required, blocked_strict_warm_start_init_state_mismatch, "
     "blocked_journal_predecessor_identity_quarantine. Read-only: scans the newest "
     "--passes terminal scheduler pass evidence files under --evidence-root "
-    f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none, "
-    "3 when none but a pass dropped its candidate lists (undecidable), 2 when the "
-    "root is missing or unreadable. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
+    f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none "
+    "and at least one scanned pass evaluated candidates, 3 when none but undecidable "
+    "(a pass dropped its candidate lists, or no scanned pass is readable and "
+    "evaluating -- see non_evaluating_passes / unreadable_passes; an empty root "
+    "counts), 2 when the root is missing or unreadable. Runbook: "
+    "docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 
 _PRE_EXECUTION_SUFFIX = ".pre_execution.json"
@@ -71,6 +103,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
 
     unreadable: list[str] = []
     dropped: list[str] = []
+    non_evaluating: list[dict[str, Any]] = []
     actions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     # Oldest first, so first/last seen read in time order.
     for name, path in reversed(selected):
@@ -79,7 +112,11 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
             unreadable.append(name)
             continue
         limit = payload.get("limit")
-        if isinstance(limit, Mapping) and limit.get("candidate_lists") == "dropped":
+        limit = limit if isinstance(limit, Mapping) else {}
+        status = _effective_pass_status(payload.get("status"), limit)
+        if status not in EVALUATING_PASS_STATUSES:
+            non_evaluating.append({"pass": name, "status": status})
+        if limit.get("candidate_lists") == "dropped":
             dropped.append(name)
         for action in _pass_actions(payload):
             key = (action["source_id"] or "", action["cycle_time"] or "", action["model_id"] or "", action["decision"])
@@ -101,12 +138,22 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
         "operator_action_count": len(listed),
         "operator_actions": listed,
         "candidate_lists_dropped_passes": sorted(dropped),
+        "non_evaluating_passes": sorted(non_evaluating, key=lambda item: item["pass"]),
     }
+    evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:
         return receipt, 1
-    if dropped:
+    if dropped or evaluating_count < 1:
         return receipt, 3
     return receipt, 0
+
+
+def _effective_pass_status(status: Any, limit: Mapping[str, Any]) -> str | None:
+    """The pass's own status; a size-fallback artifact keeps it as ``limit.pre_limit_status``."""
+
+    if status == _SIZE_FALLBACK_STATUS and limit.get("pre_limit_status") not in (None, ""):
+        status = limit.get("pre_limit_status")
+    return None if status in (None, "") else str(status)
 
 
 def _newest_pass_files(root: Path, passes: int) -> list[tuple[str, Path]]:

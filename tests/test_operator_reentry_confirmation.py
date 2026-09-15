@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from services.orchestrator import cli, scheduler_state_manual_retry
+from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.journal_root_authority import JOURNAL_ROOT_INVALID_MESSAGE
@@ -457,16 +457,14 @@ def test_confirmation_is_never_adopted_as_a_manual_retry_marker(
     assert confirmed.evidence["counts"]["submitted_count"] == 1
     assert real_rerun(tmp_path, root, confirmed_orchestrator.calls[0]["basins"]).status == "complete"
 
-    state = FileOrchestrationJournalRepository(root).candidate_state(
-        source_id="gfs",
-        cycle_time=_dt(BREAKER_CYCLE),
-        model_id="model_a",
-        run_id="fcst_gfs_2026052100_model_a",
-        forcing_version_id="forc_gfs_2026052100_model_a",
-        candidate_id="gfs:2026-05-21T00:00:00Z:model_a:forecast_gfs_deterministic",
-    )
-    assert scheduler_state_manual_retry._manual_retry_requested(state) is False
-
+    # Marker isolation itself is pinned by the exact stored shape in
+    # ``test_attest_records_a_dedicated_confirmation_event`` (dedicated event
+    # type, details without ``trigger``/``manual_retry_marker``).  A
+    # ``_manual_retry_requested(candidate_state)`` read here could not bite
+    # (round 1 cand-05): the marker reader needs ``trigger: "manual"`` too, so
+    # even an event type flipped to ``retry`` stays unadopted; verified by
+    # mutation, then removed.  What remains is the decision the marker would
+    # have changed.
     candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
     assert candidates == []
     (entry,) = blocked
@@ -574,16 +572,16 @@ class _NoConfirmationAccessorRepository(FileOrchestrationJournalRepository):
 class _NoRerunCountAccessorRepository(FileOrchestrationJournalRepository):
     """Confirmations readable, but no live breaker pin to compare them with."""
 
-    completed_quarantine_rerun_count = None  # type: ignore[assignment]
+    quarantine_rerun_count = None  # type: ignore[assignment]
 
 
 class _UnreadableRerunCountRepository(FileOrchestrationJournalRepository):
-    def completed_quarantine_rerun_count(self, **_kwargs: Any) -> int | None:
+    def quarantine_rerun_count(self, **_kwargs: Any) -> int | None:
         return None
 
 
 class _RaisingRerunCountRepository(FileOrchestrationJournalRepository):
-    def completed_quarantine_rerun_count(self, **_kwargs: Any) -> int | None:
+    def quarantine_rerun_count(self, **_kwargs: Any) -> int | None:
         raise RuntimeError("count unavailable")
 
 

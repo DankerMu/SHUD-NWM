@@ -1557,14 +1557,15 @@ def operator_reentry_confirmation_match(
 ) -> dict[str, Any] | None:
     """The newest operator re-entry confirmation pinned to the LIVE value, or ``None`` (#1555/#1768).
 
-    One authorization, one re-entry: the pin is the value every completed rerun
-    moves, and it must equal the confirmation's pin EXACTLY, so a completed
-    rerun invalidates the confirmation by itself.
+    One authorization, one re-entry: the pin is the value every rerun moves,
+    and it must equal the confirmation's pin EXACTLY, so the rerun invalidates
+    the confirmation by itself.
 
     * Breaker (``blocked_journal_predecessor_identity_quarantine``): the live
-      value is the repository's model-level ``completed_quarantine_rerun_count``
-      (``pin`` is ignored).  It moves on a completed stamped rerun whatever
-      token that rerun recorded, so the token is NOT compared here.
+      value is the repository's model-level ``quarantine_rerun_count``
+      (``pin`` is ignored).  It moves when a stamped rerun is accepted for
+      submission, whatever its outcome or recorded token, so neither is
+      compared here.
     * Budget: the live value is the caller's stage-scoped attempt ``pin``.
 
     Accessor injection follows the ``getattr`` convention of
@@ -1581,7 +1582,7 @@ def operator_reentry_confirmation_match(
         return None
     try:
         if decision == OPERATOR_REENTRY_BREAKER_DECISION:
-            counter = getattr(repository, "completed_quarantine_rerun_count", None)
+            counter = getattr(repository, "quarantine_rerun_count", None)
             if not callable(counter):
                 return None
             live_pin = counter(source_id=source_id, cycle_time=cycle_time, model_id=model_id)

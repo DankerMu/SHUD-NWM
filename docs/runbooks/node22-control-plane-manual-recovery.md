@@ -33,9 +33,22 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
   --passes 6
 ```
 
+- **evidence root 取值**（#2399）：`NHMS_SCHEDULER_EVIDENCE_ROOT` 必须取自 systemd unit
+  `nhms-compute-scheduler.service` 实际加载的 `infra/env/compute.scheduler-dbfree.env`。
+  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。执行后核对 receipt 的
+  `evidence_root` 就是该 unit 的目录，且 `passes_scanned > 0`——否则结论无效。
 - 只读：扫描 evidence root **顶层**最新 `--passes` 个终态 pass 文件（按 mtime；
-  `*.pre_execution.json` 不计），不读 journal——决策只在 evidence 里。
+  `*.pre_execution.json` 不计），不读 journal——决策只在 evidence 里。窗口固定为最新 N
+  个文件，不会越过它们去扫更早的 pass。
 - `--evidence-root` 缺省取 `NHMS_SCHEDULER_EVIDENCE_ROOT`。
+- **可判定 pass**：只有可读且 status 属于"候选构造已运行后才写出"的封闭集合（`planned`、
+  `blocked`、`unavailable`、`submitted`、`submitted_partial`、`slurm_status_synced`、
+  `slurm_status_sync_failed`、`slurm_cancelled`、`slurm_partially_cancelled`、
+  `slurm_cancellation_blocked`、`restart_reconciled`、`restart_reconcile_unknown`；size
+  fallback 产物按 `limit.pre_limit_status` 判）的 pass 才能回答"没有待办"。其余（例如
+  `lock_contended`、`preflight_blocked`——它在候选构造前后都会写出，单凭 status 分不清——
+  `lease_lost`、异常路径的 `resource_limit_blocked`、未知 status）列在
+  `non_evaluating_passes:[{pass,status}]`。
 - 按 decision 字面识别，不看 `manual_retry_required` 布尔。bounded 摘要（
   `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision` 与
   `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required`，
@@ -52,8 +65,8 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 | exit | 含义 |
 |---|---|
 | `1` | 列出了至少一条 operator action |
-| `0` | 没有 |
-| `3` | 没有，但某个被扫描的 pass 是 `limit.candidate_lists=dropped`，无法判定——去看更早的 pass 或未截断证据 |
+| `0` | 没有，且窗口内至少有一个可判定 pass |
+| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里，或 root 为空、`passes_scanned == 0`）——加大 `--passes`、等下一个正常 pass，或先核对 evidence root |
 | `2` | evidence root 未设置、缺失或不可读；`--passes < 1` |
 
 ## 第二步：按 decision 处置
@@ -102,20 +115,26 @@ run 在飞或不存在时拒绝）：
 - 写入一条 `forecast_cycle` pipeline event，`event_type=operator_reentry_confirmation`
   （不是 `retry` / `manual_retry`，不会被当成 manual-retry marker）。
 - **一次一授权**：`--pin` 必须等于 rerun 会推动的那个 live 值——
-  - 断路器：该模型的 **quarantine rerun 计数**（已完成、provenance 命名该模型的 cohort
-    master 数，不分 token）。它**不是** `list-operator-actions` / blocked evidence 里的
+  - 断路器：该模型的 **quarantine rerun 计数**（provenance 命名该模型的 cohort master 数，
+    不看终态、不分 token）。它**不是** `list-operator-actions` / blocked evidence 里的
     `occurrences`（那是按 token 的带戳计数，只用来判断断路器是否触发）。先不带
     `--attest` 跑一次，从 dry-run receipt 的 `live.quarantine_rerun_count` 读出 pin；
     `--recorded-init-state-id` 取 `recorded_init_state_id`，必须等于 live 记录 token（写侧
     意图前置条件，读侧不再比较 token）。
-  - 预算：`attempt`（stage-scoped 尝试次数，取自 `list-operator-actions`），不需要 token。
-  scheduler 只在 pin 严格相等时放行一次；rerun 完成后该值 +1（断路器下无论 rerun 记录了
-  哪个 token），fail-stop 自行重新接管，不需要撤销。
+  - 预算：`attempt`（stage-scoped 尝试次数，取自 `list-operator-actions` **最新** pass），不需要 token。
+    写侧不复算 attempt，也不检查候选是否已 blocked，所以**大于现值的 pin 不会失效，而是预授权**：
+    attempt 走到该值时会在没有新签字的情况下放行一次（#2400）。写入前先 dry-run，并逐字核对
+    pin 与最新 pass 的 `attempt`、`retry_limit`；写错时停止并上报，**不要**再写一条正确 pin 覆盖
+    （旧的错误确认物仍会在之后生效）。
+  scheduler 只在 pin 严格相等时放行一次。断路器的确认物在 rerun **被接受提交**时即被消费：
+  provenance 戳在 accepted-submit 时写入 master，计数当场 +1（无论 rerun 之后成功、失败，
+  也无论记录了哪个 token）；预算在 rerun 行写入 `_retry_<n>` 时 attempt +1。fail-stop 自行
+  重新接管，不需要撤销。
 - 拒绝时不写任何字节、打印 `decision=refused` receipt 并 exit 2。`reason` 取值：
   `required_argument_blank`、`decision_not_reentry_eligible`、`cycle_time_invalid`、
   `pin_invalid`、`completed_identity_absent`、`recorded_init_state_id_mismatch`、
   `breaker_not_engaged`、`pin_mismatch`（后三者只适用于断路器；预算的 pin 不在 CLI
-  侧复算，陈旧 pin 在读侧无效而非放行）。断路器的检查顺序为 `breaker_not_engaged` →
+  侧复算：小于现值的 pin 在读侧无效，大于现值的 pin 会预授权，见上文与 #2400）。断路器的检查顺序为 `breaker_not_engaged` →
   `recorded_init_state_id_mismatch` → `pin_mismatch`，拒绝 receipt 的 `live` 同样带
   `occurrences` 与 `quarantine_rerun_count`。journal root 不可信时 stderr 为
   `FILE_JOURNAL_INVALID_ROOT: ...`，exit 2。
@@ -129,8 +148,8 @@ run 在飞或不存在时拒绝）：
   `operator_reentry_confirmation: {request_id, operator, reason, pin, decision}`；
   断路器几何下该 cycle 保留 backfill 执行槽（不再出现 breaker not-selected 条目）。
 - rerun 在飞期间：候选是 active，`submitted_count` 不因它增加。
-- rerun 完成后：断路器 `quarantine_rerun_count` +1 / 预算 `attempt` +1，pin 不再相等，下一 pass
-  回到 blocked。
+- rerun 被接受提交后（在飞、完成或失败）：断路器 `quarantine_rerun_count` 已 +1 / 预算
+  `attempt` +1，pin 不再相等，之后的 pass 回到 blocked。
 
 各决策的判读细节见
 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)
@@ -138,19 +157,18 @@ run 在飞或不存在时拒绝）：
 
 ## 已知限制
 
-- **Slurm 层失败的 rerun**：没有 completed master，`quarantine_rerun_count` 不变，确认物依旧
-  匹配；但候选此时是 failed 而不是 completed-skip，走普通失败重试预算。只有 rerun
-  最终 completed，确认物才被消费。失败路径受 retry 预算约束，不构成无限自旋。
+- **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。
+  需要再次重入时，重新跑 dry run，用新的 live 计数再确认一次。
 - **forcing 见证闸（#1844）**：确认物匹配但该模型没有自己的 forcing 时，候选落到
   forcing 缺失的具名 blocked，不提交；断路器几何下该 cycle 会持续占用执行槽。确认物
   **没有撤销手段**——先回补 forcing。
-- **确认后的 rerun 即使拿到正确 lineage 也仍显示 breaker-blocked**：file journal 的
-  `hydro_run` 行在同一 `run_id` 重跑时不更新（#2397），live 记录 token 停在第一次记录的
-  值。因此即使确认过的 rerun 拿到了正确 lineage，候选仍会显示为 breaker-blocked，直到该
-  缺陷修复。这不是确认物失效：**不要重复确认**。
+- **候选仍显示 blocked ≠ 确认物未生效**：先看 dry-run receipt 的 live 计数是否已 +1（file
+  journal 的 `hydro_run` 在同一 `run_id` 重跑时不更新，#2397，即使 rerun 拿到正确 lineage
+  候选也仍显示 breaker-blocked）；已 +1 就**不要重复确认**。
 - **`recover-released-identity-blocked-reservation` 列表模式的逐行隔离**：receipt 的
-  `skipped[]` 只覆盖首轮 flat 扫描与逐 cycle 确认中"单行内容校验"类原因（
-  `ROW_CONTENT_SKIP_REASONS`）；预算拒绝、不可读、containment 类故障照旧 fail closed。
+  `skipped[]` 只覆盖 flat `pipeline-jobs/` 行在首轮扫描与逐 cycle 确认 replay 中的"单行内容
+  校验"类原因（`ROW_CONTENT_SKIP_REASONS`），逐行跳过、按 `(path, reason)` 去重，同 cycle 的
+  wedged 行照常列出；cycle 的 `journal/` 日志或 `latest/` 视图损坏不属于"行"，照旧 raise；预算拒绝、不可读、containment 类故障照旧 fail closed。
   没有 cycle scope 时走的 unscoped 全树 fallback **不隔离**，受 `full_tree_replay`
   预算契约约束，生产规模下会先撞预算。
 - `list-operator-actions` 只看 evidence，不接 systemd timer；定时运行另议。

@@ -1530,28 +1530,34 @@ class FileOrchestrationJournalRepository:
             return 0
         return sum(
             1
-            for job in _completed_quarantine_rerun_masters(
-                rows, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            for job in _quarantine_rerun_masters(
+                rows,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                require_completed=True,
             )
             if _master_row_records_init_state_id(job, model_id=model_id, init_state_id=token)
         )
 
-    def completed_quarantine_rerun_count(
+    def quarantine_rerun_count(
         self,
         *,
         source_id: str,
         cycle_time: datetime,
         model_id: str,
     ) -> int | None:
-        """Count completed §8.7 quarantine reruns of this cycle+model, whatever token they recorded.
+        """Count §8.7 quarantine reruns of this cycle+model accepted for submission.
 
-        The pin of a breaker re-entry confirmation (#1555).  Same qualifying
-        masters as :meth:`completed_pipeline_init_state_id_occurrences` minus
-        the identity comparison: any completed, provenance-stamped rerun moves
-        the count by exactly one, so a confirmation is consumed even when the
-        rerun re-recorded a DIFFERENT stale token.  (The live token can not
-        witness that on a file journal: a same-``run_id`` rerun never rewrites
-        the completed ``hydro_run`` row that the identity authority reads first.)
+        The pin of a breaker re-entry confirmation (#1555): cohort masters whose
+        quarantine provenance names the model, regardless of their terminal
+        status and of the token they recorded.  The provenance is stamped when
+        the rerun is accepted, so the count moves by exactly one at acceptance:
+        a rerun that later fails at the compute layer does not restore the
+        confirmation (a following ordinary replacement carries no stamp), and a
+        rerun that re-records a DIFFERENT stale token still consumes it.  (The
+        live token can not witness either on a file journal: a same-``run_id``
+        rerun never rewrites the completed ``hydro_run`` row, #2397.)
 
         Returns ``None`` when the journal can not be read, which a confirmation
         consumer treats as "no match" -- never as a release.
@@ -1563,8 +1569,12 @@ class FileOrchestrationJournalRepository:
             return None
         return sum(
             1
-            for _job in _completed_quarantine_rerun_masters(
-                rows, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            for _job in _quarantine_rerun_masters(
+                rows,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                require_completed=False,
             )
         )
 
@@ -2034,10 +2044,11 @@ class FileOrchestrationJournalRepository:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Enumerate the released identity-blocked wedge for an OPERATOR (#1748).
 
-        Returns ``(jobs, skipped)``.  #1820: one flat row, or one confirming
-        cycle, whose read fails with a ``ROW_CONTENT_SKIP_REASONS`` reason is
-        reported in ``skipped`` and the scan continues -- this is the command an
-        operator runs on a damaged journal, so one bad row must not blind it.
+        Returns ``(jobs, skipped)``.  #1820: one flat row whose read fails with a
+        ``ROW_CONTENT_SKIP_REASONS`` reason -- in the first flat scan or in the
+        confirming cycle replay -- is reported once in ``skipped`` (per path and
+        reason) and the scan continues; this is the command an operator runs on
+        a damaged journal, so one bad row must not blind it.
         Every other journal error still raises.  The unscoped whole-tree
         fallback is NOT isolated: it is governed by the ``full_tree_replay``
         budget contract and would hit that budget first at production scale.
@@ -2107,28 +2118,13 @@ class FileOrchestrationJournalRepository:
         # 4,557-file listing is D9's rejected growth law, re-entered.
         with _flat_direct_job_listing_memo_scope():
             for cycle_scope, scope_job_ids in scoped.items():
-                cycle_confirmed: dict[str, dict[str, Any]] = {}
-                try:
-                    for job in self._iter_pipeline_job_records_scoped(cycle_scope):
-                        job_id = str(job.get("job_id") or "")
-                        if job_id in scope_job_ids and _released_identity_blocked_row(job):
-                            cycle_confirmed[job_id] = job
-                except FileOrchestrationJournalError as error:
-                    if error.reason not in ROW_CONTENT_SKIP_REASONS:
-                        raise
-                    # The whole cycle is withheld: a partial replay is not a
-                    # confirmation.  ``_cycle_job_records_memoized`` stores
-                    # nothing on a raise, so later reads fail closed again.
-                    skipped.append(
-                        {
-                            "path": None,
-                            "reason": error.reason,
-                            "field": error.field,
-                            "cycle_scope": _cycle_id_for_file_source(*cycle_scope),
-                        }
-                    )
-                    continue
-                confirmed.update(cycle_confirmed)
+                # Row-level isolation in the confirming replay too (round 1):
+                # the replay re-reads this cycle's flat rows, so withholding the
+                # whole cycle would hide its wedged rows beside one bad row.
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope, skip_collector=skipped):
+                    job_id = str(job.get("job_id") or "")
+                    if job_id in scope_job_ids and _released_identity_blocked_row(job):
+                        confirmed[job_id] = job
         if unscoped:
             # #1734 D4, kept verbatim: an underivable scope costs the old
             # expensive read, never a false "not found".  ONE pass serves every
@@ -6637,31 +6633,45 @@ class FileOrchestrationJournalRepository:
                 max_depth=self.max_depth,
             )
         ):
-            if skip_collector is None:
-                payload = self._read_optional_json(path)
-                if payload is not None:
-                    yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
-                continue
-            try:
-                payload = self._read_optional_json(path)
-                job = (
-                    None
-                    if payload is None
-                    else self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
-                )
-            except FileOrchestrationJournalError as error:
-                if error.reason not in ROW_CONTENT_SKIP_REASONS:
-                    raise
-                skip_collector.append(
-                    {
-                        "path": str(_relative_evidence(path, self.root)),
-                        "reason": error.reason,
-                        "field": error.field,
-                    }
-                )
-                continue
+            job = self._flat_direct_pipeline_job_record(path, skip_collector=skip_collector)
             if job is not None:
                 yield job
+
+    def _flat_direct_pipeline_job_record(
+        self,
+        path: Path,
+        *,
+        skip_collector: list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """Read and validate one flat ``pipeline-jobs/`` file; ``None`` when absent.
+
+        ``skip_collector is None`` raises every error, as every scheduler read
+        does.  Otherwise (#1820, operator listing only) a
+        ``ROW_CONTENT_SKIP_REASONS`` failure is recorded once per
+        ``(path, reason)`` -- the confirming cycle replay re-reads rows the
+        first flat scan already reported -- and the row is skipped; every other
+        error still raises.
+        """
+
+        if skip_collector is None:
+            payload = self._read_optional_json(path)
+            if payload is None:
+                return None
+            return self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
+        try:
+            payload = self._read_optional_json(path)
+            if payload is None:
+                return None
+            return self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
+        except FileOrchestrationJournalError as error:
+            if error.reason not in ROW_CONTENT_SKIP_REASONS:
+                raise
+            entry = {"path": str(_relative_evidence(path, self.root)), "reason": error.reason, "field": error.field}
+            if not any(
+                (item.get("path"), item.get("reason")) == (entry["path"], entry["reason"]) for item in skip_collector
+            ):
+                skip_collector.append(entry)
+            return None
 
     def _flat_direct_pipeline_job_paths(self) -> list[Path]:
         """The whole flat ``pipeline-jobs/`` listing, memoized per read call.
@@ -6744,20 +6754,22 @@ class FileOrchestrationJournalRepository:
         *,
         source_id: str,
         cycle_time: datetime,
+        skip_collector: list[dict[str, Any]] | None = None,
     ) -> Iterable[dict[str, Any]]:
         """Flat ``pipeline-jobs/`` records for one cycle, filtered by file name.
 
         Filtering lives in ``_flat_direct_pipeline_job_paths_for_cycle``; this
-        is the record-shaped view of it.
+        is the record-shaped view of it.  ``skip_collector``: see
+        ``_flat_direct_pipeline_job_record`` (``None`` for every scheduler read).
         """
 
         for path in self._flat_direct_pipeline_job_paths_for_cycle(
             source_id=source_id,
             cycle_time=cycle_time,
         ):
-            payload = self._read_optional_json(path)
-            if payload is not None:
-                yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
+            job = self._flat_direct_pipeline_job_record(path, skip_collector=skip_collector)
+            if job is not None:
+                yield job
 
     def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
         # #1734 D11: a single-row probe, not a scan — its own lane so its two
@@ -7073,6 +7085,7 @@ class FileOrchestrationJournalRepository:
         source_segments: tuple[str, ...],
         cycle_segment: str,
         include_direct: bool = True,
+        skip_collector: list[dict[str, Any]] | None = None,
     ) -> Iterable[dict[str, Any]]:
         """Replay one cycle's pipeline jobs through the whole-tree merge path.
 
@@ -7161,6 +7174,7 @@ class FileOrchestrationJournalRepository:
             for job in self._iter_flat_direct_pipeline_job_records_for_cycle(
                 source_id=source_id,
                 cycle_time=cycle_time,
+                skip_collector=skip_collector,
             ):
                 budget.consume()
                 _insert_missing_by_key(jobs, job, key="job_id")
@@ -7171,16 +7185,39 @@ class FileOrchestrationJournalRepository:
         cycle_scope: tuple[str, datetime] | None,
         *,
         include_direct: bool = True,
+        skip_collector: list[dict[str, Any]] | None = None,
     ) -> Iterable[dict[str, Any]]:
         """Cycle-scoped replay when the key named a cycle, whole tree otherwise.
 
         ``cycle_scope is None`` is the fall-open path (#1734 design D4): an
         underivable key costs the old full scan, never a false "not found".
+
+        ``skip_collector`` (#1820 round 1, operator listing only) skips flat
+        rows with a ``ROW_CONTENT_SKIP_REASONS`` failure.  That read BYPASSES
+        ``_cycle_job_records_memoized``: a filtered list must never be served
+        to a later fail-closed read of the same instance.  It needs a cycle
+        scope; the whole-tree fallback is not isolated.
         """
 
         if cycle_scope is None:
             return self._iter_pipeline_job_records(include_direct=include_direct)
         source_id, cycle_time = cycle_scope
+        if skip_collector is not None:
+            with journal_read_lane("cycle_replay"):
+                return list(
+                    self._replay_pipeline_job_records_for_cycle(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        source_segments=_cycle_read_source_segments(
+                            source_id=source_id,
+                            source_segment_override=None,
+                            root=self.root,
+                        ),
+                        cycle_segment=format_cycle_time(cycle_time),
+                        include_direct=include_direct,
+                        skip_collector=skip_collector,
+                    )
+                )
         return self._iter_pipeline_job_records_for_cycle(
             source_id=source_id,
             cycle_time=cycle_time,
@@ -13432,19 +13469,22 @@ def _candidate_row_self_bound_identity(
     return {key: value for key, value in entry.items() if value not in (None, "")}
 
 
-def _completed_quarantine_rerun_masters(
-    rows: Any, *, source_id: str, cycle_time: datetime, model_id: str
+def _quarantine_rerun_masters(
+    rows: Any, *, source_id: str, cycle_time: datetime, model_id: str, require_completed: bool
 ) -> Iterator[Mapping[str, Any]]:
-    """Completed cohort masters whose quarantine provenance names ``model_id`` (#1157/#1562).
+    """Cohort masters whose quarantine provenance names ``model_id`` (#1157/#1562/#1555).
 
-    Aggregate terminal success, or ``partially_failed`` with this model's own
-    projection succeeded; per-model terminal copies are not masters.  One
-    unreadable row is skipped (it can only undercount).
+    ``require_completed`` keeps only completed convergence attempts: aggregate
+    terminal success, or ``partially_failed`` with this model's own projection
+    succeeded.  Without it every stamped master counts whatever its status --
+    the provenance is written when the rerun is accepted for submission.
+    Per-model terminal copies are never masters.  One unreadable row is
+    skipped (it can only undercount).
     """
 
     for job in _current_terminal_jobs(rows.pipeline_jobs.values()):
         try:
-            if not _job_is_breaker_terminal_success(job, model_id=model_id):
+            if require_completed and not _job_is_breaker_terminal_success(job, model_id=model_id):
                 continue
             if not _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id):
                 continue

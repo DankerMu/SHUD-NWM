@@ -460,14 +460,15 @@ exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submiss
    ```
 
    CLI 按 live 值核对：断路器必须已触发、token 必须等于 live 记录 token、`--pin` 必须
-   等于该模型的 quarantine rerun 计数（已完成且 provenance 命名该模型的 cohort master
-   数，不分 token；**不是** `occurrences`），否则 exit 2 且不写。先不带 `--attest` 跑，
+   等于该模型的 quarantine rerun 计数（provenance 命名该模型的 cohort master 数，不看终态、
+   不分 token；**不是** `occurrences`），否则 exit 2 且不写。先不带 `--attest` 跑，
    从 receipt 的 `live.quarantine_rerun_count` 读 pin。确认物匹配（pin 严格相等，读侧不比
    token）时：
    discovery 侧该 cycle 不再释放执行槽，候选侧 decision 回到
    `retry_journal_predecessor_identity_mismatch`，`state_evidence` 带
    `operator_reentry_confirmation`，真实提交一次 quarantine 重跑（照常打 provenance
-   戳）。**一次一授权**：重跑完成后（无论记录哪个 token）rerun 计数 +1，pin 不再相等，下一
+   戳）。**一次一授权**：重跑被接受提交时 rerun 计数即 +1（之后成功、失败、记录哪个 token 都
+   不回退；Slurm 失败不会恢复确认物，需要时用新的 live 计数重新确认），pin 不再相等，下一
    pass 断路器重新接管；重跑在飞期间候选是 active，不会二次提交。只确认一个模型时，同
    cycle 其他断路器模型保持 blocked。确认物无撤销手段；已知限制（Slurm 失败的重跑、
    forcing 见证闸持续占槽、`hydro_run` 冻结 #2397）见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)。
@@ -481,10 +482,10 @@ exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submiss
 5. **验证收敛**：确认放行的重跑完成后的下一个自然 pass，若 journal 记录了
    `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete，
    `blocked_candidates[]` 条目与 backfill `not_selected` 条目同时从 pass evidence
-   中消失；否则断路器重新接管（rerun 计数已 +1）。已知限制：file journal 的
-   `hydro_run` 行在同一 `run_id` 重跑时不更新（#2397），live 记录 token 停在第一次记录的
-   值。因此即使确认过的 rerun 拿到了正确 lineage，候选仍会显示为 breaker-blocked，直到该
-   缺陷修复，§8.7 在 file journal 上暂时无法由此收敛。这不是确认物失效：**不要重复确认**。
+   中消失；否则断路器重新接管（rerun 计数已 +1）。候选仍显示 blocked ≠ 确认物未生效：先看
+   dry-run receipt 的 live 计数是否已 +1（file journal 的 `hydro_run` 在同一 `run_id` 重跑时
+   不更新，#2397，即使 rerun 拿到正确 lineage 也仍显示 breaker-blocked，§8.7 在 file journal
+   上暂时无法由此收敛）；已 +1 就**不要重复确认**。
 
 ## `terminal_stage_forced_resubmit_veto`
 

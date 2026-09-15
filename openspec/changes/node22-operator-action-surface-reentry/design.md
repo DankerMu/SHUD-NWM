@@ -72,7 +72,7 @@
 - **退出码**：
   - 列表非空为 `1`；
   - 列表为空，但有 pass 的 `limit.candidate_lists == "dropped"`（`scheduler_evidence_payload.py:219-222`）时为 `3`（无法判定），否则会在最拥堵的 pass 上假阴性（F7）；
-  - 其余空列表为 `0`，`unreadable_passes` 只在输出里呈现；
+  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）；
   - root 缺失或不可读为 `2`。
 - **bounded 白名单扩容**（与 D3 共用同一次编辑）：
   - 在 `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 追加 `retry_attempt ← (retry_policy, attempt)`、`retry_limit ← (retry_policy, retry_limit)`、`retry_occurrences ← (retry_policy, occurrences)`、`manual_retry_required ← (retry_policy, manual_retry_required)`；
@@ -135,7 +135,7 @@
 - **前置条件**（不满足即 exit 2，不写）：
   1. journal 对 `(source, cycle, model)` 有 completed identity，即 `completed_pipeline_init_state_identity` 非 `None`。
   2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等（写侧意图前置条件）、breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`），并要求 `--pin` 等于**模型级 quarantine rerun 计数**（见下文「实现后修订」）。
-  3. 若 decision 为预算：写侧不重算 attempt。attempt 依赖调度侧的候选权威视图，不在写侧复制这段逻辑。`--pin` 取自 `list-operator-actions` 输出的 `attempt`，写侧只要求 `pin >= 1`。pin 与现值不符的确认物在读侧是惰性的，不会放行，见下文。
+  3. 若 decision 为预算：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
 - **写入**：
   - `insert_pipeline_event(entity_type="forecast_cycle", entity_id=<cycle_id>, event_type="operator_reentry_confirmation", status_from=None, status_to="confirmed", details={model_id, decision, pin, operator, reason, request_id, recorded_init_state_id}`，其中 `recorded_init_state_id` 仅 breaker 必填)`；
   - `cycle_id` 用 `_cycle_id_for_file_source`（`file_orchestration_journal.py:13945`）构造，不手拼；
@@ -180,11 +180,11 @@
 - **spec 冲突处理（F4）**：`job-retry-mechanism`「Strict-warm-start terminal mismatch retries SHALL respect a stage-scoped budget」与 `file-state-snapshot-index`「A non-convergent quarantine SHALL be broken …」两条 requirement 以 MODIFIED delta 写入确认物例外与槽位保留。
 - **白名单**：`blocked_journal_predecessor_identity_quarantine` / `blocked_strict_warm_start_init_state_mismatch` 仍不在两处 forced-resubmit 白名单，成员钉测试不改。
 - **已知限制**（写进 runbook）：
-  - breaker 放行的 rerun 若在 Slurm 层失败，没有 completed master，occurrences 不变，确认物依旧匹配。但此时候选不再是 completed-skip，而是 failed，走普通失败重试预算；只有 rerun 最终 completed 且带 stale token，确认物才被消费。
-  - 这不构成无限自旋：失败路径受 retry 预算约束，completed 路径使 pin 失效。
+  - （round 1 cand-01 修订）确认物在 rerun **被接受提交**时即被消费：provenance 戳在 accepted-submit 时写入 master，rerun 计数统计带戳 master 而不看终态，所以 Slurm 失败不会恢复确认物；需要再次重入时用新的 live 计数重新确认。原文「只有 rerun 最终 completed 才被消费」会在「失败 → 普通重试补成 completed」路径上二次放行，已废弃。
+  - 候选仍显示 blocked 不等于确认物未生效（#2397）：先看 dry-run receipt 的 live 计数是否已 +1。
 - **实现后修订（Phase 1 发现，非第三轮 fixture review）**：
   - 原设计把 breaker 确认物的消费绑定在 token 维度的 `occurrences(X)` 上。实现时 D.4 第 6 步（rerun 记录另一个 stale token Y）实测失败：file journal 在同 run_id 重跑时不更新已 succeeded 的 `hydro_run` 行（`create_hydro_run_from_basin` → `_write_hydro_run(retriable_only=True)` 抛 `HYDRO_RUN_NOT_RETRIABLE` 后返回旧行，`file_orchestration_journal.py:2499-2510`、`:9015-9026`），而 `completed_pipeline_init_state_identity` 以 `hydro_run` 为第一权威（`:1428-1438`）。于是 live token 冻结在首跑的 X，`occurrences(X)` 不随 Y 变化，确认物被二次消费。
-  - 修订：pin 现值改为**模型级 quarantine rerun 计数**——对 `(source, cycle, model)` 统计已完成且 provenance 命名该模型的 cohort master 数，合格规则与 `completed_pipeline_init_state_id_occurrences` 相同（aggregate terminal-success，或 `partially_failed` 且该模型 projection 为 succeeded），但不比较 identity。任何 token 的已完成 rerun 都使其恰好 +1，确认物无条件被消费。新增只读 accessor `completed_quarantine_rerun_count`（journal-direct，`_cycle_rows`），读失败返回 `None`（谓词视为不匹配）。
+  - 修订：pin 现值改为**模型级 quarantine rerun 计数**——对 `(source, cycle, model)` 统计 provenance 命名该模型的 cohort master 数，不比较 identity。round 1 cand-01 进一步去掉「已完成」限定：不看终态，rerun 被接受提交即 +1。只读 accessor `quarantine_rerun_count`（journal-direct，`_cycle_rows`），读失败返回 `None`（谓词视为不匹配）；`completed_pipeline_init_state_id_occurrences` 行为不变。
   - `--recorded-init-state-id` 保留为写侧意图前置条件；读侧不再比较 token。
   - `hydro_run` 权威冻结本身是既有缺陷（§8.7 在 node-22 上对「rerun 得到正确 lineage」的情形也无法收敛），按越界规则单独立 issue，不在本批修复。
 
@@ -199,7 +199,7 @@
        - 非 `None` 时在**生成器内部**对单行的 `_read_optional_json` + `_validated_direct_pipeline_job_record` 做 try/except，allowlist 内的原因 append `{path, reason, field}` 后 `continue`，allowlist 外 re-raise。
      - 另两个调用方 `_cycle_source_discoveries`、`_replay_all_pipeline_job_records` 不传该参数。
      - 路径枚举与 byte/file 预算原语不动。
-  2. 逐 cycle 确认循环（`:1998` 的 `_iter_pipeline_job_records_scoped(cycle_scope)`）：逐 cycle try/except。命中时该 cycle 的全部候选不输出，记一条 cycle 级 skip。实现者须核实 `_cycle_job_records_memoized` 在异常时不缓存半成品，并用 C.3 钉住同一实例后续读取仍 raise。
+  2. 逐 cycle 确认循环（`:1998` 的 `_iter_pipeline_job_records_scoped(cycle_scope)`）：（round 1 cand-04 修订）cycle replay 会重读同 cycle 的 flat 行，整 cycle 扣下会让同 cycle 的 wedged 行消失，违反 spec 与 #1820 验收。改为逐行 skip：`skip_collector` 贯穿 `_iter_pipeline_job_records_scoped` → `_replay_pipeline_job_records_for_cycle` → `_iter_flat_direct_pipeline_job_records_for_cycle`（默认 `None` 逐字节不变），skip 模式读取绕过 `_cycle_job_records_memoized`，skip 条目按 `(path, reason)` 去重；删除 cycle 级 except。C.3 继续钉住同一实例的非 skip 读取仍 raise。
   3. **unscoped 全树 fallback**（`:2002-2009`）**不隔离**：它走 `_replay_all_pipeline_job_records`，受 `full_tree_replay` 预算契约约束（`test_file_journal_full_tree_budget_contract.py:307`），生产规模下本来就会先撞预算。在 runbook 中明写。
 - **可跳过原因**是「单行内容校验」的封闭 allowlist 常量 `ROW_CONTENT_SKIP_REASONS`（F6）。实现者须 grep `_validated_direct_pipeline_job_record`（`:8825-8851`）、解码路径（`:13672-13730`）与 accepted-submit 校验（`:12371-12377`）的全部 raise 点，补全列表并逐个表驱动测试。已知成员：
   - `file_journal_malformed_json`、`file_journal_expected_object`、`file_journal_record_type_mismatch`、`file_journal_schema_mismatch`

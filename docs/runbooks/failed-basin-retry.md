@@ -119,13 +119,15 @@ commands, exit codes and node-22 execution discipline are in
   terminal-success, so a manual-retry marker never reaches it. Re-enter once with
   `confirm-operator-reentry --pin <quarantine_rerun_count> --recorded-init-state-id <token>`; triage
   first per [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
-  The breaker pin is the model's quarantine rerun count (completed masters whose quarantine
-  provenance names the model, any token), not `occurrences`; read it from the dry-run
-  receipt's `live.quarantine_rerun_count`.
-  **Known limitation:** the file journal does not update the `hydro_run` row on a same-`run_id`
-  rerun (#2397), so the live recorded token stays at the first run's value. Even when the
-  confirmed rerun got the correct lineage, the candidate still shows as breaker-blocked until
-  that defect is fixed. Do not confirm again.
+  The breaker pin is the model's quarantine rerun count (cohort masters whose quarantine
+  provenance names the model, whatever their terminal status or token), not `occurrences`;
+  read it from the dry-run receipt's `live.quarantine_rerun_count`. The confirmation is
+  consumed when the rerun is accepted for submission: a Slurm failure does not restore it, so
+  re-confirm with the new live count if another re-entry is needed.
+  **A candidate still showing blocked does not mean the confirmation did not take effect:**
+  first check whether the dry-run receipt's live count already moved +1 (the file journal does
+  not update the `hydro_run` row on a same-`run_id` rerun, #2397, so even a rerun with the
+  correct lineage still shows as breaker-blocked). If it moved, do not confirm again.
 - `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
   the next section (`confirm-operator-reentry --pin <attempt>`).
 

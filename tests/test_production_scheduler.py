@@ -56886,7 +56886,7 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
     ] == [[recorded]]
     # The pinned value -- the model-level quarantine rerun count -- moved 1 -> 2
     # whatever token the rerun recorded.
-    assert reopened.completed_quarantine_rerun_count(**live_query) == 2
+    assert reopened.quarantine_rerun_count(**live_query) == 2
     if rerun_token == "same_stale_token":
         assert reopened.completed_pipeline_init_state_id_occurrences(**live_query, init_state_id=stale) == 2
     else:
@@ -56900,6 +56900,99 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
     assert _breaker_released_cycles(after) == [BREAKER_CYCLE]
     assert after.evidence["counts"]["submitted_count"] == 0
     assert after_orchestrator.calls == []
+
+
+def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even_if_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """round 1 cand-01: a Slurm-failed confirmed rerun never restores the confirmation.
+
+    The provenance stamp lands on the cohort master when the rerun is accepted,
+    so the quarantine rerun count moves N -> N+1 before the rerun finishes; a
+    failure at the compute layer leaves it there and nothing re-enters again.
+    """
+
+    import shutil
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import (
+        BREAKER_CYCLE,
+        _breaker_candidate_decisions,
+        breaker_confirm_argv,
+        real_rerun,
+        run_confirm,
+        seed_breaker_journal,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
+
+    def stamped_master_ids(journal_root: Path) -> set[str]:
+        return {
+            str(row["job_id"])
+            for row in FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+            if row.get("stage") == "forecast"
+            and row.get("model_id") is None
+            and "model_a" in (row.get("journal_predecessor_quarantine_rerun_model_ids") or [])
+        }
+
+    seeded_stamped = stamped_master_ids(root)
+    assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 1
+    code, _receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
+    assert code == 0
+
+    confirmed, confirmed_orchestrator = _reentry_pass(tmp_path, root)
+    assert confirmed.evidence["counts"]["submitted_count"] == 1
+    (call,) = confirmed_orchestrator.calls
+    basins = [dict(basin) for basin in call["basins"]]
+
+    # Accepted but not finished: the count already reads N+1.
+    inflight_root = tmp_path / "inflight-journal"
+    shutil.copytree(root, inflight_root)
+    inflight = real_rerun(
+        tmp_path,
+        inflight_root,
+        basins,
+        slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
+        job_timeout_seconds=0.3,
+    )
+    assert inflight.status != "complete"
+    assert FileOrchestrationJournalRepository(inflight_root).quarantine_rerun_count(**live_query) == 2
+
+    # The confirmed rerun fails at the compute layer (job and array task both failed).
+    failed = real_rerun(
+        tmp_path,
+        root,
+        basins,
+        slurm_client=FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed"]}),
+    )
+    assert failed.status == "failed"
+    reopened = FileOrchestrationJournalRepository(root)
+    new_stamped = stamped_master_ids(root) - seeded_stamped
+    assert len(new_stamped) == 1
+    new_stamped_statuses = {
+        row["status"] for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026052100") if row["job_id"] in new_stamped
+    }
+    assert new_stamped_statuses == {"failed"}
+    assert reopened.quarantine_rerun_count(**live_query) == 2
+
+    # The old success rows survive the failure, so the candidate stays on the
+    # completed-class path: the breaker blocks, the confirmation no longer matches.
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert "operator_reentry_confirmation" not in entry.state_evidence
+
+    for _ in range(2):
+        later, later_orchestrator = _reentry_pass(tmp_path, root)
+        assert _breaker_released_cycles(later) == [BREAKER_CYCLE]
+        assert later.evidence["counts"]["submitted_count"] == 0
+        assert later_orchestrator.calls == []
+    assert stamped_master_ids(root) - seeded_stamped == new_stamped
 
 
 def test_breaker_reentry_confirms_only_the_named_model_of_a_mixed_cycle(

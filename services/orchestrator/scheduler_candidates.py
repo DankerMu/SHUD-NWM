@@ -2398,7 +2398,8 @@ def _journal_predecessor_identity_quarantine(
     if _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
         # #1555: a confirmation pinned to the model's live quarantine rerun count
         # re-emits the ordinary quarantine retry exactly once: the rerun's stamped
-        # master moves the count (whatever token it records) and the pin stops matching.
+        # master moves the count at acceptance (whatever its outcome or token) and
+        # the pin stops matching.
         confirmation = _scheduler_generation.operator_reentry_confirmation_match(
             context.active_repository,
             source_id=candidate.source_id,

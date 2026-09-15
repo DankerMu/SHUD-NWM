@@ -112,9 +112,9 @@ def confirm_operator_reentry(
             if live_token
             else 0
         )
-        # The pin is the model-level rerun count, not ``occurrences``: it moves on
-        # every completed stamped rerun whatever token that rerun records.
-        rerun_count = repository.completed_quarantine_rerun_count(**identity_query)
+        # The pin is the model-level rerun count, not ``occurrences``: it moves when
+        # a stamped rerun is accepted, whatever its outcome or recorded token.
+        rerun_count = repository.quarantine_rerun_count(**identity_query)
         live = {"occurrences": occurrences, "quarantine_rerun_count": rerun_count}
         if not _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
             return _refused("breaker_not_engaged", target=target, pin=pin, live=live), 2
