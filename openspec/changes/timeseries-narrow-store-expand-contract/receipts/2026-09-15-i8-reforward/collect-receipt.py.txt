@@ -1,0 +1,36 @@
+import json, re, subprocess, hashlib
+D="/home/nwm/.local/state/issue2374-reforward-3cdcf500-inputs"
+S="/home/nwm/.local/state/issue2374-reforward-3cdcf500-prepare"
+def rd(p): return open(p).read()
+def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+dsn=re.compile(r"postgres(ql)?://\S+")
+state=json.load(open(S+"/state.json"))
+keep=("phase","mode","old_oid","narrow_oid","retained_runs","t0","fence_epochs","readability","route_proof","runtime","restored_timers","remaining","governance_handoff","milestone_only","new_sha","old_sha","driver_sha256","config_sha256","boot_id")
+out={
+ "reprepare_result": json.load(open(D+"/reprepare/result.json")),
+ "reforward_result": json.load(open(D+"/reforward/result.json")),
+ "state_excerpt": {k: state.get(k) for k in keep},
+ "ledger_after_tail": state["ledger_after"][-3:], "ledger_after_count": len(state["ledger_after"]),
+ "ledger_unchanged": state["ledger_after"]==state["ledger_before"],
+ "governance_unstage_attempt": json.loads(rd(D+"/gov-unstage.stdout")),
+ "governance_recover": json.loads(rd(D+"/gov-recover.stdout")),
+ "autovacuum_launcher_restart": rd("/home/nwm/tmp/av-restart.done"),
+ "launcher_sha256": hashlib.sha256(open("/home/nwm/.local/state/issue2374-reforward-launch.py","rb").read()).hexdigest(),
+ "admission_sha256": {k: hashlib.sha256(open(f"{D}/admission/{k}.json","rb").read()).hexdigest() for k in ("go","d12","capacity","artifacts","governance")},
+ "go": json.load(open(D+"/admission/go.json")),
+ "post": {
+  "health_8080": sh("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health"),
+  "health_8081": sh("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/health"),
+  "public_layers": sh("curl -s -o /dev/null -w '%{http_code}' https://test.nwm.ac.cn/api/v1/layers"),
+  "active_head": sh("git -C /home/nwm/NWM rev-parse HEAD").strip(),
+  "active_branch": sh("git -C /home/nwm/NWM symbolic-ref --short HEAD").strip(),
+  "active_dirty_count": sh("git -C /home/nwm/NWM status --porcelain=v1 --untracked-files=all | wc -l").strip(),
+  "timers_active": sh("systemctl --user list-timers --all --no-legend 'nhms-node27-*' | awk '{print $(NF-1)}'").split(),
+  "failed_node27_units": sh("systemctl --user list-units --all --no-legend --state=failed 'nhms-node27-*' 'nhms-display-api.service'").strip(),
+  "governance_dropins": sh("systemctl --user show nhms-node27-resource-governance.service -p DropInPaths --value").strip(),
+  "catalog_routes": sh("docker exec -i nhms-db psql -X -qAt -U nhms -d nhms -c \"BEGIN READ ONLY; SELECT c.relname||'='||c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='hydro' AND c.relname LIKE 'river_timeseries%' AND c.relkind IN ('r','p'); SELECT timeseries_store||'='||count(*) FROM hydro.hydro_run GROUP BY timeseries_store; SELECT max(last_autoanalyze)::text FROM pg_stat_all_tables; ROLLBACK;\"").split(),
+ },
+}
+txt=json.dumps(out, indent=2, ensure_ascii=False, default=str)
+assert not dsn.search(txt)
+print(txt)

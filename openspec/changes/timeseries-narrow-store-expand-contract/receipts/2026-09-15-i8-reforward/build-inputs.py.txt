@@ -1,0 +1,83 @@
+"""Build private re-forward inputs for #2374/#1987. No credentials read or written."""
+import hashlib, json, os, shutil, subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+os.umask(0o077)
+ST = Path("/home/nwm/.local/state")
+PRIOR_IN = ST / "issue2370-window-1b8b2b5b447d-retry-inputs"
+PRIOR = ST / "issue2370-window-1b8b2b5b447d-retry-prepare"
+TOOL = ST / "issue1987-tools/3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1/window_execute.py"
+OUT = ST / "issue2374-reforward-3cdcf500-inputs"
+NEWSTATE = ST / "issue2374-reforward-3cdcf500-prepare"
+PARSE = "fcst_gfs_2026081900_dg_945b6f0bbf63c5314d47df9481892229"
+
+def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def sh(*a): return subprocess.check_output(a, text=True)
+
+assert sha(TOOL) == "d6737c15c756776495b02f1b99e9254d8fca87a478dafe29ff1190cc93cdd969"
+assert not NEWSTATE.exists()
+OUT.mkdir(mode=0o700)
+(OUT / "admission").mkdir(mode=0o700)
+prov = {"state_sha256": sha(PRIOR / "state.json"), "routes_sha256": sha(PRIOR / "narrow-routes-before-reverse.json")}
+assert prov == {"state_sha256": "6bcfddd572c192f67b4a15f8c4968193dc2b59ec1f91dd753c0a730f5e26b429",
+                "routes_sha256": "d160508825bb9e939bd168d659f4d84a2c5c0689b0c7e3ec5c0ea7e835180b27"}
+c = json.loads((PRIOR / "config.json").read_text())
+old_narrow = c["reads"]["narrow"]["request"]
+assert old_narrow["run_id"] == "fcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229"
+
+src = Path(f"/home/ghdc/nwm/object-store/runs/{PARSE}/output/LH-YLJ.rivqdown.csv")
+assert src.is_file() and src.stat().st_size > 0
+q = ("BEGIN TRANSACTION READ ONLY; SELECT row_to_json(t) FROM (SELECT run_id,run_key,status,parsed_at,"
+     "basin_version_id,scenario_id,model_id,cycle_time,output_uri,timeseries_store FROM hydro.hydro_run "
+     f"WHERE run_id='{PARSE}') t; ROLLBACK;")
+meta = json.loads(sh("docker", "exec", "nhms-db", "psql", "-X", "-qAt", "-U", "nhms", "-d", "nhms", "-c", q).strip())
+assert meta["status"] == "succeeded" and meta["parsed_at"] is None
+narrow = dict(old_narrow, run_id=PARSE, issue_time="2026-08-19T00:00:00+00:00")
+assert meta["model_id"] == narrow["model_id"] and meta["basin_version_id"] == narrow["basin_version_id"]
+
+for name in ("d12", "governance"):
+    shutil.copyfile(PRIOR_IN / "admission" / f"{name}.json", OUT / "admission" / f"{name}.json")
+now = datetime.now(timezone.utc).isoformat()
+gov = {k: v for k, v in (l.split("=", 1) for l in sh("systemctl", "--user", "show", "nhms-node27-resource-governance.service",
+       "-p", "Result,ExecMainStatus,ActiveState,DropInPaths").splitlines())}
+capacity = {"measured_at": now, "measured_df": sh("df", "-h", "/", "/home", "/data/GHDC"),
+            "governance_service": gov,
+            "hold_phase": json.loads(Path("/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json").read_text())["phase"],
+            "reference_sample_write": {"rows": 512232, "seconds": 34.11867012223229,
+                                       "source": "prior admission capacity.json sha256 " + sha(PRIOR_IN / "admission/capacity.json")},
+            "note": "Re-forward reattaches a retained 89 MB table and parses one run; no expand DDL. TMPDIR=/home/nwm/tmp"}
+artifacts = {"measured_at": now, "parse_run": meta,
+             "parse_source": {"path": str(src), "bytes": src.stat().st_size, "sha256": sha(src)},
+             "retained_run": old_narrow, "narrow_request": narrow, "legacy_request": c["reads"]["legacy"]["request"],
+             "prior_artifacts_sha256": sha(PRIOR_IN / "admission/artifacts.json")}
+go = {"authorizer": "Danker", "executor": "Main", "instruction": "GO，执行生产重新切换", "instruction_at": now,
+      "operation": "reprepare then one reforward --go Danker (post-D12 reattach re-forward, OpenSpec node27-post-d12-reforward, #2374 merged PR #2380)",
+      "tool": {"commit": "3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1", "window_execute_sha256": sha(TOOL)},
+      "old_sha": c["old_sha"], "new_sha": c["new_sha"], "restore_branch": c["restore_branch"], "restore_ref": c["restore_ref"],
+      "provenance_state": str(PRIOR), "provenance": prov,
+      "retained_run": {"run_key": 17892, "run_id": old_narrow["run_id"], "parsed_at": "2026-09-14T21:10:49.225683+00:00"},
+      "parse_run_id": PARSE,
+      "bounds": {"window_seconds": 1800, "restore_threshold_after_api_stop_seconds": 600, "failure": "automatic reviewed D12 recovery"},
+      "forbidden": ["ledger DELETE", "rollback table DROP", "000059 rerun", "legacy DROP", "DROP CASCADE", "node22 mutation",
+                    "PGDATA migration", "cold activation", "foreign HOLD/drop-in release", "YD modification", "reset-failed",
+                    "reuse or rewrite of prior failed state", "second reforward invocation without user"],
+      "prior_go_sha256": sha(PRIOR_IN / "admission/go.json")}
+for name, obj in (("capacity", capacity), ("artifacts", artifacts), ("go", go)):
+    (OUT / "admission" / f"{name}.json").write_text(json.dumps(obj, indent=2, ensure_ascii=False, default=str))
+
+old_adm = {v["path"] for v in c["admission"].values()}
+c["admission"] = {k: {"path": str(OUT / "admission" / f"{k}.json"), "sha256": sha(OUT / "admission" / f"{k}.json")}
+                  for k in ("go", "d12", "capacity", "artifacts", "governance")}
+c["protected_files"] = [p for p in c["protected_files"] if p not in old_adm] + [v["path"] for v in c["admission"].values()]
+leftover = [p for p in c["protected_files"] if str(PRIOR_IN) in p]
+c["parse_run_id"] = PARSE
+c["reads"]["narrow"]["request"] = narrow
+c["reads"]["retained"] = {"request": old_narrow}
+c["reforward"] = {"provenance_state": str(PRIOR), "provenance": prov}
+cfg = OUT / "config.json"
+cfg.write_text(json.dumps(c, indent=2, ensure_ascii=False))
+os.chmod(cfg, 0o600)
+print(json.dumps({"inputs": str(OUT), "config_sha256": sha(cfg), "admission": c["admission"],
+                  "protected_files_prior_inputs_leftover": leftover, "parse_run": meta["run_id"],
+                  "protected_count": len(c["protected_files"])}, indent=2))

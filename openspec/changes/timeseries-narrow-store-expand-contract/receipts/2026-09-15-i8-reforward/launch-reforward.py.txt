@@ -1,0 +1,87 @@
+"""#2374 re-forward launcher: one executor command per invocation. Credentials stay in memory/env only."""
+
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+ACTIVE = Path("/home/nwm/NWM")
+TARGET = Path("/home/nwm/NWM-i8-target-415cbd1e")
+TOOL = Path("/home/nwm/.local/state/issue1987-tools/3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1/window_execute.py")
+TOOL_SHA = "d6737c15c756776495b02f1b99e9254d8fca87a478dafe29ff1190cc93cdd969"
+INPUTS = Path("/home/nwm/.local/state/issue2374-reforward-3cdcf500-inputs")
+STATE = Path("/home/nwm/.local/state/issue2374-reforward-3cdcf500-prepare")
+CONFIG_SHA = "3f7a2395da23b4d9819c475a3d6eca565e780bade2d59f67d6644fa75ff268a9"
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def role_url(name, user):
+    path = ACTIVE / "infra/env" / name
+    assert not path.is_symlink() and path.stat().st_uid == 1005 and path.stat().st_mode & 0o777 == 0o600
+    values = []
+    for line in path.read_text().splitlines():
+        if line.strip().startswith("DATABASE_URL="):
+            values.extend(shlex.split(line.strip().split("=", 1)[1], comments=True))
+    assert len(values) == 1
+    parsed = urllib.parse.urlsplit(values[0])
+    assert (parsed.username, parsed.hostname, parsed.port, parsed.path) == (user, "127.0.0.1", 55432, "/nhms")
+    return values[0]
+
+
+def main():
+    os.umask(0o077)
+    command = sys.argv[1]
+    assert command in ("reprepare", "reforward")
+    assert digest(TOOL) == TOOL_SHA
+    assert digest(INPUTS / "config.json") == CONFIG_SHA
+    out = INPUTS / command
+    out.mkdir(mode=0o700)
+    if command == "reprepare":
+        assert not STATE.exists()
+        args = ["reprepare", "--state", str(STATE), "--config", str(INPUTS / "config.json")]
+    else:
+        saved = json.loads((STATE / "state.json").read_text())
+        assert saved["phase"] == "REPREPARED" and saved["mode"] == "reforward"
+        args = ["reforward", "--state", str(STATE), "--go", "Danker"]
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("PG")
+        and k not in {"PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV",
+                      "NODE27_INGEST_RW_PASSWORD", "NODE27_DOWNLOAD_RW_PASSWORD"}
+    }
+    env.update(
+        PATH="/home/nwm/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        TMPDIR="/home/nwm/tmp",
+        PYTHONNOUSERSITE="1",
+        DATABASE_URL=role_url("node27-timeseries-compression-replay.env", "nhms"),
+        I8_INGEST_DSN=role_url("node27-ingest.env", "nhms_ingest_rw"),
+        I8_DISPLAY_DSN=role_url("display.env", "nhms_display_ro"),
+    )
+    cmd = [str(TARGET / ".venv/bin/python"), "-B", str(TOOL), *args]
+    with (out / "stdout").open("xb") as so, (out / "stderr").open("xb") as se:
+        process = subprocess.Popen(cmd, cwd="/home/nwm", env=env, stdin=subprocess.DEVNULL, stdout=so, stderr=se,
+                                   start_new_session=True)
+    with (out / "process.json").open("x") as stream:
+        json.dump({"pid": process.pid, "command": cmd, "tool_sha256": TOOL_SHA, "config_sha256": CONFIG_SHA,
+                   "launcher_sha256": digest(Path(__file__)), "credentials_persisted": False}, stream, indent=2)
+    rc = process.wait()
+    final = json.loads((STATE / "state.json").read_text()) if (STATE / "state.json").exists() else {}
+    result = {"command": command, "exit": rc, "phase": final.get("phase"), "mode": final.get("mode"),
+              "active_head": subprocess.check_output(["git", "-C", str(ACTIVE), "rev-parse", "HEAD"], text=True).strip(),
+              "t0": final.get("t0"), "stdout_sha256": digest(out / "stdout"), "stderr_sha256": digest(out / "stderr")}
+    with (out / "result.json").open("x") as stream:
+        json.dump(result, stream, indent=2)
+    print(json.dumps(result), flush=True)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,416 @@
+{
+  "reprepare_result": {
+    "command": "reprepare",
+    "exit": 0,
+    "phase": "REPREPARED",
+    "mode": "reforward",
+    "active_head": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "t0": null,
+    "stdout_sha256": "1e5a8982cf6dcaa3f16ca40a619233ed285456402626d1dc126a87c4bdb0fda0",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "reforward_result": {
+    "command": "reforward",
+    "exit": 0,
+    "phase": "WINDOW_VALIDATED",
+    "mode": "reforward",
+    "active_head": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "t0": "2026-09-15T02:28:31.571803+00:00",
+    "stdout_sha256": "bc6c3f8495f8f9ff99bb9ed6531d20e41d169b5166467e09418d268c962e3e94",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "state_excerpt": {
+    "phase": "WINDOW_VALIDATED",
+    "mode": "reforward",
+    "old_oid": 24541,
+    "narrow_oid": 309763188,
+    "retained_runs": [
+      {
+        "parsed_at": "2026-09-14T21:10:49.225683+00:00",
+        "run_id": "fcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
+        "run_key": 17892,
+        "status": "published"
+      }
+    ],
+    "t0": "2026-09-15T02:28:31.571803+00:00",
+    "fence_epochs": [
+      {
+        "drains": [
+          {
+            "at": "2026-09-15T02:28:32.540813+00:00",
+            "public_refusal": {
+              "at": "2026-09-15T02:28:32.496589+00:00",
+              "sha256": "61b30d408583991fd69f3dec694e154cb652471e663328ad9c8482c9021ab5db",
+              "status": 502
+            }
+          }
+        ],
+        "number": 1,
+        "restart_attempts": [
+          "2026-09-15T02:29:21.025468+00:00"
+        ],
+        "start": "2026-09-15T02:28:31.590130+00:00",
+        "validated_restart": {
+          "at": "2026-09-15T02:29:22.871628+00:00",
+          "display": {
+            "execution": "2297172794854",
+            "processes": [
+              {
+                "cmd_sha256": "42affe4a21dad0dde11b4d5137d9d9d1fa06bf06dcb1c7c089c30a31b4d65b37",
+                "cwd": "/home/nwm/NWM",
+                "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+                "pid": 1086781
+              },
+              {
+                "cmd_sha256": "131bbb62dda2dd38aa7371bca0fa8344845eb0a037c0eb562cdb1ffe31ccdc10",
+                "cwd": "/home/nwm/NWM",
+                "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+                "pid": 1086788
+              },
+              {
+                "cmd_sha256": "cfccc02bc6e519b73eb5e5ac093aa34169454880e3fcee53e08f9e02a8b3b570",
+                "cwd": "/home/nwm/NWM",
+                "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+                "pid": 1086789
+              },
+              {
+                "cmd_sha256": "dd19a0931cf33124e6223694010ffcc975ba678c204ff1dc2b38bbcfef527f0f",
+                "cwd": "/home/nwm/NWM",
+                "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+                "pid": 1086790
+              }
+            ],
+            "unit": "nhms-display-api.service"
+          },
+          "public": {
+            "at": "2026-09-15T02:29:22.869486+00:00",
+            "sha256": "81c9e15060e2a27c8c533b0db0ab137c088632fb241f7b042596cbd0bdc8c5d6",
+            "status": 200
+          },
+          "source": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+        }
+      }
+    ],
+    "readability": {
+      "legacy": {
+        "action": "legacy",
+        "module_origin_verified": true,
+        "points_verified": 168,
+        "python": "3.11.15",
+        "response_sha256": "d3247a94d64841c4a665bcf7bd8edd559fa6eb27a12e5d90e68b7fcad8899da7",
+        "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+      },
+      "narrow": {
+        "action": "narrow",
+        "module_origin_verified": true,
+        "points_verified": 168,
+        "python": "3.11.15",
+        "response_sha256": "2a15dcae861c0cc4cd46bbb2451124be8fe54cfdaacf3c619fe91adb012313f6",
+        "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+      },
+      "parse": {
+        "action": "parse",
+        "module_origin_verified": true,
+        "python": "3.11.15",
+        "rows_written": 512232,
+        "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+        "status": "parsed"
+      },
+      "retained": {
+        "action": "retained",
+        "module_origin_verified": true,
+        "points_verified": 168,
+        "python": "3.11.15",
+        "response_sha256": "84a95266f402a20d9f26834bba5f16972266f1075e6859798eea37b82738b483",
+        "sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2"
+      }
+    },
+    "route_proof": {
+      "cycle": "2026-09-14T00:00:00Z",
+      "routes": [
+        {
+          "at": "2026-09-15T02:29:23.081843+00:00",
+          "bytes": 6073,
+          "headers": {
+            "connection": "close",
+            "content-length": "6073",
+            "content-type": "application/json",
+            "date": "Tue, 15 Sep 2026 02:29:22 GMT",
+            "server": "uvicorn",
+            "vary": "Accept-Encoding",
+            "x-request-id": "f370c78f-c564-4464-94d6-0e76346ab281"
+          },
+          "path": "/api/v1/layers",
+          "port": 8080,
+          "seconds": 0.0075405859388411045,
+          "sha256": "032d961b7e20c3999bed723160366820565efa46f16bb5d7c3eab4047d03e1ce",
+          "status": 200
+        },
+        {
+          "at": "2026-09-15T02:29:23.111276+00:00",
+          "bytes": 142594,
+          "headers": {
+            "cache-control": "public, max-age=300",
+            "connection": "close",
+            "content-length": "142594",
+            "content-type": "application/x-protobuf",
+            "date": "Tue, 15 Sep 2026 02:29:22 GMT",
+            "etag": "W/\"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83\"",
+            "server": "uvicorn",
+            "vary": "Accept-Encoding",
+            "x-mvt-schema-version": "m16-hydrology-mvt-v1",
+            "x-request-id": "d7ead04a-078a-4713-818c-914b1c2e272d",
+            "x-tile-cache": "hit",
+            "x-tile-cache-key": "5a18028f2d385ab7b6ec03d612dfa395b4711f035e06874f37e886ad890269de",
+            "x-tile-checksum": "bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83",
+            "x-tile-layer-id": "river-network"
+          },
+          "path": "/api/v1/tiles/river-network-national/5/25/12.pbf",
+          "port": 8080,
+          "seconds": 0.02846265584230423,
+          "sha256": "bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83",
+          "status": 200
+        },
+        {
+          "at": "2026-09-15T02:29:25.499813+00:00",
+          "bytes": 1374287,
+          "headers": {
+            "cache-control": "public, max-age=300",
+            "connection": "close",
+            "content-length": "1374287",
+            "content-type": "application/x-protobuf",
+            "date": "Tue, 15 Sep 2026 02:29:22 GMT",
+            "etag": "W/\"m16-dd9060e870048d893ce9c7f3620f2a519bcb3134d2ec0859f75adf67b8d6cd8c\"",
+            "server": "uvicorn",
+            "vary": "Accept-Encoding",
+            "x-mvt-schema-version": "m16-hydrology-mvt-v1",
+            "x-request-id": "9a676934-99b1-4870-8fcd-6a58ee037206",
+            "x-tile-cache": "miss",
+            "x-tile-cache-key": "f188316b18a9f1ebec544280cf5bdc6cc9cf3c9aba9280a8122fd894b53c359f",
+            "x-tile-checksum": "dd9060e870048d893ce9c7f3620f2a519bcb3134d2ec0859f75adf67b8d6cd8c",
+            "x-tile-layer-id": "discharge"
+          },
+          "path": "/api/v1/tiles/hydro-national/q_down/2026-09-14T03%3A00%3A00Z/4/12/6.pbf",
+          "port": 8080,
+          "seconds": 2.3026925059966743,
+          "sha256": "dd9060e870048d893ce9c7f3620f2a519bcb3134d2ec0859f75adf67b8d6cd8c",
+          "status": 200
+        },
+        {
+          "at": "2026-09-15T02:29:30.012893+00:00",
+          "bytes": 1374311,
+          "headers": {
+            "cache-control": "public, max-age=300",
+            "connection": "close",
+            "content-length": "1374311",
+            "content-type": "application/x-protobuf",
+            "date": "Tue, 15 Sep 2026 02:29:25 GMT",
+            "etag": "W/\"m16-42353fd44d3fdcec6b751ce7d4a38437e22f6b75d003c8f11d44094f55450d86\"",
+            "server": "uvicorn",
+            "vary": "Accept-Encoding",
+            "x-mvt-schema-version": "m16-hydrology-mvt-v1",
+            "x-request-id": "14d5b6f2-fa7f-4d3e-91b8-6ee46c0ef962",
+            "x-tile-cache": "miss",
+            "x-tile-cache-key": "019baae19545074d91421ed1d0af98f1a55bc2df8f0df1b470b2a85d29031c1a",
+            "x-tile-checksum": "42353fd44d3fdcec6b751ce7d4a38437e22f6b75d003c8f11d44094f55450d86",
+            "x-tile-layer-id": "discharge"
+          },
+          "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T15%3A00%3A00Z/4/12/6.pbf",
+          "port": 8080,
+          "seconds": 4.243594809900969,
+          "sha256": "42353fd44d3fdcec6b751ce7d4a38437e22f6b75d003c8f11d44094f55450d86",
+          "status": 200
+        }
+      ],
+      "valid_times": [
+        "2026-09-14T03:00:00Z",
+        "2026-09-14T15:00:00Z"
+      ]
+    },
+    "runtime": {
+      "autopipe": {
+        "execution": "2297174654709",
+        "processes": [
+          {
+            "cmd_sha256": "957563f83b4f6353e9a2d50574f6deedfc21f83447587ec521b4a17f54cae873",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/usr/bin/bash",
+            "pid": 1086916
+          },
+          {
+            "cmd_sha256": "8b7373e54d69c939d6c4782bacd85beef0edbc193df6e1d38ba1a6b0e5a056c0",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+            "pid": 1086926
+          }
+        ],
+        "unit": "nhms-node27-autopipe.service"
+      },
+      "display": {
+        "execution": "2297172794854",
+        "processes": [
+          {
+            "cmd_sha256": "42affe4a21dad0dde11b4d5137d9d9d1fa06bf06dcb1c7c089c30a31b4d65b37",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+            "pid": 1086781
+          },
+          {
+            "cmd_sha256": "131bbb62dda2dd38aa7371bca0fa8344845eb0a037c0eb562cdb1ffe31ccdc10",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+            "pid": 1086788
+          },
+          {
+            "cmd_sha256": "cfccc02bc6e519b73eb5e5ac093aa34169454880e3fcee53e08f9e02a8b3b570",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+            "pid": 1086789
+          },
+          {
+            "cmd_sha256": "dd19a0931cf33124e6223694010ffcc975ba678c204ff1dc2b38bbcfef527f0f",
+            "cwd": "/home/nwm/NWM",
+            "executable": "/home/nwm/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11",
+            "pid": 1086790
+          }
+        ],
+        "unit": "nhms-display-api.service"
+      }
+    },
+    "restored_timers": [
+      "nhms-node27-autopipe.timer",
+      "nhms-node27-frontier-alert.timer",
+      "nhms-node27-mvt-cache-retention.timer",
+      "nhms-node27-raw-retention.timer",
+      "nhms-node27-resource-governance.timer",
+      "nhms-node27-timeseries-compression.timer",
+      "nhms-node27-timeseries-retention.timer",
+      "nhms-node27-download.timer"
+    ],
+    "remaining": [
+      "complete-cycle first chunk",
+      "SHJ-NJ/small-network compressed/uncompressed/legacy P95 and EXPLAIN",
+      "miss probes/QHH/coverage",
+      "scheduler registry counts",
+      "natural dual-table compression/retention ticks",
+      "three-basin GFS/IFS screenshots C1-C4 and /ops",
+      "full task 5.2 closure"
+    ],
+    "governance_handoff": "Parent must use recorded governance contract to verify ordinary NEW service then remove owned staging pin; executor never removes it.",
+    "milestone_only": true,
+    "new_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "driver_sha256": "d6737c15c756776495b02f1b99e9254d8fca87a478dafe29ff1190cc93cdd969",
+    "config_sha256": "e2a0561a9754b325f2874718f308dcb1f0ca0df974507ae729fbbda82ad94ed2",
+    "boot_id": "f9d0fd42-e670-418e-932d-35597adaa38f"
+  },
+  "ledger_after_tail": [
+    "000057_river_network_version_geometry_generation.sql",
+    "000058_hot_timeseries_chunk_interval_3d.sql",
+    "000059_river_timeseries_narrow_expand.sql"
+  ],
+  "ledger_after_count": 60,
+  "ledger_unchanged": true,
+  "governance_unstage_attempt": {
+    "error": "COMMAND_FAILED",
+    "error_path": null,
+    "operation": "unstage",
+    "outcome": "FAIL",
+    "phase": "unstage_starting",
+    "runtime_retained": true,
+    "schema_version": "issue1987.governance.executor.v1"
+  },
+  "governance_recover": {
+    "error": null,
+    "error_path": null,
+    "operation": "recover",
+    "outcome": "PASS",
+    "phase": "unstaged",
+    "runtime_retained": true,
+    "schema_version": "issue1987.governance.executor.v1"
+  },
+  "autovacuum_launcher_restart": "before|31|2026-09-12 05:38:22.414488+00\nterminate|t\n",
+  "launcher_sha256": "0373880714104e431c788f7d3b20dbf925ce6d1d492bd8571380e2faeed0b5a5",
+  "admission_sha256": {
+    "go": "b601f7bd64c5176722ca3e75b9123068efd37e8d672bd345cc2ee5cd0c742ab5",
+    "d12": "e9a0c6ad6887999590ae240d5e136cc945e7f6622f81633feaedfe94e5e839de",
+    "capacity": "106d3d4f3006502c5cf50a132eb9826933851cf6f4ba91d3caeb96138734d103",
+    "artifacts": "cacf5f97d443314650fbb4e16fb94efb45b1e1e67b0adfba117fb59192f6bad5",
+    "governance": "69d8cc648736868113a9590ddccff3cfcda38e94f57bd8c81f1c2578876e5311"
+  },
+  "go": {
+    "authorizer": "Danker",
+    "executor": "Main",
+    "instruction": "GO，执行生产重新切换",
+    "instruction_at": "2026-09-15T02:27:24.835224+00:00",
+    "operation": "reprepare then one reforward --go Danker (post-D12 reattach re-forward, OpenSpec node27-post-d12-reforward, #2374 merged PR #2380)",
+    "tool": {
+      "commit": "3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1",
+      "window_execute_sha256": "d6737c15c756776495b02f1b99e9254d8fca87a478dafe29ff1190cc93cdd969"
+    },
+    "old_sha": "a8db554d6402bec642e9a05627eae64b2b79aec3",
+    "new_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "restore_branch": "issue1987-reviewed-new-415cbd1e",
+    "restore_ref": "refs/remotes/origin/issue1987-frozen-new-415cbd1e",
+    "provenance_state": "/home/nwm/.local/state/issue2370-window-1b8b2b5b447d-retry-prepare",
+    "provenance": {
+      "state_sha256": "6bcfddd572c192f67b4a15f8c4968193dc2b59ec1f91dd753c0a730f5e26b429",
+      "routes_sha256": "d160508825bb9e939bd168d659f4d84a2c5c0689b0c7e3ec5c0ea7e835180b27"
+    },
+    "retained_run": {
+      "run_key": 17892,
+      "run_id": "fcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
+      "parsed_at": "2026-09-14T21:10:49.225683+00:00"
+    },
+    "parse_run_id": "fcst_gfs_2026081900_dg_945b6f0bbf63c5314d47df9481892229",
+    "bounds": {
+      "window_seconds": 1800,
+      "restore_threshold_after_api_stop_seconds": 600,
+      "failure": "automatic reviewed D12 recovery"
+    },
+    "forbidden": [
+      "ledger DELETE",
+      "rollback table DROP",
+      "000059 rerun",
+      "legacy DROP",
+      "DROP CASCADE",
+      "node22 mutation",
+      "PGDATA migration",
+      "cold activation",
+      "foreign HOLD/drop-in release",
+      "YD modification",
+      "reset-failed",
+      "reuse or rewrite of prior failed state",
+      "second reforward invocation without user"
+    ],
+    "prior_go_sha256": "521c6bc16581cfdbf4c4869efdf995bd885c7c4695fd4f76e12cd6240d392cbc"
+  },
+  "post": {
+    "health_8080": "200",
+    "health_8081": "200",
+    "public_layers": "200",
+    "active_head": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "active_branch": "issue1987-reviewed-new-415cbd1e",
+    "active_dirty_count": "0",
+    "timers_active": [
+      "nhms-node27-autopipe.timer",
+      "nhms-node27-frontier-alert.timer",
+      "nhms-node27-download.timer",
+      "nhms-node27-raw-retention.timer",
+      "nhms-node27-mvt-cache-retention.timer",
+      "nhms-node27-resource-governance.timer",
+      "nhms-node27-timeseries-compression.timer",
+      "nhms-node27-timeseries-retention.timer"
+    ],
+    "failed_node27_units": "",
+    "governance_dropins": "",
+    "catalog_routes": [
+      "river_timeseries_legacy=24541",
+      "river_timeseries=309763188",
+      "narrow=1533",
+      "legacy=6644",
+      "2026-09-15",
+      "02:37:04.635085+00"
+    ]
+  }
+}
