@@ -6211,9 +6211,52 @@ is already narrow.
 
 **Any fact Seq Scan or order-of-magnitude query-shape regression blocks
 contract.** Missing evidence leaves 5.2 open. Browser click P95 belongs to
-issue #1970 (§4.9), separate from these SQL/API bounds. **Fourteen real daily receipts
-plus zero legacy chunks belongs only to #1988**; neither an in-window tick nor
-a disposable empty legacy table satisfies that gate.
+issue #1970 (§4.9), separate from these SQL/API bounds. **The §4.10.6 reparse receipts plus
+zero in-window legacy-routed runs and no shape regression (replacing fourteen daily
+receipts plus zero legacy chunks) belong only to #1988**; neither an in-window tick nor a disposable
+empty legacy table satisfies that gate.
+
+#### 4.10.6 Reparse in-window legacy runs into the narrow store (#2382)
+
+After the re-forward, runs parsed before T0 stay routed `legacy`. The runner
+`scripts/node27_river_narrow_reparse_backfill.py` reparses each in-window
+`published`/`superseded` run from its SHUD `.rivqdown`. Each run is one
+transaction: row lock, route flip, parser write, count check, commit (design:
+`openspec/changes/node27-river-narrow-reparse-backfill/design.md`). Runs outside
+`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` stay `legacy` and are dropped with the
+table at contract time. **Production `run` requires a separate explicit GO.**
+
+Runtime: publish the reviewed script bytes to
+`~/.local/state/issue1987-tools/<commit>/`, run them with the live NEW interpreter
+and `PYTHONPATH=/home/nwm/NWM`, through a transient `systemd-run --user` unit
+whose launcher builds `DATABASE_URL` in memory from `infra/env/node27-ingest.env`
+(role `nhms_ingest_rw`), scrubs `PG*`, and sets `OBJECT_STORE_ROOT`,
+`OBJECT_STORE_PREFIX` and the retention window from the live env files. Never
+pass a DSN in argv. `plan` and `verify` also run under the display read-only role.
+
+1. `plan --receipt-dir D`: candidates by status, estimated rows, newest/oldest
+   cycle, legacy route counts (in/out of window), and compressed narrow chunks
+   overlapping the range. Check `df -h / /home /data/GHDC` against ≈179 B/row
+   uncompressed.
+2. Pilot: `run --go <token> --limit 20 --concurrency 4 --deadline <UTC+2h>`.
+   The unit holds the lifecycle mutex. Compression (exit 2) and retention
+   (exit 1) ticks during the run are expected refusals, not incidents.
+   Autopipe may log a lock wait on a run being reparsed, since the row lock
+   lasts a whole parse; it retries next tick.
+   Derive rows/s from `runs.jsonl` `seconds`/`rows_written`, then choose the
+   concurrency and deadline for the full run.
+3. Full run: the same command without `--limit`. Optionally add
+   `--end-time-after` when the contract date is fixed, since runs aging out
+   before it need no reparse. Exit 3 (`deadline`/signal) or a killed unit is
+   resumable: rerun the same command; committed runs are already `narrow`.
+   Exit 1: read `runs.jsonl` failures before rerunning; the failure budget stops
+   early by design. Exit 2: refused, nothing mutated (GO, mutex, decompress
+   budget, config).
+4. `verify --sample 50` (read-only): every sampled run `pass`. Any mismatch
+   blocks #1988.
+5. After the unit ends, confirm that the next compression tick compresses the
+   backlog, and run the governance receipt. A read-only count of legacy routes
+   with `end_time > now() - window` must be 0 before #1988 opens.
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 

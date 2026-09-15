@@ -221,10 +221,10 @@
   unchanged forcing catalog and retained-ledger skip. No production mutation;
   runtime pin/hold authorization and #2273 destination headroom remain live gates.
 
-## 6. River contract (I9 — entry gate: fourteen archived daily receipts + `legacy_chunks = 0`)
+## 6. River contract (I9 — entry gate: #2382 reparse receipts + zero in-window legacy-routed runs + no shape regression; replaces fourteen daily receipts + `legacy_chunks = 0`)
 
-- [ ] 6.1 Archive the fourteen daily receipts under the change and assert the retention receipt shows `legacy_chunks = 0` and no shape regression; this is the issue's opening check (schedule note: the last legacy seven-day chunk may keep `legacy_chunks > 0` until about twenty-one days after the expand, so the conjunction gate opens later than the fourteen receipts alone).
-- [ ] 6.2 Contract migration: refuse on non-zero legacy chunks; drop `hydro.river_timeseries_legacy`, `hydro.cutover_river_identity_normalization()`, `hydro.verify_river_identity_normalization()`, `hydro.hydro_run.timeseries_store`; contract window deploys routing-free code before the migration. Verify: real-DB test of the refusal and of the clean path.
+- [ ] 6.1 Archive the #2382 reparse backfill receipts under the change and assert a read-only count of legacy-routed runs with `end_time` inside the retention window is 0 and no shape regression; this is the issue's opening check (amended by #2382: legacy chunks may remain; they are dropped with the table).
+- [ ] 6.2 Contract migration: refuse while any legacy-routed run is inside the retention window; drop `hydro.river_timeseries_legacy`, `hydro.cutover_river_identity_normalization()`, `hydro.verify_river_identity_normalization()`, `hydro.hydro_run.timeseries_store`; contract window deploys routing-free code before the migration. Verify: real-DB test of the refusal and of the clean path.
 - [ ] 6.3 Delete `scripts/node27_river_identity_backfill.py` and `tests/test_node27_river_identity_backfill*.py`; remove the **river** renderer's legacy path and routing code; physically delete every marker line and aid line; collapse the cleanup oracles to "no text identity column in fact-table SQL"; marker census zero (the marker set is river-only; forcing carries no markers). Verify: `grep -rn "remove with #1342" --include=*.py --include=*.sql .` empty; oracles green.
 - [ ] 6.4 ADR 0002 amendment (Decision 4 list superseded by the narrow settings, 7-day chunk assumption retired, FK disposition), runbook table/capacity/cutover sections rewritten, `openspec/glossary.md` entries; move the browser click P95 acceptance text to #1970, then close #1342 and #1336 with the receipts.
 

@@ -149,7 +149,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 - [新表无 basin/network FK] → 与 ADR 0002 修正案同一规则；coverage 审计 join 等价校验。
 - [1 天 chunk 让 chunk 数 ×7] → 14 天内两表合计 ≈ 40 个；retention/compression 按 `range_end` 工作；autopipeline 前沿 ANALYZE 腿每 tick ≤ 3 个 chunk 的预算在 receipt 中复核（1 天 chunk 下未压缩 chunk 数 ≈ 9–10）。
 - [forcing IDENTITY 列 ADD 的锁] → 先实测，receipt 前置。
-- [contract 迁移在 legacy 非空时被误跑] → 迁移内 chunk 计数 fail-closed；runbook 前置 `legacy_chunks = 0`；contract 窗口先部署去掉列引用的代码再 DROP 列。
+- [contract 迁移在 legacy 非空时被误跑] → 迁移内"保留窗口内 legacy 路由 run 数"计数 fail-closed（#2382 修订，原为 chunk 计数）；runbook 前置该计数 = 0 与补解析 receipt；contract 窗口先部署去掉列引用的代码再 DROP 列。
 - [维护窗口内旧进程读到空窄表] → 窗口顺序：timers stop → API/parser stop → pull → migrate → start → timers start。
 - [治理峰值外推低估] → 7 天日均 + 100 GiB 余量；流域新增在 receipt 中即时反映。
 
@@ -162,7 +162,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 4. **I6 车道与治理**（发现式集合、supervisor/capture、receipt schema、per-tick 重钉、governance 指标）——legacy 缺席时为 no-op，可独立合绿；部署上先于 I7 落 node-27。
 5. **I7 expand 迁移 + parser 窄写 + fixture 重钉**（一次合入；此时读方已按 store 路由，真实 DB pytest 可绿）。
 6. **I8 rollout runbook + node-27 receipt**（D11 全部项 + D12 回退演练在 throwaway 库）。
-7. **I9 river contract**：开门条件 = 14 天 receipt 归档 + `legacy_chunks = 0`；contract 迁移、删函数/backfill runner/aid、oracle 收敛、ADR/runbook/glossary、关闭 #1342/#1336。
+7. **I9 river contract**：开门条件 = #2382 补解析 receipt 归档 + 保留窗口内 legacy 路由 run 数 = 0 + 无形状回归（2026-09-15 用户决定，取代原“14 天 receipt 归档 + `legacy_chunks = 0`”）；contract 迁移、删函数/backfill runner/aid、oracle 收敛、ADR/runbook/glossary、关闭 #1342/#1336。
 8. **I10 forcing 只读实测 receipt** → **I11 forcing 读方** → **I12 forcing expand + 写方** → **I13 forcing rollout receipt** → **I14 forcing contract**（开门条件同 I9）。
 
 ## Open Questions

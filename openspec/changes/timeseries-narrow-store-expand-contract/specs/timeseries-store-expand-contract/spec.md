@@ -49,16 +49,16 @@ While the legacy table exists, the runbook SHALL provide the reverse sequence: s
 - **WHEN** the reverse sequence is executed after a narrow run was parsed
 - **THEN** the legacy run is readable and re-parseable by the pre-change code, the previously narrow run is re-parsed into the (again canonical) text table, and the renamed narrow table drops cleanly
 
-### Requirement: The contract migration SHALL refuse while the legacy table holds any chunk, and code SHALL stop reading the routing column before it is dropped
+### Requirement: The contract migration SHALL refuse while any legacy-routed run is inside the retention window, and code SHALL stop reading the routing column before it is dropped
 
-The river contract migration SHALL count the legacy table's chunks first and MUST raise, changing nothing, when the count is non-zero. When zero it SHALL drop the legacy table, drop `hydro.cutover_river_identity_normalization()` and `hydro.verify_river_identity_normalization()`, and drop `hydro.hydro_run.timeseries_store`. The contract window SHALL deploy the code that no longer references `timeseries_store` before applying the migration.
+The river contract SHALL first count `hydro.hydro_run` rows routed `legacy` whose `end_time` is later than now minus the deployment's configured retention window, and MUST raise, changing nothing, when that count is non-zero. In-window legacy runs are brought to the narrow store by the reparse backfill (change `node27-river-narrow-reparse-backfill`, #2382); legacy-routed runs outside the window keep route `legacy` and their remaining legacy chunks are dropped with the table, the same visibility loss retention imposes. When the count is zero it SHALL drop the legacy table regardless of its remaining chunk count, drop `hydro.cutover_river_identity_normalization()` and `hydro.verify_river_identity_normalization()`, and drop `hydro.hydro_run.timeseries_store`. The contract window SHALL deploy the code that no longer references `timeseries_store` before applying the migration.
 
-#### Scenario: Non-empty legacy refused
-- **WHEN** the contract migration runs while one legacy chunk remains
-- **THEN** it raises naming the chunk count and the catalog is unchanged
+#### Scenario: In-window legacy run refused
+- **WHEN** the contract migration runs while one legacy-routed run has `end_time` inside the retention window
+- **THEN** it raises naming the run count and the catalog is unchanged
 
 #### Scenario: Clean contract
-- **WHEN** the contract migration runs after retention has emptied the legacy table and the routing-free code is deployed
+- **WHEN** the contract migration runs after the reparse backfill (or retention) leaves zero in-window legacy-routed runs, legacy chunks may remain, and the routing-free code is deployed
 - **THEN** the legacy table, both functions and the routing column are gone and `tests/test_migrations.py` pins the final three-index shape
 
 ### Requirement: Contract SHALL remove every transitional aid and the legacy read variant
@@ -75,11 +75,11 @@ After the contract batch, no file in the repository SHALL contain the marker `tr
 
 ### Requirement: Rollout and contract SHALL each be gated by node-27 live receipts
 
-The river rollout SHALL not be declared complete without a node-27 receipt recording: expand migration wall time per statement; the first narrow chunk's size after one full cycle; the per-segment EXPLAIN gate and the probe before/after plans (`timeseries-narrow-store`); registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; the governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with both source curves rendered and identities not crossed (screenshot evidence); the display read-only boundary deny-write receipt; `/ops` reachable. The contract SHALL not run before fourteen consecutive daily receipts show the narrow route healthy and the retention receipt shows `legacy_chunks = 0`; the fourteen-day wait is the entry gate of the contract issue, not a task of the rollout issue.
+The river rollout SHALL not be declared complete without a node-27 receipt recording: expand migration wall time per statement; the first narrow chunk's size after one full cycle; the per-segment EXPLAIN gate and the probe before/after plans (`timeseries-narrow-store`); registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; the governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with both source curves rendered and identities not crossed (screenshot evidence); the display read-only boundary deny-write receipt; `/ops` reachable. The contract SHALL not run before the #2382 reparse backfill receipts are archived, a read-only count shows zero legacy-routed runs inside the retention window, and no query-shape regression is recorded (user decision 2026-09-15 recorded in #2382/#1988; replaces the fourteen consecutive daily receipts plus `legacy_chunks = 0`); this is the entry gate of the contract issue, not a task of the rollout issue.
 
 #### Scenario: Contract precondition
 - **WHEN** an operator prepares the contract window
-- **THEN** the runbook checklist requires the archived fourteen daily receipts and the retention receipt with `legacy_chunks = 0` before the migration may be applied
+- **THEN** the runbook checklist requires the archived reparse backfill receipts, a zero in-window legacy-route count and no shape regression before the migration may be applied
 
 #### Scenario: Maintenance window order
 - **WHEN** the expand window runs
