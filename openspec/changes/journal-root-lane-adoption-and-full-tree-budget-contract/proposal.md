@@ -52,7 +52,8 @@ from a cycle-scoped budget refusal (same reason token, same field).
 - **#1955 A3** — the recovery and rollback entrypoints (click and argparse)
   widen their `except` arms to include `OrchestratorError`, so the refusal is a
   typed single line instead of a traceback; the two scripts get the same typed
-  exit at `main()`.
+  exit at `main()`. After round 1, `migrate-scheduler-state` gets the same arm
+  as well (design D4a), so all five CLIs render one typed line.
 - **#1955 B** — `_require_output_outside_root` converts the bare `RuntimeError`
   from `expanduser` into the new typed `CENSUS_OUTPUT_UNEXPANDABLE`, distinct
   from the post-emit `CENSUS_OUTPUT_UNWRITABLE`.

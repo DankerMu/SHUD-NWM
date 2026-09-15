@@ -4627,7 +4627,9 @@ node-22 活树的 `include_direct=False` 原始计费是 **148,381**（`latest/*
   单 cycle 车道是 `cycle_replay`。**stderr 那一行没有变**，仍然是
   `file_journal_record_limit_exceeded: pipeline_job_records`——census 渲染的是
   `reason: field`，lane 只在 evidence 里，用来区分"整棵树太大"和"这一个 cycle
-  太大"这两种同码同 field 的拒绝。
+  太大"这两种同码同 field 的拒绝。**注意 census 的 stderr 永远看不到 lane**：
+  它只渲染 `reason: field`，把 evidence 整个丢掉。要读 lane，只能看 `query_*`
+  返回的合成行 `file_journal.evidence`，或消费该行的 receipt。
 - **`--max-records` 是唯一被认可的处置**，`--max-files` 不是这个旋钮（见下）。
 - **默认预算不会被调高**：#1810 的 `MAX_FILE_JOURNAL_RECORDS` docstring 已经记
   过"抬高预算只是把悬崖往后挪"，而这次实测说明悬崖已经落在生产树里面了——再调

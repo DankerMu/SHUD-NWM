@@ -259,8 +259,8 @@ master.
   `scheduler_core.py:67`, `operator_reserved_demotion.py:74`,
   `journal_scope_census.py:488,610`,
   `operator_released_reservation_recovery.py:132`,
-  `file_orchestration_migration.py:91,237,1027` plus the create-capable
-  `_verified_or_created_journal_root` (`:1286,1293`), and the two scripts
+  `file_orchestration_migration.py:91,237,1031` plus the create-capable
+  `_verified_or_created_journal_root` (`:1290,1310`), and the two scripts
   (`scripts/node22_manual_retry_failed_runs.py:91`,
   `scripts/ops/node22_repair_placeholder_hydro_uris.py:67`). `FILE_JOURNAL_INVALID_ROOT`
   still has exactly one raise site (`journal_root_authority.py:87`).

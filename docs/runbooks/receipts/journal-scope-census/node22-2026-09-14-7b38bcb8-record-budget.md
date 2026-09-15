@@ -19,8 +19,13 @@ receipt:      node22-2026-09-14-7b38bcb8-record-budget.json
 ```
 
 `measure_1953.py` is a one-shot out-of-tree probe (it hardcodes the node-22
-`sys.path`), deliberately not committed; the sha256 above is what pins the exact
-version that produced this JSON.
+`sys.path`), deliberately not committed; the sha256 above pins the exact version
+that produced this JSON. Committing it was tried and reverted: the repo's lint
+rejects it, and reformatting it would invalidate the very hash this receipt
+pins. So the hash attests provenance rather than enabling a byte-identical
+rerun — what makes the numbers checkable is the committed JSON plus the
+derivation below, every figure of which is re-derivable by counting the three
+record sources named here.
 
 ## Why the receipt speaks for master
 
