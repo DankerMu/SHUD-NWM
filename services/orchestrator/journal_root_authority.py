@@ -103,3 +103,15 @@ def verify_journal_root_authority(journal_root: str | Path, *, setting: str) -> 
         return verify_directory_no_follow(expanded)
     except (OSError, SafeFilesystemError) as error:
         raise _refuse(type(error).__name__) from error
+
+
+def journal_root_refusal_line(error: OrchestratorError) -> str:
+    """Render one refusal as the single stderr line every lane of #1955 emits.
+
+    ``str(OrchestratorError)`` is the message ALONE, so an ``except`` arm that
+    echoed it would drop the code an operator greps for.  The code rides in
+    front, exactly as the demotion CLI and the census already render it, and
+    ``details`` -- which carries the configured root -- never reaches stderr.
+    """
+
+    return f"{error.error_code}: {error.message}"

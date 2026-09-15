@@ -538,6 +538,17 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+#: The status the five query entrypoints put on the synthetic row they return
+#: when the journal could not be read within its budget (#1953).  It is NOT a
+#: pipeline-job status: the row is synthesised per call, never written and never
+#: published, so this literal stays outside ``schemas/pipeline_job.schema.json``
+#: and outside the API's closed status enum.  It must stay outside every
+#: terminal set, because the duplicate-submission and active-cycle guards read a
+#: non-terminal row as an in-flight job and that is exactly what keeps them shut
+#: on an unread journal.  The three sibling blocked sentinels deliberately keep
+#: ``"running"`` -- see design D7a: one of them feeds an ALLOWLIST, where a new
+#: literal would turn fail-closed into fail-open.
+FILE_JOURNAL_READ_BLOCKED_STATUS = "file_journal_read_blocked"
 #: Exactly the master statuses the cohort task projection can DERIVE from task
 #: outcomes.  A persisted status inside this set is projection-owned and keeps
 #: being overwritten by the current pass; a persisted status outside it cannot
@@ -1022,14 +1033,33 @@ class OperatorDemoteReceipt:
 
 @dataclass
 class _RecordBudget:
+    """One aggregate record budget, tagged with the read lane it bounds (#1953).
+
+    ``lane`` defaults to ``None`` rather than to a string on purpose: the third
+    construction site (``rollback_scope_records``) is outside #1953's scope, and
+    a defaulted lane would silently change its error's evidence from ``{}`` to
+    ``{"lane": ...}``.  The key appears only when a caller names a lane.
+
+    The reason token and the field are unchanged, because the census runbook and
+    several pinned tests match on exactly those two.  The lane is the only new
+    evidence, and it is what makes a whole-tree refusal -- which on a
+    production-sized journal is every whole-tree replay -- distinguishable from
+    a cycle-scoped one that reports the same token and the same field.
+    """
+
     limit: int
     field: str
     count: int = 0
+    lane: str | None = None
 
     def consume(self, amount: int = 1) -> None:
         self.count += amount
         if self.count > self.limit:
-            raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field=self.field)
+            raise FileOrchestrationJournalError(
+                "file_journal_record_limit_exceeded",
+                field=self.field,
+                evidence={"lane": self.lane} if self.lane is not None else None,
+            )
 
 
 @dataclass
@@ -6659,7 +6689,7 @@ class FileOrchestrationJournalRepository:
 
     def _replay_all_pipeline_job_records(self, *, include_direct: bool = True) -> dict[str, dict[str, Any]]:
         jobs: dict[str, dict[str, Any]] = {}
-        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records")
+        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records", lane="full_tree_replay")
         for path in sorted(
             _iter_regular_json_files(
                 self.root / "latest",
@@ -6903,7 +6933,7 @@ class FileOrchestrationJournalRepository:
         """
 
         jobs: dict[str, dict[str, Any]] = {}
-        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records")
+        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records", lane="cycle_replay")
         for path in sorted(
             path
             for segment in source_segments
@@ -13052,6 +13082,18 @@ def _blocked_query_job(
     run_id: str | None = None,
     slurm_job_id: str | None = None,
 ) -> dict[str, Any]:
+    """The synthetic row the five query entrypoints return for a blocked read.
+
+    #1953: the status names the blocked read instead of borrowing the vocabulary
+    of a job that is actually running.  Everything else is unchanged -- the
+    ``job_id`` defaults, the ``file_journal`` marker, the reason token, the field
+    and the identifiers -- because the readers that key on the marker, and
+    ``_manual_retry_source_for_run``'s filter by ``job_id``, depend on exactly
+    those.  The row stays PRESENT and non-terminal: the duplicate-submission and
+    active-cycle guards read it as an in-flight job, which is what keeps them
+    refusing to schedule against a journal nobody could read.
+    """
+
     return _public_evidence(
         {
             "job_id": job_id or "file_journal_read_blocked",
@@ -13059,7 +13101,7 @@ def _blocked_query_job(
             "cycle_id": cycle_id,
             "run_id": run_id,
             "slurm_job_id": slurm_job_id or "unknown_after_attempt",
-            "status": "running",
+            "status": FILE_JOURNAL_READ_BLOCKED_STATUS,
             "stage": "file_journal_read",
             "error_code": error.reason,
             "file_journal": {

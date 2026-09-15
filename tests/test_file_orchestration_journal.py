@@ -38,6 +38,7 @@ from services.orchestrator.chain_repository_state import (
 )
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
+    FILE_JOURNAL_READ_BLOCKED_STATUS,
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
     FileJournalRetryService,
@@ -5625,7 +5626,9 @@ def test_file_orchestration_journal_scoped_cycle_ignores_global_replay_scan(tmp_
             "cycle_id": "unknown-source_2026062800",
             "run_id": None,
             "slurm_job_id": "unknown_after_attempt",
-            "status": "running",
+            # #1953: the fall-open row names the blocked read; it no longer
+            # borrows the vocabulary of a job that is actually running.
+            "status": FILE_JOURNAL_READ_BLOCKED_STATUS,
             "stage": "file_journal_read",
             "error_code": "file_journal_schema_mismatch",
             "file_journal": {
@@ -5654,7 +5657,7 @@ def test_file_orchestration_journal_unsafe_segments_fail_closed(tmp_path: Path) 
 
     query = repository.get_pipeline_job("job/../bad")
     assert query is not None
-    assert query["status"] == "running"
+    assert query["status"] == FILE_JOURNAL_READ_BLOCKED_STATUS
     assert query["stage"] == "file_journal_read"
     assert query["error_code"] == "file_journal_unsafe_path_segment"
 
@@ -6342,7 +6345,7 @@ def test_file_orchestration_journal_direct_pipeline_job_requires_journal_schema(
     query = FileOrchestrationJournalRepository(journal_root).get_pipeline_job(job["job_id"])
 
     assert query is not None
-    assert query["status"] == "running"
+    assert query["status"] == FILE_JOURNAL_READ_BLOCKED_STATUS
     assert query["error_code"] == "file_journal_schema_mismatch"
 
 
@@ -6725,7 +6728,7 @@ def test_file_orchestration_journal_unknown_path_source_blocks_query_helpers(
     assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026062800") is None
     query = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
 
-    assert query[0]["status"] == "running"
+    assert query[0]["status"] == FILE_JOURNAL_READ_BLOCKED_STATUS
     assert query[0]["stage"] == "file_journal_read"
     assert query[0]["error_code"] == "file_journal_invalid_identity"
     assert query[0]["file_journal"]["field"] == "source_id"
@@ -6761,11 +6764,13 @@ def test_file_orchestration_journal_unknown_record_source_blocks_candidate_and_q
     query = repository.get_pipeline_job(job["job_id"])
 
     assert state is not None
+    # The candidate-state projection is a D7a SIBLING sentinel and deliberately
+    # keeps "running": its ``pipeline_status`` feeds an allowlist.
     assert state["pipeline_status"] == "running"
     assert state["file_journal"]["reason"] == "file_journal_invalid_identity"
     assert state["file_journal"]["field"] == "source_id"
     assert query is not None
-    assert query["status"] == "running"
+    assert query["status"] == FILE_JOURNAL_READ_BLOCKED_STATUS
     assert query["stage"] == "file_journal_read"
     assert query["error_code"] == "file_journal_invalid_identity"
 

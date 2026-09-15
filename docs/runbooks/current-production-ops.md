@@ -4513,6 +4513,22 @@ preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调�
 （`details["error_type"]` 为 `RelativeJournalRoot`；`~` 无法展开时为
 `UnexpandableJournalRoot`；否则它们会被 `safe_fs` 锚到当前工作目录上）。
 
+**#1955 之后**：同一个 seam 覆盖了余下**七条** operator 写车道，不再只有
+`demote-reserved-job` 与 `census-job-id-scope`——`recover-released-identity-blocked-reservation`、
+`prepare-file-journal-rollback`、`launch-file-journal-rollback-writer`、
+`complete-file-journal-rollforward`、`import_historical_scheduler_state`
+（`migrate-scheduler-state` 经它继承），以及两个 node-22 脚本
+`scripts/node22_manual_retry_failed_runs.py` 与
+`scripts/ops/node22_repair_placeholder_hydro_uris.py`。验证发生在构造
+repository **之前**，因此不合规的 root 一个字节都不会落盘：四条 CLI 打一行
+`FILE_JOURNAL_INVALID_ROOT: <message>` 到 stderr 并 exit 2（两个脚本同样
+exit 2、不出 receipt），rollback 车道的
+`.reconcile-inventory-rollback-execution.lock` 也因此不会出现在当前工作目录里。
+rollback 锁路径由**已验证**的 root 直接派生、不再 `resolve()`，所以锁与
+repository 读的永远是同一棵树。`migrate-scheduler-state` 是唯一例外：`OrchestratorError` 是
+`RuntimeError` 的子类，它沿用自己既有的 `(RuntimeError, ValueError)` 分支——同样
+exit 2，但 stderr 只有 message、没有 `FILE_JOURNAL_INVALID_ROOT:` 前缀。
+
 ### 8.11 #1760 scope gate 与既存分叉 job_id 行
 
 **什么叫分叉行**：一行 pipeline_job 的 `job_id` 里编码的 `(source, cycle)` 与
@@ -4552,8 +4568,13 @@ fi'
 `anchor_present`、`flat_direct_present`、`reconcile_abort_trigger`）；`1` = typed
 失败（stderr 是 `error_code: message` 或 `reason: field`，无 traceback）。receipt
 是在写 `--output` **之前**就打到 stdout 的，所以 receipt 发出之后才发生的 typed
-失败（例如 `--output` 不可写）会以 `1` 收场，**即使这一趟真的查出了分叉行**；
-判分叉一律读 stdout receipt 里的 `exit_code`，不要只看 `$?`。
+失败（例如 `--output` 不可写，`CENSUS_OUTPUT_UNWRITABLE`）会以 `1` 收场，
+**即使这一趟真的查出了分叉行**；判分叉一律读 stdout receipt 里的 `exit_code`，
+不要只看 `$?`。反过来，在 census **跑之前**就发生的 typed 失败——root 不合规
+（`FILE_JOURNAL_INVALID_ROOT`）、`--output` 落在 root 里面
+（`CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT`）、`--output` 的 `~user` 展不开
+（`CENSUS_OUTPUT_UNEXPANDABLE`，#1955 起；此前是裸 `RuntimeError` traceback）——
+同样是 `1`，但 **stdout 是空的**，所以"没有 receipt"和"receipt 过期"永远不会混淆。
 
 **为什么带 `--max-records 5000000`**：整树 replay 只有**一个** record 预算，默认
 `MAX_FILE_JOURNAL_RECORDS = 100_000`，计费单位是：每一个 latest view 里
@@ -4588,6 +4609,24 @@ node-22 detached worktree + `/scratch/frd_muziyao/NWM/.venv/bin/python -m`）：
   receipt schema 不变。
 - receipt 与 transcript：`docs/runbooks/receipts/journal-scope-census/node22-2026-09-02-de33bd87.json`
   与同目录 `-transcript.md`。
+
+**默认预算在生产树上一定跳闸，这是既定事实不是偶发**（#1953，2026-09-14 实测，
+receipt：同目录 `node22-2026-09-14-7b38bcb8-record-budget.json` + `-record-budget.md`）：
+node-22 活树的 `include_direct=False` 原始计费是 **148,381**（`latest/**` 7,898 个
+文件 54,258 行 + `journal/**.jsonl` 325 个文件 94,123 行），去重之后只有 **17,025**
+个唯一 job——预算约束的是**读取工作量**，不是结果规模。所以：
+
+- **默认预算下的整树 replay 必然以 `file_journal_record_limit_exceeded:
+  pipeline_job_records` 拒绝**（实测 ~92 s 才拒绝），stderr 一行，零写入。
+- 该拒绝的结构化 evidence 现在带 **`lane`**：整树车道是 `full_tree_replay`，
+  单 cycle 车道是 `cycle_replay`。**stderr 那一行没有变**，仍然是
+  `file_journal_record_limit_exceeded: pipeline_job_records`——census 渲染的是
+  `reason: field`，lane 只在 evidence 里，用来区分"整棵树太大"和"这一个 cycle
+  太大"这两种同码同 field 的拒绝。
+- **`--max-records` 是唯一被认可的处置**，`--max-files` 不是这个旋钮（见下）。
+- **默认预算不会被调高**：#1810 的 `MAX_FILE_JOURNAL_RECORDS` docstring 已经记
+  过"抬高预算只是把悬崖往后挪"，而这次实测说明悬崖已经落在生产树里面了——再调
+  一次，下次树长大还得再调。预算保持 100,000，逃生口是命令行旋钮。
 - 结论：node-22 当前**没有**分叉行，规划中的 guarded repair 命令
   （`repair-job-id-scope`）因此没有实现；真要修就走本节下面的人工恢复步骤。
 - 并发口径：两趟都是在 `nhms-compute-scheduler.service` 处于 `activating`

@@ -24,6 +24,7 @@ from .file_orchestration_migration import (
     prepare_file_journal_rollback,
     write_migration_receipt,
 )
+from .journal_root_authority import journal_root_refusal_line
 from .journal_scope_census import (
     CENSUS_JOB_ID_SCOPE_COMMAND,
     add_argparse_census_subparser,
@@ -597,6 +598,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 target_writer_generation=target_writer_generation,
             )
             click.echo(json.dumps(receipt, sort_keys=True))
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            click.echo(journal_root_refusal_line(error), err=True)
+            raise SystemExit(2) from error
         except (FileOrchestrationJournalError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
@@ -634,6 +639,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(json.dumps(result, sort_keys=True))
             if result["writer_exit_code"] != 0:
                 raise SystemExit(int(result["writer_exit_code"]))
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            click.echo(journal_root_refusal_line(error), err=True)
+            raise SystemExit(2) from error
         except (FileOrchestrationJournalError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
@@ -663,6 +672,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
                 lock_ttl_seconds=lock_ttl_seconds,
             )
             click.echo(json.dumps(receipt, sort_keys=True))
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            click.echo(journal_root_refusal_line(error), err=True)
+            raise SystemExit(2) from error
         except (FileOrchestrationJournalError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
@@ -891,6 +904,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(receipt, sort_keys=True))
             return 0
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            return 2
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
@@ -908,6 +925,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, sort_keys=True))
             return int(result["writer_exit_code"])
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            return 2
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
@@ -923,6 +944,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(receipt, sort_keys=True))
             return 0
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            return 2
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
