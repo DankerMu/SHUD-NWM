@@ -82,11 +82,14 @@ SHUD/
 rSHUD/
 AutoSHUD/
 
-# Agent local config and generated installed/scratch skill copies. Existing
-# tracked .agents/skills/** project assets remain visible via git ls-files;
-# promoting new project skill files requires intentional force-add / PR review.
+# Agent local config and installed/generated skill copies. These are per-machine
+# installs kept in sync by the skill manager, not project source: tracking them
+# produced permanent working-tree drift (edits plus relocations between
+# .agents/skills/ and .agents/skills-manual/) on every install. Untracked as of
+# this commit; recover history from git log if a copy is ever needed.
 .claude/
 .agents/skills/
+.agents/skills-manual/
 .omp/
 
 # Design artifacts (tracked separately)
