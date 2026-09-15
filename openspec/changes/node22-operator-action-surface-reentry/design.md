@@ -135,7 +135,7 @@
 - **前置条件**（不满足即 exit 2，不写）：
   1. journal 对 `(source, cycle, model)` 有 completed identity，即 `completed_pipeline_init_state_identity` 非 `None`。
   2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等（写侧意图前置条件）、breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`），并要求 `--pin` 等于**模型级 quarantine rerun 计数**（见下文「实现后修订」）。
-  3. 若 decision 为预算：（Round 3 修订，取代下文旧文）要求 `--pin` 等于**模型级预算重入计数**（journal-direct，见「Round 3 修订」），不再与 attempt 比较，#2400 在本 PR 关闭。旧文：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
+  3. 若 decision 为预算：（Round 3 修订，取代下文旧文）要求 `--pin` 等于**模型级预算重入计数**（journal-direct，见「Round 3 修订」），不再与 attempt 比较。Round 4 修订（r4-01）：这只消除了「错 pin」一半；写侧仍看不到预算是否已耗尽（不可 db-free 复算），耗尽前写入的确认物在耗尽后 pin 仍等于计数时会放行（「对 pin、错时间」），#2400 **不在**本 PR 关闭，残余改为 runbook 操作义务：只确认最新 pass 列为预算 blocked 的目标，rerun 飞行中不确认。旧文：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
 - **写入**：
   - `insert_pipeline_event(entity_type="forecast_cycle", entity_id=<cycle_id>, event_type="operator_reentry_confirmation", status_from=None, status_to="confirmed", details={model_id, decision, pin, operator, reason, request_id, recorded_init_state_id}`，其中 `recorded_init_state_id` 仅 breaker 必填)`；
   - `cycle_id` 用 `_cycle_id_for_file_source`（`file_orchestration_journal.py:13945`）构造，不手拼；
@@ -187,6 +187,10 @@
   - 修订：pin 现值改为**模型级 quarantine rerun 计数**——对 `(source, cycle, model)` 统计 provenance 命名该模型的 cohort master 数，不比较 identity。round 1 cand-01 进一步去掉「已完成」限定：不看终态，rerun 被接受提交即 +1。只读 accessor `quarantine_rerun_count`（journal-direct，`_cycle_rows`），读失败返回 `None`（谓词视为不匹配）；`completed_pipeline_init_state_id_occurrences` 行为不变。
   - `--recorded-init-state-id` 保留为写侧意图前置条件；读侧不再比较 token。
   - `hydro_run` 权威冻结本身是既有缺陷（§8.7 在 node-22 上对「rerun 得到正确 lineage」的情形也无法收敛），按越界规则单独立 issue，不在本批修复。
+
+- **Round 4 修订（第二次 retro，`.workplans/pr-2398/review/round-4/retro.md`）**：
+  - listing 的时序规则一般化：比最新可判定 pass 更新的任何「非可判定、非透明」pass 使空窗口不可判定。透明集合封闭为 `lock_contended`（`scheduler_runtime.py:716`，构造前写、列表为空）与 `preflight_blocked`（构造前写列表为空，或构造后在 `:1328-1343` 写出完整列表与 `source_cycles`，二者都不隐藏）。`lease_lost`（`:988`，构造后写并清空列表）、异常路径 `resource_limit_blocked`（`:1473`，清空列表）、size-fallback、不可读、未知 status 一律视为可能隐藏（fail toward undecidable）。
+  - 预算确认物的时间绑定残余（#2400）降为 runbook 操作义务，见 D4 前置条件 3。
 
 - **Round 3 修订（review failure retro，shape depth，`.workplans/pr-2398/review/round-3/retro.md`）**：
   - 共同不变量：fail-closed 的 operator 契约必须键在「每个应消费/应暴露它的事件都会推动」的量上。

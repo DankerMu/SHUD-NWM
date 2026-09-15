@@ -588,6 +588,130 @@ def test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidabl
     ]
 
 
+_DECIDABLE = "decidable"
+_SIZE_FALLBACK = "size_fallback"
+_UNREADABLE_TRUNCATED = "unreadable_truncated"
+_UNREADABLE_EMPTY = "unreadable_empty"
+_LOCK_CONTENDED = "lock_contended"
+_PREFLIGHT_BLOCKED = "preflight_blocked"
+_LEASE_LOST = "lease_lost"
+_RESOURCE_LIMIT_EXCEPTION = "resource_limit_blocked_exception_path"
+_UNKNOWN_STATUS = "unknown_status"
+_NON_STRING_STATUS = "non_string_status"
+
+
+@pytest.mark.parametrize(
+    ("oldest_to_newest", "expected_code"),
+    [
+        # A hidden pass (size fallback or unreadable) newer than the newest decidable pass.
+        ([_DECIDABLE, _SIZE_FALLBACK], 3),
+        ([_DECIDABLE, _UNREADABLE_TRUNCATED], 3),
+        ([_DECIDABLE, _UNREADABLE_EMPTY], 3),
+        # ... still hidden when a newer non-evaluating pass follows it.
+        ([_DECIDABLE, _SIZE_FALLBACK, _LOCK_CONTENDED], 3),
+        ([_DECIDABLE, _UNREADABLE_TRUNCATED, _LOCK_CONTENDED], 3),
+        ([_DECIDABLE, _LOCK_CONTENDED, _UNREADABLE_EMPTY], 3),
+        ([_DECIDABLE, _SIZE_FALLBACK, _DECIDABLE, _UNREADABLE_EMPTY], 3),
+        # The newest decidable pass is newer than every hidden pass.
+        ([_SIZE_FALLBACK, _DECIDABLE], 0),
+        ([_UNREADABLE_TRUNCATED, _DECIDABLE], 0),
+        ([_SIZE_FALLBACK, _DECIDABLE, _LOCK_CONTENDED], 0),
+        ([_UNREADABLE_EMPTY, _DECIDABLE, _LOCK_CONTENDED], 0),
+        ([_DECIDABLE, _LOCK_CONTENDED], 0),
+        ([_LOCK_CONTENDED, _DECIDABLE], 0),
+        ([_DECIDABLE, _UNREADABLE_TRUNCATED, _DECIDABLE], 0),
+        # No decidable pass at all.
+        ([_SIZE_FALLBACK, _UNREADABLE_TRUNCATED], 3),
+        ([_UNREADABLE_EMPTY, _SIZE_FALLBACK, _LOCK_CONTENDED], 3),
+        ([_LOCK_CONTENDED], 3),
+        # Round 4 ruling: only a transparent pass (lock_contended, preflight_blocked) is
+        # newer than a decidable pass without making it stale; every other status arms.
+        ([_DECIDABLE, _LEASE_LOST], 3),
+        ([_DECIDABLE, _RESOURCE_LIMIT_EXCEPTION], 3),
+        ([_DECIDABLE, _UNKNOWN_STATUS], 3),
+        ([_DECIDABLE, _NON_STRING_STATUS], 3),
+        ([_DECIDABLE, _LEASE_LOST, _PREFLIGHT_BLOCKED], 3),
+        ([_DECIDABLE, _PREFLIGHT_BLOCKED], 0),
+        ([_DECIDABLE, _LEASE_LOST, _DECIDABLE], 0),
+        ([_LEASE_LOST, _DECIDABLE, _PREFLIGHT_BLOCKED], 0),
+        ([_DECIDABLE, _PREFLIGHT_BLOCKED, _LOCK_CONTENDED], 0),
+    ],
+    ids=lambda value: "-".join(value) if isinstance(value, list) else str(value),
+)
+def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    oldest_to_newest: list[str],
+    expected_code: int,
+) -> None:
+    """Round 4 r4-02/r4-03: every ordering of pass kinds, not only the newest position.
+
+    Expected codes come from the spec rule, not the module: a size-fallback or
+    unreadable pass newer than the newest decidable pass makes the empty window
+    undecidable (3), and so does any other pass that is neither decidable nor
+    transparent (``lease_lost``, exception-path ``resource_limit_blocked``, an unknown
+    or non-string status); a transparent ``lock_contended`` / ``preflight_blocked``
+    pass neither arms nor clears that; no decidable pass at all is 3.  Every size-fallback pass is the
+    REAL ``bounded_evidence_payload`` of a pass that, unbounded, would list a
+    breaker release, and every unreadable pass is a half-written file.
+    """
+
+    breaker_hiding_original = {
+        "status": "blocked",
+        "source_cycles": [_breaker_released_source_cycle()],
+        "blocked_candidates": [_unrelated_blocked_row()],
+    }
+    for index, kind in enumerate(oldest_to_newest):
+        name = f"scheduler_2026052112_{index:012d}.json"
+        mtime = 1_000 * (index + 1)
+        if kind == _DECIDABLE:
+            _write_pass(tmp_path, name, mtime=mtime, status="planned", blocked=[_unrelated_blocked_row()])
+        elif kind in (_LOCK_CONTENDED, _PREFLIGHT_BLOCKED, _LEASE_LOST):
+            _write_pass(tmp_path, name, mtime=mtime, status=kind)
+        elif kind == _RESOURCE_LIMIT_EXCEPTION:
+            # ``scheduler_runtime.py`` exception path: emptied lists, no ``limit.candidate_lists``.
+            path = _write_pass(tmp_path, name, mtime=mtime, status="resource_limit_blocked")
+            written = json.loads(path.read_text(encoding="utf-8"))
+            assert "candidate_lists" not in written["limit"]
+        elif kind == _UNKNOWN_STATUS:
+            _write_pass(tmp_path, name, mtime=mtime, status="status_from_a_future_scheduler")
+        elif kind == _NON_STRING_STATUS:
+            path = tmp_path / name
+            non_string = {"pass_id": name.removesuffix(".json"), "status": ["planned"]}
+            path.write_text(json.dumps(non_string), encoding="utf-8")
+            os.utime(path, (mtime, mtime))
+        elif kind == _SIZE_FALLBACK:
+            original = {"pass_id": name.removesuffix(".json"), **breaker_hiding_original}
+            bounded = _write_real_size_fallback_pass(tmp_path, name, mtime=mtime, original=original)
+            assert bounded["source_cycles"] == []
+        else:
+            whole = json.dumps({"pass_id": name.removesuffix(".json"), **breaker_hiding_original})
+            path = tmp_path / name
+            path.write_text(whole[: len(whole) // 2] if kind == _UNREADABLE_TRUNCATED else "", encoding="utf-8")
+            os.utime(path, (mtime, mtime))
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == expected_code
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["unreadable_passes"] == [
+        f"scheduler_2026052112_{index:012d}.json"
+        for index, kind in enumerate(oldest_to_newest)
+        if kind in (_UNREADABLE_TRUNCATED, _UNREADABLE_EMPTY)
+    ]
+
+
+def test_transparent_pass_statuses_are_the_closed_hide_nothing_set() -> None:
+    """Round 4 membership pin (``scheduler_runtime.py`` writers): lock_contended 716 and
+    preflight_blocked 594/644/674/762/799/841/898 (empty lists) or 1328-1343 (full lists)."""
+
+    from services.orchestrator import operator_action_listing
+
+    assert operator_action_listing.TRANSPARENT_PASS_STATUSES == {"lock_contended", "preflight_blocked"}
+    assert not operator_action_listing.TRANSPARENT_PASS_STATUSES & operator_action_listing.EVALUATING_PASS_STATUSES
+
+
 def _write_real_size_fallback_pass(root: Path, name: str, *, mtime: int, original: dict[str, Any]) -> dict[str, Any]:
     """Write what the scheduler writes when a pass overflows: the REAL ``bounded_evidence_payload``."""
 

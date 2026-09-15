@@ -199,7 +199,15 @@ Manual re-entry, in order:
    masters whose `strict_warm_start_budget_reentry_model_ids` provenance names the model,
    whatever their terminal status, job id or retry suffix), not `retry_policy.attempt`: read
    it from the dry-run receipt's `live.budget_reentry_count`. The writer refuses any other
-   pin with `pin_mismatch` (exit 2). While the confirmation's `pin` equals that live count,
+   pin with `pin_mismatch` (exit 2).
+   **The writer can not see whether the budget is exhausted** (#2400 residual, not closed by
+   this change: right pin, wrong time). A confirmation written before exhaustion stays armed
+   until it is consumed, so once the budget is exhausted it releases one re-entry with no new
+   signature. Only confirm a target that the NEWEST `list-operator-actions` pass currently
+   lists as `blocked_strict_warm_start_init_state_mismatch`, checking `source_id`,
+   `cycle_time` and `model_id` verbatim, and never while that model's rerun is in flight. If
+   a confirmation was written in error (target, pin or timing), stop and escalate; do NOT
+   write another one over it (the earlier one stays armed). While the confirmation's `pin` equals that live count,
    the next pass emits `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
    `operator_reentry_confirmation` block in `state_evidence`). The confirmation is consumed
    when that rerun is accepted for submission: the reservation stamps the provenance on the

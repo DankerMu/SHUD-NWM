@@ -19635,6 +19635,45 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles(tmp_path: Path) -> None:
+    """#2398 round 4: ``list-operator-actions`` treats ``lock_contended`` as a pass that evaluated nothing.
+
+    Pin the premise on the artifact the scheduler actually writes: the lock is
+    taken before discovery and candidate construction (``scheduler_runtime.py``
+    ``lock.acquire`` then the ``lock_contended`` write, before ``_build_candidates``),
+    so even with a ready source cycle and a runnable model nothing is listed.
+    """
+
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "existing-token",
+                "pass_id": "existing",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.artifact_path is not None
+    on_disk = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    assert on_disk["status"] == "lock_contended"
+    assert on_disk["candidates"] == []
+    assert on_disk["blocked_candidates"] == []
+    assert on_disk["source_cycles"] == []
+
+
 def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
     with lock_path.open("wb") as handle:
@@ -57290,7 +57329,10 @@ def test_budget_reentry_confirmation_pinned_to_the_budget_reentry_count_runs_onc
     assert after_candidates == []
     (after,) = after_blocked
     assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
-    assert after.state_evidence["retry_policy"]["attempt"] >= _BUDGET_RETRY_LIMIT
+    # Exactly the limit: the re-entry minted under the ``cycle_<src>_<stamp>_forecast_``
+    # prefix does not move the stage attempt (#2404, known and out of scope); the
+    # live budget re-entry count is what moved.
+    assert after.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT
     assert "operator_reentry_confirmation" not in after.state_evidence
     assert _budget_live_reentry_count(root, capsys) == live_pin + 1
 

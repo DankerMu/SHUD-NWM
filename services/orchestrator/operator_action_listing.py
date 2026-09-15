@@ -17,14 +17,18 @@ evidence is whole: its status must be in :data:`EVALUATING_PASS_STATUSES`, and
 it must not be a size-fallback artifact -- ``bounded_evidence_payload`` empties
 ``source_cycles``, the only place a breaker-released cycle appears, so such a
 pass can still LIST its summarized blocked candidates but can never prove none
-waits.  Nor may an OLDER decidable pass answer for it (round 3 r3-01): the
-breaker may have engaged after that pass, so a size-fallback pass newer (in the
-mtime order of the scan) than the newest decidable pass leaves the window
-undecidable.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none but
-undecidable (a scanned pass dropped its candidate lists, no scanned pass is
-readable and evaluating -- including an empty root --, or a size-fallback pass
-is newer than the newest decidable pass), ``2`` evidence root missing or
-unreadable.
+waits.  Nor may an OLDER decidable pass answer for a newer pass that may have
+evaluated candidates it can not show (rounds 3/4 r3-01, r4-02): the breaker may
+have engaged after the decidable pass.  Only a TRANSPARENT pass
+(:data:`TRANSPARENT_PASS_STATUSES`) is known to hide nothing; any other
+non-decidable pass -- size-fallback, unreadable (for example half-written),
+``lease_lost``, exception-path ``resource_limit_blocked``, an unknown status --
+newer (in the mtime order of the scan) than the newest decidable pass leaves
+the window undecidable.  Exit codes: ``1`` actions listed, ``0`` none, ``3``
+none but undecidable (a scanned pass dropped its candidate lists, no scanned
+pass is readable and evaluating -- including an empty root --, or a pass that
+is neither decidable nor transparent is newer than the newest decidable pass),
+``2`` evidence root missing or unreadable.
 """
 
 from __future__ import annotations
@@ -55,6 +59,8 @@ BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_bre
 #: ``resource_limit_blocked`` with summarized/dropped candidate lists) is
 #: non-evaluating whatever ``limit.pre_limit_status`` it kept: its
 #: ``source_cycles`` were emptied (reason ``size_fallback_source_cycles_absent``).
+#: Recency (round 4): a decidable pass clears the hidden-pass flag, a
+#: :data:`TRANSPARENT_PASS_STATUSES` pass leaves it, every other pass arms it.
 EVALUATING_PASS_STATUSES = frozenset(
     (
         "planned",
@@ -86,6 +92,16 @@ EVALUATING_PASS_STATUSES = frozenset(
         "already_done",
     )
 )
+#: Non-decidable statuses known to HIDE nothing, so a newer one does not make an
+#: older decidable pass stale (round 4).  Closed; checked against the writers in
+#: ``scheduler_runtime.py``: ``lock_contended`` is written before candidate
+#: construction with empty lists (716); ``preflight_blocked`` is written either
+#: before construction with empty lists (594/644/674/762/799/841/898) or after it
+#: with the full candidate lists and ``source_cycles`` (1328-1343).  NOT here:
+#: ``lease_lost`` (988) and the exception-path ``resource_limit_blocked`` (1473)
+#: run after construction and empty the lists; a size-fallback product keeps
+#: status ``resource_limit_blocked`` and emptied ``source_cycles``.
+TRANSPARENT_PASS_STATUSES = frozenset(("lock_contended", "preflight_blocked"))
 _SIZE_FALLBACK_STATUS = "resource_limit_blocked"
 _SIZE_FALLBACK_CANDIDATE_LISTS = frozenset(("summarized", "dropped"))
 STATUS_NOT_EVALUATING_REASON = "status_not_evaluating"
@@ -108,8 +124,10 @@ LIST_OPERATOR_ACTIONS_HELP = (
     f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none "
     "and at least one scanned pass evaluated candidates, 3 when none but undecidable "
     "(a pass dropped its candidate lists, no scanned pass is readable and "
-    "evaluating, or a size-fallback pass is newer than the newest evaluating pass "
-    "-- see non_evaluating_passes / unreadable_passes; an empty root "
+    "evaluating, or a pass that is neither evaluating nor transparent -- "
+    "size-fallback, unreadable, lease_lost, resource_limit_blocked, unknown status; "
+    "transparent = lock_contended, preflight_blocked -- is newer than the newest "
+    "evaluating pass; see non_evaluating_passes / unreadable_passes; an empty root "
     "counts, and a size-fallback pass never counts as evaluating because its "
     "source_cycles were dropped), 2 when the root is missing or unreadable. Runbook: "
     "docs/runbooks/node22-control-plane-manual-recovery.md"
@@ -135,23 +153,27 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     dropped: list[str] = []
     non_evaluating: list[dict[str, Any]] = []
     actions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    # r3-01: a size-fallback pass seen after (newer than) the newest decidable pass.
-    size_fallback_after_decidable = False
+    # r3-01/r4-02: a pass that is neither decidable nor transparent seen after
+    # (newer than) the newest decidable pass.  Transparent passes leave it as is.
+    hidden_after_decidable = False
     # Oldest first, so first/last seen read in time order.
     for name, path in reversed(selected):
         payload = _read_pass(path)
         if payload is None:
             unreadable.append(name)
+            hidden_after_decidable = True
             continue
         limit = payload.get("limit")
         limit = limit if isinstance(limit, Mapping) else {}
         non_evaluating_entry = _non_evaluating_entry(name, payload.get("status"), limit)
         if non_evaluating_entry is None:
-            size_fallback_after_decidable = False
+            hidden_after_decidable = False
         else:
             non_evaluating.append(non_evaluating_entry)
-            if non_evaluating_entry["reason"] == SIZE_FALLBACK_NON_EVALUATING_REASON:
-                size_fallback_after_decidable = True
+            status = payload.get("status")
+            # A size fallback's raw status is ``resource_limit_blocked``: never transparent.
+            if not (isinstance(status, str) and status in TRANSPARENT_PASS_STATUSES):
+                hidden_after_decidable = True
         if limit.get("candidate_lists") == "dropped":
             dropped.append(name)
         for action in _pass_actions(payload):
@@ -179,7 +201,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:
         return receipt, 1
-    if dropped or evaluating_count < 1 or size_fallback_after_decidable:
+    if dropped or evaluating_count < 1 or hidden_after_decidable:
         return receipt, 3
     return receipt, 0
 

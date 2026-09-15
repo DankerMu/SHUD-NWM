@@ -12,6 +12,10 @@ This command writes one ``forecast_cycle`` pipeline event of the dedicated type
 while the confirmation's ``pin`` equals the live value the rerun will move (the
 model-level quarantine rerun count for the breaker, the model-level budget
 re-entry count for the budget), then the fail-stop takes over again by itself.
+The writer can not see whether the budget is exhausted (#2400 residual): a
+budget confirmation written early stays armed until consumed, so the runbook
+confines it to a target the newest ``list-operator-actions`` pass lists as
+budget-blocked, with no rerun in flight.
 
 Dry run by default; only ``--attest`` writes.  Refusals are write-free, print a
 receipt naming the failed precondition, and exit 2.
@@ -51,7 +55,11 @@ CONFIRM_OPERATOR_REENTRY_HELP = (
     "re-entry count (budget; see live.budget_reentry_count in the dry-run receipt). "
     "The scheduler re-enters "
     "once; the rerun moves the value when it is accepted for submission (whatever "
-    "its outcome) and the fail-stop re-engages. Dry run "
+    "its outcome) and the fail-stop re-engages. A budget confirmation written "
+    "before the budget is exhausted stays armed until consumed (#2400): only "
+    "confirm a target the newest list-operator-actions pass lists as "
+    "blocked_strict_warm_start_init_state_mismatch, never while its rerun is in "
+    "flight; if written in error, stop and escalate instead of writing another. Dry run "
     "unless --attest. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 

@@ -71,8 +71,8 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 | exit | 含义 |
 |---|---|
 | `1` | 列出了至少一条 operator action |
-| `0` | 没有，窗口内至少有一个可判定 pass，且最新的可判定 pass 比窗口内所有 size fallback 产物都新 |
-| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`），**或**有 size fallback 产物比最新的可判定 pass 更新（按 mtime；breaker 可能在那个可判定 pass 之后才触发，而 fallback 清空了唯一能看到它的 `source_cycles`）——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
+| `0` | 没有，窗口内至少有一个可判定 pass，且比最新的可判定 pass 更新的只有**透明** pass（status 为 `lock_contended` 或 `preflight_blocked`：前者在候选构造前写出、列表为空；后者要么构造前写出列表为空，要么构造后写出完整列表，都不隐藏候选） |
+| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`），**或**有既不可判定也不透明的 pass 比最新的可判定 pass 更新（按 mtime）：size fallback 产物、`unreadable_passes` 里的不可读 pass（例如写到一半的文件）、`lease_lost`、异常路径的 `resource_limit_blocked`（后两者在候选构造后写出却清空了列表）、未知 status——breaker 可能在那个可判定 pass 之后才触发，而这些 pass 可能评估过却看不见它；其后再有透明 pass 也不解除——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
 | `2` | evidence root 未设置、缺失或不可读；`--passes < 1` |
 
 ## 第二步：按 decision 处置
@@ -132,6 +132,12 @@ run 在飞或不存在时拒绝）：
     命名该模型的 cohort master 数，不看终态、job id、retry 后缀），不需要 token。它**不是**
     `list-operator-actions` / blocked evidence 里的 `attempt`（`attempt` 只决定是否 blocked）。
     先不带 `--attest` 跑一次，从 dry-run receipt 的 `live.budget_reentry_count` 读出 pin。
+    **写侧看不到预算是否已耗尽**（#2400 残余，本 PR 不关闭：pin 对了、时间错了）：耗尽前写入的
+    确认物在 pin 仍等于计数时一直有效，直到被消费——预算一耗尽就会在没有新签字的情况下放行一次。
+    所以只确认 `list-operator-actions` **最新** pass 当前列为
+    `blocked_strict_warm_start_init_state_mismatch` 的目标，并逐字核对 `source_id` /
+    `cycle_time` / `model_id`；该模型的 rerun 仍在飞时不要确认。写错（目标、pin 或时机）时停止并
+    上报，**不要**再写一条覆盖（旧确认物仍有效）。
   scheduler 只在 pin 严格相等时放行一次。确认物在 rerun **被接受提交**时即被消费：
   provenance 戳在 accepted-submit（reservation）时写入 cohort master，对应计数当场 +1
   （无论 rerun 之后成功、失败，断路器也无论记录了哪个 token，预算也无论 rerun 落在哪个 job-id
