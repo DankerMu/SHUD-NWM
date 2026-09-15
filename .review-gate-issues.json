@@ -3561,9 +3561,17 @@
       ]
     },
     "1186": {
-      "ceilingPrs": [],
+      "ceilingPrs": [
+        2398
+      ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 2398,
+          "outcome": "superseded-by-split",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
