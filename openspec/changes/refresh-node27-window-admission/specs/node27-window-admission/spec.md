@@ -139,3 +139,15 @@ start, bounded by30 seconds and by remaining forward window/outage budgets where
 
 - **WHEN** recovery is otherwise eligible after a prior forward deadline expired
 - **THEN** the existing recovery policy remains available with its own bounded readiness attempt and all guards intact
+
+#### Scenario: A bounded readiness call blocks instead of answering
+
+- **WHEN** a unit-status or health call inside the readiness wait blocks until its clipped timeout expires
+- **THEN** the budget is consumed, not extended, and exhaustion refuses with the readiness-timeout check code rather
+  than an untyped process-timeout error
+
+#### Scenario: Readiness is exercised by the disposable window oracle
+
+- **WHEN** the disposable eight-case window oracle runs any case that starts the display service
+- **THEN** the readiness transport resolves against the oracle's own simulated boundary and real socket creation
+  refuses, so no case can reach a live host service

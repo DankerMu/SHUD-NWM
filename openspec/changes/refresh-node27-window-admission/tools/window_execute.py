@@ -1147,6 +1147,7 @@ class Executor:
     def display_health_probe(self, timeout):
         previous = signal.getsignal(signal.SIGALRM)
         pending = signal.getitimer(signal.ITIMER_REAL)
+        started = time.monotonic()
 
         def expire(_signum, _frame):
             raise TimeoutError("DISPLAY_HEALTH_TIMEOUT")
@@ -1170,14 +1171,29 @@ class Executor:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)
             if pending[0] > 0:
-                signal.setitimer(signal.ITIMER_REAL, pending[0], pending[1])
+                # An outer deadline keeps counting down across the probe: never
+                # restore the full pre-probe value, and never 0 (which disarms).
+                outer = max(pending[0] - (time.monotonic() - started), 1e-6)
+                signal.setitimer(signal.ITIMER_REAL, outer, pending[1])
         return status, body
+
+    def display_unit_snapshot(self, until):
+        # A blocked `systemctl show` spends readiness budget but never extends
+        # it: the deadline decides that readiness failed, not a bare
+        # TimeoutExpired escaping as an untyped failure envelope.
+        remaining = self.remaining_deadline(until)
+        try:
+            return self.unit(DISPLAY, timeout=min(30, remaining))
+        except subprocess.TimeoutExpired:
+            self.remaining_deadline(until)
+            return None
 
     def wait_display_ready(self):
         until = self.display_startup_deadline()
         while True:
-            remaining = self.remaining_deadline(until)
-            unit = self.unit(DISPLAY, timeout=min(30, remaining))
+            unit = self.display_unit_snapshot(until)
+            if unit is None:
+                continue
             require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
             require(self.display_unit_waiting(unit), "DISPLAY_SERVICE_FAILED")
             remaining = self.remaining_deadline(until)
@@ -1185,19 +1201,19 @@ class Executor:
                 status, body = self.display_health_probe(min(15, remaining))
             except (TimeoutError, ConnectionRefusedError, urllib.error.URLError) as error:
                 require(self.display_transient_error(error), "DISPLAY_HEALTH_FAILED")
-                remaining = self.remaining_deadline(until)
-                unit = self.unit(DISPLAY, timeout=min(30, remaining))
-                require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
-                require(self.display_unit_waiting(unit), "DISPLAY_SERVICE_FAILED")
+                unit = self.display_unit_snapshot(until)
+                if unit is not None:
+                    require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
+                    require(self.display_unit_waiting(unit), "DISPLAY_SERVICE_FAILED")
                 remaining = self.remaining_deadline(until)
                 time.sleep(min(0.2, remaining))
                 continue
             require(time.monotonic() < until, "DISPLAY_READINESS_TIMEOUT")
             if status == 200:
                 return {"status": status}, body
-            remaining = self.remaining_deadline(until)
-            unit = self.unit(DISPLAY, timeout=min(30, remaining))
-            require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
+            unit = self.display_unit_snapshot(until)
+            if unit is not None:
+                require(not self.display_unit_failed(unit), "DISPLAY_SERVICE_FAILED")
             require(False, "DISPLAY_HEALTH_FAILED")
 
     def start_runtime(self):

@@ -288,3 +288,18 @@ late authorized recovery. Never-ready exhausts the bound, failed-unit/permanent-
 marks basic_ready or restores timers without health+source+public proofs. Use a real local delayed-listener seam for
 the targeted smoke; systemd remains isolated. Retain the eight real-DB window cases and all original state guards.
 No production restart is required for this child; actual OLD availability was restored separately and remains up.
+
+The readiness wait introduces a second external boundary (an HTTP transport of its own) next to the existing
+simulated one. The disposable eight-case matrix isolates its boundaries by overriding them on the smoke executor,
+so any readiness transport that does not route through an overridden seam escapes to the host. On node27 the host
+already answers `GET 127.0.0.1:8080/health` with200 from the live display API, so an unisolated probe silently
+borrows production instead of failing. The matrix therefore overrides the readiness transport the same way it
+overrides the simulated HTTP seam, and additionally forbids real socket creation for the duration of a matrix case,
+so the isolation claim is enforced by the harness rather than asserted in a receipt. Only the focused readiness
+oracle keeps a real socket, bound to an ephemeral loopback port it owns.
+
+Budget exhaustion must produce the same typed refusal regardless of which bounded call consumes the budget. A
+blocking unit-status call raises the process-runner's own timeout rather than a typed refusal, so the readiness wait
+converts it into an in-budget transient event and lets the deadline emit the readiness-timeout refusal; the total
+wall time stays bounded by the same deadline. Proof requires both a recovery-budget exhaustion that uses no forward
+clip and a blocking unit-status case.

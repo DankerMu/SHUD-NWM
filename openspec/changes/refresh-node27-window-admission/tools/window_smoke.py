@@ -64,6 +64,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
 
@@ -416,6 +417,15 @@ class BoundaryExecutor(w.Executor):
         w.require(self.units[w.DISPLAY]["ActiveState"] == "active", "DISPLAY_NOT_RUNNING")
         return {"status": 200}, b"{}"
 
+    def display_health_probe(self, timeout):
+        # Same 127.0.0.1:8080 + admitted health path boundary as http(), but a
+        # display that is not up refuses the connection instead of raising, so
+        # the readiness retry stays exercisable.
+        w.require(0 < timeout <= 15, "UNKNOWN_HTTP_TIMEOUT")
+        if self.units[w.DISPLAY]["ActiveState"] != "active":
+            raise ConnectionRefusedError("BOUNDARY_8080_REFUSED")
+        return self.http(self.c["api_health_path"], 8080, timeout=timeout)[0]["status"], b"{}"
+
     def source_process(self, unit):
         w.require(unit in {w.DISPLAY, w.AUTO} and self.units[unit]["ActiveState"] == "active", "NO_PROCESS")
         w.require(self.selected == (w.OLD if self.recovering else w.NEW), "RUNTIME_SHA_MISMATCH")
@@ -446,6 +456,23 @@ class BoundaryExecutor(w.Executor):
         self.save_file(f"worker-{self.seq}.stdout", proc.stdout)
         w.require(proc.returncode == 0, "REAL_WORKER_FAILED")
         return json.loads(proc.stdout)
+
+
+@contextlib.contextmanager
+def refuse_real_sockets():
+    """Matrix scenarios own no HTTP boundary, so a real urlopen here would be
+    the host's production API. Fail closed instead of leaving the fixture."""
+
+    original = urllib.request.urlopen
+
+    def refuse(*_args, **_kwargs):
+        raise w.Refusal("REAL_SOCKET_BOUNDARY")
+
+    urllib.request.urlopen = refuse
+    try:
+        yield
+    finally:
+        urllib.request.urlopen = original
 
 
 def scenario(args):
@@ -1212,6 +1239,8 @@ def display_ready_oracle(args):
             self.fail_after_start = None
             self.recording = False
             self.health_probes = 0
+            self.block_unit = False
+            self.blocked_unit_timeouts = []
             self.unit_timeouts = []
             self.http_timeouts = []
             self.slept = []
@@ -1221,6 +1250,11 @@ def display_ready_oracle(args):
         def unit(self, name, timeout=30):
             if self.recording:
                 self.unit_timeouts.append(timeout)
+            if self.block_unit and name == w.DISPLAY and self.units[name]["ActiveState"] == "active":
+                # Only after the start, so immutable()'s pre-start reads still work.
+                self.blocked_unit_timeouts.append(timeout)
+                time.sleep(timeout)
+                raise subprocess.TimeoutExpired(["systemctl", "--user", "show", name], timeout)
             value = super().unit(name, timeout=timeout)
             if name == w.DISPLAY and self.fail_after_start and self.health_probes >= self.fail_after_start:
                 value.update(ActiveState="failed", SubState="failed", Result="exit-code", ExecMainStatus="1")
@@ -1412,6 +1446,7 @@ def display_ready_oracle(args):
         expired_stop=False,
         no_server=False,
         expect_start=True,
+        block_unit=False,
     ):
         executor = fixture(
             name,
@@ -1424,6 +1459,7 @@ def display_ready_oracle(args):
         server = None if no_server else bind_server(executor, status=status, refuse_first=refuse_first, trickle=trickle)
         if fail_after_start:
             executor.fail_after_start = fail_after_start
+        executor.block_unit = block_unit
         original_sleep, sleep = record_sleep(executor)
         time.sleep = sleep
         executor.recording = True
@@ -1456,6 +1492,7 @@ def display_ready_oracle(args):
                     "probes": executor.health_probes,
                     "elapsed": elapsed,
                     "http_timeouts": executor.http_timeouts,
+                    "blocked_unit_timeouts": executor.blocked_unit_timeouts,
                     "slept": executor.slept,
                 }
             )
@@ -1491,6 +1528,32 @@ def display_ready_oracle(args):
     expect_refusal("failed-unit", "DISPLAY_SERVICE_FAILED", refuse_first=100, fail_after_start=1)
     expect_refusal("permanent-http", "DISPLAY_HEALTH_FAILED", refuse_first=0, status=500)
     expect_refusal("trickle-timeout", "DISPLAY_READINESS_TIMEOUT", refuse_first=0, trickle=True, t0_remaining=1.0)
+
+    # Recovery has no window/restore clip, so only the 30s startup budget can
+    # end this wait; anything shorter would be an unproven clip.
+    recovery_never = expect_refusal(
+        # 30s of 0.2s retries is ~150 probes, so the listener must never appear.
+        "recovery-never-ready",
+        "DISPLAY_READINESS_TIMEOUT",
+        recovering=True,
+        refuse_first=10**6,
+    )
+    w.require(recovery_never["probes"] >= 2, "RECOVERY_BUDGET_NO_RETRY")
+    w.require(recovery_never["http_timeouts"][:1] == [15], "RECOVERY_BUDGET_CLIPPED")
+    w.require(29 <= recovery_never["elapsed"] <= 45, "RECOVERY_BUDGET_NOT_EXPIRED")
+
+    # A systemctl show that blocks for its whole clipped budget must expire as
+    # DISPLAY_READINESS_TIMEOUT, never as a bare subprocess.TimeoutExpired.
+    blocked = expect_refusal(
+        "blocked-unit-query",
+        "DISPLAY_READINESS_TIMEOUT",
+        refuse_first=100,
+        block_unit=True,
+        t0_remaining=1.5,
+    )
+    w.require(blocked["blocked_unit_timeouts"], "BLOCKED_UNIT_NOT_REACHED")
+    w.require(all(0 < value <= 1.5 for value in blocked["blocked_unit_timeouts"]), "BLOCKED_UNIT_TIMEOUT_NOT_CLIPPED")
+    w.require(blocked["elapsed"] < 1.5 + 0.5, "BLOCKED_UNIT_BUDGET_RESET")
     expect_refusal(
         "expired-forward",
         "WINDOW_DEADLINE",
@@ -2682,7 +2745,8 @@ if __name__ == "__main__":
         elif args.case == "write-budget":
             write_budget(args)
         else:
-            scenario(args)
+            with refuse_real_sockets():
+                scenario(args)
     except BaseException as error:
         print(
             json.dumps(

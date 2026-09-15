@@ -143,7 +143,8 @@ OpenSpec; runtime smoke on node27 with TMPDIR=/home/nwm/tmp. No live unit change
       refusal; preserve source/proxy checks before basic_ready.
 - [x] 5.2 Bound attempts/status/sleeps by startup and applicable forward deadlines; preserve bounded late recovery.
 - [x] 5.3 Prove old-red/changed-green delayed listener, never-ready, failed-unit/permanent-error and both startup paths,
-      plus the retained eight-case isolated window matrix; no production restart.
+      plus recovery-budget exhaustion and a blocking unit-status refusal, and re-earn the eight-case window matrix
+      with the readiness transport isolated on the oracle; no production restart.
 - [ ] 5.4 Complete focused review/CI and publish immutable source/evidence for parent recovery and re-forward work.
 
 Evidence Floor: real recorded ConnectionRefused failure in both startup paths and separate manual OLD restoration;
@@ -151,6 +152,12 @@ focused actual HTTP listener oracle plus deterministic deadline failures, source
 on failure. Local Ruff/strict OpenSpec; node27 isolated runtime verification with TMPDIR=/home/nwm/tmp. Production
 remains OLD with retained narrow rollback and ledger; #2374 owns new re-forward admission, not this child.
 
-Verification: tools `5c840cbcf2c7aff2d24a87e014af3d313ed4f96e`; node27 real-listener focused PASS
-(`receipts/child2373-focused-readiness.json`) and retained 8/8 isolated matrix PASS
-(`receipts/child2373-window-matrix.json`). Production was not restarted.
+Verification: node27 real-listener focused PASS (`receipts/child2373-focused-readiness.json`) and 8/8 window matrix
+PASS (`receipts/child2373-window-matrix.json`), both re-earned at the reviewed tool commit. Production was not
+restarted.
+
+Withdrawn evidence: the matrix receipt recorded at tools `5c840cbcf2c7aff2d24a87e014af3d313ed4f96e` is void. Its
+readiness probe was not routed through the oracle's simulated HTTP boundary, so on node27 it read the live display
+API on `127.0.0.1:8080`; its own `production_operations: false` claim is therefore false, and its 8/8 PASS proved
+nothing about isolation. Cross-review round1 (`.workplans/issue-2373/review/round-1-verdicts.json`) confirmed this,
+the oracle now enforces the boundary, and the receipt was replaced rather than retained.
