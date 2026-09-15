@@ -10,7 +10,13 @@ production deadlock:
 - no ancestry walk, so a twice-recalibrated model is bounded by its own
   cutover ``t2`` and never by its parent's ``t1`` (D4);
 - resolution is per ``(model_id, source_id)`` (D3);
-- absent / unreadable provenance is "no lineage", never an error (task 1.7);
+- absent provenance — and an index that has NEVER been published — is "no
+  lineage", never an error; an index that exists but cannot be read, parsed or
+  validated is a resolution FAILURE and raises
+  ``LineageResolutionError`` (#1740, change
+  ``clone-lineage-admission-predicate-convergence`` D4/D4a).  The two used to
+  collapse into the same ``None``, which memoized a transient read error as a
+  permanent "no lineage" for the rest of the process;
 - the db-free plane reads the already-loaded index and issues no extra read;
 - the DB plane uses its own ASC read — reusing the publisher's ``DESC``
   reader is the defect D3 names by hand.
@@ -88,6 +94,52 @@ def test_clone_lineage_signal_without_clone_provenance_is_no_lineage(tmp_path: P
     assert (
         scheduler_lineage.resolve_lineage_cutover(repo, model_id="model_a", source_id="gfs") is None
     )
+
+
+def test_clone_entry_without_a_gate_fingerprint_still_confers_lineage(tmp_path: Path) -> None:
+    """#1739 / spec: a missing ``clone_gate_fingerprint`` does not withhold lineage.
+
+    The file plane has never read the fingerprint, and after #1739 the DB
+    plane's earliest-row reader does not either (see
+    ``test_earliest_clone_row_query_is_ascending_and_clone_scoped`` for the SQL
+    pin and ``test_db_plane_missing_gate_fingerprint_still_resolves_lineage``
+    for the same answer on the other plane).  This is the file-plane half of
+    the cross-plane equality the spec scenario demands: the SAME row — parent
+    present, fingerprint absent — yields ``t*`` on both planes.
+
+    The row shape is not hypothetical: it is what a partially-written or
+    hand-repaired clone row looks like.  Withholding lineage from it would move
+    ``t*`` LATER and quietly drop the model out of cycles it genuinely gaps.
+    """
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True)
+    entry = _entry(
+        object_root=object_root,
+        model_id="model_a_prime",
+        valid_time="2026-08-21T12:00:00Z",
+        cloned_from_model_id="model_a",
+        clone_gate_fingerprint=None,
+    )
+    # A half-written row carries no fingerprint at all; assert the premise so a
+    # fixture that starts defaulting one in cannot leave this test green while
+    # it no longer exercises the missing-fingerprint case.
+    assert not entry.get("clone_gate_fingerprint")
+    repo = _repository(tmp_path, [entry])
+
+    signal = repo.clone_lineage_signal(model_id="model_a_prime", source_id="gfs")
+
+    assert signal["ready"] is True
+    assert signal["has_lineage"] is True
+    assert signal["predecessor_model_id"] == "model_a"
+    assert signal["cutover_valid_time"] == "2026-08-21T12:00:00Z"
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a"
+    assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
 
 
 def test_self_referential_clone_row_confers_no_lineage_on_the_db_free_plane(
@@ -246,7 +298,18 @@ def test_clone_lineage_signal_resolves_from_loaded_index_without_extra_read(tmp_
     assert signal["cutover_valid_time"] == "2026-08-21T12:00:00Z"
 
 
-def test_clone_lineage_signal_unreadable_index_is_no_lineage(tmp_path: Path) -> None:
+def test_clone_lineage_signal_unreadable_index_is_a_resolution_failure(tmp_path: Path) -> None:
+    """#1740 D4/D4a: a published-but-broken index is a FAILURE, not "no lineage".
+
+    This oracle used to assert the opposite (``... is None``) and it was the
+    contract that made the production defect possible: the file plane never
+    raises — it answers ``{"status": "blocked", "has_lineage": False}`` — so a
+    corrupt index read exactly like a model that never cloned, and the
+    scheduler memoized that answer.  The index EXISTS here and cannot be
+    parsed, which is the "I should have been able to read this and could not"
+    class; ``state_snapshot_index_missing`` (never published) stays "no
+    lineage" and is pinned separately in ``tests/test_scheduler_backfill.py``.
+    """
     index_path = tmp_path / "state-index.json"
     index_path.write_text("{not json", encoding="utf-8")
     repo = FileStateSnapshotIndexRepository(
@@ -260,12 +323,17 @@ def test_clone_lineage_signal_unreadable_index_is_no_lineage(tmp_path: Path) -> 
 
     assert signal["status"] == "blocked"
     assert signal["has_lineage"] is False
-    assert (
+
+    with pytest.raises(scheduler_lineage.LineageResolutionError) as excinfo:
         scheduler_lineage.resolve_lineage_cutover(
             repo, model_id="model_a_prime", source_id="gfs"
         )
-        is None
-    )
+
+    # The blocker reason travels verbatim from the repository's own evidence
+    # into the error, so the operator signal names WHY rather than "it failed".
+    assert excinfo.value.reason == "state_snapshot_index_malformed_json"
+    assert excinfo.value.model_id == "model_a_prime"
+    assert excinfo.value.source_id == "gfs"
 
 
 def test_clone_lineage_signal_takes_the_earliest_clone_row(tmp_path: Path) -> None:
@@ -482,6 +550,31 @@ def test_db_plane_resolves_from_the_earliest_clone_row_reader() -> None:
     assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
 
 
+def test_db_plane_missing_gate_fingerprint_still_resolves_lineage() -> None:
+    """#1739, DB plane: the row the two planes used to disagree about.
+
+    The SQL text pin proves the predicate no longer mentions the fingerprint;
+    this proves the BEHAVIOR end-to-end — a row handed over by the reader with
+    ``clone_gate_fingerprint=None`` resolves to a cutover instead of being
+    dropped somewhere downstream.  Two oracles on different seams, because a
+    text-shape assertion alone cannot tell "the predicate was relaxed" from
+    "the predicate was relaxed and something else re-imposed it".
+    """
+    row = replace(_clone_snapshot("2026-08-21T12:00:00Z"), clone_gate_fingerprint=None)
+    repo = _EarliestCloneRowRepo(row)
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert repo.calls == [("model_a_prime", "gfs")]
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a"
+    # Byte-identical to the file plane's answer for the same row shape
+    # (``test_clone_entry_without_a_gate_fingerprint_still_confers_lineage``).
+    assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
+
+
 def test_db_plane_never_consults_the_publishers_latest_row_reader() -> None:
     repo = _LatestOnlyCloneRowRepo(_clone_snapshot("2026-08-22T00:00:00Z"))
 
@@ -564,16 +657,8 @@ def test_db_plane_no_clone_row_is_no_lineage() -> None:
     )
 
 
-def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any) -> None:
-    """D3/D4: existence-start ordering, with the shadow-proof clone filters kept.
-
-    The NEGATIVE pin is the load-bearing half.  Omitting ``usable_flag`` from
-    this statement is a deliberate decision (#1735 A2): an unusable clone row
-    still proves the identity started then, and filtering it would move ``t*``
-    LATER — the silent-hide direction the design forbids.  Without an explicit
-    absence assertion, adding ``AND usable_flag = true`` here keeps every other
-    test in this suite green while silently reintroducing that regression.
-    """
+def _captured_statement(monkeypatch: Any) -> dict[str, Any]:
+    """Capture the SQL text the repository hands to ``_fetch_optional``."""
     captured: dict[str, Any] = {}
 
     def _fake_fetch_optional(self: Any, statement: str, parameters: Any) -> None:
@@ -584,6 +669,32 @@ def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any
     monkeypatch.setattr(
         PsycopgStateSnapshotRepository, "_fetch_optional", _fake_fetch_optional, raising=True
     )
+    return captured
+
+
+def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any) -> None:
+    """D3/D4 ordering + #1739: lineage admission keys on the predecessor alone.
+
+    The NEGATIVE pins are the load-bearing half, and there are now two of them:
+
+    * ``usable_flag`` — omitting it is a deliberate decision (#1735 A2): an
+      unusable clone row still proves the identity started then, and filtering
+      it would move ``t*`` LATER — the silent-hide direction the design
+      forbids.
+    * ``clone_gate_fingerprint`` — #1739 ruled it PURE PROVENANCE: it records
+      WHICH gate admitted a clone and at WHAT value, never WHETHER the identity
+      exists.  Re-adding ``AND clone_gate_fingerprint IS NOT NULL`` here would
+      reject a half-written clone row that names its predecessor, move ``t*``
+      later on exactly the rows the two planes disagree about, and silently
+      re-diverge this reader from the file plane's
+      ``_clone_entries_for_model_source`` — which has never read the
+      fingerprint.  The publisher's DESC sibling keeps the filter on purpose
+      (design D2); see the test below.
+
+    Without explicit absence assertions either regression keeps every other
+    test in this suite green.
+    """
+    captured = _captured_statement(monkeypatch)
     repo = PsycopgStateSnapshotRepository("postgresql://unused/db")
 
     assert (
@@ -591,12 +702,42 @@ def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any
         is None
     )
     assert "ORDER BY valid_time ASC, created_at ASC" in captured["statement"]
-    assert "clone_gate_fingerprint IS NOT NULL" in captured["statement"]
     assert "cloned_from_model_id IS NOT NULL" in captured["statement"]
     # A1: a row naming itself is not a predecessor and confers no lineage.
     assert "cloned_from_model_id <> model_id" in captured["statement"]
+    # #1739 negative pin: fingerprint is provenance, not an admission condition.
+    assert "clone_gate_fingerprint" not in captured["statement"]
     # A2 negative pin: no usable_flag filter, in any spelling.
     assert "usable_flag" not in captured["statement"]
+    assert captured["parameters"] == ("model_a_prime", "gfs")
+
+
+def test_publisher_latest_clone_row_query_keeps_the_fingerprint_filter(monkeypatch: Any) -> None:
+    """Design D2: the asymmetry between the two readers is deliberate.
+
+    ``get_earliest_clone_row_for_model_source`` and
+    ``get_latest_clone_row_for_model_source`` carried the byte-identical string
+    ``clone_gate_fingerprint IS NOT NULL``, and #1739 removed it from exactly
+    one of them.  Until this test the publisher's reader had no text oracle at
+    all, so "tidying up" the sibling — or editing the wrong one of two
+    near-identical functions — would have been caught by nothing.
+
+    The DESC reader answers a different question: "which row did I just
+    commit?".  The publisher wrote that row's ``clone_gate_fingerprint`` itself
+    in the same transaction (``_build_clone_row`` takes it as a required
+    ``str``), so requiring non-NULL is a cheap self-check — a row without one
+    is not the row it just wrote.  Relaxing it buys nothing and would let the
+    publisher mirror a foreign row into the file state index.
+    """
+    captured = _captured_statement(monkeypatch)
+    repo = PsycopgStateSnapshotRepository("postgresql://unused/db")
+
+    assert (
+        repo.get_latest_clone_row_for_model_source(model_id="model_a_prime", source_id="gfs")
+        is None
+    )
+    assert "clone_gate_fingerprint IS NOT NULL" in captured["statement"]
+    assert "ORDER BY valid_time DESC, created_at DESC" in captured["statement"]
     assert captured["parameters"] == ("model_a_prime", "gfs")
 
 

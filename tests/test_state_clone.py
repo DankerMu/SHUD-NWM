@@ -1515,6 +1515,184 @@ def test_clone_row_accepted_by_file_index_path_strict_warm_start_evidence(
     assert candidate["init_state_lineage"]["model_package_version"] == M1_PACKAGE_VERSION
 
 
+# --- #1741: the self-clone identity gate ----------------------------------
+
+
+SELF_CLONE_SCOPE = "self_clone_target"
+
+
+def _self_clone_source_snapshot() -> StateSnapshot:
+    """The qualified ``(M1, source, t*)`` row a self-clone would overwrite.
+
+    Seeded deliberately: with equal source and target identities the minted
+    ``state_id`` is byte-identical to this row's own ``state_id``, so without
+    the gate ``upsert_state_snapshot`` rewrites THIS row into one that names
+    itself as its own predecessor — and the original provenance is gone. The
+    row's presence is what makes the refusal load-bearing rather than
+    incidental.
+    """
+
+    return replace(
+        _make_source_snapshot(),
+        state_id=state_snapshot_id(
+            M1_MODEL_ID,
+            CUTOVER_VALID_TIME,
+            source_id=SOURCE_ID,
+            cycle_id=CYCLE_ID,
+            lead_hours=12,
+        ),
+        model_id=M1_MODEL_ID,
+        run_id=f"fcst_{SOURCE_ID}_{CYCLE_ID}_{M1_MODEL_ID}",
+        model_package_version=M1_PACKAGE_VERSION,
+        model_package_checksum=M1_PACKAGE_CHECKSUM,
+    )
+
+
+def _assert_self_clone_refused(
+    result: StateCloneResult,
+    repo: _FakeCloneRepository,
+    audit: _FakeAuditRecorder,
+    source: StateSnapshot,
+) -> None:
+    """Fail-closed obligations shared by every self-clone refusal leg."""
+
+    assert result.refused is True
+    assert result.cloned_row is None
+    assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED
+    assert result.refusal_scope == SELF_CLONE_SCOPE
+    # No row written and, specifically, the source row survives byte-identical
+    # — the damage this gate exists to prevent is an in-place overwrite.
+    assert repo.upserted == []
+    assert repo.snapshots == {source.state_id: source}
+    assert audit.records == [
+        {
+            "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
+            "refusal_scope": SELF_CLONE_SCOPE,
+            "m0_model_id": M1_MODEL_ID,
+            "m1_model_id": M1_MODEL_ID,
+            "source_id": SOURCE_ID,
+            "cutover_valid_time": CUTOVER_VALID_TIME,
+        }
+    ]
+
+
+def test_self_clone_refused_fail_closed_in_fix_forward_mode(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """#1741: equal source and target identities refuse, with no row written.
+
+    Every existing gate no-ops on a self-clone — the fingerprint gate compares
+    one package tree against itself and necessarily finds it equal — so the
+    call used to run to completion and upsert over the real state row.
+    """
+
+    source = _self_clone_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["m0_model_id"] = M1_MODEL_ID
+    kwargs["m1_model_id"] = M1_MODEL_ID
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    _assert_self_clone_refused(result, repo, audit, source)
+
+
+def test_self_clone_refused_fail_closed_in_recalibration_mode(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """#1741, recalibration route — including the skipped-cross-check branch.
+
+    ``m1_recorded_hydrologic_core_fingerprint=None`` is the branch the
+    direct-grid provisioning script produces, where the evidence cross-check is
+    skipped entirely; the per-side ``m0_*`` byte overrides are supplied so the
+    call would NOT refuse at the degenerate-inputs gate. The identity gate must
+    hold on both transfer modes: ``state_id`` minting is mode-independent, so
+    the overwrite hazard is too.
+    """
+
+    source = _self_clone_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["m0_model_id"] = M1_MODEL_ID
+    kwargs["m1_model_id"] = M1_MODEL_ID
+    kwargs["transfer_mode"] = "recalibration"
+    kwargs["m1_recorded_hydrologic_core_fingerprint"] = None
+    kwargs["m0_state_schema_bytes"] = DEFAULT_STATE_SCHEMA_BYTES
+    kwargs["m0_solver_config_bytes"] = DEFAULT_SOLVER_CONFIG_BYTES
+
+    result = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    _assert_self_clone_refused(result, repo, audit, source)
+
+
+def test_self_clone_refusal_outranks_every_other_gate(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """#1741 ordering: the identity gate runs before gate 0 and gate 1.
+
+    Two legs, because each answers a different question:
+
+    * **Leg A** is the spec scenario: a valid direct-grid manifest and
+      non-empty gate bytes, so no other gate WOULD refuse. It proves the
+      refusal is the self-clone scope and not a downstream accident — the
+      explicit negative assertions are what distinguish it from "some refusal
+      happened".
+    * **Leg B** is the precedence proof: the same call with a legacy manifest
+      and degenerate bytes, each of which alone refuses with its own scope.
+      Only a gate placed BEFORE both can still answer ``self_clone_target``.
+      Without leg B, moving the identity check below gate 0 would keep leg A
+      green while the audit trail for a self-clone attempt silently degraded
+      into a contract-hygiene mishap.
+    """
+
+    source = _self_clone_source_snapshot()
+    repo = _FakeCloneRepository()
+    repo.add(source)
+    audit = _FakeAuditRecorder()
+
+    kwargs = _default_clone_kwargs(m0_m1_equal_packages)
+    kwargs["m0_model_id"] = M1_MODEL_ID
+    kwargs["m1_model_id"] = M1_MODEL_ID
+
+    leg_a = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    assert leg_a.refusal_scope == SELF_CLONE_SCOPE
+    assert leg_a.refusal_scope != "reverse_clone_target_not_direct_grid"
+    assert leg_a.refusal_scope != "degenerate_gate_inputs"
+    _assert_self_clone_refused(leg_a, repo, audit, source)
+
+    audit.records.clear()
+    kwargs["m1_forcing_mapping_manifest"] = {}  # classifier -> None (legacy)
+    kwargs["state_schema_bytes"] = b""
+    kwargs["solver_config_bytes"] = b""
+
+    leg_b = fingerprint_gated_state_clone(
+        repository=repo,
+        audit_recorder=audit,
+        **kwargs,
+    )
+
+    _assert_self_clone_refused(leg_b, repo, audit, source)
+
+
 # --- Test helpers ----------------------------------------------------------
 
 
