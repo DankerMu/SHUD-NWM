@@ -138,12 +138,17 @@ def _recover_released_identity_blocked_reservation(
                 "reason": "job_id_required_to_attest",
                 "detail": "--attest acts on exactly one row; run without --job-id to list candidates",
             }, 2
-        wedged = repository.query_released_identity_blocked_jobs()
+        # #1820: one malformed row or unreadable confirming cycle is reported
+        # under ``skipped`` instead of aborting the listing; budget refusals,
+        # unreadable files and containment faults still raise (exit 2).
+        wedged, skipped = repository.query_released_identity_blocked_jobs_with_skips()
         return {
             "decision": "listed",
             "slurm_liveness_checked": False,
             "wedged_count": len(wedged),
             "wedged": [_released_reservation_summary(row) for row in wedged],
+            "skipped_count": len(skipped),
+            "skipped": skipped,
         }, 0
 
     try:

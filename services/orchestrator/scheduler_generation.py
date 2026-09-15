@@ -1540,3 +1540,68 @@ def journal_identity_quarantine_breaker_engaged(occurrences: Any) -> bool:
         return int(occurrences) >= _JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
     except (TypeError, ValueError):
         return False
+
+
+#: The §8.7 breaker's blocked decision literal, as a confirmation names it.
+OPERATOR_REENTRY_BREAKER_DECISION = "blocked_journal_predecessor_identity_quarantine"
+
+
+def operator_reentry_confirmation_match(
+    repository: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    decision: str,
+    pin: int | None = None,
+) -> dict[str, Any] | None:
+    """The newest operator re-entry confirmation pinned to the LIVE value, or ``None`` (#1555/#1768).
+
+    One authorization, one re-entry: the pin is the value every completed rerun
+    moves, and it must equal the confirmation's pin EXACTLY, so a completed
+    rerun invalidates the confirmation by itself.
+
+    * Breaker (``blocked_journal_predecessor_identity_quarantine``): the live
+      value is the repository's model-level ``completed_quarantine_rerun_count``
+      (``pin`` is ignored).  It moves on a completed stamped rerun whatever
+      token that rerun recorded, so the token is NOT compared here.
+    * Budget: the live value is the caller's stage-scoped attempt ``pin``.
+
+    Accessor injection follows the ``getattr`` convention of
+    :func:`journal_identity_quarantine_occurrence_count`.  TOTAL: no repository,
+    a missing or raising accessor, an unreadable count (``None``), or a
+    malformed pin all yield ``None``, which keeps the fail-stop (the direction
+    that never submits without a human).  Read-only: the scoring and filtering
+    surfaces never write the journal.
+    """
+    if repository is None:
+        return None
+    accessor = getattr(repository, "operator_reentry_confirmations", None)
+    if not callable(accessor):
+        return None
+    try:
+        if decision == OPERATOR_REENTRY_BREAKER_DECISION:
+            counter = getattr(repository, "completed_quarantine_rerun_count", None)
+            if not callable(counter):
+                return None
+            live_pin = counter(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        else:
+            live_pin = pin
+        if type(live_pin) is not int:
+            return None
+        confirmations = accessor(source_id=source_id, cycle_time=cycle_time, model_id=model_id, decision=decision)
+        for details in reversed(list(confirmations)):
+            if not isinstance(details, Mapping) or type(details.get("pin")) is not int:
+                continue
+            if details["pin"] != live_pin:
+                continue
+            return dict(details)
+    except Exception:  # noqa: BLE001 - a foreign accessor must not break the pass
+        return None
+    return None
+
+
+def operator_reentry_confirmation_evidence(confirmation: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``operator_reentry_confirmation`` block a re-entry retry carries."""
+
+    return {key: confirmation.get(key) for key in ("request_id", "operator", "reason", "pin", "decision")}

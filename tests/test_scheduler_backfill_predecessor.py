@@ -1801,3 +1801,348 @@ def test_lineage_scope_out_sees_the_derived_predecessor_cycle(monkeypatch: Any) 
     assert candidates == []
     assert [record["reason"] for record in evidence] == ["lineage_scoped_out_pre_cutover"]
     assert evidence[0]["predecessor_cycle_time"] == "2026-07-06T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# #1543: ``predecessor_emission_blocked`` — did THIS pass's §8.6 emission for a
+# blocked successor actually have a path to close its gap?  Orthogonal to the
+# gate's ``operator_action_required`` (predecessor slot readiness).  Transient
+# skips read ``False``; every other skip or a cap truncation reads ``True``.
+# ---------------------------------------------------------------------------
+
+_SUCCESSOR_ID = "cand_gfs_2026070612_model_a"
+
+
+def _pending_successor(
+    *,
+    candidate_id: str = _SUCCESSOR_ID,
+    model_id: str = "model_a",
+    predecessor_cycle_time: datetime = _dt("2026-07-06T00:00:00Z"),
+) -> SchedulerCandidate:
+    return _candidate(
+        candidate_id=candidate_id,
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        model_id=model_id,
+        state_evidence=_predecessor_pending_evidence(predecessor_cycle_time=predecessor_cycle_time),
+    )
+
+
+def _emit_and_attach(
+    blocked: list[SchedulerCandidate],
+    *,
+    models: list[Any] | None = None,
+    candidates: list[SchedulerCandidate] | None = None,
+    candidate_factory: Any = _candidate_factory,
+    gate: Any = _gate_ready,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()] if models is None else models,
+        cycles=[],
+        candidates=[] if candidates is None else candidates,
+        blocked=blocked,
+        candidate_factory=candidate_factory,
+        strict_warm_start_for_candidate=gate,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        **kwargs,
+    )
+    _bf.attach_emission_summary_to_blocked(blocked, evidence)
+    return evidence
+
+
+def _successor_evidence(blocked: list[SchedulerCandidate], candidate_id: str = _SUCCESSOR_ID) -> Any:
+    return next(entry for entry in blocked if entry.candidate_id == candidate_id).state_evidence
+
+
+def _raising_candidate_factory(**_kwargs: Any) -> SchedulerCandidate:
+    raise RuntimeError("synthetic construction failure")
+
+
+def _raising_gate(_candidate: SchedulerCandidate, _cycle: Any) -> dict[str, Any]:
+    raise RuntimeError("synthetic gate failure")
+
+
+@pytest.mark.parametrize(
+    ("arm", "expected_reason"),
+    [
+        ("manifest_not_ready", "predecessor_raw_manifest_not_ready"),
+        ("model_not_available", "predecessor_model_not_available"),
+        ("construction_failed", "predecessor_candidate_construction_failed"),
+        ("gate_failed", "predecessor_gate_failed"),
+    ],
+)
+def test_non_transient_predecessor_skip_flags_the_successor_emission_blocked(
+    monkeypatch: Any,
+    arm: str,
+    expected_reason: str,
+) -> None:
+    """B.1: a skip that cannot heal on its own marks the successor ``True``."""
+    _wire_manifest_ready(monkeypatch, status="not_ready" if arm == "manifest_not_ready" else "ready")
+    blocked = [_pending_successor()]
+
+    evidence = _emit_and_attach(
+        blocked,
+        models=[] if arm == "model_not_available" else None,
+        candidate_factory=_raising_candidate_factory if arm == "construction_failed" else _candidate_factory,
+        gate=_raising_gate if arm == "gate_failed" else _gate_ready,
+    )
+
+    assert [(record["status"], record["reason"]) for record in evidence] == [("skipped", expected_reason)]
+    assert _successor_evidence(blocked)["predecessor_emission_blocked"] is True
+
+
+def test_emission_cap_truncation_names_and_flags_the_cut_off_successor(monkeypatch: Any) -> None:
+    """B.1 cap arm + B.6: the truncation record locates the successor it cut off."""
+    _wire_manifest_ready(monkeypatch)
+    monkeypatch.setattr(_bf, "MAX_PREDECESSOR_EMISSIONS", 1)
+    first = _pending_successor(candidate_id="cand_gfs_2026070612_model_a", model_id="model_a")
+    second = _pending_successor(candidate_id="cand_gfs_2026070612_model_b", model_id="model_b")
+    blocked = [first, second]
+
+    evidence = _emit_and_attach(blocked, models=[_FakeModel("model_a"), _FakeModel("model_b")])
+
+    truncated = [record for record in evidence if record["status"] == "truncated"]
+    assert truncated == [
+        {
+            "status": "truncated",
+            "reason": "predecessor_emission_cap_reached",
+            "total_attempted": 1,
+            "cap": 1,
+            "successor_candidate_ids": ["cand_gfs_2026070612_model_b"],
+        }
+    ]
+    assert _successor_evidence(blocked, "cand_gfs_2026070612_model_b")["predecessor_emission_blocked"] is True
+    # The emitted successor stays unflagged, and the pass totals still count the
+    # truncation once.
+    emitted_evidence = _successor_evidence(blocked, "cand_gfs_2026070612_model_a")
+    assert emitted_evidence["predecessor_emission_blocked"] is False
+    assert emitted_evidence["predecessor_backfill"]["summary"]["pass_totals"] == {"emitted": 1, "truncated": 1}
+    cut_off_summary = _successor_evidence(blocked, "cand_gfs_2026070612_model_b")["predecessor_backfill"]["summary"]
+    assert cut_off_summary["totals"] == {"truncated": 1}
+
+
+@pytest.mark.parametrize(
+    "arm",
+    ["already_present", "active_pipeline", "env_unwired", "emitted"],
+)
+def test_transient_predecessor_outcome_leaves_the_successor_unflagged(monkeypatch: Any, arm: str) -> None:
+    """B.3: transient skips and a real emission read ``False`` — never absent."""
+    if arm != "env_unwired":
+        _wire_manifest_ready(monkeypatch)
+    candidates: list[SchedulerCandidate] = []
+    if arm == "already_present":
+        candidates.append(
+            _candidate(
+                candidate_id="cand_gfs_2026070600_model_a",
+                cycle_id="gfs_2026070600",
+                cycle_time=_dt("2026-07-06T00:00:00Z"),
+                status="pending",
+            )
+        )
+
+    class _ActiveRepo:
+        def has_active_pipeline(self, **_kwargs: Any) -> bool:
+            return True
+
+    unrelated = _candidate(
+        candidate_id="cand_gfs_2026070612_model_z",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        model_id="model_z",
+        reason="unrelated_block",
+    )
+    blocked = [_pending_successor(), unrelated]
+
+    evidence = _emit_and_attach(
+        blocked,
+        candidates=candidates,
+        active_repository=_ActiveRepo() if arm == "active_pipeline" else None,
+    )
+
+    expected = {
+        "already_present": ("skipped", "predecessor_already_present"),
+        "active_pipeline": ("skipped", "predecessor_backfill_active_pipeline"),
+        "env_unwired": ("skipped", "predecessor_raw_manifest_env_unwired"),
+        "emitted": ("emitted", None),
+    }[arm]
+    assert [(record["status"], record.get("reason")) for record in evidence] == [expected]
+    assert _successor_evidence(blocked)["predecessor_emission_blocked"] is False
+    # A blocked entry the emitter never recorded anything for carries no flag.
+    assert "predecessor_emission_blocked" not in _successor_evidence(blocked, "cand_gfs_2026070612_model_z")
+
+
+@pytest.mark.parametrize(
+    ("cutover", "expected_flag"),
+    [
+        # Successor 12Z precedes t*=18Z: discovery scopes the successor out too.
+        ("2026-07-06T18:00:00Z", False),
+        # Successor 12Z is at/after t*=06Z: the successor stays blocked forever.
+        ("2026-07-06T06:00:00Z", True),
+    ],
+)
+def test_lineage_scoped_out_skip_flags_only_a_successor_at_or_after_the_cutover(
+    monkeypatch: Any,
+    cutover: str,
+    expected_flag: bool,
+) -> None:
+    """B.4 (F9): the lineage scope-out is transient only when the successor predates ``t*``."""
+    _wire_manifest_ready(monkeypatch)
+    blocked = [_pending_successor()]
+
+    evidence = _emit_and_attach(blocked, lineage_cutover_for_model_source=_lineage_resolver(_dt(cutover)))
+
+    assert [record["reason"] for record in evidence] == ["lineage_scoped_out_pre_cutover"]
+    assert _successor_evidence(blocked)["predecessor_emission_blocked"] is expected_flag
+
+
+def test_emission_blocked_flag_survives_bounded_summarization(monkeypatch: Any) -> None:
+    """B.7: both ``True`` and ``False`` survive the bounded candidate summary."""
+    from services.orchestrator import scheduler_evidence_payload
+
+    _wire_manifest_ready(monkeypatch, status="not_ready")
+    flagged = [_pending_successor()]
+    _emit_and_attach(flagged)
+    _wire_manifest_ready(monkeypatch)
+    unflagged = [_pending_successor()]
+    _emit_and_attach(unflagged)
+
+    flagged_summary = scheduler_evidence_payload._bounded_candidate_summary(flagged[0].to_dict())
+    unflagged_summary = scheduler_evidence_payload._bounded_candidate_summary(unflagged[0].to_dict())
+
+    assert flagged_summary["predecessor_emission_blocked"] is True
+    assert unflagged_summary["predecessor_emission_blocked"] is False
+    assert scheduler_evidence_payload._bounded_candidate_summary(flagged_summary) == flagged_summary
+    assert scheduler_evidence_payload._bounded_candidate_summary(unflagged_summary) == unflagged_summary
+
+
+def test_missing_predecessor_manifest_is_not_reported_as_self_healing_under_real_gate(
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    """B.2: ``operator_action_required=False`` AND ``predecessor_emission_blocked=True``.
+
+    Same real-gate self-heal geometry as
+    ``test_emitted_predecessor_admitted_when_self_heal_expected`` (the
+    predecessor slot verifies ready, so the gate names no operator action) with
+    ONE delta: the predecessor's raw manifest is not staged under the wired
+    env.  The emitter skips it as ``predecessor_raw_manifest_not_ready``, so the
+    gap cannot close this pass even though the gate's boolean says stand down —
+    the two axes disagree, and only the new flag reports it.
+    """
+    from services.orchestrator import scheduler_evidence_payload
+    from services.orchestrator import scheduler_generation as generation
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+        _write_missing_forcing_repair_raw_manifest,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, Path(tmp_path) / "db-free-local-root")
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = fixture["package_checksum"]
+    if len(candidate_checksum) != 64 or any(ch not in "0123456789abcdef" for ch in candidate_checksum):
+        candidate_checksum = "b" * 64
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_prior_history",
+                valid_time="2026-05-21T00:00:00Z",
+                cycle_id="gfs_2026052012",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = Path(tmp_path) / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(generation.CUTOVER_DECLARATION_ENV, str(declaration_path))
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    # The ONLY delta from the self-heal test: the successor's manifest is staged,
+    # the predecessor's is not.
+    _write_missing_forcing_repair_raw_manifest(roots["object_store_root"], cycle_time=cycle_time)
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail("predecessor-pending cutover must not build orchestrator"),
+    )
+
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert candidates == []
+    (successor,) = [entry for entry in blocked if entry.cycle_time_utc == cycle_time]
+    records = successor.state_evidence["predecessor_backfill"]["summary"]["records"]
+    assert [(record["status"], record["reason"]) for record in records] == [
+        ("skipped", "predecessor_raw_manifest_not_ready")
+    ]
+    assert successor.state_evidence["operator_action_required"] is False
+    assert successor.state_evidence["predecessor_emission_blocked"] is True
+    summary = scheduler_evidence_payload._bounded_candidate_summary(successor.to_dict())
+    assert summary["operator_action_required"] is False
+    assert summary["predecessor_emission_blocked"] is True

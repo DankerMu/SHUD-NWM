@@ -577,6 +577,20 @@ def _breaker_engaged_gap_identities(
         )
         if not _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
             return None
+        # #1555: a model the operator confirmed for re-entry at its live
+        # quarantine rerun count has real work, so the cycle keeps the slot (any,
+        # not every, like the mixed-cycle rule above).  Read-only; the cycle stays a gap.
+        if (
+            _scheduler_generation.operator_reentry_confirmation_match(
+                context.active_repository,
+                source_id=discovery.source_id,
+                cycle_time=discovery.cycle_time,
+                model_id=model.model_id,
+                decision=_scheduler_generation.OPERATOR_REENTRY_BREAKER_DECISION,
+            )
+            is not None
+        ):
+            return None
         identities.append(
             {
                 "model_id": model.model_id,

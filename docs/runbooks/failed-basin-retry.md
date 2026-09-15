@@ -103,6 +103,32 @@ transition it, and its `reconcile-inventory` anchor can abort the whole reconcil
 [`current-production-ops.md`](current-production-ops.md) §8.11 for the census and the recovery
 path, and §8.10 for the journal-root realpath precondition both depend on.
 
+### Operator-action decisions (`manual_retry_required: true`)
+
+Four DB-free decisions wait on an operator. List them with
+`list-operator-actions` (read-only, pass evidence only) and pick the entry per decision;
+commands, exit codes and node-22 execution discipline are in
+[`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md).
+
+- `permanent_failure` — the failure classifier called the error permanent (for example
+  `ARTIFACT_NOT_FOUND`), so the run never retries by itself. Fix the cause, then mark the
+  run once with `scripts/node22_manual_retry_failed_runs.py` (preview, then `--execute`).
+- `cancelled_manual_retry_required` — a cancelled run is not retried automatically. Confirm
+  the cancellation was not intentional, then use the same manual-retry script.
+- `blocked_journal_predecessor_identity_quarantine` — the §8.7 breaker. The journal row is
+  terminal-success, so a manual-retry marker never reaches it. Re-enter once with
+  `confirm-operator-reentry --pin <quarantine_rerun_count> --recorded-init-state-id <token>`; triage
+  first per [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
+  The breaker pin is the model's quarantine rerun count (completed masters whose quarantine
+  provenance names the model, any token), not `occurrences`; read it from the dry-run
+  receipt's `live.quarantine_rerun_count`.
+  **Known limitation:** the file journal does not update the `hydro_run` row on a same-`run_id`
+  rerun (#2397), so the live recorded token stays at the first run's value. Even when the
+  confirmed rerun got the correct lineage, the candidate still shows as breaker-blocked until
+  that defect is fixed. Do not confirm again.
+- `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
+  the next section (`confirm-operator-reentry --pin <attempt>`).
+
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
 
 The candidate ladder now checks the stage-scoped retry budget before emitting
@@ -153,9 +179,34 @@ Manual re-entry, in order:
 2. Decide whether re-running is actually correct. If the init-state identity mismatch is a
    data defect, fix the data first — the budget is protecting you from re-submitting the
    same mismatch forever.
-3. To re-open the ladder, raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt`
-   and restart the scheduler service. Below-budget behaviour is byte-identical to the old
-   retry decision, so the candidate is selected again.
+3. To re-open the ladder for ONE candidate, record a pinned one-shot confirmation (#1768):
+
+   ```bash
+   /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
+     confirm-operator-reentry \
+     --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+     --source-id <source_id> --cycle-time <cycle_time> --model-id <model_id> \
+     --decision blocked_strict_warm_start_init_state_mismatch \
+     --pin <retry_policy.attempt> \
+     --operator "<operator>" --reason "<why>" --attest
+   ```
+
+   The blocked evidence names this channel in `retry_policy.operator_reentry_command` /
+   `retry_policy.recovery_runbook`. While the confirmation's `pin` equals the live
+   stage-scoped `attempt`, the next pass emits
+   `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
+   `operator_reentry_confirmation` block in `state_evidence`); the rerun's `_retry_<N>` row
+   moves `attempt` past the pin and the candidate is blocked again. A stale pin is inert.
+   `NHMS_SCHEDULER_RETRY_LIMIT` is not touched. Run it without `--attest` first; see
+   [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) for
+   the receipt, refusals and known limitations. The same precondition below (a
+   higher-attempt retry row must outrank a released base row) applies.
+
+   Raising the global budget is the fallback only when the confirmation channel is not
+   available (a DB-backed repository without the confirmation accessor keeps the budget
+   fail-stop): raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt` and restart
+   the scheduler service. Below-budget behaviour is byte-identical to the old retry
+   decision, so the candidate is selected again.
    **`NHMS_SCHEDULER_RETRY_LIMIT` is one GLOBAL budget shared by every retry decision
    family in the deployment** (`scheduler_config.py` `retry_limit` is injected into every
    `scheduler_candidates.py` state provider, not per-decision), so raise it only

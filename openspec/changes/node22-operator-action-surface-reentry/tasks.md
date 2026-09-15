@@ -4,27 +4,27 @@
 
 ## B. #1543 — §8.6 发射可行性标（design D3）
 
-- [ ] B.1 红测试（`tests/test_scheduler_backfill_predecessor.py`，沿用既有 real-gate 用例风格）。三条非瞬时臂各一条，断言对应 successor 的 blocked `state_evidence.predecessor_emission_blocked is True`：
+- [x] B.1 红测试（`tests/test_scheduler_backfill_predecessor.py`，沿用既有 real-gate 用例风格）。三条非瞬时臂各一条，断言对应 successor 的 blocked `state_evidence.predecessor_emission_blocked is True`：
       - `predecessor_raw_manifest_not_ready`
       - `predecessor_model_not_available`
       - cap 截断：把 `MAX_PREDECESSOR_EMISSIONS` monkeypatch 为小值，断言被截断的 successor 被打标
       - `predecessor_candidate_construction_failed`、`predecessor_gate_failed`（F8）
-- [ ] B.2 正交钉：同一几何下 `operator_action_required is False` 且 `predecessor_emission_blocked is True`。
-- [ ] B.3 瞬时臂不打标：`predecessor_already_present`、`predecessor_backfill_active_pipeline`、`predecessor_raw_manifest_env_unwired` 各断言值为 `False`。emitted 的 successor 同样为 `False`；无记录的 successor 不带该键。
-- [ ] B.4 `LINEAGE_SCOPED_OUT_REASON` 两种几何：successor cycle_time 早于 `cutover_valid_time` 时为 `False`；不早于 cutover 时为 `True`（F9）。
-- [ ] B.5 实现：
+- [x] B.2 正交钉：同一几何下 `operator_action_required is False` 且 `predecessor_emission_blocked is True`。
+- [x] B.3 瞬时臂不打标：`predecessor_already_present`、`predecessor_backfill_active_pipeline`、`predecessor_raw_manifest_env_unwired` 各断言值为 `False`。emitted 的 successor 同样为 `False`；无记录的 successor 不带该键。
+- [x] B.4 `LINEAGE_SCOPED_OUT_REASON` 两种几何：successor cycle_time 早于 `cutover_valid_time` 时为 `False`；不早于 cutover 时为 `True`（F9）。
+- [x] B.5 实现：
       - `scheduler_backfill_predecessor.py` 迭代改为 `enumerate(pending)`，截断记录追加 `successor_candidate_ids`；
       - 瞬时 allowlist 常量采用反向定义（D3）；
       - `attach_emission_summary_to_blocked` 按该列表归组；
       - `_attach_summary_to_single_blocked` 写布尔。
-- [ ] B.6 截断记录断言：`successor_candidate_ids` 含被截断 successor，`status/reason/total_attempted/cap` 不变。
-- [ ] B.7 bounded 保留钉：`_bounded_candidate_summary` 后 `predecessor_emission_blocked` 的 `True` 与 `False` 都保留。
+- [x] B.6 截断记录断言：`successor_candidate_ids` 含被截断 successor，`status/reason/total_attempted/cap` 不变。
+- [x] B.7 bounded 保留钉：`_bounded_candidate_summary` 后 `predecessor_emission_blocked` 的 `True` 与 `False` 都保留。
 
 ## A. #1186 — 列举面 + runbook（design D1/D2）
 
-- [ ] A.1 （fixture review 已核实字面与嵌套位置，见 design D1）实现时如发现不符，记入偏离记录。
-- [ ] A.2 bounded 白名单追加 `retry_attempt / retry_limit / retry_occurrences / manual_retry_required` pulls，与 B 的键同文件编辑；新增逐键保留钉（含 `False`/`0`）。
-- [ ] A.3 红测试（新文件 `tests/test_operator_action_listing.py`），构造真实 `scheduler_*.json` evidence 文件：
+- [x] A.1 （fixture review 已核实字面与嵌套位置，见 design D1）实现时如发现不符，记入偏离记录。
+- [x] A.2 bounded 白名单追加 `retry_attempt / retry_limit / retry_occurrences / manual_retry_required` pulls，与 B 的键同文件编辑；新增逐键保留钉（含 `False`/`0`）。
+- [x] A.3 红测试（新文件 `tests/test_operator_action_listing.py`），构造真实 `scheduler_*.json` evidence 文件：
       - 四类 decision 各一条「存在 → 列出且 exit 1」；
       - 一条「全部无关 blocked → 空列表 exit 0」；
       - 一条 summarized pass：用真实 `_bounded_candidate_summary` 产出的条目，仍被识别，`attempt` 等字段来自新 bounded 键；
@@ -36,23 +36,23 @@
       - root 缺失时 exit 2；
       - breaker 释放的 not-selected `source_cycles` 条目按模型列出（F1）；
       - 无 action 且某 pass 的 `limit.candidate_lists == "dropped"` 时 exit 3，并列出该 pass（F7）。
-- [ ] A.4 实现 `services/orchestrator/operator_action_listing.py`，argparse 子命令 `list-operator-actions` 挂到 `cli.py`，通过 `main([...])` 端到端测试一次。
-- [ ] A.5 新建 `docs/runbooks/node22-control-plane-manual-recovery.md`；`failed-basin-retry.md` 为四类决策各写一段处置。
-- [ ] A.6 slug 存在性测试：从 `apps/api/routes/pipeline.py` 的实际 payload 构造路径读 slug（必要时抽模块常量，且不改值），断言 `docs/runbooks/<slug>.md` 存在。
+- [x] A.4 实现 `services/orchestrator/operator_action_listing.py`，argparse 子命令 `list-operator-actions` 挂到 `cli.py`，通过 `main([...])` 端到端测试一次。
+- [x] A.5 新建 `docs/runbooks/node22-control-plane-manual-recovery.md`；`failed-basin-retry.md` 为四类决策各写一段处置。
+- [x] A.6 slug 存在性测试：从 `apps/api/routes/pipeline.py` 的实际 payload 构造路径读 slug（必要时抽模块常量，且不改值），断言 `docs/runbooks/<slug>.md` 存在。
 - [ ] A.7 node-22 现场收据（D2）：隔离 worktree，只读执行，贴出输出后移除 worktree。
 
 ## C. #1820 — operator 命令逐行 / 逐 cycle 隔离（design D5）
 
-- [ ] C.1 红测试（放在 `tests/test_file_orchestration_journal.py`；CLI receipt 断言放在既有 recovery 用例所在的 `tests/test_production_scheduler.py`，先 grep 定位）：
+- [x] C.1 红测试（放在 `tests/test_file_orchestration_journal.py`；CLI receipt 断言放在既有 recovery 用例所在的 `tests/test_production_scheduler.py`，先 grep 定位）：
       - flat 目录放一行 `accepted_submit_contract_version` 当前但内容畸形的记录，与若干正常 wedged 行同目录；
       - 断言 list receipt 仍列出正常行；
       - `skipped_count >= 1`；
       - `skipped[]` 含 path 与 `reason == "file_journal_evidence_invariant_invalid"`。
-- [ ] C.2 表驱动：`ROW_CONTENT_SKIP_REASONS` 中每个 reason 构造一条真实触发该 reason 的行（至少覆盖 malformed JSON、`job_mismatch`（文件名与 job_id 不符）、`schema_mismatch`、accepted-submit `evidence_required`、`json_depth_exceeded`），断言被跳过。无法用真实行触发的 reason 在 PR 中列出原因。
-- [ ] C.3 逐 cycle：确认循环中某 cycle 的记录畸形，但它不是首轮扫描出的候选本身。断言该 cycle 记一条 cycle 级 skip，其他 cycle 的候选照常输出；同一 repository 实例随后 `get_pipeline_job` 该 cycle 仍 raise（记忆化不缓存半成品）。
-- [ ] C.4 allowlist 外不吞：同时构造畸形行与 `record_limit` / `file_limit` 预算超限，断言仍 raise 预算原因；`file_journal_unreadable` 也 re-raise；`tests/test_file_journal_full_tree_budget_contract.py` 原样全绿。`--job-id` 模式既有测试原样全绿（F5，不改该模式）。
-- [ ] C.5 热路径不变钉：同一畸形行下，`candidate_state` / `get_pipeline_job` 所在 cycle 的读取行为与改动前一致（仍 raise）。
-- [ ] C.6 实现：
+- [x] C.2 表驱动：`ROW_CONTENT_SKIP_REASONS` 中每个 reason 构造一条真实触发该 reason 的行（至少覆盖 malformed JSON、`job_mismatch`（文件名与 job_id 不符）、`schema_mismatch`、accepted-submit `evidence_required`、`json_depth_exceeded`），断言被跳过。无法用真实行触发的 reason 在 PR 中列出原因。
+- [x] C.3 逐 cycle：确认循环中某 cycle 的记录畸形，但它不是首轮扫描出的候选本身。断言该 cycle 记一条 cycle 级 skip，其他 cycle 的候选照常输出；同一 repository 实例随后 `get_pipeline_job` 该 cycle 仍 raise（记忆化不缓存半成品）。
+- [x] C.4 allowlist 外不吞：同时构造畸形行与 `record_limit` / `file_limit` 预算超限，断言仍 raise 预算原因；`file_journal_unreadable` 也 re-raise；`tests/test_file_journal_full_tree_budget_contract.py` 原样全绿。`--job-id` 模式既有测试原样全绿（F5，不改该模式）。
+- [x] C.5 热路径不变钉：同一畸形行下，`candidate_state` / `get_pipeline_job` 所在 cycle 的读取行为与改动前一致（仍 raise）。
+- [x] C.6 实现：
       - `_iter_direct_pipeline_job_records(skip_collector=None)`；
       - `query_released_identity_blocked_jobs_with_skips`；
       - 原函数委托；
@@ -60,7 +60,7 @@
 
 ## D. #1555 + #1768 — operator 重入确认物（design D4）
 
-- [ ] D.1 写侧红测试（新文件 `tests/test_operator_reentry_confirmation.py`）：
+- [x] D.1 写侧红测试（新文件 `tests/test_operator_reentry_confirmation.py`）：
       - dry-run 不写任何 journal 字节；
       - `--attest` 写入 `event_type == "operator_reentry_confirmation"`；
       - 无 completed identity 时 exit 2；
@@ -69,14 +69,14 @@
       - 预算决策下 pin < 1 时 exit 2；
       - 必填参数空白时 exit 2；
       - 非法 journal root 输出 typed refusal 且 exit 2。
-- [ ] D.2 marker 隔离钉：写入确认物后，该候选 `candidate_state` 的 `_manual_retry_requested` 仍为 `False`，调度决策仍为 breaker `blocked`（pin 不匹配时）。
-- [ ] D.3 accessor 测试：
+- [x] D.2 marker 隔离钉：写入确认物后，该候选 `candidate_state` 的 `_manual_retry_requested` 仍为 `False`，调度决策仍为 breaker `blocked`（pin 不匹配时）。
+- [x] D.3 accessor 测试：
       - 按 `model_id + decision` 精确过滤；
       - 别的模型或别的 decision 的确认物不返回；
       - 读失败返回 `[]`；
       - forecast_cycle 行状态为 `complete` / `published` 时仍能读到（F3，按 `model_id=None` 读）；
       - 事件数超过 `DEFAULT_CANDIDATE_STATE_EVENT_LIMIT` 时仍能读到（不经 bounded candidate_state）。
-- [ ] D.4 #1555 闭环（`tests/test_production_scheduler.py`，E2E 形状，走 scheduler pass）：
+- [x] D.4 #1555 闭环（`tests/test_production_scheduler.py`，E2E 形状，走 scheduler pass）：
       **必须在 backfill 模式下跑**（`backfill_enabled=True`），几何为单 cycle 且全部模型 breaker-engaged（F1）。
       1. breaker 已触发（occurrences 等于阈值）：无确认物时 cycle 以 not-selected 呈现，`submitted_count == 0`；
       2. 通过 `confirm-operator-reentry --attest`（CLI 入口）写入 token + `pin == occurrences` 的确认物后，下一 pass 该 cycle 保留执行槽位，并产生**真实** replacement forecast submission，evidence 带 `operator_reentry_confirmation`；
@@ -85,25 +85,25 @@
       5. 下一 pass occurrences 加 1，回到 breaker 释放 / `blocked`，`submitted_count == 0`；
       6. 变体：rerun 记录另一个 stale token Y 时，同样回到 blocked，`submitted_count == 0`（F2）。
       另加一条 mixed：同一 cycle 两个 breaker 模型、只确认其中一个，未确认的仍 `blocked`。
-- [ ] D.5 #1555 × #1844：非 strict 车道，确认物匹配但本模型无 forcing 时，候选落入 #1843 具名 `blocked`，`submitted_count == 0`。
-- [ ] D.6 #1768 闭环（E2E，strict 车道，在 backfill 模式下跑）：
+- [x] D.5 #1555 × #1844：非 strict 车道，确认物匹配但本模型无 forcing 时，候选落入 #1843 具名 `blocked`，`submitted_count == 0`。
+- [x] D.6 #1768 闭环（E2E，strict 车道，在 backfill 模式下跑）：
       1. 用 CONFLICT 几何（记录 init_state_id 与选中 state 不一致，使 cycle 保持 gap 占槽）构造，`attempt >= retry_limit` 时 `blocked`；
       2. `pin == attempt` 确认物使下一 pass 产生真实 retry submission，且不改 `NHMS_SCHEDULER_RETRY_LIMIT`；
       3. 中间 pass：`submitted_count == 0`；
       4. rerun 行使 attempt 加 1，下一 pass 回到 `blocked`；
       5. `pin != attempt`（陈旧）的确认物不放行。
-- [ ] D.7 DB plane / 无 accessor 替身：行为逐字节不变，breaker 与预算都保持 `blocked`。
-- [ ] D.8 实现：
+- [x] D.7 DB plane / 无 accessor 替身：行为逐字节不变，breaker 与预算都保持 `blocked`。
+- [x] D.8 实现：
       - `operator_reentry_confirmations` accessor（`_cycle_rows(model_id=None)`）；
       - `scheduler_generation.operator_reentry_confirmation_match` 共享谓词；
       - 三个消费点：discovery `_breaker_engaged_gap_identities`、breaker 铸造点、预算铸造点；
       - 两条 blocked evidence 的 `retry_policy` 追加 `operator_reentry_command` / `recovery_runbook`；
       - `operator_reentry_confirmation.py` 与 `confirm-operator-reentry` 子命令。
-- [ ] D.9 既有钉原样全绿：
+- [x] D.9 既有钉原样全绿：
       - forced-resubmit 白名单成员钉；
       - §8.7 read-only invariant 测试；
       - breaker 系列（`tests/test_scheduler_generation.py`、`tests/test_warm_start_chaining.py`、`tests/test_scheduler_backfill.py`）。
-- [ ] D.10 runbook：
+- [x] D.10 runbook：
       - `scheduler-dbfree-typed-reasons.md` §8.7 breaker 节的处置步骤从「带外新提交身份」改为 `confirm-operator-reentry`，写明命令、预期 evidence 形状、一次一授权与已知限制；
       - `failed-basin-retry.md` 的 strict 预算节改为同一通道，不再以抬全局旋钮为首选；
       - 已知限制写明：已确认模型若一直被 forcing 见证闸挡住，cycle 会持续占槽，确认物无撤销手段（需先回补 forcing）。

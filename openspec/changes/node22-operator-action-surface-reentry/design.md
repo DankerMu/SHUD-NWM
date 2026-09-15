@@ -134,7 +134,7 @@
   - 默认 dry-run，`--attest` 才写入。
 - **前置条件**（不满足即 exit 2，不写）：
   1. journal 对 `(source, cycle, model)` 有 completed identity，即 `completed_pipeline_init_state_identity` 非 `None`。
-  2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等、`occurrences == --pin`，并且 breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`）。
+  2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等（写侧意图前置条件）、breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`），并要求 `--pin` 等于**模型级 quarantine rerun 计数**（见下文「实现后修订」）。
   3. 若 decision 为预算：写侧不重算 attempt。attempt 依赖调度侧的候选权威视图，不在写侧复制这段逻辑。`--pin` 取自 `list-operator-actions` 输出的 `attempt`，写侧只要求 `pin >= 1`。pin 与现值不符的确认物在读侧是惰性的，不会放行，见下文。
 - **写入**：
   - `insert_pipeline_event(entity_type="forecast_cycle", entity_id=<cycle_id>, event_type="operator_reentry_confirmation", status_from=None, status_to="confirmed", details={model_id, decision, pin, operator, reason, request_id, recorded_init_state_id}`，其中 `recorded_init_state_id` 仅 breaker 必填)`；
@@ -155,15 +155,15 @@
 
 - 共享谓词放在 `scheduler_generation.py`，与 `journal_identity_quarantine_occurrence_count` 相邻：`operator_reentry_confirmation_match(repository, *, source_id, cycle_time, model_id, decision, pin, recorded_init_state_id=None) -> dict | None`。
   - 同样按 `getattr` 注入 accessor，任何异常都返回 `None`。
-  - breaker 决策要求 `details.recorded_init_state_id == recorded_init_state_id` 且 `details.pin == pin`；预算决策只比较 pin。
+  - breaker 与预算决策在读侧都只比较 pin；breaker 的 pin 现值是模型级 quarantine rerun 计数，不再比较 token（见「实现后修订」）。
   - 多条匹配时取最新一条（按 event_id）。
-- **discovery（F1）**：`_breaker_engaged_gap_identities`（`scheduler_discovery.py:535-588`）在 `breaker_engaged(occurrences)` 为真后，若该模型的谓词匹配（token + occurrences），立即 `return None`，即保留执行槽位。
+- **discovery（F1）**：`_breaker_engaged_gap_identities`（`scheduler_discovery.py:535-588`）在 `breaker_engaged(occurrences)` 为真后，若该模型的谓词匹配（pin == 模型级 rerun 计数），立即 `return None`，即保留执行槽位。
   - 语义与既有「mixed cycle」规则一致：有 confirmed 模型就是有真实工作，用 any 而不是 every。
   - 仍然只读，cycle 仍为 gap，不会被判 complete。
   - 同一 cycle 里未确认的 breaker 模型在 `build_candidates` 中照常 `blocked`。
 
 
-- **breaker（#1555）**：在 `_journal_predecessor_identity_quarantine` 中，`breaker_engaged(occurrences)` 为真之后、返回 `blocked` 之前，调用谓词（token = `recorded_init_state_id`，pin = `occurrences`）。
+- **breaker（#1555）**：在 `_journal_predecessor_identity_quarantine` 中，`breaker_engaged(occurrences)` 为真之后、返回 `blocked` 之前，调用谓词（pin 现值 = 模型级 quarantine rerun 计数）。
   - 存在则返回既有的 `CandidateStateDecision("retry", "journal_predecessor_identity_mismatch", ...)`；
   - evidence 在 `_journal_predecessor_identity_retry_evidence` 基础上追加 `operator_reentry_confirmation: {request_id, operator, reason, pin, decision}`。
   - 该 retry 已在两处白名单内；非 strict 车道仍经 `:625-634` 的 #1844 forcing 见证闸（调用点在本函数之后，无需改动）。
@@ -173,7 +173,7 @@
   - 随后照常经 `:587` 见证闸。
 - **严格相等**：pin 与现值必须严格相等，不接受 `>=` / `<=`。
 - **一次授权一次重入（为什么能自动失效）**：
-  - breaker：放行后，rerun 以同一 stale token 完成，并带 provenance 的 master 使 occurrences +1，pin 不再匹配，breaker 重新接管。rerun 若记录另一个 stale token Y，确认物绑定的是旧 token，不匹配，Y 自己的 breaker 接管（F2）。rerun 若拿到正确 token，`matches is not False`，候选回到正常 skip。fixture review 已核实 provenance 戳由 `state_evidence.decision == "retry_journal_predecessor_identity_mismatch"` 触发（`accepted_submit_identity.py:1186-1208`），重入 retry 复用同一 evidence。
+  - breaker：放行后，rerun 无论记录哪个 token，只要以带 provenance 的 master 完成，模型级 rerun 计数就 +1，pin 不再匹配，breaker 重新接管（F2 变体同样收敛）。fixture review 已核实 provenance 戳由 `state_evidence.decision == "retry_journal_predecessor_identity_mismatch"` 触发（`accepted_submit_identity.py:1186-1208`），重入 retry 复用同一 evidence。
   - 预算：放行后，rerun 行的 `_retry_<n>` 使 attempt +1，pin 不再匹配，再次 `attempt >= limit` 即回到 `blocked`。
   - 放行到 rerun 完成之间，候选处于 active/非 completed 状态，活跃判定先于 terminal skip（`scheduler_state_decision.py:193-221`），不会再次进入铸造点。这一点由 D.4 与 D.6 的中间 pass 测试钉住。
 - **§8.7 read-only invariant**：三个消费点都只读 accessor，评分/过滤面不写 journal。discovery 侧的 quarantine **filter**（`_journal_predecessor_identity_is_stale`）不读确认物，保持只能 DECLINE；读确认物的只有槽位释放判断，而它的作用只是「不释放」，不会 ADMIT completion。
@@ -182,6 +182,12 @@
 - **已知限制**（写进 runbook）：
   - breaker 放行的 rerun 若在 Slurm 层失败，没有 completed master，occurrences 不变，确认物依旧匹配。但此时候选不再是 completed-skip，而是 failed，走普通失败重试预算；只有 rerun 最终 completed 且带 stale token，确认物才被消费。
   - 这不构成无限自旋：失败路径受 retry 预算约束，completed 路径使 pin 失效。
+- **实现后修订（Phase 1 发现，非第三轮 fixture review）**：
+  - 原设计把 breaker 确认物的消费绑定在 token 维度的 `occurrences(X)` 上。实现时 D.4 第 6 步（rerun 记录另一个 stale token Y）实测失败：file journal 在同 run_id 重跑时不更新已 succeeded 的 `hydro_run` 行（`create_hydro_run_from_basin` → `_write_hydro_run(retriable_only=True)` 抛 `HYDRO_RUN_NOT_RETRIABLE` 后返回旧行，`file_orchestration_journal.py:2499-2510`、`:9015-9026`），而 `completed_pipeline_init_state_identity` 以 `hydro_run` 为第一权威（`:1428-1438`）。于是 live token 冻结在首跑的 X，`occurrences(X)` 不随 Y 变化，确认物被二次消费。
+  - 修订：pin 现值改为**模型级 quarantine rerun 计数**——对 `(source, cycle, model)` 统计已完成且 provenance 命名该模型的 cohort master 数，合格规则与 `completed_pipeline_init_state_id_occurrences` 相同（aggregate terminal-success，或 `partially_failed` 且该模型 projection 为 succeeded），但不比较 identity。任何 token 的已完成 rerun 都使其恰好 +1，确认物无条件被消费。新增只读 accessor `completed_quarantine_rerun_count`（journal-direct，`_cycle_rows`），读失败返回 `None`（谓词视为不匹配）。
+  - `--recorded-init-state-id` 保留为写侧意图前置条件；读侧不再比较 token。
+  - `hydro_run` 权威冻结本身是既有缺陷（§8.7 在 node-22 上对「rerun 得到正确 lineage」的情形也无法收敛），按越界规则单独立 issue，不在本批修复。
+
 - **evidence 措辞**：两条 blocked evidence 的 `retry_policy` 追加 `operator_reentry_command: "confirm-operator-reentry"` 与 `recovery_runbook: "node22-control-plane-manual-recovery"`，使 `manual_retry_required: true` 指向真实通道。
 
 ## D5 — #1820 逐行 / 逐 cycle 隔离（仅 operator 命令）
