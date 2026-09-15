@@ -14,6 +14,8 @@ Live read-only facts (2026-09-15T02:52Z, node-27, `READ ONLY` transactions):
 | Legacy chunks | five 7-day chunks 2026-08-20..09-24; retention drops them like narrow chunks (`_legacy` sibling) |
 | Parser throughput (production autopipe, NEW) | one LH-YLJ run: 512 232 rows in ≈34 s, one process |
 | Since T0 | only LH-YLJ (3049 segments) has gone through the NEW parser in production |
+| Artifacts (production `plan`, 03:15Z, display RO role, runner sha256 `5a145389…`) | 3770 candidates, 0 missing `.rivqdown`; oldest cycle with artifact 2026-08-18T12Z; 0 compressed narrow overlap |
+| Ownership | `hydro.river_timeseries`, its 8 chunks and its compressed hypertable owned by `nhms_ingest_rw` (so `decompress_chunk` runs under the ingest role) |
 
 At ~15 k rows/s per process, a single-process run needs ~66 h. The runner is therefore concurrent and resumable. The
 production pilot measures real scaling before the full run.
@@ -108,3 +110,9 @@ file, built in memory by a launcher; they never appear in argv or receipts.
 - [Checkpoint/WAL pressure at `max_wal_size` 1 GB] → throughput-only effect; no archive or slot can fill a disk.
 - [A reparse differs from the legacy parse] → `verify` sample; any mismatch stops the rollout before the contract.
 - [Autopipe latency during the run] → bounded concurrency; autopipe is not blocked by the mutex.
+- [Row lock held for a whole parse (minutes for a 16 k-segment run)] → an autopipe `UPDATE` of the same `hydro_run` row
+  (e.g. superseding it) waits or hits its own lock timeout and retries next tick; this is tick noise, not
+  corruption, because the before/after checks run under the same lock.
+- [Only LH-YLJ has gone through NEW in production] → the pilot's summary and `runs.jsonl` show per-run seconds and
+  rows; the full run stops on the failure budget if a large network fails, and a large-network run's timing is read
+  in the first session before its deadline is extended.

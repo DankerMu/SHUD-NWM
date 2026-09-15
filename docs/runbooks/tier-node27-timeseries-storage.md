@@ -6241,6 +6241,8 @@ pass a DSN in argv. `plan` and `verify` also run under the display read-only rol
 2. Pilot: `run --go <token> --limit 20 --concurrency 4 --deadline <UTC+2h>`.
    The unit holds the lifecycle mutex. Compression (exit 2) and retention
    (exit 1) ticks during the run are expected refusals, not incidents.
+   Autopipe may log a lock wait on a run being reparsed, since the row lock
+   lasts a whole parse; it retries next tick.
    Derive rows/s from `runs.jsonl` `seconds`/`rows_written`, then choose the
    concurrency and deadline for the full run.
 3. Full run: the same command without `--limit`. Optionally add

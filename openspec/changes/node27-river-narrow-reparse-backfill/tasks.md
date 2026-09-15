@@ -30,9 +30,11 @@ plus the mutant driver.
 Hygiene: `uv run ruff check scripts/node27_river_narrow_reparse_backfill.py tests/test_node27_river_narrow_reparse_backfill*.py`;
 `openspec validate node27-river-narrow-reparse-backfill --strict --no-interactive`.
 
-Evidence: node-27 at `d29045eb` (pre-docs head; runner bytes unchanged since): 15 DB-free + 8 real-DB passed. The six
-mutants give 6/1/2/1/1/1 failures, then the source is restored clean. The row-lock aged-out assertion was added
-afterwards and is re-run at the PR head (see PR body).
+Evidence: node-27 at `d29045eb` (first runner head): 15 DB-free + 8 real-DB passed. The six
+mutants give 6/1/2/1/1/1 failures, then the source is restored clean; later runner changes only add the read-only plan artifact check. The row-lock aged-out assertion was added
+afterwards, together with the plan artifact check: 23 passed at `18b80827`. The production import check ran the
+runner with `PYTHONPATH=/home/nwm/NWM` at `415cbd1e` (`import_ok`, parser from the live tree). Read-only production
+`plan` at `18b80827`: 3770 candidates, 0 artifacts missing, 3.56 B estimated rows (design Context).
 
 ## 2. Documentation and gate
 
