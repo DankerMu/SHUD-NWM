@@ -1,0 +1,265 @@
+{
+ "tool_commit": "3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1",
+ "executors": {
+  "window_execute.py": "d6737c15c756776495b02f1b99e9254d8fca87a478dafe29ff1190cc93cdd969",
+  "window_smoke.py": "3605c4f43be585547ea57b522bf7b0a59ca781c7c815d439069f279809104b3a"
+ },
+ "driver_sha256": "d4f1ef5ddd357436d05d27054d2364de9627a2fa7b5dba93e78aadd50146ca8f",
+ "container": "nwm-i8-1987-window-volume-6fb30b552",
+ "deployment_target": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+ "matrix": [
+  {
+   "case": "happy",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_happy_3cdcf500_20260915010911408129",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_3cdcf500_20260915010911408129.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_3cdcf500_20260915010911408129.stdout": "11c23bc65b18f6eb32919bc6406d27d39993998e6e2aeaf9abe1457779943eba",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_happy_3cdcf500_20260915010911408129.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "stop",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_stop_3cdcf500_20260915010926514975",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_3cdcf500_20260915010926514975.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_3cdcf500_20260915010926514975.stdout": "37cc9d8362d3d00d2fe34d2b57133f781335c796213411c2698ffe796c313eff",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_stop_3cdcf500_20260915010926514975.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "session",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_session_3cdcf500_20260915010933305232",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_3cdcf500_20260915010933305232.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_3cdcf500_20260915010933305232.stdout": "cd69186c4547ddf90fd6b3c3be57b4433feb20e67bb4f831743c3aa435bfdf7e",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_session_3cdcf500_20260915010933305232.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "fence",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_fence_3cdcf500_20260915010940289642",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_3cdcf500_20260915010940289642.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_3cdcf500_20260915010940289642.stdout": "7f86b1d5f4b24b906222541cdec9ff1049901abf3170797a13baaed34312613d",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_fence_3cdcf500_20260915010940289642.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "do-before-ledger",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_do_before_ledger_3cdcf500_20260915010947172067",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_3cdcf500_20260915010947172067.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_3cdcf500_20260915010947172067.stdout": "f8d0b2d5f417e59ecb104572241f8563f7916b31638d177f5bcab5d879846972",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_do_before_ledger_3cdcf500_20260915010947172067.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "rename",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_rename_3cdcf500_20260915010956169449",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_3cdcf500_20260915010956169449.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_3cdcf500_20260915010956169449.stdout": "4d6bd9608dde51aee07791b5c10f38070640e1578c1a7a2fc79aad309e11f3a3",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_rename_3cdcf500_20260915010956169449.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "source",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_source_3cdcf500_20260915011004512383",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_3cdcf500_20260915011004512383.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_3cdcf500_20260915011004512383.stdout": "786302aa97ed8e40096d9ad1826c08a04fbfa6eaca0af258c696bbde757702aa",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_source_3cdcf500_20260915011004512383.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "restart",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_restart_3cdcf500_20260915011012698481",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_3cdcf500_20260915011012698481.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_3cdcf500_20260915011012698481.stdout": "284a62543dc2e821ea86410da41659d5977b7b9b29a6808ac585446736ed32de",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_restart_3cdcf500_20260915011012698481.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   }
+  },
+  {
+   "case": "reforward",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_reforward_3cdcf500_20260915011021832945",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_3cdcf500_20260915011021832945.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_3cdcf500_20260915011021832945.stdout": "accb62b34359a6876cd2510d92160c51794d5e4fb88cd5f37e02b9e496e02538",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_3cdcf500_20260915011021832945.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   },
+   "final_phase": "RECOVERED_OLD_RETAINED",
+   "refusals": [
+    "READMISSION_TABLE_SET",
+    "READMISSION_TABLE_SET",
+    "READMISSION_OID_MISMATCH",
+    "READMISSION_OWNER_MISMATCH",
+    "READMISSION_LEDGER_MISMATCH",
+    "RETAINED_RUN_CHANGED_SINCE_D12",
+    "RETAINED_RUN_NOT_IN_PROVENANCE",
+    "PROVENANCE_HASH_MISMATCH",
+    "RETAINED_READ_IDENTITY_MISMATCH",
+    "PROVENANCE_EXECUTOR_RUNNING",
+    "PREPARE_MODE_CONFIG_MISMATCH",
+    "PREPARED_SIGNED_GO_REQUIRED",
+    "PREPARED_SIGNED_GO_REQUIRED",
+    "PREPARED_STATE_DRIFT",
+    "RETAINED_RUN_CHANGED_SINCE_D12"
+   ],
+   "third_readmission": [
+    "i8_narrow_run",
+    "i8_reforward_run"
+   ]
+  },
+  {
+   "case": "reforward-rename",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_reforward_rename_3cdcf500_20260915011047556657",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_rename_3cdcf500_20260915011047556657.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_rename_3cdcf500_20260915011047556657.stdout": "499ff31ed00b020c50d603c796521533fe0a5865b0ff1e4421c0775705199cce",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_rename_3cdcf500_20260915011047556657.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   },
+   "final_phase": "RECOVERED_OLD_RETAINED",
+   "refusals": [],
+   "third_readmission": [
+    "i8_narrow_run"
+   ]
+  },
+  {
+   "case": "reforward-restart",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_reforward_restart_3cdcf500_20260915011102663535",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_restart_3cdcf500_20260915011102663535.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_restart_3cdcf500_20260915011102663535.stdout": "e17f406162f026834975c664a8fe815ee2ad1b8b02a292fc572d4dc534abf904",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_restart_3cdcf500_20260915011102663535.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   },
+   "final_phase": "RECOVERED_OLD_RETAINED",
+   "refusals": [],
+   "third_readmission": [
+    "i8_narrow_run",
+    "i8_reforward_run"
+   ]
+  },
+  {
+   "case": "reforward-readiness",
+   "returncode": 0,
+   "records": [
+    {
+     "result": "PASS"
+    }
+   ],
+   "database": "i8_1987_reforward_readiness_3cdcf500_20260915011119519277",
+   "receipt_path": "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_readiness_3cdcf500_20260915011119519277.receipt.json",
+   "logs": {
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_readiness_3cdcf500_20260915011119519277.stdout": "9bf624b8224cccc6320ed6ea9ad2fc7fb7d453e17882ac122e13cf0481155c54",
+    "/home/nwm/tmp/i8-window-oracle-6fb30b552/i8_1987_reforward_readiness_3cdcf500_20260915011119519277.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+   },
+   "final_phase": "RECOVERED_OLD_RETAINED",
+   "refusals": [],
+   "third_readmission": [
+    "i8_narrow_run",
+    "i8_reforward_run"
+   ]
+  }
+ ],
+ "db_free": {
+  "unit-config": {
+   "stdout_sha256": "f2d3b4b6e48c9c7853469a5fac31a6b85f53b061fc46f672e89739a7fd4e0eea",
+   "tail": "IT_CONFIG_CHANGED\", \"state_unchanged\": true, \"system_actions\": [], \"worker_calls\": []}], \"result\": \"PASS\", \"scope\": \"typed unit comparator and pre-T0 admission only; no database or production operation\", \"state\": \"/home/nwm/tmp/issue2374/dbfree-3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1-unit-config\"}\n"
+  },
+  "display-ready": {
+   "stdout_sha256": "73c21aea59a32662632d6d02ebe6744b62012af4a7582e0d1fe67a8de98cf3c8",
+   "tail": "e\": \"forward-then-recovery\", \"forward_probes\": 2, \"recovery_probes\": 2, \"result\": \"pass\"}], \"result\": \"PASS\", \"scope\": \"shared start_runtime health readiness only; no database or production operation\", \"state\": \"/home/nwm/tmp/issue2374/dbfree-3cdcf5007583b57c3e08c08b9cf6ad754c0b56f1-display-ready\"}\n"
+  }
+ },
+ "all_pass": true,
+ "production_operations": false,
+ "isolation_bite_proof": [
+  {
+   "mutant": "reattach routes retained runs 'legacy'",
+   "window_execute_sha256": "4584d761c4228943174bc644dc367bab52cf179f361ceafe118e485c2334bba5",
+   "case": "reforward",
+   "returncode": 1,
+   "check": "RETAINED_ROUTE_MISMATCH"
+  },
+  {
+   "mutant": "readmission ignores parsed_at change",
+   "window_execute_sha256": "ffd4e4b97a0b07b3fc64024b05a0e9407393793833dc0c98faefb59260fa0b05",
+   "case": "reforward",
+   "returncode": 1,
+   "check": "REFORWARD_REFUSAL_ACCEPTED:RETAINED_RUN_CHANGED_SINCE_D12"
+  }
+ ],
+ "simulated_boundaries": "systemd, process inspection, git selection, role-provisioning script, national HTTP transport and readiness answer; SQL, OIDs, ledger, parser rows and reader values real",
+ "limitations": [
+  "reprepare shared runtime admission (container/proxy/units/HOLD) is not re-driven; the reforward oracle drives the real readmission DB block plus the real reforward window",
+  "recovery narrow-OID pin (design D6) has no dedicated foreign-canonical negative case",
+  "pre-reattach failure recovery is not exercised: it writes no narrow-routes-before-reverse.json, so a later reprepare citing that state fails untyped on the missing file; the original D12 state remains the provenance (design D6, runbook 4.10.3)"
+ ]
+}

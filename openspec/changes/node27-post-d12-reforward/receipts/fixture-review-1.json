@@ -1,0 +1,32 @@
+{
+  "change": "node27-post-d12-reforward",
+  "issue": 2374,
+  "review": "design fixture review against issue acceptance",
+  "reviewer_seat": "orchestrator (user instruction 2026-09-15: no agent teams); advisor consulted before design",
+  "live_inputs": {
+    "at": "2026-09-15T00:47Z",
+    "mode": "READ ONLY transactions and catalog/state-file reads on node-27; no fact-table scans",
+    "catalog": {"river_timeseries": 24541, "river_timeseries_narrow_rollback": 309763188, "owners": "nhms_ingest_rw"},
+    "runs_created_since_t0": 0,
+    "runs_parsed_since_d12": 0,
+    "retained_run": {"run_key": 17892, "snapshot_status": "parsed", "live_status": "published", "parsed_at": "2026-09-14T21:10:49.225683+00:00", "rows": 512232},
+    "prior_state_phase": "BLOCKED_FENCED",
+    "lifecycle_targets": "compression and retention select hydro.river_timeseries by name"
+  },
+  "acceptance_mapping": [
+    {"bullet": "disposable expand->narrow parse->D12->new-state re-admission->re-forward succeeds, OIDs/facts/ledger preserved", "design": ["D1", "D2", "D3", "D4", "D5", "D7 reforward"], "verdict": "covered"},
+    {"bullet": "OLD facts and route changes since D12 accounted; narrow-only visibility explicit, never assigned to missing data", "design": ["D3 rule 6", "D4 derivation"], "verdict": "covered"},
+    {"bullet": "extra/missing/foreign tables, divergent ledger, changed runtime/ownership/provenance refuse before mutation", "design": ["D2 shared runtime admission", "D3 checks 1-6 pre-T0 and in fence", "D7 refusal set"], "verdict": "covered"},
+    {"bullet": "no ledger DELETE, rollback DROP, implicit 000059 rerun, reuse of failed original state", "design": ["D1", "D2"], "verdict": "covered"},
+    {"bullet": "forward failure after second rename and during readiness recovers with data and OLD service", "design": ["D4 single transaction", "D6", "D7 reforward-rename/restart/readiness"], "verdict": "covered"},
+    {"bullet": "hashes and explicit GO required; initial path unchanged and tested", "design": ["D2", "tasks Evidence Floor: eight-case matrix rerun"], "verdict": "covered"}
+  ],
+  "findings": [
+    {"id": "F1", "severity": "P1", "summary": "Snapshot status 'parsed' differs from live 'published' for the retained run; status equality would refuse the real state.", "resolution": "D3 rule 6 compares run_id and parsed_at exactly and requires status in parsed/published (publication does not reparse)."},
+    {"id": "F2", "severity": "P1", "summary": "Initial claim that OLD parses only succeeded+unparsed runs is false: autopipe recompute reparses published runs (#1789).", "resolution": "Rule 6 rests on unconditional parsed_at=now() in the OLD parse transaction (a8db554d parser.py parse_run/mark_run_parsed), verified in source."},
+    {"id": "F3", "severity": "P2", "summary": "A run_key probe on the OLD store decompresses every compressed chunk (EXPLAIN on production).", "resolution": "Retained discovery is a loose index scan on the rollback primary key; no OLD-store scan."},
+    {"id": "F4", "severity": "P2", "summary": "Reverse recovery accepted any non-OLD canonical OID; after reattach it must be the admitted narrow OID.", "resolution": "D6 pins canonical to narrow_oid in reforward mode."}
+  ],
+  "decisions_for_user_veto": ["reattach not drop/re-expand", "route derivation from retained facts + D12 snapshot", "separate reprepare/reforward commands", "NEW stays 415cbd1e"],
+  "result": "clean after F1-F4 folded into design"
+}
