@@ -148,7 +148,10 @@ issue 验收 3 要求 `test_completed_forecast_cycle_stale_journal_identity_is_q
    不在本批。
 
 **被接受的成本**：每次模型换代都必须跑 `scripts/node22_backfill_forcing_for_model_ids.py`。漏跑的代价是一批候选
-长期停在具名、可见的 `blocked`，而不是静默烧毁。这项成本写进 runbook（tasks 3.1），并在 #1826 下留言定性为
+长期停在具名、可见的 `blocked`，而不是静默烧毁；并且被挡住的 cycle 在 completion 打分里是 `gap`、没有已打标的
+quarantine rerun，breaker 不释放它，它会占住该 source 唯一的 backfill 执行槽，更晚的 gap 停在
+`backfill_deferred_waiting_for_prior_cycle`（`scheduler_discovery.py:818-855`，round-1 审查读码确认；与本 PR 之前
+失败 rerun 的占槽行为相同，不是回归）。这项成本写进 runbook（tasks 3.1），并在 #1826 下留言定性为
 已接受（tasks 3.2）。
 
 **被否决的中间态**（issue 备选：聚合排空清单/告警）：不在本批范围，不做。它能降低「得有人记得」的成本，

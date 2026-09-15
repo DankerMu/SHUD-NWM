@@ -11249,6 +11249,9 @@ def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_e
     assert result.evidence["counts"]["submitted_count"] == 1
     # #1844: the retry was emitted after the witness guard consulted THIS model's package.
     assert state_evidence["forcing_provenance"]["source"] == "journal"
+    # #1844 AC2: the quarantine retry restarts at ``forecast``.
+    assert state_evidence["restart_stage"] == "forecast"
+    assert state_evidence["restart_from_stage"] == "forecast"
 
 
 def test_completed_forecast_cycle_stale_journal_identity_without_own_forcing_blocks_end_to_end(
@@ -11307,14 +11310,16 @@ def test_completed_forecast_cycle_stale_journal_identity_without_own_forcing_blo
 def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_quarantine_witness(
     tmp_path: Path,
 ) -> None:
-    """#1844 acceptance 4: ``manual_retry_requested`` is outside the quarantine witness gate.
+    """#1844 acceptance 4: a manual retry is not rewritten by the quarantine call site's witness consultation.
 
-    The gate sits inside the ``action == "skip"`` branch and a manual retry is a
-    ``retry``, so the quarantine (and the witness wrapped around it) does not reach it
-    (design D1, static reading).
-    Pinned end to end with a stale journal lineage AND no forcing witness: the
-    candidate keeps its manual-retry decision and submits, as it does without the
-    journal accessor (see the placeholder-bypass test above).
+    The quarantine and its witness consultation sit inside the ``action == "skip"``
+    branch; a manual retry is a ``retry``, so that call site does not reach it
+    (design D1, static reading).  The prior failure is cold-start quarantined, so the
+    manual-retry evidence carries ``restart_stage == "forecast"`` and the witness helper
+    would NOT return early if it were consulted here -- that keeps the pin non-vacuous.
+    Pinned end to end with a stale journal lineage AND no forcing witness (no recorded
+    package, no ``OBJECT_STORE_ROOT``): the candidate keeps its manual-retry decision.
+    Manual cold-start forecast restarts are deliberately not witnessed by this change.
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -11335,7 +11340,7 @@ def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_
                     "status": "permanently_failed",
                     "stage": "forecast",
                     "retry_count": 3,
-                    "error_code": "NODE_FAILURE",
+                    "error_code": "COLD_START_QUARANTINED",
                     "updated_at": "2026-05-21T06:57:16Z",
                 }
             ],
@@ -11347,7 +11352,7 @@ def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_
                     "status_from": "failed",
                     "status_to": "permanently_failed",
                     "created_at": "2026-05-21T06:57:16Z",
-                    "details": {**identity, "final_retry_count": 3, "last_error": "NODE_FAILURE"},
+                    "details": {**identity, "final_retry_count": 3, "last_error": "COLD_START_QUARANTINED"},
                 },
                 {
                     "event_id": 102,
@@ -11362,7 +11367,7 @@ def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_
                         "manual_retry_marker": True,
                         "retry_count": 4,
                         "previous_job_id": failed_job_id,
-                        "prior_failure_reason": "NODE_FAILURE",
+                        "prior_failure_reason": "COLD_START_QUARANTINED",
                     },
                 },
             ],
@@ -11386,6 +11391,7 @@ def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_
     state_evidence = result.evidence["candidates"][0]["state_evidence"]
     assert state_evidence["decision"] == "manual_retry"
     assert state_evidence["reason"] == "manual_retry_requested"
+    assert state_evidence["restart_stage"] == "forecast"
     assert "journal_predecessor_identity" not in state_evidence
     assert "forcing_provenance" not in state_evidence
 

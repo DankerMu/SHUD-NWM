@@ -60,6 +60,9 @@
 - [x] 2.4 DB 与 FileJournal producer 回归：确认既有测试覆盖以下两处，并在 PR 中列出测试名；缺失时补。
       - `retry.py:465` 的叠加 id；
       - `file_orchestration_journal.py:10708-10730` 的 accepted-submit / 非 accepted-submit 两形。
+      - 覆盖测试：DB 叠加 `tests/test_retry.py::test_schedule_auto_retry_on_a_retry_row_stacks_the_suffix`；
+        FileJournal accepted-submit `tests/test_file_orchestration_journal.py::test_next_current_master_retry_identity_is_stable_after_helper_consolidation`；
+        FileJournal 非 accepted-submit `tests/test_file_orchestration_journal.py::test_file_journal_auto_retry_on_a_retry_row_stacks_the_suffix`。
 
 ## 3. #1846 — 裁决落档（design D3）
 
@@ -68,7 +71,8 @@
       - (b) 它排空的 `blocked` 来源：#1843 strict-warm-start 见证，以及 #1844 quarantine 见证（本批）。
       - (c) 排空通道按车道写：strict warm-start 车道可用 `node22_backfill_forcing_for_model_ids.py`，
         也可用运维授权单 cycle 修复；非 strict 车道（#1844 quarantine）**只能**用回补脚本，
-        原因是精确修复通道会以 `warm_state_missing` 拒绝。
+        原因是该车道上修复策略根本不被评估（即便补一次调用也会以 `warm_state_missing` 拒绝，design D1）；
+        round-1 C1 修正：runbook 不得声称运维会看到 `warm_state_missing`。
       - (d) 裁决出处链接到本 change 归档后的 design.md 路径。
 - [ ] 3.2 在 #1826（已关闭）下发评论：引用本 PR 与 D3，定性「每次换代须人工回补」为已接受成本。merge 后发。
 

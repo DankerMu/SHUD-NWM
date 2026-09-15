@@ -10,7 +10,8 @@
 它把「模型换代后自己没有 forcing，forecast 一秒死在 `ARTIFACT_NOT_FOUND`」这个危害类封在了
 strict-warm-start 车道。剩下的是一个同类洞、一个 retry 序号缺陷，外加一个悬而未决的设计取舍：
 
-- **#1844（调度决策侧最后一个未设防发射点）**：`_journal_predecessor_identity_quarantine`
+- **#1844（调度决策侧一个未设防发射点）**：同一车道上 `terminal_run_manifest_missing` retry 是另一个既有的未设防发射点，
+  不在 #1844 范围，round-1 审查确认后另立 issue 跟踪。`_journal_predecessor_identity_quarantine`
   （`services/orchestrator/scheduler_candidates.py:2304`）在 `strict_warm_start is None` 车道上，
   用硬编码 `restart_stage: "forecast"` 的 retry 替换 skip 决策（`:613-624`）。之后只有
   `strict_warm_start is not None` 才过 `:638-650` 的见证闸。
