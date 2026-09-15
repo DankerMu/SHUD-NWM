@@ -149,5 +149,5 @@ start, bounded by30 seconds and by remaining forward window/outage budgets where
 #### Scenario: Readiness is exercised by the disposable window oracle
 
 - **WHEN** the disposable eight-case window oracle runs any case that starts the display service
-- **THEN** the readiness transport resolves against the oracle's own simulated boundary and real socket creation
-  refuses, so no case can reach a live host service
+- **THEN** the readiness transport resolves against the oracle's own simulated boundary and any real urllib HTTP
+  request refuses, so no case can reach a live host HTTP service

@@ -145,7 +145,7 @@ OpenSpec; runtime smoke on node27 with TMPDIR=/home/nwm/tmp. No live unit change
 - [x] 5.3 Prove old-red/changed-green delayed listener, never-ready, failed-unit/permanent-error and both startup paths,
       plus recovery-budget exhaustion and a blocking unit-status refusal, and re-earn the eight-case window matrix
       with the readiness transport isolated on the oracle; no production restart.
-- [ ] 5.4 Complete focused review/CI and publish immutable source/evidence for parent recovery and re-forward work.
+- [x] 5.4 Complete focused review/CI and publish immutable source/evidence for parent recovery and re-forward work.
 
 Evidence Floor: real recorded ConnectionRefused failure in both startup paths and separate manual OLD restoration;
 focused actual HTTP listener oracle plus deterministic deadline failures, source/public gating and no timer release
@@ -155,7 +155,7 @@ remains OLD with retained narrow rollback and ledger; #2374 owns new re-forward 
 Verification: tools `20eb5b8741037723eea6a5d581727cc925a4cdfe`; node27 real-listener focused PASS
 (`receipts/child2373-focused-readiness.json`, 14 reports including the new recovery-budget and blocked-unit-status
 cases) and 8/8 window matrix PASS (`receipts/child2373-window-matrix.json`) with the readiness transport simulated
-and real socket creation refused. A negative control that deletes only the oracle's readiness override fails closed
+and real urllib HTTP requests refused. A negative control that deletes only the oracle's readiness override fails closed
 with `REAL_SOCKET_BOUNDARY`, so the isolation claim is enforced rather than asserted. Production was not restarted.
 
 Withdrawn evidence: the matrix receipt recorded at tools `5c840cbcf2c7aff2d24a87e014af3d313ed4f96e` is void. Its

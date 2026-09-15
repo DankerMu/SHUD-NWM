@@ -294,9 +294,10 @@ simulated one. The disposable eight-case matrix isolates its boundaries by overr
 so any readiness transport that does not route through an overridden seam escapes to the host. On node27 the host
 already answers `GET 127.0.0.1:8080/health` with200 from the live display API, so an unisolated probe silently
 borrows production instead of failing. The matrix therefore overrides the readiness transport the same way it
-overrides the simulated HTTP seam, and additionally forbids real socket creation for the duration of a matrix case,
-so the isolation claim is enforced by the harness rather than asserted in a receipt. Only the focused readiness
-oracle keeps a real socket, bound to an ephemeral loopback port it owns.
+overrides the simulated HTTP seam, and additionally makes the real urllib HTTP transport refuse for the duration of
+a matrix case, so the isolation claim is enforced by the harness rather than asserted in a receipt. The guard is
+HTTP-only: the matrix's disposable database connections still use real sockets by design. Only the focused
+readiness oracle keeps a real HTTP transport, bound to an ephemeral loopback listener it owns.
 
 Budget exhaustion must produce the same typed refusal regardless of which bounded call consumes the budget. A
 blocking unit-status call raises the process-runner's own timeout rather than a typed refusal, so the readiness wait
