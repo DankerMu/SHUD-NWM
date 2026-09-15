@@ -186,8 +186,10 @@ test pinning "no production caller" so the fact cannot rot.
    only `evidence.lane` is added and the `status` literal changes.
 3. `verify_journal_root_authority`'s returned path stays unresolved, so a
    repository still reads the exact configured location.
-4. `migrate-scheduler-state` behaviour, the db-free preflight lane and the
-   retention/restore authority are untouched.
+4. The db-free preflight lane and the retention/restore authority are
+   untouched. (`migrate-scheduler-state` was on this list until round 1; D4a
+   supersedes it — the lane keeps its exit code and its export behaviour, and
+   changes only the rendering of a refusal it already inherited.)
 5. Census `--max-records` remains the escape valve, and the existing
    `CENSUS_OUTPUT_*` codes keep their meanings.
 

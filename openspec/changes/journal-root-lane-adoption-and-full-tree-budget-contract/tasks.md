@@ -26,8 +26,11 @@
       would otherwise raise `ValueError` on any legitimate `~` root.
 - [x] 1.6 Widen `except` arms to include `OrchestratorError`:
       `operator_released_reservation_recovery.py:250,284`; `cli.py:600,637,666`
-      (click) and `:894,911,926` (argparse). Leave `migrate-scheduler-state`
-      (`cli.py:559,875`) unchanged.
+      (click) and `:894,911,926` (argparse). `migrate-scheduler-state`
+      (`cli.py:560,896`) gains the same arm ahead of its existing
+      `(RuntimeError, ValueError)` arm — revised after round 1, see design D4a;
+      the original instruction here was to leave it unchanged, and review showed
+      that left the shipped spec, the code and the runbook disagreeing.
 - [x] 1.7 `journal_scope_census.py:544`: wrap `expanduser` and raise the new
       `CENSUS_OUTPUT_UNEXPANDABLE`; update the CLI help so the code list and its
       timing wording stay true (design D5).

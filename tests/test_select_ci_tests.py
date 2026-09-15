@@ -9131,11 +9131,22 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # #1953: the third instance of exactly that shape. The budget-contract suite
     # imports `TERMINAL_JOB_STATUSES` from chain_types to assert the synthetic
     # blocked-read status stays OUTSIDE it, while its subject is the journal's
-    # record budget — and the dedicated oracle for the status sets themselves is
-    # tests/test_hydro_status_set_parity.py, which the chain rules already carry.
-    # The same focused-`::`-node-ids contract as the two pairs above applies, so
-    # the suite is selected from the file_orchestration_journal.py and cli.py
-    # stop rules instead.
+    # record budget. The same focused-`::`-node-ids contract as the two pairs
+    # above applies, so the suite is selected from the
+    # file_orchestration_journal.py and cli.py stop rules instead.
+    # Stated plainly, because this table is only worth what its reasons are
+    # worth: this exclusion DOES strand one assertion. The suite's
+    # `TERMINAL_JOB_STATUSES == RUNTIME_TERMINAL_JOB_STATUSES` check is the only
+    # place the two hand-written terminal sets (chain_types.py and
+    # chain_runtime_utils.py) are compared, and a chain_types-only PR selects no
+    # suite that runs it — tests/test_hydro_status_set_parity.py governs the
+    # hydro run-status sets, NOT these two, and is not in chain_types.py's
+    # selection either. A divergence would therefore be caught by the master
+    # full run rather than on the PR. Routing the budget suite into the
+    # chain_types stop rule is not the fix: it breaks that rule's focused-node
+    # contract (two selector tests pin it). Moving the parity assertion to a
+    # suite the chain rules already carry would be, and is left to whoever owns
+    # that pair of sets next.
     ("services/orchestrator/chain_types.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
