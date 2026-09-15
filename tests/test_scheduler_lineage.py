@@ -336,6 +336,65 @@ def test_clone_lineage_signal_unreadable_index_is_a_resolution_failure(tmp_path:
     assert excinfo.value.source_id == "gfs"
 
 
+def test_clone_lineage_signal_that_raises_is_a_resolution_failure() -> None:
+    """D4's "``clone_lineage_signal`` raises ⇒ FAILURE" row, pinned on its own.
+
+    The real file-plane implementation answers ``{"status": "blocked", ...}``
+    rather than raising for every index fault, so this branch is only reachable
+    through a provider that breaks that convention — and `clone_lineage_signal`
+    DOES have one such route of its own (an invalid non-empty ``source_id``
+    escapes its internal ``except StateManagerError``). A duck-typed stub is
+    therefore the honest seam: it exercises the branch without asserting that
+    the production repository takes it.
+
+    The ``reason`` literal is the whole payload of the operator signal
+    (``log_lineage_resolution_failure`` renders it verbatim) and nothing else in
+    the suite spells it, so it would drift silently.  The ``__cause__`` chain is
+    pinned for the same reason: the warn line renders it, and dropping ``from
+    error`` would turn "it failed BECAUSE X" into "it failed".
+    """
+
+    driver_error = RuntimeError("index provider exploded")
+
+    class _RaisingSignalRepo:
+        def clone_lineage_signal(self, *, model_id: str, source_id: str) -> dict[str, Any]:
+            raise driver_error
+
+    with pytest.raises(scheduler_lineage.LineageResolutionError) as excinfo:
+        scheduler_lineage.resolve_lineage_cutover(
+            _RaisingSignalRepo(), model_id="model_a_prime", source_id="gfs"
+        )
+
+    assert excinfo.value.reason == "clone_lineage_signal_failed"
+    assert excinfo.value.model_id == "model_a_prime"
+    assert excinfo.value.source_id == "gfs"
+    assert excinfo.value.__cause__ is driver_error
+
+
+def test_clone_lineage_signal_returning_a_non_mapping_is_a_resolution_failure() -> None:
+    """D4's "``clone_lineage_signal`` returns a non-Mapping ⇒ FAILURE" row.
+
+    A provider that answers with something the resolver cannot read has broken
+    the resolution contract; that is not the same claim as "this model has no
+    predecessor", so it must not be memoized as one.  A list is used rather than
+    ``None`` on purpose: ``None`` is falsy and a future ``if not signal`` shortcut
+    would let it collapse back into "no lineage" unnoticed.
+    """
+
+    class _NonMappingSignalRepo:
+        def clone_lineage_signal(self, *, model_id: str, source_id: str) -> list[str]:
+            return ["not", "a", "mapping"]
+
+    with pytest.raises(scheduler_lineage.LineageResolutionError) as excinfo:
+        scheduler_lineage.resolve_lineage_cutover(
+            _NonMappingSignalRepo(), model_id="model_a_prime", source_id="gfs"
+        )
+
+    assert excinfo.value.reason == "clone_lineage_signal_contract_violation"
+    assert excinfo.value.model_id == "model_a_prime"
+    assert excinfo.value.source_id == "gfs"
+
+
 def test_clone_lineage_signal_takes_the_earliest_clone_row(tmp_path: Path) -> None:
     """Task 5.8 / D4: a backdated re-activation must not move the boundary later."""
     object_root = tmp_path / "objects"

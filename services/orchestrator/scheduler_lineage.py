@@ -37,8 +37,16 @@ Boundaries (change ``lineage-scoped-cycle-completion``):
   single transient DB blip be memoized as a permanent "no lineage" for the rest
   of the process, silently reverting the pair to pre-#1735 semantics with no
   operator signal.  The caller still ends up treating a failure as "no lineage"
-  for the pass it is in — the point is that it must not REMEMBER it, and must
-  say so out loud.
+  for the CALL it is in — per call, NOT per pass.  Nothing is memoized, so a
+  later call for the same pair inside the SAME pass may resolve, and one pass's
+  evidence can disagree with itself: a model scored in scope by one consumer and
+  annotated ``lineage_scoped_out_pre_cutover`` by another.  The disagreement is
+  monotone (``None`` first, then the cutover — a SUCCESS is memoized the moment
+  it happens and the cache is never cleared mid-pass) and it is always in the
+  LOUD direction, because every consumer that sees ``None`` keeps the model in
+  scope, which at worst leaves a visible stuck gap.  It self-heals on the next
+  pass.  The point is that a failure must not be REMEMBERED, and must say so out
+  loud.
 - A clone row naming ITSELF as its predecessor (``cloned_from_model_id ==
   model_id``) is corrupt provenance, not an existence-start, and confers no
   lineage.  Both planes reject it at the reader; this module rejects it again
@@ -48,7 +56,14 @@ Boundaries (change ``lineage-scoped-cycle-completion``):
   proves nothing — the silent direction, since the gap simply disappears.
 
 The resolution result is a scoping input; the ``lineage_scoped_out_pre_cutover``
-record it produces is an ANNOTATION and is never read back as a decision input.
+record it produces is an ANNOTATION, and is not re-derived into a decision
+anywhere.  One carrier is the exception to "never read back": the backfill
+predecessor lane stows the record on its own pending entry
+(``scheduler_backfill_predecessor.py``'s ``_extract_pending_predecessors``) and
+``emit_predecessor_candidates`` branches on its presence to skip the prepend.
+That is the SAME decision handed forward between two functions of one pass, not
+a consumer turning an annotation into a new decision — but it does mean the
+record IS read, so do not delete it on the strength of "nothing reads it".
 """
 
 from __future__ import annotations
@@ -311,8 +326,11 @@ def lineage_scoped_out_record(
 
     Names the excluded model, its predecessor, and the resolved ``t*`` so an
     operator can tell "scoped out because it did not exist yet" from "every
-    model genuinely completed" without re-deriving lineage.  Annotation only —
-    never read back as a completion, admission, or selection input.
+    model genuinely completed" without re-deriving lineage.  Annotation only: it
+    is never re-derived into a completion, admission or selection decision.  The
+    backfill predecessor lane does READ one copy back, to carry its own
+    already-made skip decision across two functions of the same pass — see the
+    module docstring.
     """
 
     record: dict[str, Any] = {

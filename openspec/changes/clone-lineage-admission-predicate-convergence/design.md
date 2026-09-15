@@ -69,35 +69,46 @@ publisher 在同一次写入事务里刚刚亲手写下了那行的 `clone_gate_
 
 写在 reader docstring 里，以免下一个人「顺手对齐」。
 
-## D3 — 收敛后两面仍存的一条分叉：空白串 parent（report, don't fix）
+## D3 — 收敛后两面仍存的分叉：`cloned_from_model_id` 规范化轴的**两种**形状（report, don't fix）
 
-去掉 fingerprint 条件后，两面在 fingerprint 这一轴上完全一致，但**另一轴仍分叉**：文件面
-`_clone_entries_for_model_source` 对 `cloned_from_model_id` 做 `.strip()` 并跳过空白串
-（`state_manager.py:3705-3707`），DB 面的 `cloned_from_model_id IS NOT NULL` 接受空白串。
+去掉 fingerprint 条件后，两面在 fingerprint 这一轴上完全一致，但**规范化轴仍分叉**：文件面
+`_clone_entries_for_model_source` 对 `cloned_from_model_id` 先 `.strip()` 再判定
+（改后 `state_manager.py:3783-3785`），DB 面的 SQL 判的是原始字节（`state_manager.py:962-963`）。
+该轴上有**两种**遮蔽形状，不是一种——第二种是 round-2 审查才发现的，早先「只剩一条分叉」的措辞是错的：
 
-后果比装饰性更重：一行空白串 parent 的行若是最早行，DB 面 earliest reader 会**选中它**，随后
-`_from_clone_row`（`scheduler_lineage.py:121-134`）因 `predecessor_model_id` 为空而返回 `None`
+1. **空白串 parent**：文件面跳过，DB 面 `cloned_from_model_id IS NOT NULL` 接受。
+2. **带空白的自指 parent**：`cloned_from_model_id = 'model_a_prime '` 而 `model_id = 'model_a_prime'`。
+   文件面 strip 后判定为自指、跳过；DB 面 `cloned_from_model_id <> model_id` 是**逐字**比较（没有
+   `btrim`），两串不等，于是**接受**。
+
+后果比装饰性更重，且两种形状一致：这样一行若是最早行，DB 面 earliest reader 会**选中它**，随后
+resolver `_from_clone_row`（改前 `scheduler_lineage.py:121-134`，改后 `:208-222`）因
+`predecessor_model_id` 为空（形状 1）或 strip 后自指（形状 2，`:209`+`:213-214`）而返回 `None`
 →「无血缘」，**即便后面还有一行合法 clone 行**；文件面则跳过它、找到后面那行、给出 `t*`。同一模型两面
-不同答案。
+不同答案——已用两个真实 reader 实跑确认 `t*` 分叉。
 
 这条**不在本 PR 修**：它属于 `cloned_from_model_id` 的规范化轴，不是 #1739 裁定的 fingerprint 轴，
-修它要动 SQL 的 `btrim(...) <> ''` 或 DB 约束，属于另一次裁定。本 PR 的义务是：
-`_clone_entries_for_model_source` 的 docstring **如实描述收敛后剩下的这一条分叉**（验收项 3 要求
-docstring 不再描述已消除的分叉，而不是要求它宣称两面完全一致），并另立 follow-up issue。
+修它要动 SQL 或 DB 约束，属于另一次裁定。本 PR 的义务是：
+`_clone_entries_for_model_source` 的 docstring **如实描述收敛后剩下的这两条分叉**（验收项 3 要求
+docstring 不再描述已消除的分叉，而不是要求它宣称两面完全一致），并另立 follow-up issue（已立：**#2392**）。
 node-27 live receipt 显示现网 `whitespace_only_parent = 0`。
 
-两点必须一并写进 docstring，否则下一个人会拿本 PR 的措辞去改错地方：
+三点必须一并写进 docstring，否则下一个人会拿本 PR 的措辞去改错地方：
 
 1. **本次去掉 fingerprint 条件小幅扩大了这条分叉的暴露面**：在此之前「空白串 parent 且无 fingerprint」
    的行 DB 面根本选不中；之后它也能进入 `LIMIT 1` 的候选，从而可能遮蔽后面那行合法 clone 行。存量为零，
    但方向要如实记。
 2. **spec delta 那句 "keyed on `cloned_from_model_id` alone — present, non-empty, and different" 里的
-   non-empty，在 DB 面是由 resolver 的 `.strip()`（`scheduler_lineage.py:122-125`）满足的，不是由 SQL
+   non-empty，在 DB 面是由 resolver `_from_clone_row` 的 `.strip()`（改后 `scheduler_lineage.py:209`）
+   满足的，不是由 SQL
    满足的**。合规点落在 resolver 那一层。把这句话当成「SQL 也该加 `btrim(...) <> ''`」去改，会连带改变
    `LIMIT 1` 的选行，属于另一次裁定。
+3. **`btrim(cloned_from_model_id) <> ''` 只关掉形状 1**。形状 2 还需要
+   `btrim(cloned_from_model_id) <> model_id`。只补 emptiness 那一句的 follow-up 会看起来做完了、
+   实际把第二种遮蔽原样留下——这一点必须写进 docstring，因为它正是下一个人最容易漏的半步。
 
 为什么这条不算 #1739 的 in-scope：#1739 验收项 2 的原文是「对**同一行**给出同一答案（含缺 fingerprint
-行）」。逐行看，两面对空白串 parent 行的答案本来就一致（都不成立血缘）；分歧出在 `LIMIT 1` 的**遮蔽**
+行）」。逐行看，两面对这两种行的答案本来就一致（都不成立血缘）；分歧出在 `LIMIT 1` 的**遮蔽**
 层面，不在谓词轴上。
 
 ## D4 — 失败不缓存：`resolve_lineage_cutover` 抛异常（#1740 裁定，用户拍板）
@@ -122,18 +133,28 @@ node-27 live receipt 显示现网 `whitespace_only_parent = 0`。
 | `get_earliest_clone_row_for_model_source` 返回 `None` | **无血缘**（可缓存） | 读成功、该 pair 没有 clone 行 |
 | `clone_lineage_signal` 抛异常 | **失败** | 该方法号称不抛，但契约不能靠它自觉；见下方「确定性入参错误」一条 |
 | `clone_lineage_signal` 返回 `status == "blocked"`，reason 为 `state_snapshot_index_missing` | **无血缘**（可缓存） | 见 D4a——这是「从没发布过索引」的正常冷态，不是故障 |
-| `clone_lineage_signal` 返回 `status == "blocked"`，reason 为其它（unreadable / malformed_json / not_object / size_limit / 校验或新鲜度失败） | **失败** | 文件面**不抛异常**，而是返回 `{"status": "blocked", "has_lineage": False, ...}`（`state_manager.py:1691-1710`）。不把这些认成失败，文件面就还是今天那个「索引坏了 = 无血缘」的静默塌缩 |
+| `clone_lineage_signal` 返回 `status == "blocked"`，reason 为其它（unreadable / malformed_json / not_object / size_limit / 校验或新鲜度失败） | **失败** | 文件面**不抛异常**，而是返回 `{"status": "blocked", "has_lineage": False, ...}`（`state_manager.py:1741-1760`）。不把这些认成失败，文件面就还是今天那个「索引坏了 = 无血缘」的静默塌缩 |
 | `clone_lineage_signal` 返回非 Mapping | **失败** | provider 契约被破坏，不是「没有血缘」 |
 | 签名 ready 但 `has_lineage=False` | **无血缘**（可缓存） | 正常答案 |
 | 签名 ready、有血缘但字段不可解析（predecessor 空 / 时间解析不出 / 自指） | **无血缘**（可缓存） | 已由 D1/#1738 裁定为「这行不成立血缘」，不是读失败 |
 
 **确定性入参错误按失败处理，且刻意不收敛**：`clone_lineage_signal` 的
-`_normalize_state_index_source_id(...)`（`state_manager.py:1711`）落在它自己的
-`try/except StateManagerError`（`:1691-1693`）**之外**，非法 `source_id` 会直接向上抛，按表落入
+`_normalize_state_index_source_id(...)`（`state_manager.py:1761`）落在它自己的
+`try/except StateManagerError`（`:1741-1743`）**之外**，非法 `source_id` 会直接向上抛，按表落入
 「失败」。这与表里「入参为空 ⇒ 可缓存」看似冲突，是刻意的：空 `source_id` 由 resolver 自己在入口挡掉、
-不代表配置有错；而一个**非法**（非空但不合规）的 `source_id` 是调度器配置里的真缺陷，每 pass 重试一次
-并重新 warn 一次，正是它应得的响度——把它缓存成「无血缘」会让一条配置错误永久静音。代价是该 key 永不
-收敛，这是明知的选择，不是遗漏。
+不代表配置有错；而一个**非法**（非空但不合规）的 `source_id` 表示有人把一个没经过规范化的 id 喂进了
+血缘解析，每次被问到就重试一次、重新 warn 一次，正是它应得的响度——把它缓存成「无血缘」会让这条缺陷
+永久静音。代价是该 key 永不收敛，这是明知的选择，不是遗漏。
+
+**这条非法 `source_id` 从哪来（round 2 审查修正，原文说的「调度器配置里的真缺陷」是错的）**：配置面进不来。
+config 的 `source_id` 在构造期就过 `normalize_source_id`（`scheduler_runtime_roots.py:538` 的
+`_normalize_sources`），不合规在**配置时**就抛，到不了血缘解析。唯一的活路由是
+`scheduler_backfill_predecessor.py:141`：它的 `source_id` 取自**持久化 journal 行**里的
+`selected_predecessor.source_id`（`:107`），而不是 config。且还要同时满足
+`cycle_id` 为空/缺失——`:121-131` 那段在 `declared_cycle_id` 非空时会先调 `cycle_id_for(source_id, ...)`，
+非法 `source_id` 在那里就 `ValueError` → `continue`，根本走不到 resolver。所以这条非收敛路径的前提是
+**一行被手工改坏的持久化 journal 行：`source_id` 非法且 `cycle_id` 空/缺**。
+另外这只在文件面成立：DB 面一个非法 `source_id` 只是 SQL 匹配不到行 ⇒ `None` ⇒ 照常进缓存。
 
 **db-free 面也跟着变**（#1740 的备选方案里点名要评估这一面）：文件面今天靠每 pass 清缓存兜底，但
 「索引坏了」在缓存生命周期内同样会被当成无血缘复用。改后它归入失败、不进缓存，行为只会更响亮。
@@ -141,11 +162,13 @@ node-27 live receipt 显示现网 `whitespace_only_parent = 0`。
 ## D4a — 为什么「索引缺失」不是失败
 
 `clone_lineage_signal` 用 `allow_empty=False` 调 `_load_index_snapshot`
-（`state_manager.py:1692`），而 `_read_payload` 在**索引文件不存在**时就抛
-`state_snapshot_index_missing`（`state_manager.py:1991-1998`）。把整个 `status == "blocked"` 一刀切
+（`state_manager.py:1742`），而 `_read_payload` 在**索引文件不存在**时就抛
+`state_snapshot_index_missing`（`state_manager.py:2040-2048`）。把整个 `status == "blocked"` 一刀切
 成失败会踩一个大坑：**一套从未发布过 state-clone 索引的 db-free 部署是健康的，不是故障的**——它只是
 没有任何 clone。一刀切后，这种系统的每个 `(model_id, source_id)` 在每 pass 都会抛一次、warn 一次，
 永不收敛；而 node-22 的生产 scheduler 恰恰是 db-free 面。那不是「更响亮」，那是把噪声当信号。
+（**适用面见下方 D4a-1 的修正**：在 db-free-required 生产面上，这种「从没发布过索引」的部署其实会先被
+运行时 preflight 挡住，根本走不到血缘解析——本段描述的噪声场景比原文窄，但裁定本身不变。）
 
 所以分界按 blocker reason 走，不按 `status` 走：
 
@@ -154,8 +177,44 @@ node-27 live receipt 显示现网 `whitespace_only_parent = 0`。
 - 其余 reason（读不出来 / JSON 坏 / 不是对象 / 超限 / 校验或新鲜度不过）⇒ **失败**。这些都表示
   「索引本该有内容，但我拿不到」，正是 #1740 要求区分出来的那一类。
 
-reason 从 `_first_state_index_blocker_reason`（`state_manager.py:4400-4406`）取，`clone_lineage_signal`
-已经把它放进返回值的 `reason` 字段（`:1695`、`:1700`），resolver 直接读该字段即可，无需新接口。
+reason 从 `_first_state_index_blocker_reason`（`state_manager.py:4478-4484`）取，`clone_lineage_signal`
+已经把它放进返回值的 `reason` 字段（`:1745`、`:1750`），resolver 直接读该字段即可，无需新接口。
+
+### D4a-1 — 「`state_snapshot_index_missing` 太宽」的反驳（round 2 审查，已实证）
+
+审查意见：`state_snapshot_index_missing` 不只覆盖「从没发布过」，也覆盖「索引路径上某一级目录不可达」
+（例如 NFS 掉了），于是一次真故障会被这条静默分支伪装成健康冷态。**该意见被推翻**，理由是一条本来
+没写进设计、却承重的前置事实：**索引路径本身在任何血缘解析之前，已由 db-free 运行时 preflight 裁决过**。
+
+链路（逐条核对过）：
+
+1. `_lineage_provider`（`scheduler_core.py:739-740`）只在 `config.db_free_required` 为真时选文件面
+   provider，否则走 DB repo。也就是说 `clone_lineage_signal` 这条分支在生产里**只在 db-free 模式下可达**
+   （`db_free_required` 就是 `scheduler_db_free_required` 的 property，`scheduler_config/config.py:657-659`）。
+2. 同一个开关下，`db_free_runtime_preflight()` 把 `_DB_FREE_PATH_SPECS` 逐条送进 `_db_free_path_check`
+   （`scheduler_config/config.py:763-769`），而该表里**就有索引本身**：
+   `("scheduler_state_index", "NHMS_SCHEDULER_STATE_INDEX", "file")`（`:52`）。
+3. `kind="file"` 的判定里，父目录不存在 ⇒ `db_free_required_path_parent_missing`
+   （`scheduler_config/db_free.py:307-308`）；叶子文件不存在 ⇒ `db_free_required_path_not_found`（`:347-348`）；
+   还有 symlink / 不可读 / 越界 / realpath 失败各自的 blocker。
+4. 任一 blocker ⇒ 整个 pass 在取锁前就 `preflight_blocked`，
+   `execution_boundary: "db_free_runtime_preflight_blocked"`（`scheduler_runtime.py:668-700`，字面量在 `:698`）。
+5. 生产配置的索引路径正是那条 NFS 根下的本地路径
+   （`infra/env/compute.scheduler-dbfree.env.example:50`），所以 NFS 掉了就落在第 3 条里。
+
+所以 NFS 类故障的结局是 `preflight_blocked`——比任何 warn 都响，而且根本走不到血缘解析。
+另外，publisher 发布时会**自建父目录链**（`state_manager.py:4036` → `provider_atomic.py:374`
+`atomic_write_bytes_no_follow` → `safe_fs.py:133` 的 `_open_parent_dir(..., create=True)`），
+所以「合法根下面缺一级中间目录」和「从没发布过」本来就是同一个状态，不是两件事。
+
+**同时必须诚实记一条**：第 3 条里「叶子文件不存在」也会 block。这意味着在 db-free-required 的生产面上，
+D4a 开头那句「一套从没发布过索引的部署会每 pass 抛一次 warn 一次」其实**到不了**——那种部署会先被
+preflight 更响地挡住。D4a 的裁定依然成立，但它的适用面比原文窄，真正剩下的可达路径是两条：
+preflight 与解析之间的 TOCTOU（索引在窗口内被删），以及任何不经 preflight 直接构造
+`FileStateSnapshotIndexRepository` 的嵌入方（测试、未来的非 db-free-required 调用方）。
+在这两条路径上，「没有索引」与「索引里没有这个 pair」仍是同一个答案，把它判成失败只会在**什么都没坏**
+的时候制造一条永不收敛的 warn。这条 reason 之所以可以静默，正是因为它能伪装的那一类故障已经在上游
+被更响地挡掉了——这是它安全的**理由**，必须写下来，否则下一个人只会看到「一个过宽的字面量走了静默分支」。
 
 ## D5 — 失败不缓存的成本上界，以及为什么不选「每 pass 清缓存」
 
@@ -164,7 +223,7 @@ reason 从 `_first_state_index_blocker_reason`（`state_manager.py:4400-4406`）
   `O(models × sources × 消费点数)`，且**只在已经出错的路径上发生**。稳态（无失败）零额外查询。
 - **失败不缓存的成本（db-free 面，逐条记明，#1740 验收项 4）**：文件面的失败不是逐 key 偶发，而是
   **整面同时**——索引一旦坏掉，每个 pair 都 blocked。叠加两条放大器：(1) `_load_index_snapshot` 只在
-  成功时写缓存（`state_manager.py:1930-1932`），失败路径**每次重读并重校验整份索引文件**；(2) D6 不做
+  成功时写缓存（`state_manager.py:1980-1982`），失败路径**每次重读并重校验整份索引文件**；(2) D6 不做
   warn 去重。于是索引损坏期间每 pass 产生 `O(models × sources × 3)` 次整索引读取与同量 warn 行。
   **明确接受这个代价**，三条理由：(a) D4a 已经把最常见也最良性的那一类（索引从未发布）划出失败，
   剩下的都是索引真的坏了——那时 scheduler 已经处于降级态，重复读取的绝对成本远小于「静默按无血缘调度」
@@ -212,10 +271,23 @@ if m0_model_id == m1_model_id:
   `self_clone_target` 而不是 `reverse_clone_target_not_direct_grid`——否则这条测试根本没在测排序。
 - **比较口径**：逐字 `==`。不做 `.strip()` / 大小写折叠——model_id 在全仓是逐字键（`state_snapshot_id`
   直接拼接它），引入规范化会让这条闸与 id 铸造口径分叉，正是 D3 那类问题。
-- **已知限制（记录，不修）**：`_refuse` 硬编码 `refusal_code =
+- **已知限制 1（记录，不修）**：`_refuse` 硬编码 `refusal_code =
   STATE_CLONE_COLD_START_APPROVAL_REQUIRED`，对一个「调用方传错参数」的拒绝语义上不贴切
   （它本意是「需要人工批准冷启动」）。改 refusal code 会动所有既有 refusal 的稳定错误码契约
   （docs §11.3 clause 2），远超本 issue 边界。新 scope 在 audit 记录里已经把原因说清楚。
+- **已知限制 2（记录，不修；写在这里是为了不被误读成 #1741 的漏洞）**：逐字比较意味着
+  `m0='model_a_prime '` / `m1='model_a_prime'` **不会**被这道闸拒掉。但 #1741 真正要防的伤害——
+  把源行**原地覆写**——在这种情况下依然不会发生，两条互相独立的理由：
+  1. m1 带空白时，`_build_clone_row` 连 `state_id` 都铸不出来：`state_snapshot_id`
+     （`state_manager.py:4519-4529`）走 `_safe_path_component`（`:4679-4686`，
+     `_SAFE_PATH_COMPONENT = ^[A-Za-z0-9_.-]+$`）不接受空白字符，直接 `ValueError`，一行都不会写。
+  2. m0 带空白时，铸出的 `state_id` 逐字嵌的是**干净的 m1**，而源行是另一个 `model_id` 的行；
+     upsert 按 `state_id` 主键落地，写的是新行，不是源行。
+  残留物恰好就是 D3 的**遮蔽形状 2**：新行 `model_id='model_a_prime'` 而
+  `cloned_from_model_id='model_a_prime '`（`_build_clone_row` 逐字抄 `source_snapshot.model_id`，
+  `state_clone.py:738`），DB 面 SQL 会把它放进 `LIMIT 1`、resolver 再把它判掉。那是
+  `cloned_from_model_id` 规范化轴（#2392 / D3 注 3）的事，不是这道闸的事——所以
+  **不动这道闸的逐字比较**。
 - 模块 docstring 的 refusal scope 清单同步新增该 scope，并把计数改对。`packages/common/state_clone.py`
   里写死 "six" 的地方共 **4 处**，不是 2 处，全部要改：`:24`（模块 docstring "The six distinguished
   refusal scopes are"）、`:55`（"adds a seventh scope"）、`:205`（`StateCloneAuditRecorder` docstring
@@ -267,7 +339,8 @@ lineage', never an error"）也过时——`unreadable` 现在是 error。这是
 | 验收项来源 | 证据 |
 |---|---|
 | #1739 裁定留痕 | 本文件 D1 + D2 + D3 |
-| #1739 两面同答案 | `tests/test_scheduler_lineage.py` 负向文本钉 + 文件面对称用例 |
+| #1739 两面同答案 | `tests/test_scheduler_lineage.py` 负向文本钉 + 文件面对称用例（两者都不执行 SQL） |
+| #1739 谓词本身的可执行 oracle | `tests/test_real_database_integration.py::test_real_clone_row_readers_disagree_about_a_null_fingerprint_row` —— 真实 PG 上跑两个 reader，同时钉裁定、D2 不对称与 ASC/DESC 排序（tasks 1.8 / EF-4） |
 | #1739 docstring 不再描述已消除的分叉 | `_clone_entries_for_model_source` docstring 改写（D3） |
 | #1739 live 计数 | `docs/runbooks/receipts/2026-09-15-issue-1739-clone-provenance-count-node27.md` |
 | #1740 失败后续 pass 可重解析 | 新回归测试：会抛一次再成功的 fake provider |

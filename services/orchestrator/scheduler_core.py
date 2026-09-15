@@ -765,8 +765,9 @@ class ProductionScheduler:
             # #1740: a FAILED resolution is not an answer, so it is NOT
             # memoized — on the DB plane this dict is never cleared, so caching
             # it would pin the pair to "no lineage" for the life of the
-            # process.  The caller's semantics are unchanged (no lineage for
-            # this pass); the next pass re-attempts the read.
+            # process.  THIS CALL's semantics are unchanged (no lineage); a
+            # later call — the next pass, or another consumer in this same
+            # pass — re-attempts it.  See scheduler_lineage's module docstring.
             _scheduler_lineage.log_lineage_resolution_failure(error)
             return None
         self._lineage_cutover_cache[key] = cutover

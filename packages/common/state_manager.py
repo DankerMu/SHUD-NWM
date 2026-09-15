@@ -1710,10 +1710,34 @@ class FileStateSnapshotIndexRepository:
           later, which is the silent-hide direction.
 
         Reads the already-loaded (cached) index snapshot, so a scheduling
-        pass that has touched the index issues no additional read.  Never
-        raises: an absent clone entry, and an index that cannot be loaded,
-        both yield ``has_lineage=False`` — "no lineage", which leaves the
-        model scored exactly as a model that never cloned.
+        pass that has touched the index issues no additional read.
+
+        Never raises on anything the INDEX itself can be in: an absent clone
+        entry and an index that cannot be loaded both come back as
+        ``has_lineage=False``.  (The one raise left is an invalid non-empty
+        ``source_id`` — ``_normalize_state_index_source_id`` below sits outside
+        the ``except StateManagerError`` deliberately; see change
+        ``clone-lineage-admission-predicate-convergence`` D4.)
+
+        Those two ``has_lineage=False`` answers are NOT the same answer, and
+        ``status`` is what separates them (#1740):
+
+        - an absent clone entry is ``status="ready"`` — a RESOLVED "this model
+          has no lineage", which :func:`resolve_lineage_cutover` reports as
+          ``None`` and the scheduler's own cache memoizes;
+        - an index that cannot be loaded is ``status="blocked"`` with a
+          ``reason``, which :func:`resolve_lineage_cutover` treats as a
+          resolution FAILURE: it raises ``LineageResolutionError``, the
+          scheduler warns and does NOT memoize.  The exception is ``reason ==
+          "state_snapshot_index_missing"`` (never published), which says the
+          same thing as "this pair is not in the index" and stays memoizable
+          (D4a).
+
+        What #1740 changed is memoization and the operator signal, NOT per-pass
+        scoring: ``scheduler_core`` catches that error and still returns
+        ``None`` for the call, so for THAT call the model is still scored
+        exactly as a model that never cloned.  It is simply no longer
+        REMEMBERED that way for the life of the process.
         """
         try:
             index_snapshot = self._load_index_snapshot(allow_empty=False)
@@ -3704,13 +3728,22 @@ def _clone_entries_for_model_source(
     so both planes key lineage admission on ``cloned_from_model_id`` alone.
     This function has never read the fingerprint.
 
-    One divergence survives, on a different axis: this plane ``.strip()``\\ s
-    ``cloned_from_model_id`` and skips a WHITESPACE-ONLY value, while the DB
-    plane's ``cloned_from_model_id IS NOT NULL`` accepts it.  Row-for-row the
-    two still give the same ANSWER — neither confers lineage from a blank
-    parent — but the DB plane can let such a row win its ``LIMIT 1`` and
-    thereby MASK a later, legitimate clone row, where this plane skips it and
-    finds the legitimate one.  Two notes for whoever reads this next:
+    What survives is a different axis — ``cloned_from_model_id``
+    NORMALISATION — and it has TWO shapes, not one.  This plane ``.strip()``\\ s
+    the value before judging it; the SQL judges the raw bytes:
+
+    * a WHITESPACE-ONLY parent — this plane skips it, the DB plane's
+      ``cloned_from_model_id IS NOT NULL`` accepts it;
+    * a self-reference WITH SURROUNDING WHITESPACE (``'model_a_prime '`` under
+      ``model_id = 'model_a_prime'``) — this plane strips it and skips it as
+      self-referential, while the SQL's ``cloned_from_model_id <> model_id``
+      compares literally, finds the two strings unequal, and accepts it.
+
+    Row-for-row the two planes still give the same ANSWER — neither confers
+    lineage from a blank or from a self-naming parent — but in BOTH shapes the
+    DB plane lets such a row win its ``LIMIT 1``, the resolver then rejects it
+    and reports "no lineage", and a later LEGITIMATE clone row is MASKED — the
+    row this plane would have found.  Three notes for whoever reads this next:
 
     * Dropping the fingerprint condition widened that exposure slightly. A row
       with a blank parent AND no fingerprint was previously unselectable on the
@@ -3725,11 +3758,19 @@ def _clone_entries_for_model_source(
       NOT by the SQL. Reading that sentence as "the SQL should also say
       ``btrim(...) <> ''``" would change which row ``LIMIT 1`` returns, which
       is a separate ruling on the ``cloned_from_model_id`` NORMALISATION axis —
-      out of scope for #1739's fingerprint ruling, and tracked as a follow-up.
+      out of scope for #1739's fingerprint ruling, and tracked as #2392.
+    * That ``btrim(...) <> ''`` sketch closes the FIRST shape only. The padded
+      self-reference needs ``btrim(cloned_from_model_id) <> model_id`` as well;
+      a follow-up that adds only the emptiness test would leave the second
+      masking shape standing and look finished.
 
-    A row naming ITSELF as its own predecessor is rejected on both planes:
-    lineage is a clone from a *predecessor* model, and an identity is not its
-    own predecessor.
+    A row naming ITSELF as its own predecessor confers no lineage on either
+    plane — lineage is a clone from a *predecessor* model, and an identity is
+    not its own predecessor — but WHERE that is enforced differs, and the
+    difference is what the second shape above exploits. This plane rejects it
+    during SELECTION, so the next candidate is considered. The DB plane rejects
+    it at the RESOLVER, after ``LIMIT 1`` has already spent the single row it
+    returns; the SQL's own ``<> model_id`` catches only the byte-exact case.
 
     Ordering is ``(valid_time, created_at)`` ASC — see
     :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal` for why
