@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -2217,6 +2218,208 @@ def test_db_plane_provider_is_constructed_once_and_memoized(
     assert second is not None
     assert second.predecessor_model_id == "model_b_legacy"
     assert provider.calls == [("model_a", "gfs"), ("model_b", "gfs")]
+
+
+_LINEAGE_WARN_LOGGER = "services.orchestrator.scheduler_lineage"
+
+
+class _FlakyEarliestCloneRowRepository:
+    """A DB-plane provider whose first read raises and whose second succeeds.
+
+    Models the production trigger for #1740: one transient connection blip
+    during a long-lived DB-plane pass.  The scheduler never clears
+    ``_lineage_cutover_cache`` on that plane (the only clear site is gated on
+    ``db_free_required``), so a failure memoized as "no lineage" is memoized
+    for the life of the process.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def get_earliest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> Any:
+        self.calls.append((model_id, source_id))
+        if len(self.calls) == 1:
+            raise RuntimeError("connection reset by peer")
+        return StateSnapshot(
+            state_id=f"state_db_clone_{model_id}",
+            model_id=model_id,
+            run_id="clone_run",
+            valid_time=_dt(_LINEAGE_CUTOVER),
+            state_uri=f"s3://nhms/states/{source_id}/{model_id}/state.cfg.ic",
+            checksum="sha256:" + "e" * 64,
+            usable_flag=True,
+            source_id=source_id,
+            cloned_from_model_id=f"{model_id}_legacy",
+            clone_gate_fingerprint="sha256:" + "d" * 64,
+            clone_gate_kind="state_compatibility",
+        )
+
+
+def _lineage_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == _LINEAGE_WARN_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+def _file_index_lineage_scheduler(tmp_path: Path, provider: Any) -> ProductionScheduler:
+    """A scheduler whose lineage provider is a REAL file state-index repository."""
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=PerModelCompletionRepository(set()),
+        models=[_model("model_a_prime", "basin_a")],
+    )
+    scheduler._lineage_provider_cache = provider
+    return scheduler
+
+
+def test_db_plane_lineage_read_failure_is_not_memoized_and_resolves_on_retry(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1740: a raising read is a FAILURE — not cached, signalled, re-attempted.
+
+    Before this change the ``except Exception`` inside ``resolve_lineage_cutover``
+    returned ``None`` and ``_lineage_cutover_for_model_source`` wrote that
+    ``None`` into ``_lineage_cutover_cache``.  On the DB plane nothing ever
+    clears that dict, so a single blip silently reverted the pair to
+    pre-#1735 semantics for the whole process, with no operator signal.
+
+    All three obligations are pinned together because each alone is
+    satisfiable without the fix: returning ``None`` (unchanged caller
+    semantics), NOT caching, and emitting the signal.
+    """
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    scheduler = _db_plane_lineage_scheduler(tmp_path)
+    provider = _FlakyEarliestCloneRowRepository()
+    scheduler._lineage_provider_cache = provider
+    caplog.set_level(logging.WARNING, logger=_LINEAGE_WARN_LOGGER)
+
+    assert scheduler._lineage_cutover_for_model_source("model_a", "gfs") is None
+    assert ("model_a", "gfs") not in scheduler._lineage_cutover_cache
+
+    warnings = _lineage_warnings(caplog)
+    assert len(warnings) == 1
+    warned = warnings[0].getMessage()
+    assert "model_id=model_a" in warned
+    assert "source_id=gfs" in warned
+    assert "reason=earliest_clone_row_read_failed" in warned
+    # The operator needs the underlying error, not just "it failed".
+    assert "connection reset by peer" in warned
+
+    # The condition clears; the very next resolution re-reads rather than
+    # replaying the failure, without a scheduler restart.
+    cutover = scheduler._lineage_cutover_for_model_source("model_a", "gfs")
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a_legacy"
+    assert cutover.cutover_time == _dt(_LINEAGE_CUTOVER)
+    assert scheduler._lineage_cutover_cache[("model_a", "gfs")] == cutover
+    assert provider.calls == [("model_a", "gfs"), ("model_a", "gfs")]
+
+
+def test_db_free_unreadable_index_is_not_memoized_and_resolves_once_repaired(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1740 db-free half: a corrupt PUBLISHED index is a failure, not "no lineage".
+
+    The file plane never raises — ``clone_lineage_signal`` answers
+    ``{"status": "blocked", "has_lineage": False}`` — so a corrupt index was
+    indistinguishable from a model that never cloned.  A real repository is
+    used on both legs so the reason literal the resolver classifies on is the
+    one the repository actually emits; a hand-written fake would let a typo
+    through.  Publishing a good index over the broken one on the same instance
+    also proves the repository does not cache the failed load.
+    """
+    root = tmp_path / "lineage-index"
+    object_root = root / "objects"
+    object_root.mkdir(parents=True, exist_ok=True)
+    index_path = root / "state-index.json"
+    index_path.write_text("{not json", encoding="utf-8")
+    repository = state_manager_module.FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        now=_dt(_IDENTITY_NOW),
+    )
+    scheduler = _file_index_lineage_scheduler(tmp_path, repository)
+    caplog.set_level(logging.WARNING, logger=_LINEAGE_WARN_LOGGER)
+
+    assert scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs") is None
+    assert ("model_a_prime", "gfs") not in scheduler._lineage_cutover_cache
+
+    warnings = _lineage_warnings(caplog)
+    assert len(warnings) == 1
+    warned = warnings[0].getMessage()
+    assert "model_id=model_a_prime" in warned
+    assert "source_id=gfs" in warned
+    assert "reason=state_snapshot_index_malformed_json" in warned
+
+    state_manager_module.publish_state_snapshot_index(
+        [
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+        index_path,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=_dt(_IDENTITY_NOW),
+    )
+
+    cutover = scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs")
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a_legacy"
+    assert cutover.cutover_time == _dt(_LINEAGE_CUTOVER)
+    assert scheduler._lineage_cutover_cache[("model_a_prime", "gfs")] == cutover
+
+
+def test_db_free_never_published_index_is_quiet_no_lineage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D4a: "never published" is a healthy answer, not a failure.
+
+    ``clone_lineage_signal`` loads with ``allow_empty=False``, so an index file
+    that does not exist blocks with ``state_snapshot_index_missing`` — the same
+    ``status == "blocked"`` shape a corrupt index produces.  Classifying on
+    ``status`` alone would make every ``(model_id, source_id)`` on a db-free
+    deployment that has simply never cloned raise and warn on every pass,
+    forever, and never converge: noise dressed as signal on node-22's
+    production plane.  "No index" and "this pair is not in the index" are the
+    same answer — no lineage — so it resolves quietly AND memoizes.
+    """
+    root = tmp_path / "lineage-index"
+    (root / "objects").mkdir(parents=True, exist_ok=True)
+    index_path = root / "state-index.json"
+    assert not index_path.exists()
+    repository = state_manager_module.FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=root / "objects",
+        object_store_prefix="s3://nhms",
+        now=_dt(_IDENTITY_NOW),
+    )
+    scheduler = _file_index_lineage_scheduler(tmp_path, repository)
+    caplog.set_level(logging.WARNING, logger=_LINEAGE_WARN_LOGGER)
+
+    signal = repository.clone_lineage_signal(model_id="model_a_prime", source_id="gfs")
+    # Premise: the same blocked shape the corrupt-index test rides on.
+    assert signal["status"] == "blocked"
+    assert signal["reason"] == "state_snapshot_index_missing"
+
+    assert scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs") is None
+
+    assert scheduler._lineage_cutover_cache[("model_a_prime", "gfs")] is None
+    assert _lineage_warnings(caplog) == []
 
 
 def test_pre_cutover_cycle_scores_complete_for_a_lineage_bearing_model(tmp_path: Path) -> None:

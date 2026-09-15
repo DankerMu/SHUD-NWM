@@ -869,6 +869,20 @@ class PsycopgStateSnapshotRepository:
         index and ``strict_warm_start_evidence(M1, source, t*)`` would
         miss because the index key uses the stale ``valid_time``.
 
+        #1739 removed that same ``clone_gate_fingerprint IS NOT NULL``
+        condition from :meth:`get_earliest_clone_row_for_model_source` and
+        DELIBERATELY left it here; do not "align" the two. The two readers
+        answer different questions. The earliest reader answers "when did this
+        identity come into existence?" — an existence question whose answer
+        scopes cycles out of completion scoring, so a wrong NO hides a real
+        gap and the predicate must be wide. This reader answers "which row did
+        I just commit?", and the publisher wrote that row's
+        ``clone_gate_fingerprint`` itself moments earlier in the same write
+        path (``_build_clone_row`` takes it as a required ``str``), so
+        requiring non-NULL is a cheap self-check: a row without one is not the
+        row this publisher just wrote. Relaxing it buys nothing and would let
+        the publisher mirror a foreign row into the file state index.
+
         Among clone rows the newest by ``(valid_time, created_at)`` is
         the just-committed clone row. No usable-flag / lineage filter:
         the publisher's job is to mirror the DB clone row verbatim into
@@ -910,17 +924,31 @@ class PsycopgStateSnapshotRepository:
         the identity out of cycles it actually ran (change
         ``lineage-scoped-cycle-completion`` D4).
 
-        Same shadow-proof ``clone_gate_fingerprint IS NOT NULL`` filter as the
-        publisher's reader, plus ``cloned_from_model_id IS NOT NULL``: lineage
-        is established by the predecessor id being present (D2), and the
-        scoped-out evidence annotation always names it.  A row naming ITSELF
-        as its own predecessor is rejected (``cloned_from_model_id <>
-        model_id``): the spec defines lineage as a clone from a *predecessor*
-        model, and an identity is not its own predecessor, so such a row is
-        corrupt provenance rather than an existence-start.  No ``usable_flag``
-        filter — an unusable clone row still proves the identity started then,
-        and skipping it would move the boundary later (the silent-hide
-        direction).
+        Lineage admission keys on ``cloned_from_model_id`` ALONE (#1739):
+        present, and different from the row's own ``model_id``.
+        ``clone_gate_fingerprint`` is pure provenance — it records WHICH gate
+        admitted a clone and at WHAT value, not WHETHER this identity came
+        into existence — so it is deliberately NOT a condition here, and this
+        reader agrees with the file plane's
+        :func:`_clone_entries_for_model_source`, which has never read it.
+        Requiring it would reject a clone row that names its predecessor but
+        carries no fingerprint, moving ``t*`` LATER and quietly removing the
+        model from cycles it genuinely gaps; admitting it leaves at most a loud
+        stuck gap.  The shadow-proof purpose the fingerprint filter used to
+        serve here survives the relaxation: the SHUD forecast / save-state
+        write paths populate neither clone column, so the surviving
+        ``cloned_from_model_id`` conditions keep rejecting their rows.  The publisher's
+        :meth:`get_latest_clone_row_for_model_source` KEEPS the fingerprint
+        filter on purpose — see its docstring; the asymmetry is a ruling, not
+        an oversight.
+
+        A row naming ITSELF as its own predecessor is rejected
+        (``cloned_from_model_id <> model_id``): the spec defines lineage as a
+        clone from a *predecessor* model, and an identity is not its own
+        predecessor, so such a row is corrupt provenance rather than an
+        existence-start.  No ``usable_flag`` filter — an unusable clone row
+        still proves the identity started then, and skipping it would move the
+        boundary later (the silent-hide direction).
 
         Returns ``None`` when the pair has no clone row — cold start, fresh
         basin, or legacy target — which the caller reads as "no lineage".
@@ -931,7 +959,6 @@ class PsycopgStateSnapshotRepository:
             FROM hydro.state_snapshot
             WHERE model_id = %s
               AND source_id = %s
-              AND clone_gate_fingerprint IS NOT NULL
               AND cloned_from_model_id IS NOT NULL
               AND cloned_from_model_id <> model_id
             ORDER BY valid_time ASC, created_at ASC
@@ -1683,10 +1710,45 @@ class FileStateSnapshotIndexRepository:
           later, which is the silent-hide direction.
 
         Reads the already-loaded (cached) index snapshot, so a scheduling
-        pass that has touched the index issues no additional read.  Never
-        raises: an absent clone entry, and an index that cannot be loaded,
-        both yield ``has_lineage=False`` — "no lineage", which leaves the
-        model scored exactly as a model that never cloned.
+        pass that has touched the index issues no additional read.
+
+        Never raises on anything the INDEX itself can be in: an absent clone
+        entry and an index that cannot be loaded both come back as
+        ``has_lineage=False``.  (The one raise left is an unrecognised
+        ``source_id``, the empty string included —
+        ``_normalize_state_index_source_id`` below sits outside the ``except
+        StateManagerError`` deliberately; see change
+        ``clone-lineage-admission-predicate-convergence`` D4.
+        :func:`resolve_lineage_cutover` drops a blank or whitespace-only
+        ``source_id`` at its own entry, so the empty string cannot arrive by
+        that route — but an id that is NON-BLANK and still unrecognised is not
+        dropped there.  D4's static trace of the scheduler finds one live route
+        for it: ``scheduler_backfill_predecessor`` takes ``source_id`` from a
+        persisted journal row's ``selected_predecessor``, rejects it only when
+        EMPTY, and runs it through ``cycle_id_for`` only when that row also
+        declares a ``cycle_id`` — so a journal row carrying an invalid
+        non-blank ``source_id`` and no ``cycle_id`` reaches here.  Direct
+        callers of this method reach it too.)
+
+        Those two ``has_lineage=False`` answers are NOT the same answer, and
+        ``status`` is what separates them (#1740):
+
+        - an absent clone entry is ``status="ready"`` — a RESOLVED "this model
+          has no lineage", which :func:`resolve_lineage_cutover` reports as
+          ``None`` and the scheduler's own cache memoizes;
+        - an index that cannot be loaded is ``status="blocked"`` with a
+          ``reason``, which :func:`resolve_lineage_cutover` treats as a
+          resolution FAILURE: it raises ``LineageResolutionError``, the
+          scheduler warns and does NOT memoize.  The exception is ``reason ==
+          "state_snapshot_index_missing"`` (never published), which says the
+          same thing as "this pair is not in the index" and stays memoizable
+          (D4a).
+
+        What #1740 changed is memoization and the operator signal, NOT per-pass
+        scoring: ``scheduler_core`` catches that error and still returns
+        ``None`` for the call, so for THAT call the model is still scored
+        exactly as a model that never cloned.  It is simply no longer
+        REMEMBERED that way for the life of the process.
         """
         try:
             index_snapshot = self._load_index_snapshot(allow_empty=False)
@@ -3671,27 +3733,57 @@ def _clone_entries_for_model_source(
     state-clone hook writes it, so forecast / save-state entries can never
     shadow a clone written at a backdated ``t*``.
 
-    This is NOT literally the same predicate as the DB reader's
-    (:meth:`PsycopgStateSnapshotRepository.get_earliest_clone_row_for_model_source`
-    requires BOTH ``clone_gate_fingerprint`` and ``cloned_from_model_id`` to
-    be non-NULL; this filters on ``cloned_from_model_id`` alone).  They select
-    the same rows for everything the sole writer produces —
-    :func:`packages.common.state_clone._build_clone_row` writes both fields
-    together and takes ``clone_gate_fingerprint`` as a required ``str`` — and
-    diverge only on a partially written or corrupt row, where the DB plane is
-    the stricter of the two on the fingerprint axis — but not uniformly: this
-    plane ``.strip()``\\ s ``cloned_from_model_id`` and skips a whitespace-only
-    value, while the DB plane's ``cloned_from_model_id IS NOT NULL`` accepts it,
-    so on that one sub-case the FILE plane is the stricter one (#1739).
-    Tightening this plane up to match would move
-    ``t*`` LATER on such a row, which is the silent-hide direction the design
-    forbids, and the spec scenario keys "no lineage" on the absence of
-    ``cloned_from_model_id``, never on the fingerprint.  So the divergence is
-    deliberate and stays.
+    On the fingerprint axis the two planes now AGREE: #1739 ruled
+    ``clone_gate_fingerprint`` pure provenance and removed it from
+    :meth:`PsycopgStateSnapshotRepository.get_earliest_clone_row_for_model_source`,
+    so both planes key lineage admission on ``cloned_from_model_id`` alone.
+    This function has never read the fingerprint.
 
-    A row naming ITSELF as its own predecessor is rejected on both planes:
-    lineage is a clone from a *predecessor* model, and an identity is not its
-    own predecessor.
+    What survives is a different axis — ``cloned_from_model_id``
+    NORMALISATION — and it has TWO shapes, not one.  This plane ``.strip()``\\ s
+    the value before judging it; the SQL judges the raw bytes:
+
+    * a WHITESPACE-ONLY parent — this plane strips it to empty and skips it,
+      while the DB plane accepts it: BOTH conjuncts hold (``IS NOT NULL`` is
+      TRUE, and ``<> model_id`` is TRUE for any model id that is not that same
+      whitespace string), and nothing in the SQL rejects it;
+    * a self-reference WITH SURROUNDING WHITESPACE (``'model_a_prime '`` under
+      ``model_id = 'model_a_prime'``) — this plane strips it and skips it as
+      self-referential, while the SQL's ``cloned_from_model_id <> model_id``
+      compares literally, finds the two strings unequal, and accepts it.
+
+    Row-for-row the two planes still give the same ANSWER — neither confers
+    lineage from a blank or from a self-naming parent — but in BOTH shapes the
+    DB plane lets such a row win its ``LIMIT 1``, the resolver then rejects it
+    and reports "no lineage", and a later LEGITIMATE clone row is MASKED — the
+    row this plane would have found.  Three notes for whoever reads this next:
+
+    * Dropping the fingerprint condition widened that exposure slightly. A row
+      with a blank parent AND no fingerprint was previously unselectable on the
+      DB plane; it is now a ``LIMIT 1`` candidate. The direction is recorded
+      honestly. The node-27 live census found zero such rows, but that is a
+      WEAK reading: ``hydro.state_snapshot`` was empty end to end at receipt
+      time, so it is "zero out of zero", not "zero half-written among many"
+      (``docs/runbooks/receipts/2026-09-15-issue-1739-clone-provenance-count-node27.md``).
+    * The spec's "present, non-empty, and different" is satisfied on the DB
+      plane by the resolver's own ``.strip()``
+      (``services/orchestrator/scheduler_lineage.py``'s ``_from_clone_row``),
+      NOT by the SQL. Reading that sentence as "the SQL should also say
+      ``btrim(...) <> ''``" would change which row ``LIMIT 1`` returns, which
+      is a separate ruling on the ``cloned_from_model_id`` NORMALISATION axis —
+      out of scope for #1739's fingerprint ruling, and tracked as #2392.
+    * That ``btrim(...) <> ''`` sketch closes the FIRST shape only. The padded
+      self-reference needs ``btrim(cloned_from_model_id) <> model_id`` as well;
+      a follow-up that adds only the emptiness test would leave the second
+      masking shape standing and look finished.
+
+    A row naming ITSELF as its own predecessor confers no lineage on either
+    plane — lineage is a clone from a *predecessor* model, and an identity is
+    not its own predecessor — but WHERE that is enforced differs, and the
+    difference is what the second shape above exploits. This plane rejects it
+    during SELECTION, so the next candidate is considered. The DB plane rejects
+    it at the RESOLVER, after ``LIMIT 1`` has already spent the single row it
+    returns; the SQL's own ``<> model_id`` catches only the byte-exact case.
 
     Ordering is ``(valid_time, created_at)`` ASC — see
     :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal` for why

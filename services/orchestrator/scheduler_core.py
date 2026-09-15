@@ -757,9 +757,19 @@ class ProductionScheduler:
         key = (str(model_id), str(source_id))
         if key in self._lineage_cutover_cache:
             return self._lineage_cutover_cache[key]
-        cutover = _scheduler_lineage.resolve_lineage_cutover(
-            self._lineage_provider(), model_id=key[0], source_id=key[1]
-        )
+        try:
+            cutover = _scheduler_lineage.resolve_lineage_cutover(
+                self._lineage_provider(), model_id=key[0], source_id=key[1]
+            )
+        except _scheduler_lineage.LineageResolutionError as error:
+            # #1740: a FAILED resolution is not an answer, so it is NOT
+            # memoized — on the DB plane this dict is never cleared, so caching
+            # it would pin the pair to "no lineage" for the life of the
+            # process.  THIS CALL's semantics are unchanged (no lineage); a
+            # later call — the next pass, or another consumer in this same
+            # pass — re-attempts it.  See scheduler_lineage's module docstring.
+            _scheduler_lineage.log_lineage_resolution_failure(error)
+            return None
         self._lineage_cutover_cache[key] = cutover
         return cutover
 

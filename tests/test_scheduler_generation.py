@@ -5300,7 +5300,9 @@ def test_model_without_clone_lineage_keeps_the_first_cycle_cold_start_branch(
         now="2026-07-06T12:00:00Z",
     )
 
-    # No lineage for this model — resolution yields None, never an error.
+    # This pair genuinely has no lineage: the index's only clone entry belongs
+    # to another model, so resolution SUCCEEDS and answers None. A resolution
+    # failure would now raise instead (#1740).
     assert (
         scheduler_lineage.resolve_lineage_cutover(repo, model_id="model_new", source_id="gfs")
         is None

@@ -21,8 +21,15 @@ Refusal contract
 Every rejection surfaces the stable error code
 ``state_clone_cold_start_approval_required`` (docs §11.3 clause 2) and
 records a compact refusal audit record whose ``refusal_scope`` names WHY
-the clone was blocked. The six distinguished refusal scopes are:
+the clone was blocked. The seven distinguished refusal scopes are:
 
+* ``self_clone_target`` — ``m0_model_id`` and ``m1_model_id`` are the same
+  value (#1741). Evaluated BEFORE every other gate, because every other
+  gate no-ops under equal identities while ``state_id`` minting does not:
+  the minted id equals the source row's own id, so the upsert would
+  overwrite the real state row in place with a row naming itself as its
+  own predecessor. Mode-independent — it refuses under both transfer
+  modes. Fail-closed, no override.
 * ``reverse_clone_target_not_direct_grid`` — defense-in-depth guard at
   the clone function's own signature (Epic #982 SUB-7 §4.1). The target
   ``M1`` model does NOT classify as direct-grid under Change 4's single
@@ -52,7 +59,7 @@ the clone was blocked. The six distinguished refusal scopes are:
   ``transfer_mode='fix_forward'`` an ABSENT or empty recorded value also
   refuses here — the fix-forward cross-check obligation does not weaken.
 
-Change ``recalibration-state-carryover`` adds a seventh scope, reachable
+Change ``recalibration-state-carryover`` adds an eighth scope, reachable
 only from the opt-in ``transfer_mode='recalibration'`` route:
 
 * ``state_compatibility_unequal`` — the eight-surface
@@ -153,6 +160,11 @@ _QUALIFIED_LEAD_HOURS = 12
 # and cannot silently diverge on typo.
 _REVERSE_CLONE_TARGET_NOT_DIRECT_GRID = "reverse_clone_target_not_direct_grid"
 
+# #1741 identity refusal scope: the call names the SAME model as both the
+# transfer source and the transfer target. Module-level alongside the sibling
+# scope so downstream audit consumers key on the exact literal.
+_SELF_CLONE_TARGET = "self_clone_target"
+
 # Change `recalibration-state-carryover` refusal scope: the eight-surface
 # state-compatibility gate found the two packages unequal (or a declared
 # hydrologic-core file present on exactly one side). Module-level so
@@ -202,7 +214,7 @@ class StateCloneAuditRecorder(Protocol):
     """Sink for refusal audit records.
 
     A single ``record_refusal(mapping)`` entry point keeps the shape stable
-    across the six refusal scopes. Wiring this to ``ops.audit_log`` is
+    across the seven refusal scopes. Wiring this to ``ops.audit_log`` is
     the caller's responsibility (SUB-4 / atomic-cutover-transaction owns
     the transaction plumbing); this module only emits records.
     """
@@ -220,9 +232,13 @@ class StateCloneResult:
     ``True``, ``refusal_code`` is
     :data:`STATE_CLONE_COLD_START_APPROVAL_REQUIRED`, and
     ``refusal_scope`` names one of the distinguished scopes documented in
-    this module's docstring — the six fix-forward scopes plus
+    this module's docstring: the mode-independent identity gate
+    ``self_clone_target``, plus the six fix-forward scopes, plus
     :data:`STATE_COMPATIBILITY_UNEQUAL`, which is reachable only from
-    ``transfer_mode='recalibration'``.
+    ``transfer_mode='recalibration'``. The identity gate sits outside the
+    fix-forward / recalibration split on purpose — it refuses under BOTH
+    transfer modes, because the ``state_id`` collision it prevents is
+    mode-independent.
     """
 
     cloned_row: StateSnapshot | None
@@ -309,11 +325,24 @@ def fingerprint_gated_state_clone(
     :data:`STATE_CLONE_COLD_START_APPROVAL_REQUIRED` (docs §11.3 clause 2
     routes this into the explicit cold-start approval path).
 
+    Self-clone identity guard (#1741)
+    ---------------------------------
+    Before EVERY other gate — including the no-reverse-clone classifier
+    below — the function refuses fail-closed with
+    ``refusal_scope='self_clone_target'`` when ``m0_model_id`` and
+    ``m1_model_id`` are the same value, so a self-clone is refused on
+    identity alone no matter how valid the remaining inputs are. The
+    check lives in the gate rather than in each caller because the damage
+    is minted here: an equal-identity call mints a ``state_id`` identical
+    to the source row's, and the upsert overwrites the real source row in
+    place with a row naming itself as its own predecessor.
+
     No-reverse-clone guard (SUB-7 §4.1)
     -----------------------------------
     The ``m1_forcing_mapping_manifest`` kwarg is the ``M1`` target's
     forcing-mapping manifest / resource-profile ``direct_grid_forcing``
-    section. Before any other check, this function classifies the target
+    section. Before any other GATE check (the identity guard above runs
+    first), this function classifies the target
     through Change 4's single classifier
     (``workers.forcing_producer.direct_grid_contract.load_forcing_mapping_contract_from_manifest``);
     if the classifier returns ``None`` or raises
@@ -416,6 +445,30 @@ def fingerprint_gated_state_clone(
         source_id=source_id,
         cutover_valid_time=cutover_valid_time,
     )
+
+    # -1. Self-clone identity guard (#1741). Refuse BEFORE every other gate:
+    #     the remaining gates are all no-ops under equal identities (the
+    #     fingerprint gate compares one package tree against itself and
+    #     necessarily finds it equal; the recalibration route skips the
+    #     evidence cross-check outright), so the call would run to completion.
+    #     It belongs HERE rather than in each caller because the damage is
+    #     minted inside this function: `state_id` is derived from the TARGET
+    #     `model_id` plus the preserved source / valid-time / cycle / lead
+    #     inputs, so with equal identities the minted id is byte-identical to
+    #     the source row's own id and the upsert REWRITES the real state row
+    #     in place — into a row naming itself as its own predecessor, with the
+    #     original provenance gone. A reader-side guard (#1738) can reject
+    #     such a row afterwards; nothing can restore the overwritten one.
+    #     Compared verbatim: `model_id` is a literal key repo-wide
+    #     (`state_snapshot_id` concatenates it as given), so stripping or
+    #     case-folding here would fork this gate from the id-minting
+    #     convention and let a "different" id mint an identical `state_id`.
+    if m0_model_id == m1_model_id:
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope=_SELF_CLONE_TARGET,
+        )
 
     # 0. No-reverse-clone guard (SUB-7 §4.1). Classify the M1 target
     #    through Change 4's single classifier BEFORE any other gate check

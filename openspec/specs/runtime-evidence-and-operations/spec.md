@@ -413,7 +413,25 @@ refusal as `<code>: <message>` on standard error with a non-zero exit, on
 every command entrypoint it offers. The operator lane that already verifies
 a journal root before acting (reserved-job demotion) SHALL use this same
 verification seam, so there is one message and one error code for an invalid
-root across the scheduler and its operator tooling. The db-free preflight's
+root across the scheduler and its operator tooling. Every other lane that
+takes a journal root from an operator knob and builds a file journal
+repository from it SHALL use that same seam before construction — the
+released-reservation recovery command, the file-journal migration commands
+(rollback prepare, rollback-writer launch, rollforward completion and
+historical scheduler-state import) and the operator scripts that retry failed
+runs or repair placeholder hydro URIs — and each SHALL name its own knob in
+the error's `setting` detail. A lane that derives a lock path, an inventory
+path or any other filesystem location from that root SHALL derive it from the
+verified root, and SHALL NOT resolve the configured value through symlinks
+for that purpose, so the lock and the repository always name the same tree and
+a blank root can never create a lock file in the process working directory.
+Every entrypoint of those lanes SHALL catch the refusal and exit non-zero with
+the typed single line, never a traceback, on both the click and the argparse
+entrypoint where the lane offers both. A read-only census that takes a receipt
+destination SHALL likewise refuse a destination whose home cannot be expanded
+with its own typed error code, distinct from the code it uses for a
+destination that fails after the receipt has been emitted, rather than
+surfacing the bare `RuntimeError` that tilde expansion raises. The db-free preflight's
 own path adjudication SHALL be unchanged by this requirement — it remains the
 lane that adjudicates absence, writability and containment — and the
 constraint SHALL be documented at every place the repository's environment
@@ -465,4 +483,36 @@ with a diagnostic that does not mention a symlink).
   scheduler construction uses, its details naming `--journal-root` as the
   setting, still without a traceback or module name on standard error, and
   still with zero journal bytes written
+
+#### Scenario: Every operator lane that takes a journal root refuses a blank, relative or hostile root the same way
+
+- **WHEN** the released-reservation recovery command, any of the four
+  file-journal migration commands, or either operator script is given a blank,
+  relative, tilde-unexpandable or symlink-ancestor journal root
+- **THEN** the command refuses before any repository is constructed, with
+  `FILE_JOURNAL_INVALID_ROOT`, the shared message and details naming that
+  lane's own knob
+- **THEN** the process exits non-zero with one typed line on standard error,
+  with no traceback and no filesystem path — on both entrypoints for a lane
+  that offers a click and an argparse entrypoint, and from `main()` for the
+  operator scripts, which offer only one
+- **THEN** nothing is written anywhere under the process working directory
+
+#### Scenario: The rollback execution lock is taken on the verified root, not on a resolved alias
+
+- **WHEN** a rollback lane is given a journal root reached through a symlinked
+  ancestor, or a blank root
+- **THEN** the lane refuses at verification and no rollback execution lock file
+  is created — in particular none in the process working directory
+- **THEN** for a root that verifies, the lock path is derived from the verified
+  root itself, so the lock and the repository name the same tree
+
+#### Scenario: A census receipt destination with an unexpandable home is a typed refusal
+
+- **WHEN** the read-only job-id scope census is given a receipt destination
+  whose `~user` cannot be expanded
+- **THEN** it exits 1 with its own typed code for an unexpandable destination,
+  distinct from the code reserved for a destination that fails after the
+  receipt has been emitted, on both entrypoints
+- **THEN** no traceback is printed and no receipt byte is written
 

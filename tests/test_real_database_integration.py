@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from sqlalchemy import text
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from packages.common.migrate import MIGRATIONS_DIR
+from packages.common.state_manager import PsycopgStateSnapshotRepository
+from services.orchestrator import scheduler_lineage
 from tests.integration_helpers import (
     BASIN_ID,
     BASIN_VERSION_ID,
@@ -18,11 +21,13 @@ from tests.integration_helpers import (
     CYCLE_TIME,
     FORECAST_RUN_ID,
     HINDCAST_RUN_ID,
+    ISSUE_126_PREFIX,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
     SOURCE_ID,
     STATE_ID,
     apply_migrations_from_zero,
+    psycopg_connection,
     seed_issue_126_data,
     set_integration_env,
     sqlalchemy_engine,
@@ -564,6 +569,197 @@ def test_no_cross_gap_invariant_holds_after_ingest(
             assert ratio < 0.05, (
                 f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m drift={ratio:.3%} exceeds 5% bound"
             )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1739: the two clone-row readers' predicates, EXECUTED against real
+# PostgreSQL. Every other oracle for these two statements is a text-shape
+# assertion over the SQL string (tests/test_scheduler_lineage.py) or a stub
+# repository that replaces the reader outright, so nothing anywhere else proves
+# that the relaxed predicate actually selects the row the ruling is about.
+# ---------------------------------------------------------------------------
+
+# Deliberately carries the it126 prefix: `seed_issue_126_data` clears
+# `hydro.state_snapshot WHERE state_id LIKE 'it126%'` before re-seeding, and
+# these rows hold a foreign key onto the it126 forecast run it deletes on the
+# same pass. Sharing the prefix means a crashed run cannot leave rows behind
+# that make the NEXT test's seed fail with an FK violation; the per-test
+# `finally` below is still the primary cleanup.
+_ISSUE_1739_PREDECESSOR_MODEL_ID = f"{ISSUE_126_PREFIX}_it1739_model_a"
+_ISSUE_1739_NULL_FINGERPRINT_STATE_ID = f"{ISSUE_126_PREFIX}_it1739_clone_no_fingerprint"
+_ISSUE_1739_FINGERPRINTED_STATE_ID = f"{ISSUE_126_PREFIX}_it1739_clone_fingerprinted"
+# Both strictly LATER than the seeded non-clone row at VALID_TIME_1, so that row
+# is the earliest under `(MODEL_ID, SOURCE_ID)` and stands as a decoy for the
+# clone-provenance half of the predicate — but only if BOTH `cloned_from_model_id`
+# conjuncts are lost: its `cloned_from_model_id` is NULL, and `NULL <> model_id`
+# is NULL rather than TRUE, so `<> model_id` filters it on its own and dropping
+# `IS NOT NULL` alone changes nothing. Distinct instants
+# because `state_snapshot_model_source_valid_time_key` is unique over
+# `(model_id, COALESCE(source_id, ''), valid_time)`.
+_ISSUE_1739_CLONE_VALID_TIME = datetime(2026, 5, 4, 0, tzinfo=UTC)
+_ISSUE_1739_LATER_CLONE_VALID_TIME = datetime(2026, 5, 5, 0, tzinfo=UTC)
+
+
+def _insert_issue_1739_clone_row(
+    database_url: str,
+    *,
+    state_id: str,
+    valid_time: datetime,
+    clone_gate_fingerprint: str | None,
+) -> None:
+    """Commit one clone row under the seeded `(MODEL_ID, SOURCE_ID)` pair.
+
+    Committed rather than left in an open transaction: the repository under test
+    opens its OWN connection, so an uncommitted row would be invisible to it and
+    the test would pass for the wrong reason.
+    """
+
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO hydro.state_snapshot (
+                    state_id, model_id, run_id, valid_time, state_uri, checksum,
+                    usable_flag, source_id, cycle_id,
+                    cloned_from_state_id, cloned_from_model_id,
+                    clone_gate_fingerprint, clone_gate_kind
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (state_id) DO NOTHING
+                """,
+                (
+                    state_id,
+                    MODEL_ID,
+                    FORECAST_RUN_ID,
+                    valid_time,
+                    f"s3://nhms/state/{state_id}.pkl",
+                    "1" * 64,
+                    True,
+                    SOURCE_ID,
+                    CYCLE_ID,
+                    STATE_ID,
+                    _ISSUE_1739_PREDECESSOR_MODEL_ID,
+                    clone_gate_fingerprint,
+                    "state_compatibility",
+                ),
+            )
+
+
+def _delete_issue_1739_clone_rows(database_url: str) -> None:
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM hydro.state_snapshot WHERE state_id = ANY(%s)",
+                (
+                    [
+                        _ISSUE_1739_NULL_FINGERPRINT_STATE_ID,
+                        _ISSUE_1739_FINGERPRINTED_STATE_ID,
+                    ],
+                ),
+            )
+
+
+def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
+    integration_database_url: str,
+) -> None:
+    """#1739 / design D1+D2, executed: the relaxed predicate and its asymmetry.
+
+    `get_earliest_clone_row_for_model_source` dropped `clone_gate_fingerprint IS
+    NOT NULL` (#1739: the fingerprint records WHICH gate admitted a clone, never
+    WHETHER the identity exists) while the publisher's
+    `get_latest_clone_row_for_model_source` kept it (D2: the publisher wrote that
+    fingerprint itself moments earlier, so non-NULL is a cheap self-check). The
+    two statements carried the byte-identical condition, so a revert of either —
+    or an "alignment" of the wrong one — has to be caught by something that runs
+    the SQL. Until this test the only assertion that reacted to the revert was a
+    text pin over the statement string, and the stub-repository behaviour test
+    replaces the reader, so it proves the DOWNSTREAM half only.
+
+    One fixture pins three claims at once:
+
+    * the #1739 ruling — the NULL-fingerprint clone row IS admitted by the
+      earliest reader;
+    * the D2 asymmetry — the same row is NOT admitted by the publisher's reader;
+    * the ordering ruled by change `lineage-scoped-cycle-completion` D4 (NOT
+      this change's own D4, which is about not caching failures) — with a
+      second, fingerprinted clone row at a later
+      `valid_time`, `earliest` still answers the NULL-fingerprint row (ASC) and
+      `latest` answers the other one (DESC). A backdated re-activation must not
+      retroactively move `t*` later.
+
+    The seeded it126 `STATE_ID` row is a decoy, but a NARROWER one than it looks:
+    it sits at an EARLIER `valid_time` under the same pair with no clone
+    provenance at all, so an earliest reader that lost BOTH `cloned_from_model_id`
+    conjuncts would return it and fail here. Losing `IS NOT NULL` alone would NOT
+    fail here, and the docstring must not imply otherwise: that row's
+    `cloned_from_model_id` is NULL, `NULL <> model_id` evaluates to NULL rather
+    than TRUE, and `<> model_id` therefore filters it unaided. `IS NOT NULL` is
+    in fact redundant against `<> model_id` outright, not just against a NULL
+    parent: by SQL three-valued logic `x <> model_id` can be TRUE only when `x`
+    is non-NULL, so for any bound `model_id` the extra conjunct cannot change
+    the WHERE clause's truth value. An EMPTY-STRING parent passes BOTH conjuncts
+    and is admitted by the SQL; what rejects it is the `.strip()` in the
+    resolver's `_from_clone_row`, downstream of the query (design D3 note 2 —
+    the normalisation axis, tracked as #2392). This fixture builds no such row.
+    """
+
+    apply_migrations_from_zero(integration_database_url)
+    seed_issue_126_data(integration_database_url)
+    repository = PsycopgStateSnapshotRepository(integration_database_url)
+
+    try:
+        _insert_issue_1739_clone_row(
+            integration_database_url,
+            state_id=_ISSUE_1739_NULL_FINGERPRINT_STATE_ID,
+            valid_time=_ISSUE_1739_CLONE_VALID_TIME,
+            clone_gate_fingerprint=None,
+        )
+
+        earliest = repository.get_earliest_clone_row_for_model_source(
+            model_id=MODEL_ID, source_id=SOURCE_ID
+        )
+        assert earliest is not None, "the relaxed predicate rejected a NULL-fingerprint clone row"
+        assert earliest.state_id == _ISSUE_1739_NULL_FINGERPRINT_STATE_ID
+        assert earliest.clone_gate_fingerprint is None
+        assert earliest.cloned_from_model_id == _ISSUE_1739_PREDECESSOR_MODEL_ID
+
+        # D2: the publisher's reader still requires the fingerprint, so for it
+        # this pair has no clone row at all.
+        assert (
+            repository.get_latest_clone_row_for_model_source(
+                model_id=MODEL_ID, source_id=SOURCE_ID
+            )
+            is None
+        )
+
+        _insert_issue_1739_clone_row(
+            integration_database_url,
+            state_id=_ISSUE_1739_FINGERPRINTED_STATE_ID,
+            valid_time=_ISSUE_1739_LATER_CLONE_VALID_TIME,
+            clone_gate_fingerprint="sha256:" + "d" * 64,
+        )
+
+        earliest_with_sibling = repository.get_earliest_clone_row_for_model_source(
+            model_id=MODEL_ID, source_id=SOURCE_ID
+        )
+        assert earliest_with_sibling is not None
+        assert earliest_with_sibling.state_id == _ISSUE_1739_NULL_FINGERPRINT_STATE_ID
+
+        latest = repository.get_latest_clone_row_for_model_source(
+            model_id=MODEL_ID, source_id=SOURCE_ID
+        )
+        assert latest is not None
+        assert latest.state_id == _ISSUE_1739_FINGERPRINTED_STATE_ID
+
+        # The whole DB-plane chain, end to end: real SQL -> real row -> resolver.
+        cutover = scheduler_lineage.resolve_lineage_cutover(
+            repository, model_id=MODEL_ID, source_id=SOURCE_ID
+        )
+        assert cutover is not None
+        assert cutover.predecessor_model_id == _ISSUE_1739_PREDECESSOR_MODEL_ID
+        assert cutover.cutover_time == _ISSUE_1739_CLONE_VALID_TIME
+    finally:
+        _delete_issue_1739_clone_rows(integration_database_url)
 
 
 # ---------------------------------------------------------------------------

@@ -942,6 +942,32 @@ It SHALL NOT return "not found" on a derivation failure. A narrowed lookup that
 misses an existing row is silent and unsafe, whereas the fallback is merely as
 slow as the prior behaviour.
 
+That fallback is bounded by the journal's aggregate record budget, and on a
+production-sized tree the budget is reached before the scan completes, so the
+fallback SHALL be treated as a lane that can refuse rather than as one that is
+merely slow. A whole-tree replay that exhausts the budget SHALL carry evidence
+naming the read lane it was refused on, so that a whole-tree refusal is
+distinguishable from a cycle-scoped refusal that reports the same reason token
+and the same field. The refusal SHALL NOT be avoided by raising the aggregate
+record budget: the budget bounds read work rather than result size, and a
+larger default only moves the point at which a larger tree reaches it.
+
+The single-row and by-cycle/by-run query entrypoints named by this requirement
+— lookup by idempotency key, by job id, by cycle id, by run id and by scheduler
+job id — convert such a refusal into a synthetic row, and that row SHALL NOT be
+presented as an ordinary running job. (Blocked-read sentinels produced by other
+surfaces — the active scheduler-job listing, the blocked candidate-state
+projection and the blocked stage-status projection — are outside this
+requirement and keep their own vocabulary, because their consumers adjudicate
+on different allowlists.) The synthetic row SHALL remain
+present (never absent, never an empty result) and SHALL remain non-terminal, so
+that every caller which treats a non-terminal row as an in-flight job keeps
+refusing to schedule, reserve or reuse against an unread journal; and its
+status SHALL name the blocked read rather than borrow the vocabulary of a job
+that is actually running. The blocked read SHALL stay identifiable by the
+structured marker the readers already key on, and the identifiers the row
+carries SHALL be unchanged by this requirement.
+
 An entrypoint whose argument carries no derivable cycle SHALL keep the
 whole-tree scan, with its semantics unchanged.
 
@@ -1069,6 +1095,34 @@ path.
 - **WHEN** the `job_id` matches neither recognised identifier shape
 - **THEN** the write is accepted and the row is readable afterwards, so the
   fall-open rule is unchanged at the write boundary
+
+#### Scenario: A whole-tree refusal is distinguishable from a cycle-scoped refusal
+
+- **WHEN** a whole-tree replay exhausts the aggregate record budget
+- **THEN** the raised fault carries evidence naming the whole-tree read lane
+- **THEN** a cycle-scoped replay that exhausts the same budget carries the
+  cycle-scoped lane instead, so the two are distinguishable even though the
+  reason token and field are the same
+
+#### Scenario: A blocked read stays in-flight for every scheduling guard
+
+- **WHEN** a single-row or by-cycle/by-run lookup refuses because the journal
+  could not be read within the budget
+- **THEN** the entrypoint returns a row (or a one-row list), never `None` and
+  never an empty list, so the duplicate-submission guards that key on presence
+  keep refusing
+- **THEN** that row's status is not a terminal status, so the active-job guards
+  keep treating the cycle or run as occupied
+- **THEN** that row is not reusable as an auto-retry target
+
+#### Scenario: A blocked read does not claim the job is running
+
+- **WHEN** a caller inspects the row produced by a blocked read
+- **THEN** the row's status names the blocked read rather than reporting the
+  job as running
+- **THEN** the structured blocked marker, the reason token and the job
+  identifiers the row carries are unchanged, so readers that key on the marker
+  behave exactly as before
 
 ### Requirement: The cycle-scoped replay is memoized with a cycle-scoped invalidation signature
 
