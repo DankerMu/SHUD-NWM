@@ -1,0 +1,260 @@
+{
+  "scope": "R3 remainingcoldsource deletion/R4matchingauthority, isolatedR5.1proof; not deployment/archive/epicclosure",
+  "runtime_source_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+  "baseline": {
+    "sha": "a236b8e51112c59477cb7229e44463d1a634fe3c",
+    "master_CI": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34893768686",
+    "full_unit": "success"
+  },
+  "targeted": {
+    "initial_sha": "92b1cfbb85a1ffedddaaa3778ee9ded2bfbada56",
+    "initial": "5failed1324passed1skipped",
+    "repair_sha": "18ead6e790105acd68aaa6fb4f1ebf8e050a51cb",
+    "repair": "1invalidsamename-mutant failed;1328passed1skipped",
+    "final_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+    "final_correction": "14passed700deselected; realroutesrestored,partialrouteomissionmutanttargetsprobes not independentlysame-name suite"
+  },
+  "pgdata_oracle": {
+    "passed": 23,
+    "seconds": 277.41,
+    "engine": "disposable PG15.2/TimescaleDB2.10.2",
+    "command": "NHMS_RUN_NODE27_DOCKER=1 uv run --all-extras pytest -q -m \"integration and timescaledb_210 and node27_docker\" tests/test_node27_pgdata_migrate_oracle.py"
+  },
+  "workload": {
+    "source": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+    "serialized_identity": {
+      "compressed": {
+        "independent_sha256": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25",
+        "query_digest": "e1f5b0c08d1d6e2c4d4cbf370b9f2ca4122e5184a26c106a742cc6550cd0da25"
+      },
+      "uncompressed": {
+        "independent_sha256": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65",
+        "query_digest": "ff8d1e33f620c0e4a8b157563a8f9eaadda13cb98e69b4bf00e0cdba7c04fd65"
+      }
+    },
+    "samples_per_population_per_SQL_API": "one discarded warmup +20 accepted",
+    "refusals": [
+      {
+        "exit_status": 1,
+        "name": "wrong cycle with existing candidate chunks",
+        "no_output": true,
+        "observed_code": "SQL_IDENTITY_MISSING",
+        "secret_safe": true,
+        "stderr": "SQL_IDENTITY_MISSING: authoritative run identity is missing or ambiguous\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "non-loopback origin",
+        "no_output": true,
+        "observed_code": "INPUT_ORIGIN_INVALID",
+        "secret_safe": true,
+        "stderr": "INPUT_ORIGIN_INVALID: API origin is not the local loopback contract\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "HTTP redirect",
+        "no_output": true,
+        "observed_code": "API_REDIRECT",
+        "secret_safe": true,
+        "stderr": "API_REDIRECT: API response redirected (302)\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "symlink DSN",
+        "no_output": true,
+        "observed_code": "DSN_FILE_UNAVAILABLE",
+        "secret_safe": true,
+        "stderr": "DSN_FILE_UNAVAILABLE: reader DSN file is unavailable\n",
+        "stdout_empty": true
+      },
+      {
+        "existing_output_digest_after": "4674b1d5cd60bdcc84b9ea7097091273cfc22c08cb5775c97a1560bf3b985112",
+        "existing_output_digest_before": "4674b1d5cd60bdcc84b9ea7097091273cfc22c08cb5775c97a1560bf3b985112",
+        "existing_output_unchanged": true,
+        "exit_status": 1,
+        "name": "existing output no-clobber",
+        "no_output": false,
+        "observed_code": "OUTPUT_EXISTS",
+        "secret_safe": true,
+        "stderr": "OUTPUT_EXISTS: target already exists\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "loopback wrong API segment_id",
+        "no_output": true,
+        "observed_code": "API_SEGMENT_MISMATCH",
+        "secret_safe": true,
+        "stderr": "API_SEGMENT_MISMATCH: API segment_id does not match the frozen pin\n",
+        "stdout_empty": true
+      },
+      {
+        "exit_status": 1,
+        "name": "loopback malformed status=[] extra key",
+        "no_output": true,
+        "observed_code": "API_BODY_KEYS_INVALID",
+        "secret_safe": true,
+        "stderr": "API_BODY_KEYS_INVALID: RiverSeriesResponse has extra keys\n",
+        "stdout_empty": true
+      }
+    ],
+    "cleanup": {
+      "cleanup": "PASS",
+      "owned_root_absent": true,
+      "token": "fd857cbfae304c5cb36659d24287a5a4"
+    },
+    "full_receipts_local": ".workplans/epic-1891/final-workload-smoke.json",
+    "digest_reconstruction": "retirement-workload-digest-reconstruction.json"
+  },
+  "compression": {
+    "actual": {
+      "case": "actual-enforce",
+      "cleanup": "owned cluster and work root removed before case return",
+      "container": "nhms-1895-comp-b6b93e540aa4",
+      "head_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+      "producer_receipt": {
+        "budget": {
+          "cleanup_margin_seconds": 300,
+          "compress_timeout_ms": 3600000,
+          "systemd_wall_seconds": 3941,
+          "wrapper_wall_seconds": 3900
+        },
+        "deferred": [],
+        "generated_at": "2026-09-14T22:53:51.613949Z",
+        "head_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+        "lag_seconds": 86400,
+        "mode": "enforce",
+        "now_utc": "2026-07-11T12:00:00Z",
+        "outcome": "clean",
+        "per_table_totals": {
+          "hydro.river_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          },
+          "met.forcing_station_timeseries": {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunks_compressed": 1
+          }
+        },
+        "per_tick_bound": 4,
+        "schema_version": "2.1",
+        "selected": [
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_1_1_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "river_timeseries",
+            "hypertable_schema": "hydro",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          },
+          {
+            "after_bytes": 32768,
+            "before_bytes": 49152,
+            "chunk_name": "_hyper_2_2_chunk",
+            "chunk_schema": "_timescaledb_internal",
+            "hypertable_name": "forcing_station_timeseries",
+            "hypertable_schema": "met",
+            "mutation_state": "committed",
+            "range_end": "2026-06-04T00:00:00Z",
+            "range_start": "2026-05-28T00:00:00Z"
+          }
+        ],
+        "skipped": []
+      },
+      "receipt": "/home/nwm/tmp/nhms-1895-comp-b6b93e540aa4-6lu6h2pw/private/node27_timeseries_compression.json",
+      "returncode": 0
+    },
+    "refused": {
+      "case": "unsafe-env-refusal",
+      "returncode": 1,
+      "stderr": "{\"status\":\"failed\",\"reason\":\"compression budget preflight failed\"}"
+    },
+    "status": "ok"
+  },
+  "c4": [
+    {
+      "binder_diagnostic": "",
+      "binder_exit": 0
+    },
+    {
+      "source_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+      "evidence_kind": "synthetic-isolated-cli-and-real-node-binder",
+      "live_C4_proof": false,
+      "commands": [
+        {
+          "command": "freeze",
+          "exit": 0,
+          "stdout": "C4 production acceptance freeze PASS\n",
+          "stderr": ""
+        },
+        {
+          "command": "bind",
+          "exit": 0,
+          "stdout": "C4 production acceptance bind PASS\n",
+          "stderr": ""
+        },
+        {
+          "command": "verify",
+          "exit": 0,
+          "stdout": "C4 production acceptance verify PASS\n",
+          "stderr": ""
+        },
+        {
+          "command": "verify",
+          "exit": 1,
+          "stdout": "",
+          "stderr": "C4_IDENTITY_DRIFT: original file identity drifted\n"
+        }
+      ],
+      "changed_receipt_refused": true
+    },
+    {
+      "cleanup": "PASS",
+      "owned_root_absent": true
+    }
+  ],
+  "local": {
+    "frontend": "81files1055passed; renamedfixturebridge9passed,emittedsyntheticproducerreceipt",
+    "ruff": "PASS",
+    "strict_spec": [
+      "compressed-chunk-cold-tablespace-tiering",
+      "ci-contract-baseline",
+      "runtime-service-role-boundary"
+    ],
+    "markdown": "6files0errors"
+  },
+  "full_backend": {
+    "result": {
+      "source_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+      "host": "ghdc",
+      "pid": 787110,
+      "started_at": "2026-09-14T22:58:21.174113+00:00",
+      "command": [
+        "/home/nwm/.local/bin/uv",
+        "run",
+        "--directory",
+        "/home/nwm/tmp/epic1891-retirement-20260914/checkout",
+        "--all-extras",
+        "pytest",
+        "-q",
+        "--basetemp=/home/nwm/tmp/epic1891-retirement-20260914/full-deletion-1e05a90a-rV2Vfx/pytest"
+      ],
+      "exit_code": 0,
+      "duration_seconds": 3300.896568899043,
+      "finished_at": "2026-09-14T23:53:22.070672+00:00"
+    },
+    "summary": "18805passed328skipped1warning3294.10s",
+    "warning": "Cannot find ecCodes library; GRIB/optinlanes not claimedPASS",
+    "archive": ".workplans/epic-1891/full-deletion-passed.tar.gz"
+  },
+  "production_mutation": false,
+  "effective_deployment": "pending separatelyauthorizedunit/source/env/pinhandoff; observedcompression3940!=new3941"
+}

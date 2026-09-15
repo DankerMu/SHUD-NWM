@@ -91,7 +91,7 @@ budget fields. Real launcher and collection/survivor proofs are required.
   same-byte/new-inode fixture correction:
   `evidence/retirement-workload-compression-fixture-proof.json`.
   This is not effective production deployment or global retirement completion.
-- [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
+- [x] R1.5 Transfer behavioral tests and selector ownership with each extraction.
   Prove PGDATA clean-stop/copy verification, exact container preservation,
   pre-write restoration, no stale post-write rollback, bounded commands and
   descriptor/RAID/SMART refusals; prove governance placement/unknown/conflict
@@ -104,7 +104,9 @@ budget fields. Real launcher and collection/survivor proofs are required.
   C4 extraction evidence: `evidence/retirement-c4-verification.json`; targeted
   owner/selector, real Node binder, CLI refusal and post-binder mutation proof.
   Workload capture/native-plan/CLI and producer-selector tests now follow their
-  PGDATA owner. Remaining compression/deletion test transfers are still pending.
+  PGDATA owner. Compression/deletion transfers are implemented; isolated
+  survivor and routed-consumer proof is in `evidence/retirement-deletion-verification.json`.
+  Full regression and independent merge review remain separate R5.1/R4.3 gates.
 - [x] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
   SHA-256/file-identity recheck from G0/C3 to the existing display deployment
   owner's **Bringup-C4 production acceptance** seam. R1 must ship and record its
@@ -175,7 +177,7 @@ The source census found 95 candidate Python files (38 cold package, 6 cold CLI,
 31 issue1895 package, 20 issue1895 CLI); these are families to classify after
 extraction, not wildcard deletion authority or proof of dynamic completeness.
 
-- [ ] R3.1 Delete `packages/common/compressed_chunk_cold_{residency,target,tick,
+- [x] R3.1 Delete `packages/common/compressed_chunk_cold_{residency,target,tick,
   receipt,runtime,runtime_catalog,runtime_target,runtime_timing}.py` and
   `compressed_chunk_cold_probe/`; `node27_cold_tablespace_{authority,container,
   engine,evidence,host,identity,install,integration,observation,pending,receipt,
@@ -183,32 +185,32 @@ extraction, not wildcard deletion authority or proof of dynamic completeness.
   _collection,_history,_runtime}.py`; `node27_cold_residency_census_policy.py`;
   and cold-only `packages/common/node27_issue1895_*.py` after R1 extraction.
   Delete issue1895 first or together with cold because it imports cold owners.
-- [ ] R3.2 Delete `scripts/node27_cold_residency.py`,
+- [x] R3.2 Delete `scripts/node27_cold_residency.py`,
   `node27_cold_residency_census.py`, `node27_cold_identity_observe.py`,
   `node27_cold_tablespace_install.py`, `node27_cold_tablespace_root_evidence_setup.py`,
   `probe_compressed_chunk_cold_tablespace.py`, `node27_cold_residency_once.sh`,
   cold-only `scripts/node27_issue1895_*.py` and
   `infra/env/node27-cold-residency.example`. Remove all deployable old G0-G8 exits,
   including manual/runbook callers after R1.4; no dormant stubs or re-exports.
-- [ ] R3.3 Remove the `nhms_cold` CREATE grant and positive cold-grant audit from
+- [x] R3.3 Remove the `nhms_cold` CREATE grant and positive cold-grant audit from
   `db/roles/node27_write_roles.sql` and update
   `scripts/node27_provision_write_roles.sh` description. Preserve all unrelated
   ownership, role flags, membership, trigger/default and security audits.
   Source retirement does not authorize live privilege revocation or DROP.
-- [ ] R3.4 Delete `timeseries_cold_residency_receipt`,
+- [x] R3.4 Delete `timeseries_cold_residency_receipt`,
   `node27_cold_tablespace_install_receipt`, `node27_cold_governance_receipt`,
   `node27_issue1895_c1/c2/c3` receipt schemas and matching synthetic examples.
   Delete cold-only tests/fakes/mutants, including issue1895/2224/2290/2291 tests
   whose sole contract is retired. Move surviving command/container/evidence/
   capacity/launcher tests to actual owners; remove incidental source-text or
   constant-count pins rather than repinning obsolete wording.
-- [ ] R3.5 Update `scripts/select_ci_tests.py` PathTestRule/owner tuples/closure
+- [x] R3.5 Update `scripts/select_ci_tests.py` PathTestRule/owner tuples/closure
   sets and `tests/test_select_ci_tests.py`; close shared conftest/fixture/import/
   generated and non-Python references. Every retained path must select existing
   assertion-bearing surviving suites with no stale collection imports.
   Preserve independent C4 and generic readonly suites. Leave migrations
   `000058`/`000059`, ordinary compression/retention and current data unchanged.
-- [ ] R3.6 Retire the G7-only `explicit-cycle-query-binding` capability with
+- [x] R3.6 Retire the G7-only `explicit-cycle-query-binding` capability with
   `node27_issue1895_query`'s recorder/capture-validator/digest and retired
   performance/lanes callers. Delete
   `tests/test_issue2227_explicit_cycle_named_binding.py` and `ISSUE2227_*`
@@ -216,7 +218,7 @@ extraction, not wildcard deletion authority or proof of dynamic completeness.
   Its purpose and callers are #1895/G7-only; a test import is not justification
   to promote dead recorder code. Keep the real shipping forecast owner,
   native named psycopg binding, API and independent tests unchanged.
-- [ ] R3.7 Close the following mixed/non-Python rows in the atomic cutover.
+- [x] R3.7 Close the following mixed/non-Python rows in the atomic cutover.
   These are explicit work items, not work deferred to R5's audit.
 
 | Surface | Required disposition | Closure proof |
@@ -231,9 +233,15 @@ The last row is an explicit exclusion, not a new implementation task. Generic
 Docker collection gates in `tests/conftest.py` remain unchanged; only their
 retired test container changes owner.
 
+Implemented source census: `evidence/retirement-deletion-path-census.json`.
+Fresh retained PGDATA oracle, native SQL/API workloads, compression-only wrapper
+and real C4 CLI/Node-binder proof: `evidence/retirement-deletion-verification.json`.
+The latter uses explicitly synthetic C4 input, not a production browser receipt.
+R3 source completion does not complete R4.3 review or R5 deployment/closure.
+
 ## R4 — Correct active authority and preserve history
 
-- [ ] R4.1 Implement the proposed surviving-capability deltas beside this file
+- [x] R4.1 Implement the proposed surviving-capability deltas beside this file
   with their matching source changes: PGDATA placement, compression launch/roles,
   runtime role provisioning, CI selection and C4 production-acceptance ownership.
   Canonical `openspec/specs/**`
@@ -271,14 +279,18 @@ retired test container changes owner.
 
 ## R5 — Verify survivors, authorize deployment handoff, then close
 
-- [ ] R5.1 Audit zero active imports/entrypoints/options/CI targets for removed
+- [x] R5.1 Audit zero active imports/entrypoints/options/CI targets for removed
   families using Python and non-Python/manual consumers. Document only justified
   protective negative guards and immutable history exceptions. Prove R1-R3
   retained behavior via real isolated runtime oracles on node27 with owned
   TMPDIR/resources, not a database inside production. Run affected local
   Ruff/OpenSpec/frontend checks plus node27 targeted, required full/backend and
-  isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 regression. No test/PASS or fresh
-  review is claimed by this planning revision.
+  isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 regression. Runtime source
+  `1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3`: full backend 18805 passed,
+  328 skipped, one ecCodes warning; isolated PGDATA oracle 23 passed.
+  Detailed source/command/results and non-production limits:
+  `evidence/retirement-deletion-verification.json`;
+  negative-guard/history census: `evidence/retirement-deletion-active-reference-disposition.json`.
 
   Implementation-stage commands below belong on node-27 (owned checkout/venv,
   `TMPDIR=/home/nwm/tmp`, no production database substitution):
@@ -290,9 +302,8 @@ retired test container changes owner.
   uv run pytest -q
   ```
 
-  The collection-gate path is the explicit R3.7 migration target, not a file
-  claimed to exist in this review revision. The PGDATA unit and oracle paths
-  both exist now and are retained. The isolated command must execute real
+  The collection-gate suite now exists under its R3.7 owner. The PGDATA unit
+  and oracle paths are retained. The isolated command must execute real
   oracle assertions; empty selection or all-skipped output cannot satisfy it.
   Retained/transferred test paths and their selector rows move together.
   Record the actual compression-only wrapper launch/refusal smoke invocation
@@ -307,8 +318,8 @@ retired test container changes owner.
   suites; any required real C4 browser proof remains node-27/owner-authorized.
   Local contract checks are
   `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`
-  and Ruff/Markdown checks on the changed surface. No command here is claimed
-  to have run for runtime retirement in this contract review.
+  and Ruff/Markdown checks on the changed surface. These source-retirement
+  checks do not authorize or establish R5.2 effective deployment.
 - [ ] R5.2 Separately authorize effective-deployment handoff at the final release:
   identify actual unit/dropins/env/ExecStartPre and referenced paths, coordinate
   owners and foreign holds, remove retired cold activation/configuration without

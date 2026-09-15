@@ -1045,8 +1045,8 @@ SHALL NOT be covered by this rule (the pin's glob is `*.service`).
 - **THEN** the retention unit still selects exactly
   `["tests/test_node27_timeseries_retention.py"]`, the mvt-cache-retention unit
   still selects both its own suite and the pin's suite, and the
-  resource-governance unit still selects `tests/test_node27_cold_governance.py`
-  and `tests/test_node27_resource_governance.py` plus the lane pin
+  resource-governance unit still selects `tests/test_node27_resource_governance.py`
+  plus the lane pin
 
 ### Requirement: node-27 unit files with a content-asserting owner suite MUST select that suite
 
@@ -1070,8 +1070,8 @@ glob rule: `nhms-node27-autopipe.service` →
 `nhms-node27-download.timer` → `tests/test_node27_download_cycles.py`;
 `nhms-node27-timeseries-compression.timer` →
 `tests/test_node27_timeseries_compression.py` and any surviving owner suite
-protecting its compression-only budget/scheduling contract, not the deleted
-cold-residency suite. Because rule matches accumulate, each `.service` selection
+protecting its compression-only budget/scheduling contract. Because rule matches
+accumulate, each `.service` selection
 SHALL contain its owner suites and the glob rule's pin suite, each of the two
 `.timer` selections above SHALL contain its owner suites and SHALL NOT contain
 the pin suite. Existing selections for
@@ -1079,7 +1079,7 @@ the pin suite. Existing selections for
 `nhms-node27-autopipe.timer`, and
 `nhms-node27-mvt-cache-retention.{service,timer}` SHALL remain unchanged; the
 retention timer SHALL select its surviving retention suite and any actual
-retained reader suites, not a deleted cold suite. Units whose only path reader
+retained reader suites. Units whose only path reader
 is the pin suite itself, which the glob rule already selects
 (`nhms-node27-unit-failure-alert@.service`) or that have no content-asserting
 reader at all (`nhms-node27-frontier-alert.timer`,
@@ -1111,7 +1111,7 @@ requirement.
 - **THEN** the retention service still selects exactly
   `["tests/test_node27_timeseries_retention.py"]`, the retention timer selects
   `tests/test_node27_timeseries_retention.py` and any actual retained reader
-  suites without `tests/test_node27_cold_residency.py`, and the autopipe timer
+  suites, and the autopipe timer
   still selects exactly
   `["tests/test_node27_autopipeline_preflight.py", "tests/test_node27_mvt_prewarm.py"]`
 

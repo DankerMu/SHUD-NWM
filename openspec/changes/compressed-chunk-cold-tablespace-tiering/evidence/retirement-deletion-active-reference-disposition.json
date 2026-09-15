@@ -1,0 +1,24 @@
+{
+  "source_sha": "1e05a90ae6dc2ae9a1a233c211042e6f2a7a0ce3",
+  "deleted_path_census": "retirement-deletion-path-census.json",
+  "active_deleted_path_or_module_hits": 0,
+  "method": "tracked runtime/Python/nonPython paths; deleted full paths, qualified modules and distinctive basenames; separate retiredprotocol token scan. Generic probe basenames checked qualified to avoid types/report/catalog collisions. Not a proof against arbitrary computed dynamic import strings.",
+  "retained_negative_guards": {
+    "packages/common/node27_pgdata_host.py": "Refuses active/enabled retired cold service or timer during wholePGDATA relocation; does not start it.",
+    "packages/common/node27_pgdata_migrate.py": "Refuses cold binds/identity during wholePGDATA relocation; no movementalias.",
+    "packages/common/node27_timeseries_compression_budget.py": "Rejects retired cold/sequentialpair configkeys; no executionlane.",
+    "tests/test_node27_pgdata_container.py; tests/test_node27_pgdata_migrate.py": "Negativecontainer/unit/bind protection mirrorsretained behavior.",
+    "tests/test_node27_timeseries_compression_budget.py; tests/test_node27_timeseries_compression_runner_config.py; tests/test_node27_timeseries_compression_wrappers.py": "Retiredkeyrefusal/absentcoldenv and isolatedenvscrub; no retiredimport or call.",
+    "tests/test_node27_working_set.py": "Coldreceipt env is inert; governance output remains independent."
+  },
+  "history": "Old completedledger, originalfixtures/evidence/proberecords and explicitlywithdrawn runbooksections retained as history; not currentexecutionauthority.",
+  "preserved_exclusions": [
+    "scripts/diagnostic/display-cold-waterfall.sh",
+    "db/migrations/000058_hot_timeseries_chunk_interval_3d.sql",
+    "db/migrations/000059_river_timeseries_narrow_expand.sql"
+  ],
+  "governance_audit": {
+    "command": "uv run --all-extras python scripts/governance/audit_repo_entropy.py --mode hard-gate --structural-base-ref a236b8e51112c59477cb7229e44463d1a634fe3c --format json",
+    "gate_eligible_findings": 0
+  }
+}

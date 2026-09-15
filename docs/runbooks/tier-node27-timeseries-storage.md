@@ -6,37 +6,41 @@ delivered under `openspec/changes/tier-node27-timeseries-storage`, plus the
 **write-path least-privilege roles (§9)** these lanes run as
 (`openspec/changes/node27-write-path-roles`, #1774).
 
-## Current authority: selective-cold code retirement (implementation pending)
+## Current authority: selective-cold source retirement
 
-The **accepted direction, not implemented state**, for #1891/#1895 is mandatory
-selective-cold **code retirement**. Production cold rollout is withdrawn: no new
-G1 retry, cold sample, install/movement window or G0–G8 acceptance run is planned.
-The sole retirement contract is the active change
+The #1891/#1895 selective-cold source retirement is implemented. Production
+cold rollout is withdrawn: no new G1 retry, cold sample, install/movement
+window or G0–G8 acceptance run is planned. The sole retirement contract is the
+active change
 [`tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md):
 
-- **R1:** transfer minimal PGDATA command/container/evidence, ordinary governance
-  capacity sampling and genuinely retained manual/shared consumers to their actual owners.
-- **R2:** detach normal compression from cold env, paired budgets
-  and launcher, retaining safe inert parsing, bounded execution and lifecycle locking.
-- **R3:** after each affected consumer transfer, delete cold-only runtime, old G0–G8
-  wrappers, schemas/examples/tests, CI targets and cold SQL grant/audit. Tests/docs accompany
-  each source slice; leaving code dormant is not closure.
-- **R4:** correct active authority while preserving completed delivery and immutable
-  evidence; withdraw old pending rollout, never mark it executed or promote its
-  withdrawn cold ADDED specs into base authority.
-- **R5:** prove surviving behavior, obtain separately authorized effective-deployment
-  handoff, then close honestly. #2293/#2298/#1938 retire only after affected paths
-  and deployed references are gone; a transferred defect stays with its real owner.
+- **R1/R2 (completed):** transfer minimal PGDATA command/container/evidence,
+  ordinary governance capacity sampling and genuinely retained manual/shared
+  consumers to their actual owners; detach normal compression from the cold
+  env, paired budgets and launcher while retaining safe inert parsing, bounded
+  execution and lifecycle locking.
+- **R3 (completed source closure):** delete cold-only runtime, old G0–G8
+  wrappers, schemas/examples/tests, CI targets and cold SQL grant/audit after
+  each affected consumer transfer. Leaving code dormant is not closure.
+- **R4 (current authority):** correct active authority while preserving completed
+  delivery and immutable evidence; withdraw old pending rollout, never mark it
+  executed or promote its withdrawn cold ADDED specs into base authority.
+- **R5 (pending):** prove surviving behavior, obtain separately authorized
+  effective-deployment handoff, then close honestly. #2293/#2298/#1938 retire
+  only after affected paths and deployed references are gone; a transferred
+  defect stays with its real owner.
 
-This document revision removes no scripts and observes no effective unit,
-dropins, env or production cleanup. Deployment handoff must inspect the approved
-release's actual references and coordinate owners/foreign holds; it must not delete
-tablespaces, data, old PGDATA or private recovery evidence. Unexpected deployed cold
-state requires a separately approved safe disposition. Cold samples, I9, I8,
-issues #2162 and #2017 are not blanket retirement dependencies. Existing PGDATA, compression,
-retention, readonly/display, capacity, upgrade and recovery duties remain with their
+This repository state records source closure only. It does not observe an
+effective unit, dropin, env or production cleanup. Deployment handoff must
+inspect the approved release's actual references and coordinate owners/foreign
+holds; it must not delete tablespaces, data, old PGDATA or private recovery
+evidence. Unexpected deployed cold state requires a separately approved safe
+disposition. Cold samples, I9, I8, issues #2162 and #2017 are not blanket
+retirement dependencies. Existing PGDATA, compression, retention,
+readonly/display, capacity, upgrade and recovery duties remain with their
 owners; no new comprehensive storage/display acceptance project or RPO/RTO gate
-is created. The completed #1370 archive retirement below is a different history.
+is created. The completed #1370 archive retirement below is a different
+history.
 
 ## Retirement record: the cold archive lane is gone (2026-08-11)
 
@@ -121,8 +125,9 @@ removed; git history preserves them. Do not recreate `ghdc`.
 
 **Current live fact:** hot storage is `pg_default` on
 `/data/GHDC/nhms-primary/pgdata` (host; container bind `/home/postgres/pgdata/data`).
-Issues #1891/#1895 now own mandatory selective-cold code retirement, not a later
-`nhms_cold` install/migration. A PGDATA-only backup is incomplete once any
+The #1891/#1895 selective-cold source retirement is implemented: no current
+repository command, env template, receipt schema, or role grant activates it.
+Effective deployment and privilege disposition remain separately authorized R5.2 work. A PGDATA-only backup is incomplete once any
 `pg_tblspc` target exists.
 
 **Past-tense facts (2026-08-06 overflow, now retired):** a tablespace named
@@ -155,20 +160,21 @@ units, wrappers and env templates no longer exist in the repository, and
 node-27 cleanup of any leftover installed units is the one-off step recorded
 in #1370's live evidence, not a recurring procedure.
 
-## #1894 cold-tablespace installation and governance contract (no live rollout)
+## Historical #1894 cold-tablespace installation and governance contract
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R5.2 effective-deployment handoff)
 - superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-13
+- status_since: 2026-09-14
 - archive_scope: section, including installation/rollback/governance details and oracle subsection
-- retained_for: historical installation contract; no install or rollout authorization
+- retained_for: historical installation contract and safety rationale; no install, oracle, or rollout authorization
 
-Issue #1894 introduces only the tested installation/preflight and audit contract for
-`nhms_cold`; it does not authorize a node-27 mutation, chunk movement, archive-lane
-revival, or a new timer. Live install, writer quiescence, migration, performance proof
-and any archive decision are explicitly #1895 work.
+The source installer, probe, receipt schemas, CLI wrappers, and role grant/audit
+were retired from the repository. The preserved material below records the
+original safety boundary only and MUST NOT be used as a runnable procedure.
+It neither authorizes node-27 mutation nor establishes effective deployment,
+writer quiescence, migration, performance proof, or an archive decision.
 
 The fixed identities are `nhms_cold`, host
 `/data/GHDC/nhms-cold-tablespace`, container
@@ -693,13 +699,16 @@ SQL/API measurement is owned by the PGDATA workload CLI. It captures the
 shipping explicit-cycle `forecast_series()` named query once, then discards
 one warmup and accepts 20 serial SQL EXPLAIN and local forecast-series API
 samples. Isolated receipts never imply live acceptance. Published
-`query.parameters` is the existing `query_digest` typed representation
-(`{mapping:...}`, datetime `{datetime:UTC ISO}`, sequence `{sequence:[...]}`);
-an independent SHA-256 of compact sorted JSON `{sql,parameters}` must equal
-the recorded digest. General redaction still applies; only that validated
-parameter block is restored. Receipts are written through a private staged
-sibling and exclusive publication so the final path is mode-0600 from the
-first byte and a pre-publish write/fsync failure leaves no partial final.
+`query.parameters` is the existing typed representation
+(`{mapping:...}`, datetime `{datetime:UTC ISO}`, sequence `{sequence:[...]}`).
+To reproduce the recorded digest, normalize captured SQL with
+`" ".join(sql.split())`, pair it with the published typed `query.parameters`
+envelope, serialize compact key-sorted JSON `{sql,parameters}` with
+`ensure_ascii=False` and `allow_nan=False`, encode UTF-8, then SHA-256.
+General redaction still applies; only that validated parameter block is restored.
+Receipts are written through a private staged sibling and exclusive publication
+so the final path is mode-0600 from the first byte and a pre-publish
+write/fsync failure leaves no partial final.
 Reader credentials use a descriptor-bound mode-0600 nonsymlink private DSN
 file for `nhms_display_ro` (not `display.env` or shell sourcing). Invalid UTF-8
 DSN bytes refuse `DSN_FILE_INVALID`. Repeat the same frozen inputs for
@@ -795,15 +804,16 @@ Archive status:
 - status: superseded
 - current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
 - superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-13
+- status_since: 2026-09-14
 - archive_scope: section, through G8 and its stop/rollback tables
-- retained_for: historical cold rollout and failed-window evidence; all commands and retry/closure demands withdrawn
+- retained_for: historical cold rollout and failed-window evidence; commands and retry/closure demands withdrawn, source retirement complete, effective-deployment handoff pending
 
 The following is the **withdrawn historical procedure**, not authorization to create
 `nhms_cold`, move chunks, retry G1 or run a fresh G0–G8 window. Its former gate
-order and safety evidence are preserved for audit; mandatory retirement remains
-unfinished. Use the current retirement authority and retained workload entrypoint
-above, not these commands, for current work.
+order and safety evidence are preserved for audit. Source retirement is
+complete; R5 effective-deployment handoff remains pending. Use the current
+retirement authority and retained workload entrypoint above, not these commands,
+for current work.
 
 > **STOP — the gate order is load-bearing.** G0…G8 run inside one maintenance
 > window and each gate's artifact is consumed by the next. No node-27 command

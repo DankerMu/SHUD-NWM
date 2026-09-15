@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common.node27_issue1895_readonly_accept import accept_c2_evidence
 from services.production_closure.readonly_db_validation import (
     ProbeTarget,
     PsycopgReadonlyDbProbeAdapter,
@@ -588,25 +586,6 @@ def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -
     assert (lane / "summary.json").is_file()
     for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json"):
         assert (lane / filename).stat().st_mode & 0o777 == 0o600
-    receipt_parent = evidence_root / f"c2-receipt-{run_id}"
-    receipt_parent.mkdir(mode=0o700)
-    os.chmod(receipt_parent, 0o700)
-    accepted = accept_c2_evidence(
-        evidence_root=evidence_root,
-        run_id=run_id,
-        receipt_path=receipt_parent / "c2.json",
-        head_sha="a" * 40,
-        reviewed_sha="a" * 40,
-        now=lambda: "2026-09-06T12:00:00Z",
-    )
-    assert accepted["checks"]["summary_full_gfs_ifs_scope"] == {
-        "merged_source_evidence": True,
-        "declared_sources": ["GFS", "IFS"],
-        "reduced_scope": False,
-        "source_bundle_count": 2,
-        "source_artifact_sources": [["GFS"], ["IFS"]],
-        "display_identity_sources": ["GFS", "IFS"],
-    }
 
 
 @pytest.mark.parametrize(

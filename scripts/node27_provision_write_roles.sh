@@ -5,10 +5,9 @@
 #
 #   --roles-only   The ADDITIVE phase.  Creates/converges nhms_ingest_rw and
 #                  nhms_download_rw, their DML grants, sequence USAGE, default
-#                  privileges, the cold-tablespace CREATE grant and the event
-#                  trigger that refuses CREATE RULE / CREATE TRIGGER from the
-#                  write roles, then runs the negative COPY ... FROM PROGRAM
-#                  probes and a non-strict audit.  No `ALTER ... OWNER TO` is
+#                  privileges, and the event trigger that refuses CREATE RULE /
+#                  CREATE TRIGGER from the write roles, then runs the negative
+#                  COPY ... FROM PROGRAM probes and a non-strict audit.  No `ALTER ... OWNER TO` is
 #                  executed and no relation lock is taken, so it is safe to run
 #                  on the live primary while every unit still connects as
 #                  `nhms`.  This is the pre-merge phase.

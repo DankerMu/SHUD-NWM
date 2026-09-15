@@ -54,10 +54,6 @@ Whitelisted non-wiring modules (documented as intentionally unwired):
 * ``scripts/reset_qhh_smoke_db.py`` — smoke-DB reset script; analogous
   non-wiring rationale to seed_demo (fresh DB reset, never touches
   production compressed data).
-* ``packages/common/compressed_chunk_cold_probe/shell.py`` — disposable
-  2.10.2 probe schema bootstrap; DELETE targets only the four-column
-  fixture on a fail-closed isolated cluster, never production. Docstring
-  documents the exemption.
 """
 
 from __future__ import annotations
@@ -80,7 +76,6 @@ _INTENTIONALLY_UNWIRED_MODULES: frozenset[Path] = frozenset(
         _GUARD_MODULE_PATH,
         REPO_ROOT / "db" / "seeds" / "seed_demo.py",
         REPO_ROOT / "scripts" / "reset_qhh_smoke_db.py",
-        REPO_ROOT / "packages" / "common" / "compressed_chunk_cold_probe" / "shell.py",
     }
 )
 
@@ -510,10 +505,6 @@ def test_every_guarded_delete_literal_carries_the_certified_valid_time_window() 
     unbounded DELETE is rejected outright by TimescaleDB once any chunk of the
     hypertable is compressed.  This test closes that gap structurally.
 
-    ``packages/common/compressed_chunk_cold_probe/shell.py`` carries the
-    half-open form but sits on ``_INTENTIONALLY_UNWIRED_MODULES`` and therefore
-    never reaches ``_wire_site_hits()``; the admitted-spelling set is NOT widened
-    for it.
     """
 
     scanned = 0

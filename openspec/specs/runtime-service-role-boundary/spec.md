@@ -89,7 +89,7 @@ The `slurm_gateway` role SHALL not accidentally start the full business API surf
 
 ### Requirement: node-27 write-path components SHALL authenticate as non-superuser roles provisioned idempotently
 
-Every recurring node-27 runtime unit that writes to the production database SHALL connect as a role with `rolsuper`, `rolcreaterole`, `rolcreatedb`, `rolreplication` and `rolbypassrls` all false, holding the measured privilege set for its component (ownership of the application-schema relations plus DML grants and default privileges for the ingest-class lanes, DML grants and default privileges on `met` for the download lane); the roles, grants, default privileges and ownership SHALL be provisioned by one idempotent script whose trailing audit fails on drift; the superuser role SHALL appear in no runtime env file — in DSN or `PGUSER` form — except the documented migration-class exceptions (archive-rebuild drill, compression replay supervisor).
+Every recurring node-27 runtime unit that writes to the production database SHALL connect as a role with `rolsuper`, `rolcreaterole`, `rolcreatedb`, `rolreplication` and `rolbypassrls` all false, holding the measured privilege set for its component (ownership of the application-schema relations plus DML grants and default privileges for the ingest-class lanes, DML grants and default privileges on `met` for the download lane); the roles, grants, default privileges and ownership SHALL be provisioned by one idempotent script whose trailing audit fails on drift; the superuser role SHALL appear in no runtime env file — in DSN or `PGUSER` form — except the documented migration-class exceptions (archive-rebuild drill, compression replay supervisor). Retired cold-residency runtime and its tablespace `CREATE` grant/positive grant audit SHALL NOT be provisioned or required; all unrelated security audits SHALL remain intact. This source retirement SHALL NOT authorize live privilege revocation or tablespace/data deletion.
 
 #### Scenario: Provision is idempotent
 
@@ -121,10 +121,11 @@ Every recurring node-27 runtime unit that writes to the production database SHAL
 - **WHEN** either write role is granted to any other role (for example `GRANT nhms_ingest_rw TO nhms_display_ro`)
 - **THEN** the flags audit raises a security-regression error naming both roles and the runner exits 3
 
-#### Scenario: Cold tablespace grant is audited
+#### Scenario: Retired cold tablespace grant is not provisioned or required
 
-- **WHEN** the tablespace `nhms_cold` exists and `nhms_ingest_rw` does not hold `CREATE` on it
-- **THEN** the trailing audit reports the missing grant (a warning outside strict mode, an error under strict audit so the runner exits 3); when the tablespace is absent the audit prints an explicit "grant skipped" line instead of staying silent
+- **WHEN** ordinary provisioning runs whether or not an old `nhms_cold` tablespace exists
+- **THEN** it neither grants `CREATE` for the retired lane nor demands that grant in a positive audit, and unrelated strict role/security audits remain enforced
+- **AND** it does not revoke live privileges or `DROP` an existing tablespace as part of this source retirement
 
 #### Scenario: Program execution is closed
 
@@ -133,11 +134,11 @@ Every recurring node-27 runtime unit that writes to the production database SHAL
 
 #### Scenario: Runtime env files carry no superuser
 
-- **WHEN** the ingest, download, compression, cold-residency and retention env files on node-27 are inspected
+- **WHEN** the ingest, download, compression, and retention env files on node-27 are inspected
 - **THEN** none names the `nhms` user in any credential form, the templates in `infra/env/` name the same roles as the live files, and the drill and compression-replay files are the only ones still naming `nhms`, each with its documented reason
 
 #### Scenario: Each component runs under its role
 
-- **WHEN** ingest, compression, cold-residency and retention each execute one real run under `nhms_ingest_rw`, and download under `nhms_download_rw`
+- **WHEN** ingest, compression, and retention each execute one real run under `nhms_ingest_rw`, and download under `nhms_download_rw`
 - **THEN** each completes with its normal receipt, no `permission denied`, and the ingest tick's stats guard reports both ANALYZE legs as `ok`
 

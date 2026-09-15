@@ -10,27 +10,24 @@
 > `openspec/changes/m22-two-node-docker-readonly-display/tasks.md`；角色边界设计见
 > `docs/runbooks/two-node-deployment-overview.md`。
 
-## 当前边界：selective-cold 必须退役代码，尚未实施
+## 当前边界：selective-cold 源码已退役；effective-deployment handoff 待授权
 
-原 #1891/#1895 的生产冷层 rollout 已撤回，不再要求新 G1
-retry、冷样本或 G0–G8 窗口。唯一退役合同是
-[`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md)：R1 最小共享/PGDATA/governance/manual
-consumers 迁到真实 owner；R2 独立解除普通 compression 的 cold env/paired
-budget/launcher 耦合并保留安全边界；R3 在二者之后删除 cold-only
-runtime、旧 G0–G8 wrappers、schemas/examples/tests/CI/SQL
-grant-audit；R4 更正权威并保留历史，不晋升 withdrawn ADDED cold
-specs；R5 验证存活能力、另行批准 effective-deployment
-handoff 后才闭合。测试/文档随各源码切片同行。代码仍待删除，不能以 dormant
-retention 关闭；#2293/#2298/#1938 仅在受影响路径和部署引用真正退出后处置，迁出的缺陷随真实 owner 保留。
+原 #1891/#1895 的生产冷层 rollout 已撤回，不再要求新 G1 retry、冷样本或
+G0–G8 窗口。R1–R3 的仓库源码闭包已删除 cold-only runtime、旧 wrappers、
+schemas/examples/tests/CI 和 source grant-audit；R4 已把当前权威转回真实
+PGDATA、governance、compression、readonly 与 C4 owners。不存在可由当前仓库
+启动 selective-cold 的命令、env template 或 grant audit。
+
+这不声明 effective unit/dropin/env、live privilege、tablespace 或数据已处置。
+R5 仍须验证存活能力，并另行授权 effective-deployment handoff；#2293/#2298/#1938
+只能在受影响路径和部署引用真正退出后按 capability-retired 处置，迁出的缺陷随真实
+owner 保留。冷样本/I9/I8/#2162/#2017 不是一揽子退役依赖，部署仍须协调真实
+owner 和 foreign holds；既有容量、升级、恢复职责不取消，也不新增 RPO/RTO gate。
 
 本清单 C1–C4、river-click 和既有只读/展示 producer 继续由各自 owner 承担；
-**不把 #1895 改造成新的全面 display/storage acceptance 项目**。旧 issue1895
-C1/C2/C3/performance 包装不是本地 C4
-producer/binder 的前置，但其中必要的外层 SHA/digest 保证必须按 R1.6 迁交
-**Bringup-C4 production acceptance**。R1 必须迁移/repoint 真正保留的手工/PGDATA
-consumers 后 R3 才能删除旧出口。此修订不声称源码已移除、effective
-unit 已观测或生产已清理。冷样本/I9/I8/#2162/#2017 不是一揽子退役依赖，部署仍须协调真实 owner 和 foreign
-holds；既有容量、升级、恢复职责不取消，也不新增 RPO/RTO gate。
+**不把 #1895 改造成新的全面 display/storage acceptance 项目**。Bringup-C4
+production acceptance 保留外层 reviewed-SHA/digest 与文件身份保证；本地 C4
+producer/binder 成功不代替它，也不代替独立的生产部署证明。
 
 ## 开发流程衔接（2026-06-07）
 
@@ -228,7 +225,7 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
       `services/production_closure/readonly_db_validation`
       独立保留。凭证和 evidence 必须绑定本次实际运行，私有保存且不得泄露 DSN。旧 #1895
       C2 acceptance wrapper/digest 绑定链已撤回，不是 canonical
-      validator 的永久前置；R1 迁移真正保留的绑定消费者后 R3 才删除旧出口：
+      validator 的永久前置；R1 已迁移真正保留的绑定消费者，R3 已删除旧出口：
   - display API（health/models/stations/latest-product/pipeline
     status·stages·jobs·logs/runtime
     config）在只读凭证下 PASS，identity-bound 路由用一个 strict
@@ -258,8 +255,7 @@ C2 证的是**读**边界（`nhms_display_ro`
       有效 SELECT 集合 before/after 一致、 `relacl` diff（预期只有 grantor 从
       `…/nhms` 改写为 `…/nhms_ingest_rw`）。
 - [ ] 存活 lane 各在新角色下跑一轮真实 run 并留 receipt；**不为冷层退役启动 cold
-      lane**。R3 删除 cold-only grant/positive
-      audit，不据本文直接撤销生产权限。autopipe dry tick 的统计守卫
+      lane**。R3 已删除 cold-only grant/positive audit，不据本文直接撤销生产权限。autopipe dry tick 的统计守卫
       **两条 ANALYZE 腿都必须是 `ok`**（`warning`
       = 非 owner 被静默跳过，tick 绿而腿死）。
 - [ ] env 切换后脱敏 `grep`：`/home/nwm/NWM/infra/env/*.env` 中不再出现 `nhms:`

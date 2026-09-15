@@ -1,0 +1,21 @@
+{
+  "verdict": "pass",
+  "repair_iteration": 1,
+  "sole_amendment": true,
+  "artifact": "openspec/changes/compressed-chunk-cold-tablespace-tiering/fixtures/retirement-cold-family-deletion.md",
+  "head_sha": "a236b8e51112c59477cb7229e44463d1a634fe3c",
+  "working_tree": "10-line insertion only at fixture lines 28-35; no other files changed",
+  "closed_finding": {
+    "id": "R4-WORKLOAD-DIGEST-RECONSTRUCTION-PROSE",
+    "status": "closed",
+    "proof": "Current R4 authority now names the surviving reconstruction: whitespace-fold SQL via \" \".join(sql.split()), published typed query.parameters envelopes, compact key-sorted JSON with ensure_ascii=False and allow_nan=False, UTF-8, SHA-256. That matches packages/common/node27_pgdata_workload_query.py:268-274 query_digest_preimage. Current storage guidance must agree with that preimage; tests and immutable history are forbidden to change; both committed lane receipts (retirement-pgdata-workload-smoke.json serialized_identity compressed/uncompressed) must independently reproduce their digests; no new source-text pins or runtime contract."
+  },
+  "tests_run": false,
+  "implementation_authorized": false,
+  "production_authorized": false,
+  "archive_or_epic_closure": "pending-R5-separately-authorized",
+  "notes": [
+    "Static fixture qualification only. Implementation, regression, exact-head CI, R5.2, archive, and epic closure remain unauthorized.",
+    "R2 mixed attribution/lifecycle closures remain already-applied at HEAD; remaining-deletion still classifies them as first-deletion census to reconcile, not redo."
+  ]
+}

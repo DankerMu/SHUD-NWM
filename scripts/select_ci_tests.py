@@ -789,38 +789,15 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 )
 
 
-# #1895 task 4.0 second leg: the runbook contract suite is the review gate for
-# the two read-only CLIs, the installer/runner receipt contracts and the probe
-# parser tokens it pins. The suite is a CHANGED_TEST_FILE_RULES redirect because
-# rewriting it can silently weaken its pins; a contract-only PR must run the
-# owners the contract protects (the CLI/host/target/installer/runner surfaces),
-# replacing the ordinary self-selection + importer closure exactly like the
-# SQL-shape oracle does. The runbook rule (PATH_TEST_RULES) still selects this
-# suite on a runbook-only change; this redirect covers the test-only change.
-# #1895 task 4.0 structural split (large-file guard): the census test suite is
-# physically partitioned into the core module (capacity arithmetic, exact-count,
-# group-state, engine/read-only, head-freeze, connection setup) and the
-# publication / no-clobber / secret / import-surface module. Both halves are ONE
-# contract: the publication half imports the core module's shared fake helpers
-# at module scope, and the runbook binds the artifact the CLI publishes. This
-# tuple is the single two-partition route authority for the CLI rule, the
-# policy-owner rule, the runbook-contract redirect and the publication-suite
-# redirect below, so a future third partition reddens the meta-tests instead of
-# falling out of one of the four routes.
-NODE27_COLD_RESIDENCY_CENSUS_TESTS: tuple[str, ...] = (
-    "tests/test_node27_cold_residency_census.py",
-    "tests/test_node27_cold_residency_census_publication.py",
+# Canonical readonly-boundary corpus. The three partitions import the generic
+# validator directly; retired selective-cold acceptance wrappers are not
+# consumers of this surviving contract.
+READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
+    "tests/test_readonly_db_validation.py",
+    "tests/test_readonly_db_validation_probes.py",
+    "tests/test_readonly_db_validation_routes.py",
 )
 
-# Producer/contract closure for the census CLI and its capacity-policy owner:
-# both census halves, the #1893 runtime owner the CLI calls, and the runbook
-# contract that binds the artifact schema it publishes.
-NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS: tuple[str, ...] = (
-    *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
-    "tests/test_compressed_chunk_cold_runtime.py",
-    "tests/test_compressed_chunk_cold_runtime_integration.py",
-    "tests/test_issue1895_runbook_contract.py",
-)
 
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
@@ -843,193 +820,11 @@ NODE27_PGDATA_WORKLOAD_TESTS: tuple[str, ...] = (
     "tests/test_select_ci_tests.py",
 )
 
-# #2224: production parity is one closure across the catalog SQL owner, the
-# movement owner, the read-only G1 census, post-target observer and G0/G1
-# runbook fence. The integration suite is intentionally present even where its
-# disposable Docker guard skips: routing owns collection and the node-27 oracle.
-ORIGIN_CHUNK_PARITY_TESTS: tuple[str, ...] = (
-    "tests/test_compressed_chunk_cold_runtime.py",
-    "tests/test_compressed_chunk_cold_runtime_proof.py",
-    "tests/test_node27_cold_residency_census.py",
-    "tests/test_compressed_chunk_cold_runtime_integration.py",
-    "tests/test_issue1895_readiness_storage.py",
-    "tests/test_issue1895_runbook_contract.py",
-    "tests/test_issue2224_origin_chunk_parity.py",
-    "tests/test_issue2224_origin_parity_integration.py",
-    "tests/test_issue2224_origin_parity_runbook_contract.py",
-)
-
-READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
-    "tests/test_readonly_db_validation.py",
-    "tests/test_readonly_db_validation_probes.py",
-    "tests/test_readonly_db_validation_routes.py",
-)
-
-ISSUE1895_READINESS_C1_C2_C3_TESTS: tuple[str, ...] = (
-    "tests/test_issue1895_readiness_c1_c2_c3.py",
-    "tests/test_issue1895_readiness_c3.py",
-    "tests/test_issue1895_readiness_c3_bind.py",
-)
-
-ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST = "tests/test_issue2227_explicit_cycle_named_binding.py"
-
-ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS: tuple[str, ...] = (
-    "tests/test_issue1895_readiness_performance_live.py",
-    "tests/test_issue1895_readiness_performance_live_cli.py",
-)
-
-ISSUE1895_READINESS_STORAGE_TESTS: tuple[str, ...] = (
-    "tests/test_issue1895_readiness_storage.py",
-    "tests/test_issue1895_readiness_storage_publication.py",
-)
-
-ISSUE1895_READINESS_TESTS: tuple[str, ...] = (
-    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-    "tests/test_issue1895_readiness_gates.py",
-    "tests/test_issue1895_readiness_performance.py",
-    *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-    "tests/test_issue1895_readiness_performance_publication.py",
-    "tests/test_issue1895_readiness_c14.py",
-    *ISSUE1895_READINESS_STORAGE_TESTS,
-)
-
-ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
-    *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
-    "tests/test_node27_cold_identity_observe.py",
-    "tests/test_node27_cold_tablespace_cli.py",
-    "tests/test_node27_cold_tablespace_install.py",
-    "tests/test_node27_cold_tablespace_host.py",
-    "tests/test_compressed_chunk_cold_target.py",
-    "tests/test_compressed_chunk_cold_runtime.py",
-    "tests/test_probe_compressed_chunk_cold_tablespace.py",
-    "tests/test_timeseries_storage_schemas.py",
-    "tests/test_issue2224_origin_parity_runbook_contract.py",
-    *ISSUE1895_READINESS_TESTS,
-)
 
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_sql_shape_helpers.py",
         SQL_SHAPE_ORACLE_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_runbook_contract.py",
-        (*ISSUE1895_RUNBOOK_CONTRACT_TESTS, "tests/test_issue2291_reviewed_census_count.py"),
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue2291_reviewed_census_count.py",
-        (
-            *ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-            "tests/test_issue2291_reviewed_census_count.py",
-            "tests/test_compressed_chunk_cold_runtime_integration.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
-        ),
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue2224_origin_parity_runbook_contract.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS + ORIGIN_CHUNK_PARITY_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue2224_origin_chunk_parity.py",
-        ORIGIN_CHUNK_PARITY_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue2224_origin_parity_integration.py",
-        ORIGIN_CHUNK_PARITY_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        # A test-only change to the isolated-cluster runtime integration can drop
-        # `node27_docker` while ordinary CI still skips the Docker body. Redirect
-        # to the AST marker contract that pins the triple marker, replacing
-        # ordinary self-selection (which would omit the contract).
-        "tests/test_compressed_chunk_cold_runtime_integration.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime_integration.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_c1_c2_c3.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_c3.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_c3_bind.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_gates.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_performance.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_performance_live.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_performance_live_cli.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_performance_publication.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_c14.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_storage.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_issue1895_readiness_storage_publication.py",
-        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_node27_cold_residency_census.py",
-        (
-            *NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
-            *ISSUE1895_READINESS_TESTS,
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        # The publication half of the census suite moved out of the core module
-        # for the 1,000-line guard. A test-only change to it must run BOTH
-        # census halves plus the producer/contract closure (the CLI rule, the
-        # runbook contract it binds, and the runtime owner), replacing the
-        # ordinary self-selection + importer closure exactly like the runbook
-        # contract redirect does.
-        "tests/test_node27_cold_residency_census_publication.py",
-        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1120,7 +915,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_grid_stability_verification.py",
             "tests/test_integration_gate.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_docker_collection_gate.py",
             NODE22_ENTRYPOINT_INVARIANT_TEST,
         ),
     ),
@@ -1233,46 +1028,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/__init__.py",
         (
             "tests/test_integration_gate.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_docker_collection_gate.py",
             "tests/test_node27_timeseries_compression_capture.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
-        ),
-    ),
-    PathTestRule(
-        "tests/cold_residency_fakes.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_compressed_chunk_cold_runtime_proof.py",
-            "tests/test_compressed_chunk_cold_target.py",
-            # #1929: the isolated-cluster suite now shares the identity helpers,
-            # so a fakes-only PR must still run it (its own tests skip without
-            # the oracle, but collection is the contract check).
-            "tests/test_compressed_chunk_cold_runtime_integration.py",
-            # #1895 task 4.0 structural split: both census halves import the
-            # shared fakes at module scope (the publication half imports the
-            # core half, which imports the fakes). A fakes-only edit must run
-            # both, or the split leaves the publication half blind.
-            *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
-            # #2224: focused origin-chunk parity imports the shared fakes at
-            # module scope, so a fakes-only edit must run it.
-            "tests/test_issue2224_origin_chunk_parity.py",
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue1895_readiness_performance_live.py",
-            "tests/test_issue1895_readiness_storage.py",
-            "tests/test_issue1895_readiness_performance_live_cli.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        # #2224 Stage-1 identity mutants. Four non-gated suites import this
-        # helper at module scope; without an explicit support-module rule a
-        # helper-only edit collapses to the meta-guard and skips the inspect/
-        # tick/AST contracts that consume it.
-        "tests/cold_residency_identity_mutants.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_issue2224_origin_chunk_parity.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
         ),
     ),
     PathTestRule(
@@ -1592,6 +1350,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
         ),
         stop_on_match=True,
+    ),
+    # C4 reads pinned evidence through evidence_io's descriptor-bound
+    # byte/JSON identity primitives. This exact owner has no same-name suite,
+    # so route the surviving C4 acceptance partitions without pulling retired
+    # C1/C2/C3 suites; shared core/invariant riders remain additive outside
+    # PATH_TEST_RULES.
+    PathTestRule(
+        "packages/common/evidence_io.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
     ),
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[1],
@@ -2327,10 +2094,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "services/production_closure/readonly_db_validation.py",
-        (
-            *READONLY_DB_VALIDATION_TESTS,
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-        ),
+        READONLY_DB_VALIDATION_TESTS,
     ),
     PathTestRule(
         "services/production_closure/__init__.py",
@@ -2810,13 +2574,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_write_roles.py",),
     ),
     PathTestRule(
-        "packages/common/compressed_chunk_cold_residency.py",
-        (
-            "tests/test_node27_write_roles.py",
-            *ORIGIN_CHUNK_PARITY_TESTS,
-        ),
-    ),
-    PathTestRule(
         "infra/compose.compute.yml",
         ("tests/test_two_node_docker_runtime.py",),
     ),
@@ -2916,10 +2673,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/validate_readonly_db_boundary.py",
-        (
-            *READONLY_DB_VALIDATION_TESTS,
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-        ),
+        READONLY_DB_VALIDATION_TESTS,
     ),
     PathTestRule(
         # #1571: the continuous entrypoint's dedicated current-authority owner
@@ -3021,6 +2775,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_node22_refresh_timer_health.py",
         ),
+    ),
+    # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
+    # After cold-family retirement that consumer contract is gone, while the
+    # node-22 refresh-timer probe still copies `DEFAULT_MAX_MANIFEST_AGE_HOURS`
+    # as its own `CONSUMER_MAX_MANIFEST_AGE_HOURS` (D4 forbids the probe importing
+    # repo packages) and derives both threshold ceilings from it. The probe suite
+    # asserts the two constants are equal, so a drop in the consumer's bound must
+    # run it -- otherwise the probe keeps grading `ok` for a manifest the consumer
+    # has already fail-closed on.
+    PathTestRule(
+        "services/orchestrator/scheduler_file_providers.py",
+        ("tests/test_node22_refresh_timer_health.py",),
     ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;
@@ -3386,549 +3152,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "docs/runbooks/tier-node27-timeseries-storage.md",
         (
-            *ORIGIN_CHUNK_PARITY_TESTS,
+            *NODE27_PGDATA_WORKLOAD_TESTS,
+            *C4_PRODUCTION_ACCEPTANCE_TESTS,
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_budget.py",
             "tests/test_node27_timeseries_compression_runner_config.py",
             "tests/test_node27_timeseries_compression_wrappers.py",
             "tests/test_node27_timeseries_lifecycle_lock.py",
             "tests/test_node27_lifecycle_contract.py",
-            # #1895 task 4.0 second leg: the live-rollout section is the review
-            # gate for the two new read-only CLIs and the installer/runner
-            # contracts it binds; a section-only PR must run its contract suite
-            # instead of falling to collect-only.
-            "tests/test_issue1895_runbook_contract.py",
-            *ISSUE1895_READINESS_TESTS,
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_performance_oracle.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_performance_bind.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_bind_readonly_dsn.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_display_runtime.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_display_runtime_bind.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_readonly_accept.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-            *READONLY_DB_VALIDATION_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_readonly_accept_bind.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_publication_current.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_publication_current_bind.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_fs_reconcile.py",
-        (
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_group_reconcile.py",
-        (
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_readiness_gates.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_env.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_performance.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_query.py",
-        (
-            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_lanes.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_catalog.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2290_cold_parent_admission.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_identity.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_private_receipt.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_display_runtime.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_readonly_accept.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-            *READONLY_DB_VALIDATION_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_publication_current.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    # C1 and C3 read pinned evidence through evidence_io's descriptor-bound
-    # byte/JSON identity primitives. This exact owner has no same-name suite,
-    # so route both receipt contract partitions without pulling unrelated legacy
-    # evidence suites; shared core/invariant riders remain additive outside
-    # PATH_TEST_RULES.
-    PathTestRule(
-        "packages/common/evidence_io.py",
-        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, *C4_PRODUCTION_ACCEPTANCE_TESTS),
-    ),
-    # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
-    # After the readiness suite split that consumer contract lives in
-    # test_issue1895_readiness_c3.py, while the shared C1/C2 helpers remain in
-    # test_issue1895_readiness_c1_c2_c3.py; a change here must run both
-    # partitions. This exact owner has no same-name suite.
-    # #2146 round 2 widened this row by one: the node-22 refresh-timer probe
-    # duplicates `DEFAULT_MAX_MANIFEST_AGE_HOURS` as its own
-    # `CONSUMER_MAX_MANIFEST_AGE_HOURS` (D4 forbids the probe importing repo
-    # packages), and derives both threshold ceilings from it. The probe suite
-    # asserts the two constants are equal, so a drop in the consumer's bound
-    # must run it -- otherwise the probe keeps grading `ok` for a manifest the
-    # consumer has already fail-closed on.
-    PathTestRule(
-        "services/orchestrator/scheduler_file_providers.py",
-        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, "tests/test_node22_refresh_timer_health.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_commit.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_receipt_validate.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_performance_live.py",
-        (
-            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2290_cold_parent_admission.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_http.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_sql.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_readiness_gates.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_probe.py",
-        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_process.py",
-        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_dsn.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            *READONLY_DB_VALIDATION_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_fs.py",
-        (
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_timer.py",
-        (
-            "tests/test_issue1895_readiness_gates.py",
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_publication.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_c14.py",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_gates.py",
-        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_rollback.py",
-        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_engine.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_census_bind.py",
-        (
-            "tests/test_issue1895_readiness_storage.py",
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_receipt.py",
-        (
-            "tests/test_issue1895_readiness_storage.py",
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_post_target.py",
-        (
-            *ORIGIN_CHUNK_PARITY_TESTS,
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_watermark.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_engine.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_census_bind.py",
-        (
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_sequential_receipt.py",
-        (
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_post_target_observe.py",
-        (
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_publication_prove.py",
-        (
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_watermark.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_percentiles.py",
-        (
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_issue1895_types.py",
-        (
-            "tests/test_issue1895_readiness_gates.py",
-            "tests/test_issue1895_readiness_performance.py",
-            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
-            "tests/test_issue1895_readiness_performance_publication.py",
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "docs/runbooks/node-27-bringup-checklist.md",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json",
-        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, "tests/test_issue1895_readiness_c14.py"),
-    ),
-    PathTestRule(
-        "schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *READONLY_DB_VALIDATION_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "schemas/node27_issue1895_c3_current_publication_display_receipt.schema.json",
-        (
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
-            "tests/test_issue1895_readiness_c14.py",
-            *ISSUE1895_READINESS_STORAGE_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/node27_issue1895_c1_display_runtime_receipt.example.json",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
-    ),
-    PathTestRule(
-        "schemas/examples/node27_issue1895_c2_readonly_boundary_receipt.example.json",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
-    ),
-    PathTestRule(
-        "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
-    ),
-    PathTestRule(
-        # #1895 task 4.0: the pre-target census CLI freezes the group/capacity
-        # preimage at the exact reviewed SHA. Any change to it invalidates the
-        # two census suites (core + publication), the #1893 production owners it
-        # calls, and the runbook contract that binds the artifact schema it
-        # publishes.
-        "scripts/node27_cold_residency_census.py",
-        (
-            *NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
-            "tests/test_issue1895_readiness_storage.py",
-            *ORIGIN_CHUNK_PARITY_TESTS,
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue2291_reviewed_census_count.py",
-        ),
-    ),
-    PathTestRule(
-        # #1895 task 4.0 structural split: the shared canonical-decimal capacity
-        # policy owner has no same-name suite (it is not a CLI), so a policy-only
-        # change must run the census suites that assert the arithmetic plus the
-        # runtime owner and runbook contract, instead of falling to the #1744
-        # shared-baseline smoke which asserts none of it.
-        "packages/common/node27_cold_residency_census_policy.py",
-        (*NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS, "tests/test_issue2291_reviewed_census_count.py"),
-    ),
-    PathTestRule(
-        "scripts/node27_issue1895_cutoff_count.py",
-        ("tests/test_issue2291_reviewed_census_count.py", "tests/test_compressed_chunk_cold_runtime_integration.py"),
-    ),
-    PathTestRule(
-        # #1895 task 4.0: the read-only identity observer supplies the two
-        # deliberately distinct device identities (installer mount identity and
-        # runner descriptor identity). A change to it must run its own suite,
-        # the two host/target owners it calls, and the runbook contract that
-        # pins the two lanes.
-        "scripts/node27_cold_identity_observe.py",
-        (
-            "tests/test_node27_cold_identity_observe.py",
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_compressed_chunk_cold_target.py",
-            "tests/test_issue1895_runbook_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/timeseries_cold_residency_receipt.schema.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/timeseries_cold_residency_receipt.example.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/timeseries_cold_residency_receipt.noop.example.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/timeseries_cold_residency_receipt.partial.example.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/timeseries_cold_residency_receipt.error.example.json",
-        (
-            "tests/test_timeseries_storage_schemas.py",
         ),
     ),
     PathTestRule(
@@ -3962,87 +3193,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_retention.py",
             "tests/test_node27_timeseries_decompression_replay.py",
-        ),
-    ),
-    PathTestRule(
-        # Movement owner. After the #1929 split this module owns only the
-        # shell-first sequence plus its catalog read helpers; the suites below
-        # are its derived importers (RuntimeConfig / LIVE_CONTAINER_NAME by name,
-        # or the tick that drives it). Its preflight re-exports and the
-        # inspector/receipt surfaces are routed to their own owners below.
-        "packages/common/compressed_chunk_cold_runtime.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_compressed_chunk_cold_runtime_proof.py",
-            # #1774: this lane runs as a non-superuser; a superuser-gated
-            # READ added here would fail SILENTLY.
-            "tests/test_node27_write_roles.py",
-            *ORIGIN_CHUNK_PARITY_TESTS,
-            "tests/test_issue2290_cold_parent_admission.py",
-        ),
-    ),
-    PathTestRule(
-        # #1929 structural split: the ONLY definition site of the
-        # target-preflight identity contract (RuntimeConfig, TargetIdentity,
-        # preflight_target_identity, require_runtime_exec_identity). No test
-        # imports it by name — movement re-exports it and the CLI/tick reach it
-        # through that surface — so importer derivation alone routes a PR here
-        # to zero cold-residency suites. Each listed suite executes the gate:
-        # directly (preflight / RuntimeConfig / CLI env), or through a
-        # run_tick that preflights before its first SQL. `test_..._target.py` is
-        # the inspector's only production caller; the isolated-cluster suite is
-        # included because its disposable oracle proves the same
-        # expected==observed path on a real container.
-        "packages/common/compressed_chunk_cold_runtime_target.py",
-        (
-            "tests/test_compressed_chunk_cold_target.py",
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_compressed_chunk_cold_runtime_proof.py",
-            "tests/test_compressed_chunk_cold_runtime_integration.py",
-            # #2224: focused origin-chunk parity imports the movement owner,
-            # which re-exports this target-preflight surface; one-hop derivation
-            # therefore requires this suite on a target-only PR.
-            "tests/test_issue2224_origin_chunk_parity.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_runtime_catalog.py",
-        (
-            *ORIGIN_CHUNK_PARITY_TESTS,
-            "tests/test_issue2290_cold_parent_admission.py",
-            "tests/test_issue1895_readiness_performance_live_cli.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_receipt.py",
-        (
-            "tests/test_timeseries_storage_schemas.py",
-            *ORIGIN_CHUNK_PARITY_TESTS,
-        ),
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_target.py",
-        (
-            "tests/test_compressed_chunk_cold_target.py",
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_compressed_chunk_cold_runtime_proof.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_tick.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_compressed_chunk_cold_target.py",
-            # #1774: this lane runs as a non-superuser; a superuser-gated
-            # READ added here would fail SILENTLY.
-            "tests/test_node27_write_roles.py",
-            "tests/test_issue2290_cold_parent_admission.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_runtime_timing.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
         ),
     ),
     PathTestRule(
@@ -4228,7 +3378,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *CORE_SMOKE_TESTS,
             *THREAD_EXCEPTION_POLICY_TESTS,
-            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_docker_collection_gate.py",
             # #1765: `tmp_path_retention_policy` lives in the same table and is
             # asserted here (parsed key + the running session's resolved ini).
             PYTHON_ENVIRONMENT_TRUTH_TEST,
@@ -4277,37 +3427,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/openapi_auth_security.py",
         (SLURM_OPENAPI_SECURITY_TEST,),
     ),
-    PathTestRule(
-        # #1892/#1900: probe-support modules have no same-name suite and are not
-        # imported by the residency unit suite at module scope, so a support-only
-        # PR previously selected core-smoke plus the #1656 rider and skipped the
-        # focused probe contract. Ownership/cleanup lives in a sibling suite so a
-        # support-only PR cannot skip the created-containerker. Additive: the
-        # #1744 shared-library baseline remains outside this rule.
-        "packages/common/compressed_chunk_cold_probe/**",
-        (
-            "tests/test_probe_compressed_chunk_cold_tablespace.py",
-            "tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py",
-        ),
-    ),
-    # #1894 installer owners are deliberately partitioned by safety boundary,
-    # not by same-stem test filename.  These rows attach their direct public
-    # contracts while the shared-library baseline remains additive below.
+    # Retained PGDATA owners keep only their real command, migration, oracle,
+    # evidence, and C4 acceptance consumers.
     PathTestRule(
         "packages/common/node27_pgdata_command.py",
         (
             "tests/test_node27_pgdata_command.py",
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
-            "tests/test_compressed_chunk_cold_target.py",
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
         ),
         stop_on_match=True,
@@ -4318,14 +3445,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_pgdata_container.py",
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
-            "tests/test_node27_cold_tablespace_container.py",
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
         ),
         stop_on_match=True,
     ),
@@ -4335,15 +3454,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_pgdata_evidence.py",
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
-            "tests/test_node27_cold_tablespace_evidence.py",
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_root_evidence.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
         ),
         stop_on_match=True,
     ),
@@ -4382,254 +3492,39 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
-        "packages/common/node27_cold_tablespace_identity.py",
-        (
-            "tests/test_node27_cold_tablespace_identity.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_types.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_dry_run.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_container.py",
-        (
-            "tests/test_node27_cold_tablespace_container.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_evidence.py",
-        (
-            "tests/test_node27_cold_tablespace_evidence.py",
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_root_evidence.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_host.py",
-        (
-            "tests/test_node27_cold_tablespace_host.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_authority.py",
-        (
-            "tests/test_node27_cold_tablespace_authority.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_receipt.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_topology.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_dry_run.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_engine.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_dry_run.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_pending.py",
-        (
-            "tests/test_node27_cold_tablespace_pending_action.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
-            "tests/test_node27_cold_tablespace_authority.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_observation.py",
-        (
-            "tests/test_node27_cold_tablespace_pending_action.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_recovery.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_authority.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_pending_action.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_install.py",
-        (
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_dry_run.py",
-            "tests/test_node27_cold_tablespace_recovery_contract.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_integration.py",
-        (
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_tablespace_marker_contract.py",
-            "tests/test_node27_cold_tablespace_root_evidence.py",
-            # #1774: this lane runs as a non-superuser; a superuser-gated
-            # READ added here would fail SILENTLY.
-            "tests/test_node27_write_roles.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_tablespace_root_capability.py",
-        (
-            "tests/test_node27_cold_tablespace_integration.py",
-            "tests/test_node27_cold_tablespace_root_evidence.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_cold_tablespace_install.py",
-        (
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_dry_run.py",
-        ),
-    ),
-    PathTestRule(
-        "scripts/node27_cold_tablespace_root_evidence_setup.py",
-        (
-            *CORE_SMOKE_TESTS,
-            "tests/test_node27_cold_tablespace_cli.py",
-            "tests/test_node27_cold_tablespace_root_evidence.py",
-            "tests/test_node27_cold_tablespace_evidence.py",
-            "tests/test_node27_cold_tablespace_install.py",
-            "tests/test_node27_cold_tablespace_integration.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/node27_cold_tablespace_install_receipt.schema.json",
-        ("tests/test_node27_cold_tablespace_install.py",),
-    ),
-    PathTestRule(
-        "schemas/examples/node27_cold_tablespace_install_receipt*.example.json",
-        ("tests/test_node27_cold_tablespace_install.py",),
-    ),
-    PathTestRule(
         "packages/common/node27_resource_governance_collection.py",
         (
             "tests/test_node27_resource_governance.py",
             "tests/test_node27_working_set.py",
             "tests/test_node27_maintenance_output_integration.py",
-            "tests/test_node27_cold_governance.py",
-        ),
-    ),
-    PathTestRule(
-        "packages/common/node27_cold_governance_collection.py",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-            "tests/test_node27_working_set.py",
-        ),
-    ),
-    # The governance runtime consumes the installer evidence boundary.  Its own
-    # modules share the same two public contract suites.
-    PathTestRule(
-        "packages/common/node27_cold_governance*.py",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
         "scripts/node27_resource_governance.py",
         (
-            "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
             "tests/test_node27_working_set.py",
             "tests/test_node27_maintenance_output_integration.py",
         ),
     ),
     PathTestRule(
-        "schemas/node27_cold_governance_receipt.schema.json",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-            "tests/test_node27_working_set.py",
-        ),
-    ),
-    PathTestRule(
-        "schemas/examples/node27_cold_governance_receipt*.example.json",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
-    ),
-    PathTestRule(
         "infra/env/node27-resource-governance.example",
         (
-            "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
             "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node27-resource-governance.service",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
+        ("tests/test_node27_resource_governance.py",),
     ),
     PathTestRule(
         "infra/systemd/nhms-node27-resource-governance.timer",
-        (
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
+        ("tests/test_node27_resource_governance.py",),
     ),
     PathTestRule(
         "scripts/node27_resource_governance_once.sh",
-        (
-            *CORE_SMOKE_TESTS,
-            "tests/test_node27_cold_governance.py",
-            "tests/test_node27_resource_governance.py",
-        ),
+        (*CORE_SMOKE_TESTS, "tests/test_node27_resource_governance.py"),
     ),
     PathTestRule(
         "apps/api/auth.py",
