@@ -152,9 +152,11 @@ focused actual HTTP listener oracle plus deterministic deadline failures, source
 on failure. Local Ruff/strict OpenSpec; node27 isolated runtime verification with TMPDIR=/home/nwm/tmp. Production
 remains OLD with retained narrow rollback and ledger; #2374 owns new re-forward admission, not this child.
 
-Verification: node27 real-listener focused PASS (`receipts/child2373-focused-readiness.json`) and 8/8 window matrix
-PASS (`receipts/child2373-window-matrix.json`), both re-earned at the reviewed tool commit. Production was not
-restarted.
+Verification: tools `20eb5b8741037723eea6a5d581727cc925a4cdfe`; node27 real-listener focused PASS
+(`receipts/child2373-focused-readiness.json`, 14 reports including the new recovery-budget and blocked-unit-status
+cases) and 8/8 window matrix PASS (`receipts/child2373-window-matrix.json`) with the readiness transport simulated
+and real socket creation refused. A negative control that deletes only the oracle's readiness override fails closed
+with `REAL_SOCKET_BOUNDARY`, so the isolation claim is enforced rather than asserted. Production was not restarted.
 
 Withdrawn evidence: the matrix receipt recorded at tools `5c840cbcf2c7aff2d24a87e014af3d313ed4f96e` is void. Its
 readiness probe was not routed through the oracle's simulated HTTP boundary, so on node27 it read the live display
