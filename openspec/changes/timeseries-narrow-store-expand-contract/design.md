@@ -132,7 +132,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 本 change 的性能硬门在 SQL / 本机 API 层：逐河段曲线 SQL 在 narrow 未压缩与压缩 chunk 上 `river_segment_key` 进 Index Cond 或 segmentby 剪枝、`Rows Removed by Filter / returned ≤ 10`、`shared hit ≤ 5000`、SQL warm P95 ≤ 300 ms（≥ 5 个 warm 样本）、本机单源 `forecast-series` warm P95 ≤ 500 ms（SHJ-NJ 大河网 + 一个小河网）；identity-existence 探针 miss 分支与 QHH 回落 CTE 的 before/after EXPLAIN（D4 的索引证据门）。rollout receipt 另含 #1342 的两条验收项：注册表全量口径计数（active/runnable/selected/excluded）；`/` 实机点击覆盖 SHJ-NJ、一个中等河网、一个小河网（GFS/IFS 双曲线成功、身份不串档，agent-browser 截图证据）；以及 display 只读边界 deny-write receipt（`docs/runbooks/node-27-bringup-checklist.md` C1–C4）。浏览器点击 P95 < 2 s 的验收文字在关闭 #1342 前显式迁移到 #1970 的 body。
 
 ### D12 回退（expand 后、contract 前可执行的反向序列）
-停 timers 与 API/parser → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → 回滚代码到 change 之前版本 → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'`（列保留，旧代码不读它）→ 启动。窄表中已写入的 run 在回退后对读路径不可见（旧代码只读正名表）；这些 run 按旧 parser 重解析进（现为正名的）旧表；`narrow_rollback` 表在再次尝试 expand 前 DROP。允许的中间态"store 回置 legacy 且窄表残留行存在"写进 spec。contract 之后不可回退。
+停 timers 与 API/parser → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → 回滚代码到 change 之前版本 → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'`（列保留，旧代码不读它）→ 启动。窄表中已写入的 run 在回退后对读路径不可见（旧代码只读正名表）；这些 run 按旧 parser 重解析进（现为正名的）旧表；`narrow_rollback` 表要么由显式 post-D12 re-forward（change `node27-post-d12-reforward`：保留双 OID 与 ledger、不重跑 expand 迁移、按保留事实与 D12 快照推导 route）原样重挂，要么在从零重新 expand 前 DROP。允许的中间态"store 回置 legacy 且窄表残留行存在"写进 spec。contract 之后不可回退。
 
 ## Sketch seams under test
 

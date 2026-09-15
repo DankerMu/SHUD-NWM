@@ -2640,9 +2640,11 @@ def reforward_oracle(prior, args, dsn, artifacts, admitted_oid):
             ).encode(),
         )
         fixture = SimpleNamespace(**{**vars(args), "state": str(state_root)})
+        # The fixture pre-creates the state, so construct as reforward and then admit as reprepare.
         executor = ReforwardExecutor(
-            fixture, dsn, cli_args=SimpleNamespace(state=str(state_root), command="reprepare", go=None)
+            fixture, dsn, cli_args=SimpleNamespace(state=str(state_root), command="reforward", go=None)
         )
+        executor.args.command = "reprepare"
         return executor
 
     def snapshot(executor):
@@ -3179,6 +3181,9 @@ if __name__ == "__main__":
             with refuse_real_sockets():
                 scenario(args)
     except BaseException as error:
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
         print(
             json.dumps(
                 {
