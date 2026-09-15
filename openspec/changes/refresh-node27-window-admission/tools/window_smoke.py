@@ -11,7 +11,7 @@ Run once per case, with a DIFFERENT fresh database and --state each time:
     --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
     --state PRIVATE_ABSOLUTE_NEW_DIR --case happy \
     --original-new-repo ORIGINAL_1A32
-Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart, unit-config.
+Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart, unit-config, display-ready.
 Happy also drives the real main/CLI admission refusals and admitted emergency paths,
 including window's nested recovery protection and historical-ledger pending-set
 admission at both prepare and the migration worker; only external boundaries are simulated.
@@ -31,6 +31,12 @@ Expected-original-red uses only a private baseline copy:
   python window_smoke.py --case unit-config --state PRIVATE_ABSOLUTE_NEW_DIR \
     --original-executor PRIVATE/original-window_execute.py
 
+Focused display-readiness oracle needs no database:
+  python window_smoke.py --case display-ready --state PRIVATE_ABSOLUTE_NEW_DIR
+Expected-original-red uses a private baseline copy of the immediate-probe executor:
+  python window_smoke.py --case display-ready --state PRIVATE_ABSOLUTE_NEW_DIR \
+    --original-executor PRIVATE/original-window_execute.py
+
 Small real write-budget entrypoint, AFTER copying the actual LH-YLJ artifact
 and its complete authoritative run/model/segment metadata into the isolated
 expanded DB, with succeeded/parsed_at NULL/narrow routing:
@@ -45,14 +51,20 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import http.server
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
+import socket
+import socketserver
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
 
@@ -199,7 +211,7 @@ class BoundaryExecutor(w.Executor):
     def bus_path(self, name):
         return w._SYSTEMD_UNIT_PREFIX + "".join(character if character.isalnum() else "_" for character in name)
 
-    def unit(self, name):
+    def unit(self, name, timeout=30):
         w.require(name in self.units, "UNKNOWN_UNIT")
         value = dict(self.units[name])
         self.show_tick += 1
@@ -400,10 +412,19 @@ class BoundaryExecutor(w.Executor):
     def yd(self):
         return {"boundary": "unchanged-yd"}
 
-    def http(self, path, port=8080):
+    def http(self, path, port=8080, timeout=15):
         w.require(path == self.c["api_health_path"] and port == 8080, "UNKNOWN_HTTP_BOUNDARY")
         w.require(self.units[w.DISPLAY]["ActiveState"] == "active", "DISPLAY_NOT_RUNNING")
         return {"status": 200}, b"{}"
+
+    def display_health_probe(self, timeout):
+        # Same 127.0.0.1:8080 + admitted health path boundary as http(), but a
+        # display that is not up refuses the connection instead of raising, so
+        # the readiness retry stays exercisable.
+        w.require(0 < timeout <= 15, "UNKNOWN_HTTP_TIMEOUT")
+        if self.units[w.DISPLAY]["ActiveState"] != "active":
+            raise ConnectionRefusedError("BOUNDARY_8080_REFUSED")
+        return self.http(self.c["api_health_path"], 8080, timeout=timeout)[0]["status"], b"{}"
 
     def source_process(self, unit):
         w.require(unit in {w.DISPLAY, w.AUTO} and self.units[unit]["ActiveState"] == "active", "NO_PROCESS")
@@ -435,6 +456,23 @@ class BoundaryExecutor(w.Executor):
         self.save_file(f"worker-{self.seq}.stdout", proc.stdout)
         w.require(proc.returncode == 0, "REAL_WORKER_FAILED")
         return json.loads(proc.stdout)
+
+
+@contextlib.contextmanager
+def refuse_real_sockets():
+    """Matrix scenarios own no HTTP boundary, so a real urlopen here would be
+    the host's production API. Fail closed instead of leaving the fixture."""
+
+    original = urllib.request.urlopen
+
+    def refuse(*_args, **_kwargs):
+        raise w.Refusal("REAL_SOCKET_BOUNDARY")
+
+    urllib.request.urlopen = refuse
+    try:
+        yield
+    finally:
+        urllib.request.urlopen = original
 
 
 def scenario(args):
@@ -1116,6 +1154,500 @@ def unit_config_oracle(args):
         "scope": "typed unit comparator and pre-T0 admission only; no database or production operation",
     }
     w.private_write(root / "unit-config-oracle.json", json.dumps(receipt, sort_keys=True).encode())
+    print(json.dumps(receipt, sort_keys=True))
+
+
+def display_ready_oracle(args):
+    """Real start_runtime HTTP readiness with a delayed local listener; no database."""
+
+    root = Path(args.state).resolve()
+    root.mkdir(mode=0o700, parents=False, exist_ok=False)
+    reports = []
+    health_path = "/health"
+
+    class HealthHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self):
+            if self.path != health_path:
+                self.send_error(404)
+                return
+            trickle = getattr(self.server, "trickle", False)
+            status = getattr(self.server, "health_status", 200)
+            body = b'{"status":"ok"}' if status == 200 else b'{"status":"error"}'
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if trickle:
+                self.wfile.write(body[:1])
+                self.wfile.flush()
+                time.sleep(5)
+                self.wfile.write(body[1:])
+                return
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    class DelayedHealthServer:
+        def __init__(self, *, status=200, refuse_first=1, trickle=False):
+            self.status = status
+            self.refuse_first = refuse_first
+            self.trickle = trickle
+            self.holder = socket.socket()
+            self.holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.holder.bind(("127.0.0.1", 0))
+            self.port = self.holder.getsockname()[1]
+            self.httpd = None
+            self.thread = None
+            self.closed = False
+            self.seen = 0
+
+        def observe(self):
+            self.seen += 1
+            if self.seen > self.refuse_first:
+                self.listen()
+
+        def listen(self):
+            if self.httpd is not None:
+                return
+            self.holder.close()
+            self.httpd = socketserver.TCPServer(("127.0.0.1", self.port), HealthHandler, bind_and_activate=False)
+            self.httpd.allow_reuse_address = True
+            self.httpd.server_bind()
+            self.httpd.server_activate()
+            self.httpd.health_status = self.status
+            self.httpd.trickle = self.trickle
+            self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+            self.thread.start()
+
+        def close(self):
+            if self.closed:
+                return
+            self.closed = True
+            if self.httpd is not None:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+            else:
+                self.holder.close()
+
+    class ReadinessExecutor(BoundaryExecutor):
+        def __init__(self, fixture_args, *, cli_args=None):
+            super().__init__(fixture_args, "unused", cli_args=cli_args)
+            self.health_server = None
+            self.fail_after_start = None
+            self.recording = False
+            self.health_probes = 0
+            self.block_unit = False
+            self.blocked_unit_timeouts = []
+            self.unit_timeouts = []
+            self.http_timeouts = []
+            self.slept = []
+            self.source_ready = None
+            self.public_ready = None
+
+        def unit(self, name, timeout=30):
+            if self.recording:
+                self.unit_timeouts.append(timeout)
+            if self.block_unit and name == w.DISPLAY and self.units[name]["ActiveState"] == "active":
+                # Only after the start, so immutable()'s pre-start reads still work.
+                self.blocked_unit_timeouts.append(timeout)
+                time.sleep(timeout)
+                raise subprocess.TimeoutExpired(["systemctl", "--user", "show", name], timeout)
+            value = super().unit(name, timeout=timeout)
+            if name == w.DISPLAY and self.fail_after_start and self.health_probes >= self.fail_after_start:
+                value.update(ActiveState="failed", SubState="failed", Result="exit-code", ExecMainStatus="1")
+                self.units[name].update(value)
+            return value
+
+        def display_health_probe(self, timeout):
+            if self.recording:
+                self.http_timeouts.append(timeout)
+            self.health_probes += 1
+            server = self.health_server
+            w.require(server is not None, "DISPLAY_READY_SERVER_REQUIRED")
+            original_urlopen = urllib.request.urlopen
+
+            def urlopen(url, timeout=15):
+                request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
+                request.full_url = request.full_url.replace(":8080", ":" + str(server.port), 1)
+                server.observe()
+                return original_urlopen(request, timeout=timeout)
+
+            urllib.request.urlopen = urlopen
+            try:
+                return w.Executor.display_health_probe(self, timeout)
+            finally:
+                urllib.request.urlopen = original_urlopen
+
+        def source_process(self, unit):
+            if unit == w.DISPLAY:
+                self.source_ready = {"basic_ready": self.s.get("basic_ready"), "fenced": self.s.get("fenced")}
+            return super().source_process(unit)
+
+        def public_probe(self, stopped=False):
+            if not stopped:
+                self.public_ready = {"basic_ready": self.s.get("basic_ready"), "fenced": self.s.get("fenced")}
+            return super().public_probe(stopped=stopped)
+
+    def fixture(
+        name, *, recovering=False, t0_remaining=None, stop_remaining=None, expired_t0=False, expired_stop=False
+    ):
+        case_root = root / name
+        case_root.mkdir(mode=0o700)
+        repo = case_root / "repo"
+        repo.mkdir()
+        config = {
+            "repo": str(repo),
+            "staged_new_repo": str(repo / "staged"),
+            "api_health_path": health_path,
+            "yd_health_path": health_path,
+            "authorized_timers": [w.TIMERS[0]],
+            "public_base_url": "https://fixture.invalid",
+            "proxy": {"master_pid": os.getpid(), "files": {str(case_root / "proxy.conf"): w.digest(b"proxy\n")}},
+        }
+        config_bytes = json.dumps(config).encode()
+        w.private_write(case_root / "config.json", config_bytes)
+        protected = case_root / "protected.conf"
+        w.private_write(protected, b"stable protected fixture\n")
+        w.private_write(case_root / "proxy.conf", b"proxy\n")
+        units = {
+            unit: {
+                "LoadState": "loaded",
+                "ActiveState": "inactive",
+                "SubState": "dead",
+                "Result": "success",
+                "MainPID": "0",
+                "ControlGroup": "",
+                "UnitFileState": "enabled",
+                "FragmentPath": str(repo / "units" / unit),
+                "DropInPaths": "",
+                "WorkingDirectory": str(repo),
+                "ExecStart": "",
+                "Environment": "FIXTURE_ENV=stable",
+                "EnvironmentFiles": "/fixture/stable.env (ignore_errors=no)",
+                "TimeoutStartUSec": "1min",
+                "TimersCalendar": "",
+                "ExecMainStartTimestampMonotonic": "0",
+                "ExecMainStatus": "0",
+                "ConditionResult": "yes",
+            }
+            for unit in w.TIMERS + w.SERVICES
+        }
+        units[w.TIMERS[0]]["ActiveState"] = "active"
+        now_mono = time.monotonic()
+        state = {
+            "phase": "FENCED_DRAINED",
+            "units": units,
+            "files": {str(protected): {"sha256": w.digest(protected.read_bytes())}},
+            "old_branch": "old",
+            "fence_epochs": [{"number": 1, "start": w.now(), "drains": [{"at": w.now()}], "restart_attempts": []}],
+            "unit_config_snapshot": w.UNIT_CONFIG_SNAPSHOT,
+            "config_sha256": w.digest(config_bytes),
+            "driver_sha256": w.digest(Path(w.__file__).read_bytes()),
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "ledger_before": ["fixture"],
+            "basic_ready": False,
+            "fenced": True,
+        }
+        if t0_remaining is not None:
+            state["t0_mono"] = now_mono - (1800 - t0_remaining)
+        elif expired_t0:
+            state["t0_mono"] = now_mono - 1900
+        else:
+            state["t0_mono"] = now_mono
+        if stop_remaining is not None:
+            state["stop_mono"] = now_mono - (600 - stop_remaining)
+        elif expired_stop:
+            state["stop_mono"] = now_mono - 700
+        else:
+            state["stop_mono"] = now_mono
+        w.private_write(case_root / "state.json", json.dumps(state, sort_keys=True).encode())
+        command = "recover" if recovering else "window"
+        executor = ReadinessExecutor(
+            SimpleNamespace(state=str(case_root)),
+            cli_args=SimpleNamespace(state=str(case_root), command=command, go="Danker"),
+        )
+        snapshot = {unit: executor.unit(unit) for unit in units}
+        for unit, record in snapshot.items():
+            record.update(executor.stable_unit_config(unit))
+        executor.save(units=snapshot)
+        executor.selected = w.OLD if recovering else w.NEW
+        executor.recovering = recovering
+        return executor
+
+    def close(executor):
+        os.close(executor.lock)
+
+    def bind_server(executor, *, status=200, refuse_first=1, trickle=False):
+        server = DelayedHealthServer(status=status, refuse_first=refuse_first, trickle=trickle)
+        executor.health_server = server
+        return server
+
+    def record_sleep(executor):
+        original_sleep = time.sleep
+
+        def sleep(seconds):
+            if executor.recording:
+                executor.slept.append(seconds)
+            original_sleep(seconds)
+
+        return original_sleep, sleep
+
+    def original_refused(error):
+        if isinstance(error, ConnectionRefusedError):
+            return True
+        return isinstance(error, urllib.error.URLError) and isinstance(error.reason, ConnectionRefusedError)
+
+    def expect_success(name, *, recovering=False, expired_t0=False, expired_stop=False):
+        executor = fixture(name, recovering=recovering, expired_t0=expired_t0, expired_stop=expired_stop)
+        server = bind_server(executor)
+        original_sleep, sleep = record_sleep(executor)
+        time.sleep = sleep
+        executor.recording = True
+        try:
+            executor.start_runtime()
+            w.require(executor.s.get("basic_ready") is True, "DISPLAY_READY_MISSING_BASIC_READY")
+            w.require(executor.s.get("fenced") is False, "DISPLAY_READY_FENCE_HELD")
+            w.require(executor.s["fence_epochs"][-1].get("validated_restart"), "DISPLAY_READY_MISSING_VALIDATED")
+            w.require(executor.health_probes >= 2, "DISPLAY_READY_NO_RETRY")
+            w.require(executor.source_ready == {"basic_ready": False, "fenced": True}, "SOURCE_SAW_READY_FLAGS")
+            w.require(executor.public_ready == {"basic_ready": False, "fenced": True}, "PUBLIC_SAW_READY_FLAGS")
+            starts = [row for row in executor.system_actions if row["action"] == "start" and w.DISPLAY in row["units"]]
+            w.require(len(starts) == 1, "DISPLAY_READY_RESTARTED")
+            reports.append(
+                {
+                    "case": name,
+                    "result": "pass",
+                    "recovering": recovering,
+                    "probes": executor.health_probes,
+                    "starts": len(starts),
+                }
+            )
+        finally:
+            executor.recording = False
+            time.sleep = original_sleep
+            server.close()
+            close(executor)
+
+    def expect_refusal(
+        name,
+        expected,
+        *,
+        recovering=False,
+        status=200,
+        fail_after_start=None,
+        refuse_first=1,
+        trickle=False,
+        t0_remaining=None,
+        stop_remaining=None,
+        expired_t0=False,
+        expired_stop=False,
+        no_server=False,
+        expect_start=True,
+        block_unit=False,
+    ):
+        executor = fixture(
+            name,
+            recovering=recovering,
+            t0_remaining=t0_remaining,
+            stop_remaining=stop_remaining,
+            expired_t0=expired_t0,
+            expired_stop=expired_stop,
+        )
+        server = None if no_server else bind_server(executor, status=status, refuse_first=refuse_first, trickle=trickle)
+        if fail_after_start:
+            executor.fail_after_start = fail_after_start
+        executor.block_unit = block_unit
+        original_sleep, sleep = record_sleep(executor)
+        time.sleep = sleep
+        executor.recording = True
+        try:
+            started = time.monotonic()
+            try:
+                executor.start_runtime()
+            except w.Refusal as error:
+                w.require(str(error) == expected, "DISPLAY_READY_WRONG_REFUSAL")
+            else:
+                raise w.Refusal("DISPLAY_READY_ACCEPTED_FAILURE")
+            elapsed = time.monotonic() - started
+            w.require(executor.s.get("basic_ready") is not True, "DISPLAY_READY_WROTE_BASIC_READY")
+            w.require(executor.s.get("fenced") is not False, "DISPLAY_READY_RELEASED_FENCE")
+            w.require(not executor.s["fence_epochs"][-1].get("validated_restart"), "DISPLAY_READY_WROTE_VALIDATED")
+            w.require(executor.source_ready is None, "DISPLAY_READY_REACHED_SOURCE")
+            w.require(executor.public_ready is None, "DISPLAY_READY_REACHED_PUBLIC")
+            starts = [row for row in executor.system_actions if row["action"] == "start" and w.DISPLAY in row["units"]]
+            w.require(len(starts) == (1 if expect_start else 0), "DISPLAY_READY_START_COUNT")
+            autopipe = [row for row in executor.system_actions if w.AUTO in row["units"] and row["action"] == "start"]
+            w.require(not autopipe, "DISPLAY_READY_STARTED_AUTOPIPE")
+            timers = [
+                row for row in executor.system_actions if row["action"] == "start" and set(row["units"]) & set(w.TIMERS)
+            ]
+            w.require(not timers, "DISPLAY_READY_RESTORED_TIMERS")
+            reports.append(
+                {
+                    "case": name,
+                    "check": expected,
+                    "probes": executor.health_probes,
+                    "elapsed": elapsed,
+                    "http_timeouts": executor.http_timeouts,
+                    "blocked_unit_timeouts": executor.blocked_unit_timeouts,
+                    "slept": executor.slept,
+                }
+            )
+            return reports[-1]
+        finally:
+            executor.recording = False
+            time.sleep = original_sleep
+            if server is not None:
+                server.close()
+            close(executor)
+
+    expect_success("forward-delayed", recovering=False)
+    expect_success("recovery-delayed", recovering=True)
+    expect_success("late-recovery-delayed", recovering=True, expired_t0=True, expired_stop=True)
+
+    never_ready = expect_refusal("never-ready", "DISPLAY_READINESS_TIMEOUT", refuse_first=100, t0_remaining=1.2)
+    w.require(never_ready["probes"] >= 1, "NEVER_READY_NO_PROBE")
+    w.require(never_ready["elapsed"] < 1.2 + 0.5, "NEVER_READY_BUDGET_RESET")
+    w.require(
+        all(value <= 1.2 for value in never_ready["http_timeouts"] + never_ready["slept"]), "NEVER_READY_PROBE_RESET"
+    )
+
+    clipped = expect_refusal(
+        "clipped-stop-budget",
+        "DISPLAY_READINESS_TIMEOUT",
+        refuse_first=100,
+        t0_remaining=20,
+        stop_remaining=0.8,
+    )
+    w.require(clipped["probes"] >= 1, "STOP_BUDGET_NO_PROBE")
+    w.require(clipped["elapsed"] < 0.8 + 0.5, "STOP_BUDGET_NOT_CLIPPED")
+    w.require(all(value <= 0.8 for value in clipped["http_timeouts"] + clipped["slept"]), "STOP_BUDGET_PROBE_RESET")
+    expect_refusal("failed-unit", "DISPLAY_SERVICE_FAILED", refuse_first=100, fail_after_start=1)
+    expect_refusal("permanent-http", "DISPLAY_HEALTH_FAILED", refuse_first=0, status=500)
+    expect_refusal("trickle-timeout", "DISPLAY_READINESS_TIMEOUT", refuse_first=0, trickle=True, t0_remaining=1.0)
+
+    # Recovery has no window/restore clip, so only the 30s startup budget can
+    # end this wait; anything shorter would be an unproven clip.
+    recovery_never = expect_refusal(
+        # 30s of 0.2s retries is ~150 probes, so the listener must never appear.
+        "recovery-never-ready",
+        "DISPLAY_READINESS_TIMEOUT",
+        recovering=True,
+        refuse_first=10**6,
+    )
+    w.require(recovery_never["probes"] >= 2, "RECOVERY_BUDGET_NO_RETRY")
+    w.require(recovery_never["http_timeouts"][:1] == [15], "RECOVERY_BUDGET_CLIPPED")
+    w.require(29 <= recovery_never["elapsed"] <= 45, "RECOVERY_BUDGET_NOT_EXPIRED")
+
+    # A systemctl show that blocks for its whole clipped budget must expire as
+    # DISPLAY_READINESS_TIMEOUT, never as a bare subprocess.TimeoutExpired.
+    blocked = expect_refusal(
+        "blocked-unit-query",
+        "DISPLAY_READINESS_TIMEOUT",
+        refuse_first=100,
+        block_unit=True,
+        t0_remaining=1.5,
+    )
+    w.require(blocked["blocked_unit_timeouts"], "BLOCKED_UNIT_NOT_REACHED")
+    w.require(all(0 < value <= 1.5 for value in blocked["blocked_unit_timeouts"]), "BLOCKED_UNIT_TIMEOUT_NOT_CLIPPED")
+    w.require(blocked["elapsed"] < 1.5 + 0.5, "BLOCKED_UNIT_BUDGET_RESET")
+    expect_refusal(
+        "expired-forward",
+        "WINDOW_DEADLINE",
+        no_server=True,
+        expired_t0=True,
+        recovering=False,
+        expect_start=False,
+    )
+
+    forward = fixture("forward-then-recovery-forward")
+    recovery = fixture("forward-then-recovery-recovery", recovering=True)
+    forward_server = bind_server(forward)
+    recovery_server = bind_server(recovery)
+    original_sleep = time.sleep
+    try:
+        time.sleep = record_sleep(forward)[1]
+        forward.recording = True
+        forward.start_runtime()
+        w.require(forward.s.get("basic_ready") is True, "NESTED_FORWARD_NOT_READY")
+        recovery.units[w.DISPLAY].update(ActiveState="inactive", SubState="dead", MainPID="0")
+        time.sleep = record_sleep(recovery)[1]
+        recovery.recording = True
+        recovery.start_runtime()
+        w.require(recovery.s.get("basic_ready") is True, "NESTED_RECOVERY_NOT_READY")
+        w.require(forward.health_probes >= 2 and recovery.health_probes >= 2, "NESTED_NO_DELAYED_READY")
+        reports.append(
+            {
+                "case": "forward-then-recovery",
+                "result": "pass",
+                "forward_probes": forward.health_probes,
+                "recovery_probes": recovery.health_probes,
+            }
+        )
+    finally:
+        time.sleep = original_sleep
+        forward_server.close()
+        recovery_server.close()
+        close(forward)
+        close(recovery)
+
+    if args.original_executor:
+        original = Path(args.original_executor).resolve()
+        w.require(original.is_file(), "ORIGINAL_EXECUTOR_REQUIRED")
+        baseline = load(original, "window_executor_original_display_ready")
+
+        def original_http(self, path, port=8080, timeout=15):
+            server = self.health_server
+            w.require(path == self.c["api_health_path"] and port == 8080, "UNKNOWN_HTTP_BOUNDARY")
+            self.health_probes += 1
+            w.require(server is not None, "ORIGINAL_HTTP_SERVER_REQUIRED")
+            original_urlopen = urllib.request.urlopen
+
+            def urlopen(url, timeout=15):
+                request = url if isinstance(url, urllib.request.Request) else urllib.request.Request(url)
+                request.full_url = request.full_url.replace(":8080", ":" + str(server.port), 1)
+                return original_urlopen(request, timeout=timeout)
+
+            urllib.request.urlopen = urlopen
+            try:
+                return w.Executor.http(self, path, timeout=timeout)
+            finally:
+                urllib.request.urlopen = original_urlopen
+
+        for name, recovering in (("original-delayed-red-forward", False), ("original-delayed-red-recovery", True)):
+            executor = fixture(name, recovering=recovering)
+            server = bind_server(executor, refuse_first=100)
+            executor.http = original_http.__get__(executor, type(executor))
+            try:
+                try:
+                    baseline.Executor.start_runtime(executor)
+                except BaseException as error:
+                    w.require(original_refused(error), "ORIGINAL_DELAYED_WRONG_FAILURE")
+                    reports.append(
+                        {
+                            "case": name,
+                            "error_type": type(error).__name__,
+                            "check": str(error),
+                            "recovering": recovering,
+                        }
+                    )
+                else:
+                    raise w.Refusal("ORIGINAL_DELAYED_LISTENER_ACCEPTED")
+            finally:
+                server.close()
+                close(executor)
+
+    receipt = {
+        "case": "display-ready",
+        "result": "PASS",
+        "state": str(root),
+        "reports": reports,
+        "scope": "shared start_runtime health readiness only; no database or production operation",
+    }
+    w.private_write(root / "display-ready-oracle.json", json.dumps(receipt, sort_keys=True).encode())
     print(json.dumps(receipt, sort_keys=True))
 
 
@@ -2178,12 +2710,13 @@ def arguments():
             "restart",
             "write-budget",
             "unit-config",
+            "display-ready",
         ),
     )
     args = p.parse_args()
     if args.worker:
         required = ("container", "state", "repo", "sha", "action")
-    elif args.case == "unit-config":
+    elif args.case in {"unit-config", "display-ready"}:
         required = ("state",)
     elif args.case == "write-budget":
         required = ("container", "state", "new_repo", "fixture_config")
@@ -2191,8 +2724,8 @@ def arguments():
         required = ("oracle", "old_repo", "new_repo", "container", "state", "case")
         if args.case == "happy":
             required = required + ("original_new_repo",)
-    if args.original_executor and args.case != "unit-config":
-        p.error("--original-executor requires --case unit-config")
+    if args.original_executor and args.case not in {"unit-config", "display-ready"}:
+        p.error("--original-executor requires --case unit-config or --case display-ready")
     for name in required:
         if not getattr(args, name):
             p.error("missing --" + name.replace("_", "-"))
@@ -2207,10 +2740,13 @@ if __name__ == "__main__":
             worker(args)
         elif args.case == "unit-config":
             unit_config_oracle(args)
+        elif args.case == "display-ready":
+            display_ready_oracle(args)
         elif args.case == "write-budget":
             write_budget(args)
         else:
-            scenario(args)
+            with refuse_real_sockets():
+                scenario(args)
     except BaseException as error:
         print(
             json.dumps(
