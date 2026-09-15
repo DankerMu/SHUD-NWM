@@ -41,11 +41,11 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
   `*.pre_execution.json` 不计），不读 journal——决策只在 evidence 里。窗口固定为最新 N
   个文件，不会越过它们去扫更早的 pass。
 - `--evidence-root` 缺省取 `NHMS_SCHEDULER_EVIDENCE_ROOT`。
-- **可判定 pass**：只有可读且 status 属于"候选构造已运行后才写出"的封闭集合（`planned`、
-  `blocked`、`unavailable`、`submitted`、`submitted_partial`、`slurm_status_synced`、
-  `slurm_status_sync_failed`、`slurm_cancelled`、`slurm_partially_cancelled`、
-  `slurm_cancellation_blocked`、`restart_reconciled`、`restart_reconcile_unknown`；size
-  fallback 产物按 `limit.pre_limit_status` 判）的 pass 才能回答"没有待办"。其余（例如
+- **可判定 pass**：只有可读且 status 属于"候选构造已运行后才写出"的封闭集合
+  `EVALUATING_PASS_STATUSES`（权威列表见 `services/orchestrator/operator_action_listing.py`，
+  含 `planned`、`blocked`、`submitted`、`submission_failed` 等由执行 evidence 透传的状态；size
+  fallback 产物按 `limit.pre_limit_status` 判；集合外的候选构造后状态保守计为不可判定）的
+  pass 才能回答"没有待办"。其余（例如
   `lock_contended`、`preflight_blocked`——它在候选构造前后都会写出，单凭 status 分不清——
   `lease_lost`、异常路径的 `resource_limit_blocked`、未知 status）列在
   `non_evaluating_passes:[{pass,status}]`。
