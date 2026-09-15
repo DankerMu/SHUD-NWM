@@ -803,11 +803,16 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # DB markers and no psycopg, green with no database up), and to 49 in
     # harden-copyback-mutex-residuals (the retention lock-signal suite, 5 tests
     # in ~1.0s, and the run-tree backup-lifecycle suite, 11 tests in ~0.1s;
-    # both DB-free). Those running
+    # both DB-free), and to 51 in #1955/#1953 (the journal-root lane-adoption
+    # suite, 76 tests in 0.70s, and the full-tree budget-contract suite, 11
+    # tests in 1.85s; both DB-free — that route is what closes the importer
+    # gaps of `services/orchestrator/__init__.py`, journal_root_authority.py
+    # and chain_runtime_utils.py, which no narrow or stop rule owns). Those
+    # running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 51 targets, the rule's 49 plus two riders that arrive from OUTSIDE the rule
+    # 53 targets, the rule's 51 plus two riders that arrive from OUTSIDE the rule
     # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
     # river-segment write-surface scan by the services/** supplemental route.
     # The literal stays FROZEN here:
@@ -823,6 +828,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_cli_cleanup_frontier.py",
         "tests/test_cli_publish_qdown.py",
         "tests/test_e2e_m3.py",
+        # #1953: the full-tree budget contract rides the broad orchestrator
+        # directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py` and chain_runtime_utils.py.
+        "tests/test_file_journal_full_tree_budget_contract.py",
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
@@ -835,6 +844,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # scheduler_state_failure.py and scheduler_state_types.py, which no
         # narrow or stop rule owns.
         "tests/test_hydro_status_set_parity.py",
+        # #1955: the lane-adoption suite rides the broad orchestrator directory
+        # rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py` and journal_root_authority.py.
+        "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
         "tests/test_orchestration_chain.py",
@@ -8781,6 +8794,12 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # to mint the journal rows it censuses; it is an orchestrator-journal suite,
     # selected by `services/orchestrator/**`.
     ("workers/data_adapters/base.py", "tests/test_scheduler_journal_scope_census.py"): "edge-consumer",
+    # #1953: the full-tree budget contract imports `cycle_id_for` for exactly
+    # the same reason as its fourteen neighbours above — to mint the job ids of
+    # the rows it drives the budget over. Its subject is the journal's record
+    # budget and the synthetic blocked row, not the adapters; it is selected by
+    # `services/orchestrator/**` and by the journal module's own stop rule.
+    ("workers/data_adapters/base.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
     # -- runtime-budget ----------------------------------------------------
@@ -8849,6 +8868,26 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # pins the selection exactly), so the suite is selected from the cli.py,
     # scheduler.py and scheduler_core.py rules instead.
     ("services/orchestrator/chain_types.py", "tests/test_scheduler_journal_root_authority.py"): "edge-consumer",
+    # #1953: the third instance of exactly that shape. The budget-contract suite
+    # imports `TERMINAL_JOB_STATUSES` from chain_types to assert the synthetic
+    # blocked-read status stays OUTSIDE it, while its subject is the journal's
+    # record budget. The same focused-`::`-node-ids contract as the two pairs
+    # above applies, so the suite is selected from the
+    # file_orchestration_journal.py and cli.py stop rules instead.
+    # Stated plainly, because this table is only worth what its reasons are
+    # worth: this exclusion DOES strand one assertion. The suite's
+    # `TERMINAL_JOB_STATUSES == RUNTIME_TERMINAL_JOB_STATUSES` check is the only
+    # place the two hand-written terminal sets (chain_types.py and
+    # chain_runtime_utils.py) are compared, and a chain_types-only PR selects no
+    # suite that runs it — tests/test_hydro_status_set_parity.py governs the
+    # hydro run-status sets, NOT these two, and is not in chain_types.py's
+    # selection either. A divergence would therefore be caught by the master
+    # full run rather than on the PR. Routing the budget suite into the
+    # chain_types stop rule is not the fix: it breaks that rule's focused-node
+    # contract (two selector tests pin it). Moving the parity assertion to a
+    # suite the chain rules already carry would be, and is left to whoever owns
+    # that pair of sets next.
+    ("services/orchestrator/chain_types.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
@@ -9817,11 +9856,25 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # still gone. One token away from losing the requirement oracle for
     # cli.py-only PRs with nothing but a dispositionable gap objecting -- which
     # is what this pin exists to prevent.
+    # #1955/#1953 added two more at-site targets to the same cli.py rule, for
+    # the same reason the copyback-mutex one is here: both are stop-shadowed
+    # and both are cli.py's own exit-code/stderr-rendering oracles.
     (
         "services/orchestrator/cli.py",
-        (*ORCHESTRATOR_CLI_IMPORTER_TESTS, "tests/test_retention_copyback_mutex.py"),
+        (
+            *ORCHESTRATOR_CLI_IMPORTER_TESTS,
+            "tests/test_retention_copyback_mutex.py",
+            "tests/test_journal_root_lane_adoption.py",
+            "tests/test_file_journal_full_tree_budget_contract.py",
+        ),
     ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
+    # #1955: the file_orchestration_migration.py stop rule's at-site addition.
+    # Its shared constant FILE_JOURNAL_READ_STATE_TESTS is the redirect, pinned
+    # by the file-journal selection test, so only the at-site target is named --
+    # the same "pin what the extension added" shape as the scheduler_runtime.py
+    # row below.
+    ("services/orchestrator/file_orchestration_migration.py", ("tests/test_journal_root_lane_adoption.py",)),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
     # #2260: the scheduler_runtime.py stop rule's at-site addition. Its shared
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
@@ -9934,9 +9987,12 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     (
         # 49 -> 51 and 48 -> 50: harden-copyback-mutex-residuals added two
         # orchestrator-tree suites (lock signal, run-tree backup lifecycle).
-        ("services/orchestrator/retention.py", 51),
-        ("services/orchestrator/cli.py", 30),
-        ("services/orchestrator/__init__.py", 50),
+        # +2 on all three legs (#1955/#1953): the lane-adoption and full-tree
+        # budget suites joined the broad orchestrator list (which retention.py
+        # and __init__.py take) and the cli.py stop rule's at-site targets.
+        ("services/orchestrator/retention.py", 53),
+        ("services/orchestrator/cli.py", 32),
+        ("services/orchestrator/__init__.py", 52),
         ("tests/retention_test_helpers.py", 6),
     ),
 )

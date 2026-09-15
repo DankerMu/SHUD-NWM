@@ -29,9 +29,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from services.orchestrator.chain_types import OrchestratorError  # noqa: E402
 from services.orchestrator.file_orchestration_journal import (  # noqa: E402
     FileJournalRetryService,
     FileOrchestrationJournalRepository,
+)
+from services.orchestrator.journal_root_authority import (  # noqa: E402
+    journal_root_refusal_line,
+    verify_journal_root_authority,
 )
 
 
@@ -78,7 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    repository = FileOrchestrationJournalRepository(str(args.journal_root))
+    # #1955: this script writes markers, and it has no wrapping handler, so the
+    # typed refusal has to be produced (and rendered) here.  Every later use of
+    # the root -- the repository AND the receipt's ``journal_root`` field --
+    # takes the verified, tilde-expanded value.
+    try:
+        journal_root = verify_journal_root_authority(args.journal_root, setting="--journal-root")
+    except OrchestratorError as error:
+        print(journal_root_refusal_line(error), file=sys.stderr)
+        return 2
+    repository = FileOrchestrationJournalRepository(journal_root)
     service = FileJournalRetryService(repository)
 
     results: list[dict[str, Any]] = []
@@ -116,7 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for entry in results:
         outcomes[str(entry["outcome"])] = outcomes.get(str(entry["outcome"]), 0) + 1
     receipt = {
-        "journal_root": str(args.journal_root),
+        "journal_root": str(journal_root),
         "executed": bool(args.execute),
         "reason": args.reason,
         "requested_by": args.requested_by,

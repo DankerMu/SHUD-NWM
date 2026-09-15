@@ -28,12 +28,14 @@ from packages.common.rollback_execution_binding import (
     write_rollback_execution_binding,
 )
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
     _public_evidence,
     _validated_git_writer_generation,
 )
+from services.orchestrator.journal_root_authority import verify_journal_root_authority
 from services.orchestrator.scheduler_state import _format_utc
 from workers.data_adapters.base import parse_cycle_time
 
@@ -77,23 +79,31 @@ def prepare_file_journal_rollback(
     checked_by: str,
     target_writer_generation: str,
 ) -> dict[str, Any]:
-    """Produce the durable receipt required before launching an old writer."""
+    """Produce the durable receipt required before launching an old writer.
 
+    #1955 D1: the root is verified at the lane's FIRST statement, not at the
+    repository constructor, because the execution lock below is taken ahead of
+    the repository -- verifying later would leave the lock itself on an
+    unverified root, and a blank root would create the lock file in the process
+    working directory.
+    """
+
+    verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
     target_writer_generation = _validated_git_writer_generation(
         target_writer_generation,
         field="target_writer_generation",
         invalid_reason="file_journal_rollback_target_writer_generation_invalid",
     )
-    with _rollback_execution_lock(journal_root):
+    with _rollback_execution_lock(verified_root):
         config, lease_identity = _rollback_file_lease_config(
-            journal_root=journal_root,
+            journal_root=verified_root,
             workspace_root=workspace_root,
             lock_path=lock_path,
             scheduler_lock_backend=scheduler_lock_backend,
             lock_ttl_seconds=lock_ttl_seconds,
         )
         lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="prepare")
-        repository = FileOrchestrationJournalRepository(journal_root)
+        repository = FileOrchestrationJournalRepository(verified_root)
         try:
             receipt = repository._prepare_reconcile_inventory_rollback_under_scheduler_lease(
                 scheduler_lease_identity=lease_identity,
@@ -218,21 +228,26 @@ def launch_file_journal_rollback_writer(
     scheduler_lock_backend: str = "file",
     lock_ttl_seconds: int = 60,
 ) -> dict[str, Any]:
-    """Validate the bound receipt and only then cross the old-writer exec boundary."""
+    """Validate the bound receipt and only then cross the old-writer exec boundary.
 
+    #1955 D1: verified at the first statement, so the verified root reaches the
+    scheduler config, the execution lock and the repository alike.
+    """
+
+    verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
     arguments = _validated_production_writer_arguments(writer_args)
     config, _lease_identity = _rollback_file_lease_config(
-        journal_root=journal_root,
+        journal_root=verified_root,
         workspace_root=workspace_root,
         lock_path=lock_path,
         scheduler_lock_backend=scheduler_lock_backend,
         lock_ttl_seconds=lock_ttl_seconds,
     )
-    with _rollback_execution_lock(journal_root) as execution_lock_fd:
+    with _rollback_execution_lock(verified_root) as execution_lock_fd:
         repository_root, actual_writer_generation = _resolve_clean_writer_generation(writer_repository_root)
         writer_runtime, resolved_runtime, runtime_identity = _resolve_target_writer_runtime(repository_root)
         receipt = require_file_journal_rollback_prepared(
-            journal_root=journal_root,
+            journal_root=verified_root,
             workspace_root=workspace_root,
             receipt_id=receipt_id,
             actual_writer_generation=actual_writer_generation,
@@ -370,7 +385,7 @@ def launch_file_journal_rollback_writer(
                 check=False,
                 env=_rollback_writer_environment(
                     config=config,
-                    journal_root=journal_root,
+                    journal_root=verified_root,
                     target_python_runtime=Path(binding["target_python_runtime"]),
                     target_python_source_root=Path(binding["target_python_source_root"]),
                 ),
@@ -735,7 +750,11 @@ def _rollback_writer_environment(
     environment.update(
         {
             "WORKSPACE_ROOT": str(config.workspace_root),
-            "NHMS_SCHEDULER_JOURNAL_ROOT": str(Path(journal_root).expanduser().resolve()),
+            # #1955 D3: the caller already hands us the VERIFIED root, so there
+            # is nothing left to expand and nothing that may be resolved --
+            # ``resolve()`` follows symlinks, which is exactly the drift the
+            # seam exists to prevent.
+            "NHMS_SCHEDULER_JOURNAL_ROOT": str(journal_root),
             "NHMS_SCHEDULER_LOCK_BACKEND": "file",
             "NHMS_SCHEDULER_LOCK_ROOT": str(Path(config.lock_path).parent),
             "NHMS_SCHEDULER_DB_FREE_REQUIRED": "true",
@@ -939,10 +958,22 @@ def _run_rollback_writer(
 
 
 @contextmanager
-def _rollback_execution_lock(journal_root: str | Path) -> Iterator[int]:
+def _rollback_execution_lock(verified_journal_root: Path) -> Iterator[int]:
+    """Take the rollback execution lock on the ALREADY-VERIFIED journal root.
+
+    #1955 D3: the lock path is derived, never resolved.  ``.resolve()`` follows
+    symlinks, which both made the ``ensure_directory_no_follow`` below
+    unfalsifiable -- it could only ever be handed a realpath -- and split the
+    lock's tree from the repository's, so an aliased root took the lock on the
+    realpath while every read went through the alias.  The ``ensure_`` call is
+    kept as cheap defence in depth: no lane that takes this lock is
+    create-capable, so on a verified root it never creates anything, and on a
+    root that reached here unverified it still refuses a symlinked component.
+    """
+
     import fcntl
 
-    root = Path(journal_root).expanduser().resolve()
+    root = Path(verified_journal_root)
     lock_path = root / ROLLBACK_EXECUTION_LOCK_NAME
     lock_fd: int | None = None
     try:
@@ -992,18 +1023,22 @@ def complete_file_journal_rollforward(
     scheduler_lock_backend: str = "file",
     lock_ttl_seconds: int = 60,
 ) -> dict[str, Any]:
-    """Rebuild inventory and consume the rollback fence under the scheduler lease."""
+    """Rebuild inventory and consume the rollback fence under the scheduler lease.
 
-    with _rollback_execution_lock(journal_root):
+    #1955 D1: verified at the first statement, ahead of the execution lock.
+    """
+
+    verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
+    with _rollback_execution_lock(verified_root):
         config, lease_identity = _rollback_file_lease_config(
-            journal_root=journal_root,
+            journal_root=verified_root,
             workspace_root=workspace_root,
             lock_path=lock_path,
             scheduler_lock_backend=scheduler_lock_backend,
             lock_ttl_seconds=lock_ttl_seconds,
         )
         lease, heartbeat, pass_id = _acquire_rollback_file_lease(config, operation="rollforward")
-        repository = FileOrchestrationJournalRepository(journal_root)
+        repository = FileOrchestrationJournalRepository(verified_root)
         try:
             try:
                 binding = read_rollback_execution_binding(
@@ -1034,7 +1069,7 @@ def complete_file_journal_rollforward(
                 preparation_receipt_id=preparation_receipt_id,
                 lease_identity=lease_identity,
                 config=config,
-                journal_root=Path(journal_root).expanduser().resolve(),
+                journal_root=verified_root,
             )
             if binding["status"] in {"prepared", "active"}:
                 try:
@@ -1237,6 +1272,44 @@ def _rollback_lease_is_held(lease: Any, heartbeat: Any, *, pass_id: str) -> bool
     return not heartbeat.lost and bool(lease.renew(pass_id=pass_id))
 
 
+def _verified_or_created_journal_root(journal_root: str | Path) -> Path:
+    """The create-capable lane's root: refuse first, create only a missing one.
+
+    #1955 D2.  ``import_historical_scheduler_state`` is legitimately pointed at
+    a not-yet-existing root, and the seam refuses a missing root
+    (``FileNotFoundError`` is an ``OSError``).  So this lane asks the seam
+    first -- which is what refuses a blank, relative or unexpandable root, and
+    what refuses a symlinked ancestor -- and only the ONE refusal shape that
+    means "nothing is there yet" may be answered by creating.  The creation goes
+    through ``ensure_directory_no_follow``, which refuses a symlinked component
+    while creating the missing ones, and the result is verified again so the
+    lane never builds a repository on an unverified path.
+    """
+
+    try:
+        return verify_journal_root_authority(journal_root, setting="--journal-root")
+    except OrchestratorError as error:
+        if error.details.get("error_type") != "FileNotFoundError":
+            raise
+    # Safe by construction: the seam already refused the unexpandable and the
+    # non-absolute shapes, so this expansion cannot raise and cannot be relative.
+    # The creation itself can still fail -- an unwritable parent is the ordinary
+    # case -- and ``safe_fs`` reports that with the full target path inside a
+    # ``RuntimeError`` subclass, which the CLI's ``(RuntimeError, ValueError)``
+    # arm would echo verbatim; a bare ``OSError`` re-raised out of ``safe_fs``
+    # would escape that arm as a traceback.  Both become the typed, path-free
+    # refusal ``_ensure_root_unlocked`` already raises for the same failure.
+    try:
+        ensure_directory_no_follow(Path(journal_root).expanduser())
+    except (OSError, SafeFilesystemError) as error:
+        raise OrchestratorError(
+            "FILE_JOURNAL_WRITE_FAILED",
+            "failed to create file orchestration journal root",
+            {"error_type": type(error).__name__, "surface": "journal_root"},
+        ) from error
+    return verify_journal_root_authority(journal_root, setting="--journal-root")
+
+
 def import_historical_scheduler_state(
     *,
     journal_root: str | Path,
@@ -1252,7 +1325,12 @@ def import_historical_scheduler_state(
     runs = _normalized_rows_limited("hydro_runs", hydro_runs)
     jobs = _normalized_rows_limited("pipeline_jobs", pipeline_jobs)
     events = _normalized_rows_limited("pipeline_events", pipeline_events)
-    repository = FileOrchestrationJournalRepository(journal_root)
+    # #1955 D2, deliberately AFTER the row-limit gate rather than at the lane's
+    # first statement: this is the one create-capable lane, and the over-limit
+    # refusal is pinned to leave no journal root behind at all.  It is still
+    # ahead of the repository, which is what the seam has to precede.
+    verified_root = _verified_or_created_journal_root(journal_root)
+    repository = FileOrchestrationJournalRepository(verified_root)
     imported_cycles: list[dict[str, Any]] = []
     imported_runs: list[dict[str, Any]] = []
     imported_jobs: list[dict[str, Any]] = []

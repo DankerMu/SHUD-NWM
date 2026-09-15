@@ -96,9 +96,14 @@ CENSUS_JOB_ID_SCOPE_HELP = (
     "Writes nothing under the journal root: --output refuses any path inside "
     "it, and inventory .tmp residue is reported, never removed. Exit 0 when no "
     "divergent row exists, 2 when one or more do, 1 on a typed failure -- and a "
-    "typed failure raised AFTER the receipt was emitted (an unwritable --output) "
+    "typed failure raised AFTER the receipt was emitted (an unwritable --output, "
+    "CENSUS_OUTPUT_UNWRITABLE) "
     "exits 1 even when divergent rows were found, so read exit_code inside the "
-    "stdout receipt, not only $?. A production-sized tree can legitimately "
+    "stdout receipt, not only $?. A typed failure raised BEFORE the census runs "
+    "(an invalid --journal-root, an --output inside the root, or an --output "
+    "whose ~user cannot be expanded: CENSUS_OUTPUT_UNEXPANDABLE) exits 1 with an "
+    "EMPTY stdout, so an absent receipt and a stale one are never confusable. "
+    "A production-sized tree can legitimately "
     "exceed the default replay record budget "
     "(file_journal_record_limit_exceeded: pipeline_job_records, exit 1); "
     "--max-records raises it -- node-22 needed 5000000 on 2026-09-02."
@@ -116,6 +121,15 @@ _OUTPUT_INSIDE_ROOT_MESSAGE = (
 #: command emits.  It names stdout deliberately: the census already ran and its
 #: receipt is complete on stdout, so the operator loses the file, not the run.
 OUTPUT_UNWRITABLE_MESSAGE = "census receipt could not be written; the receipt above on stdout is complete"
+#: #1955 B.  Distinct from ``OUTPUT_UNWRITABLE_MESSAGE`` on purpose (design D5):
+#: this one fires BEFORE the census runs, so nothing has been emitted on stdout,
+#: whereas the unwritable code is documented as a failure after the receipt is
+#: already complete.  One shared exit code for both would make exit 1 ambiguous
+#: about whether stdout carries a receipt at all.  Path-free like every other
+#: typed line this command emits: the destination rides in the details.
+OUTPUT_UNEXPANDABLE_MESSAGE = (
+    "census receipt --output has a home directory that cannot be expanded; no census was run"
+)
 
 MAX_FILES_HELP = (
     "Override the per-walk discovered-file budget (default 100000). A trip is "
@@ -140,9 +154,10 @@ MAX_RECORDS_HELP = (
 _OUTPUT_HELP = (
     "Write the receipt to this path. It must be outside the journal root: an "
     "in-root path is refused (CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT, exit 1) before "
-    "the census runs, so nothing is echoed for it either. Once the census has "
-    "run, stdout carries the complete receipt whether or not this file write "
-    "succeeds."
+    "the census runs, so nothing is echoed for it either, and so is a path whose "
+    "~user cannot be expanded (CENSUS_OUTPUT_UNEXPANDABLE, exit 1). Once the "
+    "census has run, stdout carries the complete receipt whether or not this "
+    "file write succeeds (CENSUS_OUTPUT_UNWRITABLE, exit 1)."
 )
 
 
@@ -540,9 +555,24 @@ def census_job_id_scope(
 
 
 def _require_output_outside_root(output: str, verified_root: Path) -> Path:
-    """Refuse a receipt path whose realpath lies at or under the verified root."""
+    """Refuse a receipt path whose realpath lies at or under the verified root.
 
-    target = Path(output).expanduser()
+    ``Path.expanduser`` raises a BARE ``RuntimeError`` when no home can be
+    determined (``~<unknown user>``, or no passwd entry with ``HOME`` unset).
+    Neither entrypoint catches that -- both arms name ``OrchestratorError`` and
+    ``FileOrchestrationJournalError`` -- so before #1955 the shape left a
+    traceback on a command that documents "1 on a typed failure".  It becomes
+    its own code because the failure happens BEFORE the census runs (design D5).
+    """
+
+    try:
+        target = Path(output).expanduser()
+    except RuntimeError as error:
+        raise OrchestratorError(
+            "CENSUS_OUTPUT_UNEXPANDABLE",
+            OUTPUT_UNEXPANDABLE_MESSAGE,
+            {"error_type": "UnexpandableOutputHome", "output": str(output)},
+        ) from error
     resolved = Path(os.path.realpath(target))
     root_real = Path(os.path.realpath(verified_root))
     if resolved == root_real or root_real in resolved.parents:
@@ -671,6 +701,7 @@ __all__ = [
     "CENSUS_SCHEMA_VERSION",
     "MAX_FILES_HELP",
     "MAX_RECORDS_HELP",
+    "OUTPUT_UNEXPANDABLE_MESSAGE",
     "OUTPUT_UNWRITABLE_MESSAGE",
     "add_argparse_census_subparser",
     "census_job_id_scope",

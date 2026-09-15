@@ -1,0 +1,71 @@
+{
+  "measured_at": "2026-09-14T23:35:46.449016+00:00",
+  "journal_root": "/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal",
+  "default_budget": 100000,
+  "counts": {
+    "latest_files": 7898,
+    "latest_rows": 54258,
+    "segment_files": 325,
+    "segment_records": 94123,
+    "direct_records": 5328
+  },
+  "raw_consumes_include_direct_false": 148381,
+  "raw_consumes_include_direct_true": 153709,
+  "unique_jobs_include_direct_false": 17025,
+  "unique_jobs_include_direct_true": 17025,
+  "unbudgeted_replay_seconds": 132.73,
+  "default_budget_probes": {
+    "full_tree_include_direct_true": {
+      "outcome": "raised",
+      "reason": "file_journal_record_limit_exceeded",
+      "field": "pipeline_job_records",
+      "seconds": 91.97
+    },
+    "full_tree_include_direct_false": {
+      "outcome": "raised",
+      "reason": "file_journal_record_limit_exceeded",
+      "field": "pipeline_job_records",
+      "seconds": 93.52
+    },
+    "query_pipeline_job_by_slurm_id": {
+      "outcome": "returned",
+      "value": {
+        "job_id": "file_journal_read_blocked",
+        "idempotency_key": null,
+        "cycle_id": null,
+        "run_id": null,
+        "slurm_job_id": "measure-1953-nonexistent",
+        "status": "running",
+        "stage": "file_journal_read",
+        "error_code": "file_journal_record_limit_exceeded",
+        "file_journal": {
+          "status": "blocked",
+          "reason": "file_journal_record_limit_exceeded",
+          "field": "pipeline_job_records",
+          "evidence": {}
+        }
+      },
+      "seconds": 90.67
+    },
+    "query_candidate_state_underivable_key": {
+      "outcome": "returned",
+      "value": {
+        "job_id": "file_journal_read_blocked",
+        "idempotency_key": "measure-1953-underivable-key",
+        "cycle_id": null,
+        "run_id": null,
+        "slurm_job_id": "unknown_after_attempt",
+        "status": "running",
+        "stage": "file_journal_read",
+        "error_code": "file_journal_record_limit_exceeded",
+        "file_journal": {
+          "status": "blocked",
+          "reason": "file_journal_record_limit_exceeded",
+          "field": "pipeline_job_records",
+          "evidence": {}
+        }
+      },
+      "seconds": 91.12
+    }
+  }
+}

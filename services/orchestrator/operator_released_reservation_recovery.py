@@ -21,6 +21,7 @@ from .accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
 )
+from .chain_types import OrchestratorError
 from .file_orchestration_journal import (
     OPERATOR_RECOVERY_ATTESTATION_FIELD,
     RELEASED_RESERVATION_RECOVERY_COMMAND,
@@ -28,6 +29,7 @@ from .file_orchestration_journal import (
     FileOrchestrationJournalRepository,
     _accepted_submit_source_cycle_from_job_id,
 )
+from .journal_root_authority import journal_root_refusal_line, verify_journal_root_authority
 
 RECOVER_RELEASED_RESERVATION_HELP = (
     "Find and recover released identity-blocked cohort masters (#1748). Without "
@@ -119,9 +121,16 @@ def _recover_released_identity_blocked_reservation(
     automatic path can set or clear the attestation -- but it is a genuinely
     weaker guarantee than an operator-supplied expectation, and ``--dry-run``
     followed by ``--attest`` narrows it rather than closing it.
+
+    #1955: the root goes through the one journal-root authority seam before the
+    repository is built.  This lane is NOT read-only -- ``--attest`` writes --
+    and ``safe_fs`` anchors a relative path on ``Path.cwd()``, so a blank or
+    relative ``--journal-root`` would otherwise have recovered against the
+    process working directory.
     """
 
-    repository = FileOrchestrationJournalRepository(journal_root)
+    verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
+    repository = FileOrchestrationJournalRepository(verified_root)
     if job_id is None:
         if not dry_run:
             return {
@@ -247,6 +256,10 @@ def register_click_recovery_command(cli: Any) -> None:
                 job_id=job_id,
                 dry_run=dry_run,
             )
+        except OrchestratorError as error:
+            # #1955: an invalid journal root is a typed refusal, not a traceback.
+            click.echo(journal_root_refusal_line(error), err=True)
+            raise SystemExit(2) from error
         except (FileOrchestrationJournalError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
@@ -281,6 +294,10 @@ def run_argparse_recovery_command(args: Any) -> int:
             job_id=args.job_id,
             dry_run=args.dry_run,
         )
+    except OrchestratorError as error:
+        # #1955: an invalid journal root is a typed refusal, not a traceback.
+        print(journal_root_refusal_line(error), file=sys.stderr)
+        return 2
     except (FileOrchestrationJournalError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 2

@@ -34,6 +34,7 @@ from services.orchestrator.journal_root_authority import JOURNAL_ROOT_INVALID_ME
 from services.orchestrator.journal_scope_census import (
     CENSUS_JOB_ID_SCOPE_COMMAND,
     CENSUS_SCHEMA_VERSION,
+    OUTPUT_UNEXPANDABLE_MESSAGE,
     OUTPUT_UNWRITABLE_MESSAGE,
     census_job_id_scope,
 )
@@ -655,6 +656,48 @@ def test_unwritable_output_after_a_divergent_census_exits_1_not_2(
     assert receipt["divergent_total"] >= 1
     assert receipt["reconcile_abort_triggers"] >= 1
     assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_output_with_an_unexpandable_home_is_its_own_typed_code(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """#1955 B: ``expanduser`` raises a BARE ``RuntimeError``, which no arm caught.
+
+    ``_require_output_outside_root`` called ``Path(output).expanduser()`` outside
+    any handler, so a ``~<unknown user>`` destination left a traceback on a CLI
+    that documents "1 on a typed failure".  The code is deliberately NOT
+    ``CENSUS_OUTPUT_UNWRITABLE``: that one is documented as a failure AFTER the
+    receipt is emitted, and reusing it would make exit 1 ambiguous about whether
+    stdout already carries a receipt (design D5).  This one fires BEFORE the
+    census runs, so stdout is empty.
+    """
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+    before = _snapshot(root)
+    # A literal ``~nhms-no-such-user-7f3a`` directory would be created RELATIVE
+    # to the process working directory, so the glob below is only falsifiable
+    # from inside the tree it globs.  ``root`` is absolute and unaffected.
+    monkeypatch.chdir(tmp_path)
+
+    code, out, err = _invoke(
+        entrypoint,
+        _census_args(root, "--output", "~nhms-no-such-user-7f3a/receipt.json"),
+        capsys,
+    )
+
+    assert code == 1
+    assert out.strip() == ""
+    assert err.strip() == f"CENSUS_OUTPUT_UNEXPANDABLE: {OUTPUT_UNEXPANDABLE_MESSAGE}"
+    assert "Traceback" not in err
+    assert "RuntimeError" not in err
+    # Zero bytes: neither a receipt file nor a census over the tree.
+    assert _snapshot(root) == before
+    assert not list(tmp_path.glob("~*"))
 
 
 # ---------------------------------------------------------------------------

@@ -732,6 +732,18 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # change to the repository's on-disk layout or writer path silently changes
     # what the census observes. 33 tests in 1.21s, hence a rule not an exclusion.
     "tests/test_scheduler_journal_scope_census.py",
+    # #1953: the whole-tree budget contract is ABOUT this module — the read
+    # lane its `_RecordBudget` tags, and the synthetic blocked row the five
+    # query entrypoints return when the budget refuses. Its static pins read
+    # the constant and the sibling sentinels straight out of this file, so a
+    # budget, lane or sentinel edit must run it. DB-free, 11 tests in 1.85s,
+    # hence a rule rather than a rule-gap exclusion.
+    "tests/test_file_journal_full_tree_budget_contract.py",
+    # #1955: the journal-root lane-adoption suite builds this repository on
+    # every verified root it pins and asserts that a refused root leaves zero
+    # bytes anywhere the lane could have written — a claim only this module's
+    # write paths can break. DB-free, 76 tests in 0.70s.
+    "tests/test_journal_root_lane_adoption.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -1371,8 +1383,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#1955), not by editing the shared constant:
+        # FILE_JOURNAL_READ_STATE_TESTS also serves safe_fs.py and every other
+        # journal pattern, whose selection must not move. This module owns the
+        # create-capable import lane and `_rollback_execution_lock` — the two
+        # places design D2/D3 decide whether a root may be created and which
+        # tree the lock lands in — and the lane-adoption suite is their
+        # requirement oracle, so this stop rule is where its importer gap
+        # closes. DB-free, 76 tests in 0.70s, hence a rule rather than a
+        # rule-gap exclusion.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[3],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_journal_root_lane_adoption.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1408,11 +1429,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # from the environment and thereby decides which roots the deleter locks,
         # so an env-read or root-assembly edit here must run it. DB-free, 25
         # tests in 5.27s, hence a rule rather than a rule-gap exclusion.
+        #
+        # #1955/#1953 added two more at-site targets for the same reason. Both
+        # drive `_click_main` AND `_argparse_main` and both own an exit-code and
+        # stderr-rendering contract that lives HERE: the lane-adoption suite
+        # pins the typed `FILE_JOURNAL_INVALID_ROOT` line and exit 2 on five
+        # commands (`migrate-scheduler-state` among them, where the refusal is
+        # inherited and the `except OrchestratorError` arm ordering decides
+        # whether the code prefix survives), the budget-contract suite pins the
+        # one typed line the recovery command renders when the whole-tree replay
+        # raises. An arm-ordering or exit-code edit in cli.py must run them.
+        # DB-free, 87 tests in 2.07s together.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
             *ORCHESTRATOR_CLI_IMPORTER_TESTS,
             "tests/test_retention_copyback_mutex.py",
+            "tests/test_journal_root_lane_adoption.py",
+            "tests/test_file_journal_full_tree_budget_contract.py",
         ),
         stop_on_match=True,
     ),
@@ -1709,6 +1743,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 50 tests in 1.50s.
             "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_journal_scope_census.py",
+            # #1955/#1953: the lane-adoption and full-tree budget suites
+            # top-level-import `services.orchestrator` itself plus
+            # journal_root_authority.py (the seam under test) and
+            # chain_types.py / chain_runtime_utils.py (the terminal-status sets
+            # the blocked sentinel must stay outside of) — modules no stop rule
+            # owns, so the directory rule is where those importer gaps close.
+            # Their other importer pairs (cli.py, file_orchestration_journal.py,
+            # file_orchestration_migration.py) are stop-rule owned and ride
+            # THEIR sites, per this rule's #1455 note above. Both are
+            # orchestrator-journal suites; measured together, 87 tests in 2.07s.
+            "tests/test_journal_root_lane_adoption.py",
+            "tests/test_file_journal_full_tree_budget_contract.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list

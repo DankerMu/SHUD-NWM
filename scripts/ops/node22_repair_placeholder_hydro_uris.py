@@ -7,7 +7,10 @@ the deterministic URIs from each run_id, verifies the run manifest exists on
 the object store, and appends a corrected hydro_run record through the
 journal repository so journal + latest views stay consistent.
 
-Dry-run by default; pass --apply to write. Emits a JSON receipt either way.
+Dry-run by default; pass --apply to write. Emits a JSON receipt either way,
+except on a journal root the #1955 authority seam refuses: that exits 2 with a
+single ``FILE_JOURNAL_INVALID_ROOT: <message>`` line on stderr and no receipt,
+before any directory is read.
 
 Usage (node-22, exact active interpreter — never bare uv before maintenance):
     /scratch/frd_muziyao/NWM/.venv/bin/python scripts/ops/node22_repair_placeholder_hydro_uris.py \
@@ -20,13 +23,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalRepository,
     _format_utc,
     _parse_cycle_time_field,
+)
+from services.orchestrator.journal_root_authority import (
+    journal_root_refusal_line,
+    verify_journal_root_authority,
 )
 
 PLACEHOLDERS = {"[object-uri]", "[uri]"}
@@ -50,11 +59,21 @@ def main() -> int:
     parser.add_argument("--receipt", type=Path, default=None)
     args = parser.parse_args()
 
+    # #1955: verified BEFORE the glob, not only before the repository.  The
+    # dry-run half reads the tree too, so a blank or relative root would
+    # otherwise still report a clean receipt over the working directory, and a
+    # symlinked ancestor would report over a tree the operator never named.
+    try:
+        journal_root = verify_journal_root_authority(args.journal_root, setting="--journal-root")
+    except OrchestratorError as error:
+        print(journal_root_refusal_line(error), file=sys.stderr)
+        return 2
+
     repaired: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
-    repository = FileOrchestrationJournalRepository(args.journal_root) if args.apply else None
+    repository = FileOrchestrationJournalRepository(journal_root) if args.apply else None
 
-    for latest_path in sorted(args.journal_root.glob("latest/*/*/*.json")):
+    for latest_path in sorted(journal_root.glob("latest/*/*/*.json")):
         payload = json.loads(latest_path.read_text(encoding="utf-8"))
         hydro_run = payload.get("hydro_run")
         if not isinstance(hydro_run, dict):
@@ -64,7 +83,10 @@ def main() -> int:
             continue
         run_id = str(hydro_run.get("run_id") or "")
         entry = {
-            "latest": str(latest_path.relative_to(args.journal_root)),
+            # The verified root, never the raw one: ``relative_to`` against an
+            # unexpanded ``~/journal`` literal raises ``ValueError`` for every
+            # legitimate tilde root.
+            "latest": str(latest_path.relative_to(journal_root)),
             "run_id": run_id,
             "fields": ",".join(polluted),
         }
