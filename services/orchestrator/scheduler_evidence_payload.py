@@ -39,6 +39,16 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     # row per pass), so dropping it here would make the runbook's
     # single-boolean triage unexecutable where it is needed most.
     ("operator_action_required", ("operator_action_required",)),
+    # #1543: the §8.6 emission-feasibility boolean, read together with the one
+    # above; ``False`` must survive as well (retention is ``is not None``).
+    ("predecessor_emission_blocked", ("predecessor_emission_blocked",)),
+    # #1186: ``list-operator-actions`` identifies manual-action rows by
+    # ``decision`` and reports these numbers; a summarized pass must keep them,
+    # ``0``/``False`` included.  Summary names avoid the row-level keys above.
+    ("retry_attempt", ("retry_policy", "attempt")),
+    ("retry_limit", ("retry_policy", "retry_limit")),
+    ("retry_occurrences", ("retry_policy", "occurrences")),
+    ("manual_retry_required", ("retry_policy", "manual_retry_required")),
 )
 _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)

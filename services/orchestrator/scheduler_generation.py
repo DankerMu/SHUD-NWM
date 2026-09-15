@@ -1540,3 +1540,76 @@ def journal_identity_quarantine_breaker_engaged(occurrences: Any) -> bool:
         return int(occurrences) >= _JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
     except (TypeError, ValueError):
         return False
+
+
+#: The §8.7 breaker's blocked decision literal, as a confirmation names it.
+OPERATOR_REENTRY_BREAKER_DECISION = "blocked_journal_predecessor_identity_quarantine"
+#: The strict warm-start budget's blocked decision literal, as a confirmation names it.
+OPERATOR_REENTRY_BUDGET_DECISION = "blocked_strict_warm_start_init_state_mismatch"
+#: The repository count each re-entry decision's pin is compared with.  Both
+#: move by exactly one when a stamped re-entry is accepted for submission.
+_OPERATOR_REENTRY_LIVE_PIN_COUNTERS = {
+    OPERATOR_REENTRY_BREAKER_DECISION: "quarantine_rerun_count",
+    OPERATOR_REENTRY_BUDGET_DECISION: "budget_reentry_count",
+}
+
+
+def operator_reentry_confirmation_match(
+    repository: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    decision: str,
+) -> dict[str, Any] | None:
+    """The newest operator re-entry confirmation pinned to the LIVE value, or ``None`` (#1555/#1768).
+
+    One authorization, one re-entry: the pin is the value every rerun moves,
+    and it must equal the confirmation's pin EXACTLY, so the rerun invalidates
+    the confirmation by itself.
+
+    * Breaker (``blocked_journal_predecessor_identity_quarantine``): the live
+      value is the repository's model-level ``quarantine_rerun_count``.  It
+      moves when a stamped rerun is accepted for submission, whatever its
+      outcome or recorded token, so neither is compared here.
+    * Budget (``blocked_strict_warm_start_init_state_mismatch``): the live
+      value is the repository's model-level ``budget_reentry_count`` (round 3
+      r3-02), which moves the same way whatever job-id prefix the re-entry
+      mints under.  The blocked decision itself stays attempt-driven.
+
+    Accessor injection follows the ``getattr`` convention of
+    :func:`journal_identity_quarantine_occurrence_count`.  TOTAL: no repository,
+    a missing or raising accessor or live counter, or an unreadable count
+    (``None``) all yield ``None``, which keeps the fail-stop (the direction
+    that never submits without a human).  Read-only: the scoring and filtering
+    surfaces never write the journal.
+    """
+    if repository is None:
+        return None
+    accessor = getattr(repository, "operator_reentry_confirmations", None)
+    if not callable(accessor):
+        return None
+    try:
+        counter_name = _OPERATOR_REENTRY_LIVE_PIN_COUNTERS.get(decision)
+        counter = getattr(repository, counter_name, None) if counter_name is not None else None
+        if not callable(counter):
+            return None
+        live_pin = counter(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+        if type(live_pin) is not int:
+            return None
+        confirmations = accessor(source_id=source_id, cycle_time=cycle_time, model_id=model_id, decision=decision)
+        for details in reversed(list(confirmations)):
+            if not isinstance(details, Mapping) or type(details.get("pin")) is not int:
+                continue
+            if details["pin"] != live_pin:
+                continue
+            return dict(details)
+    except Exception:  # noqa: BLE001 - a foreign accessor must not break the pass
+        return None
+    return None
+
+
+def operator_reentry_confirmation_evidence(confirmation: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``operator_reentry_confirmation`` block a re-entry retry carries."""
+
+    return {key: confirmation.get(key) for key in ("request_id", "operator", "reason", "pin", "decision")}

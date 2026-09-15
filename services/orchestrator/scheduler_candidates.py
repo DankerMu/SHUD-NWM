@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -581,6 +582,14 @@ def build_candidates(
                             state_decision.evidence,
                             strict_warm_start,
                             raw_candidate_state,
+                            reentry_match=functools.partial(
+                                _scheduler_generation.operator_reentry_confirmation_match,
+                                context.active_repository,
+                                source_id=candidate.source_id,
+                                cycle_time=candidate.cycle_time_utc,
+                                model_id=candidate.model_id,
+                                decision=_scheduler_generation.OPERATOR_REENTRY_BUDGET_DECISION,
+                            ),
                         )
                         # Same emitting point ruling as the run-manifest leg above
                         # (#1826).  The budget-exhausted ``blocked`` leg of this
@@ -2387,6 +2396,36 @@ def _journal_predecessor_identity_quarantine(
         recorded_init_state_id=str(recorded_init_state_id),
     )
     if _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
+        # #1555: a confirmation pinned to the model's live quarantine rerun count
+        # re-emits the ordinary quarantine retry exactly once: the rerun's stamped
+        # master moves the count at acceptance (whatever its outcome or token) and
+        # the pin stops matching.
+        confirmation = _scheduler_generation.operator_reentry_confirmation_match(
+            context.active_repository,
+            source_id=candidate.source_id,
+            cycle_time=candidate.cycle_time_utc,
+            model_id=candidate.model_id,
+            decision=_scheduler_generation.OPERATOR_REENTRY_BREAKER_DECISION,
+        )
+        if confirmation is not None:
+            return CandidateStateDecision(
+                "retry",
+                "journal_predecessor_identity_mismatch",
+                _evidence_safe(
+                    {
+                        **_journal_predecessor_identity_retry_evidence(
+                            state_decision.evidence,
+                            recorded_init_state_id=str(recorded_init_state_id),
+                            expected_init_state_id=expected_init_state_id,
+                            required_lead_hours=required_lead_hours,
+                            skipped_reason=str(state_decision.reason or ""),
+                        ),
+                        "operator_reentry_confirmation": (
+                            _scheduler_generation.operator_reentry_confirmation_evidence(confirmation)
+                        ),
+                    }
+                ),
+            )
         return CandidateStateDecision(
             "blocked",
             "journal_predecessor_identity_quarantine_breaker_engaged",
@@ -2410,6 +2449,14 @@ def _journal_predecessor_identity_quarantine(
             skipped_reason=str(state_decision.reason or ""),
         ),
     )
+
+
+#: #1555/#1768: where ``manual_retry_required`` actually leads for the two
+#: completed-skip fail-stops — the pinned confirmation command and its runbook.
+_OPERATOR_REENTRY_POLICY = {
+    "operator_reentry_command": "confirm-operator-reentry",
+    "recovery_runbook": "node22-control-plane-manual-recovery",
+}
 
 
 def _journal_predecessor_identity_retry_evidence(
@@ -2480,6 +2527,7 @@ def _journal_predecessor_identity_blocked_evidence(
                 "occurrence_threshold": (
                     _scheduler_generation._JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
                 ),
+                **_OPERATOR_REENTRY_POLICY,
             },
         }
     )
@@ -2505,8 +2553,15 @@ def _strict_warm_start_terminal_mismatch_decision(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
     raw_candidate_state: Mapping[str, Any] | None,
+    reentry_match: Callable[..., Mapping[str, Any] | None] | None = None,
 ) -> CandidateStateDecision:
     """Emit the terminal-mismatch retry, or a stable blocked decision once spent.
+
+    ``reentry_match`` (#1768), bound by the caller to the candidate and the
+    budget decision, is asked for a confirmation pinned to the model's live
+    budget re-entry count; a match emits the ordinary retry once (the re-entry
+    is stamped on its cohort master at reservation, which moves the count past
+    the pin -- round 3 r3-02).  ``None`` keeps the decision byte-identical.
 
     Without a budget this decision re-selected every already-completed candidate
     of the cycle on every pass. The demoted decision uses ``action="blocked"`` so
@@ -2537,6 +2592,20 @@ def _strict_warm_start_terminal_mismatch_decision(
     attempt = _state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
     retry_limit = _state_retry_limit(state)
     if retry_limit is not None and attempt >= retry_limit:
+        confirmation = reentry_match() if reentry_match is not None else None
+        if confirmation is not None:
+            return CandidateStateDecision(
+                "retry",
+                "strict_warm_start_terminal_init_state_mismatch",
+                _evidence_safe(
+                    {
+                        **_strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence),
+                        "operator_reentry_confirmation": (
+                            _scheduler_generation.operator_reentry_confirmation_evidence(confirmation)
+                        ),
+                    }
+                ),
+            )
         return CandidateStateDecision(
             "blocked",
             "strict_warm_start_retry_budget_exhausted",
@@ -2576,6 +2645,7 @@ def _strict_warm_start_terminal_blocked_evidence(
             "manual_retry_required": True,
             "attempt": attempt,
             "retry_limit": retry_limit,
+            **_OPERATOR_REENTRY_POLICY,
         },
     }
     selected = strict_evidence.get("candidate_state")

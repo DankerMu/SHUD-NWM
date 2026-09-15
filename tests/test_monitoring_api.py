@@ -2335,6 +2335,29 @@ def test_display_cancel_returns_manual_action_without_gateway_or_store_dependenc
     assert "cancelled" not in details
 
 
+def test_display_manual_action_recovery_runbook_slug_names_an_existing_runbook(monkeypatch: Any) -> None:
+    """#1186: the slug the 409 hands an operator must resolve to a real runbook file.
+
+    The slug is read off the live payload the route builds, not a second copy of
+    the literal, so renaming either side without the other goes red here.
+    """
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 409
+    slug = response.json()["error"]["details"]["recovery_runbook"]
+    runbook = Path(__file__).resolve().parents[1] / "docs" / "runbooks" / f"{slug}.md"
+    assert runbook.is_file(), runbook
+
+
 def test_display_cancel_invalid_run_id_returns_existing_validation_error(monkeypatch: Any) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     display_app = create_app(_display_env())

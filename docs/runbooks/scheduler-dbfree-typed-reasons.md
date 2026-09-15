@@ -150,12 +150,27 @@ successor 记录**的 `state_evidence.predecessor_backfill.summary.records[]` �
 - `status=skipped` 且 `reason=predecessor_backfill_active_pipeline` → 上一轮
   pipeline 还在飞，良性，等下一个自然 pass。
 
+**发射可行性布尔 `predecessor_emission_blocked`（#1543）**：上面这张分支表的结论
+由 scheduler 直接写成 successor `state_evidence` 顶层布尔。本 successor 的任一
+`skipped` / `truncated` 发射记录不属于瞬时类，即为 `true`；瞬时类只有
+`predecessor_already_present`、`predecessor_backfill_active_pipeline`、
+`predecessor_raw_manifest_env_unwired`（配置问题，另有每 pass 一条 warning），以及
+successor `cycle_time` 早于记录 `cutover_valid_time` 的 lineage scoped-out 记录。其余
+一律为 `true`（`predecessor_raw_manifest_not_ready`、`predecessor_model_not_available`、
+`predecessor_emission_cap_reached` 截断、`predecessor_candidate_construction_failed`、
+`predecessor_gate_failed`、successor 不早于 cutover 的 scoped-out，以及今后新增的 skip
+臂），方向是倒向升级。全部记录为 `emitted` 或瞬时 skip 时为 `false`；本 successor 没有
+任何发射记录时**不写**该键。cap 截断记录的 `successor_candidate_ids` 列出被截断的
+successor，所以被截断的 successor 自己也带 `true`。它与 `operator_action_required`
+正交：`operator_action_required=false` 且 `predecessor_emission_blocked=true` 就是下面
+"另一类 stall"。
+
 **summarized pass 的例外**：当 pass evidence 的 `limit.candidate_lists` 为
-`summarized` 或 `dropped` 时，bounded 摘要只保留 `operator_action_required`
-（`scheduler_evidence_payload.py` 的
-`_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`），`predecessor_backfill.summary`
-的 records 已被丢掉。此时**光凭这个布尔不能停手**——先去找未摘要的完整证据
-（journal / 未截断的 pass 日志）拿到发射记录再判。
+`summarized` 或 `dropped` 时，`predecessor_backfill.summary` 的 records 已被丢掉，但
+bounded 摘要（`scheduler_evidence_payload.py` 的
+`_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`）保留 `operator_action_required` 与
+`predecessor_emission_blocked` 两个布尔（`false` 值也保留）。读两个布尔即可分诊；键
+缺席（旧 evidence 或无发射记录）时仍要去找未摘要的完整证据再判。
 
 **单级语义（重要）**：这组字段只回答"**本条记录所属候选**的单级 backfill 会不
 会闭合它自己的缺口"，不描述整条 backfill 链。因此：
@@ -210,16 +225,13 @@ pass 会呈现这组稳定特征（这是"卡住"而不是"正在收敛"的判�
   当收敛判据——错代条目或对象丢失时它同样相等。可靠特征是连续 pass 上的
   `operator_action_required=true`。
 
-反例（不要按本节处置）：如果 summary 里的记录是
-`status=skipped`（`predecessor_raw_manifest_env_unwired` /
-`predecessor_raw_manifest_not_ready` /
-`predecessor_backfill_active_pipeline` /
-`predecessor_already_present` /
-`predecessor_model_not_available` /
-`predecessor_candidate_construction_failed` /
-`predecessor_gate_failed`），那么 §8 gate 根本没对 predecessor 执行，问题在
-raw manifest / 模型可用性 / 在途 pipeline / 发射本身，不是 state 缺口——逐
-reason 的处置见"处置"第 1 步的分支表。
+反例（不要按本节处置）：successor 的 `predecessor_emission_blocked=true`（或
+records 在场时是 `status=skipped` 的 `predecessor_raw_manifest_env_unwired` /
+`predecessor_backfill_active_pipeline` / `predecessor_already_present` 这类瞬时
+skip），说明 §8 gate 根本没对 predecessor 执行，问题在 raw manifest / 模型可用性 /
+在途 pipeline / 发射本身，不是 state 缺口——逐 reason 的处置见"处置"第 1 步的分支
+表。该布尔在 summarized pass 上也保留，不再依赖摘要后消失的
+`predecessor_backfill.summary`。
 
 **另一类 stall：`operator_action_required=false` 也会卡住。** state 那一格是
 齐的，但 §8.6 每个 pass 都因上面那些 `skipped` 原因（典型是 raw manifest 长
@@ -231,8 +243,12 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
 
 ### 处置
 
-1. **确认群体**（两步，缺一不可）。取**被发现的 successor** 候选的
-   `state_evidence`：
+1. **确认群体**（两个布尔一起读，缺一不可）。取**被发现的 successor** 候选的
+   `state_evidence`，同时读 `operator_action_required` 与
+   `predecessor_emission_blocked`：`predecessor_emission_blocked=true` 时，无论
+   `operator_action_required` 是什么，缺口都**不会**自己闭合，先按下面第二步的分支表修
+   发射侧；两者都为 `false` 才是"会自愈"，等下一个自然 pass。下面两步是布尔背后的
+   记录级核对（记录在场时用来定位具体 reason）：
    - 一、读 `operator_action_required`。为 `true` **也不能直接动手**：先做
      第二步核对发射记录——`status=emitted` 说明 §8.6 本 pass 已经把 predecessor
      发出去且它被自己那道门放行了（典型是 declared-cutover 边界上的假阳性），
@@ -425,23 +441,51 @@ exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submiss
    forced-resubmit 白名单（`_FORCE_TERMINAL_RESUBMIT_DECISIONS` /
    `force_replacement_decisions`）来"放行"：那正是断路器要防的复活，会把
    fail-stop 变回无限重跑。
-4. **恢复只能靠"新的提交身份"，补状态本身不会自己再入**。断路器是 fail-stop：
-   journal 里那条 completed 行既不改写也不删除，所以即使第 2 步把期望的
-   predecessor state 补齐了，下一个 pass 读到的仍是同一个 stale token、同一个
-   带戳计数——候选侧继续 blocked、discovery 侧继续释放执行槽，**不会**自动重跑。
-   要让该 cycle+model 重新进入调度，必须在 §8.7 之外产生一次**新的 forecast 提交
-   身份**（新的 run / cohort 身份，其 journal 行记录期望 token）；此后 §8.7 不再
-   判定，cycle 才可能转 complete。
+4. **补状态本身不会自己再入；用 `confirm-operator-reentry` 授权一次重跑**（#1555）。
+   断路器是 fail-stop：journal 里那条 completed 行既不改写也不删除，所以即使第 2 步把
+   期望的 predecessor state 补齐了，下一个 pass 读到的仍是同一个 stale token、同一个
+   带戳计数。补齐之后，按 blocked evidence 的
+   `retry_policy.operator_reentry_command` 记录一次钉住的确认物（先 dry run，再
+   `--attest`）：
+
+   ```bash
+   /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
+     confirm-operator-reentry \
+     --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+     --source-id <source_id> --cycle-time <cycle_time> --model-id <model_id> \
+     --decision blocked_journal_predecessor_identity_quarantine \
+     --pin <dry-run receipt 的 live.quarantine_rerun_count> \
+     --recorded-init-state-id <journal_predecessor_identity.recorded_init_state_id> \
+     --operator "<operator>" --reason "<why>"
+   ```
+
+   CLI 按 live 值核对：断路器必须已触发、token 必须等于 live 记录 token、`--pin` 必须
+   等于该模型的 quarantine rerun 计数（provenance 命名该模型的 cohort master 数，不看终态、
+   不分 token；**不是** `occurrences`），否则 exit 2 且不写。先不带 `--attest` 跑，
+   从 receipt 的 `live.quarantine_rerun_count` 读 pin。确认物匹配（pin 严格相等，读侧不比
+   token）时：
+   discovery 侧该 cycle 不再释放执行槽，候选侧 decision 回到
+   `retry_journal_predecessor_identity_mismatch`，`state_evidence` 带
+   `operator_reentry_confirmation`，真实提交一次 quarantine 重跑（照常打 provenance
+   戳）。**一次一授权**：重跑被接受提交时 rerun 计数即 +1（之后成功、失败、记录哪个 token 都
+   不回退；Slurm 失败不会恢复确认物，需要时用新的 live 计数重新确认），pin 不再相等，下一
+   pass 断路器重新接管；重跑在飞期间候选是 active，不会二次提交。只确认一个模型时，同
+   cycle 其他断路器模型保持 blocked。确认物无撤销手段；已知限制（Slurm 失败的重跑、
+   forcing 见证闸持续占槽、`hydro_run` 冻结 #2397）见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)。
+   不需要、也不应该带外造一个新的 forecast 提交身份。
    **特别注意：给该行打 `manual_retry_marker` 是无效的**——
    `manual_retry_requested` 要到 `scheduler_state_decision.py:269` 才被评估，而
    terminal-success 系列 skip 在 `:220`（`terminal_hydro_success`）/
    `:235`（`terminal_completed_cycle`）/ `:257`（`terminal_pipeline_success`）
    就已返回，一条 completed 行永远走不到 manual retry 那一支；打了标记只会看到
    同一个 blocked reason 原样再来一遍。
-5. **验证收敛**：新提交身份完成后的下一个自然 pass，该 cycle+model 的 journal 行
-   应记录 `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete；
+5. **验证收敛**：确认放行的重跑完成后的下一个自然 pass，若 journal 记录了
+   `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete，
    `blocked_candidates[]` 条目与 backfill `not_selected` 条目同时从 pass evidence
-   中消失。
+   中消失；否则断路器重新接管（rerun 计数已 +1）。候选仍显示 blocked ≠ 确认物未生效：先看
+   dry-run receipt 的 live 计数是否已 +1（file journal 的 `hydro_run` 在同一 `run_id` 重跑时
+   不更新，#2397，即使 rerun 拿到正确 lineage 也仍显示 breaker-blocked，§8.7 在 file journal
+   上暂时无法由此收敛）；已 +1 就**不要重复确认**。
 
 ## `terminal_stage_forced_resubmit_veto`
 
@@ -566,3 +610,5 @@ identity 可匹配"被误报为 `canonical_identity_mismatch`。
 - [`current-production-ops.md`](current-production-ops.md) — 当前生产值守手册。
 - [`failed-basin-retry.md`](failed-basin-retry.md) — 候选级 retry 预算与
   `blocked_strict_warm_start_init_state_mismatch` 的人工再入口径。
+- [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) —
+  `list-operator-actions` 与 `confirm-operator-reentry` 的用法、退出码与已知限制。

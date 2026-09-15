@@ -19635,6 +19635,45 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles(tmp_path: Path) -> None:
+    """#2398 round 4: ``list-operator-actions`` treats ``lock_contended`` as a pass that evaluated nothing.
+
+    Pin the premise on the artifact the scheduler actually writes: the lock is
+    taken before discovery and candidate construction (``scheduler_runtime.py``
+    ``lock.acquire`` then the ``lock_contended`` write, before ``_build_candidates``),
+    so even with a ready source cycle and a runnable model nothing is listed.
+    """
+
+    lock_path = tmp_path / "scheduler.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "existing-token",
+                "pass_id": "existing",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.artifact_path is not None
+    on_disk = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    assert on_disk["status"] == "lock_contended"
+    assert on_disk["candidates"] == []
+    assert on_disk["blocked_candidates"] == []
+    assert on_disk["source_cycles"] == []
+
+
 def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
     with lock_path.open("wb") as handle:
@@ -49021,6 +49060,9 @@ def test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhauste
         "manual_retry_required": True,
         "attempt": 3,
         "retry_limit": 3,
+        # #1768: the fail-stop names its real re-entry channel.
+        "operator_reentry_command": "confirm-operator-reentry",
+        "recovery_runbook": "node22-control-plane-manual-recovery",
     }
     assert evidence["native_shud_resubmitted"] is False
     assert evidence["replacement_submitted"] is False
@@ -56763,3 +56805,799 @@ def _assert_reserved_unbound_ordinary_keeps_durable_reason(
     # Outcome reason is None; the durable reason must survive the merge rather
     # than being blanked.
     assert outcome["reconciliation_reason_class"] == "comment_accounting_unproven"
+
+
+# ---------------------------------------------------------------------------
+# #1555: the §8.7 breaker re-enters ONLY through a pinned one-shot operator
+# confirmation, closed loop through real scheduler passes in backfill mode
+# (single cycle, every model breaker-engaged -- the F1 geometry whose slot the
+# discovery side would otherwise release).  Journal, CLI write, candidate
+# decision and the rerun's reservation are all real; only the Slurm/orchestrator
+# boundary of the scheduler pass is faked.
+# ---------------------------------------------------------------------------
+
+
+def _reentry_pass(tmp_path: Path, root: Path, **kwargs: Any) -> tuple[Any, FakeProductionOrchestrator]:
+    from tests.test_operator_reentry_confirmation import breaker_scheduler
+
+    orchestrator = FakeProductionOrchestrator()
+    result = breaker_scheduler(tmp_path, root, orchestrator, **kwargs).run_once()
+    return result, orchestrator
+
+
+def _breaker_released_cycles(result: Any) -> list[str]:
+    return [
+        str(item["cycle_time_utc"])
+        for item in result.evidence["source_cycles"]
+        if item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+    ]
+
+
+@pytest.mark.parametrize("rerun_token", ["same_stale_token", "different_stale_token"])
+def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    rerun_token: str,
+) -> None:
+    import shutil
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import (
+        BREAKER_CYCLE,
+        breaker_confirm_argv,
+        real_rerun,
+        run_confirm,
+        seed_breaker_journal,
+        stale_token,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    # The whole lifecycle up to here is real: fresh run -> quarantine rerun
+    # (provenance-stamped) re-recording the same stale token -> breaker engaged.
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    stale = stale_token()
+    live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
+
+    # 1. Breaker engaged, no confirmation: the cycle releases the slot, nothing submits.
+    first, first_orchestrator = _reentry_pass(tmp_path, root)
+    assert _breaker_released_cycles(first) == [BREAKER_CYCLE]
+    assert first.evidence["counts"]["submitted_count"] == 0
+    assert first_orchestrator.calls == []
+
+    # 2. The operator attests token + pin == live occurrences through the CLI.
+    code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
+    assert code == 0
+    assert receipt is not None and receipt["decision"] == "recorded"
+
+    confirmed, confirmed_orchestrator = _reentry_pass(tmp_path, root)
+    assert _breaker_released_cycles(confirmed) == []
+    assert confirmed.evidence["counts"]["submitted_count"] == 1
+    (candidate,) = confirmed.evidence["candidates"]
+    evidence = candidate["state_evidence"]
+    assert evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    assert evidence["operator_reentry_confirmation"] == {
+        "request_id": receipt["request_id"],
+        "operator": "ops-oncall",
+        "reason": "stale lineage re-recorded; forcing and state re-verified",
+        "pin": 1,
+        "decision": "blocked_journal_predecessor_identity_quarantine",
+    }
+    (call,) = confirmed_orchestrator.calls
+    basins = [dict(basin) for basin in call["basins"]]
+    assert [basin["model_id"] for basin in basins] == ["model_a"]
+
+    # 3. Mid-flight snapshot: the rerun is submitted but not terminal -> no second submission.
+    inflight_root = tmp_path / "inflight-journal"
+    shutil.copytree(root, inflight_root)
+    inflight = real_rerun(
+        tmp_path,
+        inflight_root,
+        basins,
+        slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
+        job_timeout_seconds=0.3,
+    )
+    assert inflight.status != "complete"
+    assert FileOrchestrationJournalRepository(inflight_root).has_active_pipeline(**live_query)
+    middle, middle_orchestrator = _reentry_pass(tmp_path, inflight_root)
+    assert middle.evidence["counts"]["submitted_count"] == 0
+    assert middle_orchestrator.calls == []
+
+    # 4. The rerun completes through the REAL reservation path, provenance-stamped.
+    recorded = stale if rerun_token == "same_stale_token" else stale_token(lead_hours=18)
+    before_masters = {
+        str(row["job_id"])
+        for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+    }
+    assert real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": recorded}).status == "complete"
+    reopened = FileOrchestrationJournalRepository(root)
+    new_stamped_masters = [
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026052100")
+        if str(row["job_id"]) not in before_masters
+        and row.get("stage") == "forecast"
+        and row.get("model_id") is None
+        and row.get("status") == "succeeded"
+    ]
+    assert [row["journal_predecessor_quarantine_rerun_model_ids"] for row in new_stamped_masters] == [["model_a"]]
+    assert [
+        [entry["init_state_id"] for entry in row["init_state_identities"]] for row in new_stamped_masters
+    ] == [[recorded]]
+    # The pinned value -- the model-level quarantine rerun count -- moved 1 -> 2
+    # whatever token the rerun recorded.
+    assert reopened.quarantine_rerun_count(**live_query) == 2
+    if rerun_token == "same_stale_token":
+        assert reopened.completed_pipeline_init_state_id_occurrences(**live_query, init_state_id=stale) == 2
+    else:
+        # F2: per token each stale lineage counts once, so a per-token pin would
+        # still read 1 == the old pin; the rerun count does not.
+        assert reopened.completed_pipeline_init_state_id_occurrences(**live_query, init_state_id=stale) == 1
+        assert reopened.completed_pipeline_init_state_id_occurrences(**live_query, init_state_id=recorded) == 1
+
+    # 5/6. The confirmation no longer matches: blocked again, nothing submits.
+    after, after_orchestrator = _reentry_pass(tmp_path, root)
+    assert _breaker_released_cycles(after) == [BREAKER_CYCLE]
+    assert after.evidence["counts"]["submitted_count"] == 0
+    assert after_orchestrator.calls == []
+
+
+def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even_if_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """round 1 cand-01: a Slurm-failed confirmed rerun never restores the confirmation.
+
+    The provenance stamp lands on the cohort master when the rerun is accepted,
+    so the quarantine rerun count moves N -> N+1 before the rerun finishes; a
+    failure at the compute layer leaves it there and nothing re-enters again.
+    """
+
+    import shutil
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import (
+        BREAKER_CYCLE,
+        _breaker_candidate_decisions,
+        breaker_confirm_argv,
+        real_rerun,
+        run_confirm,
+        seed_breaker_journal,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
+
+    def stamped_master_ids(journal_root: Path) -> set[str]:
+        return {
+            str(row["job_id"])
+            for row in FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+            if row.get("stage") == "forecast"
+            and row.get("model_id") is None
+            and "model_a" in (row.get("journal_predecessor_quarantine_rerun_model_ids") or [])
+        }
+
+    seeded_stamped = stamped_master_ids(root)
+    assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 1
+    code, _receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
+    assert code == 0
+
+    confirmed, confirmed_orchestrator = _reentry_pass(tmp_path, root)
+    assert confirmed.evidence["counts"]["submitted_count"] == 1
+    (call,) = confirmed_orchestrator.calls
+    basins = [dict(basin) for basin in call["basins"]]
+
+    # Accepted but not finished: the count already reads N+1.
+    inflight_root = tmp_path / "inflight-journal"
+    shutil.copytree(root, inflight_root)
+    inflight = real_rerun(
+        tmp_path,
+        inflight_root,
+        basins,
+        slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
+        job_timeout_seconds=0.3,
+    )
+    assert inflight.status != "complete"
+    assert FileOrchestrationJournalRepository(inflight_root).quarantine_rerun_count(**live_query) == 2
+
+    # The confirmed rerun fails at the compute layer (job and array task both failed).
+    failed = real_rerun(
+        tmp_path,
+        root,
+        basins,
+        slurm_client=FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed"]}),
+    )
+    assert failed.status == "failed"
+    reopened = FileOrchestrationJournalRepository(root)
+    new_stamped = stamped_master_ids(root) - seeded_stamped
+    assert len(new_stamped) == 1
+    new_stamped_statuses = {
+        row["status"] for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026052100") if row["job_id"] in new_stamped
+    }
+    assert new_stamped_statuses == {"failed"}
+    assert reopened.quarantine_rerun_count(**live_query) == 2
+
+    # The old success rows survive the failure, so the candidate stays on the
+    # completed-class path: the breaker blocks, the confirmation no longer matches.
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert "operator_reentry_confirmation" not in entry.state_evidence
+
+    for _ in range(2):
+        later, later_orchestrator = _reentry_pass(tmp_path, root)
+        assert _breaker_released_cycles(later) == [BREAKER_CYCLE]
+        assert later.evidence["counts"]["submitted_count"] == 0
+        assert later_orchestrator.calls == []
+    assert stamped_master_ids(root) - seeded_stamped == new_stamped
+
+
+def test_breaker_reentry_confirms_only_the_named_model_of_a_mixed_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.test_operator_reentry_confirmation import breaker_confirm_argv, run_confirm, seed_breaker_journal
+
+    models = ("model_a", "model_b")
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models)
+    before, _ = _reentry_pass(tmp_path, root, model_ids=models)
+    assert _breaker_released_cycles(before) == ["2026-05-21T00:00:00Z"]
+    assert before.evidence["counts"]["submitted_count"] == 0
+
+    code, _receipt, _err = run_confirm(breaker_confirm_argv(root, model_id="model_a"), capsys)
+    assert code == 0
+
+    result, orchestrator = _reentry_pass(tmp_path, root, model_ids=models)
+
+    assert _breaker_released_cycles(result) == []
+    assert [candidate["model_id"] for candidate in result.evidence["candidates"]] == ["model_a"]
+    (blocked,) = result.evidence["blocked_candidates"]
+    assert blocked["model_id"] == "model_b"
+    assert blocked["state_evidence"]["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert blocked["state_evidence"]["retry_policy"]["operator_reentry_command"] == "confirm-operator-reentry"
+    assert blocked["state_evidence"]["retry_policy"]["recovery_runbook"] == "node22-control-plane-manual-recovery"
+    (call,) = orchestrator.calls
+    assert [basin["model_id"] for basin in call["basins"]] == ["model_a"]
+
+
+def test_breaker_reentry_without_the_models_own_forcing_lands_on_the_missing_forcing_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D.5 (#1555 x #1844): a matching confirmation does not bypass the non-strict forcing witness."""
+
+    import shutil
+
+    from tests.test_operator_reentry_confirmation import breaker_confirm_argv, run_confirm, seed_breaker_journal
+
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    code, _receipt, _err = run_confirm(breaker_confirm_argv(root), capsys)
+    assert code == 0
+    # Remove every witness of THIS model's forcing: the package manifest and its sidecar.
+    shutil.rmtree(tmp_path / "object-store" / "forcing")
+
+    result, orchestrator = _reentry_pass(tmp_path, root)
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert result.evidence["candidates"] == []
+    (blocked,) = result.evidence["blocked_candidates"]
+    # With the object-store forcing tree gone no provenance tier can witness it.
+    assert blocked["reason"] == "forcing_version_row_absent"
+    assert blocked["state_evidence"]["decision"] == "blocked_missing_upstream_artifact"
+    guard = blocked["state_evidence"]["artifact_guard"]
+    assert guard["planned_retry_reason"] == "journal_predecessor_identity_mismatch"
+    assert blocked["state_evidence"]["operator_reentry_confirmation"]["pin"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #1768: the strict warm-start retry budget re-enters ONLY through a confirmation
+# pinned to the live budget re-entry count.  Strict lane, backfill enabled, CONFLICT
+# geometry (the journal-recorded init state disagrees with the selected strict
+# state, so discovery keeps the cycle a gap holding the slot).  Driven through
+# the real discovery and candidate-construction seams over a REAL journal;
+# ``NHMS_SCHEDULER_RETRY_LIMIT`` is never touched.
+# ---------------------------------------------------------------------------
+
+_BUDGET_CYCLE = "2026-05-21T00:00:00Z"
+_BUDGET_RETRY_LIMIT = 2
+
+
+def _budget_attempt_row(attempt: int, *, status: str, slurm_job_id: str | None = None) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "job_id": f"job_fcst_gfs_2026052100_model_a_forecast_retry_{attempt}",
+        "run_id": "fcst_gfs_2026052100_model_a",
+        "cycle_id": "gfs_2026052100",
+        "model_id": "model_a",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": status,
+        "retry_count": 0,
+    }
+    if slurm_job_id is not None:
+        row["slurm_job_id"] = slurm_job_id
+    return row
+
+
+def _record_budget_attempt(root: Path, row: Mapping[str, Any]) -> None:
+    """Write an attempt row through the journal WRITE path.
+
+    A confirmation write re-materializes the cycle's latest view, so rows that
+    exist only in a hand-written latest view would silently vanish.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    FileOrchestrationJournalRepository(root).upsert_pipeline_job({**row, "source_id": "gfs"})
+
+
+def _seed_budget_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, jobs: list[dict[str, Any]]
+) -> tuple[Path, Any]:
+    """Strict db-free lane over a real journal: selected state lead 6h, recorded token lead 12h (CONFLICT)."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_scheduler_backfill import (
+        _DB_FREE_PACKAGE_CHECKSUM,
+        _db_free_state_index_entry,
+        _gfs_adapter,
+        _init_state_id_for,
+        _seed_completed_journal_cycle,
+    )
+
+    root = tmp_path / "journal"
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=_dt(_BUDGET_CYCLE),
+        package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
+        generated_at=_dt("2026-05-21T06:00:00Z"),
+        entries=[
+            _db_free_state_index_entry(
+                roots, valid_time=_dt(_BUDGET_CYCLE), producer_cycle_time=_dt("2026-05-20T18:00:00Z")
+            ),
+            _db_free_state_index_entry(
+                roots, valid_time=_dt("2026-05-21T06:00:00Z"), producer_cycle_time=_dt(_BUDGET_CYCLE)
+            ),
+        ],
+    )
+    package_dir = "forcing/gfs/2026052100/basin_a_v1/model_a"
+    store = LocalObjectStore(Path(os.environ["OBJECT_STORE_ROOT"]), "s3://nhms")
+    store.write_bytes_atomic(f"{package_dir}/forcing_package.json", b'{"schema_version": "nhms.forcing_package.v1"}')
+    store.write_bytes_atomic(
+        f"{package_dir}/forcing_version_record.json",
+        json.dumps(
+            {"forcing_package_uri": f"s3://nhms/{package_dir}/", "forcing_version_id": "forc_gfs_2026052100_model_a"}
+        ).encode("utf-8"),
+    )
+    latest_path = _seed_completed_journal_cycle(
+        root,
+        cycle_time=_BUDGET_CYCLE,
+        init_state_id=_init_state_id_for(_BUDGET_CYCLE, lead_hours=12),
+        jobs=[],
+    )
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    package_uri = "s3://nhms/forcing/gfs/2026052100/basin_a_v1/model_a/forcing_package.json"
+    latest["forcing_version"].update(
+        {
+            "forcing_version_id": "forc_gfs_2026052100_model_a",
+            "forcing_package_uri": package_uri,
+            "forcing_package_manifest_uri": package_uri,
+        }
+    )
+    latest_path.write_text(json.dumps(latest), encoding="utf-8")
+    for job in jobs:
+        _record_budget_attempt(root, job)
+
+    def _scheduler(repository: Any | None = None) -> ProductionScheduler:
+        return ProductionScheduler(
+            _config(
+                tmp_path,
+                now=_dt("2026-05-21T06:00:00Z"),
+                backfill_enabled=True,
+                max_cycles_per_source=1,
+                lookback_hours=12,
+                retry_limit=_BUDGET_RETRY_LIMIT,
+            ),
+            registry=FakeRegistry(
+                [
+                    _model(
+                        "model_a",
+                        "basin_a",
+                        resource_profile={
+                            "runnable": True,
+                            "memory_gb": 8,
+                            "display_capabilities": {"tiles": True},
+                            "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+                        },
+                    )
+                ]
+            ),
+            adapters={"gfs": _gfs_adapter([_BUDGET_CYCLE])},
+            active_repository=repository if repository is not None else FileOrchestrationJournalRepository(root),
+            orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+        )
+
+    return root, _scheduler
+
+
+def _budget_pass(scheduler: ProductionScheduler) -> tuple[list[str], list[Any], list[Any], list[dict[str, Any]]]:
+    """One backfill discovery + candidate construction: (selected cycles, candidates, blocked, skipped)."""
+
+    models = scheduler._discover_models()[0]
+    cycles, _evidence = scheduler._discover_cycles(_dt("2026-05-21T06:00:00Z"), models=models)
+    candidates, blocked, skipped, _dup, _sync = scheduler._build_candidates(models=models, cycles=cycles)
+    return [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles], candidates, blocked, skipped
+
+
+def _budget_confirm_argv(root: Path, *, pin: int) -> list[str]:
+    return [
+        "--journal-root", str(root), "--source-id", "gfs", "--cycle-time", _BUDGET_CYCLE,
+        "--model-id", "model_a", "--decision", "blocked_strict_warm_start_init_state_mismatch",
+        "--pin", str(pin), "--operator", "ops-oncall", "--reason", "state index repaired; one more strict rerun",
+        "--attest",
+    ]  # fmt: skip
+
+
+def test_budget_reentry_confirmation_pinned_to_the_budget_reentry_count_runs_once_then_the_budget_reengages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    spent = [_budget_attempt_row(_BUDGET_RETRY_LIMIT, status="succeeded")]
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, spent)
+    retry_limit_env = os.environ.get("NHMS_SCHEDULER_RETRY_LIMIT")
+
+    # 1. Budget spent: the CONFLICT cycle keeps the slot, the candidate is blocked.
+    selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+    assert selected == [_BUDGET_CYCLE]
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    policy = entry.state_evidence["retry_policy"]
+    assert (policy["attempt"], policy["retry_limit"]) == (2, 2)
+    assert policy["operator_reentry_command"] == "confirm-operator-reentry"
+    assert policy["recovery_runbook"] == "node22-control-plane-manual-recovery"
+
+    # 5 (stale pin first): a pin other than the live budget re-entry count is
+    # refused on the write side (r3-02) and releases nothing.
+    live_pin = _budget_live_reentry_count(root, capsys)
+    assert live_pin == 0
+    code, stale_receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin + 1), capsys)
+    assert (code, stale_receipt["reason"]) == (2, "pin_mismatch")
+    _selected, stale_candidates, stale_blocked, _ = _budget_pass(scheduler())
+    assert stale_candidates == []
+    assert [item.state_evidence["decision"] for item in stale_blocked] == [
+        "blocked_strict_warm_start_init_state_mismatch"
+    ]
+
+    # 2. pin == live count: exactly one retry, the global limit untouched.
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert code == 0
+    confirmed = scheduler()
+    _selected, confirmed_candidates, confirmed_blocked, _ = _budget_pass(confirmed)
+    assert confirmed_blocked == []
+    (retry,) = confirmed_candidates
+    assert retry.state_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert retry.state_evidence["operator_reentry_confirmation"] == {
+        "request_id": receipt["request_id"],
+        "operator": "ops-oncall",
+        "reason": "state index repaired; one more strict rerun",
+        "pin": live_pin,
+        "decision": "blocked_strict_warm_start_init_state_mismatch",
+    }
+    assert os.environ.get("NHMS_SCHEDULER_RETRY_LIMIT") == retry_limit_env
+
+    # 3. Mid-flight (on a copy of the journal): the real reservation path has
+    # accepted the rerun but Slurm never finishes it -> nothing new is admitted.
+    import shutil
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    inflight_root = tmp_path / "inflight-journal"
+    shutil.copytree(root, inflight_root)
+    inflight = _budget_real_reentry(
+        tmp_path,
+        monkeypatch,
+        inflight_root,
+        confirmed,
+        confirmed_candidates,
+        slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
+        job_timeout_seconds=0.3,
+    )
+    assert inflight.status not in {"succeeded", "complete"}
+    _selected, middle_candidates, _middle_blocked, _ = _budget_pass(
+        scheduler(FileOrchestrationJournalRepository(inflight_root))
+    )
+    assert middle_candidates == []
+
+    # 4. The rerun completes through the real reservation path: the live count
+    # moved past the pin, the budget blocks again.
+    completed = _budget_real_reentry(tmp_path, monkeypatch, root, scheduler(), confirmed_candidates)
+    assert completed.status == "succeeded"
+    _selected, after_candidates, after_blocked, _ = _budget_pass(scheduler())
+    assert after_candidates == []
+    (after,) = after_blocked
+    assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    # Exactly the limit: the re-entry minted under the ``cycle_<src>_<stamp>_forecast_``
+    # prefix does not move the stage attempt (#2404, known and out of scope); the
+    # live budget re-entry count is what moved.
+    assert after.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT
+    assert "operator_reentry_confirmation" not in after.state_evidence
+    assert _budget_live_reentry_count(root, capsys) == live_pin + 1
+
+
+def test_budget_reentry_is_inert_on_a_repository_without_the_accessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D.7 budget leg: no accessor means no confirmation, byte-for-byte the pre-change decision."""
+
+    from tests.test_operator_reentry_confirmation import _NoConfirmationAccessorRepository, run_confirm
+
+    root, scheduler = _seed_budget_journal(
+        monkeypatch, tmp_path, [_budget_attempt_row(_BUDGET_RETRY_LIMIT, status="succeeded")]
+    )
+    # r3-02: the live pin is the budget re-entry count (0 here), not the attempt.
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=0), capsys)
+    assert code == 0
+
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(_NoConfirmationAccessorRepository(root)))
+
+    assert candidates == []
+    assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]
+
+
+_BUDGET_FULL_CHAIN_RUN_ID = "cycle_gfs_2026052100_full_model_a"
+
+
+def _budget_full_chain_master_row(job_suffix: str, *, slurm_job_id: str) -> dict[str, Any]:
+    """A full-chain forecast cohort master spent by the automatic retry service.
+
+    Hand-seeded: the strict db-free lane can not drive the chain's own automatic
+    retry loop.  The job-id shape is the one that loop mints -- each retry
+    appends ``_retry_<n>`` to the job it retries (``retry.py:458``,
+    ``file_orchestration_journal.py:10939``), so the second retry of the bare
+    master is ``..._forecast_retry_1_retry_2`` and the stage-scoped attempt is 2.
+    """
+
+    return {
+        "job_id": f"job_{_BUDGET_FULL_CHAIN_RUN_ID}_forecast{job_suffix}",
+        "run_id": _BUDGET_FULL_CHAIN_RUN_ID,
+        "cycle_id": "gfs_2026052100",
+        "model_id": None,
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "slurm_job_id": slurm_job_id,
+    }
+
+
+def _budget_forecast_masters(root: Path) -> list[str]:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    return sorted(
+        str(row["job_id"])
+        for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+
+
+def _budget_real_reentry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    scheduler: ProductionScheduler,
+    candidates: list[Any],
+    *,
+    slurm_client: Any | None = None,
+    job_timeout_seconds: float = 120.0,
+) -> Any:
+    """Hand ``candidates`` to the REAL forecast orchestrator + reservation path on ``root``.
+
+    The handoff basins are the scheduler's own (``_execute_candidates_async``
+    builds them through ``candidate_basin_manifest``; ``run_once`` itself is
+    preflight-blocked in the db-free lane), captured by a fake orchestrator and
+    replayed through ``real_rerun``.  Only system boundaries are trimmed: Slurm
+    is faked, the NFS run-tree copyback is unset, and the chain stops after the
+    forecast stage (publication needs the ``DATABASE_URL`` this lane forbids).
+    The rerun re-records the journal's lead-12 token, so the CONFLICT persists
+    and every later pass re-evaluates the spent budget.
+    """
+
+    from tests.test_operator_reentry_confirmation import real_rerun
+    from tests.test_scheduler_backfill import _init_state_id_for
+
+    capture = FakeProductionOrchestrator()
+    scheduler.orchestrator_factory = lambda _source_id: capture
+    scheduler._execute_candidates_async(candidates)
+    (call,) = capture.calls
+    with monkeypatch.context() as patch:
+        patch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+        return real_rerun(
+            tmp_path,
+            root,
+            [dict(basin) for basin in call["basins"]],
+            recorded_tokens={"model_a": _init_state_id_for(_BUDGET_CYCLE, lead_hours=12)},
+            slurm_client=slurm_client,
+            job_timeout_seconds=job_timeout_seconds,
+            terminal_stage="forecast",
+        )
+
+
+def _budget_live_reentry_count(root: Path, capsys: pytest.CaptureFixture[str]) -> int:
+    """The live pin, read the way the runbook tells an operator to: a dry run's ``live.budget_reentry_count``."""
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    argv = [item for item in _budget_confirm_argv(root, pin=0) if item != "--attest"]
+    _code, receipt, _err = run_confirm(argv, capsys)
+    assert receipt is not None
+    assert receipt["decision"] in {"dry_run", "refused"}, receipt
+    return receipt["live"]["budget_reentry_count"]
+
+
+def _spent_full_chain_budget_rows() -> list[dict[str, Any]]:
+    return [
+        _budget_full_chain_master_row("", slurm_job_id="100"),
+        _budget_full_chain_master_row("_retry_1", slurm_job_id="101"),
+        _budget_full_chain_master_row("_retry_1_retry_2", slurm_job_id="102"),
+    ]
+
+
+def test_budget_reentry_confirmation_is_consumed_even_when_the_rerun_mints_under_another_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r3-02: one budget confirmation re-enters exactly once, whatever job-id prefix the rerun mints under.
+
+    The budget was spent by the full chain's automatic retries
+    (``cycle_..._full_model_a`` prefix, attempt 2 == limit).  A re-entry reserves
+    under the scheduler's ``cycle_..._forecast_model_a`` prefix, whose retry
+    suffix starts over (bare, ``_retry_1``, ``_retry_2``), so the stage-scoped
+    attempt does not move; the confirmation must be consumed anyway.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert entry.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT
+
+    pin = _budget_live_reentry_count(root, capsys)
+    assert pin == 0
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=pin), capsys)
+    assert code == 0, receipt
+
+    # The confirmed pass: exactly one retry, carrying the confirmation, through
+    # the real reservation path.
+    confirmed = scheduler()
+    _selected, candidates, blocked, _skipped = _budget_pass(confirmed)
+    assert blocked == []
+    (retry,) = candidates
+    assert retry.state_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert retry.state_evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    result = _budget_real_reentry(tmp_path, monkeypatch, root, confirmed, candidates)
+    assert result.status == "succeeded"
+    masters = _budget_forecast_masters(root)
+    assert "job_cycle_gfs_2026052100_forecast_model_a_forecast" in masters
+    # Accepted for submission: the live count moved past the pin, and the
+    # consumed pin is refused on the write side too.
+    assert _budget_live_reentry_count(root, capsys) == pin + 1
+    code, stale, _err = run_confirm(_budget_confirm_argv(root, pin=pin), capsys)
+    assert (code, stale["reason"]) == (2, "pin_mismatch")
+
+    # Every later pass: blocked, nothing new reserved.  Without the fix these
+    # passes re-enter again under ``..._forecast_model_a_forecast_retry_1`` and
+    # ``_retry_2`` on the same confirmation.
+    for later_pass in range(3):
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+        assert [item.state_evidence.get("decision") for item in candidates] == [], later_pass
+        (after,) = blocked
+        assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+        assert "operator_reentry_confirmation" not in after.state_evidence
+        assert _budget_forecast_masters(root) == masters
+
+
+def test_budget_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even_if_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r3-02: a Slurm-failed confirmed budget re-entry never restores the confirmation.
+
+    The budget re-entry stamp lands on the cohort master when the rerun is
+    accepted, so the count moves 0 -> 1 before the rerun finishes; a failure
+    at the compute layer leaves it there and nothing re-enters again.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0, receipt
+    seeded_masters = _budget_forecast_masters(root)
+
+    confirmed = scheduler()
+    _selected, candidates, _blocked, _skipped = _budget_pass(confirmed)
+    (retry,) = candidates
+    assert retry.state_evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    failed = _budget_real_reentry(
+        tmp_path,
+        monkeypatch,
+        root,
+        confirmed,
+        candidates,
+        slurm_client=FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed"]}),
+    )
+    assert failed.status == "failed"
+    (new_master,) = set(_budget_forecast_masters(root)) - set(seeded_masters)
+    reopened = file_orchestration_journal_module.FileOrchestrationJournalRepository(root)
+    assert reopened.get_pipeline_job(new_master)["status"] == "failed"
+    assert _budget_live_reentry_count(root, capsys) == 1
+
+    masters = _budget_forecast_masters(root)
+    for later_pass in range(2):
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+        assert candidates == [], later_pass
+        assert all("operator_reentry_confirmation" not in item.state_evidence for item in blocked)
+        assert _budget_forecast_masters(root) == masters
+
+
+class _NoBudgetReentryCountAccessorRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    """Confirmations readable, but no live budget pin to compare them with."""
+
+    budget_reentry_count = None  # type: ignore[assignment]
+
+
+class _UnreadableBudgetReentryCountRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    def budget_reentry_count(self, **_kwargs: Any) -> int | None:
+        return None
+
+
+class _RaisingBudgetReentryCountRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    def budget_reentry_count(self, **_kwargs: Any) -> int | None:
+        raise RuntimeError("count unavailable")
+
+
+@pytest.mark.parametrize(
+    "repository_class",
+    [
+        _NoBudgetReentryCountAccessorRepository,
+        _UnreadableBudgetReentryCountRepository,
+        _RaisingBudgetReentryCountRepository,
+    ],
+)
+def test_budget_reentry_is_inert_without_a_readable_live_reentry_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    repository_class: type[Any],
+) -> None:
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=0), capsys)
+    assert code == 0
+
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(repository_class(root)))
+
+    assert candidates == []
+    assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]
