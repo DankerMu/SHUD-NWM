@@ -12,12 +12,15 @@ breaker-released backfill cycle never reaches candidate construction, so its
 models are read from the not-selected ``source_cycles`` entry instead.
 
 Evidence only, never the journal: the journal carries no decisions.  A pass
-only answers "nothing waits" when candidate construction ran in it: its status
-(or, for a size-fallback artifact, ``limit.pre_limit_status``) must be in
-:data:`EVALUATING_PASS_STATUSES`.  Exit codes: ``1`` actions listed, ``0`` none,
-``3`` none but undecidable (a scanned pass dropped its candidate lists, or no
-scanned pass is readable and evaluating -- including an empty root), ``2``
-evidence root missing or unreadable.
+only answers "nothing waits" when candidate construction ran in it and its
+evidence is whole: its status must be in :data:`EVALUATING_PASS_STATUSES`, and
+it must not be a size-fallback artifact -- ``bounded_evidence_payload`` empties
+``source_cycles``, the only place a breaker-released cycle appears, so such a
+pass can still LIST its summarized blocked candidates but can never prove none
+waits.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none but undecidable
+(a scanned pass dropped its candidate lists, or no scanned pass is readable and
+evaluating -- including an empty root), ``2`` evidence root missing or
+unreadable.
 """
 
 from __future__ import annotations
@@ -44,7 +47,10 @@ BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_bre
 #: ``resource_limit_blocked`` and every unknown status are non-evaluating;
 #: ``preflight_blocked`` is written both before candidate construction (root,
 #: runtime, lock-side preflights) and after it, and the status alone can not
-#: tell which, so it is non-evaluating too.
+#: tell which, so it is non-evaluating too.  A size-fallback artifact (status
+#: ``resource_limit_blocked`` with summarized/dropped candidate lists) is
+#: non-evaluating whatever ``limit.pre_limit_status`` it kept: its
+#: ``source_cycles`` were emptied (reason ``size_fallback_source_cycles_absent``).
 EVALUATING_PASS_STATUSES = frozenset(
     (
         "planned",
@@ -77,6 +83,9 @@ EVALUATING_PASS_STATUSES = frozenset(
     )
 )
 _SIZE_FALLBACK_STATUS = "resource_limit_blocked"
+_SIZE_FALLBACK_CANDIDATE_LISTS = frozenset(("summarized", "dropped"))
+STATUS_NOT_EVALUATING_REASON = "status_not_evaluating"
+SIZE_FALLBACK_NON_EVALUATING_REASON = "size_fallback_source_cycles_absent"
 
 OPERATOR_ACTION_DECISIONS = frozenset(
     (
@@ -96,7 +105,8 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "and at least one scanned pass evaluated candidates, 3 when none but undecidable "
     "(a pass dropped its candidate lists, or no scanned pass is readable and "
     "evaluating -- see non_evaluating_passes / unreadable_passes; an empty root "
-    "counts), 2 when the root is missing or unreadable. Runbook: "
+    "counts, and a size-fallback pass never counts as evaluating because its "
+    "source_cycles were dropped), 2 when the root is missing or unreadable. Runbook: "
     "docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 
@@ -128,9 +138,9 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
             continue
         limit = payload.get("limit")
         limit = limit if isinstance(limit, Mapping) else {}
-        status = _effective_pass_status(payload.get("status"), limit)
-        if status not in EVALUATING_PASS_STATUSES:
-            non_evaluating.append({"pass": name, "status": status})
+        non_evaluating_entry = _non_evaluating_entry(name, payload.get("status"), limit)
+        if non_evaluating_entry is not None:
+            non_evaluating.append(non_evaluating_entry)
         if limit.get("candidate_lists") == "dropped":
             dropped.append(name)
         for action in _pass_actions(payload):
@@ -163,12 +173,23 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     return receipt, 0
 
 
-def _effective_pass_status(status: Any, limit: Mapping[str, Any]) -> str | None:
-    """The pass's own status; a size-fallback artifact keeps it as ``limit.pre_limit_status``."""
+def _non_evaluating_entry(name: str, status: Any, limit: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``None`` for an evaluating pass, else its ``non_evaluating_passes`` entry."""
 
-    if status == _SIZE_FALLBACK_STATUS and limit.get("pre_limit_status") not in (None, ""):
-        status = limit.get("pre_limit_status")
-    return None if status in (None, "") else str(status)
+    if status == _SIZE_FALLBACK_STATUS and limit.get("candidate_lists") in _SIZE_FALLBACK_CANDIDATE_LISTS:
+        kept = limit.get("pre_limit_status")
+        return {
+            "pass": name,
+            "status": str(kept) if kept not in (None, "") else _SIZE_FALLBACK_STATUS,
+            "reason": SIZE_FALLBACK_NON_EVALUATING_REASON,
+        }
+    if isinstance(status, str) and status in EVALUATING_PASS_STATUSES:
+        return None
+    return {
+        "pass": name,
+        "status": status if isinstance(status, str) and status else None,
+        "reason": STATUS_NOT_EVALUATING_REASON,
+    }
 
 
 def _newest_pass_files(root: Path, passes: int) -> list[tuple[str, Path]]:

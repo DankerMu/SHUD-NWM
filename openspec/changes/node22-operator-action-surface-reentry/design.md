@@ -72,7 +72,7 @@
 - **退出码**：
   - 列表非空为 `1`；
   - 列表为空，但有 pass 的 `limit.candidate_lists == "dropped"`（`scheduler_evidence_payload.py:219-222`）时为 `3`（无法判定），否则会在最拥堵的 pass 上假阴性（F7）；
-  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）；
+  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）。Phase 7 F-1 修订：size-fallback 产物（`resource_limit_blocked` + `limit.pre_limit_status`）的 `source_cycles` 被 `bounded_evidence_payload` 无条件清空（`scheduler_evidence_payload.py:1129`），看不到 breaker 释放的 cycle，因此不计为可判定 pass（进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`），但其 summarized `blocked_candidates` 仍照常列出；
   - root 缺失或不可读为 `2`。
 - **bounded 白名单扩容**（与 D3 共用同一次编辑）：
   - 在 `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 追加 `retry_attempt ← (retry_policy, attempt)`、`retry_limit ← (retry_policy, retry_limit)`、`retry_occurrences ← (retry_policy, occurrences)`、`manual_retry_required ← (retry_policy, manual_retry_required)`；

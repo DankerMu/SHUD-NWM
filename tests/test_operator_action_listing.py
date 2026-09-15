@@ -139,9 +139,11 @@ def _write_pass(
         "source_cycles": list(source_cycles or []),
     }
     if candidate_lists is not None:
-        # The size fallback rewrites the status and keeps the pass's own one.
+        # The size fallback rewrites the status, keeps the pass's own one, and
+        # empties ``source_cycles`` exactly like ``bounded_evidence_payload``.
         payload["status"] = "resource_limit_blocked"
         payload["limit"].update({"candidate_lists": candidate_lists, "pre_limit_status": status})
+        payload["source_cycles"] = []
     path = root / name
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.utime(path, (mtime, mtime))
@@ -473,7 +475,11 @@ def test_a_window_of_non_evaluating_passes_is_undecidable_even_with_an_older_act
     assert payload["passes_scanned"] == 6
     assert payload["operator_actions"] == []
     assert payload["non_evaluating_passes"] == [
-        {"pass": name, "status": "lock_contended" if index % 2 else "preflight_blocked"}
+        {
+            "pass": name,
+            "status": "lock_contended" if index % 2 else "preflight_blocked",
+            "reason": "status_not_evaluating",
+        }
         for index, name in enumerate(names, start=1)
     ]
 
@@ -511,11 +517,15 @@ def test_an_empty_evidence_root_is_undecidable(tmp_path: Path, capsys: pytest.Ca
 def test_one_clean_evaluating_pass_in_the_window_decides_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """round 1 cand-03 (c): non-evaluating neighbours do not taint an evaluating pass."""
+    """round 1 cand-03 (c): non-evaluating neighbours do not taint an evaluating pass.
+
+    P7 F-1: the size-fallback neighbour used to count as evaluating by the status
+    it kept; it is non-evaluating now (its ``source_cycles`` were emptied), so
+    the one clean ``planned`` pass is what decides 0 here.
+    """
 
     _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
     _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
-    # A size-fallback artifact is judged by the status it kept.
     _write_pass(
         tmp_path,
         "scheduler_2026052112_cccccccccccc.json",
@@ -529,8 +539,111 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
     assert code == 0
     assert payload is not None
     assert payload["non_evaluating_passes"] == [
-        {"pass": "scheduler_2026052112_bbbbbbbbbbbb.json", "status": "lock_contended"}
+        {
+            "pass": "scheduler_2026052112_bbbbbbbbbbbb.json",
+            "status": "lock_contended",
+            "reason": "status_not_evaluating",
+        },
+        {
+            "pass": "scheduler_2026052112_cccccccccccc.json",
+            "status": "submitted",
+            "reason": "size_fallback_source_cycles_absent",
+        },
     ]
+
+
+def _write_real_size_fallback_pass(root: Path, name: str, *, mtime: int, original: dict[str, Any]) -> dict[str, Any]:
+    """Write what the scheduler writes when a pass overflows: the REAL ``bounded_evidence_payload``."""
+
+    bounded = scheduler_evidence_payload.bounded_evidence_payload(original, reason="evidence_bytes_exceeded")
+    path = root / name
+    path.write_text(json.dumps(bounded), encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return bounded
+
+
+def _breaker_released_source_cycle() -> dict[str, Any]:
+    return {
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026052100",
+        "cycle_time_utc": "2026-05-21T00:00:00Z",
+        "selection_status": "not_selected",
+        "selection_reason": "journal_predecessor_identity_quarantine_breaker_engaged",
+        "journal_predecessor_identity_quarantine": {
+            "models": [
+                {
+                    "model_id": "model_a",
+                    "recorded_init_state_id": "state_gfs_model_a_2026052100_gfs_2026052012_f012",
+                    "occurrences": 1,
+                }
+            ]
+        },
+    }
+
+
+def test_a_window_of_size_fallback_passes_is_undecidable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """P7 F-1: the size fallback drops ``source_cycles``, which hid a breaker-released cycle behind exit 0."""
+
+    original = {
+        "pass_id": "scheduler_2026052112_aaaaaaaaaaaa",
+        "status": "blocked",
+        "source_cycles": [_breaker_released_source_cycle()],
+        "blocked_candidates": [_unrelated_blocked_row()],
+    }
+    # The whole pass (unbounded) WOULD list the breaker action.
+    _write_pass(tmp_path, "scheduler_2026052112_000000000000.json", mtime=1_000, **_as_write_pass_kwargs(original))
+    assert _run(["--evidence-root", str(tmp_path)], capsys)[0] == 1
+    (tmp_path / "scheduler_2026052112_000000000000.json").unlink()
+
+    bounded = _write_real_size_fallback_pass(
+        tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, original=original
+    )
+    assert bounded["source_cycles"] == []
+    assert bounded["limit"]["candidate_lists"] == "summarized"
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == [
+        {
+            "pass": "scheduler_2026052112_aaaaaaaaaaaa.json",
+            "status": "blocked",
+            "reason": "size_fallback_source_cycles_absent",
+        }
+    ]
+
+
+def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P7 F-1: non-evaluating is only about proving absence; what the summary holds is still listed."""
+
+    original = {
+        "pass_id": "scheduler_2026052112_aaaaaaaaaaaa",
+        "status": "blocked",
+        "source_cycles": [_breaker_released_source_cycle()],
+        "blocked_candidates": [_budget_row(), _unrelated_blocked_row()],
+    }
+    _write_real_size_fallback_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, original=original)
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert payload is not None
+    assert _action_projection(payload) == [
+        ("model_c", "blocked_strict_warm_start_init_state_mismatch", 12, 12, None),
+    ]
+    assert [item["reason"] for item in payload["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
+
+
+def _as_write_pass_kwargs(original: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": original["status"],
+        "source_cycles": original["source_cycles"],
+        "blocked": original["blocked_candidates"],
+    }
 
 
 def test_a_window_of_submission_failed_passes_without_actions_decides_zero(

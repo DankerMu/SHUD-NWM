@@ -117,6 +117,13 @@
 - [x] R1.5 cand-05：D.2 的 `_manual_retry_requested` 断言经变异证实无法咬住（marker 读取还要求 `trigger: "manual"`），删除并以注释指向 `test_attest_records_a_dedicated_confirmation_event` 的精确形状断言。
 - [x] R1.6 runbook：确认物在 rerun 被接受提交时消费、Slurm 失败不恢复；「候选仍显示 blocked ≠ 确认物未生效」与 #2397 合并；退出码表加 exit 3 新条件与 `non_evaluating_passes`；evidence root 取自 `nhms-compute-scheduler.service` 的 `infra/env/compute.scheduler-dbfree.env`（#2399）并核对 `evidence_root` 与 `passes_scanned > 0`。预算 pin 仍取 `list-operator-actions` 最新 pass 的 `attempt`，并附 #2400 预授权警告。
 
+## P7 修复（终审 F-1）
+
+- [x] P7.1 `list-operator-actions` 读侧：size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` ∈ {summarized, dropped}）不再按 `limit.pre_limit_status` 解包计为可判定，进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`（`bounded_evidence_payload` 清空 `source_cycles`，breaker 释放的 cycle 会被隐藏成 exit 0）；其摘要 `blocked_candidates` 照常列出。为统一条目形状，所有 `non_evaluating_passes` 条目都带 `reason`（status 类为 `status_not_evaluating`）。
+- [x] P7.2 测试：真实 `bounded_evidence_payload` 产物——含 breaker 释放 `source_cycles` + 无关 blocked 行 → exit 3 且该 pass 在 `non_evaluating_passes`；含 summarized `blocked_strict_warm_start_init_state_mismatch` → exit 1 并列出；`_write_pass` 的 fallback 形状同步清空 `source_cycles`；变异（恢复解包）使新测试变红。
+- [x] P7.3 修正既有期望：`test_one_clean_evaluating_pass_in_the_window_decides_zero` 中的 summarized fallback 邻居原按保留 status 计为可判定，现改为 non-evaluating（理由同 P7.1），exit 0 由同窗口的 `planned` pass 决定；两处 `non_evaluating_passes` 精确断言补 `reason` 字段。
+- [x] P7.4 同步 `LIST_OPERATOR_ACTIONS_HELP`、模块 docstring、`EVALUATING_PASS_STATUSES` 注释与 runbook 可判定定义 / 退出码表。
+
 ## Evidence Floor
 
 - EF-1 本地：`uv run pytest -q tests/test_scheduler_backfill_predecessor.py tests/test_scheduler_generation.py tests/test_warm_start_chaining.py tests/test_scheduler_backfill.py` 全绿。

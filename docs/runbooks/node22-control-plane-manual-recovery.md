@@ -43,12 +43,18 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 - `--evidence-root` 缺省取 `NHMS_SCHEDULER_EVIDENCE_ROOT`。
 - **可判定 pass**：只有可读且 status 属于"候选构造已运行后才写出"的封闭集合
   `EVALUATING_PASS_STATUSES`（权威列表见 `services/orchestrator/operator_action_listing.py`，
-  含 `planned`、`blocked`、`submitted`、`submission_failed` 等由执行 evidence 透传的状态；size
-  fallback 产物按 `limit.pre_limit_status` 判；集合外的候选构造后状态保守计为不可判定）的
-  pass 才能回答"没有待办"。其余（例如
-  `lock_contended`、`preflight_blocked`——它在候选构造前后都会写出，单凭 status 分不清——
-  `lease_lost`、异常路径的 `resource_limit_blocked`、未知 status）列在
-  `non_evaluating_passes:[{pass,status}]`。
+  含 `planned`、`blocked`、`submitted`、`submission_failed` 等由执行 evidence 透传的状态；集合外
+  的候选构造后状态保守计为不可判定），**且不是 size fallback 产物**的 pass 才能回答"没有待办"。
+  size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` 为
+  `summarized`/`dropped`）无论 `limit.pre_limit_status` 是什么都**不可判定**：写入器把
+  `source_cycles` 清空了，而 breaker 释放的 cycle 只出现在那里；但它摘要里的
+  `blocked_candidates` 照常列出（有就 exit 1）。node-22 的 pass 文件接近 5 MB 上限，这种 pass
+  现实中会出现。不可判定的 pass 列在 `non_evaluating_passes:[{pass,status,reason}]`：
+  - `reason=status_not_evaluating`：status 不在集合里（例如 `lock_contended`、
+    `preflight_blocked`——它在候选构造前后都会写出，单凭 status 分不清——`lease_lost`、异常路径
+    的 `resource_limit_blocked`、未知 status）；
+  - `reason=size_fallback_source_cycles_absent`：size fallback 产物，`status` 为它保留的
+    `limit.pre_limit_status`（没有时为 `resource_limit_blocked`）。
 - 按 decision 字面识别，不看 `manual_retry_required` 布尔。bounded 摘要（
   `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision` 与
   `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required`，
@@ -66,7 +72,7 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 |---|---|
 | `1` | 列出了至少一条 operator action |
 | `0` | 没有，且窗口内至少有一个可判定 pass |
-| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里，或 root 为空、`passes_scanned == 0`）——加大 `--passes`、等下一个正常 pass，或先核对 evidence root |
+| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`）——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
 | `2` | evidence root 未设置、缺失或不可读；`--passes < 1` |
 
 ## 第二步：按 decision 处置
