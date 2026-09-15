@@ -662,6 +662,7 @@ def test_unwritable_output_after_a_divergent_census_exits_1_not_2(
 def test_output_with_an_unexpandable_home_is_its_own_typed_code(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
     """#1955 B: ``expanduser`` raises a BARE ``RuntimeError``, which no arm caught.
@@ -678,6 +679,10 @@ def test_output_with_an_unexpandable_home_is_its_own_typed_code(
     root = tmp_path / "journal"
     _mint_legal_journal(root)
     before = _snapshot(root)
+    # A literal ``~nhms-no-such-user-7f3a`` directory would be created RELATIVE
+    # to the process working directory, so the glob below is only falsifiable
+    # from inside the tree it globs.  ``root`` is absolute and unaffected.
+    monkeypatch.chdir(tmp_path)
 
     code, out, err = _invoke(
         entrypoint,

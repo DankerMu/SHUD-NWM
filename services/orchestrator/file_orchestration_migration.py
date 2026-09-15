@@ -750,7 +750,11 @@ def _rollback_writer_environment(
     environment.update(
         {
             "WORKSPACE_ROOT": str(config.workspace_root),
-            "NHMS_SCHEDULER_JOURNAL_ROOT": str(Path(journal_root).expanduser().resolve()),
+            # #1955 D3: the caller already hands us the VERIFIED root, so there
+            # is nothing left to expand and nothing that may be resolved --
+            # ``resolve()`` follows symlinks, which is exactly the drift the
+            # seam exists to prevent.
+            "NHMS_SCHEDULER_JOURNAL_ROOT": str(journal_root),
             "NHMS_SCHEDULER_LOCK_BACKEND": "file",
             "NHMS_SCHEDULER_LOCK_ROOT": str(Path(config.lock_path).parent),
             "NHMS_SCHEDULER_DB_FREE_REQUIRED": "true",
@@ -1289,7 +1293,20 @@ def _verified_or_created_journal_root(journal_root: str | Path) -> Path:
             raise
     # Safe by construction: the seam already refused the unexpandable and the
     # non-absolute shapes, so this expansion cannot raise and cannot be relative.
-    ensure_directory_no_follow(Path(journal_root).expanduser())
+    # The creation itself can still fail -- an unwritable parent is the ordinary
+    # case -- and ``safe_fs`` reports that with the full target path inside a
+    # ``RuntimeError`` subclass, which the CLI's ``(RuntimeError, ValueError)``
+    # arm would echo verbatim; a bare ``OSError`` re-raised out of ``safe_fs``
+    # would escape that arm as a traceback.  Both become the typed, path-free
+    # refusal ``_ensure_root_unlocked`` already raises for the same failure.
+    try:
+        ensure_directory_no_follow(Path(journal_root).expanduser())
+    except (OSError, SafeFilesystemError) as error:
+        raise OrchestratorError(
+            "FILE_JOURNAL_WRITE_FAILED",
+            "failed to create file orchestration journal root",
+            {"error_type": type(error).__name__, "surface": "journal_root"},
+        ) from error
     return verify_journal_root_authority(journal_root, setting="--journal-root")
 
 

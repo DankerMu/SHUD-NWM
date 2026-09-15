@@ -108,9 +108,13 @@
       `tests/test_file_orchestration_journal.py`, `tests/test_retry.py`,
       `tests/test_gateway_reconcile_file_cohort_identity.py`, the orchestrator
       CLI module(s) carrying the rollback/recovery entrypoint tests, the census
-      test module, and every module the implementer adds or touches → green,
-      with red-before evidence for each new case. The exact module list is
-      reported in the PR body.
+      test module, and every module the implementer adds or touches → green.
+      Red-before evidence is owed by every new **behavioral** case. The
+      regression pins required by tasks 1.8a, 1.10 and 2.6 are green-before by
+      construction (`safe_fs` already expanded `~` before this change, and a
+      "no production caller" pin asserts today's truth), so they are declared as
+      pins rather than counted as red evidence. The exact module list and the
+      pin list are reported in the PR body.
 - [x] EF-3 Every new/changed CLI case asserts exact stderr shape: one typed
       line, no traceback, no filesystem path.
 - [x] EF-4 `openspec validate journal-root-lane-adoption-and-full-tree-budget-contract

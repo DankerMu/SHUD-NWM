@@ -59,8 +59,9 @@ in every segment charges one unit whatever its record type.
 | `query_candidate_state("measure-1953-underivable-key")` | returned a synthetic row, `status: "running"`, `error_code: file_journal_record_limit_exceeded`, `file_journal.evidence: {}` | 91.12 |
 
 Both returned rows carry an EMPTY `evidence` and the status of a job that is
-running — which is precisely what this measurement was taken to show, and what
-#1953 changes: the refusal now carries `evidence.lane`, and the synthetic row's
-status names the blocked read. The reason token and the field are unchanged, so
+running — which is precisely what this measurement was taken to show, and
+what #1953 changes: the refusal now carries `evidence.lane`, and the synthetic
+row's status names the blocked read. The reason token and the field are
+unchanged, so
 the census runbook's `file_journal_record_limit_exceeded: pipeline_job_records`
 stderr line still reads exactly as recorded on 2026-09-02.

@@ -4520,14 +4520,19 @@ preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调�
 （`migrate-scheduler-state` 经它继承），以及两个 node-22 脚本
 `scripts/node22_manual_retry_failed_runs.py` 与
 `scripts/ops/node22_repair_placeholder_hydro_uris.py`。验证发生在构造
-repository **之前**，因此不合规的 root 一个字节都不会落盘：四条 CLI 打一行
+repository **之前**，因此不合规的 root 一个字节都不会落盘：五条 CLI（上面四条
+再加 `migrate-scheduler-state`）打一行
 `FILE_JOURNAL_INVALID_ROOT: <message>` 到 stderr 并 exit 2（两个脚本同样
 exit 2、不出 receipt），rollback 车道的
 `.reconcile-inventory-rollback-execution.lock` 也因此不会出现在当前工作目录里。
 rollback 锁路径由**已验证**的 root 直接派生、不再 `resolve()`，所以锁与
-repository 读的永远是同一棵树。`migrate-scheduler-state` 是唯一例外：`OrchestratorError` 是
-`RuntimeError` 的子类，它沿用自己既有的 `(RuntimeError, ValueError)` 分支——同样
-exit 2，但 stderr 只有 message、没有 `FILE_JOURNAL_INVALID_ROOT:` 前缀。
+repository 读的永远是同一棵树。`migrate-scheduler-state` 自己不调 seam：它经
+`import_historical_scheduler_state` 继承这条拒绝，并在 click 与 argparse 两个入口
+渲染出同一行带 code 前缀的 typed line、同样 exit 2。
+还有一条行为变更：三条 rollback 车道现在先验证再动手，所以**不存在**的 root 也是
+`FILE_JOURNAL_INVALID_ROOT` 拒绝——`_rollback_execution_lock` 过去会替你把缺失的
+root 建出来，现在不会建任何东西；rollback 前 root 必须已经存在（唯一仍会创建 root
+的车道是 `import_historical_scheduler_state`）。
 
 ### 8.11 #1760 scope gate 与既存分叉 job_id 行
 

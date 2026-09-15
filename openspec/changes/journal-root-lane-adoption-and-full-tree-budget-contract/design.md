@@ -79,9 +79,23 @@ lane of D2, which takes no lock).
 `OrchestratorError` and `FileOrchestrationJournalError` are siblings under
 `RuntimeError`, so the recovery lane (`operator_released_reservation_recovery.py:250,284`)
 and the three rollback commands (`cli.py:600,637,666` click; `:894,911,926`
-argparse) add `OrchestratorError` to their arms. `migrate-scheduler-state`
-(`cli.py:559,875`) already catches `RuntimeError` and is left alone. The two
-scripts have no wrapping handler and get a typed non-zero return inside `main()`.
+argparse) add `OrchestratorError` to their arms. The two scripts have no
+wrapping handler and get a typed non-zero return inside `main()`.
+
+**D4a — `migrate-scheduler-state` converges instead of staying the exception
+(revised after round 1).** D4 originally left it alone, on the ground that its
+existing `(RuntimeError, ValueError)` arm already catches the refusal
+(`OrchestratorError` is a `RuntimeError`). Review showed what that costs: the
+arm prints `str(error)`, which is the message *alone*, so the one thing an
+operator greps for — the `FILE_JOURNAL_INVALID_ROOT:` prefix — never appears,
+while this change's own spec delta promises the typed line on all four
+migration commands. Three surfaces then disagreed: spec said typed line, code
+said message-only, runbook documented the divergence as deliberate. The cheapest
+honest fix is to make the code match the spec: the same `except OrchestratorError`
+arm on both entrypoints, the runbook's exception paragraph deleted, and a
+db-free test (fake exporter forwarding into the real
+`import_historical_scheduler_state`) pinning the typed line on both — which also
+closes the "documented exception nobody pins" gap review found.
 
 **D5 — a new census code, not a reused one.**
 `CENSUS_OUTPUT_UNEXPANDABLE` is new. `CENSUS_OUTPUT_UNWRITABLE` is documented
@@ -203,9 +217,16 @@ master.
 ## Recorded, not fixed (out of scope findings)
 
 - `_manual_retry_source_for_run` (`:11762`) drops the sentinel by `job_id` and
-  then proceeds as if the run had no jobs: on a blocked read the manual-retry
-  planner fails **open**. Pre-existing, not one of #1953's three reach points.
-  File as a follow-up issue.
+  then proceeds as if the run had no jobs. Filed as **#2385**, whose read-only
+  probe corrected the shape twice: the outcome is `RetryNotFoundError` →
+  HTTP 404 `RETRY_NOT_FOUND` with zero writes, i.e. a **misclassified refusal**
+  ("no retryable job" standing in for "the journal could not be read"), not a
+  fail-open write; and it is unreachable from #1953's full-tree lane, because
+  both call sites derive the cycle from the run id first, so only the
+  cycle-scoped replay's own budget (or any other cycle-scoped read fault) can
+  produce it. It becomes a genuine fail-open only if someone later adds a
+  "no job found, create one" branch. Pre-existing, not one of #1953's three
+  reach points.
 - #1953's "无兄弟副本" premise is wrong: three sibling blocked sentinels exist
   (`:1497-1500`, `:12799`, `:12844`). They are deliberately left alone — see
   D7a, which also records why `_file_journal_blocked_candidate_state` must not
@@ -217,7 +238,15 @@ master.
   (`ensure_` + `RetentionFailure("journal_root_*")`). The archived change is not
   edited; the updated detection is recorded here — grep `verify_directory_no_follow`,
   `ensure_directory_no_follow` **and** `RetentionFailure("journal_root_` — and
-  convergence of the two authorities is a separate adjudication.
+  convergence of the two authorities is a separate adjudication, filed as
+  **#2384**. One refinement from that filing: the literal
+  `RetentionFailure("journal_root_` leg hits only the two non-f-string raises
+  (`retention.py:190,193`), because the symlink/unsafe reasons are built as
+  `RetentionFailure(f"{field}_symlink")`; the sharper discriminator for the
+  second authority is `_safe_existing_directory(` together with
+  `field="journal_root"`. The triple above still surfaces both files (through
+  its `ensure_directory_no_follow` leg), so the recorded means is sound, just
+  blunter than the pair now named here.
 
   **Re-censused (task 1.12), post-change.** `verify_directory_no_follow` inside
   `services/orchestrator/` now appears at exactly one journal-root site,

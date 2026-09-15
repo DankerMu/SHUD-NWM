@@ -540,9 +540,13 @@ TERMINAL_PIPELINE_STATUSES = {
 }
 #: The status the five query entrypoints put on the synthetic row they return
 #: when the journal could not be read within its budget (#1953).  It is NOT a
-#: pipeline-job status: the row is synthesised per call, never written and never
-#: published, so this literal stays outside ``schemas/pipeline_job.schema.json``
-#: and outside the API's closed status enum.  It must stay outside every
+#: pipeline-job status: the ROW is synthesised per call and never persisted, so
+#: this literal is never written as a pipeline-job ``status`` value, is not in
+#: the API's closed status enum and is not in
+#: ``schemas/pipeline_job.schema.json``.  (The literal itself can still reach
+#: derived durable strings that copy a row's status -- the terminal-stage
+#: ``error_code`` and the scheduler's reservation evidence both do -- exactly as
+#: the ``"running"`` it replaces did.)  It must stay outside every
 #: terminal set, because the duplicate-submission and active-cycle guards read a
 #: non-terminal row as an in-flight job and that is exactly what keeps them shut
 #: on an unread journal.  The three sibling blocked sentinels deliberately keep

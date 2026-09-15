@@ -557,6 +557,14 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             if receipt_path:
                 write_migration_receipt(receipt, receipt_path, containment_root=journal_root)
             click.echo(json.dumps(receipt, sort_keys=True))
+        except OrchestratorError as error:
+            # #1955: this lane inherits the journal-root refusal through
+            # `import_historical_scheduler_state`, and renders it as the same
+            # typed single line as every other migration entrypoint.  Without
+            # this arm the `(RuntimeError, ValueError)` arm below would swallow
+            # it and print the message with no error code in front.
+            click.echo(journal_root_refusal_line(error), err=True)
+            raise SystemExit(2) from error
         except (RuntimeError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
@@ -885,6 +893,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 write_migration_receipt(receipt, args.receipt_path, containment_root=args.journal_root)
             print(json.dumps(receipt, sort_keys=True))
             return 0
+        except OrchestratorError as error:
+            # #1955: same inherited refusal as the click entrypoint above.
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            return 2
         except (RuntimeError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
