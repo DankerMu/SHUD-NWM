@@ -6242,7 +6242,10 @@ pass a DSN in argv. `plan` and `verify` also run under the display read-only rol
    The unit holds the lifecycle mutex. Compression (exit 2) and retention
    (exit 1) ticks during the run are expected refusals, not incidents.
    Autopipe may log a lock wait on a run being reparsed, since the row lock
-   lasts a whole parse; it retries next tick.
+   lasts a whole parse; it retries next tick. The runner first runs its
+   `seed_runs` one at a time to create the missing one-day chunks, because
+   concurrent chunk creation deadlocks on `hydro_run`. `transient` lines in
+   `runs.jsonl` (`40P01`/`55P03`) are requeued lock collisions, not failures.
    Derive rows/s from `runs.jsonl` `seconds`/`rows_written`, then choose the
    concurrency and deadline for the full run.
 3. Full run: the same command without `--limit`. Optionally add
