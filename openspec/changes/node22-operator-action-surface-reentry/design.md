@@ -213,9 +213,9 @@
 - **返回形状**：函数签名不变，仍返回 list，调用方与既有测试依赖它。跳过项经新增的只读属性或 out 参数传出，由实现者择一，要求调用点显式取用，而不是全局状态：
   - 推荐新增 `query_released_identity_blocked_jobs_with_skips() -> tuple[list, list]`，原函数委托并丢弃 skips；
   - `operator_released_reservation_recovery` 的 list 模式改调新函数。
-- **receipt**：list 模式追加 `skipped_count` 与 `skipped:[{path, reason, field, cycle_scope?}]`，`path` 经与 receipt 其他字段同一套公共脱敏；exit code 语义不变。
+- **receipt**：list 模式追加 `skipped_count` 与 `skipped:[{path, reason, field}]`（round 1 cand-04 后不再有 cycle 级条目），`path` 经与 receipt 其他字段同一套公共脱敏；exit code 语义不变。
 - **`--job-id` 模式不改**（F5）：它走 `get_pipeline_job` + `_diagnose_released_reservation_recovery` 的 typed refusal（`operator_released_reservation_recovery.py:161-174`），不经过 listing；改成新函数会把带原因的 refusal 退化为 not-found。
-- **热路径零改动**：`_iter_flat_direct_pipeline_job_records_for_cycle`、`_cycle_job_records_memoized`、`_cycle_rows`、`_cycle_source_discoveries` 都不改。理由：它们服务 `candidate_state` / `get_pipeline_job`，在那里逐行跳过等于静默窄化候选集，比响亮中止更糟。
+- **热路径行为零改动**：`_cycle_job_records_memoized`、`_cycle_rows`、`_cycle_source_discoveries` 不改；`_iter_flat_direct_pipeline_job_records_for_cycle` 只加默认 `None` 的 `skip_collector`（round 1 cand-04），调度侧调用不传，行为逐字节不变。理由：它们服务 `candidate_state` / `get_pipeline_job`，在那里逐行跳过等于静默窄化候选集，比响亮中止更糟。
 - **预算契约**：`tests/test_file_journal_full_tree_budget_contract.py` 原样全绿，并新增断言：一行畸形与预算超限同时存在时，预算拒绝仍 raise。
 
 ## 不做（non-goals）

@@ -533,6 +533,28 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
     ]
 
 
+def test_a_window_of_submission_failed_passes_without_actions_decides_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """round 2 r2-03: a pass whose submissions failed still evaluated its candidates."""
+
+    for index in range(3):
+        _write_pass(
+            tmp_path,
+            f"scheduler_2026052112_{index:012d}.json",
+            mtime=1_000 + index,
+            blocked=[_unrelated_blocked_row()],
+            status="submission_failed",
+        )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 0
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == []
+
+
 def test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set() -> None:
     """Membership pin: every status here is written only after ``_build_candidates`` ran."""
 
@@ -551,6 +573,18 @@ def test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set
         "slurm_cancellation_blocked",
         "restart_reconciled",
         "restart_reconcile_unknown",
+        "submission_failed",
+        "skipped_duplicate_submission",
+        "reconciling",
+        "submit_result_ambiguous",
+        "reconcile_unverified",
+        "cancelled",
+        "complete",
+        "succeeded",
+        "parsed_partial",
+        "forcing_ready_partial",
+        "forcing_ready",
+        "already_done",
     }
     # Written before (or without) candidate construction, or ambiguous: never evaluating.
     for status in ("lock_contended", "preflight_blocked", "lease_lost", "resource_limit_blocked", None):

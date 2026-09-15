@@ -59,6 +59,21 @@ EVALUATING_PASS_STATUSES = frozenset(
         "slurm_cancellation_blocked",
         "restart_reconciled",
         "restart_reconcile_unknown",
+        # Passed through ``_scheduler_pass_status_from_execution`` from the last
+        # execution-evidence item (#2398 round 2).  Execution evidence is only
+        # built after candidate construction, so each is post-construction.
+        "submission_failed",
+        "skipped_duplicate_submission",
+        "reconciling",
+        "submit_result_ambiguous",
+        "reconcile_unverified",
+        "cancelled",
+        "complete",
+        "succeeded",
+        "parsed_partial",
+        "forcing_ready_partial",
+        "forcing_ready",
+        "already_done",
     )
 )
 _SIZE_FALLBACK_STATUS = "resource_limit_blocked"

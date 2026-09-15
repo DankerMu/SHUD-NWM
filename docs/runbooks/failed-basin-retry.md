@@ -198,8 +198,11 @@ Manual re-entry, in order:
    stage-scoped `attempt`, the next pass emits
    `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
    `operator_reentry_confirmation` block in `state_evidence`); the rerun's `_retry_<N>` row
-   moves `attempt` past the pin and the candidate is blocked again. A stale pin is inert.
-   `NHMS_SCHEDULER_RETRY_LIMIT` is not touched. Run it without `--attest` first; see
+   moves `attempt` past the pin and the candidate is blocked again. A pin below the live
+   `attempt` is inert; a pin ABOVE it is not checked by the writer and pre-authorizes a
+   future re-entry once the attempt reaches it (#2400). So run it without `--attest` first
+   and compare `--pin` with the `attempt` of the newest `list-operator-actions` pass before
+   attesting. `NHMS_SCHEDULER_RETRY_LIMIT` is not touched; see
    [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) for
    the receipt, refusals and known limitations. The same precondition below (a
    higher-attempt retry row must outrank a released base row) applies.

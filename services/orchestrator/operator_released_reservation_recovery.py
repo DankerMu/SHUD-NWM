@@ -138,8 +138,9 @@ def _recover_released_identity_blocked_reservation(
                 "reason": "job_id_required_to_attest",
                 "detail": "--attest acts on exactly one row; run without --job-id to list candidates",
             }, 2
-        # #1820: one malformed row or unreadable confirming cycle is reported
-        # under ``skipped`` instead of aborting the listing; budget refusals,
+        # #1820: a malformed flat row (first scan or confirming cycle replay) is
+        # skipped row by row and reported under ``skipped`` instead of aborting
+        # the listing; budget refusals,
         # unreadable files and containment faults still raise (exit 2).
         wedged, skipped = repository.query_released_identity_blocked_jobs_with_skips()
         return {

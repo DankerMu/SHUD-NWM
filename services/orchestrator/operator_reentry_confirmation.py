@@ -49,7 +49,8 @@ CONFIRM_OPERATOR_REENTRY_HELP = (
     "model's quarantine rerun count (breaker, with --recorded-init-state-id; see "
     "live.quarantine_rerun_count in the dry-run receipt) or the attempt (budget, "
     "as shown by list-operator-actions). The scheduler re-enters "
-    "once; a completed rerun moves the value and the fail-stop re-engages. Dry run "
+    "once; the rerun moves the value when it is accepted for submission (whatever "
+    "its outcome) and the fail-stop re-engages. Dry run "
     "unless --attest. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 
@@ -125,8 +126,9 @@ def confirm_operator_reentry(
         if rerun_count != pin:
             return _refused("pin_mismatch", target=target, pin=pin, live=live), 2
     # The budget attempt is NOT recomputed here: it comes from the scheduler's
-    # candidate-authority view.  A confirmation whose pin is not the live attempt
-    # is inert on the read side, never a release.
+    # candidate-authority view.  A pin BELOW the live attempt is inert on the read
+    # side; a pin ABOVE it pre-authorizes a future re-entry once the attempt
+    # reaches it (#2400).
 
     receipt: dict[str, Any] = {"decision": "dry_run", "target": target, "pin": pin, "live": live}
     if dry_run:
