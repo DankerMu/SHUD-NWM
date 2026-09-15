@@ -6085,11 +6085,21 @@ missing-reparse refusal before this successful path (R5).
 D12 retains `hydro_run.timeseries_store` **and** the 000059 ledger row. Ordinary
 `packages.common.migrate` skips it; that is not re-expansion. A run created
 during rollback can inherit default `narrow` even while old code writes text.
-An approved explicit reattempt must inventory/classify rollback-window parse
-facts correctly, prove recovery, clear only the owned rollback table, and
-review how expand will be deliberately re-executed with the retained route
-column. No automatic ledger deletion, implicit reclassification or unreviewed
-recovery shortcut. Contract removes this rollback option.
+The approved explicit reattempt while `_narrow_rollback` is retained is the
+I8 executor's **post-D12 re-forward** (OpenSpec `node27-post-d12-reforward`):
+`reprepare` admits a fresh state from hash-pinned prior D12 provenance
+(`state.json`, `narrow-routes-before-reverse.json`) and read-only verifies
+both OIDs, owners, ledger (history plus 000059, nothing pending), narrow
+shape and that every retained run's `run_id`/`parsed_at` is unchanged since
+D12; `reforward` repeats that inside the fence and then, in one transaction,
+reattaches (OLD → `river_timeseries_legacy`, `_narrow_rollback` →
+`river_timeseries`) and derives routes: retained runs `narrow`, other parsed
+runs (including rollback-window OLD parses that kept default `narrow`)
+`legacy`, unparsed `narrow`. It never deletes ledger rows, drops the rollback
+table or reruns 000059, and any failure recovers through this same D12.
+The DROP path above remains the only alternative, and is required before any
+from-scratch expand. No automatic ledger deletion, implicit reclassification
+or unreviewed recovery shortcut. Contract removes this rollback option.
 
 **Transitional cold tier does not cover `_legacy`.** The canonical-only cold
 allowlist is unchanged; discovery by compression/retention is not cold-move
