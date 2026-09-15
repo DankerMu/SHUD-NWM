@@ -52,8 +52,13 @@ cycle 被摘出完成度打分与 cohort 准入。围绕它的三个洞分别在
   - `services/orchestrator/scheduler_lineage.py` — `resolve_lineage_cutover` 对外契约 + 新异常类型
   - `services/orchestrator/scheduler_core.py` — `_lineage_cutover_for_model_source` 的缓存写入条件与 warn
   - `packages/common/state_clone.py` — 新 refusal scope + 闸 -1 + 模块 docstring
-- Affected tests: `tests/test_scheduler_lineage.py`、`tests/test_scheduler_backfill.py`、
-  `tests/test_state_clone.py`、`tests/test_state_clone_recalibration.py`
+- Affected tests（以 `git diff --stat b675da88a -- tests/` 为准）：
+  `tests/test_real_database_integration.py`（新增 #1739 谓词的**可执行** oracle——本 PR 里其余针对
+  这两条 SQL 的断言都是文本形状钉或 stub repository，一行 SQL 都不执行；它的路径也是让 CI 的
+  `database` path filter 命中、从而真的跑起 `real-db-integration` 的那一条）、
+  `tests/test_scheduler_lineage.py`、`tests/test_scheduler_backfill.py`、`tests/test_state_clone.py`、
+  `tests/test_scheduler_generation.py`（仅注释修正，断言不变）。
+  `tests/test_state_clone_recalibration.py` **不改动**，按 design D8 第 5 条保持原样绿。
 - Live receipt: `docs/runbooks/receipts/2026-09-15-issue-1739-clone-provenance-count-node27.md`
 - Non-goals: 不改 `_build_clone_row` 的写入契约；不改 `(valid_time, created_at) ASC` 排序口径；
   不改 `usable_flag` 不过滤的决策；不改任何现有 clone 调用方；不对存量行做体检/回填；

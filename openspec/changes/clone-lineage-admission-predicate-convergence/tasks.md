@@ -18,7 +18,9 @@
       `cloned_from_model_id` 规范化轴上的两种遮蔽形状**（design D3）——(1) 空白串 parent；
       (2) 带空白的自指 parent（SQL 的 `<> model_id` 是逐字比较）——并注明该轴不在本次裁定范围内、
       已另立 follow-up #2392，以及 `btrim(...) <> ''` 只关得掉第一种。
-      **round-2 修正**：原文写的「唯一一条分叉」是错的，第二种形状同样存在且已实证。
+      **round-2 修正**：原文写的「唯一一条分叉」是错的，第二种形状同样存在——**已论证，未实跑**
+      （对 SQL 谓词与 `.strip()` 的静态推演；两面都没有为空白填充的行建过用例，本仓无活 PG、
+      node-27 表为空、CI 的 real-db 用例也没建这类行）。
 - [x] 1.5 `tests/test_scheduler_lineage.py:594` 的正向文本钉翻成负向钉：
       `assert "clone_gate_fingerprint" not in captured["statement"]`；其余三条断言
       （`ORDER BY valid_time ASC, created_at ASC`、`cloned_from_model_id IS NOT NULL`、
@@ -83,7 +85,8 @@
       LineageResolutionError)` 并改名（`..._is_a_resolution_failure`）；同步修
       `tests/test_scheduler_lineage.py:13` 的模块 docstring（"absent / unreadable provenance is 'no
       lineage', never an error" 已过时——`unreadable` 现在是 error，`missing` 仍是 no lineage）。
-      这是本 PR 唯一一条被有意打红的既有测试（design D8 末段），不是回归。
+      这是本 PR **两条**被有意打红的既有断言之一（design D8 末段），不是回归；另一条是 1.5 翻转的
+      `tests/test_scheduler_lineage.py:594` 正向 fingerprint 文本钉——1.1 从 SQL 去掉那句条件即打红它。
 - [x] 2.8 不改 `scheduler_runtime.py:872-875` 的 `db_free_required` 闸、不拆
       `_refresh_db_free_file_providers`（design D5）；确认
       `tests/test_scheduler_backfill.py:3017-3025` 与
@@ -121,7 +124,9 @@
 - [x] 4.1 live receipt 已落盘：
       `docs/runbooks/receipts/2026-09-15-issue-1739-clone-provenance-count-node27.md`（已完成，
       随本 PR 提交）。
-- [x] 4.2 D3 的空白串跨面分叉立 follow-up issue（report, don't fix）：**#2392**。
+- [x] 4.2 D3 的 `cloned_from_model_id` 归一化轴**两种**遮蔽形状（空白串 parent + 带空白自指 parent）
+      立 follow-up issue（report, don't fix）：**#2392**（标题与范围已按 round-2 补充，含
+      `btrim(...) <> model_id` 这第二个必需条件——只补 emptiness 那半步会看起来做完了）。
 - [x] 4.3 `openspec validate clone-lineage-admission-predicate-convergence --strict --no-interactive` 通过。
 
 ## Evidence Floor

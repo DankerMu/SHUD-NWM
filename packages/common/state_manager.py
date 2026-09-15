@@ -935,9 +935,9 @@ class PsycopgStateSnapshotRepository:
         carries no fingerprint, moving ``t*`` LATER and quietly removing the
         model from cycles it genuinely gaps; admitting it leaves at most a loud
         stuck gap.  The shadow-proof purpose the fingerprint filter used to
-        serve here stands independently on ``cloned_from_model_id IS NOT
-        NULL``: the SHUD forecast / save-state write paths populate neither
-        column, so they still cannot shadow a clone row.  The publisher's
+        serve here survives the relaxation: the SHUD forecast / save-state
+        write paths populate neither clone column, so the surviving
+        ``cloned_from_model_id`` conditions keep rejecting their rows.  The publisher's
         :meth:`get_latest_clone_row_for_model_source` KEEPS the fingerprint
         filter on purpose — see its docstring; the asymmetry is a ruling, not
         an oversight.
@@ -1714,10 +1714,21 @@ class FileStateSnapshotIndexRepository:
 
         Never raises on anything the INDEX itself can be in: an absent clone
         entry and an index that cannot be loaded both come back as
-        ``has_lineage=False``.  (The one raise left is an invalid non-empty
-        ``source_id`` — ``_normalize_state_index_source_id`` below sits outside
-        the ``except StateManagerError`` deliberately; see change
-        ``clone-lineage-admission-predicate-convergence`` D4.)
+        ``has_lineage=False``.  (The one raise left is an unrecognised
+        ``source_id``, the empty string included —
+        ``_normalize_state_index_source_id`` below sits outside the ``except
+        StateManagerError`` deliberately; see change
+        ``clone-lineage-admission-predicate-convergence`` D4.
+        :func:`resolve_lineage_cutover` drops a blank or whitespace-only
+        ``source_id`` at its own entry, so the empty string cannot arrive by
+        that route — but an id that is NON-BLANK and still unrecognised is not
+        dropped there.  D4's static trace of the scheduler finds one live route
+        for it: ``scheduler_backfill_predecessor`` takes ``source_id`` from a
+        persisted journal row's ``selected_predecessor``, rejects it only when
+        EMPTY, and runs it through ``cycle_id_for`` only when that row also
+        declares a ``cycle_id`` — so a journal row carrying an invalid
+        non-blank ``source_id`` and no ``cycle_id`` reaches here.  Direct
+        callers of this method reach it too.)
 
         Those two ``has_lineage=False`` answers are NOT the same answer, and
         ``status`` is what separates them (#1740):
@@ -3732,8 +3743,10 @@ def _clone_entries_for_model_source(
     NORMALISATION — and it has TWO shapes, not one.  This plane ``.strip()``\\ s
     the value before judging it; the SQL judges the raw bytes:
 
-    * a WHITESPACE-ONLY parent — this plane skips it, the DB plane's
-      ``cloned_from_model_id IS NOT NULL`` accepts it;
+    * a WHITESPACE-ONLY parent — this plane strips it to empty and skips it,
+      while the DB plane accepts it: BOTH conjuncts hold (``IS NOT NULL`` is
+      TRUE, and ``<> model_id`` is TRUE for any model id that is not that same
+      whitespace string), and nothing in the SQL rejects it;
     * a self-reference WITH SURROUNDING WHITESPACE (``'model_a_prime '`` under
       ``model_id = 'model_a_prime'``) — this plane strips it and skips it as
       self-referential, while the SQL's ``cloned_from_model_id <> model_id``

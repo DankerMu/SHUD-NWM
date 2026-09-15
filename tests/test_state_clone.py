@@ -1647,10 +1647,13 @@ def test_self_clone_refusal_outranks_every_other_gate(
     Two legs, because each answers a different question:
 
     * **Leg A** is the spec scenario: a valid direct-grid manifest and
-      non-empty gate bytes, so no other gate WOULD refuse. It proves the
-      refusal is the self-clone scope and not a downstream accident — the
-      explicit negative assertions are what distinguish it from "some refusal
-      happened".
+      non-empty gate bytes, so no other gate WOULD refuse. What separates it
+      from "some refusal happened" is that the scope is asserted BY NAME —
+      ``refusal_scope == SELF_CLONE_SCOPE``, restated inside
+      ``_assert_self_clone_refused`` together with the audit record's own
+      scope. An equality against one named scope already excludes every other
+      scope, so no ``!=`` assertions are carried here; they would repeat the
+      equality rather than add a claim.
     * **Leg B** is the precedence proof: the same call with a legacy manifest
       and degenerate bytes, each of which alone refuses with its own scope.
       Only a gate placed BEFORE both can still answer ``self_clone_target``.
@@ -1675,8 +1678,6 @@ def test_self_clone_refusal_outranks_every_other_gate(
     )
 
     assert leg_a.refusal_scope == SELF_CLONE_SCOPE
-    assert leg_a.refusal_scope != "reverse_clone_target_not_direct_grid"
-    assert leg_a.refusal_scope != "degenerate_gate_inputs"
     _assert_self_clone_refused(leg_a, repo, audit, source)
 
     audit.records.clear()

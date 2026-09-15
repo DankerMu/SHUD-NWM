@@ -590,7 +590,10 @@ _ISSUE_1739_NULL_FINGERPRINT_STATE_ID = f"{ISSUE_126_PREFIX}_it1739_clone_no_fin
 _ISSUE_1739_FINGERPRINTED_STATE_ID = f"{ISSUE_126_PREFIX}_it1739_clone_fingerprinted"
 # Both strictly LATER than the seeded non-clone row at VALID_TIME_1, so that row
 # is the earliest under `(MODEL_ID, SOURCE_ID)` and stands as a decoy for the
-# `cloned_from_model_id IS NOT NULL` half of the predicate. Distinct instants
+# clone-provenance half of the predicate — but only if BOTH `cloned_from_model_id`
+# conjuncts are lost: its `cloned_from_model_id` is NULL, and `NULL <> model_id`
+# is NULL rather than TRUE, so `<> model_id` filters it on its own and dropping
+# `IS NOT NULL` alone changes nothing. Distinct instants
 # because `state_snapshot_model_source_valid_time_key` is unique over
 # `(model_id, COALESCE(source_id, ''), valid_time)`.
 _ISSUE_1739_CLONE_VALID_TIME = datetime(2026, 5, 4, 0, tzinfo=UTC)
@@ -677,15 +680,27 @@ def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
     * the #1739 ruling — the NULL-fingerprint clone row IS admitted by the
       earliest reader;
     * the D2 asymmetry — the same row is NOT admitted by the publisher's reader;
-    * the D4 ordering — with a second, fingerprinted clone row at a later
+    * the ordering ruled by change `lineage-scoped-cycle-completion` D4 (NOT
+      this change's own D4, which is about not caching failures) — with a
+      second, fingerprinted clone row at a later
       `valid_time`, `earliest` still answers the NULL-fingerprint row (ASC) and
       `latest` answers the other one (DESC). A backdated re-activation must not
       retroactively move `t*` later.
 
-    The seeded it126 `STATE_ID` row is a fourth, free assertion: it sits at an
-    EARLIER `valid_time` under the same pair with no clone provenance at all, so
-    an earliest reader that had also lost `cloned_from_model_id IS NOT NULL`
-    would return it and fail here.
+    The seeded it126 `STATE_ID` row is a decoy, but a NARROWER one than it looks:
+    it sits at an EARLIER `valid_time` under the same pair with no clone
+    provenance at all, so an earliest reader that lost BOTH `cloned_from_model_id`
+    conjuncts would return it and fail here. Losing `IS NOT NULL` alone would NOT
+    fail here, and the docstring must not imply otherwise: that row's
+    `cloned_from_model_id` is NULL, `NULL <> model_id` evaluates to NULL rather
+    than TRUE, and `<> model_id` therefore filters it unaided. `IS NOT NULL` is
+    in fact redundant against `<> model_id` outright, not just against a NULL
+    parent: by SQL three-valued logic `x <> model_id` can be TRUE only when `x`
+    is non-NULL, so for any bound `model_id` the extra conjunct cannot change
+    the WHERE clause's truth value. An EMPTY-STRING parent passes BOTH conjuncts
+    and is admitted by the SQL; what rejects it is the `.strip()` in the
+    resolver's `_from_clone_row`, downstream of the query (design D3 note 2 —
+    the normalisation axis, tracked as #2392). This fixture builds no such row.
     """
 
     apply_migrations_from_zero(integration_database_url)

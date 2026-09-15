@@ -42,9 +42,16 @@ Boundaries (change ``lineage-scoped-cycle-completion``):
   evidence can disagree with itself: a model scored in scope by one consumer and
   annotated ``lineage_scoped_out_pre_cutover`` by another.  The disagreement is
   monotone (``None`` first, then the cutover — a SUCCESS is memoized the moment
-  it happens and the cache is never cleared mid-pass) and it is always in the
-  LOUD direction, because every consumer that sees ``None`` keeps the model in
-  scope, which at worst leaves a visible stuck gap.  It self-heals on the next
+  it happens and the cache is never cleared mid-pass).  Every consumer that sees
+  ``None`` keeps the model in scope, which for the discovery and candidate lanes
+  means at worst a visible stuck gap — the loud direction.  Do NOT generalise
+  that to "at worst a stuck gap" for all three: the backfill predecessor lane
+  reads ``None`` as "this model has no cutover", writes no
+  ``lineage_scoped_out`` record, and therefore does NOT skip the prepend, so it
+  can synthesise a predecessor candidate at a cycle EARLIER than ``t*`` — the
+  backward walk ``scheduler_backfill_predecessor``'s own docstring names as the
+  hazard.  Not memoizing the failure is exactly what bounds that to the one pass
+  it happened in instead of every pass until restart; it self-heals on the next
   pass.  The point is that a failure must not be REMEMBERED, and must say so out
   loud.
 - A clone row naming ITSELF as its predecessor (``cloned_from_model_id ==

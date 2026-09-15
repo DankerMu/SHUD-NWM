@@ -31,10 +31,30 @@ would reject such a row and move `t*` LATER, which silently removes the model
 from cycles it genuinely has a gap in, whereas admitting it leaves at most a
 loud stuck gap.
 
+That admission predicate binds the ANSWER, and the layer that discharges each
+clause differs by plane. On the file state-snapshot index plane one filter
+discharges all three clauses while SELECTING the entries. On the database plane
+the row-selection statement discharges only presence and a byte-literal
+difference from the row's own `model_id`; the non-empty clause, and the
+difference clause under whitespace normalisation, are discharged downstream of
+selection. Because selection there takes the earliest row and stops, a
+provenance-corrupt row — a blank `cloned_from_model_id`, or one naming the row's
+own `model_id` with surrounding whitespace — can be selected, be correctly
+refused lineage downstream, and thereby MASK a later legitimate clone row that
+the file plane would have found. Both planes give the same answer for that row;
+they can still resolve different `t*` for the same model. This masking is a
+known open gap, not a claim of compliance: on the database plane, row selection
+SHALL eventually normalise `cloned_from_model_id` before applying both clauses,
+so a corrupt row is skipped rather than merely refused. Closing it requires
+BOTH an emptiness test and a normalised self-reference test — an emptiness test
+alone leaves the padded self-reference standing.
+
 Lineage resolution SHALL distinguish a resolution FAILURE from a resolved "no
 lineage". A state-snapshot index that exists but cannot be read, parsed, or
-validated, a persistence-plane read that raises, and a provider that violates
-the resolution contract are failures; an absent provider, an index that has
+validated, a persistence-plane read that raises, and — on a plane whose
+provider returns a structured signal the resolver can shape-check — a provider
+that violates the resolution contract are failures; an absent provider, an
+index that has
 never been published, absent provenance, and provenance that does not establish
 a predecessor are resolved answers meaning "no lineage". A never-published index
 SHALL NOT be treated as a failure: a deployment that has performed no clone is a

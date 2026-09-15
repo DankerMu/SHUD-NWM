@@ -613,11 +613,15 @@ def test_db_plane_missing_gate_fingerprint_still_resolves_lineage() -> None:
     """#1739, DB plane: the row the two planes used to disagree about.
 
     The SQL text pin proves the predicate no longer mentions the fingerprint;
-    this proves the BEHAVIOR end-to-end — a row handed over by the reader with
+    this proves the DOWNSTREAM half only — a row handed over BY a reader with
     ``clone_gate_fingerprint=None`` resolves to a cutover instead of being
-    dropped somewhere downstream.  Two oracles on different seams, because a
-    text-shape assertion alone cannot tell "the predicate was relaxed" from
-    "the predicate was relaxed and something else re-imposed it".
+    dropped somewhere below.  It drives a stub, so **no SQL executes here** and
+    this is NOT an oracle for the predicate itself; the executing oracle is
+    ``tests/test_real_database_integration.py``'s
+    ``test_real_clone_row_readers_disagree_about_a_null_fingerprint_row``.
+    Still worth its own seam, because a text-shape assertion alone cannot tell
+    "the predicate was relaxed" from "the predicate was relaxed and something
+    else re-imposed it".
     """
     row = replace(_clone_snapshot("2026-08-21T12:00:00Z"), clone_gate_fingerprint=None)
     repo = _EarliestCloneRowRepo(row)
