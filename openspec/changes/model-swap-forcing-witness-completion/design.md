@@ -52,7 +52,8 @@ issue 引用的行号取自 `92fb2dbe`。以下是当前 HEAD `36266332b` 的位
 **breaker 臂不加代码**：
 - `_strict_warm_start_forcing_witness_decision` 对非 `retry` 决策是 no-op（`:2242-2243`）。
 - breaker 出口本就是 `blocked`，不提交任何作业。
-- 其 reason `blocked_journal_predecessor_identity_quarantine` 不在两份 forced-resubmit 白名单里
+- 其 evidence decision `blocked_journal_predecessor_identity_quarantine`（reason 为
+  `journal_predecessor_identity_quarantine_breaker_engaged`）不在两份 forced-resubmit 白名单里
   （`chain_forced_resubmit.py:14-28`、`chain_runtime_utils.py:200-211`；已由
   `tests/test_warm_start_chaining.py` 钉住）。
 
@@ -142,7 +143,9 @@ issue 验收 3 要求 `test_completed_forecast_cycle_stale_journal_identity_is_q
      守的是 `stage.stage == "download"`。
    - 当前 `ForecastOrchestrator.stages`（`M3_STAGES`，`chain_stages.py:14-63`）与 `LEGACY_FORECAST_STAGES`
      都没有 `download` stage，所以**该探针在调用点不可达**（读码确认，未执行）。
-   - 结论：自动重入在 raw 已裁剪时，确实没有链路侧的第二道防线。
+   - 结论：自动重入在 raw 已裁剪时，没有链路侧的第二道防线。调度侧另有 `build_candidates` 内的
+     `_nfs_raw_manifest_gate`（`required` 且未 ready 时 block），但它同样是调度决策面的单点闸，
+     不改变「降级依赖调度侧门判定正确」这一结构（Phase 7 终审补注）。
 3. **「blast radius 与 #1843 不同」——维持。** 本批 #1845 的核查进一步说明，即便只在链路执行侧做一次性重投，
    也会带来 cohort 级停摆这类新的 blast radius（见「Descoped: #1845」）。自动重入属于更大一圈的决策，
    不在本批。

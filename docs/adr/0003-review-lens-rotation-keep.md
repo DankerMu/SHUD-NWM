@@ -4673,7 +4673,7 @@ R1.4 及其余退役任务仍未完成；本次修复不授权生产操作。
 11 terminal；223 个多轮样本，later-round catches core=287、rotated=270、
 phase=61、skipped=15。
 
-#2391 expanded 三轮：round 1 三席（correctness / invariant-state /
+PR #2391 expanded 三轮：round 1 三席（correctness / invariant-state /
 test-evidence）验证 5 项；round 2 **轮换**——换下 invariant-state、换上
 spec-compliance——验证 9 项；round 3 clean。
 
