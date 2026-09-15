@@ -94,6 +94,7 @@ from services.orchestrator.reservation import (
     slurm_comment_for,
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.orchestrator.retry_identity import retry_suffix_attempt
 from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
 from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -869,10 +870,12 @@ def _next_retry_attempt_for_stage(
         job_id = str(job.get("job_id") or "")
         if not job_id.startswith(prefix):
             continue
-        try:
-            attempts.append(int(job_id.removeprefix(prefix)))
-        except ValueError:
-            continue
+        # The LAST ``_retry_<n>`` suffix is the attempt (stacked producer ids,
+        # #2254).  Suffix only, not ``retry_count``: an unparsable tail yields 0
+        # and must stay out of the numbering.
+        attempt = retry_suffix_attempt(job_id)
+        if attempt > 0:
+            attempts.append(attempt)
     return max(attempts, default=0) + 1
 
 

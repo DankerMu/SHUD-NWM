@@ -622,6 +622,16 @@ def build_candidates(
                         # would otherwise re-skip this candidate, and the
                         # retry evidence must reach the candidate.
                         state_decision = identity_quarantine
+                        if strict_warm_start is None:
+                            # The quarantine retry restarts at ``forecast``, so it must
+                            # consult the per-model forcing witness before it leaves
+                            # (#1844).  Lane-scoped: with strict warm-start evidence the
+                            # consultation after the upgrade below already runs on it.
+                            state_decision = _strict_warm_start_forcing_witness_decision(
+                                candidate,
+                                raw_candidate_state,
+                                state_decision,
+                            )
                     else:
                         skipped.append(
                             {

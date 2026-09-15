@@ -4666,3 +4666,31 @@ CI reader-edge 缺口另由 #2323 跟踪。
 记录 deferral：keep/cut 仍待维护者决策；合并预授权不含审核策略调整。
 现行 keep、座位上限不变。R1.6a 已有 fresh master 全量通过证据；
 R1.4 及其余退役任务仍未完成；本次修复不授权生产操作。
+
+### Revisit 2026-09-15（post PR #2391 / issues #1739 + #1740 + #1741）
+
+追加 #2391 与前一 bookkeeping PR #2383/#2389 后实测 675 行、664 merged、
+11 terminal；223 个多轮样本，later-round catches core=287、rotated=270、
+phase=61、skipped=15。
+
+PR #2391 expanded 三轮：round 1 三席（correctness / invariant-state /
+test-evidence）验证 5 项；round 2 **轮换**——换下 invariant-state、换上
+spec-compliance——验证 9 项；round 3 clean。
+
+本次是轮换收益的一个清晰样本，故记下细节而非只记计数：**spec-compliance
+贡献的两条 P2 无人重叠**——(1) spec delta 那句准入谓词在 DB 面由 resolver
+在 `LIMIT 1` **之后**兑现，归档后 baseline spec 会声称一条 DB 面未实现的
+谓词，且与 `cross-cycle-warm-start-chaining` 既有的「per row, not per
+model」SHALL 冲突；(2) follow-up issue 的范围只覆盖两种遮蔽形状里的一种，
+而其推荐修法正是本 change 自己 docstring 点名会「看起来做完了」的那半步。
+两条都落在「归档后的契约记忆」这一面，前两个 lens 按其职责不会去看。
+
+另一条与座位无关、但对本 ADR 的 keep 论据有意义的观察：本 PR 触发了
+Phase 6.2 不变量审计（`contract-doc-accuracy` 跨 round 1/2 重复），审计
+发现 8 项同类，**其中一项是 round-2 修复自身引入的**（SQL 三值逻辑写反）。
+即修复循环会自我繁殖同类缺陷；靠增加轮次不收敛，靠一条书写规则收口
+（无可引证据不得写「实证 / proves / never / 唯一」）。这支持「轮换换视角」
+优于「同席位加轮次」。
+
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 keep、座位上限不变。

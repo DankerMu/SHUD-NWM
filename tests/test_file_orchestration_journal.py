@@ -3074,6 +3074,45 @@ def test_file_journal_retry_service_schedules_auto_retry_and_records_event(tmp_p
     assert retry_event["details"]["failure"]["retryable"] is True
 
 
+def test_file_journal_auto_retry_on_a_retry_row_stacks_the_suffix(tmp_path: Path) -> None:
+    """#2254 task 2.4: the non-accepted-submit FileJournal producer appends to the source id.
+
+    The source row already carries ``_retry_1``; the producer builds
+    ``f"{source['job_id']}_retry_{next_retry_count}"``, so the next attempt stacks
+    the suffix (same shape as the DB producer) instead of rewriting it.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_forecast")
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="3001")
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+
+    repository.update_pipeline_job_status("job_forecast", "failed", error_code="SLURM_TIMEOUT", finished_at=cycle_time)
+    first = service.handle_failed_job(repository.get_pipeline_job("job_forecast"))
+    assert first.job_id == "job_forecast_retry_1"
+    assert repository.get_pipeline_job("job_forecast_retry_1")["retry_count"] == 1
+
+    repository.update_pipeline_job_status(
+        "job_forecast_retry_1",
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        finished_at=cycle_time,
+    )
+    stacked = service.handle_failed_job(repository.get_pipeline_job("job_forecast_retry_1"))
+
+    assert stacked.job_id == "job_forecast_retry_1_retry_2"
+    assert stacked.status == "pending"
+    assert stacked.retry_count == 2
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    retry_event = next(
+        event for event in state["pipeline_events"] if event["entity_id"] == "job_forecast_retry_1_retry_2"
+    )
+    assert retry_event["details"]["previous_job_id"] == "job_forecast_retry_1"
+
+
 def test_file_journal_auto_retry_persists_retry_count_on_cycle_scope_rows(tmp_path: Path) -> None:
     """Cycle-scope (model-less) rows are NOT master rows: their retry_count is durable.
 
