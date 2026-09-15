@@ -20,26 +20,12 @@
 - [x] B.6 截断记录断言：`successor_candidate_ids` 含被截断 successor，`status/reason/total_attempted/cap` 不变。
 - [x] B.7 bounded 保留钉：`_bounded_candidate_summary` 后 `predecessor_emission_blocked` 的 `True` 与 `False` 都保留。
 
-## A. #1186 — 列举面 + runbook（design D1/D2）
+## A'. 运维面留在 PR-A 的部分（原 A 切片，#1186 列举面已移出）
 
-- [x] A.1 （fixture review 已核实字面与嵌套位置，见 design D1）实现时如发现不符，记入偏离记录。
-- [x] A.2 bounded 白名单追加 `retry_attempt / retry_limit / retry_occurrences / manual_retry_required` pulls，与 B 的键同文件编辑；新增逐键保留钉（含 `False`/`0`）。
-- [x] A.3 红测试（新文件 `tests/test_operator_action_listing.py`），构造真实 `scheduler_*.json` evidence 文件：
-      - 四类 decision 各一条「存在 → 列出且 exit 1」；
-      - 一条「全部无关 blocked → 空列表 exit 0」；
-      - 一条 summarized pass：用真实 `_bounded_candidate_summary` 产出的条目，仍被识别，`attempt` 等字段来自新 bounded 键；
-      - 旧格式 summary 缺少新键时字段为 `null`；
-      - `.pre_execution.json` 被排除；
-      - `--passes` 按 mtime 取最新 N 个；
-      - 同一候选跨 pass 去重，并记录 `first_seen_pass/last_seen_pass`；
-      - 损坏 JSON 进入 `unreadable_passes` 且不中止；
-      - root 缺失时 exit 2；
-      - breaker 释放的 not-selected `source_cycles` 条目按模型列出（F1）；
-      - 无 action 且某 pass 的 `limit.candidate_lists == "dropped"` 时 exit 3，并列出该 pass（F7）。
-- [x] A.4 实现 `services/orchestrator/operator_action_listing.py`，argparse 子命令 `list-operator-actions` 挂到 `cli.py`，通过 `main([...])` 端到端测试一次。
-- [x] A.5 新建 `docs/runbooks/node22-control-plane-manual-recovery.md`；`failed-basin-retry.md` 为四类决策各写一段处置。
-- [x] A.6 slug 存在性测试：从 `apps/api/routes/pipeline.py` 的实际 payload 构造路径读 slug（必要时抽模块常量，且不改值），断言 `docs/runbooks/<slug>.md` 存在。
-- [ ] A.7 node-22 现场收据（D2）：隔离 worktree，只读执行，贴出输出后移除 worktree。
+- [x] A'.1 bounded 白名单追加 `retry_attempt / retry_limit / retry_occurrences / manual_retry_required` pulls，与 B 的键同文件编辑；新增逐键保留钉（含 `False`/`0`）。
+- [x] A'.2 新建 `docs/runbooks/node22-control-plane-manual-recovery.md`；`failed-basin-retry.md` 为四类决策各写一段处置。「怎么找到目标」写过渡口径（直接读最新 pass evidence，按 decision 字面量筛 `blocked_candidates` + not-selected `source_cycles`），PR-B 落地 `list-operator-actions` 时替换。
+- [x] A'.3 slug 存在性测试：从 `apps/api/routes/pipeline.py` 的实际 payload 构造路径读 slug（必要时抽模块常量，且不改值），断言 `docs/runbooks/<slug>.md` 存在。
+- [—] A'.4 拆分移出：原 A.3/A.4（`tests/test_operator_action_listing.py`、`services/orchestrator/operator_action_listing.py` 与 `list-operator-actions` 子命令）与 A.7（node-22 现场收据）随 #1186 移入 change `node22-operator-action-listing`（PR-B）。
 
 ## C. #1820 — operator 命令逐行 / 逐 cycle 隔离（design D5）
 
@@ -112,17 +98,10 @@
 
 - [x] R1.1 cand-01：accessor 改名 `quarantine_rerun_count`，统计 provenance 命名该模型的 cohort master，不看终态、不比 identity；谓词、写侧前置条件、receipt `live.quarantine_rerun_count` 同步；`completed_pipeline_init_state_id_occurrences` 经共享 helper 的 `require_completed=True` 保持原行为。新增 D.4 变体：确认 → 提交 → 在飞时 count == N+1 → forecast 失败 → 仅 1 个新带戳 master、之后 pass 不再提交；变异（只数 completed）变红。
 - [x] R1.2 cand-02：**DEFER（#2400）**。预算写侧复算 attempt 不可行：读侧 attempt 依赖调度侧候选身份（registry/adapter 构造的 `candidate_identity` 与 `candidate_state` 参数），写侧无法复用同一推导。runbook 写明预授权风险与 dry-run 核对步骤；spec/design 回到「写侧只校验 pin >= 1」。Round 3 由 R3.3 关闭 #2400。（Round 4 撤回：写侧无法判断预算是否耗尽，#2400 残余（对 pin、错时间）保留为 runbook 义务，见 R4.3）
-- [x] R1.3 cand-03：`EVALUATING_PASS_STATUSES` 正向封闭 allowlist（size fallback 按 `limit.pre_limit_status`），receipt `non_evaluating_passes:[{pass,status}]`；零个可判定 pass（含空 root，#2399）→ exit 3；成员钉与 (a)(b)(c)/空目录测试；CLI help 与 runbook 退出码表同步。
+- [—] R1.3 cand-03（列举面可判定 pass 语义）随 #1186 移入 PR-B 的 change。
 - [x] R1.4 cand-04：`skip_collector` 贯穿 `_iter_pipeline_job_records_scoped` → `_replay_pipeline_job_records_for_cycle` → `_iter_flat_direct_pipeline_job_records_for_cycle`，skip 模式绕过 `_cycle_job_records_memoized`，按 `(path, reason)` 去重，删除 cycle 级 except；同 cycle 坏行、无法解析文件名的坏行测试；C.3 改为同 cycle 坏行 + 同实例非 skip 读仍 raise（记忆化变异变红）；C.5 补 `jobs` 断言；cycle journal 日志损坏照旧 raise。
 - [x] R1.5 cand-05：D.2 的 `_manual_retry_requested` 断言经变异证实无法咬住（marker 读取还要求 `trigger: "manual"`），删除并以注释指向 `test_attest_records_a_dedicated_confirmation_event` 的精确形状断言。
-- [x] R1.6 runbook：确认物在 rerun 被接受提交时消费、Slurm 失败不恢复；「候选仍显示 blocked ≠ 确认物未生效」与 #2397 合并；退出码表加 exit 3 新条件与 `non_evaluating_passes`；evidence root 取自 `nhms-compute-scheduler.service` 的 `infra/env/compute.scheduler-dbfree.env`（#2399）并核对 `evidence_root` 与 `passes_scanned > 0`。预算 pin 仍取 `list-operator-actions` 最新 pass 的 `attempt`，并附 #2400 预授权警告。（Round 3 修订：pin 为预算重入计数，见 R3）
-
-## P7 修复（终审 F-1）
-
-- [x] P7.1 `list-operator-actions` 读侧：size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` ∈ {summarized, dropped}）不再按 `limit.pre_limit_status` 解包计为可判定，进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`（`bounded_evidence_payload` 清空 `source_cycles`，breaker 释放的 cycle 会被隐藏成 exit 0）；其摘要 `blocked_candidates` 照常列出。为统一条目形状，所有 `non_evaluating_passes` 条目都带 `reason`（status 类为 `status_not_evaluating`）。
-- [x] P7.2 测试：真实 `bounded_evidence_payload` 产物——含 breaker 释放 `source_cycles` + 无关 blocked 行 → exit 3 且该 pass 在 `non_evaluating_passes`；含 summarized `blocked_strict_warm_start_init_state_mismatch` → exit 1 并列出；`_write_pass` 的 fallback 形状同步清空 `source_cycles`；变异（恢复解包）使新测试变红。
-- [x] P7.3 修正既有期望：`test_one_clean_evaluating_pass_in_the_window_decides_zero` 中的 summarized fallback 邻居原按保留 status 计为可判定，现改为 non-evaluating（理由同 P7.1），exit 0 由同窗口的 `planned` pass 决定；两处 `non_evaluating_passes` 精确断言补 `reason` 字段。
-- [x] P7.4 同步 `LIST_OPERATOR_ACTIONS_HELP`、模块 docstring、`EVALUATING_PASS_STATUSES` 注释与 runbook 可判定定义 / 退出码表。
+- [x] R1.6 runbook：确认物在 rerun 被接受提交时消费、Slurm 失败不恢复；「候选仍显示 blocked ≠ 确认物未生效」与 #2397 合并；evidence root 取自 `nhms-compute-scheduler.service` 的 `infra/env/compute.scheduler-dbfree.env`（#2399）。预算 pin 取最新 pass 的现值并附 #2400 预授权警告。（Round 3 修订：pin 为预算重入计数，见 R3；拆分修订：退出码表与 `non_evaluating_passes` 随 #1186 移入 PR-B）
 
 ## R3 修复（PR #2398 第 3 轮审查）
 
@@ -131,27 +110,33 @@
       - 既有 `test_budget_reentry_is_inert_on_a_repository_without_the_accessor` 的 pin 2 改为 0（新语义下 pin 2 会被写侧拒绝，测试意图不变）。
 - [x] R3.2 预算重入 provenance：reservation writer 在 basin 的 `state_evidence` 为 `retry_strict_warm_start_terminal_init_state_mismatch` 且带 decision 为 `blocked_strict_warm_start_init_state_mismatch` 的 `operator_reentry_confirmation` 时，于 cohort master 戳 `strict_warm_start_budget_reentry_model_ids`（与 quarantine provenance 同形：capture-once 冻结字段、ordinary-upsert merge 字段、closed constructor 成员、evidence normalizer）；普通 strict retry 与 breaker 重入不戳。只读 accessor `budget_reentry_count`（journal-direct `_cycle_rows`，不看终态/job id/suffix，读失败 None）；共享谓词按 decision 取对应计数（breaker `quarantine_rerun_count`，预算 `budget_reentry_count`），缺失/None/抛错 → 不匹配；blocked 判定仍由 stage-scoped attempt 驱动，`_next_retry_attempt_for_stage` 未改。测试：accessor 表驱动（无戳 0、戳别的模型 0、failed master 1、跨前缀两个 2、master+terminal copy 1、无 journal 0、读失败 None）；reservation 戳往返 + 伪造改写被拒；Slurm 失败的预算重入不恢复确认物；accessor 缺失/None/抛错时惰性。
 - [x] R3.3 写侧：预算 decision 要求 pin == live `budget_reentry_count`，否则 `pin_mismatch`（exit 2）；删除 `pin >= 1` 特例（`pin_invalid` 只剩负数）与 #2400 注释/help 文案；receipt `live.budget_reentry_count`。既有 `test_budget_confirmation_is_recorded_without_a_token`（pin 12、`live is None`）改为 pin 0 / `live == {"budget_reentry_count": 0}`，`budget_pin_below_one` 腿改为 `budget_pin_differs_from_live_reentry_count`（pin_mismatch）与 `budget_pin_negative`（pin_invalid）（偏离记录：旧期望正是被本轮 spec 取代的语义）。Round 4 撤回：写侧无法判断预算是否耗尽，#2400 残余（对 pin、错时间）保留为 runbook 义务（见 R4.3）。
-- [x] R3.4 r3-01：无待办时，若有 size-fallback pass 按 mtime 比最新的可判定 pass 更新 → exit 3；可判定 pass 比所有 fallback 新 → 0。`test_one_clean_evaluating_pass_in_the_window_decides_zero` 拆为两条（偏离记录）：fallback 最旧、`planned` 最新 → 0；新增 `test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidable`（fallback 最新 → 3），两者都用真实 `bounded_evidence_payload`。help、模块 docstring 同步。
-- [x] R3.5 runbook：`node22-control-plane-manual-recovery.md` 预算 pin 改取 dry-run receipt `live.budget_reentry_count`，删除预授权/#2400 警告与「`_retry_<n>` 使 attempt +1」措辞，写明确认物在 rerun 被接受提交时消费，`pin_mismatch` 适用两类、`pin_invalid` 仅负数，退出码表加 fallback 新于可判定 pass 的 exit 3；`failed-basin-retry.md` 预算节同步。`scheduler-dbfree-typed-reasons.md` 未涉及预算 pin 与 exit 3 条件，无需改。
+- [—] R3.4 r3-01（列举面时序规则）随 #1186 移入 PR-B 的 change。原文：无待办时，若有 size-fallback pass 按 mtime 比最新的可判定 pass 更新 → exit 3；可判定 pass 比所有 fallback 新 → 0。`test_one_clean_evaluating_pass_in_the_window_decides_zero` 拆为两条（偏离记录）：fallback 最旧、`planned` 最新 → 0；新增 `test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidable`（fallback 最新 → 3），两者都用真实 `bounded_evidence_payload`。help、模块 docstring 同步。
+- [x] R3.5 runbook：`node22-control-plane-manual-recovery.md` 预算 pin 改取 dry-run receipt `live.budget_reentry_count`，删除预授权/#2400 警告与「`_retry_<n>` 使 attempt +1」措辞，写明确认物在 rerun 被接受提交时消费，`pin_mismatch` 适用两类、`pin_invalid` 仅负数，`failed-basin-retry.md` 预算节同步（退出码表随 #1186 移入 PR-B）。`scheduler-dbfree-typed-reasons.md` 未涉及预算 pin 与 exit 3 条件，无需改。
 
 ## R4 修复（PR #2398 第 4 轮审查）
 
-- [x] R4.1 r4-02 + r4-03 listing 一般规则（偏离 1 已裁定：以封闭「透明」allowlist 取代「非评估 pass 不触发」）：`operator_action_listing.py` 新增模块常量 `TRANSPARENT_PASS_STATUSES = {lock_contended, preflight_blocked}`；按时间旧→新遍历，可判定 pass 清零标志 `hidden_after_decidable`，透明 pass 不变，其余一律置位（不可读、size-fallback——其原始 status 为 `resource_limit_blocked` 故不透明——、`lease_lost`、异常路径 `resource_limit_blocked`、未知或非字符串 status）；`non_evaluating_passes` 条目形状不变。help、模块 docstring、`EVALUATING_PASS_STATUSES` 注释与 runbook 退出码表 0/3 两行同步。测试：`test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule` 排序表 26 项（decidable(planned)、size_fallback(真实 `bounded_evidence_payload`，未裁剪时会列出 breaker release)、unreadable(截断 JSON / 0 字节)、lock_contended、preflight_blocked、lease_lost、异常路径 resource_limit_blocked（limit 无 `candidate_lists`）、未知 status、非字符串 status；期望由 spec 推导）；`test_transparent_pass_statuses_are_the_closed_hide_nothing_set` 钉成员且与 `EVALUATING_PASS_STATUSES` 不相交。在 0dca0613b 源码上 11 项红。变异：「只看最新 pass 是否 fallback」「不可读不置位」「lock_contended 重置标志」各有表项红；透明集合加入 `lease_lost` 3 项红、删除 `preflight_blocked` 4 项红（含 `[D, preflight_blocked] → 0`）。517/560 两测保留不动。
-- [x] R4.2 早退 writer 核查（`scheduler_runtime.py`，候选构造 `_build_candidates` 937）：`lock_contended`（716）构造前写、列表与 `source_cycles` 为空，`test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles` 对真实落盘 artifact 钉住；`preflight_blocked` 构造前（594/644/674 prelock，762/799/841/898）列表为空，构造后（`pass_status` 1043/1077/1089/1173/1195/1208 与 `_scheduler_pass_status_from_execution` 1253）经 1328-1343 写出完整 `source_cycles` / `blocked_candidates`，二者都不隐藏 → 透明。`lease_lost`（988，唯一写者，总在 937 之后）与异常路径 `resource_limit_blocked`（1473；由构造后 progress-guard checkpoint 938/1020/1102/1141/1227/1235 → `scheduler_runtime.py:58`，或构造中 `scheduler_candidates.py:272`、`scheduler_backfill_predecessor.py:671` 抛出）清空列表 → 不透明（可能隐藏）；其 `limit` 不带 `candidate_lists`，不会被误判为 size fallback。偏离 1（此前按停止条件上报的分类问题）已由协调者裁定为透明 allowlist，见 R4.1。
-- [x] R4.3 r4-01 #2400 descope：R1.2 / R3.3 撤回「关闭 #2400」；`node22-control-plane-manual-recovery.md` 预算 pin 段与 `failed-basin-retry.md` 第 3 步恢复新形式警告（pin 取 dry-run `live.budget_reentry_count`；只确认最新 `list-operator-actions` pass 当前列为 `blocked_strict_warm_start_init_state_mismatch` 的目标并逐字核对 source/cycle/model；rerun 在飞不确认；耗尽前写入的确认物保持有效直到被消费；写错停止上报、不再写一条覆盖）；`operator_reentry_confirmation.py` 只改 docstring 与 help 文案，逻辑未动。R3.5 删除 #2400 警告的部分由本项取代。
+- [—] R4.1（列举面一般规则）随 #1186 移入 PR-B 的 change。原文：r4-02 + r4-03 listing 一般规则（偏离 1 已裁定：以封闭「透明」allowlist 取代「非评估 pass 不触发」）：`operator_action_listing.py` 新增模块常量 `TRANSPARENT_PASS_STATUSES = {lock_contended, preflight_blocked}`；按时间旧→新遍历，可判定 pass 清零标志 `hidden_after_decidable`，透明 pass 不变，其余一律置位（不可读、size-fallback——其原始 status 为 `resource_limit_blocked` 故不透明——、`lease_lost`、异常路径 `resource_limit_blocked`、未知或非字符串 status）；`non_evaluating_passes` 条目形状不变。help、模块 docstring、`EVALUATING_PASS_STATUSES` 注释与 runbook 退出码表 0/3 两行同步。测试：`test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule` 排序表 26 项（decidable(planned)、size_fallback(真实 `bounded_evidence_payload`，未裁剪时会列出 breaker release)、unreadable(截断 JSON / 0 字节)、lock_contended、preflight_blocked、lease_lost、异常路径 resource_limit_blocked（limit 无 `candidate_lists`）、未知 status、非字符串 status；期望由 spec 推导）；`test_transparent_pass_statuses_are_the_closed_hide_nothing_set` 钉成员且与 `EVALUATING_PASS_STATUSES` 不相交。在 0dca0613b 源码上 11 项红。变异：「只看最新 pass 是否 fallback」「不可读不置位」「lock_contended 重置标志」各有表项红；透明集合加入 `lease_lost` 3 项红、删除 `preflight_blocked` 4 项红（含 `[D, preflight_blocked] → 0`）。517/560 两测保留不动。
+- [—] R4.2（早退 writer 的透明性核查，服务于列举面）随 #1186 移入 PR-B 的 change。原文：早退 writer 核查（`scheduler_runtime.py`，候选构造 `_build_candidates` 937）：`lock_contended`（716）构造前写、列表与 `source_cycles` 为空，`test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles` 对真实落盘 artifact 钉住；`preflight_blocked` 构造前（594/644/674 prelock，762/799/841/898）列表为空，构造后（`pass_status` 1043/1077/1089/1173/1195/1208 与 `_scheduler_pass_status_from_execution` 1253）经 1328-1343 写出完整 `source_cycles` / `blocked_candidates`，二者都不隐藏 → 透明。`lease_lost`（988，唯一写者，总在 937 之后）与异常路径 `resource_limit_blocked`（1473；由构造后 progress-guard checkpoint 938/1020/1102/1141/1227/1235 → `scheduler_runtime.py:58`，或构造中 `scheduler_candidates.py:272`、`scheduler_backfill_predecessor.py:671` 抛出）清空列表 → 不透明（可能隐藏）；其 `limit` 不带 `candidate_lists`，不会被误判为 size fallback。偏离 1（此前按停止条件上报的分类问题）已由协调者裁定为透明 allowlist，见 R4.1。
+- [x] R4.3 r4-01 #2400 descope：R1.2 / R3.3 撤回「关闭 #2400」；`node22-control-plane-manual-recovery.md` 预算 pin 段与 `failed-basin-retry.md` 第 3 步恢复新形式警告（pin 取 dry-run `live.budget_reentry_count`；只确认最新 pass evidence 当前列为 `blocked_strict_warm_start_init_state_mismatch` 的目标并逐字核对 source/cycle/model；rerun 在飞不确认；耗尽前写入的确认物保持有效直到被消费；写错停止上报、不再写一条覆盖）；`operator_reentry_confirmation.py` 只改 docstring 与 help 文案，逻辑未动。R3.5 删除 #2400 警告的部分由本项取代。
 - [x] R4.4 预清理：D.6 第 2/4/5 步与 R1.6 加 Round 3 修订标记（原文保留）；预算重入测试第 4 步 `attempt >= _BUDGET_RETRY_LIMIT` 改回 `== _BUDGET_RETRY_LIMIT`（实测等于 limit 2），注释引用 #2404。
+
+## S 拆分（PR #2398 触顶，用户裁决拆 PR）
+
+- [x] S.1 `services/orchestrator/operator_action_listing.py`、`tests/test_operator_action_listing.py`、`cli.py` 的 `list-operator-actions` 挂载从本分支移除，随 #1186 进 PR-B。
+- [x] S.2 runbook 的列举面段落与退出码表改为过渡口径（直接读最新 pass evidence 按 decision 字面量筛），并注明 PR-B 落地时替换；预算 pin、#2400 警告、消费时机、`pin_mismatch`/`pin_invalid` 语义不变。
+- [x] S.3 openspec change 更名为 `node22-operator-reentry-confirmation`，列举面 requirement 移出，保留 bounded `retry_policy` 保留钉与 slug 存在性两条。
 
 ## Evidence Floor
 
 - EF-1 本地：`uv run pytest -q tests/test_scheduler_backfill_predecessor.py tests/test_scheduler_generation.py tests/test_warm_start_chaining.py tests/test_scheduler_backfill.py` 全绿。
 - EF-2 本地：`uv run pytest -q tests/test_production_scheduler.py tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py` 全绿。
-- EF-3 本地：`uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_journal_full_tree_budget_contract.py tests/test_operator_action_listing.py tests/test_operator_reentry_confirmation.py` 以及 C 切片所在测试文件全绿。
-- EF-4 `uv run ruff check .` 通过；`openspec validate node22-operator-action-surface-reentry --strict --no-interactive` 通过。
+- EF-3 本地：`uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_journal_full_tree_budget_contract.py tests/test_operator_reentry_confirmation.py` 以及 C 切片所在测试文件全绿。
+- EF-4 `uv run ruff check .` 通过；`openspec validate node22-operator-reentry-confirmation --strict --no-interactive` 通过。
 - EF-5 反复活 grep：`grep -n "blocked_journal_predecessor_identity_quarantine\|blocked_strict_warm_start_init_state_mismatch" services/orchestrator/chain_forecast_orchestrator_cycle.py services/orchestrator/chain_runtime_utils.py` 只命中注释。
 - EF-6 红证据与变异：每个切片贴出源码改动前的失败断言。单独回退以下三处，对应测试变红：
   - D 的 pin 严格相等（改成 `>=`）→ D.4 第 5 步或 D.6 第 4 步变红；
   - C 的 allowlist（改成吞全部）→ C.4 变红；
   - B 的瞬时 allowlist（删掉一项 → B.3 变红；把 `predecessor_gate_failed` 加进 allowlist → B.1 变红）。
-- EF-7 node-27 后端 oracle：隔离 worktree `/home/nwm/tmp/wt-b7`，复用共享 venv，不设 integration 环境变量。跑 `tests/test_production_scheduler.py tests/test_scheduler_backfill_predecessor.py tests/test_file_orchestration_journal.py tests/test_operator_action_listing.py tests/test_operator_reentry_confirmation.py`。
-- EF-8 node-22 现场收据（A.7，design D2）。
+- EF-7 node-27 后端 oracle：隔离 worktree `/home/nwm/tmp/wt-b7a`，复用共享 venv，不设 integration 环境变量，`umask 022` + `TMPDIR=/home/nwm/tmp`。跑 `tests/test_production_scheduler.py tests/test_scheduler_backfill_predecessor.py tests/test_file_orchestration_journal.py tests/test_operator_reentry_confirmation.py`。
+- [—] EF-8 node-22 现场收据随 #1186 移入 PR-B（它验证的就是列举面本身）。
 - EF-9 runbook 与新 slug 文件随 PR 提交；merge 后在 #1767 评论：定向解除通道已存在，`RETRY_LIMIT=12` 的回收可以执行。只评论，不执行。

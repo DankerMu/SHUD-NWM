@@ -42,9 +42,9 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     # #1543: the §8.6 emission-feasibility boolean, read together with the one
     # above; ``False`` must survive as well (retention is ``is not None``).
     ("predecessor_emission_blocked", ("predecessor_emission_blocked",)),
-    # #1186: ``list-operator-actions`` identifies manual-action rows by
-    # ``decision`` and reports these numbers; a summarized pass must keep them,
-    # ``0``/``False`` included.  Summary names avoid the row-level keys above.
+    # #1186: the operator manual-action surface identifies rows by ``decision``
+    # and reports these numbers; a summarized pass must keep them, ``0``/``False``
+    # included.  Summary names avoid the row-level keys above.
     ("retry_attempt", ("retry_policy", "attempt")),
     ("retry_limit", ("retry_policy", "retry_limit")),
     ("retry_occurrences", ("retry_policy", "occurrences")),

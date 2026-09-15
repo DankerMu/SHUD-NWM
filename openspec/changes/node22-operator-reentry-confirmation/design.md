@@ -1,13 +1,13 @@
-# Design — node-22 operator-action surface + targeted re-entry
+# Design — node-22 operator 重入确认物 + 发射可行性标 + 逐行隔离（#1543 + #1555 + #1768 + #1820）
 
 ## Risk triage
 
 - **Fixture level: `high`**，round 1 设 4 个 reviewer 席位。
   - **与 precedent 的偏离**：#1157 的 `2026-08-18-scheduler-quarantine-residual-hardening` 定为 `expanded`，但它只有一个 seam。本批改动面更宽：
     - 调度决策路径新增一条 operator 授权通道（D）；
-    - evidence bounded 契约扩容（A/B）；
+    - evidence bounded 契约扩容（A'/B）；
     - journal 扫描异常行为改变（C）；
-    - 新增两条 CLI 与一份新 runbook。
+    - 新增一条 CLI 与一份新 runbook。
   - 五个 issue 都没有 `Suggested fixture level` 字段，本次为首次定级。
 - **Risk packs selected**：
   - `invariant-state`：
@@ -17,11 +17,10 @@
     - #1843/#1844 forcing 见证不变量在重入路径上保持。
   - `correctness`：
     - pin 匹配语义；
-    - 列举 CLI 对 summarized pass 的兼容；
+    - bounded summary 对 `retry_policy` 键的保留；
     - skip allowlist 的边界。
   - `security-perf`：
     - operator 写侧的前置条件与 dry-run 默认值；
-    - 扫描 N 个 evidence 文件的 I/O 上界；
     - 预算拒绝不得被吞。
   - `test-evidence`：每个切片先红后绿；闭环测试走公开入口 `build_candidates` / scheduler pass。
 - **Risk packs not selected**：`integration`。gateway、reservation、producer 不改；display API 只新增 slug 文件存在性测试，payload 不变。
@@ -44,64 +43,23 @@
 | `_iter_flat_direct_pipeline_job_records_for_cycle` 位于 `_cycle_job_records_memoized` 链上，即调度热路径 | `file_orchestration_journal.py:6575`、`:6824-6994` |
 | §8.6 emitter 的 cap `break`，截断记录无 successor | `scheduler_backfill_predecessor.py:365-367`、`:681-689` |
 
-## D1 — 列举面 `list-operator-actions`（#1186）
+## D1/D2 — 已移出本 change（#1186 列举面）
 
-- **位置**：新模块 `services/orchestrator/operator_action_listing.py`，argparse 子命令挂到 `cli.py`，挂载方式照抄 `operator_released_reservation_recovery.add_argparse_recovery_subparser`。
-- **输入**：
-  - `--evidence-root`，缺省读 `NHMS_SCHEDULER_EVIDENCE_ROOT`，两者都缺则 exit 2；
-  - `--passes N`，默认 `6`，下限 1。
-- **扫描**：
-  - 只取 root 顶层满足 `is_scheduler_pass_evidence_filename` 的 **终态** `scheduler_*.json`，排除 `.pre_execution.json`；
-  - 按 mtime 降序取前 N 个（uuid 后缀不按时间排序）；
-  - 单文件 JSON 损坏或不是 object 时记入 `unreadable_passes`，并继续。
-- **判定**：
-  - 另读每个 pass 的 `source_cycles[]`：`selection_status=="not_selected"` 且 `selection_reason=="journal_predecessor_identity_quarantine_breaker_engaged"` 的条目，把 `journal_predecessor_identity_quarantine.models[]` 逐个列为 `blocked_journal_predecessor_identity_quarantine`，并带上 `occurrences` 与 `recorded_init_state_id`。backfill 模式下，breaker 释放的 cycle 不会进入 `build_candidates`，所以 `blocked_candidates` 里没有它（`scheduler_discovery.py:813-845`，fixture review F1）。
-  - 读每个 pass 的 `blocked_candidates[]`，**按 `decision` 识别**，不按 `manual_retry_required` 识别，因为该标志在 summarized pass 上不存在；
-  - decision 优先取 summary 顶层 `decision`，其次取 `state_evidence.decision`；
-  - 族集合为常量 `OPERATOR_ACTION_DECISIONS`，即 proposal 列出的四个字面；
-  - fixture review 已核实：`permanent_failure` 与 `cancelled_manual_retry_required` 写在 `state_evidence.decision`，`retry_policy` 下有 `attempt/retry_limit/manual_retry_required`（`scheduler_state_failure.py:1982-1990`、`:2177-2189`）。blocked 条目的 `reason` 与 decision 字面不同，所以只按 decision 识别。
-- **输出**：一行 sorted-key JSON。
-  ```text
-  {schema_version, evidence_root, passes_scanned, unreadable_passes:[...], operator_action_count,
-   operator_actions:[{candidate_id, source_id, cycle_time, model_id, decision, reason,
-                      attempt, retry_limit, occurrences, recorded_init_state_id, first_seen_pass, last_seen_pass, seen_in_passes}],
-   candidate_lists_dropped_passes:[...]}
-  ```
-  - 按 `candidate_id + decision` 去重；
-  - `attempt / retry_limit / occurrences` 从 `state_evidence.retry_policy`（或 summary 新增的 bounded 键）取，缺失时为 `null`。
-- **退出码**：
-  - 列表非空为 `1`；
-  - 列表为空，但有 pass 的 `limit.candidate_lists == "dropped"`（`scheduler_evidence_payload.py:219-222`）时为 `3`（无法判定），否则会在最拥堵的 pass 上假阴性（F7）；
-  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）。Phase 7 F-1 修订：size-fallback 产物（`resource_limit_blocked` + `limit.pre_limit_status`）的 `source_cycles` 被 `bounded_evidence_payload` 无条件清空（`scheduler_evidence_payload.py:1129`），看不到 breaker 释放的 cycle，因此不计为可判定 pass（进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`），但其 summarized `blocked_candidates` 仍照常列出。Round 3 r3-01 修订：无待办时，若窗口内有 size-fallback pass 比最新的可判定 pass 更新，也为 `3`——breaker 可能在那个可判定 pass 之后才 engage，而 fallback 清空了唯一能看到它的 `source_cycles`；可判定 pass 比所有 fallback 更新时仍为 `0`（释放状态持续到 backfill 完成或确认，更新的可判定 pass 必然显示它）；
-  - root 缺失或不可读为 `2`。
-- **bounded 白名单扩容**（与 D3 共用同一次编辑）：
-  - 在 `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 追加 `retry_attempt ← (retry_policy, attempt)`、`retry_limit ← (retry_policy, retry_limit)`、`retry_occurrences ← (retry_policy, occurrences)`、`manual_retry_required ← (retry_policy, manual_retry_required)`；
-  - summary 键名不得与 `_BOUNDED_CANDIDATE_SUMMARY_KEYS` 冲突。
-  - 新增一条白名单钉测试，逐项断言 summary 后这些键存在，`False`/`0` 值也要保留。
-- **runbook**：
-  - 新建 `docs/runbooks/node22-control-plane-manual-recovery.md`，对齐 `apps/api/routes/pipeline.py:248` 的 slug。内容：
-    - `list-operator-actions` 用法；
-    - 四类决策各自的处置入口：
-      - permanent_failure / cancelled 走 `scripts/node22_manual_retry_failed_runs.py`（#1825，`record_manual_repair`）；
-      - breaker / 预算 走 D4 的 `confirm-operator-reentry`；
-    - node-22 执行纪律：维护窗口前禁止裸 `uv run`，用 `.venv/bin/python -m`。
-  - `failed-basin-retry.md` 为四类决策各写一段，并链接新 runbook。
-  - 新测试断言 `pipeline.py` 引用的 slug 在 `docs/runbooks/<slug>.md` 存在。测试从源码常量读 slug，不硬编码第二份。
-- **不做**：
-  - 不改 409 payload 的 `suggested_action` 文本（userspace 字符串，已有两处测试钉）；
-  - 不接 systemd timer（用法写进 runbook，部署另议）；
-  - 不扫 journal，只扫 evidence。issue 提到的「+ journal」属 YAGNI：journal 不带决策，决策只在 evidence 里。
+原 D1（只读子命令 `list-operator-actions`）与 D2（node-22 现场收据的执行方式）随 #1186 移入子 change
+`node22-operator-action-listing`（PR-B）。拆分依据见 `.workplans/pr-2398/review/split-plan.md`。
 
-## D2 — node-22 现场收据的执行方式（偏离 issue Verification 文本）
+留在本 change 的只有两项原属 A 切片、与确认物直接相关的部分：
 
-#1186 的 Verification 文本写的是在 node-22 活动 checkout 上 `git pull` + `uv run python -m ...`，两者都违反 CLAUDE.md：共享 checkout 不应被本批 pull，维护窗口前也禁止裸 `uv run`。改为下面的流程：
-
-1. `git -C /scratch/frd_muziyao/NWM fetch origin <branch>`；
-2. `git worktree add --detach /scratch/frd_muziyao/tmp/wt-b7 <sha>`；
-3. **先 `cd <wt>`**（`python -m` 会把 cwd 放在 `PYTHONPATH` 前面，在共享 checkout 下运行会导入旧代码），再执行 `PYTHONPATH=<wt> /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli list-operator-actions --evidence-root $NHMS_SCHEDULER_EVIDENCE_ROOT`。root 值先用只读 `ls` 核实，并断言 `services.orchestrator.__file__` 位于 worktree 内；
-4. 贴出输出，然后 `git worktree remove`。
-
-只读，不连 DB，不写 evidence root。
+- **bounded 白名单扩容**（与 D3 共用同一次编辑）：在 `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 追加
+  `retry_attempt ← (retry_policy, attempt)`、`retry_limit ← (retry_policy, retry_limit)`、
+  `retry_occurrences ← (retry_policy, occurrences)`、`manual_retry_required ← (retry_policy, manual_retry_required)`；
+  summary 键名不得与 `_BOUNDED_CANDIDATE_SUMMARY_KEYS` 冲突；逐项钉测试，`False`/`0` 值也保留。
+  理由不依赖列举面：summarized pass 丢弃整个 `state_evidence`，运维按过渡口径直接读 evidence 时同样看不到 attempt / occurrences。
+- **runbook**：新建 `docs/runbooks/node22-control-plane-manual-recovery.md`，对齐 `apps/api/routes/pipeline.py:248` 的 slug；
+  测试从源码常量读 slug 断言文件存在。四类决策的处置入口（permanent_failure / cancelled 走
+  `scripts/node22_manual_retry_failed_runs.py`；breaker / 预算走 D4 的 `confirm-operator-reentry`）与 node-22 执行纪律照旧。
+  「怎么找到目标」写过渡口径——直接读 evidence root 下最新的 `scheduler_*.json`，按 decision 字面量筛 `blocked_candidates`，
+  并看 not-selected `source_cycles` 的 breaker 释放条目；PR-B 落地 `list-operator-actions` 时替换该段与退出码表。
 
 ## D3 — §8.6 发射可行性标（#1543）
 
@@ -135,7 +93,7 @@
 - **前置条件**（不满足即 exit 2，不写）：
   1. journal 对 `(source, cycle, model)` 有 completed identity，即 `completed_pipeline_init_state_identity` 非 `None`。
   2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等（写侧意图前置条件）、breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`），并要求 `--pin` 等于**模型级 quarantine rerun 计数**（见下文「实现后修订」）。
-  3. 若 decision 为预算：（Round 3 修订，取代下文旧文）要求 `--pin` 等于**模型级预算重入计数**（journal-direct，见「Round 3 修订」），不再与 attempt 比较。Round 4 修订（r4-01）：这只消除了「错 pin」一半；写侧仍看不到预算是否已耗尽（不可 db-free 复算），耗尽前写入的确认物在耗尽后 pin 仍等于计数时会放行（「对 pin、错时间」），#2400 **不在**本 PR 关闭，残余改为 runbook 操作义务：只确认最新 pass 列为预算 blocked 的目标，rerun 飞行中不确认。旧文：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
+  3. 若 decision 为预算：（Round 3 修订，取代下文旧文）要求 `--pin` 等于**模型级预算重入计数**（journal-direct，见「Round 3 修订」），不再与 attempt 比较。Round 4 修订（r4-01）：这只消除了「错 pin」一半；写侧仍看不到预算是否已耗尽（不可 db-free 复算），耗尽前写入的确认物在耗尽后 pin 仍等于计数时会放行（「对 pin、错时间」），#2400 **不在**本 PR 关闭，残余改为 runbook 操作义务：只确认最新 pass 列为预算 blocked 的目标，rerun 飞行中不确认。旧文：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用最新 pass evidence 的现值核对 pin；写错时停止并上报，不要再写一条覆盖。
 - **写入**：
   - `insert_pipeline_event(entity_type="forecast_cycle", entity_id=<cycle_id>, event_type="operator_reentry_confirmation", status_from=None, status_to="confirmed", details={model_id, decision, pin, operator, reason, request_id, recorded_init_state_id}`，其中 `recorded_init_state_id` 仅 breaker 必填)`；
   - `cycle_id` 用 `_cycle_id_for_file_source`（`file_orchestration_journal.py:13945`）构造，不手拼；
@@ -189,8 +147,8 @@
   - `hydro_run` 权威冻结本身是既有缺陷（§8.7 在 node-22 上对「rerun 得到正确 lineage」的情形也无法收敛），按越界规则单独立 issue，不在本批修复。
 
 - **Round 4 修订（第二次 retro，`.workplans/pr-2398/review/round-4/retro.md`）**：
-  - listing 的时序规则一般化：比最新可判定 pass 更新的任何「非可判定、非透明」pass 使空窗口不可判定。透明集合封闭为 `lock_contended`（`scheduler_runtime.py:716`，构造前写、列表为空）与 `preflight_blocked`（构造前写列表为空，或构造后在 `:1328-1343` 写出完整列表与 `source_cycles`，二者都不隐藏）。`lease_lost`（`:988`，构造后写并清空列表）、异常路径 `resource_limit_blocked`（`:1473`，清空列表）、size-fallback、不可读、未知 status 一律视为可能隐藏（fail toward undecidable）。
   - 预算确认物的时间绑定残余（#2400）降为 runbook 操作义务，见 D4 前置条件 3。
+  - 同一 retro 里 listing 的时序规则一般化随 #1186 移入 PR-B 的 change。
 
 - **Round 3 修订（review failure retro，shape depth，`.workplans/pr-2398/review/round-3/retro.md`）**：
   - 共同不变量：fail-closed 的 operator 契约必须键在「每个应消费/应暴露它的事件都会推动」的量上。
@@ -241,7 +199,8 @@
 ## 偏离记录（预置）
 
 1. 本分支带着上一批的 post-merge 提交 `8713b73e9`（归档 + loop-log + ADR 0003 deferral + `.review-gate-issues.json`）。
-2. #1186 Verification 文本中 node-22 的 `git pull` + 裸 `uv run`，改为隔离 worktree + `.venv/bin/python -m`（D2）。
+2. #1186 Verification 文本中 node-22 的 `git pull` + 裸 `uv run`，改为隔离 worktree + `.venv/bin/python -m`；该 D2 流程随 #1186 移入 PR-B。
 3. Phase 0 勘察 explorer 执行过一次只读的裸 `python3` heredoc，违反「Python 只经 uv」纪律；无写入，未重复。
 4. fixture level 由 precedent 的 `expanded` 升为 `high`（见 Risk triage）。
 5. fixture review 第一轮判 revise（F1–F10），全部按本文修正；第二轮 approve（附 3 条 P3，已并入）。
+6. PR #2398 在第 5 轮交叉审查触到轮次上限（`gates.md` round ceiling），用户裁决拆分：本 change 为 PR-A（#1543/#1555/#1768/#1820），#1186 的列举面移入 `node22-operator-action-listing`（PR-B）。原 change 目录 `node22-operator-action-surface-reentry` 更名为本目录，fixture level 仍为 `high`，轮次计数器按 `gates.md` 对子 PR 重置。

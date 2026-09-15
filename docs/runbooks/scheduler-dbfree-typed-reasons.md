@@ -611,4 +611,4 @@ identity 可匹配"被误报为 `canonical_identity_mismatch`。
 - [`failed-basin-retry.md`](failed-basin-retry.md) — 候选级 retry 预算与
   `blocked_strict_warm_start_init_state_mismatch` 的人工再入口径。
 - [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) —
-  `list-operator-actions` 与 `confirm-operator-reentry` 的用法、退出码与已知限制。
+  `confirm-operator-reentry` 的用法、拒绝原因与已知限制。

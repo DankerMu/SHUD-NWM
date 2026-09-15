@@ -19636,7 +19636,7 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
 
 
 def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles(tmp_path: Path) -> None:
-    """#2398 round 4: ``list-operator-actions`` treats ``lock_contended`` as a pass that evaluated nothing.
+    """#2398 round 4: ``lock_contended`` is a pass that evaluated nothing.
 
     Pin the premise on the artifact the scheduler actually writes: the lock is
     taken before discovery and candidate construction (``scheduler_runtime.py``
@@ -20588,6 +20588,118 @@ def test_bounded_candidate_summary_retains_predecessor_pending_operator_signal()
         scheduler_evidence_payload_module._bounded_candidate_summary(self_healing_summary)
         == self_healing_summary
     )
+
+
+def test_bounded_candidate_summary_retains_budget_exhausted_retry_policy() -> None:
+    """#1186: the four ``retry_policy`` pulls survive summarization, falsy values included.
+
+    The operator manual-action surface identifies a row by its ``decision`` and
+    then reports the pin/budget numbers; a size-bounded pass that dropped them
+    would still name the candidate but leave the operator unable to read how far
+    the budget ran.  The retention guard is ``value is not None``
+    (scheduler_evidence_payload.py:399), NOT truthiness, so ``0``/``False`` must
+    survive as values rather than be erased into "field absent".
+    """
+
+    # Producer literals: the strict warm-start budget arm's blocked evidence
+    # (scheduler_candidates.py:2633-2650, ``_OPERATOR_REENTRY_POLICY`` at 2456).
+    # ``occurrences`` is written by the breaker arm, but the bounded-summary
+    # contract folds all four numbers into one summary shape, so the budget row
+    # carries it too.
+    budget_row = {
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_c:forecast_gfs_deterministic",
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T12:00:00Z",
+        "cycle_time_utc": "2026-05-21T12:00:00Z",
+        "model_id": "model_c",
+        "status": "blocked",
+        "reason": "strict_warm_start_retry_budget_exhausted",
+        "state_evidence": {
+            "decision": "blocked_strict_warm_start_init_state_mismatch",
+            "reason": "strict_warm_start_retry_budget_exhausted",
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "native_shud_resubmitted": False,
+            "replacement_submitted": False,
+            "durable_output_reused": False,
+            "retry_policy": {
+                "automatic_retry_allowed": False,
+                "manual_retry_required": True,
+                "attempt": 12,
+                "retry_limit": 12,
+                "occurrences": 1,
+                "operator_reentry_command": "confirm-operator-reentry",
+                "recovery_runbook": "node22-control-plane-manual-recovery",
+            },
+            "strict_warm_start": {"detail": _bounded_incident_verbose_text("budget-strict-warm-start")},
+        },
+    }
+    # Synthetic falsy shape: the real budget arm hardcodes
+    # ``manual_retry_required: True``, so no producer emits this row.  It exists
+    # solely to pin the ``is not None`` guard — a truthiness guard would drop all
+    # four keys here and read exactly like a pass that never had a retry policy.
+    falsy_row = {
+        **budget_row,
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_d:forecast_gfs_deterministic",
+        "model_id": "model_d",
+        "state_evidence": {
+            **budget_row["state_evidence"],
+            "retry_policy": {
+                "automatic_retry_allowed": False,
+                "manual_retry_required": False,
+                "attempt": 0,
+                "retry_limit": 0,
+                "occurrences": 0,
+                "operator_reentry_command": "confirm-operator-reentry",
+                "recovery_runbook": "node22-control-plane-manual-recovery",
+            },
+            "strict_warm_start": {"detail": _bounded_incident_verbose_text("falsy-strict-warm-start")},
+        },
+    }
+
+    budget_summary = scheduler_evidence_payload_module._bounded_candidate_summary(budget_row)
+    assert budget_summary["retry_attempt"] == 12
+    assert budget_summary["retry_limit"] == 12
+    assert budget_summary["retry_occurrences"] == 1
+    assert budget_summary["manual_retry_required"] is True
+    assert budget_summary["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+
+    falsy_summary = scheduler_evidence_payload_module._bounded_candidate_summary(falsy_row)
+    assert falsy_summary["retry_attempt"] == 0
+    assert falsy_summary["retry_limit"] == 0
+    assert falsy_summary["retry_occurrences"] == 0
+    assert falsy_summary["manual_retry_required"] is False
+
+    # Idempotent for both rows: the already-summarized branch re-reads its own
+    # output through the same ``is not None`` guard, so the falsy row has to
+    # survive a second pass too.
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(budget_summary) == budget_summary
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(falsy_summary) == falsy_summary
+
+    # End-to-end through the real receipt compaction path.
+    payload = _incident_scheduler_evidence_payload("scheduler_2026052112_budget_retry_policy")
+    payload["blocked_candidates"] = [budget_row, falsy_row]
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+
+    assert bounded["limit"]["candidate_lists"] == "summarized"
+    assert len(bounded["blocked_candidates"]) == 2
+    bounded_by_model = {row.get("model_id"): row for row in bounded["blocked_candidates"]}
+    assert bounded_by_model["model_c"]["retry_attempt"] == 12
+    assert bounded_by_model["model_c"]["retry_limit"] == 12
+    assert bounded_by_model["model_c"]["retry_occurrences"] == 1
+    assert bounded_by_model["model_c"]["manual_retry_required"] is True
+    assert bounded_by_model["model_d"]["retry_attempt"] == 0
+    assert bounded_by_model["model_d"]["retry_limit"] == 0
+    assert bounded_by_model["model_d"]["retry_occurrences"] == 0
+    assert bounded_by_model["model_d"]["manual_retry_required"] is False
+    # The verbose detail the summary exists to shed is gone from both rows.
+    assert "state_evidence" not in bounded_by_model["model_c"]
+    assert "state_evidence" not in bounded_by_model["model_d"]
 
 
 def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() -> None:

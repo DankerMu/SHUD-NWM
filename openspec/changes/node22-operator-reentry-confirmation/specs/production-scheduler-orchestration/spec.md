@@ -1,41 +1,17 @@
 ## ADDED Requirements
 
-### Requirement: Operator-action decisions SHALL be enumerable from db-free pass evidence
+### Requirement: Bounded pass evidence SHALL retain the operator-relevant retry policy and the promised runbook slug
 
-The scheduler CLI SHALL provide a read-only `list-operator-actions` subcommand that scans the most recent N terminal scheduler pass evidence files under the evidence root (`--evidence-root`, defaulting to `NHMS_SCHEDULER_EVIDENCE_ROOT`), excluding `.pre_execution.json` files and ordering by modification time. It SHALL identify blocked candidates by decision literal — `permanent_failure`, `cancelled_manual_retry_required`, `blocked_strict_warm_start_init_state_mismatch`, `blocked_journal_predecessor_identity_quarantine` — not by the `manual_retry_required` flag, so that bounded-summarized passes remain enumerable. It SHALL also list each model named in a not-selected `source_cycles` entry whose `selection_reason` is `journal_predecessor_identity_quarantine_breaker_engaged`, because a breaker-released cycle never reaches candidate construction. Each listed action SHALL carry `candidate_id`, `source_id`, `cycle_time`, `model_id`, `decision`, `reason`, `attempt`, `retry_limit`, `occurrences` (null when absent), and first/last seen pass. The command SHALL exit `1` when at least one action is listed, `0` when none, and `2` when the evidence root is missing or unreadable; an individual unreadable pass file SHALL be reported and SHALL NOT abort the scan. A scanned pass SHALL be decidable only when it is readable and its terminal status belongs to a closed allowlist of statuses known to be written only after candidate construction ran (a post-construction status missing from the allowlist errs toward undecidable), and it is not a size-fallback product (`resource_limit_blocked` carrying `limit.pre_limit_status`), because that product empties `source_cycles` and so cannot show breaker-released cycles — its summarized blocked candidates SHALL still be listed; every other pass (for example `lock_contended`, `preflight_blocked`, or an unknown status) SHALL be reported under `non_evaluating_passes` with its status. A transparent pass is one whose status belongs to a closed set — `lock_contended` and `preflight_blocked` — known either to have evaluated nothing or to have written its full candidate lists and `source_cycles`; a transparent pass never hides anything. When no action is listed and at least one scanned pass dropped its candidate lists under the evidence byte budget, or no scanned pass is decidable, or any pass that is neither decidable nor transparent is newer than the newest decidable pass (it may have evaluated candidates it cannot show — a size-fallback product, an unreadable pass file, a `lease_lost` or exception-path `resource_limit_blocked` pass that emptied its lists, or an unknown status — and so may hide a breaker release that engaged after that decidable pass), the command SHALL report those passes and exit `3` (undecidable) instead of `0`. The bounded candidate summary SHALL retain `retry_policy` `attempt`, `retry_limit`, `occurrences`, and `manual_retry_required`, including false and zero values. The `recovery_runbook` slug returned by the display API's manual-action 409 SHALL name an existing file under `docs/runbooks/`.
+The bounded candidate summary SHALL retain the `retry_policy` fields `attempt`, `retry_limit`, `occurrences`, and `manual_retry_required`, including false and zero values, so that a size-bounded pass still shows an operator the pin and budget state of a blocked candidate. The `recovery_runbook` slug returned by the display API's manual-action 409 SHALL name an existing file under `docs/runbooks/`.
 
-#### Scenario: Summarized pass still lists a budget-exhausted candidate
-- **WHEN** the latest pass evidence was bounded-summarized and contains a blocked candidate whose decision is `blocked_strict_warm_start_init_state_mismatch`
-- **THEN** `list-operator-actions` SHALL list it with `attempt` and `retry_limit` taken from the retained bounded keys
-- **AND** the command SHALL exit `1`
+#### Scenario: Summarized pass keeps the retry policy of a budget-exhausted candidate
+- **WHEN** pass evidence is bounded-summarized and contains a blocked candidate whose decision is `blocked_strict_warm_start_init_state_mismatch`
+- **THEN** the summary entry SHALL carry that candidate's `attempt`, `retry_limit`, `occurrences`, and `manual_retry_required`
+- **AND** a false or zero value SHALL be retained rather than dropped
 
-#### Scenario: Breaker-released cycle is listed from source-cycle evidence
-- **WHEN** a pass released a breaker-engaged cycle from the backfill slot so no candidate entry exists for it
-- **THEN** `list-operator-actions` SHALL list each model of that not-selected entry with decision `blocked_journal_predecessor_identity_quarantine`
-
-#### Scenario: Dropped candidate lists are undecidable
-- **WHEN** no action is found and a scanned pass marked its candidate lists as dropped
-- **THEN** the command SHALL exit `3` and name that pass
-
-#### Scenario: A window without an evaluating pass is undecidable
-- **WHEN** every scanned pass is unreadable or non-evaluating (for example lock-contended or preflight-blocked) while an older evaluated pass outside the window holds a blocked candidate
-- **THEN** the command SHALL list those passes under `unreadable_passes` or `non_evaluating_passes` and exit `3`, never `0`
-
-#### Scenario: A window of size-fallback passes is undecidable
-- **WHEN** every scanned pass is a size-fallback product whose original payload had a breaker-released not-selected source cycle and no other listed decision
-- **THEN** the command SHALL report those passes under `non_evaluating_passes` and exit `3`, never `0`
-- **AND WHEN** such a pass still carries a summarized blocked candidate of a listed decision
-- **THEN** that candidate SHALL be listed and the command SHALL exit `1`
-
-#### Scenario: A hidden pass newer than every decidable pass is undecidable
-- **WHEN** no action is listed, an older scanned pass is decidable, and a newer scanned pass is a size-fallback product, unreadable, `lease_lost`, or of an unknown status — whether or not a still newer transparent pass follows it
-- **THEN** the command SHALL exit `3`, never `0`
-- **AND WHEN** instead only transparent passes are newer than the newest decidable pass
-- **THEN** the command SHALL exit `0`
-
-#### Scenario: No operator actions
-- **WHEN** the scanned passes contain only blocked candidates of other decisions, at least one scanned pass is decidable, no pass dropped its candidate lists, and only transparent passes are newer than the newest decidable pass
-- **THEN** the command SHALL print an empty `operator_actions` list and exit `0`
+#### Scenario: The promised runbook slug exists
+- **WHEN** the display API returns a manual-action 409 naming a `recovery_runbook` slug
+- **THEN** a file of that slug SHALL exist under `docs/runbooks/`
 
 ### Requirement: A breaker- or budget-blocked candidate SHALL re-enter only through a pinned one-shot operator confirmation
 

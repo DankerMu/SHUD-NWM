@@ -105,9 +105,11 @@ path, and §8.10 for the journal-root realpath precondition both depend on.
 
 ### Operator-action decisions (`manual_retry_required: true`)
 
-Four DB-free decisions wait on an operator. List them with
-`list-operator-actions` (read-only, pass evidence only) and pick the entry per decision;
-commands, exit codes and node-22 execution discipline are in
+Four DB-free decisions wait on an operator. Until the read-only operator-action listing
+CLI lands (#1186, follow-up PR), list them by reading the newest `scheduler_*.json` pass
+evidence file under the evidence root and filtering `blocked_candidates` by the decision
+literal (plus the not-selected `source_cycles` entries for breaker-released cycles); the
+exact commands, the evidence-root source and node-22 execution discipline are in
 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md).
 
 - `permanent_failure` — the failure classifier called the error permanent (for example
@@ -203,8 +205,8 @@ Manual re-entry, in order:
    **The writer can not see whether the budget is exhausted** (#2400 residual, not closed by
    this change: right pin, wrong time). A confirmation written before exhaustion stays armed
    until it is consumed, so once the budget is exhausted it releases one re-entry with no new
-   signature. Only confirm a target that the NEWEST `list-operator-actions` pass currently
-   lists as `blocked_strict_warm_start_init_state_mismatch`, checking `source_id`,
+   signature. Only confirm a target that the NEWEST pass evidence file currently lists in
+   `blocked_candidates` as `blocked_strict_warm_start_init_state_mismatch`, checking `source_id`,
    `cycle_time` and `model_id` verbatim, and never while that model's rerun is in flight. If
    a confirmation was written in error (target, pin or timing), stop and escalate; do NOT
    write another one over it (the earlier one stays armed). While the confirmation's `pin` equals that live count,

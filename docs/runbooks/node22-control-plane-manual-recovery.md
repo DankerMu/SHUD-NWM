@@ -24,56 +24,66 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 - 本文所有命令都不连 DB。写 journal 的命令默认 dry run，只有显式 `--attest` /
   `--execute` 才写。
 
-## 第一步：列出等待 operator 的候选
+## 第一步：列出等待 operator 的候选（临时口径，直读 pass evidence）
 
-```bash
-/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
-  list-operator-actions \
-  --evidence-root "$NHMS_SCHEDULER_EVIDENCE_ROOT" \
-  --passes 6
-```
+只读的 operator-action 列举子命令由 #1186 在后续 PR 交付；在它合入之前按本节直读最新一份
+pass evidence，本节届时由它整段取代。
 
 - **evidence root 取值**（#2399）：`NHMS_SCHEDULER_EVIDENCE_ROOT` 必须取自 systemd unit
   `nhms-compute-scheduler.service` 实际加载的 `infra/env/compute.scheduler-dbfree.env`。
-  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。执行后核对 receipt 的
-  `evidence_root` 就是该 unit 的目录，且 `passes_scanned > 0`——否则结论无效。
-- 只读：扫描 evidence root **顶层**最新 `--passes` 个终态 pass 文件（按 mtime；
-  `*.pre_execution.json` 不计），不读 journal——决策只在 evidence 里。窗口固定为最新 N
-  个文件，不会越过它们去扫更早的 pass。
-- `--evidence-root` 缺省取 `NHMS_SCHEDULER_EVIDENCE_ROOT`。
-- **可判定 pass**：只有可读且 status 属于"候选构造已运行后才写出"的封闭集合
-  `EVALUATING_PASS_STATUSES`（权威列表见 `services/orchestrator/operator_action_listing.py`，
-  含 `planned`、`blocked`、`submitted`、`submission_failed` 等由执行 evidence 透传的状态；集合外
-  的候选构造后状态保守计为不可判定），**且不是 size fallback 产物**的 pass 才能回答"没有待办"。
-  size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` 为
-  `summarized`/`dropped`）无论 `limit.pre_limit_status` 是什么都**不可判定**：写入器把
-  `source_cycles` 清空了，而 breaker 释放的 cycle 只出现在那里；但它摘要里的
-  `blocked_candidates` 照常列出（有就 exit 1）。node-22 的 pass 文件接近 5 MB 上限，这种 pass
-  现实中会出现。不可判定的 pass 列在 `non_evaluating_passes:[{pass,status,reason}]`：
-  - `reason=status_not_evaluating`：status 不在集合里（例如 `lock_contended`、
-    `preflight_blocked`——它在候选构造前后都会写出，单凭 status 分不清——`lease_lost`、异常路径
-    的 `resource_limit_blocked`、未知 status）；
-  - `reason=size_fallback_source_cycles_absent`：size fallback 产物，`status` 为它保留的
-    `limit.pre_limit_status`（没有时为 `resource_limit_blocked`）。
+  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。下面第一条命令若选不出
+  文件，说明 root 取错或该 root 下没有 pass——结论无效，先核对 root。
+
+```bash
+# evidence root 顶层最新的终态 pass 文件（`scheduler_*.json`；`*.pre_execution.json`
+# 不是终态 pass，不计）
+PASS=$(ls -t "$NHMS_SCHEDULER_EVIDENCE_ROOT"/scheduler_*.json \
+  | grep -v '\.pre_execution\.json$' | head -1)
+echo "$PASS"
+
+# 1) 四类等待 operator 的决策：按 decision 字面筛 blocked_candidates
+jq -c '.blocked_candidates[]?
+  | {candidate_id,
+     source_id: (.source_id // .source),
+     cycle_time: (.cycle_time_utc // .cycle_time),
+     model_id,
+     decision: (.decision // .state_evidence.decision),
+     reason,
+     attempt: (.state_evidence.retry_policy.attempt // .retry_attempt),
+     retry_limit: (.state_evidence.retry_policy.retry_limit // .retry_limit),
+     occurrences: (.state_evidence.retry_policy.occurrences // .retry_occurrences),
+     recorded_init_state_id: .state_evidence.journal_predecessor_identity.recorded_init_state_id}
+  | select(.decision as $d
+           | ["permanent_failure",
+              "cancelled_manual_retry_required",
+              "blocked_strict_warm_start_init_state_mismatch",
+              "blocked_journal_predecessor_identity_quarantine"] | index($d))' "$PASS"
+
+# 2) breaker 释放了执行槽的 backfill cycle：不构造候选，只出现在 not-selected source_cycles
+jq -c '.source_cycles[]?
+  | select(.selection_status == "not_selected"
+           and .selection_reason == "journal_predecessor_identity_quarantine_breaker_engaged")
+  | {source_id, cycle_time: .cycle_time_utc,
+     decision: "blocked_journal_predecessor_identity_quarantine",
+     models: [.journal_predecessor_identity_quarantine.models[]?
+              | {model_id, occurrences, recorded_init_state_id}]}' "$PASS"
+```
+
+- 只读 evidence，不读 journal——决策只在 evidence 里；本节不连 DB、不写任何字节。
 - 按 decision 字面识别，不看 `manual_retry_required` 布尔。bounded 摘要（
   `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision` 与
   `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required`，
-  所以摘要 pass 里的条目照样列出。
-- breaker 释放了执行槽的 backfill cycle 不构造候选，它的模型从 not-selected
-  `source_cycles` 条目（`selection_reason=journal_predecessor_identity_quarantine_breaker_engaged`）
-  读出，`candidate_id` 为 `null`。
-- 输出一行 JSON（`schema_version=nhms.operator_action_listing.v1`）。同一
-  `(source_id, cycle_time, model_id, decision)` 跨 pass 去重，带 `first_seen_pass` /
-  `last_seen_pass` / `seen_in_passes`；读不了的 pass 名列在 `unreadable_passes`。
-
-退出码：
-
-| exit | 含义 |
-|---|---|
-| `1` | 列出了至少一条 operator action |
-| `0` | 没有，窗口内至少有一个可判定 pass，且比最新的可判定 pass 更新的只有**透明** pass（status 为 `lock_contended` 或 `preflight_blocked`：前者在候选构造前写出、列表为空；后者要么构造前写出列表为空，要么构造后写出完整列表，都不隐藏候选） |
-| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`），**或**有既不可判定也不透明的 pass 比最新的可判定 pass 更新（按 mtime）：size fallback 产物、`unreadable_passes` 里的不可读 pass（例如写到一半的文件）、`lease_lost`、异常路径的 `resource_limit_blocked`（后两者在候选构造后写出却清空了列表）、未知 status——breaker 可能在那个可判定 pass 之后才触发，而这些 pass 可能评估过却看不见它；其后再有透明 pass 也不解除——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
-| `2` | evidence root 未设置、缺失或不可读；`--passes < 1` |
+  所以摘要 pass 里的条目照样列出（上面的 jq 两条取值路径都覆盖）。
+- breaker 释放了执行槽的 backfill cycle 不构造候选，它的模型从上面第 2 条命令的 not-selected
+  `source_cycles` 条目读出，没有 `candidate_id`。
+- **临时口径的盲区（只影响"没有待办"这个结论）**：最新 pass 若是 size fallback 产物
+  （`status=resource_limit_blocked` 且 `limit.candidate_lists` 为 `summarized`/`dropped`），
+  写入器已清空 `source_cycles`——breaker 释放的 cycle 看不见，`dropped` 还丢掉候选列表；
+  `lock_contended`、`lease_lost` 等 pass 也可能什么都没评估或清空了列表。node-22 的 pass 文件
+  接近 5 MB 上限，这种 pass 现实中会出现。**空输出 ≠ 没有待办**：确认 `status` 与 `limit` 后再下
+  结论，必要时换上一个未超限的正常 pass（把上面选 `PASS` 的管道末尾 `head -1` 换成
+  `sed -n 2p`，`*.pre_execution.json` 的过滤不能省）。#1186 的 CLI 会把这类不可判定的 pass
+  显式报出来并用独立退出码区分。
 
 ## 第二步：按 decision 处置
 
@@ -123,19 +133,19 @@ run 在飞或不存在时拒绝）：
   （不是 `retry` / `manual_retry`，不会被当成 manual-retry marker）。
 - **一次一授权**：`--pin` 必须等于 rerun 会推动的那个 live 值——
   - 断路器：该模型的 **quarantine rerun 计数**（provenance 命名该模型的 cohort master 数，
-    不看终态、不分 token）。它**不是** `list-operator-actions` / blocked evidence 里的
+    不看终态、不分 token）。它**不是** blocked evidence 里的
     `occurrences`（那是按 token 的带戳计数，只用来判断断路器是否触发）。先不带
     `--attest` 跑一次，从 dry-run receipt 的 `live.quarantine_rerun_count` 读出 pin；
     `--recorded-init-state-id` 取 `recorded_init_state_id`，必须等于 live 记录 token（写侧
     意图前置条件，读侧不再比较 token）。
   - 预算：该模型的 **预算重入计数**（预算重入 provenance `strict_warm_start_budget_reentry_model_ids`
     命名该模型的 cohort master 数，不看终态、job id、retry 后缀），不需要 token。它**不是**
-    `list-operator-actions` / blocked evidence 里的 `attempt`（`attempt` 只决定是否 blocked）。
+    blocked evidence 里的 `attempt`（`attempt` 只决定是否 blocked）。
     先不带 `--attest` 跑一次，从 dry-run receipt 的 `live.budget_reentry_count` 读出 pin。
     **写侧看不到预算是否已耗尽**（#2400 残余，本 PR 不关闭：pin 对了、时间错了）：耗尽前写入的
     确认物在 pin 仍等于计数时一直有效，直到被消费——预算一耗尽就会在没有新签字的情况下放行一次。
-    所以只确认 `list-operator-actions` **最新** pass 当前列为
-    `blocked_strict_warm_start_init_state_mismatch` 的目标，并逐字核对 `source_id` /
+    所以只确认**最新** pass evidence 文件的 `blocked_candidates` 当前列为
+    `blocked_strict_warm_start_init_state_mismatch` 的目标（第一步第 1 条命令），并逐字核对 `source_id` /
     `cycle_time` / `model_id`；该模型的 rerun 仍在飞时不要确认。写错（目标、pin 或时机）时停止并
     上报，**不要**再写一条覆盖（旧确认物仍有效）。
   scheduler 只在 pin 严格相等时放行一次。确认物在 rerun **被接受提交**时即被消费：
@@ -187,4 +197,3 @@ run 在飞或不存在时拒绝）：
   wedged 行照常列出；cycle 的 `journal/` 日志或 `latest/` 视图损坏不属于"行"，照旧 raise；预算拒绝、不可读、containment 类故障照旧 fail closed。
   没有 cycle scope 时走的 unscoped 全树 fallback **不隔离**，受 `full_tree_replay`
   预算契约约束，生产规模下会先撞预算。
-- `list-operator-actions` 只看 evidence，不接 systemd timer；定时运行另议。

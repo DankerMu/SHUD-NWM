@@ -1,16 +1,11 @@
-# node-22 operator-action surface + targeted re-entry (#1186 + #1543 + #1555 + #1768 + #1820)
+# node-22 operator 重入确认物 + 发射可行性标 + 逐行隔离 (#1543 + #1555 + #1768 + #1820)
+
+> 本 change 是 `node22-operator-action-surface-reentry` 的 PR-A 半边。原批次（#1186 + #1543 + #1555 + #1768 + #1820）的 PR #2398 触到审查轮次上限，用户裁决拆分；#1186 的只读列举面 `list-operator-actions` 移入子 change `node22-operator-action-listing`（PR-B），本 change 不再包含它。拆分依据见 `.workplans/pr-2398/review/split-plan.md`。
 
 ## Why
 
 node-22 db-free scheduler 会发出几类「需要人工」的终态决策，本批把这类承诺补成真的：
 
-- **#1186**：四类决策在 evidence 里写着 `manual_retry_required: true`，但节点上没有列举面：
-  - `permanent_failure`
-  - `cancelled_manual_retry_required`
-  - `blocked_strict_warm_start_init_state_mismatch`
-  - `blocked_journal_predecessor_identity_quarantine`
-
-  display API 的 409 还指向不存在的 runbook slug `node22-control-plane-manual-recovery`。
 - **#1555 / #1768**：breaker fail-stop 与 strict warm-start 预算耗尽这两个 blocked 决策，都是从 completed-skip 降级而来。现有 manual-retry marker 对 completed 行结构性失效：
   - `record_manual_repair` 对 terminal-success 行抛 `RetryNotFoundError`；
   - completed-skip early return 早于 `manual_retry_requested`。
@@ -21,11 +16,11 @@ node-22 db-free scheduler 会发出几类「需要人工」的终态决策，本
 
 ## What Changes
 
-- **A（#1186）**：
-  - 新增只读子命令 `list-operator-actions`：扫最近 N 个 pass evidence，按 decision 列出上述四类候选；非空时退出码 1。
-  - bounded summarization 白名单补 `retry_policy` 的 attempt / retry_limit / occurrences / manual_retry_required。
-  - 在 API 已承诺的 slug 处新建 `docs/runbooks/node22-control-plane-manual-recovery.md`，并有测试钉住 slug 文件存在。
+- **A'（运维面的最小必要部分，原 A 切片留在本 PR 的一半）**：
+  - bounded summarization 白名单补 `retry_policy` 的 attempt / retry_limit / occurrences / manual_retry_required——summarized pass 上这些键被整体丢弃，运维直接读 evidence 时看不到 pin 与预算现状。
+  - 在 API 已承诺的 slug 处新建 `docs/runbooks/node22-control-plane-manual-recovery.md`（display API 的 409 指向的 slug 此前不存在），并有测试钉住 slug 文件存在。
   - `failed-basin-retry.md` 为每类决策写处置段。
+  - 处置步骤的「怎么找到目标」先用直接读最新 pass evidence 的过渡口径；#1186 的 `list-operator-actions` 在 PR-B 落地时替换该段。
 - **B（#1543）**：
   - emitter 在本 successor 的非瞬时 skip（manifest not ready / model not available / cap 截断）上写 `predecessor_emission_blocked`，进 bounded 白名单；
   - 截断记录能定位到 successor；
@@ -48,7 +43,7 @@ node-22 db-free scheduler 会发出几类「需要人工」的终态决策，本
   - `file_orchestration_journal.py`
   - `operator_released_reservation_recovery.py`
   - `cli.py`
-  - 新模块：`operator_action_listing.py`、`operator_reentry_confirmation.py`
+  - 新模块：`operator_reentry_confirmation.py`
 - 文档：
   - `docs/runbooks/node22-control-plane-manual-recovery.md`（新）
   - `failed-basin-retry.md`
