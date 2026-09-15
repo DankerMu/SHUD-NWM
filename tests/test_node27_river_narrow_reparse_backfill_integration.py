@@ -203,6 +203,7 @@ def test_backfill_reparses_in_window_runs_and_leaves_aged_runs_legacy(world: Any
     assert plan["candidates"] == 2
     assert plan["candidates_by_status"] == {"published": 1, "superseded": 1}
     assert plan["estimated_rows"] == 2 * _SEGMENTS * _HOURS
+    assert (plan["artifact_missing"], plan["artifact_missing_runs"]) == (0, [])
     assert _state(connection, "run_fresh")["timeseries_store"] == "legacy"
 
     code, receipt = _run(settings, tmp_path)
@@ -256,6 +257,14 @@ def test_failed_parse_rolls_back_route_and_facts(world: Any, tmp_path: Path) -> 
     before = _state(connection, "run_missing_artifact")
     for path in (root / "runs" / "run_missing_artifact" / "output").iterdir():
         path.unlink()
+    plan_connection = backfill.connect(settings.database_url)
+    try:
+        plan = backfill.build_plan(plan_connection, settings, None)
+    finally:
+        plan_connection.close()
+    assert (plan["artifact_missing"], plan["artifact_missing_runs"]) == (1, ["run_missing_artifact"])
+    assert plan["artifact_missing_by_code"] == {"RIVQDOWN_NOT_FOUND": 1}
+    assert plan["oldest_cycle_with_artifact"] == _FRESH.isoformat()
 
     code, receipt = _run(settings, tmp_path, concurrency=1)
     assert code == backfill.EXIT_FAILED

@@ -63,7 +63,7 @@ EXIT_REFUSED = 2
 EXIT_PARTIAL = 3
 
 CANDIDATES_SQL = """
-SELECT h.run_id, h.status, h.cycle_time, h.start_time, h.end_time, rnv.segment_count
+SELECT h.run_id, h.status, h.cycle_time, h.start_time, h.end_time, h.output_uri, rnv.segment_count
 FROM hydro.hydro_run h
 JOIN core.model_instance mi ON mi.model_id = h.model_id
 JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id
@@ -246,6 +246,46 @@ def estimate_rows(candidates: Sequence[Mapping[str, Any]]) -> int:
     return total
 
 
+def artifact_problems(settings: Settings, candidates: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Resolve each candidate's ``.rivqdown`` exactly as the parser will; read-only."""
+
+    from packages.common.object_store import LocalObjectStore
+    from workers.output_parser.parser import (
+        HydroRunContext,
+        OutputParser,
+        OutputParserConfig,
+        OutputParsingError,
+    )
+
+    config = OutputParserConfig(
+        object_store_root=settings.object_store_root,
+        object_store_prefix=settings.object_store_prefix,
+    )
+    locator = OutputParser(
+        config=config,
+        repository=None,  # type: ignore[arg-type]  # only the object-store lookup is used
+        object_store=LocalObjectStore(config.object_store_root, config.object_store_prefix),
+    )
+    problems: dict[str, str] = {}
+    for row in candidates:
+        context = HydroRunContext(
+            run_id=str(row["run_id"]),
+            model_id="",
+            basin_version_id="",
+            river_network_version_id="",
+            source_id=None,
+            cycle_id=None,
+            cycle_time=row["cycle_time"],
+            start_time=row["start_time"],
+            output_uri=row["output_uri"],
+        )
+        try:
+            locator._find_rivqdown_file(context)
+        except (OutputParsingError, OSError, ValueError) as error:
+            problems[str(row["run_id"])] = getattr(error, "error_code", type(error).__name__)
+    return problems
+
+
 def build_plan(connection: Any, settings: Settings, end_time_after: datetime | None) -> dict[str, Any]:
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
@@ -255,6 +295,8 @@ def build_plan(connection: Any, settings: Settings, end_time_after: datetime | N
         routes = fetch_route_counts(connection, settings.window_days)
     finally:
         connection.rollback()
+    missing = artifact_problems(settings, candidates)
+    with_artifact = [row for row in candidates if str(row["run_id"]) not in missing]
     return {
         "tool_version": TOOL_VERSION,
         "generated_at": _now(),
@@ -266,6 +308,10 @@ def build_plan(connection: Any, settings: Settings, end_time_after: datetime | N
         "newest_cycle": _iso(candidates[0]["cycle_time"]) if candidates else None,
         "oldest_cycle": _iso(candidates[-1]["cycle_time"]) if candidates else None,
         "legacy_route_counts": routes,
+        "artifact_missing": len(missing),
+        "artifact_missing_by_code": dict(Counter(missing.values())),
+        "artifact_missing_runs": sorted(missing),
+        "oldest_cycle_with_artifact": _iso(with_artifact[-1]["cycle_time"]) if with_artifact else None,
         "compressed_narrow_overlap": [
             {
                 "chunk": f"{row['chunk_schema']}.{row['chunk_name']}",
