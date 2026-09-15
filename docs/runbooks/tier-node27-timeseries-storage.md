@@ -6097,6 +6097,9 @@ reattaches (OLD → `river_timeseries_legacy`, `_narrow_rollback` →
 runs (including rollback-window OLD parses that kept default `narrow`)
 `legacy`, unparsed `narrow`. It never deletes ledger rows, drops the rollback
 table or reruns 000059, and any failure recovers through this same D12.
+A failure before the reattach transaction commits recovers without writing a
+new `narrow-routes-before-reverse.json`; cite the original D12 state as
+provenance again (nothing was written before reattach, so it still verifies).
 The DROP path above remains the only alternative, and is required before any
 from-scratch expand. No automatic ledger deletion, implicit reclassification
 or unreviewed recovery shortcut. Contract removes this rollback option.

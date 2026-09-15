@@ -11,7 +11,7 @@ run before the state reaches `REPREPARED`. It MUST NOT resume, overwrite or writ
 
 - **WHEN** the live catalog is exactly canonical = prior OLD OID and `river_timeseries_narrow_rollback` = prior narrow
   OID, the ledger equals prior history plus `000059` with no pending file, and every retained `run_key` matches the
-  prior snapshot's `run_id`, `status` and `parsed_at`
+  prior snapshot's `run_id` and `parsed_at` with status `parsed` or `published`
 - **THEN** a fresh state records both OIDs, the ledger, the retained runs, copies of the pinned provenance and the
   route inventory, and ends in phase `REPREPARED` with mode `reforward`
 

@@ -259,6 +259,7 @@
  "simulated_boundaries": "systemd, process inspection, git selection, role-provisioning script, national HTTP transport and readiness answer; SQL, OIDs, ledger, parser rows and reader values real",
  "limitations": [
   "reprepare shared runtime admission (container/proxy/units/HOLD) is not re-driven; the reforward oracle drives the real readmission DB block plus the real reforward window",
-  "recovery narrow-OID pin (design D6) has no dedicated foreign-canonical negative case"
+  "recovery narrow-OID pin (design D6) has no dedicated foreign-canonical negative case",
+  "pre-reattach failure recovery is not exercised: it writes no narrow-routes-before-reverse.json, so a later reprepare citing that state fails untyped on the missing file; the original D12 state remains the provenance (design D6, runbook 4.10.3)"
  ]
 }

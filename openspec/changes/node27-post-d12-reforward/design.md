@@ -61,7 +61,7 @@ Config adds `reforward.provenance_state` (absolute prior state directory) and `r
    `validate_expand` requires of the canonical narrow table.
 6. Retained provenance: the distinct `run_key`s of the rollback table (loose index scan on the primary key) must each
    appear in the prior snapshot with a non-NULL `parsed_at`, and the live `hydro_run` row must match the snapshot's
-   `run_id`, `status` and `parsed_at` exactly. A snapshot run with non-NULL `parsed_at` whose key has no retained facts
+   `run_id` and `parsed_at` exactly, with status `parsed` or `published` (publication does not reparse). A snapshot run with non-NULL `parsed_at` whose key has no retained facts
    also refuses. `reads.retained.request.run_id` must be a retained run.
 
 Rule 6 avoids scanning the TB-scale OLD store (a `run_key` probe decompresses every compressed chunk). It is sound
@@ -104,7 +104,10 @@ canonical=`old_oid` + rollback=`narrow_oid` (existing branch); after it, `_legac
 reverse branch), which in reforward mode additionally requires canonical = admitted `narrow_oid`. The blanket `legacy`
 route update, OLD source switch, OLD read proof and restart are unchanged. The new state's
 `narrow-routes-before-reverse.json` becomes provenance for any later attempt; retained facts now also include rows
-parsed during the failed re-forward, and D3 admits them from that snapshot.
+parsed during the failed re-forward, and D3 admits them from that snapshot. A failure before reattach commits takes the
+existing branch, which writes no snapshot: the new state is not usable as provenance (a later `reprepare` citing it
+fails on the missing file, untyped), and the original D12 state remains the correct provenance because nothing was
+written before reattach. The D7 interruption cases are all post-reattach; this path is not exercised by the oracle.
 
 ### D7 Oracle
 
