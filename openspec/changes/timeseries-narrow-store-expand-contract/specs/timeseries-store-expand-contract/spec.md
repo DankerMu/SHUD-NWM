@@ -75,11 +75,11 @@ After the contract batch, no file in the repository SHALL contain the marker `tr
 
 ### Requirement: Rollout and contract SHALL each be gated by node-27 live receipts
 
-The river rollout SHALL not be declared complete without a node-27 receipt recording: expand migration wall time per statement; the first narrow chunk's size after one full cycle; the per-segment EXPLAIN gate and the probe before/after plans (`timeseries-narrow-store`); registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; the governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with both source curves rendered and identities not crossed (screenshot evidence); the display read-only boundary deny-write receipt; `/ops` reachable. The contract SHALL not run before fourteen consecutive daily receipts show the narrow route healthy and a read-only count shows zero legacy-routed runs inside the retention window (amended by #2382; previously `legacy_chunks = 0`); the fourteen-day wait is the entry gate of the contract issue, not a task of the rollout issue.
+The river rollout SHALL not be declared complete without a node-27 receipt recording: expand migration wall time per statement; the first narrow chunk's size after one full cycle; the per-segment EXPLAIN gate and the probe before/after plans (`timeseries-narrow-store`); registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; the governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with both source curves rendered and identities not crossed (screenshot evidence); the display read-only boundary deny-write receipt; `/ops` reachable. The contract SHALL not run before the #2382 reparse backfill receipts are archived, a read-only count shows zero legacy-routed runs inside the retention window, and no query-shape regression is recorded (user decision 2026-09-15 recorded in #2382/#1988; replaces the fourteen consecutive daily receipts plus `legacy_chunks = 0`); this is the entry gate of the contract issue, not a task of the rollout issue.
 
 #### Scenario: Contract precondition
 - **WHEN** an operator prepares the contract window
-- **THEN** the runbook checklist requires the archived fourteen daily receipts, the reparse backfill receipts, and a zero in-window legacy-route count before the migration may be applied
+- **THEN** the runbook checklist requires the archived reparse backfill receipts, a zero in-window legacy-route count and no shape regression before the migration may be applied
 
 #### Scenario: Maintenance window order
 - **WHEN** the expand window runs

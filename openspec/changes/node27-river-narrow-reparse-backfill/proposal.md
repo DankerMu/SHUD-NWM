@@ -13,7 +13,8 @@ inside the retention window, instead of waiting for the last legacy chunk to age
 - Only runs that are routed `legacy`, `published`/`superseded`, parsed, and have `end_time` inside the retention window
   are reparsed. Older runs stay `legacy` and are left for the contract to drop.
 - Amend the parent `timeseries-narrow-store-expand-contract` contract gate and guard: from "legacy table holds zero
-  chunks" to "zero legacy-routed runs inside the retention window". The fourteen daily receipts stay.
+  chunks after fourteen daily receipts" to "backfill receipts + zero legacy-routed runs inside the retention window + no
+  shape regression" (user decision 2026-09-15).
 - Add runbook §4.10.6 with the pilot, full-run and verify procedure.
 
 ## Capabilities

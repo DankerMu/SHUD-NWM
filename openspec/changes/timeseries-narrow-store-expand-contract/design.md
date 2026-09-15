@@ -162,7 +162,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 4. **I6 车道与治理**（发现式集合、supervisor/capture、receipt schema、per-tick 重钉、governance 指标）——legacy 缺席时为 no-op，可独立合绿；部署上先于 I7 落 node-27。
 5. **I7 expand 迁移 + parser 窄写 + fixture 重钉**（一次合入；此时读方已按 store 路由，真实 DB pytest 可绿）。
 6. **I8 rollout runbook + node-27 receipt**（D11 全部项 + D12 回退演练在 throwaway 库）。
-7. **I9 river contract**：开门条件 = 14 天 receipt 归档 + 保留窗口内 legacy 路由 run 数 = 0（#2382 补解析后成立，原为 `legacy_chunks = 0`）；contract 迁移、删函数/backfill runner/aid、oracle 收敛、ADR/runbook/glossary、关闭 #1342/#1336。
+7. **I9 river contract**：开门条件 = #2382 补解析 receipt 归档 + 保留窗口内 legacy 路由 run 数 = 0 + 无形状回归（2026-09-15 用户决定，取代原“14 天 receipt 归档 + `legacy_chunks = 0`”）；contract 迁移、删函数/backfill runner/aid、oracle 收敛、ADR/runbook/glossary、关闭 #1342/#1336。
 8. **I10 forcing 只读实测 receipt** → **I11 forcing 读方** → **I12 forcing expand + 写方** → **I13 forcing rollout receipt** → **I14 forcing contract**（开门条件同 I9）。
 
 ## Open Questions

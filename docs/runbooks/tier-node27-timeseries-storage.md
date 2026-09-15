@@ -6211,9 +6211,9 @@ is already narrow.
 
 **Any fact Seq Scan or order-of-magnitude query-shape regression blocks
 contract.** Missing evidence leaves 5.2 open. Browser click P95 belongs to
-issue #1970 (§4.9), separate from these SQL/API bounds. **Fourteen real daily receipts
-plus zero in-window legacy-routed runs (after the §4.10.6 reparse backfill; previously
-zero legacy chunks) belongs only to #1988**; neither an in-window tick nor a disposable
+issue #1970 (§4.9), separate from these SQL/API bounds. **The §4.10.6 reparse receipts plus
+zero in-window legacy-routed runs and no shape regression (replacing fourteen daily
+receipts plus zero legacy chunks) belong only to #1988**; neither an in-window tick nor a disposable
 empty legacy table satisfies that gate.
 
 #### 4.10.6 Reparse in-window legacy runs into the narrow store (#2382)

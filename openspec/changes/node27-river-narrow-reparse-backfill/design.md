@@ -65,8 +65,8 @@ The parser's status gate cannot demote these statuses: `mark_run_parsed` updates
 
 Flipping an aged-out run to `narrow` would claim facts that do not exist. They keep `legacy`, and their facts leave
 with retention or with the contract's DROP, which is the same visibility loss retention already imposes. The contract
-gate (parent amendment) becomes **zero legacy-routed runs inside the retention window**. The fourteen daily receipts
-are unchanged.
+gate (parent amendment, user decision 2026-09-15) becomes **backfill receipts + zero legacy-routed runs inside the
+retention window + no shape regression**. It replaces the fourteen daily receipts plus `legacy_chunks = 0`.
 
 ### D4 Lifecycle mutex for the whole run; decompress overlapping narrow chunks
 
