@@ -15977,6 +15977,166 @@ def test_manual_retry_scoped_cycle_execution_ignores_the_claim_judgement() -> No
     assert _next_retry_attempt_for_stage(scoped_jobs, base_job_id="job_run_0_forecast", stage=M3_STAGES[2]) == 2
 
 
+# --- #2254: the next cycle-stage retry attempt is read from the LAST ``_retry_<n>`` suffix ---
+
+_STACKED_RUN_ID = "cycle_gfs_2026050100_forecast_model_0"
+_STACKED_BASE_JOB_ID = "job_cycle_gfs_2026050100_forecast_model_0_forecast"
+
+
+def _stacked_retry_repository() -> tuple[PipelineStore, list[dict[str, Any]], StoreBackedCycleRepository]:
+    """``B``, ``B_retry_1``, ``B_retry_1_retry_2``, ``B_retry_1_retry_2_retry_3``, all terminal.
+
+    The retry rows are written by the real ``RetryService.handle_failed_job`` (the DB
+    producer that appends a suffix to the failed job's id).  Each new ``pending`` row is
+    then moved to a terminal ``failed`` bound to a Slurm id: otherwise the stage lookup
+    prefers the non-terminal row and resumes it instead of minting a retry id.
+    """
+
+    reserve_records: list[dict[str, Any]] = []
+
+    class _ReserveRecordingRepository(StoreBackedCycleRepository):
+        def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+            reserve_records.append(dict(record))
+            return super().reserve_pipeline_job(record)
+
+    store = _pipeline_store()
+    repository = _ReserveRecordingRepository(store)
+    job = store.create_job(
+        job_id=_STACKED_BASE_JOB_ID,
+        run_id=_STACKED_RUN_ID,
+        cycle_id="gfs_2026050100",
+        job_type="run_shud_forecast_array",
+        slurm_job_id="7000",
+        model_id="model_0",
+        stage="forecast",
+        status="failed",
+        idempotency_key=f"{_STACKED_RUN_ID}:forecast",
+    )
+    job.error_code = "NODE_FAILURE"
+    store.session.add(job)
+    store.session.commit()
+    retry_service = RetryService(store, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    for slurm_job_id in ("7001", "7002", "7003"):
+        job = retry_service.handle_failed_job(job)
+        assert job.status == "pending"
+        job.status = "failed"
+        job.slurm_job_id = slurm_job_id
+        job.error_code = "NODE_FAILURE"
+        store.session.add(job)
+        store.session.commit()
+    assert job.job_id == f"{_STACKED_BASE_JOB_ID}_retry_1_retry_2_retry_3"
+    return store, reserve_records, repository
+
+
+def test_stacked_retry_ids_mint_next_attempt_past_last_suffix_through_orchestrate_cycle(tmp_path: Path) -> None:
+    """#2254: stacked retry ids must not be under-counted by the cycle-stage retry minting.
+
+    Constructed evidence, public entry point: the ``retry_missing_forecast_output``
+    decision is hand-built (not derived by its scheduler producer from a real state),
+    and ``context.retry_attempt`` is unset, so the attempt comes from the job rows.
+    ``B_retry_1_retry_2_retry_3`` carries attempt 3 in its last suffix
+    (``retry_identity.retry_suffix_attempt``), so the next attempt is 4.  Before the fix
+    the whole tail after ``B_retry_`` was parsed, the stacked rows were skipped, and
+    ``B_retry_2`` was minted.
+    """
+
+    store, reserve_records, repository = _stacked_retry_repository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0].update(
+        {
+            "orchestration_run_id": _STACKED_RUN_ID,
+            "restart_stage": "forecast",
+            "state_evidence": {
+                "decision": "retry_missing_forecast_output",
+                "restart_stage": "forecast",
+                "retry_policy": {
+                    "automatic_retry_allowed": True,
+                    "manual_retry_required": False,
+                    "override_reason": "missing_forecast_output_recompute",
+                },
+            },
+        }
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    forecast = result.stages[0]
+    assert forecast.stage == "forecast"
+    assert forecast.pipeline_job_id == f"{_STACKED_BASE_JOB_ID}_retry_4"
+    forecast_reserves = [record for record in reserve_records if record.get("stage") == "forecast"]
+    assert forecast_reserves
+    assert str(forecast_reserves[0]["idempotency_key"]).endswith(":forecast:retry_4")
+    assert client.submissions[0]["stage"] == "forecast"
+    assert ":forecast:retry_4" in str(client.submissions[0]["manifest"]["comment"])
+    # The stacked producer rows are left as they were.
+    stacked = store.get_job(f"{_STACKED_BASE_JOB_ID}_retry_1_retry_2_retry_3")
+    assert stacked is not None
+    assert (stacked.slurm_job_id, stacked.status) == ("7003", "failed")
+
+
+def _retry_row(job_id: str, *, stage: str = "forecast", retry_count: int = 0) -> dict[str, Any]:
+    return {"job_id": job_id, "stage": stage, "status": "failed", "retry_count": retry_count}
+
+
+def test_next_retry_attempt_flat_suffixes_and_malformed_tail_are_unchanged() -> None:
+    """#2254 preservation: flat ``max+1``; an unparsable last suffix contributes nothing.
+
+    ``B_retry_garbage`` carries a non-zero ``retry_count`` on purpose: the recorded count
+    must not bring a malformed id back into the numbering.
+    """
+
+    from services.orchestrator.chain import _next_retry_attempt_for_stage
+
+    jobs = [
+        _retry_row("B"),
+        _retry_row("B_retry_1", retry_count=1),
+        _retry_row("B_retry_2", retry_count=2),
+        _retry_row("B_retry_garbage", retry_count=9),
+    ]
+    assert _next_retry_attempt_for_stage(jobs, base_job_id="B", stage=M3_STAGES[2]) == 3
+    malformed_only = [_retry_row("B_retry_garbage", retry_count=9)]
+    assert _next_retry_attempt_for_stage(malformed_only, base_job_id="B", stage=M3_STAGES[2]) == 1
+
+
+def test_next_retry_attempt_ignores_other_stage_and_other_base_rows() -> None:
+    """#2254 preservation: stage match and base-prefix filter both still apply."""
+
+    from services.orchestrator.chain import _next_retry_attempt_for_stage
+
+    jobs = [
+        _retry_row("B_retry_1"),
+        _retry_row("B_retry_1_retry_7", stage="convert"),
+        _retry_row("OTHER_retry_1_retry_9"),
+    ]
+    assert _next_retry_attempt_for_stage(jobs, base_job_id="B", stage=M3_STAGES[2]) == 2
+
+
+def test_explicit_context_retry_attempt_keeps_precedence_over_stacked_rows() -> None:
+    """#2254 preservation: an explicit ``context.retry_attempt`` wins over the row derivation."""
+
+    stage = M3_STAGES[2]
+    run_id = _STACKED_RUN_ID
+    base_job_id = f"job_{run_id}_{stage.stage}"
+    jobs = [_retry_row(f"{base_job_id}_retry_1_retry_2_retry_3")]
+    orchestrator = types.SimpleNamespace()
+    derived = ForecastOrchestrator._retry_cycle_stage_job_id(
+        orchestrator,  # type: ignore[arg-type]
+        types.SimpleNamespace(run_id=run_id, retry_attempt=None),  # type: ignore[arg-type]
+        stage,
+        jobs,
+    )
+    explicit = ForecastOrchestrator._retry_cycle_stage_job_id(
+        orchestrator,  # type: ignore[arg-type]
+        types.SimpleNamespace(run_id=run_id, retry_attempt=2),  # type: ignore[arg-type]
+        stage,
+        jobs,
+    )
+    assert derived == f"{base_job_id}_retry_4"
+    assert explicit == f"{base_job_id}_retry_2"
+
+
 @pytest.mark.parametrize(
     ("evidence", "expected"),
     [

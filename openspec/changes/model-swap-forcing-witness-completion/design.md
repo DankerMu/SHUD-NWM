@@ -218,7 +218,7 @@ issue 验收 3 要求 `test_completed_forecast_cycle_stale_journal_identity_is_q
 ## Must-preserve behavior
 
 - 本模型 forcing 包在场时，quarantine retry 的决策、reason、`restart_stage: "forecast"`、提交数不变
-  （evidence 会多出 `forcing_provenance`，与 #1843 strict 车道同形）。
+  （仅当某一 provenance 层自报来源时 evidence 才多出 `forcing_provenance`，例如 journal 层 `forcing_version_source=journal`）。
 - breaker 臂的 `blocked` 与其反复活形状不变；两份 forced-resubmit 白名单成员不变。
 - `manual_retry_requested` 的抢先语义不变。
 - `_decision_is_stable_missing_forcing_blocker` 与 `_apply_explicit_missing_forcing_repair_policy` 的既有语义不变。

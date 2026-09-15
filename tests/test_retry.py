@@ -635,6 +635,24 @@ def test_schedule_auto_retry_does_not_reuse_retry_with_slurm_binding() -> None:
         assert exc_info.value.details["existing_slurm_job_id"] == "slurm_existing_retry"
 
 
+def test_schedule_auto_retry_on_a_retry_row_stacks_the_suffix() -> None:
+    """#2254 must-preserve: the DB producer appends ``_retry_<n>`` to the failed row's id.
+
+    Retrying ``job_1_retry_1`` therefore yields the stacked ``job_1_retry_1_retry_2``;
+    the chain's attempt numbering reads the last suffix of this shape.
+    """
+
+    with _store() as store:
+        job = _create_job(store, job_id="job_1_retry_1", error_code="NODE_FAILURE", retry_count=1)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.schedule_auto_retry(job)
+
+        assert retry.job_id == "job_1_retry_1_retry_2"
+        assert retry.retry_count == 2
+        assert retry.status == "pending"
+
+
 def test_mark_permanently_failed() -> None:
     with _store() as store:
         job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)

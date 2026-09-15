@@ -353,6 +353,25 @@ forcing 是**按 model 分目录**存的：`<object-store>/forcing/<source>/<cyc
 而调度器判 forcing 完成度是**按 cycle** 的，它不会为这种 cycle 重进 forcing 阶段——
 forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域时实测，16 个 model 全中）。
 
+**依 #1846 裁决：回补是模型换代的必经步骤，调度器不会自动重入 forcing。** 上面的
+`ARTIFACT_NOT_FOUND` 是 #1843 之前的现场。#1843 与 #1844 之后，在它们接入见证闸的发射点上，restart 在 `forecast` 的候选决策
+发出前会先查该候选自己 `(source, cycle, basin_version_id, model_id)` 的 forcing 见证；查不到就停在
+具名 `blocked`（reason `missing_forcing_package_uri` / `forcing_version_row_absent`），不提交作业。
+无人值守车道不会为它重进 forcing 阶段，所以每次换代都得人工跑下面的回补；漏跑的代价是这批候选
+一直停在看得见的 `blocked`，而不是静默烧掉 forecast。这是已接受的成本，裁决与对 #1843 三条否决理由的
+逐条回应见 [design D3](../../openspec/changes/archive/2026-09-15-model-swap-forcing-witness-completion/design.md)。
+
+回补脚本排空的 `blocked` 有两个来源，排空通道**按车道分**：
+
+| 来源 | 车道 | 排空通道 |
+|---|---|---|
+| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`） |
+| #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | **只用**下面的回补脚本。8.5 的单 cycle 修复在这条车道拿不到授权：修复策略要求 strict warm-start 证据，缺席时以 `warm_state_missing` 拒绝（读码结论，未实跑；见 design D1） |
+
+strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`，所以这个键只是提示，不是车道判据。
+分不清时以 8.5 的 `--plan` 预览为准：`state_evidence.missing_forcing_repair.status = authorized` 的候选可以走
+单 cycle 修复；其余候选不走这条通道，改用回补脚本排空。
+
 正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
 `station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
 必然得到数值等价、且 id 与嵌套 checksum 自洽的包。拷贝旧目录则会把旧

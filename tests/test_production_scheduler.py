@@ -11122,49 +11122,14 @@ def test_completed_forecast_cycle_copyback_skips_stale_created_hydro_without_sub
     assert orchestrator.calls == []
 
 
-def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_end(
-    tmp_path: Path,
-) -> None:
-    """§8.7 quarantine survives the real ``build_candidates`` routing (#1157 E7).
+def _stale_journal_identity_tokens(candidate: scheduler_module.SchedulerCandidate) -> tuple[str, str]:
+    """Return ``(stale, expected)`` journal ``init_state_id`` tokens for the candidate.
 
-    Same fixture shape as the copyback skip above — a ``complete``
-    ``forecast_cycle`` with matching copyback evidence, which without the
-    quarantine skips as ``terminal_completed_cycle`` — but the journal records
-    a stale predecessor.  Driving it through ``run_once`` (not a unit call on
-    ``_journal_predecessor_identity_quarantine``) is the point: it pins that
-    the quarantine is wired into the candidate construction path and that the
-    demoted skip really leaves ``skipped_candidates`` empty.
+    The scheduler floors 06Z back to the previous allowed cycle hour (00Z), so the
+    expected predecessor lead is 6; a lead-12 token shares the base key and is
+    therefore a POSITIVE mismatch, not a no-judgement shape.
     """
 
-    class JournalIdentityRawCandidateStateRepository(RawCandidateStateRepository):
-        """The candidate-state double plus the journal identity accessors.
-
-        The quarantine reads the recorded ``init_state_id`` JOURNAL-ONLY, off
-        the repository by ``getattr``, so both surfaces have to live on the
-        same object for the real wiring to reach a judgement.
-        """
-
-        def __init__(self, state: dict[str, Any], *, recorded_init_state_id: str) -> None:
-            super().__init__(state)
-            self.recorded_init_state_id = recorded_init_state_id
-
-        def completed_pipeline_init_state_id(
-            self, *, source_id: str, cycle_time: datetime, model_id: str
-        ) -> str | None:
-            del source_id, cycle_time, model_id
-            return self.recorded_init_state_id
-
-        def completed_pipeline_init_state_id_occurrences(
-            self, *, source_id: str, cycle_time: datetime, model_id: str, init_state_id: str
-        ) -> int:
-            del source_id, cycle_time, model_id, init_state_id
-            return 0
-
-    candidate = _scheduler_candidate_fixture()
-    identity = _production_identity_fixture()
-    # The scheduler floors 06Z back to the previous allowed cycle hour (00Z),
-    # so the expected predecessor lead is 6; a lead-12 token shares the base
-    # key and is therefore a POSITIVE mismatch, not a no-judgement shape.
     _base, stale_init_state_id = scheduler_generation_module.expected_journal_init_state_tokens(
         source_id=candidate.source_id,
         model_id=candidate.model_id,
@@ -11178,29 +11143,86 @@ def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_e
         required_lead_hours=6,
     )
     assert stale_init_state_id != expected_init_state_id
-    active_repository = JournalIdentityRawCandidateStateRepository(
-        {
-            **identity,
-            "candidate_id": candidate.candidate_id,
-            "hydro_status": "created",
-            "pipeline_status": "created",
-            "forecast_cycle": {
-                "cycle_id": candidate.cycle_id,
-                "source_id": candidate.source_id,
-                "cycle_time": "2026-05-21T06:00:00Z",
-                "status": "complete",
-            },
-            "copyback_evidence": {
-                "stage": "copyback",
-                "status": "succeeded",
-                "source_id": candidate.source_id,
-                "cycle_id": candidate.cycle_id,
-                "model_id": candidate.model_id,
-                "run_id": candidate.run_id,
-                "candidate_id": candidate.candidate_id,
-                "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
-            },
+    return stale_init_state_id, expected_init_state_id
+
+
+def _completed_forecast_cycle_quarantine_state(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    forcing_package_uri: str | None,
+) -> dict[str, Any]:
+    """A ``complete`` ``forecast_cycle`` that skips as ``terminal_completed_cycle``.
+
+    ``copyback_evidence`` deliberately carries no ``copyback_source_uri``: the
+    forcing witness guard also walks a copyback leg, and with a configured
+    ``OBJECT_STORE_ROOT`` the directory-shaped ``s3://.../output/`` uri is not
+    probeable and would land ``missing_copyback_source`` (design D2 step 3).
+    """
+
+    state: dict[str, Any] = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "created",
+        "pipeline_status": "created",
+        "forecast_cycle": {
+            "cycle_id": candidate.cycle_id,
+            "source_id": candidate.source_id,
+            "cycle_time": "2026-05-21T06:00:00Z",
+            "status": "complete",
         },
+        "copyback_evidence": {
+            "stage": "copyback",
+            "status": "succeeded",
+            "source_id": candidate.source_id,
+            "cycle_id": candidate.cycle_id,
+            "model_id": candidate.model_id,
+            "run_id": candidate.run_id,
+            "candidate_id": candidate.candidate_id,
+        },
+    }
+    if forcing_package_uri is not None:
+        state["forcing_package_uri"] = forcing_package_uri
+        # Journal-materialized row for the same uri, so the witness names its tier
+        # (``forcing_provenance.source``) and a consulted guard is observable.
+        state["forcing_version"] = {
+            "forcing_version_id": candidate.forcing_version_id,
+            "forcing_package_uri": forcing_package_uri,
+            "forcing_version_source": "journal",
+        }
+    return state
+
+
+def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§8.7 quarantine survives the real ``build_candidates`` routing (#1157 E7).
+
+    Same fixture shape as the copyback skip above — a ``complete``
+    ``forecast_cycle`` with matching copyback evidence, which without the
+    quarantine skips as ``terminal_completed_cycle`` — but the journal records
+    a stale predecessor.  Driving it through ``run_once`` (not a unit call on
+    ``_journal_predecessor_identity_quarantine``) is the point: it pins that
+    the quarantine is wired into the candidate construction path and that the
+    demoted skip really leaves ``skipped_candidates`` empty.
+
+    #1844: the original fixture recorded NO forcing for the candidate and set no
+    ``OBJECT_STORE_ROOT``, so the ``submitted_count == 1`` it asserted was a
+    forecast retry emitted without any per-model forcing witness, which is the
+    #1844 bug.  The fixture now seeds this model's own forcing package, binds it
+    in state, and drops the directory-shaped ``copyback_source_uri`` (design D2);
+    every original assertion is kept.  The no-forcing twin below pins the blocker.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    stale_init_state_id, expected_init_state_id = _stale_journal_identity_tokens(candidate)
+    _seed_recorded_forcing_packages(
+        monkeypatch,
+        tmp_path / "recorded-forcing-object-store",
+        _RECORDED_FORCING_PACKAGE_URI,
+    )
+    active_repository = _JournalIdentityRawCandidateStateRepository(
+        _completed_forecast_cycle_quarantine_state(candidate, forcing_package_uri=_RECORDED_FORCING_PACKAGE_URI),
         recorded_init_state_id=stale_init_state_id,
     )
     orchestrator = FakeProductionOrchestrator()
@@ -11225,6 +11247,147 @@ def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_e
         "quarantined_skip_reason": "terminal_completed_cycle",
     }
     assert result.evidence["counts"]["submitted_count"] == 1
+    # #1844: the retry was emitted after the witness guard consulted THIS model's package.
+    assert state_evidence["forcing_provenance"]["source"] == "journal"
+
+
+def test_completed_forecast_cycle_stale_journal_identity_without_own_forcing_blocks_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1844: the quarantine retry is an emitting point for a ``forecast`` restart.
+
+    Same stale-lineage quarantine as above, but nothing witnesses this model's own
+    forcing (store configured and empty, no recorded reference).  Before #1844 the
+    ``strict_warm_start is None`` lane emitted the quarantine retry unguarded; it
+    must now land on the #1843 stable missing-forcing blocker, submit nothing, and
+    stay drainable by the forcing backfill.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    stale_init_state_id, _expected_init_state_id = _stale_journal_identity_tokens(candidate)
+    _seed_recorded_forcing_packages(monkeypatch, tmp_path / "empty-forcing-object-store")
+    active_repository = _JournalIdentityRawCandidateStateRepository(
+        _completed_forecast_cycle_quarantine_state(candidate, forcing_package_uri=None),
+        recorded_init_state_id=stale_init_state_id,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert result.evidence["skipped_candidates"] == []
+    (blocked,) = result.evidence["blocked_candidates"]
+    assert blocked["reason"] in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    blocker_evidence = blocked["state_evidence"]
+    assert "forcing_provenance" in blocker_evidence
+    # The quarantine origin stays visible on the blocker (runbook hop 5).
+    assert blocker_evidence["artifact_guard"]["planned_retry_reason"] == "journal_predecessor_identity_mismatch"
+    assert "journal_predecessor_identity" in blocker_evidence
+    # D1 drainability: the verbatim #1843 blocker satisfies the stable predicate the
+    # forcing backfill / repair channel keys on.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    assert (
+        _decision_is_stable_missing_forcing_blocker(
+            CandidateStateDecision("blocked", blocked["reason"], blocker_evidence)
+        )
+        is True
+    )
+
+
+def test_manual_retry_candidate_with_stale_journal_identity_is_not_rewritten_by_quarantine_witness(
+    tmp_path: Path,
+) -> None:
+    """#1844 acceptance 4: ``manual_retry_requested`` is outside the quarantine witness gate.
+
+    The gate sits inside the ``action == "skip"`` branch and a manual retry is a
+    ``retry``, so the quarantine (and the witness wrapped around it) does not reach it
+    (design D1, static reading).
+    Pinned end to end with a stale journal lineage AND no forcing witness: the
+    candidate keeps its manual-retry decision and submits, as it does without the
+    journal accessor (see the placeholder-bypass test above).
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    stale_init_state_id, _expected_init_state_id = _stale_journal_identity_tokens(candidate)
+    failed_job_id = "job_cycle_gfs_2026052106_model_a_forecast_retry_3"
+    active_repository = _JournalIdentityRawCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": "created",
+            "pipeline_status": "permanently_failed",
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    **identity,
+                    "job_id": failed_job_id,
+                    "status": "permanently_failed",
+                    "stage": "forecast",
+                    "retry_count": 3,
+                    "error_code": "NODE_FAILURE",
+                    "updated_at": "2026-05-21T06:57:16Z",
+                }
+            ],
+            "pipeline_events": [
+                {
+                    "event_id": 101,
+                    "entity_id": failed_job_id,
+                    "event_type": "permanently_failed",
+                    "status_from": "failed",
+                    "status_to": "permanently_failed",
+                    "created_at": "2026-05-21T06:57:16Z",
+                    "details": {**identity, "final_retry_count": 3, "last_error": "NODE_FAILURE"},
+                },
+                {
+                    "event_id": 102,
+                    "entity_id": failed_job_id,
+                    "event_type": "retry",
+                    "status_from": "permanently_failed",
+                    "status_to": "manual_repair_requested",
+                    "created_at": "2026-05-21T07:06:07Z",
+                    "details": {
+                        **identity,
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 4,
+                        "previous_job_id": failed_job_id,
+                        "prior_failure_reason": "NODE_FAILURE",
+                    },
+                },
+            ],
+        },
+        recorded_init_state_id=stale_init_state_id,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["decision"] == "manual_retry"
+    assert state_evidence["reason"] == "manual_retry_requested"
+    assert "journal_predecessor_identity" not in state_evidence
+    assert "forcing_provenance" not in state_evidence
 
 
 def test_completed_forecast_cycle_copyback_identity_mismatch_does_not_skip(
@@ -34537,6 +34700,29 @@ class RawCandidateStateRepository(FakeActiveRepository):
     ) -> dict[str, Any]:
         del source_id, cycle_time, model_id, run_id, forcing_version_id, candidate_id
         return dict(self.state)
+
+
+class _JournalIdentityRawCandidateStateRepository(RawCandidateStateRepository):
+    """The candidate-state double plus the journal identity accessors.
+
+    The quarantine reads the recorded ``init_state_id`` JOURNAL-ONLY, off
+    the repository by ``getattr``, so both surfaces have to live on the
+    same object for the real wiring to reach a judgement.
+    """
+
+    def __init__(self, state: dict[str, Any], *, recorded_init_state_id: str) -> None:
+        super().__init__(state)
+        self.recorded_init_state_id = recorded_init_state_id
+
+    def completed_pipeline_init_state_id(self, *, source_id: str, cycle_time: datetime, model_id: str) -> str | None:
+        del source_id, cycle_time, model_id
+        return self.recorded_init_state_id
+
+    def completed_pipeline_init_state_id_occurrences(
+        self, *, source_id: str, cycle_time: datetime, model_id: str, init_state_id: str
+    ) -> int:
+        del source_id, cycle_time, model_id, init_state_id
+        return 0
 
 
 class _PerModelCandidateStateRepository(FakeActiveRepository):
