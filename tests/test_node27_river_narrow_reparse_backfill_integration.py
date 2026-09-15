@@ -9,6 +9,7 @@ route ``legacy``, status ``published``. The runner must bring it back.
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -348,6 +349,52 @@ def test_compressed_narrow_overlap_is_decompressed_within_budget(world: Any, tmp
     assert _scalar(connection, compressed) == 0
     assert _state(connection, "run_fresh")["narrow_rows"] == _SEGMENTS * _HOURS
     assert _state(connection, "run_neighbour")["narrow_rows"] == _SEGMENTS * _HOURS
+
+
+def test_missing_chunks_are_seeded_serially_before_concurrency(world: Any, tmp_path: Path) -> None:
+    connection, settings, root = world
+    starts = [_FRESH - timedelta(days=offset) for offset in (0, 1, 2, 3, 4, 5)]
+    for index, start in enumerate(starts):
+        _legacy_run(connection, settings.database_url, root, f"run_day_{index}", start)
+    _execute(connection, "SELECT drop_chunks('hydro.river_timeseries', older_than => now() + interval '30 days')")
+    assert _scalar(connection, "SELECT count(*) FROM timescaledb_information.chunks "
+                               "WHERE hypertable_name = 'river_timeseries'") == 0
+    code, receipt = _run(settings, tmp_path, concurrency=4)
+    assert code == backfill.EXIT_COMPLETE, receipt
+    assert receipt["dispositions"] == {"reparsed": 6}
+    assert 1 <= len(receipt["seed_runs"]) <= 6
+    records = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    assert [record["run_id"] for record in records[: len(receipt["seed_runs"])]] == receipt["seed_runs"]
+
+
+def test_lock_timeout_is_requeued_not_failed(world: Any, tmp_path: Path) -> None:
+    import threading
+
+    connection, settings, root = world
+    _legacy_run(connection, settings.database_url, root, "run_fresh", _FRESH)
+    holder = psycopg2.connect(settings.database_url)
+    held = threading.Event()
+
+    def _hold() -> None:
+        with holder.cursor() as cursor:
+            cursor.execute("LOCK TABLE hydro.hydro_run IN SHARE ROW EXCLUSIVE MODE")
+            held.set()
+            time.sleep(backfill.LOCK_TIMEOUT_MS / 1000 + 3)
+        holder.commit()
+
+    thread = threading.Thread(target=_hold)
+    thread.start()
+    try:
+        assert held.wait(10)
+        code, receipt = _run(settings, tmp_path, concurrency=1, max_failures=1)
+    finally:
+        thread.join()
+        holder.close()
+    assert code == backfill.EXIT_COMPLETE, receipt
+    assert receipt["dispositions"] == {"reparsed": 1}
+    assert receipt["transient_retries"] >= 1
+    first = json.loads((tmp_path / "runs.jsonl").read_text().splitlines()[0])
+    assert (first["disposition"], first["error_code"], first["attempt"]) == ("transient", "55P03", 1)
 
 
 def test_refusals_change_nothing(world: Any, tmp_path: Path) -> None:

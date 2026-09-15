@@ -32,7 +32,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ from packages.common.node27_timeseries_lifecycle_lock import (  # noqa: E402
     release_timeseries_lifecycle_lock,
 )
 
-TOOL_VERSION = "node27-river-narrow-reparse-backfill/1"
+TOOL_VERSION = "node27-river-narrow-reparse-backfill/2"
 GO_TOKEN = "Danker"
 APPLICATION_NAME = "nhms-node27-river-narrow-reparse-backfill"
 ELIGIBLE_STATUSES = ("published", "superseded")
@@ -56,6 +56,10 @@ STATEMENT_TIMEOUT_MS = 600_000
 LOCK_TIMEOUT_MS = 10_000
 DEFAULT_MAX_FAILURES = 10
 DEFAULT_MAX_DECOMPRESS_BYTES = 20 * 1024**3
+# Deadlock / lock_not_available: lock-order collisions with a concurrent writer,
+# not a property of the run. Requeued, not counted against the failure budget.
+TRANSIENT_PGCODES = ("40P01", "55P03")
+MAX_TRANSIENT_ATTEMPTS = 3
 
 EXIT_COMPLETE = 0
 EXIT_FAILED = 1
@@ -95,6 +99,12 @@ WHERE c.hypertable_schema = 'hydro'
   AND c.range_end > %(window_start)s
   AND c.range_start <= %(window_end)s
 ORDER BY c.range_start
+"""
+
+NARROW_CHUNK_DAYS_SQL = """
+SELECT range_start
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
 """
 
 LOCK_RUN_SQL = """
@@ -293,6 +303,7 @@ def build_plan(connection: Any, settings: Settings, end_time_after: datetime | N
         candidates = fetch_candidates(connection, settings.window_days, end_time_after)
         overlap = fetch_compressed_overlap(connection, candidates)
         routes = fetch_route_counts(connection, settings.window_days)
+        seeds = select_seed_runs(candidates, fetch_existing_chunk_days(connection))
     finally:
         connection.rollback()
     missing = artifact_problems(settings, candidates)
@@ -308,6 +319,7 @@ def build_plan(connection: Any, settings: Settings, end_time_after: datetime | N
         "newest_cycle": _iso(candidates[0]["cycle_time"]) if candidates else None,
         "oldest_cycle": _iso(candidates[-1]["cycle_time"]) if candidates else None,
         "legacy_route_counts": routes,
+        "seed_runs": len(seeds),
         "artifact_missing": len(missing),
         "artifact_missing_by_code": dict(Counter(missing.values())),
         "artifact_missing_runs": sorted(missing),
@@ -391,11 +403,60 @@ def reparse_one(settings: Settings, run_id: str, *, connect_fn: Callable[[str], 
         return Outcome(run_id, "reparsed", rows_written=result.rows_written, seconds=time.monotonic() - started)
     except Exception as error:  # every failure is recorded; the transaction never commits
         _rollback_quietly(connection)
+        transient = transient_pgcode(error)
+        if transient is not None:
+            return Outcome(run_id, "transient", seconds=time.monotonic() - started, error_code=transient,
+                           error=str(error)[:500])
         code = error.error_code if isinstance(error, OutputParsingError) else type(error).__name__
         return Outcome(run_id, "failed", seconds=time.monotonic() - started, error_code=code,
                        error=str(error)[:500])
     finally:
         _close_quietly(connection)
+
+
+def transient_pgcode(error: BaseException) -> str | None:
+    """SQLSTATE of a deadlock/lock timeout anywhere in the cause chain (the parser wraps DB errors)."""
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        code = getattr(current, "pgcode", None)
+        if code in TRANSIENT_PGCODES:
+            return str(code)
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _utc_days(start: datetime, end: datetime) -> set[date]:
+    first = start.astimezone(UTC).date()
+    last = end.astimezone(UTC).date()
+    return {first + timedelta(days=offset) for offset in range((last - first).days + 1)}
+
+
+def select_seed_runs(candidates: Sequence[Mapping[str, Any]], existing_days: set[date]) -> list[str]:
+    """Few runs whose facts create every missing one-day narrow chunk.
+
+    Creating a chunk adds its foreign keys, which takes SHARE ROW EXCLUSIVE on
+    ``hydro.hydro_run``; concurrent reparse transactions hold ROW EXCLUSIVE on it
+    (route flip) for a whole parse, so concurrent chunk creation deadlocks. Seeds
+    run one at a time before any concurrency, so later runs only hit existing chunks.
+    """
+
+    spans = [(str(row["run_id"]), _utc_days(row["start_time"], row["end_time"])) for row in candidates]
+    uncovered = set().union(*(days for _run, days in spans)) - existing_days if spans else set()
+    seeds: list[str] = []
+    while uncovered:
+        target = min(uncovered)
+        covering = [(len(days & uncovered), run_id, days) for run_id, days in spans if target in days]
+        _gain, run_id, days = max(covering, key=lambda item: (item[0], item[1]))
+        seeds.append(run_id)
+        uncovered -= days
+    return seeds
+
+
+def fetch_existing_chunk_days(connection: Any) -> set[date]:
+    return {row["range_start"].astimezone(UTC).date() for row in _fetch(connection, NARROW_CHUNK_DAYS_SQL, {})}
 
 
 def _skip_disposition(row: Mapping[str, Any] | None) -> str | None:
@@ -503,29 +564,51 @@ def execute_run(
             connection.rollback()
             receipt["decompressed_chunks"] = decompress_overlap(connection, overlap, max_decompress_bytes)
             receipt["legacy_route_counts_before"] = fetch_route_counts(connection, settings.window_days)
+            seeds = select_seed_runs(candidates, fetch_existing_chunk_days(connection))
             connection.rollback()
         finally:
             _close_quietly(connection)
         receipt["candidates"] = len(candidates)
         receipt["estimated_rows"] = estimate_rows(candidates)
+        receipt["seed_runs"] = seeds
         counts: Counter[str] = Counter()
         rows_written = 0
+        retries = 0
+        attempts: Counter[str] = Counter()
         jsonl = receipt_dir / "runs.jsonl"
-        pending = [str(row["run_id"]) for row in candidates]
+        seed_set = set(seeds)
+        pending = seeds + [str(row["run_id"]) for row in candidates if str(row["run_id"]) not in seed_set]
         with ProcessPoolExecutor(max_workers=concurrency, initializer=_worker_init) as pool:
-            in_flight: set[Future[Outcome]] = set()
+            in_flight: dict[Future[Outcome], str] = {}
             while pending or in_flight:
-                while pending and len(in_flight) < concurrency and _may_dispatch(stop, deadline, counts,
-                                                                               max_failures):
-                    in_flight.add(pool.submit(reparse_one, settings, pending.pop(0), connect_fn=connect_fn))
+                while pending and len(in_flight) < _dispatch_cap(concurrency, seed_set, pending, in_flight) \
+                        and _may_dispatch(stop, deadline, counts, max_failures):
+                    run_id = pending.pop(0)
+                    in_flight[pool.submit(reparse_one, settings, run_id, connect_fn=connect_fn)] = run_id
                 if not in_flight:
                     break
-                done, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+                done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
                 for future in done:
+                    run_id = in_flight.pop(future)
                     outcome = future.result()
-                    counts[outcome.disposition] += 1
+                    record = {"at": _now(), **outcome.as_json()}
+                    if outcome.disposition == "transient":
+                        attempts[run_id] += 1
+                        record["attempt"] = attempts[run_id]
+                        if attempts[run_id] < MAX_TRANSIENT_ATTEMPTS:
+                            retries += 1
+                            # A seed keeps its place so chunk creation stays serialized.
+                            if run_id in seed_set:
+                                pending.insert(0, run_id)
+                            else:
+                                pending.append(run_id)
+                            _append_jsonl(jsonl, record)
+                            continue
+                        record["disposition"] = "failed"
+                    counts[record["disposition"]] += 1
                     rows_written += outcome.rows_written
-                    _append_jsonl(jsonl, {"at": _now(), **outcome.as_json()})
+                    _append_jsonl(jsonl, record)
+        receipt["transient_retries"] = retries
         receipt["dispositions"] = dict(counts)
         receipt["rows_written"] = rows_written
         receipt["not_dispatched"] = len(pending)
@@ -549,6 +632,14 @@ def execute_run(
         status = EXIT_COMPLETE
     receipt["result"] = {EXIT_COMPLETE: "complete", EXIT_FAILED: "failed", EXIT_PARTIAL: "partial"}[status]
     return status, receipt
+
+
+def _dispatch_cap(concurrency: int, seeds: set[str], pending: Sequence[str], in_flight: Mapping[Any, str]) -> int:
+    """One worker while any seed is pending or running; full concurrency afterwards."""
+
+    if any(run_id in seeds for run_id in pending) or any(run_id in seeds for run_id in in_flight.values()):
+        return 1
+    return concurrency
 
 
 def _may_dispatch(stop: Mapping[str, Any], deadline: datetime | None, counts: Counter[str], max_failures: int) -> bool:
