@@ -72,7 +72,7 @@
 - **退出码**：
   - 列表非空为 `1`；
   - 列表为空，但有 pass 的 `limit.candidate_lists == "dropped"`（`scheduler_evidence_payload.py:219-222`）时为 `3`（无法判定），否则会在最拥堵的 pass 上假阴性（F7）；
-  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）。Phase 7 F-1 修订：size-fallback 产物（`resource_limit_blocked` + `limit.pre_limit_status`）的 `source_cycles` 被 `bounded_evidence_payload` 无条件清空（`scheduler_evidence_payload.py:1129`），看不到 breaker 释放的 cycle，因此不计为可判定 pass（进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`），但其 summarized `blocked_candidates` 仍照常列出；
+  - 其余空列表为 `0`，但窗口内必须至少有一个可判定 pass（可读且 status 属于「候选构造已运行」的封闭 allowlist），否则为 `3`；不可判定的 pass 分别进 `unreadable_passes` / `non_evaluating_passes:[{pass,status}]`（round 1 cand-03 修订，推翻原「unreadable 只呈现」）。Phase 7 F-1 修订：size-fallback 产物（`resource_limit_blocked` + `limit.pre_limit_status`）的 `source_cycles` 被 `bounded_evidence_payload` 无条件清空（`scheduler_evidence_payload.py:1129`），看不到 breaker 释放的 cycle，因此不计为可判定 pass（进 `non_evaluating_passes`，reason `size_fallback_source_cycles_absent`），但其 summarized `blocked_candidates` 仍照常列出。Round 3 r3-01 修订：无待办时，若窗口内有 size-fallback pass 比最新的可判定 pass 更新，也为 `3`——breaker 可能在那个可判定 pass 之后才 engage，而 fallback 清空了唯一能看到它的 `source_cycles`；可判定 pass 比所有 fallback 更新时仍为 `0`（释放状态持续到 backfill 完成或确认，更新的可判定 pass 必然显示它）；
   - root 缺失或不可读为 `2`。
 - **bounded 白名单扩容**（与 D3 共用同一次编辑）：
   - 在 `_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS` 追加 `retry_attempt ← (retry_policy, attempt)`、`retry_limit ← (retry_policy, retry_limit)`、`retry_occurrences ← (retry_policy, occurrences)`、`manual_retry_required ← (retry_policy, manual_retry_required)`；
@@ -135,7 +135,7 @@
 - **前置条件**（不满足即 exit 2，不写）：
   1. journal 对 `(source, cycle, model)` 有 completed identity，即 `completed_pipeline_init_state_identity` 非 `None`。
   2. 若 decision 为 breaker：新增必填参数 `--recorded-init-state-id`。用 journal 现值计算 `completed_pipeline_init_state_id` 与 `completed_pipeline_init_state_id_occurrences(init_state_id=recorded)`，要求 token 与参数相等（写侧意图前置条件）、breaker engaged（阈值现为 1，见 `scheduler_generation.py:1487`），并要求 `--pin` 等于**模型级 quarantine rerun 计数**（见下文「实现后修订」）。
-  3. 若 decision 为预算：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
+  3. 若 decision 为预算：（Round 3 修订，取代下文旧文）要求 `--pin` 等于**模型级预算重入计数**（journal-direct，见「Round 3 修订」），不再与 attempt 比较，#2400 在本 PR 关闭。旧文：写侧不重算 attempt，只要求 `pin >= 1`。round 1 cand-02 指出，大于现值的 pin 不是惰性的，而是会**预授权**：attempt 走到该值时就会放行。实现者核实，读侧 attempt 先经 `_candidate_authoritative_stage_retry_attempt_state` 按候选身份过滤（`scheduler_state_identity_filter.py:271-310`，身份字段来自 `scheduler_state_evidence_owner.py:64-80`），而 CLI 只有 `(source, cycle, model)`，在写侧复算会形成第二套可能分叉的推导。因此本 PR 不修（DEFER，#2400）。runbook 要求 operator 先 dry-run，并用 `list-operator-actions` 最新 pass 的 `attempt` 核对 pin；写错时停止并上报，不要再写一条覆盖。
 - **写入**：
   - `insert_pipeline_event(entity_type="forecast_cycle", entity_id=<cycle_id>, event_type="operator_reentry_confirmation", status_from=None, status_to="confirmed", details={model_id, decision, pin, operator, reason, request_id, recorded_init_state_id}`，其中 `recorded_init_state_id` 仅 breaker 必填)`；
   - `cycle_id` 用 `_cycle_id_for_file_source`（`file_orchestration_journal.py:13945`）构造，不手拼；
@@ -169,12 +169,12 @@
   - 该 retry 已在两处白名单内；非 strict 车道仍经 `:625-634` 的 #1844 forcing 见证闸（调用点在本函数之后，无需改动）。
   - **quarantine provenance**：该 retry 与普通 quarantine retry 走同一铸造与提交路径，所以 rerun master 照常戳 `journal_predecessor_quarantine_rerun_model_ids`。实现者须用测试核实这一点，不能只凭推断。
 - **预算（#1768）**：`_strict_warm_start_terminal_mismatch_decision` 增加一个可选参数 `reentry_match`（callable 或 `None`，由调用点 `:580` 以 context 与 candidate 绑定谓词后传入；为 `None` 时逐字节不变）。
-  - 在 `attempt >= retry_limit` 分支里，`reentry_match(pin=attempt)` 命中时，返回既有的 `retry` / `strict_warm_start_terminal_init_state_mismatch` 决策，evidence 追加同形 `operator_reentry_confirmation`；
+  - 在 `attempt >= retry_limit` 分支里，`reentry_match(pin=模型级预算重入计数)` 命中时（Round 3 修订；原为 `pin=attempt`），返回既有的 `retry` / `strict_warm_start_terminal_init_state_mismatch` 决策，evidence 追加同形 `operator_reentry_confirmation`；
   - 随后照常经 `:587` 见证闸。
 - **严格相等**：pin 与现值必须严格相等，不接受 `>=` / `<=`。
 - **一次授权一次重入（为什么能自动失效）**：
   - breaker：放行后，rerun 无论记录哪个 token，只要以带 provenance 的 master 完成，模型级 rerun 计数就 +1，pin 不再匹配，breaker 重新接管（F2 变体同样收敛）。fixture review 已核实 provenance 戳由 `state_evidence.decision == "retry_journal_predecessor_identity_mismatch"` 触发（`accepted_submit_identity.py:1186-1208`），重入 retry 复用同一 evidence。
-  - 预算：放行后，rerun 行的 `_retry_<n>` 使 attempt +1，pin 不再匹配，再次 `attempt >= limit` 即回到 `blocked`。
+  - 预算：（Round 3 修订）放行的 retry 在 reservation 时于 cohort master 戳预算重入 provenance，模型级预算重入计数 +1，pin 不再匹配，回到 `blocked`。原文「rerun 行的 `_retry_<n>` 使 attempt +1」不成立：`_next_retry_attempt_for_stage` 只看同 job-id 前缀，重入 mint 落在与耗尽预算的 retry 不同的前缀下时 suffix 从头计，一次确认可重入多次（r3-02）。
   - 放行到 rerun 完成之间，候选处于 active/非 completed 状态，活跃判定先于 terminal skip（`scheduler_state_decision.py:193-221`），不会再次进入铸造点。这一点由 D.4 与 D.6 的中间 pass 测试钉住。
 - **§8.7 read-only invariant**：三个消费点都只读 accessor，评分/过滤面不写 journal。discovery 侧的 quarantine **filter**（`_journal_predecessor_identity_is_stale`）不读确认物，保持只能 DECLINE；读确认物的只有槽位释放判断，而它的作用只是「不释放」，不会 ADMIT completion。
 - **spec 冲突处理（F4）**：`job-retry-mechanism`「Strict-warm-start terminal mismatch retries SHALL respect a stage-scoped budget」与 `file-state-snapshot-index`「A non-convergent quarantine SHALL be broken …」两条 requirement 以 MODIFIED delta 写入确认物例外与槽位保留。
@@ -187,6 +187,13 @@
   - 修订：pin 现值改为**模型级 quarantine rerun 计数**——对 `(source, cycle, model)` 统计 provenance 命名该模型的 cohort master 数，不比较 identity。round 1 cand-01 进一步去掉「已完成」限定：不看终态，rerun 被接受提交即 +1。只读 accessor `quarantine_rerun_count`（journal-direct，`_cycle_rows`），读失败返回 `None`（谓词视为不匹配）；`completed_pipeline_init_state_id_occurrences` 行为不变。
   - `--recorded-init-state-id` 保留为写侧意图前置条件；读侧不再比较 token。
   - `hydro_run` 权威冻结本身是既有缺陷（§8.7 在 node-22 上对「rerun 得到正确 lineage」的情形也无法收敛），按越界规则单独立 issue，不在本批修复。
+
+- **Round 3 修订（review failure retro，shape depth，`.workplans/pr-2398/review/round-3/retro.md`）**：
+  - 共同不变量：fail-closed 的 operator 契约必须键在「每个应消费/应暴露它的事件都会推动」的量上。
+  - 预算臂与 breaker 同形：reservation writer 在 basin 的 retry evidence 带 `operator_reentry_confirmation`（decision 为预算）时，于 cohort MASTER 行戳预算重入 provenance（模型 id 列表）；只读 accessor 统计 provenance 命名该模型的 master 数，不看终态、job id、retry suffix，读失败返回 `None`（谓词视为不匹配）。
+  - 写侧与读侧、dry-run receipt 的 `live.*`、runbook 报告同一个量。
+  - 不改 `_next_retry_attempt_for_stage`；普通 strict retry 跨前缀 attempt 泄漏属既有缺陷，单独立单。
+  - 预算臂的 blocked 判定仍由 stage-scoped attempt 驱动，本修订只改确认物的 pin。
 
 - **evidence 措辞**：两条 blocked evidence 的 `retry_policy` 追加 `operator_reentry_command: "confirm-operator-reentry"` 与 `recovery_runbook: "node22-control-plane-manual-recovery"`，使 `manual_retry_required: true` 指向真实通道。
 

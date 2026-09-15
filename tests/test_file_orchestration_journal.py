@@ -9297,6 +9297,111 @@ def test_quarantine_rerun_count_is_none_when_the_journal_can_not_be_read(tmp_pat
     )
 
 
+def _budget_reentry_master_job(
+    cycle_time: datetime,
+    *,
+    run_suffix: str = "_forecast_model_a",
+    job_suffix: str = "",
+    status: str = "succeeded",
+    budget_reentry_model_ids: list[str] | None = None,
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """A cohort master under the scheduler's per-model run prefix (``cycle_gfs_<stamp><run_suffix>``).
+
+    ``budget_reentry_model_ids=None`` omits the provenance field, the shape of
+    every master that is not a confirmed budget re-entry.
+    """
+    row = _cohort_master_job(
+        cycle_time, status=status, quarantine_rerun_model_ids=quarantine_rerun_model_ids
+    )
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}{run_suffix}"
+    row.update({"job_id": f"job_{run_id}_forecast{job_suffix}", "run_id": run_id, "candidate_id": run_id})
+    if budget_reentry_model_ids is not None:
+        row["strict_warm_start_budget_reentry_model_ids"] = list(budget_reentry_model_ids)
+    return row
+
+
+def _budget_reentry_count(
+    repository: FileOrchestrationJournalRepository, cycle_time: datetime, *, model_id: str = "model_a"
+) -> int | None:
+    return repository.budget_reentry_count(source_id="gfs", cycle_time=cycle_time, model_id=model_id)
+
+
+@pytest.mark.parametrize(
+    ("leg", "expected"),
+    [
+        # Retries that spent the budget, and a quarantine rerun: no budget stamp.
+        ("no_stamp", {"model_a": 0}),
+        ("stamp_names_another_model", {"model_a": 0, "model_b": 1}),
+        # Stamped at acceptance: the terminal outcome does not matter.
+        ("failed_master", {"model_a": 1}),
+        # r3-02: neither the run prefix nor the retry suffix matters.
+        ("two_across_prefixes", {"model_a": 2}),
+        ("master_and_terminal_copy", {"model_a": 1}),
+        ("no_journal", {"model_a": 0}),
+    ],
+)
+def test_budget_reentry_count_counts_stamped_masters_whatever_their_status_prefix_or_suffix(
+    tmp_path: Path, leg: str, expected: dict[str, int]
+) -> None:
+    """r3-02: the budget confirmation pin -- stamped cohort masters, journal-direct."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    model_ids = tuple(expected)
+    jobs: list[dict[str, Any]] = []
+    if leg == "no_stamp":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, run_suffix="_full_model_a", job_suffix="_retry_1_retry_2"),
+            _budget_reentry_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+        ]
+    elif leg == "stamp_names_another_model":
+        jobs = [_budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_b"])]
+    elif leg == "failed_master":
+        jobs = [_budget_reentry_master_job(cycle_time, status="failed", budget_reentry_model_ids=["model_a"])]
+    elif leg == "two_across_prefixes":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"]),
+            _budget_reentry_master_job(
+                cycle_time, run_suffix="_full_model_a", job_suffix="_retry_1", budget_reentry_model_ids=["model_a"]
+            ),
+        ]
+    elif leg == "master_and_terminal_copy":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"]),
+            _reconciled_terminal_job(cycle_time),
+        ]
+
+    repository = (
+        FileOrchestrationJournalRepository(tmp_path / "journal")
+        if leg == "no_journal"
+        else _breaker_journal(tmp_path, cycle_time, jobs, model_ids=model_ids)
+    )
+
+    assert {model_id: _budget_reentry_count(repository, cycle_time, model_id=model_id) for model_id in model_ids} == (
+        expected
+    )
+    if leg == "no_stamp":
+        # The two provenances never stand in for each other.
+        assert _quarantine_rerun_count(repository, cycle_time) == 1
+
+
+def test_budget_reentry_count_is_none_when_the_journal_can_not_be_read(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path, cycle_time, [_budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"])]
+    )
+    assert _budget_reentry_count(repository, cycle_time) == 1
+    latest = tmp_path / "journal" / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json"
+    latest.write_text("{not json\n", encoding="utf-8")
+
+    assert _budget_reentry_count(FileOrchestrationJournalRepository(tmp_path / "journal"), cycle_time) is None
+    assert (
+        FileOrchestrationJournalRepository(tmp_path / "journal").budget_reentry_count(
+            source_id="not a source/..", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "leg",
     [

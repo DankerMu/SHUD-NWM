@@ -223,6 +223,16 @@ INIT_STATE_IDENTITY_FIELD = "init_state_identities"
 QUARANTINE_RERUN_PROVENANCE_FIELD = "journal_predecessor_quarantine_rerun_model_ids"
 #: The candidate-state decision whose reruns carry the provenance stamp.
 JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION = "retry_journal_predecessor_identity_mismatch"
+#: Models of this cohort whose submission RE-ENTERS a spent strict warm-start
+#: retry budget on an operator confirmation (#1768, round 3 r3-02).  Same
+#: capture-once reservation shape as the quarantine provenance; it is the pin a
+#: budget confirmation is compared with, because the stage-scoped attempt does
+#: not move when the re-entry mints under a different job-id prefix.
+BUDGET_REENTRY_PROVENANCE_FIELD = "strict_warm_start_budget_reentry_model_ids"
+#: The retry decision a confirmed budget re-entry is emitted as ...
+STRICT_WARM_START_TERMINAL_RETRY_DECISION = "retry_strict_warm_start_terminal_init_state_mismatch"
+#: ... and the blocked decision its ``operator_reentry_confirmation`` names.
+STRICT_WARM_START_BUDGET_BLOCKED_DECISION = "blocked_strict_warm_start_init_state_mismatch"
 INIT_STATE_IDENTITY_ENTRY_FIELDS = frozenset(
     {
         "array_task_id",
@@ -302,6 +312,9 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     # decided by the basins this reservation was built from and must never be
     # rewritten afterwards, or the breaker could be armed retroactively.
     QUARANTINE_RERUN_PROVENANCE_FIELD,
+    # Same capture-once shape (r3-02): a rewritten budget re-entry stamp would
+    # move the confirmation pin after the fact.
+    BUDGET_REENTRY_PROVENANCE_FIELD,
 )
 
 # The derived per-model row's own frozen evidence (#1187). Deliberately
@@ -855,6 +868,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     normalized[QUARANTINE_RERUN_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
         normalized.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
     )
+    normalized[BUDGET_REENTRY_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
+        normalized.get(BUDGET_REENTRY_PROVENANCE_FIELD)
+    )
     decision = normalized.get("reconciliation_decision")
     source = normalized.get("reconciliation_source")
     matched_id = normalized.get("matched_slurm_job_id")
@@ -1208,6 +1224,35 @@ def canonical_quarantine_rerun_model_ids(*, basins: Sequence[Mapping[str, Any]])
     return tuple(model_ids)
 
 
+def canonical_budget_reentry_model_ids(*, basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Project which basins of this cohort re-enter a spent strict warm-start budget (r3-02).
+
+    Only a basin whose ``state_evidence`` is the strict warm-start terminal
+    retry AND carries an ``operator_reentry_confirmation`` naming the budget's
+    blocked decision is listed.  An ordinary strict retry below the budget has
+    no confirmation block; a confirmed §8.7 breaker re-entry names the breaker
+    decision.  Neither is stamped.  The list shape (and its normalizer) is the
+    quarantine provenance's.
+    """
+
+    model_ids: list[str] = []
+    for basin in basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, Mapping):
+            continue
+        if state_evidence.get("decision") != STRICT_WARM_START_TERMINAL_RETRY_DECISION:
+            continue
+        confirmation = state_evidence.get("operator_reentry_confirmation")
+        if not isinstance(confirmation, Mapping):
+            continue
+        if confirmation.get("decision") != STRICT_WARM_START_BUDGET_BLOCKED_DECISION:
+            continue
+        model_id = str(basin.get("model_id") or "")
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return tuple(model_ids)
+
+
 def normalize_quarantine_rerun_model_ids(value: Any) -> list[str]:
     """Return the durable, de-duplicated §8.7 quarantine-rerun model list.
 
@@ -1240,6 +1285,7 @@ def init_state_identity_for_task(value: Any, array_task_id: Any) -> dict[str, An
 
 __all__ = (
     "ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS",
+    "BUDGET_REENTRY_PROVENANCE_FIELD",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
@@ -1276,6 +1322,7 @@ __all__ = (
     "apply_accepted_submit_transition",
     "canonical_forecast_cohort_init_state_identities",
     "canonical_forecast_cohort_members",
+    "canonical_budget_reentry_model_ids",
     "canonical_forecast_stage",
     "canonical_quarantine_rerun_model_ids",
     "forecast_cohort_digest",

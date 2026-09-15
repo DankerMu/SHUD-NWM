@@ -57057,7 +57057,7 @@ def test_breaker_reentry_without_the_models_own_forcing_lands_on_the_missing_for
 
 # ---------------------------------------------------------------------------
 # #1768: the strict warm-start retry budget re-enters ONLY through a confirmation
-# pinned to the current attempt.  Strict lane, backfill enabled, CONFLICT
+# pinned to the live budget re-entry count.  Strict lane, backfill enabled, CONFLICT
 # geometry (the journal-recorded init state disagrees with the selected strict
 # state, so discovery keeps the cycle a gap holding the slot).  Driven through
 # the real discovery and candidate-construction seams over a REAL journal;
@@ -57207,7 +57207,7 @@ def _budget_confirm_argv(root: Path, *, pin: int) -> list[str]:
     ]  # fmt: skip
 
 
-def test_budget_reentry_confirmation_pinned_to_the_attempt_runs_once_then_the_budget_reengages(
+def test_budget_reentry_confirmation_pinned_to_the_budget_reentry_count_runs_once_then_the_budget_reengages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -57229,19 +57229,23 @@ def test_budget_reentry_confirmation_pinned_to_the_attempt_runs_once_then_the_bu
     assert policy["operator_reentry_command"] == "confirm-operator-reentry"
     assert policy["recovery_runbook"] == "node22-control-plane-manual-recovery"
 
-    # 5 (stale pin first): a confirmation pinned to a different attempt releases nothing.
-    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=1), capsys)
-    assert code == 0
+    # 5 (stale pin first): a pin other than the live budget re-entry count is
+    # refused on the write side (r3-02) and releases nothing.
+    live_pin = _budget_live_reentry_count(root, capsys)
+    assert live_pin == 0
+    code, stale_receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin + 1), capsys)
+    assert (code, stale_receipt["reason"]) == (2, "pin_mismatch")
     _selected, stale_candidates, stale_blocked, _ = _budget_pass(scheduler())
     assert stale_candidates == []
     assert [item.state_evidence["decision"] for item in stale_blocked] == [
         "blocked_strict_warm_start_init_state_mismatch"
     ]
 
-    # 2. pin == attempt: exactly one retry, the global limit untouched.
-    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=2), capsys)
+    # 2. pin == live count: exactly one retry, the global limit untouched.
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
     assert code == 0
-    _selected, confirmed_candidates, confirmed_blocked, _ = _budget_pass(scheduler())
+    confirmed = scheduler()
+    _selected, confirmed_candidates, confirmed_blocked, _ = _budget_pass(confirmed)
     assert confirmed_blocked == []
     (retry,) = confirmed_candidates
     assert retry.state_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
@@ -57249,24 +57253,46 @@ def test_budget_reentry_confirmation_pinned_to_the_attempt_runs_once_then_the_bu
         "request_id": receipt["request_id"],
         "operator": "ops-oncall",
         "reason": "state index repaired; one more strict rerun",
-        "pin": 2,
+        "pin": live_pin,
         "decision": "blocked_strict_warm_start_init_state_mismatch",
     }
     assert os.environ.get("NHMS_SCHEDULER_RETRY_LIMIT") == retry_limit_env
 
-    # 3. Mid-flight: the rerun row exists but has not finished -> nothing new is admitted.
-    _record_budget_attempt(root, _budget_attempt_row(_BUDGET_RETRY_LIMIT + 1, status="running", slurm_job_id="9001"))
-    _selected, middle_candidates, _middle_blocked, _ = _budget_pass(scheduler())
+    # 3. Mid-flight (on a copy of the journal): the real reservation path has
+    # accepted the rerun but Slurm never finishes it -> nothing new is admitted.
+    import shutil
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    inflight_root = tmp_path / "inflight-journal"
+    shutil.copytree(root, inflight_root)
+    inflight = _budget_real_reentry(
+        tmp_path,
+        monkeypatch,
+        inflight_root,
+        confirmed,
+        confirmed_candidates,
+        slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
+        job_timeout_seconds=0.3,
+    )
+    assert inflight.status not in {"succeeded", "complete"}
+    _selected, middle_candidates, _middle_blocked, _ = _budget_pass(
+        scheduler(FileOrchestrationJournalRepository(inflight_root))
+    )
     assert middle_candidates == []
 
-    # 4. The rerun completes: attempt 3 != pin 2, the budget blocks again.
-    _record_budget_attempt(root, _budget_attempt_row(_BUDGET_RETRY_LIMIT + 1, status="succeeded"))
+    # 4. The rerun completes through the real reservation path: the live count
+    # moved past the pin, the budget blocks again.
+    completed = _budget_real_reentry(tmp_path, monkeypatch, root, scheduler(), confirmed_candidates)
+    assert completed.status == "succeeded"
     _selected, after_candidates, after_blocked, _ = _budget_pass(scheduler())
     assert after_candidates == []
     (after,) = after_blocked
     assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
-    assert after.state_evidence["retry_policy"]["attempt"] == 3
+    assert after.state_evidence["retry_policy"]["attempt"] >= _BUDGET_RETRY_LIMIT
     assert "operator_reentry_confirmation" not in after.state_evidence
+    assert _budget_live_reentry_count(root, capsys) == live_pin + 1
 
 
 def test_budget_reentry_is_inert_on_a_repository_without_the_accessor(
@@ -57281,10 +57307,255 @@ def test_budget_reentry_is_inert_on_a_repository_without_the_accessor(
     root, scheduler = _seed_budget_journal(
         monkeypatch, tmp_path, [_budget_attempt_row(_BUDGET_RETRY_LIMIT, status="succeeded")]
     )
-    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=2), capsys)
+    # r3-02: the live pin is the budget re-entry count (0 here), not the attempt.
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=0), capsys)
     assert code == 0
 
     _selected, candidates, blocked, _skipped = _budget_pass(scheduler(_NoConfirmationAccessorRepository(root)))
+
+    assert candidates == []
+    assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]
+
+
+_BUDGET_FULL_CHAIN_RUN_ID = "cycle_gfs_2026052100_full_model_a"
+
+
+def _budget_full_chain_master_row(job_suffix: str, *, slurm_job_id: str) -> dict[str, Any]:
+    """A full-chain forecast cohort master spent by the automatic retry service.
+
+    Hand-seeded: the strict db-free lane can not drive the chain's own automatic
+    retry loop.  The job-id shape is the one that loop mints -- each retry
+    appends ``_retry_<n>`` to the job it retries (``retry.py:458``,
+    ``file_orchestration_journal.py:10939``), so the second retry of the bare
+    master is ``..._forecast_retry_1_retry_2`` and the stage-scoped attempt is 2.
+    """
+
+    return {
+        "job_id": f"job_{_BUDGET_FULL_CHAIN_RUN_ID}_forecast{job_suffix}",
+        "run_id": _BUDGET_FULL_CHAIN_RUN_ID,
+        "cycle_id": "gfs_2026052100",
+        "model_id": None,
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "slurm_job_id": slurm_job_id,
+    }
+
+
+def _budget_forecast_masters(root: Path) -> list[str]:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    return sorted(
+        str(row["job_id"])
+        for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+
+
+def _budget_real_reentry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    scheduler: ProductionScheduler,
+    candidates: list[Any],
+    *,
+    slurm_client: Any | None = None,
+    job_timeout_seconds: float = 120.0,
+) -> Any:
+    """Hand ``candidates`` to the REAL forecast orchestrator + reservation path on ``root``.
+
+    The handoff basins are the scheduler's own (``_execute_candidates_async``
+    builds them through ``candidate_basin_manifest``; ``run_once`` itself is
+    preflight-blocked in the db-free lane), captured by a fake orchestrator and
+    replayed through ``real_rerun``.  Only system boundaries are trimmed: Slurm
+    is faked, the NFS run-tree copyback is unset, and the chain stops after the
+    forecast stage (publication needs the ``DATABASE_URL`` this lane forbids).
+    The rerun re-records the journal's lead-12 token, so the CONFLICT persists
+    and every later pass re-evaluates the spent budget.
+    """
+
+    from tests.test_operator_reentry_confirmation import real_rerun
+    from tests.test_scheduler_backfill import _init_state_id_for
+
+    capture = FakeProductionOrchestrator()
+    scheduler.orchestrator_factory = lambda _source_id: capture
+    scheduler._execute_candidates_async(candidates)
+    (call,) = capture.calls
+    with monkeypatch.context() as patch:
+        patch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+        return real_rerun(
+            tmp_path,
+            root,
+            [dict(basin) for basin in call["basins"]],
+            recorded_tokens={"model_a": _init_state_id_for(_BUDGET_CYCLE, lead_hours=12)},
+            slurm_client=slurm_client,
+            job_timeout_seconds=job_timeout_seconds,
+            terminal_stage="forecast",
+        )
+
+
+def _budget_live_reentry_count(root: Path, capsys: pytest.CaptureFixture[str]) -> int:
+    """The live pin, read the way the runbook tells an operator to: a dry run's ``live.budget_reentry_count``."""
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    argv = [item for item in _budget_confirm_argv(root, pin=0) if item != "--attest"]
+    _code, receipt, _err = run_confirm(argv, capsys)
+    assert receipt is not None
+    assert receipt["decision"] in {"dry_run", "refused"}, receipt
+    return receipt["live"]["budget_reentry_count"]
+
+
+def _spent_full_chain_budget_rows() -> list[dict[str, Any]]:
+    return [
+        _budget_full_chain_master_row("", slurm_job_id="100"),
+        _budget_full_chain_master_row("_retry_1", slurm_job_id="101"),
+        _budget_full_chain_master_row("_retry_1_retry_2", slurm_job_id="102"),
+    ]
+
+
+def test_budget_reentry_confirmation_is_consumed_even_when_the_rerun_mints_under_another_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r3-02: one budget confirmation re-enters exactly once, whatever job-id prefix the rerun mints under.
+
+    The budget was spent by the full chain's automatic retries
+    (``cycle_..._full_model_a`` prefix, attempt 2 == limit).  A re-entry reserves
+    under the scheduler's ``cycle_..._forecast_model_a`` prefix, whose retry
+    suffix starts over (bare, ``_retry_1``, ``_retry_2``), so the stage-scoped
+    attempt does not move; the confirmation must be consumed anyway.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert entry.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT
+
+    pin = _budget_live_reentry_count(root, capsys)
+    assert pin == 0
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=pin), capsys)
+    assert code == 0, receipt
+
+    # The confirmed pass: exactly one retry, carrying the confirmation, through
+    # the real reservation path.
+    confirmed = scheduler()
+    _selected, candidates, blocked, _skipped = _budget_pass(confirmed)
+    assert blocked == []
+    (retry,) = candidates
+    assert retry.state_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert retry.state_evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    result = _budget_real_reentry(tmp_path, monkeypatch, root, confirmed, candidates)
+    assert result.status == "succeeded"
+    masters = _budget_forecast_masters(root)
+    assert "job_cycle_gfs_2026052100_forecast_model_a_forecast" in masters
+    # Accepted for submission: the live count moved past the pin, and the
+    # consumed pin is refused on the write side too.
+    assert _budget_live_reentry_count(root, capsys) == pin + 1
+    code, stale, _err = run_confirm(_budget_confirm_argv(root, pin=pin), capsys)
+    assert (code, stale["reason"]) == (2, "pin_mismatch")
+
+    # Every later pass: blocked, nothing new reserved.  Without the fix these
+    # passes re-enter again under ``..._forecast_model_a_forecast_retry_1`` and
+    # ``_retry_2`` on the same confirmation.
+    for later_pass in range(3):
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+        assert [item.state_evidence.get("decision") for item in candidates] == [], later_pass
+        (after,) = blocked
+        assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+        assert "operator_reentry_confirmation" not in after.state_evidence
+        assert _budget_forecast_masters(root) == masters
+
+
+def test_budget_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even_if_it_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r3-02: a Slurm-failed confirmed budget re-entry never restores the confirmation.
+
+    The budget re-entry stamp lands on the cohort master when the rerun is
+    accepted, so the count moves 0 -> 1 before the rerun finishes; a failure
+    at the compute layer leaves it there and nothing re-enters again.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0, receipt
+    seeded_masters = _budget_forecast_masters(root)
+
+    confirmed = scheduler()
+    _selected, candidates, _blocked, _skipped = _budget_pass(confirmed)
+    (retry,) = candidates
+    assert retry.state_evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    failed = _budget_real_reentry(
+        tmp_path,
+        monkeypatch,
+        root,
+        confirmed,
+        candidates,
+        slurm_client=FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed"]}),
+    )
+    assert failed.status == "failed"
+    (new_master,) = set(_budget_forecast_masters(root)) - set(seeded_masters)
+    reopened = file_orchestration_journal_module.FileOrchestrationJournalRepository(root)
+    assert reopened.get_pipeline_job(new_master)["status"] == "failed"
+    assert _budget_live_reentry_count(root, capsys) == 1
+
+    masters = _budget_forecast_masters(root)
+    for later_pass in range(2):
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+        assert candidates == [], later_pass
+        assert all("operator_reentry_confirmation" not in item.state_evidence for item in blocked)
+        assert _budget_forecast_masters(root) == masters
+
+
+class _NoBudgetReentryCountAccessorRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    """Confirmations readable, but no live budget pin to compare them with."""
+
+    budget_reentry_count = None  # type: ignore[assignment]
+
+
+class _UnreadableBudgetReentryCountRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    def budget_reentry_count(self, **_kwargs: Any) -> int | None:
+        return None
+
+
+class _RaisingBudgetReentryCountRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
+    def budget_reentry_count(self, **_kwargs: Any) -> int | None:
+        raise RuntimeError("count unavailable")
+
+
+@pytest.mark.parametrize(
+    "repository_class",
+    [
+        _NoBudgetReentryCountAccessorRepository,
+        _UnreadableBudgetReentryCountRepository,
+        _RaisingBudgetReentryCountRepository,
+    ],
+)
+def test_budget_reentry_is_inert_without_a_readable_live_reentry_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    repository_class: type[Any],
+) -> None:
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=0), capsys)
+    assert code == 0
+
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(repository_class(root)))
 
     assert candidates == []
     assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]

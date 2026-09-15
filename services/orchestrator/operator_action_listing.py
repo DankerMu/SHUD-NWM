@@ -17,9 +17,13 @@ evidence is whole: its status must be in :data:`EVALUATING_PASS_STATUSES`, and
 it must not be a size-fallback artifact -- ``bounded_evidence_payload`` empties
 ``source_cycles``, the only place a breaker-released cycle appears, so such a
 pass can still LIST its summarized blocked candidates but can never prove none
-waits.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none but undecidable
-(a scanned pass dropped its candidate lists, or no scanned pass is readable and
-evaluating -- including an empty root), ``2`` evidence root missing or
+waits.  Nor may an OLDER decidable pass answer for it (round 3 r3-01): the
+breaker may have engaged after that pass, so a size-fallback pass newer (in the
+mtime order of the scan) than the newest decidable pass leaves the window
+undecidable.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none but
+undecidable (a scanned pass dropped its candidate lists, no scanned pass is
+readable and evaluating -- including an empty root --, or a size-fallback pass
+is newer than the newest decidable pass), ``2`` evidence root missing or
 unreadable.
 """
 
@@ -103,8 +107,9 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "--passes terminal scheduler pass evidence files under --evidence-root "
     f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none "
     "and at least one scanned pass evaluated candidates, 3 when none but undecidable "
-    "(a pass dropped its candidate lists, or no scanned pass is readable and "
-    "evaluating -- see non_evaluating_passes / unreadable_passes; an empty root "
+    "(a pass dropped its candidate lists, no scanned pass is readable and "
+    "evaluating, or a size-fallback pass is newer than the newest evaluating pass "
+    "-- see non_evaluating_passes / unreadable_passes; an empty root "
     "counts, and a size-fallback pass never counts as evaluating because its "
     "source_cycles were dropped), 2 when the root is missing or unreadable. Runbook: "
     "docs/runbooks/node22-control-plane-manual-recovery.md"
@@ -130,6 +135,8 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     dropped: list[str] = []
     non_evaluating: list[dict[str, Any]] = []
     actions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    # r3-01: a size-fallback pass seen after (newer than) the newest decidable pass.
+    size_fallback_after_decidable = False
     # Oldest first, so first/last seen read in time order.
     for name, path in reversed(selected):
         payload = _read_pass(path)
@@ -139,8 +146,12 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
         limit = payload.get("limit")
         limit = limit if isinstance(limit, Mapping) else {}
         non_evaluating_entry = _non_evaluating_entry(name, payload.get("status"), limit)
-        if non_evaluating_entry is not None:
+        if non_evaluating_entry is None:
+            size_fallback_after_decidable = False
+        else:
             non_evaluating.append(non_evaluating_entry)
+            if non_evaluating_entry["reason"] == SIZE_FALLBACK_NON_EVALUATING_REASON:
+                size_fallback_after_decidable = True
         if limit.get("candidate_lists") == "dropped":
             dropped.append(name)
         for action in _pass_actions(payload):
@@ -168,7 +179,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:
         return receipt, 1
-    if dropped or evaluating_count < 1:
+    if dropped or evaluating_count < 1 or size_fallback_after_decidable:
         return receipt, 3
     return receipt, 0
 

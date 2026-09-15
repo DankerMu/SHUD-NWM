@@ -71,8 +71,8 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 | exit | 含义 |
 |---|---|
 | `1` | 列出了至少一条 operator action |
-| `0` | 没有，且窗口内至少有一个可判定 pass |
-| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`）——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
+| `0` | 没有，窗口内至少有一个可判定 pass，且最新的可判定 pass 比窗口内所有 size fallback 产物都新 |
+| `3` | 没有，但无法判定：某个被扫描的 pass 是 `limit.candidate_lists=dropped`，**或**窗口内零个可判定 pass（全部在 `unreadable_passes` / `non_evaluating_passes` 里——包括窗口里全是 size fallback 产物——或 root 为空、`passes_scanned == 0`），**或**有 size fallback 产物比最新的可判定 pass 更新（按 mtime；breaker 可能在那个可判定 pass 之后才触发，而 fallback 清空了唯一能看到它的 `source_cycles`）——加大 `--passes`、等下一个未超限的正常 pass，或先核对 evidence root |
 | `2` | evidence root 未设置、缺失或不可读；`--passes < 1` |
 
 ## 第二步：按 decision 处置
@@ -116,6 +116,7 @@ run 在飞或不存在时拒绝）：
   --pin <quarantine_rerun_count> --recorded-init-state-id <recorded_init_state_id> \
   --operator "<operator>" --reason "<why>"
 # dry run 默认；核对 receipt 后追加 --attest
+# 预算：--decision blocked_strict_warm_start_init_state_mismatch --pin <budget_reentry_count>（不带 token）
 ```
 
 - 写入一条 `forecast_cycle` pipeline event，`event_type=operator_reentry_confirmation`
@@ -127,23 +128,23 @@ run 在飞或不存在时拒绝）：
     `--attest` 跑一次，从 dry-run receipt 的 `live.quarantine_rerun_count` 读出 pin；
     `--recorded-init-state-id` 取 `recorded_init_state_id`，必须等于 live 记录 token（写侧
     意图前置条件，读侧不再比较 token）。
-  - 预算：`attempt`（stage-scoped 尝试次数，取自 `list-operator-actions` **最新** pass），不需要 token。
-    写侧不复算 attempt，也不检查候选是否已 blocked，所以**大于现值的 pin 不会失效，而是预授权**：
-    attempt 走到该值时会在没有新签字的情况下放行一次（#2400）。写入前先 dry-run，并逐字核对
-    pin 与最新 pass 的 `attempt`、`retry_limit`；写错时停止并上报，**不要**再写一条正确 pin 覆盖
-    （旧的错误确认物仍会在之后生效）。
-  scheduler 只在 pin 严格相等时放行一次。断路器的确认物在 rerun **被接受提交**时即被消费：
-  provenance 戳在 accepted-submit 时写入 master，计数当场 +1（无论 rerun 之后成功、失败，
-  也无论记录了哪个 token）；预算在 rerun 行写入 `_retry_<n>` 时 attempt +1。fail-stop 自行
-  重新接管，不需要撤销。
+  - 预算：该模型的 **预算重入计数**（预算重入 provenance `strict_warm_start_budget_reentry_model_ids`
+    命名该模型的 cohort master 数，不看终态、job id、retry 后缀），不需要 token。它**不是**
+    `list-operator-actions` / blocked evidence 里的 `attempt`（`attempt` 只决定是否 blocked）。
+    先不带 `--attest` 跑一次，从 dry-run receipt 的 `live.budget_reentry_count` 读出 pin。
+  scheduler 只在 pin 严格相等时放行一次。确认物在 rerun **被接受提交**时即被消费：
+  provenance 戳在 accepted-submit（reservation）时写入 cohort master，对应计数当场 +1
+  （无论 rerun 之后成功、失败，断路器也无论记录了哪个 token，预算也无论 rerun 落在哪个 job-id
+  前缀下）。fail-stop 自行重新接管，不需要撤销。
 - 拒绝时不写任何字节、打印 `decision=refused` receipt 并 exit 2。`reason` 取值：
   `required_argument_blank`、`decision_not_reentry_eligible`、`cycle_time_invalid`、
-  `pin_invalid`、`completed_identity_absent`、`recorded_init_state_id_mismatch`、
-  `breaker_not_engaged`、`pin_mismatch`（后三者只适用于断路器；预算的 pin 不在 CLI
-  侧复算：小于现值的 pin 在读侧无效，大于现值的 pin 会预授权，见上文与 #2400）。断路器的检查顺序为 `breaker_not_engaged` →
+  `pin_invalid`（pin 为负）、`completed_identity_absent`、`recorded_init_state_id_mismatch`、
+  `breaker_not_engaged`、`pin_mismatch`。`recorded_init_state_id_mismatch` 与
+  `breaker_not_engaged` 只适用于断路器；`pin_mismatch` 两类都适用（断路器比
+  `quarantine_rerun_count`，预算比 `budget_reentry_count`）。断路器的检查顺序为 `breaker_not_engaged` →
   `recorded_init_state_id_mismatch` → `pin_mismatch`，拒绝 receipt 的 `live` 同样带
-  `occurrences` 与 `quarantine_rerun_count`。journal root 不可信时 stderr 为
-  `FILE_JOURNAL_INVALID_ROOT: ...`，exit 2。
+  `occurrences` 与 `quarantine_rerun_count`；预算拒绝 receipt 的 `live` 带 `budget_reentry_count`。
+  journal root 不可信时 stderr 为 `FILE_JOURNAL_INVALID_ROOT: ...`，exit 2。
 - 不改 `NHMS_SCHEDULER_RETRY_LIMIT`，也不改两处 forced-resubmit 白名单。
 
 预期 evidence：
@@ -154,8 +155,9 @@ run 在飞或不存在时拒绝）：
   `operator_reentry_confirmation: {request_id, operator, reason, pin, decision}`；
   断路器几何下该 cycle 保留 backfill 执行槽（不再出现 breaker not-selected 条目）。
 - rerun 在飞期间：候选是 active，`submitted_count` 不因它增加。
-- rerun 被接受提交后（在飞、完成或失败）：断路器 `quarantine_rerun_count` 已 +1 / 预算
-  `attempt` +1，pin 不再相等，之后的 pass 回到 blocked。
+- rerun 被接受提交后（在飞、完成或失败）：断路器 `quarantine_rerun_count` / 预算
+  `budget_reentry_count` 已 +1，pin 不再相等，之后的 pass 不再放行（回到 blocked；Slurm 层失败的
+  预算 rerun 可能改落为 `permanent_failure`）。
 
 各决策的判读细节见
 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)

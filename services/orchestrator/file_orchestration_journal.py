@@ -37,6 +37,7 @@ from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_PROJECTION_FIELDS,
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+    BUDGET_REENTRY_PROVENANCE_FIELD,
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
@@ -522,6 +523,8 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     # persisted one — retroactively arming the breaker is the failure this
     # guards against.
     QUARANTINE_RERUN_PROVENANCE_FIELD,
+    # Same for the budget re-entry stamp (r3-02): it is a confirmation pin.
+    BUDGET_REENTRY_PROVENANCE_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -1575,6 +1578,43 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=model_id,
                 require_completed=False,
+            )
+        )
+
+    def budget_reentry_count(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+    ) -> int | None:
+        """Count confirmed strict warm-start budget re-entries of this cycle+model accepted for submission.
+
+        The pin of a budget re-entry confirmation (#1768, round 3 r3-02): cohort
+        masters whose budget re-entry provenance names the model, regardless of
+        their terminal status, job id and retry suffix.  The provenance is
+        stamped when the re-entry is accepted, so the count moves by exactly one
+        at acceptance, even when the re-entry mints under a different job-id
+        prefix than the retries that spent the budget (whose stage-scoped
+        attempt therefore does not move).
+
+        Returns ``None`` when the journal can not be read, which a confirmation
+        consumer treats as "no match" -- never as a release.
+        """
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+        except (FileOrchestrationJournalError, TypeError, ValueError):
+            return None
+        return sum(
+            1
+            for _job in _quarantine_rerun_masters(
+                rows,
+                source_id=canonical_source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                require_completed=False,
+                provenance_field=BUDGET_REENTRY_PROVENANCE_FIELD,
             )
         )
 
@@ -9165,6 +9205,10 @@ class FileOrchestrationJournalRepository:
             QUARANTINE_RERUN_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
                 record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
             ),
+            # Explicit member for the same reason (r3-02): the budget re-entry stamp.
+            BUDGET_REENTRY_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
+                record.get(BUDGET_REENTRY_PROVENANCE_FIELD)
+            ),
             "restart_stage": record.get("restart_stage"),
             # #1748: the operator-recovery attestation.  Deliberately absent from
             # ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` so the generic upsert can
@@ -13470,9 +13514,18 @@ def _candidate_row_self_bound_identity(
 
 
 def _quarantine_rerun_masters(
-    rows: Any, *, source_id: str, cycle_time: datetime, model_id: str, require_completed: bool
+    rows: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    require_completed: bool,
+    provenance_field: str = QUARANTINE_RERUN_PROVENANCE_FIELD,
 ) -> Iterator[Mapping[str, Any]]:
     """Cohort masters whose quarantine provenance names ``model_id`` (#1157/#1562/#1555).
+
+    ``provenance_field`` selects the model-id-list stamp read: the §8.7
+    quarantine provenance by default, or the budget re-entry provenance (r3-02).
 
     ``require_completed`` keeps only completed convergence attempts: aggregate
     terminal success, or ``partially_failed`` with this model's own projection
@@ -13490,7 +13543,7 @@ def _quarantine_rerun_masters(
                 continue
             if accepted_submit_row_kind(job) != "master":
                 continue
-            if model_id not in normalize_quarantine_rerun_model_ids(job.get(QUARANTINE_RERUN_PROVENANCE_FIELD)):
+            if model_id not in normalize_quarantine_rerun_model_ids(job.get(provenance_field)):
                 continue
         except (AttributeError, TypeError, ValueError):
             continue

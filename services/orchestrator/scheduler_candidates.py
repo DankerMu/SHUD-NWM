@@ -588,7 +588,7 @@ def build_candidates(
                                 source_id=candidate.source_id,
                                 cycle_time=candidate.cycle_time_utc,
                                 model_id=candidate.model_id,
-                                decision="blocked_strict_warm_start_init_state_mismatch",
+                                decision=_scheduler_generation.OPERATOR_REENTRY_BUDGET_DECISION,
                             ),
                         )
                         # Same emitting point ruling as the run-manifest leg above
@@ -2558,9 +2558,10 @@ def _strict_warm_start_terminal_mismatch_decision(
     """Emit the terminal-mismatch retry, or a stable blocked decision once spent.
 
     ``reentry_match`` (#1768), bound by the caller to the candidate and the
-    budget decision, is asked for a confirmation pinned to the spent attempt;
-    a match emits the ordinary retry once (the rerun's ``_retry_<n>`` row moves
-    the attempt past the pin).  ``None`` keeps the decision byte-identical.
+    budget decision, is asked for a confirmation pinned to the model's live
+    budget re-entry count; a match emits the ordinary retry once (the re-entry
+    is stamped on its cohort master at reservation, which moves the count past
+    the pin -- round 3 r3-02).  ``None`` keeps the decision byte-identical.
 
     Without a budget this decision re-selected every already-completed candidate
     of the cycle on every pass. The demoted decision uses ``action="blocked"`` so
@@ -2591,7 +2592,7 @@ def _strict_warm_start_terminal_mismatch_decision(
     attempt = _state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
     retry_limit = _state_retry_limit(state)
     if retry_limit is not None and attempt >= retry_limit:
-        confirmation = reentry_match(pin=attempt) if reentry_match is not None else None
+        confirmation = reentry_match() if reentry_match is not None else None
         if confirmation is not None:
             return CandidateStateDecision(
                 "retry",

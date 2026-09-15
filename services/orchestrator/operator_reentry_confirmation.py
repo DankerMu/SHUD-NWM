@@ -10,8 +10,8 @@ rows, and the completed skip returns before the marker is read):
 This command writes one ``forecast_cycle`` pipeline event of the dedicated type
 ``operator_reentry_confirmation``.  The scheduler lets exactly one retry through
 while the confirmation's ``pin`` equals the live value the rerun will move (the
-breaker's model-level quarantine rerun count, the budget's stage attempt), then
-the fail-stop takes over again by itself.
+model-level quarantine rerun count for the breaker, the model-level budget
+re-entry count for the budget), then the fail-stop takes over again by itself.
 
 Dry run by default; only ``--attest`` writes.  Refusals are write-free, print a
 receipt naming the failed precondition, and exit 2.
@@ -47,8 +47,9 @@ CONFIRM_OPERATOR_REENTRY_HELP = (
     "(source, cycle, model) blocked by the §8.7 quarantine breaker or the strict "
     "warm-start retry budget. --pin must be the live value the rerun moves: the "
     "model's quarantine rerun count (breaker, with --recorded-init-state-id; see "
-    "live.quarantine_rerun_count in the dry-run receipt) or the attempt (budget, "
-    "as shown by list-operator-actions). The scheduler re-enters "
+    "live.quarantine_rerun_count in the dry-run receipt) or the model's budget "
+    "re-entry count (budget; see live.budget_reentry_count in the dry-run receipt). "
+    "The scheduler re-enters "
     "once; the rerun moves the value when it is accepted for submission (whatever "
     "its outcome) and the fail-stop re-engages. Dry run "
     "unless --attest. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
@@ -94,7 +95,7 @@ def confirm_operator_reentry(
         "model_id": model_id,
         "decision": decision,
     }
-    if type(pin) is not int or pin < 1:
+    if type(pin) is not int or pin < 0:
         return _refused("pin_invalid", target=target, pin=pin), 2
 
     repository = FileOrchestrationJournalRepository(verified_root)
@@ -125,10 +126,15 @@ def confirm_operator_reentry(
             return _refused("recorded_init_state_id_mismatch", target=target, pin=pin, live=live), 2
         if rerun_count != pin:
             return _refused("pin_mismatch", target=target, pin=pin, live=live), 2
-    # The budget attempt is NOT recomputed here: it comes from the scheduler's
-    # candidate-authority view.  A pin BELOW the live attempt is inert on the read
-    # side; a pin ABOVE it pre-authorizes a future re-entry once the attempt
-    # reaches it (#2400).
+    else:
+        # Round 3 r3-02: the budget pin is the model-level budget re-entry count,
+        # the same journal-direct count the scheduler compares it with; the
+        # stage-scoped attempt is not (a re-entry minted under another job-id
+        # prefix leaves it unmoved).
+        reentry_count = repository.budget_reentry_count(**identity_query)
+        live = {"budget_reentry_count": reentry_count}
+        if reentry_count != pin:
+            return _refused("pin_mismatch", target=target, pin=pin, live=live), 2
 
     receipt: dict[str, Any] = {"decision": "dry_run", "target": target, "pin": pin, "live": live}
     if dry_run:

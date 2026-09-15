@@ -520,19 +520,24 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
     """round 1 cand-03 (c): non-evaluating neighbours do not taint an evaluating pass.
 
     P7 F-1: the size-fallback neighbour used to count as evaluating by the status
-    it kept; it is non-evaluating now (its ``source_cycles`` were emptied), so
-    the one clean ``planned`` pass is what decides 0 here.
+    it kept; it is non-evaluating now (its ``source_cycles`` were emptied).
+    Round 3 r3-01: the clean ``planned`` pass decides 0 only because it is NEWER
+    than the fallback -- see the next test for the other order.
     """
 
-    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
-    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
-    _write_pass(
+    _write_real_size_fallback_pass(
         tmp_path,
         "scheduler_2026052112_cccccccccccc.json",
-        mtime=3_000,
-        status="submitted",
-        candidate_lists="summarized",
+        mtime=1_000,
+        original={
+            "pass_id": "scheduler_2026052112_cccccccccccc",
+            "status": "submitted",
+            "source_cycles": [],
+            "blocked_candidates": [_unrelated_blocked_row()],
+        },
     )
+    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=3_000, status="planned")
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
@@ -549,6 +554,37 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
             "status": "submitted",
             "reason": "size_fallback_source_cycles_absent",
         },
+    ]
+
+
+def test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 3 r3-01: the breaker may engage after the decidable pass; the newer fallback hid it."""
+
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
+    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
+    original = {
+        "pass_id": "scheduler_2026052112_cccccccccccc",
+        "status": "blocked",
+        "source_cycles": [_breaker_released_source_cycle()],
+        "blocked_candidates": [_unrelated_blocked_row()],
+    }
+    newest = tmp_path / "scheduler_2026052112_cccccccccccc.json"
+    # Unbounded, the newest pass WOULD list the breaker release.
+    _write_pass(tmp_path, newest.name, mtime=3_000, **_as_write_pass_kwargs(original))
+    assert _run(["--evidence-root", str(tmp_path)], capsys)[0] == 1
+    newest.unlink()
+    _write_real_size_fallback_pass(tmp_path, newest.name, mtime=3_000, original=original)
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert [(item["pass"], item["reason"]) for item in payload["non_evaluating_passes"]] == [
+        ("scheduler_2026052112_bbbbbbbbbbbb.json", "status_not_evaluating"),
+        ("scheduler_2026052112_cccccccccccc.json", "size_fallback_source_cycles_absent"),
     ]
 
 

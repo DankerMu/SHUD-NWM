@@ -129,7 +129,7 @@ commands, exit codes and node-22 execution discipline are in
   not update the `hydro_run` row on a same-`run_id` rerun, #2397, so even a rerun with the
   correct lineage still shows as breaker-blocked). If it moved, do not confirm again.
 - `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
-  the next section (`confirm-operator-reentry --pin <attempt>`).
+  the next section (`confirm-operator-reentry --pin <budget_reentry_count>`).
 
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
 
@@ -189,20 +189,24 @@ Manual re-entry, in order:
      --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
      --source-id <source_id> --cycle-time <cycle_time> --model-id <model_id> \
      --decision blocked_strict_warm_start_init_state_mismatch \
-     --pin <retry_policy.attempt> \
-     --operator "<operator>" --reason "<why>" --attest
+     --pin <budget_reentry_count> \
+     --operator "<operator>" --reason "<why>"
+   # dry run first; append --attest once the receipt checks out
    ```
 
    The blocked evidence names this channel in `retry_policy.operator_reentry_command` /
-   `retry_policy.recovery_runbook`. While the confirmation's `pin` equals the live
-   stage-scoped `attempt`, the next pass emits
-   `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
-   `operator_reentry_confirmation` block in `state_evidence`); the rerun's `_retry_<N>` row
-   moves `attempt` past the pin and the candidate is blocked again. A pin below the live
-   `attempt` is inert; a pin ABOVE it is not checked by the writer and pre-authorizes a
-   future re-entry once the attempt reaches it (#2400). So run it without `--attest` first
-   and compare `--pin` with the `attempt` of the newest `list-operator-actions` pass before
-   attesting. `NHMS_SCHEDULER_RETRY_LIMIT` is not touched; see
+   `retry_policy.recovery_runbook`. The pin is the model's **budget re-entry count** (cohort
+   masters whose `strict_warm_start_budget_reentry_model_ids` provenance names the model,
+   whatever their terminal status, job id or retry suffix), not `retry_policy.attempt`: read
+   it from the dry-run receipt's `live.budget_reentry_count`. The writer refuses any other
+   pin with `pin_mismatch` (exit 2). While the confirmation's `pin` equals that live count,
+   the next pass emits `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
+   `operator_reentry_confirmation` block in `state_evidence`). The confirmation is consumed
+   when that rerun is accepted for submission: the reservation stamps the provenance on the
+   cohort master, the count moves +1 whatever the rerun's outcome or the job-id prefix it
+   mints under, and the candidate is not re-entered again. A Slurm failure does not restore
+   it; re-confirm with the new live count if another re-entry is needed.
+   `NHMS_SCHEDULER_RETRY_LIMIT` is not touched; see
    [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) for
    the receipt, refusals and known limitations. The same precondition below (a
    higher-attempt retry row must outrank a released base row) applies.

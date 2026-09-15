@@ -2925,6 +2925,97 @@ def test_cohort_reservation_stamps_quarantine_rerun_provenance(tmp_path: Path) -
     assert _occurrences(quarantined_model_id, "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
 
 
+def test_cohort_reservation_stamps_budget_reentry_provenance_only_for_a_confirmed_budget_retry(
+    tmp_path: Path,
+) -> None:
+    """r3-02: the master row books WHICH models this submission re-enters past a spent strict budget.
+
+    Only a strict warm-start retry carrying a BUDGET ``operator_reentry_confirmation``
+    block is stamped: an ordinary strict retry (no block) and a confirmed §8.7
+    breaker re-entry (breaker block, quarantine decision) are not.  Pinned as a
+    write -> read round trip through ``budget_reentry_count``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    cycle = "2026050100"
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _basins(3)
+
+    def _confirmation(decision: str) -> dict[str, Any]:
+        return {"request_id": "r", "operator": "ops", "reason": "why", "pin": 0, "decision": decision}
+
+    state_evidences: list[dict[str, Any]] = [
+        # model_0: an ordinary strict retry below the budget.
+        {"decision": "retry_strict_warm_start_terminal_init_state_mismatch"},
+        # model_1: the confirmed budget re-entry.
+        {
+            "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
+            "operator_reentry_confirmation": _confirmation("blocked_strict_warm_start_init_state_mismatch"),
+        },
+        # model_2: a confirmed breaker re-entry.
+        {
+            "decision": "retry_journal_predecessor_identity_mismatch",
+            "operator_reentry_confirmation": _confirmation("blocked_journal_predecessor_identity_quarantine"),
+        },
+    ]
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast", **state_evidences[index]},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026050100/state.cfg.ic",
+                "init_state_checksum": f"sha256:state-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "complete"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = next(
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+    assert master["strict_warm_start_budget_reentry_model_ids"] == ["model_1"]
+    assert master["journal_predecessor_quarantine_rerun_model_ids"] == ["model_2"]
+
+    # Capture-once: a divergent stamp is REJECTED, never merged away.
+    durable = repository.get_pipeline_job(str(master["job_id"]))
+    replayed = {
+        key: value
+        for key, value in durable.items()
+        if "[object-uri]" not in json.dumps(value) and "[uri]" not in json.dumps(value)
+    }
+    with pytest.raises(FileOrchestrationJournalError) as forged_error:
+        repository.upsert_pipeline_job({**replayed, "strict_warm_start_budget_reentry_model_ids": ["model_0"]})
+    assert forged_error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert forged_error.value.field == "strict_warm_start_budget_reentry_model_ids"
+    assert repository.get_pipeline_job(str(master["job_id"])) == durable
+
+    counts = {
+        f"model_{index}": reopened.budget_reentry_count(
+            source_id="gfs", cycle_time=cycle_time, model_id=f"model_{index}"
+        )
+        for index in range(3)
+    }
+    assert counts == {"model_0": 0, "model_1": 1, "model_2": 0}
+
+
 def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:
     """Cold-seeded basins resolve no warm start, so nothing is booked for them.
 

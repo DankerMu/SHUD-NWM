@@ -58,6 +58,7 @@ def real_rerun(
     recorded_tokens: dict[str, str] | None = None,
     slurm_client: Any | None = None,
     job_timeout_seconds: float = 120.0,
+    terminal_stage: str | None = None,
 ) -> Any:
     """Run a scheduler handoff through the REAL forecast orchestrator + reservation path on ``root``.
 
@@ -89,6 +90,7 @@ def real_rerun(
         FileOrchestrationJournalRepository(root),
         client,
         job_timeout_seconds=job_timeout_seconds,
+        terminal_stage=terminal_stage,
     )
     return orchestrator.orchestrate_cycle("gfs", _dt(BREAKER_CYCLE), handoff)
 
@@ -307,7 +309,7 @@ def test_budget_confirmation_is_recorded_without_a_token(
     root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
     argv = [
         "--journal-root", str(root), "--source-id", "gfs", "--cycle-time", BREAKER_CYCLE,
-        "--model-id", "model_a", "--decision", BUDGET_DECISION, "--pin", "12",
+        "--model-id", "model_a", "--decision", BUDGET_DECISION, "--pin", "0",
         "--operator", "ops-oncall", "--reason", "budget spent on a converging lineage", "--attest",
     ]  # fmt: skip
 
@@ -316,9 +318,10 @@ def test_budget_confirmation_is_recorded_without_a_token(
     assert code == 0
     assert receipt is not None
     assert receipt["decision"] == "recorded"
-    assert receipt["live"] is None
+    # r3-02: the budget pin is the model's live budget re-entry count (no stamped re-entry yet).
+    assert receipt["live"] == {"budget_reentry_count": 0}
     (details,) = _confirmations(root, decision=BUDGET_DECISION)
-    assert details["pin"] == 12
+    assert details["pin"] == 0
     assert "recorded_init_state_id" not in details
 
 
@@ -329,7 +332,8 @@ def test_budget_confirmation_is_recorded_without_a_token(
         ("pin_differs_from_live_occurrences", "pin_mismatch"),
         ("token_differs_from_live_token", "recorded_init_state_id_mismatch"),
         ("breaker_not_engaged", "breaker_not_engaged"),
-        ("budget_pin_below_one", "pin_invalid"),
+        ("budget_pin_differs_from_live_reentry_count", "pin_mismatch"),
+        ("budget_pin_negative", "pin_invalid"),
     ],
 )
 def test_refused_preconditions_exit_two_and_write_nothing(
@@ -350,7 +354,8 @@ def test_refused_preconditions_exit_two_and_write_nothing(
     elif leg == "breaker_not_engaged":
         argv = breaker_confirm_argv(root)
     else:
-        argv = breaker_confirm_argv(root, pin=0)
+        # No stamped budget re-entry yet: the live budget re-entry count is 0.
+        argv = breaker_confirm_argv(root, pin=1 if leg == "budget_pin_differs_from_live_reentry_count" else -1)
         argv[argv.index(BREAKER_DECISION)] = BUDGET_DECISION
     before = _tree_bytes(root)
 
@@ -360,6 +365,8 @@ def test_refused_preconditions_exit_two_and_write_nothing(
     assert receipt is not None
     assert receipt["decision"] == "refused"
     assert receipt["reason"] == expected_reason
+    if leg == "budget_pin_differs_from_live_reentry_count":
+        assert receipt["live"] == {"budget_reentry_count": 0}
     assert _tree_bytes(root) == before
 
 
