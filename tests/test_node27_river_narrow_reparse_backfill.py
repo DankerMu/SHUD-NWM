@@ -107,6 +107,50 @@ def test_verify_samples_only_reparsed_runs_evenly(tmp_path: Path) -> None:
     assert backfill._sample_reparsed(tmp_path, 0) == []
 
 
+def test_seed_runs_cover_every_missing_chunk_day_with_few_runs() -> None:
+    base = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    candidates = [
+        {"run_id": f"r{index:02d}", "start_time": base + timedelta(hours=12 * index),
+         "end_time": base + timedelta(hours=12 * index, days=7)}
+        for index in range(20)
+    ]
+    needed = set().union(*(backfill._utc_days(row["start_time"], row["end_time"]) for row in candidates))
+    seeds = backfill.select_seed_runs(candidates, set())
+    by_id = {row["run_id"]: row for row in candidates}
+    covered = set().union(*(backfill._utc_days(by_id[r]["start_time"], by_id[r]["end_time"]) for r in seeds))
+    assert covered == needed
+    assert len(seeds) <= 3
+    assert backfill.select_seed_runs(candidates, needed) == []
+    assert backfill.select_seed_runs([], set()) == []
+    partial = needed - {min(needed)}
+    (only,) = backfill.select_seed_runs(candidates, partial)
+    assert min(needed) in backfill._utc_days(by_id[only]["start_time"], by_id[only]["end_time"])
+
+
+def test_transient_pgcode_walks_the_wrapped_cause_chain() -> None:
+    class PgError(Exception):
+        def __init__(self, code: str) -> None:
+            super().__init__(code)
+            self.pgcode = code
+
+    for code in ("40P01", "55P03"):
+        try:
+            try:
+                raise PgError(code)
+            except PgError as inner:
+                raise RuntimeError("wrapped by parser") from inner
+        except RuntimeError as outer:
+            assert backfill.transient_pgcode(outer) == code
+    assert backfill.transient_pgcode(PgError("23505")) is None
+    assert backfill.transient_pgcode(OSError("missing")) is None
+
+
+def test_dispatch_cap_serializes_while_seeds_remain() -> None:
+    assert backfill._dispatch_cap(4, {"s"}, ["s", "a"], {}) == 1
+    assert backfill._dispatch_cap(4, {"s"}, ["a"], {object(): "s"}) == 1
+    assert backfill._dispatch_cap(4, {"s"}, ["a"], {object(): "b"}) == 4
+
+
 def test_timestamps_must_carry_a_timezone() -> None:
     with pytest.raises(Exception):
         backfill._parse_time("2026-09-15T00:00:00")

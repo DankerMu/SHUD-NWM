@@ -36,6 +36,11 @@ afterwards, together with the plan artifact check: 23 passed at `18b80827`. The 
 runner with `PYTHONPATH=/home/nwm/NWM` at `415cbd1e` (`import_ok`, parser from the live tree). Read-only production
 `plan` at `18b80827`: 3770 candidates, 0 artifacts missing, 3.56 B estimated rows (design Context).
 
+- [x] 1.3 Pilot 1 fix: serial chunk seeding and transient requeue (design D5a), with DB-free seed-cover, cause-chain and
+      dispatch-cap tests plus real-DB seeded-after-`drop_chunks` and held-`SHARE ROW EXCLUSIVE` requeue cases.
+      Evidence: node-27 at `d17039a2`, 28 passed. Mutants (no seeds / no transient classification / no serial seed
+      cap / transient counted failed) give 2/2/2/1 failures, then the source is restored clean.
+
 ## 2. Documentation and gate
 
 - [x] 2.1 Amend the parent `timeseries-narrow-store-expand-contract` contract requirement, rollout gate, design and
@@ -46,5 +51,8 @@ runner with `PYTHONPATH=/home/nwm/NWM` at `415cbd1e` (`import_ok`, parser from t
 ## 3. Production (separate GO)
 
 - [ ] 3.1 Publish exact runner bytes; `plan` receipt; pilot `run --limit 20 --concurrency 4` with measured throughput.
+      Pilot 1 (`7b5c959e`, runner sha256 `5a145389…`): `failure_budget` stop; 1 reparsed (1 284 192 rows, 104 s),
+      12 rolled back by lock collisions (D5a), all verified still `legacy`/`published` with their prior `parsed_at`
+      and no narrow rows. Pilot 2 follows with the D5a runner.
 - [ ] 3.2 Full run(s) until the in-window legacy route count is 0; `verify --sample 50` pass; compression tick and
       governance receipt after release. Archive the receipts under this change.

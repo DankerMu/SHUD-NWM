@@ -87,6 +87,22 @@ killed and roll back. Each outcome is appended with fsync to `runs.jsonl`. Candi
 database on every start, so a rerun resumes naturally and never repeats a committed run (it is `narrow` now). Exit
 codes: 0 complete, 1 any failure, 2 refused (nothing mutated), 3 partial (deadline or signal).
 
+### D5a Serial chunk seeding and transient requeue (pilot 1 finding)
+
+Production pilot 1 (2026-09-15T03:37Z, `--limit 20 --concurrency 4`) ended with 1 run reparsed and 12 rolled back:
+7 deadlocks/lock timeouts inside the parser and 5 lock timeouts on the route flip. Every rolled-back row was verified
+unchanged. Cause: creating a narrow chunk adds its foreign keys, which takes `SHARE ROW EXCLUSIVE` on
+`hydro.hydro_run` (and `SHARE UPDATE EXCLUSIVE` on the hypertable). Other reparse transactions hold `ROW EXCLUSIVE`
+on `hydro_run` from the route flip for a whole parse, so concurrent chunk creation deadlocks, and the queued lock
+also blocks new route flips.
+
+Before any concurrency, the runner picks a few **seed runs** whose `[start_time, end_time]` UTC days cover every
+missing one-day narrow chunk (greedy, earliest uncovered day first) and runs them one at a time. After that, workers
+only write into existing chunks. SQLSTATE `40P01`/`55P03` anywhere in the error's cause chain is `transient`: the
+run is requeued (a seed at the front) up to 3 attempts, it does not count against the failure budget, and it is
+logged with its attempt number. Autopipe still creates tomorrow's chunk while workers run; that collision is
+requeued the same way.
+
 ### D6 Oracles
 
 In-transaction count equality (D1) is the per-run gate. `verify` compares legacy and narrow values for sampled
