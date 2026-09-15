@@ -223,6 +223,9 @@ def test_backfill_reparses_in_window_runs_and_leaves_aged_runs_legacy(world: Any
     aged = _state(connection, "run_aged")
     assert (aged["timeseries_store"], aged["narrow_rows"], aged["parsed_at"]) == ("legacy", 0, stamps["run_aged"])
     assert _state(connection, "run_not_published")["timeseries_store"] == "legacy"
+    # The row-lock re-check, not only the candidate query, keeps an aged run legacy.
+    assert backfill.reparse_one(settings, "run_aged").disposition == "aged_out"
+    assert _state(connection, "run_aged")["timeseries_store"] == "legacy"
 
     records = [json.loads(line) for line in (tmp_path / "runs.jsonl").read_text().splitlines()]
     assert sorted(record["run_id"] for record in records) == ["run_fresh", "run_superseded"]
