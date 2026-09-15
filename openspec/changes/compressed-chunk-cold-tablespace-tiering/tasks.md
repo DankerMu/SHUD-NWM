@@ -250,14 +250,14 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   Apply the `explicit-cycle-query-binding` REMOVED delta with R3.6 and remove
   its now-empty canonical capability, not leave a stale G7 Purpose behind.
   This does not remove shipping forecast behavior or its independent contracts.
-- [ ] R4.2 Reconcile #1891/#1895, ADR 0002, storage runbook, bringup checklist
+- [x] R4.2 Reconcile #1891/#1895, ADR 0002, storage runbook, bringup checklist
   and `docs/runbooks/current-production-ops.md` with mandatory retirement and
   actual surviving owners. The former pending
   rollout is withdrawn, not executed. Keep completed ledger below and immutable
   `evidence/**`, `fixtures/**` and `probe-1892-throwaway.md` as historical records,
   never active deployment authority. Runtime synthetic examples are not
   historical evidence merely because they predate retirement.
-- [ ] R4.3 Before implementation, obtain fresh retirement-specific high-risk
+- [x] R4.3 Before implementation, obtain fresh retirement-specific high-risk
   fixture/invariant review covering R1 ownership, R2 config/process/locking,
   R3 deletion/security/CI closure and manual consumers, R4 spec disposition and
   R5 deployment boundaries. Historical cold fixture approvals do not authorize
@@ -268,6 +268,11 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   remaining deletion fixtures have independent approval. Implementation review,
   regression and deployment
   requirements are not completed by fixture approval.
+  Final source review and merge: [PR #2376](https://github.com/DankerMu/SHUD-NWM/pull/2376#issuecomment-5672676409),
+  merge `7f5d720f4cbe57b4953f39828429e3063f8b7d60`; three independent seats,
+  no blocking candidates, round 1 clean and exact-head CI passed. Final
+  `023e79e1a597e2bc4a29121f9d99b573eb677b80` evidence/selector readers:
+  1124 passed. This completes source review, not R4.4 archive or R5.2 deployment.
 - [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
   surviving-spec updates and the G7-only REMOVED delta but never promotes withdrawn
   cold-enabling ADDED requirements. There is no canonical

@@ -24,8 +24,8 @@ stands; isolated 2.10.2 probe freezes shell-first movement — see
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source
-retirement is implemented; survivor verification and effective-deployment handoff
-remain pending (2026-09-14).**
+retirement and isolated survivor verification are complete; effective-deployment
+handoff remains pending R5.2.**
 
 ## Amendment (2026-09-14): selective-cold source retirement, not dormant retention
 
@@ -46,22 +46,17 @@ PASS remains insufficient for production acceptance.
 
 This is repository source authority only. It does not claim source retirement
 proves effective unit/dropin/env/ExecStartPre disposition, live privilege
-revocation, tablespace/data deletion, or production cleanup. R5 must still prove
-surviving behavior and separately authorize deployment handoff without disabling
-ordinary maintenance. Unexpected deployed cold state requires stop/preserve and a
+revocation, tablespace/data deletion, or production cleanup. R5.1 survivor proof
+and independent source review are recorded in
+[PR #2376](https://github.com/DankerMu/SHUD-NWM/pull/2376#issuecomment-5672676409)
+and the active change's `evidence/retirement-deletion-verification.json`.
+R5.2 still requires separate authorization and coordination of effective
+unit/source/env references without disabling ordinary maintenance. Repository
+templates are not deployment proof. Unexpected deployed cold state requires
+stop/preserve and a
 dedicated safe disposition. #2293/#2298/#1938 can be disposed as capability
 retired only after affected source and deployed references exit; any transferred
 defect follows its surviving owner.
-
-
-Repository templates are not evidence of the effective unit/dropins/env/ExecStartPre
-or deployed state. No production inspection/cleanup is claimed by this amendment.
-R5 handoff must identify the actual approved release references without disabling
-ordinary maintenance. Do not delete tablespaces/data, old PGDATA or private recovery
-evidence merely because code retires. Unexpected deployed cold state requires
-stop/preserve and separately approved safe disposition. #2293/#2298/#1938 can be
-disposed as capability retired only after their affected paths and deployed
-references actually exit; any transferred defect follows its surviving owner.
 
 The #1370 archive retirement remains completed history. The 2026-08-29 successor
 and its 2026-08-31 refinement below are superseded historical technical evidence,
