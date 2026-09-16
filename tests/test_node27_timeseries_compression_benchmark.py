@@ -44,8 +44,34 @@ class _FakeCursor:
             return next(self.activity_sessions)
         return self.result_rows
 
+    def _run_identity_filter(self) -> str | None:
+        """Render the #2417 run-identity aid the way PostgreSQL renders it.
+
+        Not decoration, and not hand-written: a plan of the curve statement that
+        does NOT carry this text is not a plan that statement could have
+        produced, and the offline verifier now refuses one
+        (``_assert_plan_pushes_recorded_runs``). psycopg2 interpolates
+        client-side, so the bound arrays reach the server inside the statement,
+        PostgreSQL constant-folds them and prints them back through the array
+        type's output function. The shape is copied from a real node-27 plan the
+        repo already holds — ``docs/runbooks/receipts/tier-node27-timeseries-
+        storage/timeseries-compression/terminal-replay-20260715T114625Z.json``
+        renders ``lower(source_id) = ANY ('{forecast_gfs_deterministic}'::text[])``
+        — and the VALUES come from the parameters this cursor was actually handed,
+        so the fixture cannot drift away from its own binding.
+        """
+
+        if "%(pushdown_run_keys)s" not in self.current:
+            # The mvt statement binds one run_id scalar and has no resolved set.
+            return None
+        parameters = self.executions[-1][1]
+        run_ids = ",".join(str(value) for value in parameters["pushdown_run_ids"])
+        run_keys = ",".join(str(value) for value in parameters["pushdown_run_keys"])
+        return f"((run_id = ANY ('{{{run_ids}}}'::text[])) AND (run_key = ANY ('{{{run_keys}}}'::integer[])))"
+
     def fetchone(self) -> dict[str, Any]:
         reads = next(self.plan_reads)
+        run_identity_filter = self._run_identity_filter()
         return {
             "QUERY PLAN": [
                 {
@@ -59,6 +85,7 @@ class _FakeCursor:
                         "Alias": "rt_1" if self.decompress else "river_timeseries",
                         "Shared Hit Blocks": 3,
                         "Shared Read Blocks": reads,
+                        **({"Filter": run_identity_filter} if run_identity_filter is not None else {}),
                         "Plans": [
                             {
                                 "Node Type": "Index Scan",
