@@ -10,6 +10,7 @@ test.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -92,7 +93,19 @@ def _budget_row(model_id: str = "model_c") -> dict[str, Any]:
     )
 
 
-def _breaker_row(model_id: str = "model_d") -> dict[str, Any]:
+def _breaker_row(
+    model_id: str = "model_d",
+    *,
+    recorded_init_state_id: str = "state_gfs_model_d_2026052112_gfs_2026052100_f012",
+    occurrences: int = 1,
+) -> dict[str, Any]:
+    """The token and the count are parameters because they CHANGE from pass to pass.
+
+    ``recorded_init_state_id`` is what the operator feeds to
+    ``confirm-operator-reentry``; a receipt that reports an older pass's token
+    would have the operator's dry run refused.
+    """
+
     return _candidate_row(
         model_id=model_id,
         decision="blocked_journal_predecessor_identity_quarantine",
@@ -100,14 +113,43 @@ def _breaker_row(model_id: str = "model_d") -> dict[str, Any]:
         retry_policy={
             "automatic_retry_allowed": False,
             "manual_retry_required": True,
-            "occurrences": 1,
+            "occurrences": occurrences,
             "occurrence_threshold": 1,
         },
         extra_evidence={
             "journal_predecessor_identity": {
-                "recorded_init_state_id": "state_gfs_model_d_2026052112_gfs_2026052100_f012",
-                "occurrences": 1,
+                "recorded_init_state_id": recorded_init_state_id,
+                "occurrences": occurrences,
             }
+        },
+    )
+
+
+def _sink_refusal_row(model_id: str = "model_e") -> dict[str, Any]:
+    """The fifth manual-action decision (#1555 round 4), written by ``scheduler_candidates.py``.
+
+    Shape from the producer: a ``blocked_*`` candidate whose ``state_evidence``
+    carries the decision, the sink-refusal block, and a ``retry_policy`` with
+    ``manual_retry_required: True`` and NO ``attempt`` / ``retry_limit`` /
+    ``occurrences`` -- the operator re-entry policy keys only.
+    """
+
+    return _candidate_row(
+        model_id=model_id,
+        decision="blocked_operator_reentry_restart_stage_refused",
+        reason="operator_reentry_restart_stage_not_forecast",
+        retry_policy={
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+            "operator_reentry_command": "confirm-operator-reentry",
+            "recovery_runbook": "node22-control-plane-manual-recovery",
+        },
+        extra_evidence={
+            "classifier": "operator_reentry_authorization_scope",
+            "operator_reentry_sink_refusal": {
+                "refused_restart_stage": "convert",
+                "refused_restart_from_stage": "convert",
+            },
         },
     )
 
@@ -132,10 +174,16 @@ _SCOPE_COMPLETE_OPERATOR_FILTERS: dict[str, Any] = {
     "expression": None,
     "excluded_runnable_count": 0,
 }
+#: The third scope dimension: the whole production source set a pass must have
+#: looked at.  Literal from the producers (``scheduler.py``'s
+#: ``DEFAULT_PRODUCTION_SOURCES`` and the ``cli.py`` ``resolved_sources``
+#: fallback), written into the pass by ``scheduler_evidence.py:268`` as
+#: ``list(config.sources)``.
+_SCOPE_COMPLETE_SOURCES: list[str] = ["gfs", "IFS"]
 #: The statuses written here that the scheduler only reaches AFTER candidate
-#: construction, so only those passes carry the two scope keys at all.  A
+#: construction, so only those passes carry the three scope keys at all.  A
 #: transparent pass is written before construction and structurally has no
-#: ``backfill`` key, and ``bounded_evidence_payload`` drops both keys, so
+#: ``backfill`` key, and ``bounded_evidence_payload`` drops those keys, so
 #: defaulting the keys onto every status would write shapes production can not
 #: produce.  A pass written with a status outside this set and no explicit scope
 #: keys is therefore ``scope_unknown``, which is loud, not silent.
@@ -172,6 +220,7 @@ def _write_pass(
     status: str = "blocked",
     backfill: Any = _DEFAULT_SCOPE,
     operator_filters: Any = _DEFAULT_SCOPE,
+    sources: Any = _DEFAULT_SCOPE,
 ) -> Path:
     payload: dict[str, Any] = {
         "schema_version": "nhms.production_scheduler.pass_evidence.v1",
@@ -195,10 +244,14 @@ def _write_pass(
         backfill = _SCOPE_COMPLETE_BACKFILL if bears_scope_keys else None
     if operator_filters is _DEFAULT_SCOPE:
         operator_filters = _SCOPE_COMPLETE_OPERATOR_FILTERS if bears_scope_keys else None
+    if sources is _DEFAULT_SCOPE:
+        sources = _SCOPE_COMPLETE_SOURCES if bears_scope_keys else None
     if backfill is not None:
         payload["backfill"] = backfill
     if operator_filters is not None:
         payload["operator_filters"] = operator_filters
+    if sources is not None:
+        payload["sources"] = sources
     path = root / name
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.utime(path, (mtime, mtime))
@@ -206,8 +259,21 @@ def _write_pass(
 
 
 def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """``reason`` is a SHALL field of every listed action (spec.md:5), so it is projected.
+
+    Without it, dropping ``reason=row.get("reason")`` from the module -- or
+    aliasing it onto ``decision`` -- left the whole suite green.
+    """
+
     return [
-        (item["model_id"], item["decision"], item["attempt"], item["retry_limit"], item["occurrences"])
+        (
+            item["model_id"],
+            item["decision"],
+            item["reason"],
+            item["attempt"],
+            item["retry_limit"],
+            item["occurrences"],
+        )
         for item in payload["operator_actions"]
     ]
 
@@ -215,10 +281,44 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
 @pytest.mark.parametrize(
     ("row_factory", "expected"),
     [
-        (_permanent_failure_row, ("model_a", "permanent_failure", 3, 3, None)),
-        (_cancelled_row, ("model_b", "cancelled_manual_retry_required", 1, 3, None)),
-        (_budget_row, ("model_c", "blocked_strict_warm_start_init_state_mismatch", 12, 12, None)),
-        (_breaker_row, ("model_d", "blocked_journal_predecessor_identity_quarantine", None, None, 1)),
+        (_permanent_failure_row, ("model_a", "permanent_failure", "retry_limit_exhausted", 3, 3, None)),
+        (
+            _cancelled_row,
+            ("model_b", "cancelled_manual_retry_required", "manual_retry_required_after_cancelled", 1, 3, None),
+        ),
+        (
+            _budget_row,
+            (
+                "model_c",
+                "blocked_strict_warm_start_init_state_mismatch",
+                "strict_warm_start_retry_budget_exhausted",
+                12,
+                12,
+                None,
+            ),
+        ),
+        (
+            _breaker_row,
+            (
+                "model_d",
+                "blocked_journal_predecessor_identity_quarantine",
+                "journal_predecessor_identity_quarantine_breaker_engaged",
+                None,
+                None,
+                1,
+            ),
+        ),
+        (
+            _sink_refusal_row,
+            (
+                "model_e",
+                "blocked_operator_reentry_restart_stage_refused",
+                "operator_reentry_restart_stage_not_forecast",
+                None,
+                None,
+                None,
+            ),
+        ),
     ],
 )
 def test_each_operator_action_decision_is_listed_and_exits_one(
@@ -290,8 +390,22 @@ def test_summarized_pass_still_lists_a_budget_exhausted_candidate_from_bounded_k
     assert code == 1
     assert payload is not None
     assert _action_projection(payload) == [
-        ("model_c", "blocked_strict_warm_start_init_state_mismatch", 12, 12, None),
-        ("model_d", "blocked_journal_predecessor_identity_quarantine", None, None, 1),
+        (
+            "model_c",
+            "blocked_strict_warm_start_init_state_mismatch",
+            "strict_warm_start_retry_budget_exhausted",
+            12,
+            12,
+            None,
+        ),
+        (
+            "model_d",
+            "blocked_journal_predecessor_identity_quarantine",
+            "journal_predecessor_identity_quarantine_breaker_engaged",
+            None,
+            None,
+            1,
+        ),
     ]
 
 
@@ -372,6 +486,92 @@ def test_one_candidate_seen_across_passes_is_listed_once_with_first_and_last_pas
     assert action["seen_in_passes"] == 2
 
 
+def test_a_candidate_seen_in_several_passes_reports_the_newest_passs_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 1 C1: every value field comes from ``last_seen_pass``, not from the oldest pass.
+
+    Keeping the first-seen values while naming the newest pass produced a
+    self-contradictory receipt, and the runbook feeds ``recorded_init_state_id``
+    from it into ``confirm-operator-reentry`` -- which refuses a stale token
+    before it even reaches its dry-run branch.
+    """
+
+    names = [f"scheduler_2026052112_{index:012d}.json" for index in range(3)]
+    tokens = [
+        "state_gfs_model_d_2026052112_gfs_2026052100_f012",
+        "state_gfs_model_d_2026052112_gfs_2026052106_f006",
+        "state_gfs_model_d_2026052112_gfs_2026052112_f000",
+    ]
+    for index, name in enumerate(names):
+        _write_pass(
+            tmp_path,
+            name,
+            mtime=1_000 * (index + 1),
+            blocked=[_breaker_row(recorded_init_state_id=tokens[index], occurrences=index + 1)],
+        )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert payload is not None
+    (action,) = payload["operator_actions"]
+    assert action["recorded_init_state_id"] == tokens[2]
+    assert action["occurrences"] == 3
+    assert action["first_seen_pass"] == names[0]
+    assert action["last_seen_pass"] == names[2]
+    assert action["seen_in_passes"] == 3
+
+
+def test_a_candidate_id_from_an_older_pass_survives_a_newer_pass_that_has_none(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Newest-wins has one exception: the breaker-released leg carries no ``candidate_id``."""
+
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        blocked=[_breaker_row(recorded_init_state_id="state_gfs_model_d_2026052112_gfs_2026052100_f012")],
+    )
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        mtime=2_000,
+        source_cycles=[
+            {
+                "source_id": "gfs",
+                "cycle_time_utc": "2026-05-21T12:00:00Z",
+                "selection_status": "not_selected",
+                "selection_reason": "journal_predecessor_identity_quarantine_breaker_engaged",
+                "journal_predecessor_identity_quarantine": {
+                    "models": [
+                        {
+                            "model_id": "model_d",
+                            "recorded_init_state_id": "state_gfs_model_d_2026052112_gfs_2026052112_f000",
+                            "occurrences": 4,
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert payload is not None
+    (action,) = payload["operator_actions"]
+    assert action["candidate_id"] == "gfs:2026-05-21T12:00:00Z:model_d:forecast_gfs_deterministic"
+    assert action["recorded_init_state_id"] == "state_gfs_model_d_2026052112_gfs_2026052112_f000"
+    assert action["occurrences"] == 4
+    assert (action["first_seen_pass"], action["last_seen_pass"], action["seen_in_passes"]) == (
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        2,
+    )
+
+
 def test_corrupt_pass_is_reported_unreadable_without_aborting_the_scan(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -393,6 +593,130 @@ def test_corrupt_pass_is_reported_unreadable_without_aborting_the_scan(
         "scheduler_2026052112_eeeeeeeeeeee.json",
     ]
     assert [item["decision"] for item in payload["operator_actions"]] == ["permanent_failure"]
+
+
+class _OsProxy:
+    """Stands in for the listing module's own ``os``: one overridden attribute, the rest real.
+
+    Patching the global ``os.scandir`` would reach pytest and click too; the module
+    only ever reaches the filesystem through its module-level ``os`` name.
+    """
+
+    def __init__(self, scandir: Any) -> None:
+        self.scandir = scandir
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+def _scandir_with_one_vanishing_entry(vanishing: str, failing_method: str) -> Any:
+    """Real ``scandir``, except one entry raises ``FileNotFoundError`` like a deleted file.
+
+    The retention timer (``nhms-scheduler-evidence-retention.timer``) deletes under
+    this very root on its own schedule, so ``scandir`` handing back a name whose
+    ``is_file``/``stat`` then fails is a real race, not a hypothetical one.
+    """
+
+    class _VanishingEntry:
+        def __init__(self, entry: Any) -> None:
+            self.name = entry.name
+            self.path = entry.path
+            self._entry = entry
+
+        def is_file(self, *, follow_symlinks: bool = True) -> bool:
+            if failing_method == "is_file":
+                raise FileNotFoundError(2, "No such file or directory", self.path)
+            return bool(self._entry.is_file(follow_symlinks=follow_symlinks))
+
+        def stat(self, *, follow_symlinks: bool = True) -> Any:
+            if failing_method == "stat":
+                raise FileNotFoundError(2, "No such file or directory", self.path)
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+    class _Scandir:
+        def __init__(self, path: Any) -> None:
+            self._iterator = os.scandir(path)
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc_info: Any) -> bool:
+            self._iterator.close()
+            return False
+
+        def __iter__(self) -> Any:
+            for entry in self._iterator:
+                yield _VanishingEntry(entry) if entry.name == vanishing else entry
+
+    return _Scandir
+
+
+@pytest.mark.parametrize("failing_method", ["stat", "is_file"])
+def test_a_pass_file_deleted_mid_scan_is_reported_without_aborting_the_scan(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    failing_method: str,
+) -> None:
+    """Round 1 B1: one deleted file is not "evidence root unreadable".
+
+    Before the fix the per-entry ``is_file``/``stat`` sat under the root-level
+    ``try``, so a single concurrent deletion turned the whole scan into exit 2
+    naming the ROOT -- which the runbook reads as "you took the wrong root" -- and
+    threw every readable pass away with it.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+    )
+    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="planned")
+    vanishing = "scheduler_2026052112_cccccccccccc.json"
+    _write_pass(tmp_path, vanishing, mtime=3_000, status="planned")
+    monkeypatch.setattr(
+        operator_action_listing,
+        "os",
+        _OsProxy(_scandir_with_one_vanishing_entry(vanishing, failing_method)),
+    )
+
+    code, payload, err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert err == ""
+    assert payload is not None
+    assert payload["passes_scanned"] == 2
+    assert payload["unreadable_passes"] == [vanishing]
+    assert payload["non_evaluating_passes"] == []
+    assert payload["operator_actions"] == []
+    # A global veto, not a positional one: its mtime was never read, so it can not
+    # be placed in the time order at all -- two scope-complete evaluating passes do
+    # NOT make this window answer "nothing waits".
+    assert code == 3
+
+
+def test_an_unreadable_root_still_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control leg of the test above: the ROOT failing is still the exit-2 case."""
+
+    from services.orchestrator import operator_action_listing
+
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
+
+    def _refuse(path: Any) -> Any:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(operator_action_listing, "os", _OsProxy(_refuse))
+
+    code, payload, err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 2
+    assert payload is None
+    assert "evidence root unreadable" in err
 
 
 def test_missing_evidence_root_exits_two(
@@ -490,6 +814,12 @@ def test_breaker_released_source_cycle_lists_each_model(tmp_path: Path, capsys: 
         ),
     ]
     assert all(item["source_id"] == "gfs" for item in payload["operator_actions"])
+    # The breaker-released leg has no candidate row to take a reason from: the
+    # module pins the not-selected entry's own ``selection_reason`` literal.
+    assert [item["reason"] for item in payload["operator_actions"]] == [
+        "journal_predecessor_identity_quarantine_breaker_engaged",
+        "journal_predecessor_identity_quarantine_breaker_engaged",
+    ]
 
 
 def test_no_action_with_dropped_candidate_lists_is_undecidable_and_exits_three(
@@ -658,6 +988,7 @@ _NON_STRING_STATUS = "non_string_status"
 _SIZE_FALLBACK_FROM_PREFLIGHT = "size_fallback_from_preflight_blocked"
 _SCOPE_NARROWED = "scope_narrowed"
 _BACKFILL_DISABLED = "backfill_disabled"
+_SOURCE_NARROWED = "source_narrowed"
 _MISSING_BACKFILL_KEY = "missing_backfill_key"
 _MISSING_FILTERS_KEY = "missing_filters_key"
 # Phase-2 defence: the scope key is THERE but partial, so every key the scope
@@ -711,6 +1042,11 @@ _EMPTY_BACKFILL_MAPPING = "empty_backfill_mapping"
         # the fallback arms, the narrowed pass must leave it armed; the window
         # still has one evaluating pass, so the exit code rests on the flag alone.
         ([_DECIDABLE, _SIZE_FALLBACK, _SCOPE_NARROWED], 3),
+        # 2b: ``--source`` is the THIRD narrowing dimension and must behave exactly
+        # like row 2 -- a pass that only looked at gfs never looked at IFS.  Same
+        # discriminating shape: D clears, the fallback arms, the source-narrowed
+        # pass must leave it armed.
+        ([_DECIDABLE, _SIZE_FALLBACK, _SOURCE_NARROWED], 3),
         # 3-5 (r5-03): a narrowed pass never counts as evaluating.
         ([_UNREADABLE_TRUNCATED, _SCOPE_NARROWED], 3),
         ([_SCOPE_NARROWED, _BACKFILL_DISABLED], 3),
@@ -772,13 +1108,18 @@ def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
             assert written["backfill"]["enabled"] is True
             assert (written["operator_filters"]["model_ids"], written["operator_filters"]["basin_ids"]) == ([], [])
             assert written["operator_filters"]["expression"] is None
+            assert written["sources"] == ["gfs", "IFS"]
         elif kind in (_LOCK_CONTENDED, _PREFLIGHT_BLOCKED, _LEASE_LOST):
             path = _write_pass(tmp_path, name, mtime=mtime, status=kind)
             if kind in (_LOCK_CONTENDED, _PREFLIGHT_BLOCKED):
                 # A transparent pass is written before candidate construction, so
-                # it structurally has NEITHER scope key (spec.md:54).
+                # it structurally has no ``backfill`` key (spec.md:54).  It does
+                # carry ``operator_filters`` in production (``_base_evidence``
+                # writes it unconditionally); this fixture simply omits it, which
+                # the status-first ordering makes unobservable -- so nothing here
+                # may assert its ABSENCE as if that were the producer's shape.
                 written = json.loads(path.read_text(encoding="utf-8"))
-                assert "backfill" not in written and "operator_filters" not in written
+                assert "backfill" not in written
         elif kind == _SCOPE_NARROWED:
             _write_pass(
                 tmp_path,
@@ -790,6 +1131,19 @@ def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
                     model_ids=("model_a",), expression="model_id in [model_a]"
                 ),
             )
+        elif kind == _SOURCE_NARROWED:
+            path = _write_pass(
+                tmp_path,
+                name,
+                mtime=mtime,
+                status="planned",
+                blocked=[_unrelated_blocked_row()],
+                sources=["gfs"],
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+            # Narrowed by VALUE, not by absence: every other scope key is complete.
+            assert written["sources"] == ["gfs"]
+            assert written["backfill"]["enabled"] is True
         elif kind == _BACKFILL_DISABLED:
             _write_pass(
                 tmp_path,
@@ -946,7 +1300,14 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
     assert code == 1
     assert payload is not None
     assert _action_projection(payload) == [
-        ("model_c", "blocked_strict_warm_start_init_state_mismatch", 12, 12, None),
+        (
+            "model_c",
+            "blocked_strict_warm_start_init_state_mismatch",
+            "strict_warm_start_retry_budget_exhausted",
+            12,
+            12,
+            None,
+        ),
     ]
     assert [item["reason"] for item in payload["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
 
@@ -962,6 +1323,8 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
         )}),
         ("expression", {"operator_filters": _narrowed_operator_filters(expression="model_id in [model_a]")}),
         ("backfill_disabled", {"backfill": {"enabled": False}}),
+        # ``plan-production --source gfs``: the pass never looked at IFS.
+        ("sources", {"sources": ["gfs"]}),
     ],
 )
 def test_a_window_of_only_narrowed_passes_is_undecidable(
@@ -972,10 +1335,12 @@ def test_a_window_of_only_narrowed_passes_is_undecidable(
 ) -> None:
     """r5-01: a narrowed pass listed nothing *inside its own scope*, which is not an answer.
 
-    Each shape is one of the two narrowings the pass file records (spec: backfill
-    disabled, or operator filters selecting a subset), written in the producer's
-    own four-key ``operator_filters`` shape (``scheduler_evidence.py:248``) and
-    ``backfill`` shape (``scheduler_runtime.py:1396-1402``).
+    Each shape is one of the three narrowings the pass file records (spec:
+    backfill disabled, operator filters selecting a subset, or ``sources`` naming
+    a subset of the production set), written in the producer's own four-key
+    ``operator_filters`` shape (``scheduler_evidence.py:248``), ``backfill`` shape
+    (``scheduler_runtime.py:1396-1402``) and ``sources`` list
+    (``scheduler_evidence.py:268``).
     """
 
     names = [f"scheduler_2026052112_{index:012d}.json" for index in range(2)]
@@ -1084,7 +1449,14 @@ def test_a_narrowed_pass_that_lists_a_blocked_action_still_reports_it(
     assert code == 1
     assert payload is not None
     assert _action_projection(payload) == [
-        ("model_c", "blocked_strict_warm_start_init_state_mismatch", 12, 12, None)
+        (
+            "model_c",
+            "blocked_strict_warm_start_init_state_mismatch",
+            "strict_warm_start_retry_budget_exhausted",
+            12,
+            12,
+            None,
+        )
     ]
     assert payload["non_evaluating_passes"] == [
         {"pass": "scheduler_2026052112_aaaaaaaaaaaa.json", "status": "planned", "reason": "scope_narrowed"}
@@ -1099,7 +1471,11 @@ def test_a_transparent_pass_without_a_backfill_key_is_not_reclassified_as_narrow
     _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
     transparent = _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
     written = json.loads(transparent.read_text(encoding="utf-8"))
-    assert "backfill" not in written and "operator_filters" not in written
+    # Only ``backfill`` is a key the producer structurally can not write here
+    # (``scheduler_runtime.py`` writes it on the main path only); ``operator_filters``
+    # IS written on a real transparent pass, so its absence is a fixture detail and
+    # must not be asserted as producer shape.
+    assert "backfill" not in written
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
@@ -1174,6 +1550,12 @@ def test_an_evaluating_pass_missing_the_backfill_key_arms_the_hidden_pass_flag(
         ("empty_operator_filters", {"operator_filters": {}}),
         ("operator_filters_without_expression", {"operator_filters": {"model_ids": [], "basin_ids": []}}),
         ("empty_backfill", {"backfill": {}}),
+        # The sixth field the scope test reads.  A missing ``sources`` key must not
+        # read as "no source filter"; a non-list one is a shape the writer can not
+        # produce (``scheduler_evidence.py:268`` writes ``list(config.sources)``).
+        ("missing_sources", {"sources": None}),
+        ("string_sources", {"sources": "gfs"}),
+        ("non_string_source_element", {"sources": [["gfs"]]}),
     ],
 )
 def test_a_partial_scope_mapping_is_unknown_scope_not_complete_scope(
@@ -1333,6 +1715,184 @@ def test_bounded_candidate_summary_retains_every_retry_policy_key_including_fals
     # The new keys never collide with a row-level summary key.
     new_keys = {"retry_attempt", "retry_limit", "retry_occurrences", "manual_retry_required"}
     assert not new_keys & set(scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS)
+
+
+#: The orchestrator package on disk.  The pins below READ these files with ``ast``
+#: and never import them: the listing surface is db-free on purpose, and importing
+#: the writers here would add importer pairs to the CI selector's directory rules.
+_ORCHESTRATOR_DIR = Path(__file__).resolve().parents[1] / "services" / "orchestrator"
+#: Both modules that write a ``manual_retry_required: True`` decision.
+_MANUAL_ACTION_WRITER_FILES = ("scheduler_candidates.py", "scheduler_state_failure.py")
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level ``NAME = "literal"`` assignments, so a decision named by constant resolves."""
+
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = node.value.value
+    return constants
+
+
+def _dict_literal_value(node: ast.Dict, key: str) -> ast.expr | None:
+    for literal_key, value in zip(node.keys, node.values, strict=True):
+        # ``**spread`` entries carry a ``None`` key.
+        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
+            return value
+    return None
+
+
+def _marks_manual_retry_required(node: ast.Dict, *, literal_true: bool) -> bool:
+    """True when the dict sets ``manual_retry_required``, directly or nested, in the asked-for way.
+
+    Nested matters: the flag lives in the ``retry_policy`` sub-dict of the
+    decision dict on four of the five listed writers.  ``literal_true=True``
+    matches a literal ``True`` only -- an expression cannot be judged statically;
+    ``literal_true=False`` matches the expression spellings instead, so the pin can
+    close over those too rather than being silently blind to them.
+    """
+
+    for literal_key, value in zip(node.keys, node.values, strict=True):
+        if isinstance(literal_key, ast.Constant) and literal_key.value == "manual_retry_required":
+            if literal_true:
+                if isinstance(value, ast.Constant) and value.value is True:
+                    return True
+            elif not isinstance(value, ast.Constant):
+                return True
+        if isinstance(value, ast.Dict) and _marks_manual_retry_required(value, literal_true=literal_true):
+            return True
+    return False
+
+
+def _written_manual_action_decisions(*, literal_true: bool = True) -> tuple[set[str], list[str]]:
+    """Every decision the writers pair with ``manual_retry_required``, plus what would not resolve."""
+
+    decisions: set[str] = set()
+    unresolved: list[str] = []
+    for file_name in _MANUAL_ACTION_WRITER_FILES:
+        path = _ORCHESTRATOR_DIR / file_name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict) or not _marks_manual_retry_required(node, literal_true=literal_true):
+                continue
+            value = _dict_literal_value(node, "decision")
+            if value is None:
+                continue
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                decisions.add(value.value)
+            elif isinstance(value, ast.Name) and value.id in constants:
+                decisions.add(constants[value.id])
+            else:
+                unresolved.append(f"{file_name}:{value.lineno}")
+    return decisions, unresolved
+
+
+def test_operator_action_decisions_are_closed_over_every_manual_retry_writer() -> None:
+    """The listed set must equal what the writers actually mark as needing an operator.
+
+    A missing literal is a SILENT exit 0 -- "nothing waits" for a candidate the
+    runbook's second step still handles.  That is how
+    ``blocked_operator_reentry_restart_stage_refused`` went unlisted, so the pin is
+    the deliverable, not the literal.  Source text + ``ast`` only: no import of the
+    writers, and an unresolvable ``decision`` is a failure rather than a silent gap.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    decisions, unresolved = _written_manual_action_decisions()
+
+    assert unresolved == []
+    assert decisions == {
+        "permanent_failure",
+        "cancelled_manual_retry_required",
+        "blocked_strict_warm_start_init_state_mismatch",
+        "blocked_journal_predecessor_identity_quarantine",
+        "blocked_operator_reentry_restart_stage_refused",
+    }
+    assert set(operator_action_listing.OPERATOR_ACTION_DECISIONS) == decisions
+
+    # The other direction.  Matching only the literal ``True`` is correct -- an
+    # expression cannot be judged statically -- but on its own it is a back door: a
+    # NEW ``manual_retry_required: <expression>`` writer would be invisible to this
+    # pin, and it could be the sixth operator decision.  So the expression writers
+    # are enumerated too; adding one fails here and has to be dispositioned.
+    #
+    # The two that exist today are both provably unreachable with the flag true,
+    # which is why they are out of the listed set (evidence, not assertion):
+    #   * ``scheduler_state_failure.py:514`` (``retry_downstream``) -- the same
+    #     function returns None at ``:498`` when ``failure["permanent"]``, so the
+    #     dict at ``:500`` is only ever built with the flag False.
+    #   * ``scheduler_state_failure.py:1954`` (``retry_failed``) -- no in-function
+    #     guard; the guard is at the call site, ``scheduler_state_decision.py:385``
+    #     returns the permanent ``blocked`` decision BEFORE the ``retry_failed``
+    #     return point at ``:412``, so a permanent candidate never reaches it.
+    #   * that same ``_failure_retry()`` evidence also feeds the missing-forcing
+    #     channel (``scheduler_state_decision.py:373``), whose four return points all
+    #     go through ``_artifact_blocker_evidence`` (``scheduler_state_failure.py:909``):
+    #     it writes its own ``decision`` (``:927``) and its own
+    #     ``manual_retry_required: False`` (``:947``) and inherits neither, so the
+    #     production main path (every live blocked candidate measured on node-22)
+    #     does not leak through it either.
+    expression_decisions, expression_unresolved = _written_manual_action_decisions(literal_true=False)
+
+    assert expression_unresolved == []
+    assert expression_decisions == {"retry_downstream", "retry_failed"}
+    assert not expression_decisions & set(operator_action_listing.OPERATOR_ACTION_DECISIONS)
+
+
+def _only_string_tuple_literal(node: ast.AST, where: str) -> tuple[str, ...]:
+    tuples = [
+        item
+        for item in ast.walk(node)
+        if isinstance(item, ast.Tuple)
+        and item.elts
+        and all(isinstance(element, ast.Constant) and isinstance(element.value, str) for element in item.elts)
+    ]
+    assert len(tuples) == 1, f"{where}: expected exactly one string tuple literal, found {len(tuples)}"
+    return tuple(element.value for element in tuples[0].elts)  # type: ignore[attr-defined]
+
+
+def test_the_three_spellings_of_the_production_source_set_agree() -> None:
+    """``SCOPE_COMPLETE_SOURCES`` is a local copy; drift in any of the three must be loud.
+
+    The authority is ``scheduler.py``'s ``DEFAULT_PRODUCTION_SOURCES``, but that
+    module is far too heavy to import from a db-free listing surface, and
+    ``cli.py``'s ``resolved_sources`` fallback is what a pass without
+    ``--source``/``NHMS_SCHEDULER_SOURCES`` actually records.  Read with ``ast``,
+    not imported, for the same reason.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    scheduler_tree = ast.parse((_ORCHESTRATOR_DIR / "scheduler.py").read_text(encoding="utf-8"))
+    default_sources = [
+        node
+        for node in scheduler_tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "DEFAULT_PRODUCTION_SOURCES" for target in node.targets)
+    ]
+    assert len(default_sources) == 1
+
+    cli_tree = ast.parse((_ORCHESTRATOR_DIR / "cli.py").read_text(encoding="utf-8"))
+    resolved_sources = [
+        node
+        for node in ast.walk(cli_tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "resolved_sources" for target in node.targets)
+    ]
+    assert len(resolved_sources) == 1
+
+    assert _only_string_tuple_literal(default_sources[0], "scheduler.py DEFAULT_PRODUCTION_SOURCES") == ("gfs", "IFS")
+    assert _only_string_tuple_literal(resolved_sources[0], "cli.py resolved_sources fallback") == ("gfs", "IFS")
+    assert tuple(operator_action_listing.SCOPE_COMPLETE_SOURCES) == ("gfs", "IFS")
+    assert tuple(_SCOPE_COMPLETE_SOURCES) == ("gfs", "IFS")
 
 
 def test_argparse_entrypoint_matches_click_receipt_and_exit_code(

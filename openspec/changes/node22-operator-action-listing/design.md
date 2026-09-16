@@ -21,8 +21,9 @@
 
 `exit 0` 的含义是**"扫过的窗口里没有待办，且窗口本身可信"**。round 5 发现第二个分句在窄范围 pass 上不成立：
 
-- 四条决策里的 `blocked_journal_predecessor_identity_quarantine` 条目，**只在 backfill 腿产生**（breaker 释放的 cycle 不进候选清单，只作为 not-selected source cycle 出现）。一趟 `--disable-backfill` 的 pass 因此结构性地看不见它。
+- 列举的决策里，`blocked_journal_predecessor_identity_quarantine` 条目**只在 backfill 腿产生**（breaker 释放的 cycle 不进候选清单，只作为 not-selected source cycle 出现）。一趟 `--disable-backfill` 的 pass 因此结构性地看不见它。
 - `--model-id` / `--basin-id` / `--expression` 收窄同理：没列出待办，只说明**这个子集里**没有。
+- `--source` 是第三个收窄维度（round 1 A2）：`scheduler_evidence.py:268` 无条件写顶层 `sources`，一趟 `--source gfs` 的 pass 从没看过 IFS。它**判不了空**——`cli.py:421` 在没给 `--source` 时回填全集，`sources` 恒非空——所以按集合与权威全集比较。全集在 `scheduler.py:292` 的 `DEFAULT_PRODUCTION_SOURCES`，但 `scheduler.py` 有 35 个顶层 import 与 lease-compat facade，不能被 DB-free 的列举面拖进来：本模块留本地字面量 `SCOPE_COMPLETE_SOURCES`，由测试里的三方一致性 pin（AST 只读 `scheduler.py` / `cli.py`，不 import）防漂移。
 
 原实现把这类 pass 当作可判定，于是它会**清零** `hidden_after_decidable`，把一个更早的隐藏 pass 的警报抹掉，给出假 `exit 0`。
 
@@ -39,9 +40,9 @@
 
 **可求值但 scope 键缺失，归到最后一行（置位），不是单独的第五态。** 这是 fixture 审查第二轮的裁决点，写明取舍：一趟 status 可求值、却读不到范围的 pass，范围无从判断，因此它**可能**只看了一部分——与"size fallback 可能藏了东西"是同一类不确定性，用同一个动作（置位）表达，并以 reason `scope_unknown` 计入 `non_evaluating_passes`。
 
-**"读不到"的判据是键的有无，不是值。** 第一版只查了 `backfill` / `operator_filters` 两个**顶层**键在不在，Phase 2 的探针实测出两个洞：`operator_filters` 是**空 mapping** 时（三个过滤键都不在，`.get` 全返回假值）被判成范围完整 → 清零标志 → 可产生 `exit 0`；`backfill` 是空 mapping 时（没有 `enabled`）被判成 `scope_narrowed` → 不置位。两者都是 r5-01 的失败类换了个入口。修正后的判据是：`backfill.enabled` 与 `operator_filters` 的 `basin_ids` / `model_ids` / `expression` **五个字段有任一不在即 `scope_unknown`**；键在而值收窄才是 `scope_narrowed`。
+**"读不到"的判据是键的有无，不是值。** 第一版只查了 `backfill` / `operator_filters` 两个**顶层**键在不在，Phase 2 的探针实测出两个洞：`operator_filters` 是**空 mapping** 时（三个过滤键都不在，`.get` 全返回假值）被判成范围完整 → 清零标志 → 可产生 `exit 0`；`backfill` 是空 mapping 时（没有 `enabled`）被判成 `scope_narrowed` → 不置位。两者都是 r5-01 的失败类换了个入口。修正后的判据是：`backfill.enabled`、`operator_filters` 的 `basin_ids` / `model_ids` / `expression`，以及顶层 `sources`（round 1 A2 补的第六个）**六个字段有任一不在即 `scope_unknown`**；键在而值收窄才是 `scope_narrowed`。`sources` 的"不在"还包括**不是字符串列表**——writer 写的是 `list(config.sources)`，别的形状既造不出也没法比较（并且 `set()` 碰到不可哈希元素会抛 `TypeError`，直接逃出 0/1/2/3 契约）。
 
-这条分界线有源头，不是拍的：`scheduler_evidence.py:248-253` 把顶层 `operator_filters` 写成无条件的四键 dict 字面量，`scheduler_runtime.py:1394-1402` 的 `if/else` **两条腿都写** `backfill` 且都带 `enabled`——所以字段缺失不是 pass 记录下来的一种收窄，而是 writer 造不出的形状。**易错点**：`scheduler_evidence.py:995` 的 `empty_model_discovery()` 只写两个键，看着像反例，但那是 `model_discovery.operator_filters` 这个**嵌套镜像**，本模块读顶层键，不受影响。
+这条分界线有源头，不是拍的：`scheduler_evidence.py:248-253` 把顶层 `operator_filters` 写成无条件的四键 dict 字面量，`scheduler_evidence.py:268` 无条件写 `sources`，`scheduler_runtime.py:1394-1402` 的 `if/else` **两条腿都写** `backfill` 且都带 `enabled`——所以字段缺失不是 pass 记录下来的一种收窄，而是 writer 造不出的形状。**易错点**：`scheduler_evidence.py:995` 的 `empty_model_discovery()` 只写两个键，看着像反例，但那是 `model_discovery.operator_filters` 这个**嵌套镜像**，本模块读顶层键，不受影响。
 
 这个选择有可观察后果，必须说清楚：置位是**位置相关**的，一趟更新的范围完整 pass 会把它清零。所以 `[缺键, D] → 0`（更新的那趟确实看过全部，旧的不确定性被取代），而 `[D, 缺键] → 3`。另一种写法是把它做成与 `dropped` 同类的**全局**否决（一旦出现就 exit 3，不论位置）——那需要自己的分支、自己的判据和自己的覆盖行，而 D2 实测 169/169 生产 pass 两个键都在，这是纯防御路径。
 
@@ -103,9 +104,9 @@ retry_policy.manual_retry_required   = False                        (760/760)
 retry_policy.attempt                 = 0                            (760/760)
 ```
 
-即：在管线已经死了一天多的当下，**`list-operator-actions` 会按契约返回 `exit 0`**——因为 `FORCING_VERSION_ROW_ABSENT` 不在本面列举的四类决策里，而且它自己写着 `manual_retry_required: False`。
+即：在管线已经死了一天多的当下，**`list-operator-actions` 会按契约返回 `exit 0`**——因为 `FORCING_VERSION_ROW_ABSENT` 不在本面列举的决策集合里，而且它自己写着 `manual_retry_required: False`。
 
-这**不是本面的缺陷**：它忠实反映了调度器的声明。但 `exit 0` 的含义因此必须被写死成「**没有在册的四类待办**」，而不是「调度器健康」——否则运维会拿它当健康检查，而它在这次停摆里会给出绿灯。C1 的 runbook 段落必须明写这一条，并给出这次停摆作为实例。
+这**不是本面的缺陷**：它忠实反映了调度器的声明。但 `exit 0` 的含义因此必须被写死成「**没有在册的那几类待办**」，而不是「调度器健康」——否则运维会拿它当健康检查，而它在这次停摆里会给出绿灯。C1 的 runbook 段落必须明写这一条，并给出这次停摆作为实例。
 
 另有一条**越界观察，不在本 PR 修**：这 760 个候选 `automatic_retry_allowed=False` 且 `manual_retry_required=False` 而 `attempt=0`——不是次数耗尽，是这个决策既不自动重试也不声明需要人工。它们处在"没有任何人会来管"的状态，而这个状态在任何运维面上都不会自称需要关注。这可能说明 `manual_retry_required=False` 在这个 error_code 上定错了，但那是调度决策侧的事，已作为观察提在 #2432。
 
@@ -117,6 +118,7 @@ round 5 判定排序表（pass 类别 × 收窄状态 → 期望退出码）缺�
 |---|---|---|---|---|
 | 1 | `[D, size_fallback(原 status preflight_blocked)]` | 3 | r5-00 | 不适用（r5-00 的行） |
 | 2 | **`[D, SF, scoped]`** | **3** | **本轮补**（fixture 审查 F-03） | **唯一一行有** |
+| 2b | **`[D, SF, source-narrowed]`** | **3** | **round 1 A2** | 同第 2 行（`sources` 维度） |
 | 3 | `[unreadable, scoped]` | 3 | r5-03 | 无 |
 | 4 | `[D, scoped]` | 0 | r5-03 | 无 |
 | 5 | 全窄范围窗口 | 3 | r5-03 | 无 |
@@ -133,7 +135,9 @@ round 5 判定排序表（pass 类别 × 收窄状态 → 期望退出码）缺�
 
 `[D, scoped] → 0` 是其中唯一的 `0`，也是最容易写反的一行：**更早**的可判定范围完整 pass 已经清零了标志，其后一趟窄范围 pass 按 D1 的三态「保持」，因此标志仍是零，`exit 0` 成立。
 
-### 这七行对着现有机制逐行验过（实测，非断言）
+**第 2b 行与第 2 行判别力相同，但钉的是另一个维度**：删掉 `_scope_reason` 里的 `sources` 收窄分支后，那趟 pass 变成范围完整可求值 → 清零标志 → 得 0，第 2b 行必红；反过来第 2 行对 `sources` 分支零判别力。两行都要。
+
+### 这几行对着现有机制逐行验过（实测，非断言）
 
 迭代方向先定死：`_newest_pass_files`（`:245`）以 `reverse=True` 排序，**新在前**；判定循环 `for name, path in reversed(selected)`（`:160`）因此是**从旧到新**走。`hidden_after_decidable` 的终值由**最新**那趟决定——`[D, scoped] → 0` 的推理方向成立，不是反的。
 
@@ -147,7 +151,40 @@ round 5 判定排序表（pass 类别 × 收窄状态 → 期望退出码）缺�
 
 `_non_evaluating_entry` 现签名是 `(name, status, limit)`，判不了 scope——它必须改成接收整个 payload（或额外接收 `backfill` / `operator_filters` 两段）。这条写在这里，免得实现时当成"顺手改的签名"而漏掉调用点。另一条必须落死的顺序：**status 判在 scope 判之前**（`spec.md:54`），写反即 F-02 那个坑——透明 pass 结构性无 `backfill` 键，会被当成 `scope_unknown` 置位，第 7 行必红。
 
+## D4 — round 1 交叉审查落下的三条判定（除 `sources` 外）
+
+- **决策集合闭合（A1/E2）**：`OPERATOR_ACTION_DECISIONS` 原本只有四条，漏了
+  `blocked_operator_reentry_restart_stage_refused`（写侧 `scheduler_candidates.py` 的
+  `OPERATOR_REENTRY_SINK_REFUSAL_DECISION`），而同一份 runbook 第二步一直在处置它——
+  一趟只含该 decision 的完整 pass 会返回 `exit 0`（"没有待办"）。真正的交付物不是补那条字面量，
+  而是**闭合 pin**：测试用 `ast` 只读扫 `scheduler_candidates.py` 与 `scheduler_state_failure.py`，
+  取所有带 `"manual_retry_required": True`（含嵌套 `retry_policy`）的 dict 字面量自己的 `decision`
+  值（字符串字面量或模块级常量 Name 都解析），断言集合与 `OPERATOR_ACTION_DECISIONS` 相等、且
+  `unresolved == []`。**只读源码不 import**：列举面要保持 DB-free，且不给 CI 选择器带进新的
+  importer 对。
+- **跨 pass 合并取最新趟（C1）**：原实现首次出现即定型，只更新 `last_seen_pass` /
+  `seen_in_passes`，于是 `recorded_init_state_id` 等值字段来自**最旧**趟而 `last_seen_pass` 指向最新趟，
+  receipt 自相矛盾。危害具体：runbook 让运维把 receipt 的 `recorded_init_state_id` 喂给
+  `confirm-operator-reentry`，陈旧 token 在 dry-run 分支**之前**就被拒（不会写错确认物，但恢复被阻断
+  且看不出是 pin 不对还是 token 过期）。本 diff 删掉的旧 jq 是 `ls -t | head -1`（只读最新一份，token
+  天然新鲜），换成 `--passes 6` 的合并 receipt 才出现这个问题。**判定：最新趟全胜**——除
+  `first_seen_pass` / `seen_in_passes` 外所有字段取 `last_seen_pass` 那趟，`candidate_id` 为 None
+  时（breaker 释放腿没有）回退到已知值。顺带更正一条措辞：`occurrences` **不是**逐趟递增的，写侧
+  （`scheduler_candidates.py:2600-2606`）写的是当趟实测 live 计数，稳态 fail-stop 下是平的；真正的
+  漂移风险集中在 `recorded_init_state_id`。
+- **单文件在扫描期消失不得中止整次扫描（B1）**：`_newest_pass_files` 原本把 per-entry 的
+  `is_file` / `stat` 放在根级 `try` 里，任一 `OSError` 变成 `evidence root unreadable` → exit 2。
+  可达性是真的：同一 evidence root 上 `nhms-scheduler-evidence-retention.timer` 在删这批文件。危害是
+  exit 2 的消息指向 **root**，而 runbook 把 `2` 解释成"多半是 root 取错"，运维被导向一个不存在的配置
+  问题，且全部可读 pass 被整体丢弃。**判定**：per-entry 各自 `try`，根级只保留 `os.scandir(root)`；
+  消失的文件计入 `unreadable_passes`（spec 要求"SHALL be reported"），并在退出码里作**全局否决**
+  （与 `dropped` 同档）——它的 mtime 没读到，**无法定位在时间序里**，位置未知时不能像主循环里
+  `_read_pass` 返回 None 那样按位置置位。由此产生一处**必须写明的不对称**：`unreadable_passes` 这个
+  receipt 列表与 `evaluating_count` 的减项**不是同一个集合**，因为扫描期消失的文件从来没进过
+  `selected`，减它会算错。
+
 ## 待测（未测的地方写"未测"，不写推断）
 
 - 本设计尚未在 node-22 实机跑过 `list-operator-actions`（EF-8）。D2 的取证只覆盖**输入形状**，不覆盖命令在真实证据根上的端到端退出码。
-- 169 趟样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 的七行全部只能靠构造的 fixture 立论，线上无对照样本。
+- 169 趟样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 各行全部只能靠构造的 fixture 立论，线上无对照样本。
+- D2 的**原始**三次只读探查没有采集顶层 `sources` 的取值分布（round 1 A2 之前 `sources` 不是判据），但该分布在 round 1 裁决 A2 时已由编排者在 node-22 活动证据根上单独实测：**177/177 趟 `sources` 均为 `("gfs","IFS")` 全集，零趟缺键**——这正是"加 `sources` 判据不会把线上打成 exit 3"的依据，不是推断。EF-7 在本 PR 修复后的 head 上复核时把它并入 D2 正式重测一次，届时以重测值为准。

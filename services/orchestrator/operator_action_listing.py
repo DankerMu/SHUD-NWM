@@ -1,6 +1,6 @@
 """``list-operator-actions`` (#1186): enumerate manual-action decisions from pass evidence.
 
-The db-free scheduler writes ``manual_retry_required: true`` on four terminal
+The db-free scheduler writes ``manual_retry_required: true`` on five terminal
 decisions but node-22 had no surface that lists them.  This read-only command
 scans the newest terminal pass evidence files under the evidence root and prints
 one sorted-key JSON line naming every candidate that waits on an operator.
@@ -25,15 +25,22 @@ non-decidable pass -- size-fallback, unreadable (for example half-written),
 ``lease_lost``, exception-path ``resource_limit_blocked``, an unknown status --
 newer (in the mtime order of the scan) than the newest decidable pass leaves
 the window undecidable.  A pass the operator NARROWED (round 5 r5-01: backfill
-off, or filters naming a subset) answers only for its own scope, so it can not
+off, filters naming a subset, or ``--source`` naming a subset of
+:data:`SCOPE_COMPLETE_SOURCES`) answers only for its own scope, so it can not
 say "nothing waits" either: it is non-evaluating with reason
 :data:`SCOPE_NARROWED_REASON` and leaves the hidden-pass flag exactly as it
 found it, while a pass whose scope keys are missing (:data:`SCOPE_UNKNOWN_REASON`)
-arms it.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none but
-undecidable (a scanned pass dropped its candidate lists, no scanned pass is
-readable, evaluating and scope-complete -- including an empty root --, or a pass
-that is neither decidable nor transparent nor merely narrowed is newer than the
-newest decidable pass), ``2`` evidence root missing or unreadable.
+arms it.  One candidate seen in several passes is listed once, and apart from
+``first_seen_pass``/``seen_in_passes`` EVERY value field of that entry comes from
+the ``last_seen_pass``: the newest pass wins, because the operator feeds
+``recorded_init_state_id`` straight into ``confirm-operator-reentry``, where a
+stale token is refused.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none
+but undecidable (a scanned pass dropped its candidate lists, a pass file vanished
+mid-scan, no scanned pass is readable, evaluating and scope-complete -- including
+an empty root --, or a pass that is neither evaluating-and-scope-complete, nor
+transparent, nor merely narrowed is newer than the newest evaluating and
+scope-complete pass), ``2`` evidence root missing or unreadable, or ``--passes``
+misused.
 """
 
 from __future__ import annotations
@@ -111,36 +118,56 @@ _SIZE_FALLBACK_STATUS = "resource_limit_blocked"
 _SIZE_FALLBACK_CANDIDATE_LISTS = frozenset(("summarized", "dropped"))
 STATUS_NOT_EVALUATING_REASON = "status_not_evaluating"
 SIZE_FALLBACK_NON_EVALUATING_REASON = "size_fallback_source_cycles_absent"
-#: Round 5 r5-01.  A pass the operator narrowed (backfill off, or filters naming a
-#: subset of models/basins/an expression) listed nothing only INSIDE ITS OWN
-#: SCOPE, and the breaker-released entries of one of the four listed decisions are
+#: Round 5 r5-01.  A pass the operator narrowed (backfill off, filters naming a
+#: subset of models/basins/an expression, or ``--source`` naming a subset of
+#: :data:`SCOPE_COMPLETE_SOURCES`) listed nothing only INSIDE ITS OWN
+#: SCOPE, and the breaker-released entries of one of the listed decisions are
 #: produced on the backfill leg alone.  It is therefore non-evaluating -- but it
 #: LEAVES the hidden-pass flag as it found it: it may not clear it (it did not
 #: look everywhere) and it may not arm it (the narrowing was the operator's own
 #: instruction and hides nothing unexpectedly).
 SCOPE_NARROWED_REASON = "scope_narrowed"
-#: An otherwise-evaluating pass whose ``backfill`` or ``operator_filters`` key is
-#: missing -- or present but PARTIAL, missing one of the sub-keys the scope test
-#: reads: its scope can not be read, so it is not assumed scope-complete.  This
+#: An otherwise-evaluating pass whose ``backfill``, ``operator_filters`` or
+#: ``sources`` key is missing -- or present but PARTIAL, missing one of the
+#: sub-keys the scope test reads, or of a shape the writer can not produce:
+#: its scope can not be read, so it is not assumed scope-complete.  This
 #: is the same class of uncertainty as a size fallback -- the pass MAY have
 #: evaluated candidates it can not show -- so it ARMS the flag (positionally: a
 #: newer scope-complete pass clears it again), and is not a global veto the way a
 #: dropped candidate list is.
 SCOPE_UNKNOWN_REASON = "scope_unknown"
 
+#: Every decision the db-free scheduler writes ``manual_retry_required: True`` on.
+#: Literals, not imports: this surface stays db-free and importer-free, so the
+#: closure pin in ``tests/test_operator_action_listing.py`` reads the two writer
+#: modules with ``ast`` instead.  ``blocked_operator_reentry_restart_stage_refused``
+#: is written by ``scheduler_candidates.py`` from its own module constant
+#: ``OPERATOR_REENTRY_SINK_REFUSAL_DECISION`` and is handled by the second step of
+#: ``docs/runbooks/node22-control-plane-manual-recovery.md``.
 OPERATOR_ACTION_DECISIONS = frozenset(
     (
         "permanent_failure",
         "cancelled_manual_retry_required",
         "blocked_strict_warm_start_init_state_mismatch",
+        "blocked_operator_reentry_restart_stage_refused",
         BREAKER_DECISION,
     )
 )
 
+#: The whole set of production sources a pass must have looked at to answer for
+#: everywhere; a pass narrowed with ``--source`` answers only for its own subset.
+#: A LOCAL literal on purpose: the authority is ``scheduler.py``'s
+#: ``DEFAULT_PRODUCTION_SOURCES``, but that module carries 35 top-level imports and
+#: the lease-compat facade, and this listing surface must stay db-free and cheap to
+#: import.  ``tests/test_operator_action_listing.py`` pins the three spellings
+#: (here, ``scheduler.py``, and the ``cli.py`` fallback) against each other.
+SCOPE_COMPLETE_SOURCES = ("gfs", "IFS")
+
 LIST_OPERATOR_ACTIONS_HELP = (
     "List candidates waiting on an operator (#1186): permanent_failure, "
     "cancelled_manual_retry_required, blocked_strict_warm_start_init_state_mismatch, "
-    "blocked_journal_predecessor_identity_quarantine. Read-only: scans the newest "
+    "blocked_journal_predecessor_identity_quarantine, "
+    "blocked_operator_reentry_restart_stage_refused. Read-only: scans the newest "
     "--passes terminal scheduler pass evidence files under --evidence-root "
     f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none "
     "and at least one scanned pass evaluated candidates over the whole scope, 3 when "
@@ -149,11 +176,14 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "nor transparent -- size-fallback, unreadable, lease_lost, resource_limit_blocked, "
     "unknown status; transparent = lock_contended, preflight_blocked -- is newer than "
     "the newest evaluating pass; see non_evaluating_passes / unreadable_passes; an "
-    "empty root counts, and a size-fallback pass never counts as evaluating because "
-    "its source_cycles were dropped). A pass the operator narrowed (backfill disabled "
-    "or --model-id/--basin-id filters) is reported with reason "
-    "scope_narrowed and never counts as evaluating: it answered only for its own "
-    "scope. Exit 2 when the root is missing or unreadable. Runbook: "
+    "empty root counts, a size-fallback pass never counts as evaluating because "
+    "its source_cycles were dropped, and a pass file that vanished between the "
+    "directory scan and its stat is reported under unreadable_passes and vetoes "
+    "exit 0 wherever it sat). A pass the operator narrowed (backfill disabled, "
+    "--model-id/--basin-id filters, or --source naming a subset of gfs/IFS) is "
+    "reported with reason scope_narrowed and never counts as evaluating: it "
+    "answered only for its own scope. Exit 2 when the root is missing or "
+    "unreadable, or --passes is not an integer >= 1. Runbook: "
     "docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 
@@ -171,7 +201,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     if type(passes) is not int or passes < 1:
         raise OperatorActionListingError("--passes must be an integer >= 1")
     root = Path(str(root_text))
-    selected = _newest_pass_files(root, passes)
+    selected, vanished = _newest_pass_files(root, passes)
 
     unreadable: list[str] = []
     dropped: list[str] = []
@@ -212,17 +242,33 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
             if existing is None:
                 actions[key] = {**action, "first_seen_pass": name, "last_seen_pass": name, "seen_in_passes": 1}
                 continue
-            if existing["candidate_id"] is None:
-                existing["candidate_id"] = action["candidate_id"]
-            existing["last_seen_pass"] = name
-            existing["seen_in_passes"] += 1
+            # Newest wins (the loop runs oldest -> newest): every value field is
+            # the one ``last_seen_pass`` carried.  Keeping the OLDEST values while
+            # naming the newest pass produced a self-contradictory receipt, and the
+            # runbook feeds ``recorded_init_state_id`` from it into
+            # ``confirm-operator-reentry``, which refuses a stale token.  Only
+            # ``first_seen_pass`` and the occurrence count survive from before; a
+            # missing ``candidate_id`` (the breaker-released leg has none) falls
+            # back to whatever an earlier pass knew.
+            candidate_id = action["candidate_id"]
+            actions[key] = {
+                **action,
+                "candidate_id": candidate_id if candidate_id is not None else existing["candidate_id"],
+                "first_seen_pass": existing["first_seen_pass"],
+                "last_seen_pass": name,
+                "seen_in_passes": existing["seen_in_passes"] + 1,
+            }
 
     listed = [actions[key] for key in sorted(actions)]
     receipt = {
         "schema_version": LIST_OPERATOR_ACTIONS_SCHEMA_VERSION,
         "evidence_root": str(root),
         "passes_scanned": len(selected),
-        "unreadable_passes": sorted(unreadable),
+        # Both kinds of "could not read this pass" are reported here, but only the
+        # ones that were SELECTED are subtracted from ``evaluating_count`` below:
+        # a file that vanished mid-scan never entered ``selected``, so subtracting
+        # it would undercount.  Asymmetry on purpose, see the exit chain.
+        "unreadable_passes": sorted(unreadable + vanished),
         "operator_action_count": len(listed),
         "operator_actions": listed,
         "candidate_lists_dropped_passes": sorted(dropped),
@@ -231,7 +277,11 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:
         return receipt, 1
-    if dropped or evaluating_count < 1 or hidden_after_decidable:
+    # ``vanished`` is a GLOBAL veto, like ``dropped`` and unlike an unreadable
+    # selected pass: its mtime was never read, so it can not be placed in the time
+    # order at all.  A pass whose position is unknown can not arm the flag
+    # positionally, and the only honest answer left is "undecidable".
+    if dropped or vanished or evaluating_count < 1 or hidden_after_decidable:
         return receipt, 3
     return receipt, 0
 
@@ -239,7 +289,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
 def _non_evaluating_entry(name: str, payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """``None`` for an evaluating, scope-complete pass, else its ``non_evaluating_passes`` entry.
 
-    Takes the whole payload because the scope test (r5-01) reads two of its
+    Takes the whole payload because the scope test (r5-01) reads three of its
     top-level keys.  STATUS IS JUDGED FIRST and scope only within what the status
     leaves evaluating: a pass written before candidate construction structurally
     carries no ``backfill`` key, so testing scope ahead of status would call every
@@ -276,7 +326,10 @@ def _non_evaluating_entry(name: str, payload: Mapping[str, Any]) -> dict[str, An
 #: writes ``backfill`` on BOTH legs of its if/else, each carrying ``enabled``.
 #: Do NOT read ``scheduler_evidence.py:995`` as a counter-example: that two-key
 #: mapping is ``model_discovery.operator_filters``, a NESTED mirror this module
-#: never reads -- the scope test reads the TOP-LEVEL keys only.
+#: never reads -- the scope test reads the TOP-LEVEL keys only.  The third scope
+#: dimension, the top-level ``sources`` list, is written just as unconditionally
+#: (``scheduler_evidence.py:268``, ``list(config.sources)``); the second spelling
+#: at ``:859`` is the nested runtime-config mirror, which this module never reads.
 _REQUIRED_OPERATOR_FILTER_KEYS = ("basin_ids", "model_ids", "expression")
 
 
@@ -300,15 +353,28 @@ def _scope_reason(payload: Mapping[str, Any]) -> str | None:
     the four keys at their empty defaults (measured on all 169 live node-22
     passes, 2026-09-16), so a rule keyed on mapping-emptiness would call every
     production pass narrowed and never reach exit 0.
+
+    ``sources`` is the THIRD narrowing dimension, on exactly the same footing:
+    ``plan-production --source gfs`` lands as the top-level ``sources`` list
+    (``scheduler_evidence.py:268``) and such a pass never looked at IFS.  It can
+    not be judged by emptiness -- ``cli.py:421`` makes the list non-empty always,
+    defaulting to the whole set -- so it is compared against
+    :data:`SCOPE_COMPLETE_SOURCES` as a set.
     """
 
     backfill = payload.get("backfill")
     operator_filters = payload.get("operator_filters")
+    sources = payload.get("sources")
     if not isinstance(backfill, Mapping) or "enabled" not in backfill:
         return SCOPE_UNKNOWN_REASON
     if not isinstance(operator_filters, Mapping):
         return SCOPE_UNKNOWN_REASON
     if any(key not in operator_filters for key in _REQUIRED_OPERATOR_FILTER_KEYS):
+        return SCOPE_UNKNOWN_REASON
+    # Anything but a list/tuple of strings is a shape the writer can not produce,
+    # so the scope can not be read -- and set() on an unhashable element would
+    # escape the 0/1/2/3 contract as a TypeError.
+    if not isinstance(sources, list | tuple) or not all(isinstance(item, str) for item in sources):
         return SCOPE_UNKNOWN_REASON
     if backfill["enabled"] is not True:
         return SCOPE_NARROWED_REASON
@@ -316,28 +382,43 @@ def _scope_reason(payload: Mapping[str, Any]) -> str | None:
         return SCOPE_NARROWED_REASON
     if operator_filters["expression"] is not None:
         return SCOPE_NARROWED_REASON
+    if set(sources) != set(SCOPE_COMPLETE_SOURCES):
+        return SCOPE_NARROWED_REASON
     return None
 
 
-def _newest_pass_files(root: Path, passes: int) -> list[tuple[str, Path]]:
-    """Top-level terminal pass files, newest ``passes`` by mtime (uuid suffixes are not time-ordered)."""
+def _newest_pass_files(root: Path, passes: int) -> tuple[list[tuple[str, Path]], list[str]]:
+    """Top-level terminal pass files, newest ``passes`` by mtime, plus the names that vanished.
+
+    Only ``os.scandir(root)`` itself is a scan-aborting error (exit 2, "the root
+    is unreadable").  A SINGLE entry that raises -- the retention timer deletes
+    under this very root on its own schedule -- is reported and skipped, never
+    rendered as "evidence root unreadable", which would name the root, hide the
+    file that went away, and throw every readable pass away with it.
+    """
 
     entries: list[tuple[int, str, Path]] = []
+    vanished: list[str] = []
     try:
         with os.scandir(root) as iterator:
             for entry in iterator:
                 name = entry.name
                 if not is_scheduler_pass_evidence_filename(name) or name.endswith(_PRE_EXECUTION_SUFFIX):
                     continue
-                if not entry.is_file(follow_symlinks=False):
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    mtime = entry.stat(follow_symlinks=False).st_mtime_ns
+                except OSError:
+                    vanished.append(name)
                     continue
-                entries.append((entry.stat(follow_symlinks=False).st_mtime_ns, name, Path(entry.path)))
+                entries.append((mtime, name, Path(entry.path)))
     except OSError as error:
         raise OperatorActionListingError(
             f"evidence root unreadable: {type(error).__name__}: {root}"
         ) from error
     entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [(name, path) for _mtime, name, path in entries[:passes]]
+    return [(name, path) for _mtime, name, path in entries[:passes]], vanished
 
 
 def _read_pass(path: Path) -> dict[str, Any] | None:
