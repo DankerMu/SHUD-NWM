@@ -15,7 +15,7 @@
 - [x] 3.2 E4: node-27 catalog HTTP regression red/green plus ready/missing/not-ready/pagination compatibility.
 - [x] 3.3 E5/E6: local frontend unit/type/build/API-type checks, ruff and OpenSpec validation; current lineage consumer/schema inventory.
 - [x] 3.4 E7: node-27 isolated target build + real display API browser smoke, no production mutation; capture screenshot/geometry and identify test-only role override.
-- [ ] 3.5 E8: cross-review, adjudication, clean SHA gate and green CI; close each issue only when its evidence row is satisfied.
+- [x] 3.5 E8: cross-review, adjudication, clean SHA gate and green CI; close each issue only when its evidence row is satisfied.
 
 ## Evidence Floor
 
@@ -61,4 +61,6 @@
 
 ## Evidence receipts
 
-E1–E7: [node-27 receipt](../../../docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/README.md), source `e0775fde9389aea1c10fea8259956bf5e7df9626`; capture-only redaction update `9566c155805e74943d7fba6e6329f252a5b3a0a7`. Backend red: 2 failures; browser red: 9 failures/1 compatibility pass. Fixed catalog: 30 passed; mocked browser: 31 passed; all three built-role live smoke passes. Local: 81 files/1052 tests, tsc/build/API types/ruff/OpenSpec passed. Provider 403, screenshot redaction, empty current-cycle ops data and test-only build-time roles are disclosed in the receipt; no production deployment is claimed. E8 remains a pre-merge gate.
+E1–E7: [node-27 receipt](../../../../docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/README.md), source `e0775fde9389aea1c10fea8259956bf5e7df9626`; capture-only redaction update `9566c155805e74943d7fba6e6329f252a5b3a0a7`. Backend red: 2 failures; browser red: 9 failures/1 compatibility pass. Fixed catalog: 30 passed; mocked browser: 31 passed; all three built-role live smoke passes. Local: 81 files/1052 tests, tsc/build/API types/ruff/OpenSpec passed. Provider 403, screenshot redaction, empty current-cycle ops data and test-only build-time roles are disclosed in the receipt; no production deployment is claimed.
+
+E8: [PR #2430](https://github.com/DankerMu/SHUD-NWM/pull/2430) merged as `ecbec24cd6d8877d1e1c518bbb827fc84bdcf50c`. Three independent seats returned no findings on `b9b2da7c55dcfb29fd7a7dcb1b2a3854ecc9a75e`; only subsequent change was Markdown CI formatting, and candidate `03bac554e8cb9b5f2271b32d3fd99dce7f00504c` passed all applicable [CI jobs](https://github.com/DankerMu/SHUD-NWM/actions/runs/35078586282). [Full reviews/adjudication](https://github.com/DankerMu/SHUD-NWM/pull/2430#issuecomment-5695324769) and [merge summary](https://github.com/DankerMu/SHUD-NWM/pull/2430#issuecomment-5695325701) are durable. No fix pass consumed; unrelated provider observation is tracked by [#2436](https://github.com/DankerMu/SHUD-NWM/issues/2436).

@@ -1025,6 +1025,6 @@ Risk triage（`subagent-workflow` Phase 0.5，fixture level `none`，与上游 `
 
 ### #2023 / #2128 / #2142 / #2039 后续闭环（2026-09-16）
 
-- 本文件 6.5/6.6、#2014 决策 9/10、#2015 决策 10 与 AC5 的旧底距/类名断言是历史交付记录，现由 `../display-followup-layout-catalog-contracts/` 取代：64px 控制条底距 40px，图例与 notice 同步上移 24px，实际浏览器矩形必须与 attribution 分离。规范性 layout delta 已就地更新，防止未来归档恢复旧 16px 值。
+- 本文件 6.5/6.6、#2014 决策 9/10、#2015 决策 10 与 AC5 的旧底距/类名断言是历史交付记录，现由 `../archive/2026-09-16-display-followup-layout-catalog-contracts/` 取代：64px 控制条底距 40px，图例与 notice 同步上移 24px，实际浏览器矩形必须与 attribution 分离。规范性 layout delta 已就地更新，防止未来归档恢复旧 16px 值。
 - #2142 明确补齐 #2010 目录的零 display-ready run 分支：仅保留与 run 无关的 precip，显式无效 run 的错误合同不变；#2039 按 2026-09-14 评论仅清理现行 API 文档承诺，不恢复已删除的流域详情/lineage 调用。
-- 此注记是范围与权威指向，不提前声明验收通过；各 issue 的红绿、live 与 CI 证据以新 change 的 Evidence Floor 为准。
+- 本批已由 PR #2430 合并；各 issue 的红绿、live、review 与 CI 证据见上述归档 change 的 Evidence Floor。共享 national-timeline change 的其他任务仍按原边界推进，本次不一并归档。

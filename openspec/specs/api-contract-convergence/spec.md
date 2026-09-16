@@ -78,3 +78,11 @@ Every error response declared on an operation in `openapi/nhms.v1.yaml` SHALL co
 - **AND** the only warnings are `operation-4xx-response` on `GET /api/v1/queue/depth`, `GET /api/v1/slurm/health`, `GET /health`, and `info-license` on `#/info`
 - **AND** `tasks.md` records the per-operation reason no 4XX is reachable and that `info.license` awaits an owner decision
 
+### Requirement: Display lineage proposals are not delivered API promises
+Current API documentation SHALL distinguish unimplemented display lineage proposals from registered, supported API endpoints. It SHALL NOT claim a delivered river-point/forcing-point/product lineage API or a display lineage UI after retirement of the basin detail lane. Existing model-asset provenance SHALL remain unaffected.
+
+#### Scenario: Reader checks display lineage support
+- **WHEN** a reader consults docs/spec/04_api_design.md section 9
+- **THEN** the document explicitly states that all three proposed display lineage routes are unimplemented and the prior frontend call was removed
+- **AND** no conflicting flat-object or nodes/edges response is presented as a current supported contract
+
