@@ -88,7 +88,12 @@ from typing import Any
 import pytest
 
 from packages.common import forecast_store
-from packages.common.forecast_store import PsycopgForecastStore, _ScenarioFilter
+from packages.common.forecast_store import (
+    PsycopgForecastStore,
+    _ResolvedRuns,
+    _run_identity_filter,
+    _ScenarioFilter,
+)
 from packages.common.river_ts_render import PUSHDOWN_AID_MARKER
 from services.tile_publisher import forcing_copyback_backfill as backfill_module
 from services.tile_publisher import publisher as publisher_module
@@ -204,8 +209,13 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 #
 # Counted on the SOURCE, which is the number #1342 deletes:
 #
-# * forecast_store.py 6 = the three-aid segment source (written once,
-#   consumed by all eight blocks) + the latest-product source's three.
+# * forecast_store.py 8 = the three-aid segment source (written once,
+#   consumed by all eight blocks) + the latest-product source's three + the two
+#   run-identity pushdown fragments #2417 added to the segment source's slot: one
+#   scalar `rt.run_id = %(run_id)s` for the explicit-cycle read whose caller bound
+#   a run_id, one `rt.run_id = ANY(...)` for the reads whose run set was resolved.
+#   Two constants rather than one because the bound read has no resolved array to
+#   bind — its `run_key` comes from an in-SQL scalar sub-select.
 # * publisher.py 1 / forcing_copyback_backfill.py 1 = one raw-source variable
 #   aid apiece, retained only in the rendered legacy branch.
 # * parser.py 0: narrow compression segmentby starts with run_key.
@@ -213,7 +223,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 #   than skipped: an aid appearing in the autopipeline tick or a seed helper is
 #   exactly the regression the zero says will not happen.
 MARKER_AID_CENSUS: dict[str, int] = {
-    "packages/common/forecast_store.py": 6,
+    "packages/common/forecast_store.py": 8,
     "services/tile_publisher/publisher.py": 1,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
     "scripts/node27_autopipeline.py": 0,
@@ -627,6 +637,78 @@ def _segment_block_statements() -> dict[str, str]:
     return {label: sql for label, (sql, _params) in _segment_block_executions().items()}
 
 
+#: The run set #2417's resolve-then-push call sites converge on, seeded here
+#: because this harness calls the segment-block methods DIRECTLY and therefore
+#: never sees what `forecast_series` resolves one layer up.
+PUSHED_RUN_KEYS: tuple[int, ...] = (101, 202)
+PUSHED_RUN_IDS: tuple[str, ...] = ("qhh_gfs_2026050700", "qhh_ifs_2026050700")
+PUSHED_RUNS = _ResolvedRuns(PUSHED_RUN_KEYS, PUSHED_RUN_IDS)
+#: Two scenarios on two DISTINCT cycles, so the `:718` owner's pushed window is
+#: an envelope and not one scenario's cycle used as both bounds.
+PUSHED_CYCLES: dict[str, datetime] = {"forecast_gfs_deterministic": _T0, "forecast_ifs_deterministic": _T1}
+#: The bound-run variant supplies its identity through the filter, not a key set:
+#: its push is the self-contained in-SQL scalar sub-select.
+PUSHED_IDENTITY_FILTER = _run_identity_filter(run_id="qhh_gfs_2026050700", model_id="basins_qhh_shud")
+#: A REAL scenario filter on the latest-forecast shape, so task 2.7's "no half of
+#: the scenario filter leaked into a branch" assertion is not vacuously true of a
+#: rendering that had no scenario filter to leak in the first place.
+PUSHED_SCENARIO_FILTER = forecast_store._scenario_filter(["GFS"])
+
+
+def _pushed_segment_block_executions() -> dict[str, tuple[str, Any]]:
+    """The three pushed variants of the forecast segment-block owners (#2417).
+
+    Kept OUT of ``_segment_block_executions``: that register is the eight
+    execution owners of the shared segment source, and its default rendering is
+    the un-pushed baseline. These are the same owners driven the way
+    ``forecast_series`` drives them in production, which is the only rendering
+    against which the per-branch pushdown assertions are not vacuous.
+    """
+    store = _store()
+    rendered: dict[str, tuple[str, Any]] = {}
+
+    def capture(label: str, call: Any) -> None:
+        cursor = _CaptureCursor()
+        call(cursor)
+        assert len(cursor.statements) == 1, label
+        rendered[label] = cursor.executed[0]
+
+    capture(
+        "forecast_segment_rows_bound_run",
+        lambda cursor: store._fetch_forecast_segment_rows(
+            cursor,
+            **_IDENTITY,
+            issue_time=_T0,
+            scenario_filter=_NO_FILTER,
+            identity_filter=PUSHED_IDENTITY_FILTER,
+        ),
+    )
+    capture(
+        "forecast_segment_rows_resolved_runs",
+        lambda cursor: store._fetch_forecast_segment_rows(
+            cursor,
+            **_IDENTITY,
+            issue_time=_T0,
+            scenario_filter=_NO_FILTER,
+            identity_filter=_NO_FILTER,
+            resolved_runs=PUSHED_RUNS,
+        ),
+    )
+    capture(
+        "forecast_segment_rows_selected_cycles_resolved_runs",
+        lambda cursor: store._fetch_forecast_segment_rows(
+            cursor,
+            **_IDENTITY,
+            issue_time=_T0,
+            scenario_filter=PUSHED_SCENARIO_FILTER,
+            identity_filter=_NO_FILTER,
+            cycle_times_by_scenario=PUSHED_CYCLES,
+            resolved_runs=PUSHED_RUNS,
+        ),
+    )
+    return rendered
+
+
 def _latest_product_fallback_execution(store: str = "legacy") -> tuple[str, Any]:
     """The known-run heavy execution, distinct from its raw renderer input."""
     header = {
@@ -660,6 +742,181 @@ def test_forecast_store_segment_blocks_carry_only_their_sanctioned_aids() -> Non
             f"forecast_store {label}",
             allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
         )
+
+
+def test_forecast_store_pushed_segment_blocks_carry_only_their_sanctioned_aids() -> None:
+    """The pushed variants add exactly one sanctioned aid column: ``run_id``.
+
+    Same ceiling as the un-pushed owners, so a pushdown that reached for a second
+    text column — or dropped the marker off the one it does use — is red here.
+    """
+    pushed = _pushed_segment_block_executions()
+    assert len(pushed) == 3
+    for label, (sql, _params) in pushed.items():
+        _assert_switched_surface(
+            sql,
+            "rt",
+            A_SEGMENT_BLOCK_AIDS | {"run_id"},
+            f"forecast_store pushed {label}",
+            allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
+        )
+
+
+#: Per-owner: what the UNION branches of a pushed rendering must contain, and what
+#: they must never contain. Spelled as explicit substring lists so no case can
+#: pass by asserting nothing (#2417 task 3.3).
+_PUSHED_BRANCH_REQUIRED: dict[str, tuple[str, ...]] = {
+    "forecast_segment_rows_bound_run": (
+        "AND rt.run_id = %(run_id)s",
+        "AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)",
+    ),
+    "forecast_segment_rows_resolved_runs": (
+        "AND rt.run_id = ANY(%(pushdown_run_ids)s)",
+        "AND rt.run_key = ANY(%(pushdown_run_keys)s)",
+    ),
+    "forecast_segment_rows_selected_cycles_resolved_runs": (
+        "AND rt.run_id = ANY(%(pushdown_run_ids)s)",
+        "AND rt.run_key = ANY(%(pushdown_run_keys)s)",
+        "AND rt.valid_time >= %(pushdown_window_start)s",
+        "AND rt.valid_time <= %(pushdown_window_end)s",
+    ),
+}
+
+#: The reads that deliberately span runs, and the run-identity text none of their
+#: branches may acquire. `latest_analysis_issue_time`/`analysis_segment_rows`
+#: splice across every analysis run; the two run-type owners report over every run
+#: of a run type. Converging either to a run set would delete rows.
+#: ``rt.run_key =`` rather than ``run_key =``: every branch carries the routing
+#: join ``h.run_key = rt.run_key``, which is the key-only join this whole epic
+#: exists to have. What must not appear is a CONSTRAINT on the fact side.
+_SPANNING_BRANCH_FORBIDDEN: dict[str, tuple[str, ...]] = {
+    "latest_analysis_issue_time": ("rt.run_key =", "rt.run_id"),
+    "analysis_segment_rows": ("rt.run_key =", "rt.run_id"),
+    "latest_run_type_valid_time": ("rt.run_key =", "rt.run_id", "cycle_time", "scenario_id"),
+    "run_type_segment_rows": ("rt.run_key =", "rt.run_id", "cycle_time", "scenario_id"),
+}
+
+_PROJECTION = "SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e"
+
+
+def _union_branches(sql: str) -> tuple[str, str]:
+    """The legacy and narrow UNION branch texts of one composed segment statement."""
+    start = sql.index(_PROJECTION)
+    end = sql.index(") rt", sql.index("UNION ALL"))
+    legacy, narrow = sql[start:end].split("UNION ALL")
+    return legacy, narrow
+
+
+def test_forecast_store_pushed_branches_converge_run_identity_inside_the_union() -> None:
+    """The positive half of the over-pushdown regression.
+
+    Without it the negative half below passes for a reason unrelated to this
+    change — the un-pushed default rendering contains none of these predicates
+    either, so "the spanning branch has no run_key" would be vacuously true.
+    """
+    for label, (sql, _params) in _pushed_segment_block_executions().items():
+        legacy, narrow = _union_branches(sql)
+        for predicate in _PUSHED_BRANCH_REQUIRED[label]:
+            assert predicate in legacy, (label, predicate)
+        # The narrow store has no text identity column, so its branch keeps the
+        # key-side push and loses the marker-guarded `rt.run_id` aid with it.
+        for predicate in _PUSHED_BRANCH_REQUIRED[label]:
+            if "rt.run_id" in predicate:
+                assert predicate not in narrow, (label, predicate)
+            else:
+                assert predicate in narrow, (label, predicate)
+        assert "rt.run_id" not in narrow, label
+        # Task 2.7: a filter fragment is pushed WHOLE or not at all. The scenario
+        # filter is one conjunct whose interior is an OR, so half of it inside a
+        # branch would be unsound; none of it is pushed — the resolved run set
+        # already carries what it selected.
+        for branch in (legacy, narrow):
+            assert "LOWER(h.source_id)" not in branch, label
+            assert "scenario_tokens" not in branch, label
+        if label == "forecast_segment_rows_selected_cycles_resolved_runs":
+            # …and that owner really was rendered WITH a scenario filter, so the
+            # two assertions above cannot pass for want of anything to leak.
+            assert "LOWER(h.source_id)" in sql, label
+            assert "scenario_tokens" in sql, label
+
+
+def test_forecast_store_pushed_segment_blocks_still_execute_exactly_one_statement() -> None:
+    """Task 3.6: the resolve lives in ``forecast_series``, not in these methods.
+
+    A second statement inside a segment-block method does not fail cleanly — it
+    makes every consumer of ``FORECAST_STORE_EXECUTIONS`` read the wrong SQL. The
+    capture helper asserts the count per owner; this states it as a requirement
+    over both registers at once.
+    """
+    store = _store()
+    calls = (
+        (
+            "forecast_segment_rows_bound_run",
+            lambda cursor: store._fetch_forecast_segment_rows(
+                cursor,
+                **_IDENTITY,
+                issue_time=_T0,
+                scenario_filter=_NO_FILTER,
+                identity_filter=PUSHED_IDENTITY_FILTER,
+            ),
+        ),
+        (
+            "forecast_segment_rows_resolved_runs",
+            lambda cursor: store._fetch_forecast_segment_rows(
+                cursor,
+                **_IDENTITY,
+                issue_time=_T0,
+                scenario_filter=_NO_FILTER,
+                identity_filter=_NO_FILTER,
+                resolved_runs=PUSHED_RUNS,
+            ),
+        ),
+        (
+            "forecast_segment_rows_selected_cycles_resolved_runs",
+            lambda cursor: store._fetch_forecast_segment_rows(
+                cursor,
+                **_IDENTITY,
+                issue_time=_T0,
+                scenario_filter=PUSHED_SCENARIO_FILTER,
+                identity_filter=_NO_FILTER,
+                cycle_times_by_scenario=PUSHED_CYCLES,
+                resolved_runs=PUSHED_RUNS,
+            ),
+        ),
+    )
+    for label, call in calls:
+        cursor = _CaptureCursor()
+        call(cursor)
+        assert len(cursor.statements) == 1, label
+        assert "FROM hydro.hydro_run h\n" not in cursor.statements[0], label
+    # The eight un-pushed owners are asserted the same way by the shared capture
+    # helper, which refuses any owner that issues more than one statement.
+    assert len(_segment_block_executions()) == 8
+    assert len(_pushed_segment_block_executions()) == 3
+
+
+def test_forecast_store_deliberately_spanning_branches_push_nothing_that_pins_a_run() -> None:
+    """A read that reports across runs must not converge to one — task 3.3.
+
+    The run-type owners may bind their ``run_type`` set inside the branch; that is
+    the constraint that holds for every run they report. Anything that names a
+    single run, cycle or scenario would silently delete rows that used to come
+    back, and no row-count or digest oracle in this suite could see it.
+    """
+    rendered = _segment_block_statements()
+    for label, forbidden in _SPANNING_BRANCH_FORBIDDEN.items():
+        legacy, narrow = _union_branches(rendered[label])
+        for branch, route in ((legacy, "legacy"), (narrow, "narrow")):
+            for needle in forbidden:
+                assert needle not in branch, (label, route, needle)
+    for label in ("latest_run_type_valid_time", "run_type_segment_rows"):
+        legacy, narrow = _union_branches(rendered[label])
+        for branch in (legacy, narrow):
+            assert "AND LOWER(h.run_type::text) = ANY(%(run_types)s)" in branch, label
+    for label in ("latest_analysis_issue_time", "analysis_segment_rows"):
+        legacy, narrow = _union_branches(rendered[label])
+        for branch in (legacy, narrow):
+            assert "AND h.scenario_id = 'analysis_true_field'" in branch, label
 
 
 def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() -> None:
@@ -1587,9 +1844,13 @@ def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
         assert_marker_census(path, expected, non_aid_tag_lines=NON_AID_MARKER_TAG_LINES.get(path, 0))
 
 
-def test_this_registers_marker_total_is_the_measured_eight() -> None:
-    """The two parser aids retired with narrow segmentby; eight reader aids remain."""
-    assert sum(MARKER_AID_CENSUS.values()) == 8
+def test_this_registers_marker_total_is_the_measured_ten() -> None:
+    """The two parser aids retired with narrow segmentby; ten reader aids remain.
+
+    Eight until #2417, which added the segment source's two run-identity pushdown
+    fragments. Re-pinned to the measured count, never relaxed.
+    """
+    assert sum(MARKER_AID_CENSUS.values()) == 10
 
 
 def test_every_registered_read_template_is_registered_in_the_template_registry() -> None:

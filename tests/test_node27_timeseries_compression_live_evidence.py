@@ -24,6 +24,7 @@ import pytest
 
 from apps.api.routes.hydro_display import _postgis_tile_params
 from packages.common import compression_terminal_state as terminal_state
+from packages.common import forecast_curve_capture as curve_capture
 from packages.common.evidence_io import BoundedEvidenceError, resolve_artifact_closure
 from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_timeseries_compression_benchmark as benchmark
@@ -55,6 +56,20 @@ _REAL_GIT_BLOB_BYTES = evidence._git_blob_bytes
 # provenance seam, so the source-level default can be asserted.
 _DEFAULT_PROVENANCE_REPO_ROOT = evidence.PROVENANCE_REPO_ROOT
 _DEFAULT_VERIFIER_REPO_ROOT = evidence.VERIFIER_REPO_ROOT
+# Since #2417 the curve owner converges run identity against the database before
+# it reads the fact table. These fixtures never touch one, so they replay a fixed
+# resolved run set — the same seam the offline verifier uses to re-derive a
+# recorded bundle's curve statement exactly.
+_CURVE_RESOLVED_RUNS = ({"run_key": 4242, "run_id": "fcst_gfs_2026052800_basins_heihe_shud"},)
+_CURVE_RESOLVE = curve_capture.seeded_resolve_cursor(_CURVE_RESOLVED_RUNS)
+# ... and the verifier now reconciles that recorded run set against the plan text,
+# so a synthetic curve plan must render the pushed arrays the way PostgreSQL does:
+# a folded array constant printed by the array type's output function. Built from
+# `_CURVE_RESOLVED_RUNS` so the two cannot drift apart.
+_CURVE_PLAN_FILTER = "((run_id = ANY ('{{{ids}}}'::text[])) AND (run_key = ANY ('{{{keys}}}'::integer[])))".format(
+    ids=",".join(str(row["run_id"]) for row in _CURVE_RESOLVED_RUNS),
+    keys=",".join(str(row["run_key"]) for row in _CURVE_RESOLVED_RUNS),
+)
 RECEIPT_SCHEMA = json.loads((ROOT / "schemas/timeseries_compression_receipt.schema.json").read_text(encoding="utf-8"))
 EVIDENCE_SCHEMA = json.loads(
     (ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text(encoding="utf-8")
@@ -466,6 +481,8 @@ def _measurement(*, name: str, after: bool, execution_ms: float, read_blocks: in
             "Shared Hit Blocks": 10,
             "Shared Read Blocks": read_blocks,
         }
+    if name == "curve":
+        plan_tree["Filter"] = _CURVE_PLAN_FILTER
     plan = {"Planning Time": 1.0, "Execution Time": execution_ms, "Plan": plan_tree}
     return {
         "plan": plan,
@@ -643,13 +660,14 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     curve_source = ROOT / "packages/common/forecast_store.py"
     mvt_source = ROOT / "services/tiles/mvt.py"
     route_source = ROOT / "apps/api/routes/hydro_display.py"
-    curve_query, curve_names, curve_parameters = benchmark._curve_query_and_binding(
+    curve_query, curve_names, curve_parameters = curve_capture.curve_query_and_binding(
         basin_version_id="basin-v1",
         river_segment_id="model_reach_000001",
         river_network_version_id="network-v1",
         issue_time=datetime(2026, 5, 28, tzinfo=UTC),
         end_time=datetime(2026, 6, 4, tzinfo=UTC),
         scenario="gfs",
+        resolve_cursor=_CURVE_RESOLVE,
     )
     mvt_request = {
         "run_id": "run-1",
@@ -3754,13 +3772,14 @@ def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
     query = document["queries"][0]
     issue_time = datetime(2026, 6, 4, tzinfo=UTC)
     end_time = datetime(2026, 6, 11, tzinfo=UTC)
-    query_text, names, parameters = benchmark._curve_query_and_binding(
+    query_text, names, parameters = curve_capture.curve_query_and_binding(
         basin_version_id=query["request"]["basin_version_id"],
         river_segment_id=query["request"]["river_segment_id"],
         river_network_version_id=query["request"]["river_network_version_id"],
         issue_time=issue_time,
         end_time=end_time,
         scenario=query["request"]["scenario"],
+        resolve_cursor=_CURVE_RESOLVE,
     )
     query["request"]["issue_time"] = "2026-06-04T00:00:00Z"
     query["request"]["end_time"] = "2026-06-11T00:00:00Z"
@@ -3773,6 +3792,134 @@ def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
     bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "exclusive-end-curve.json", document)
     with pytest.raises(evidence.EvidenceError, match="selected chunk range"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    ("keys", "ids"),
+    [
+        pytest.param([], [], id="no-run-resolved"),
+        pytest.param([4242, 4243], ["fcst_gfs_2026052800_basins_heihe_shud"], id="misaligned"),
+        pytest.param(["4242"], ["fcst_gfs_2026052800_basins_heihe_shud"], id="key-is-not-a-surrogate"),
+        pytest.param([4242], [""], id="empty-run-id"),
+    ],
+)
+def test_a_curve_whose_recorded_run_identity_is_not_a_production_run_set_is_rejected(
+    tmp_path: Path,
+    keys: list[Any],
+    ids: list[Any],
+) -> None:
+    """#2417: the two resolved bindings are production facts, so they fail closed.
+
+    The offline verifier cannot recompute a run set — it replays the recorded
+    one back through the public owner so everything else stays exactly
+    re-derived. That replay is only sound while the recorded pair is a
+    well-formed, non-empty, aligned run set; ``= ANY('{}')`` in particular would
+    be a benchmark that measured zero rows and a phantom improvement.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    names = list(query["binding"]["parameter_names"])
+    bound = list(query["binding"]["bound_parameters"])
+    bound[names.index("pushdown_run_keys")] = keys
+    bound[names.index("pushdown_run_ids")] = ids
+    query["binding"]["bound_parameters"] = bound
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "unresolved-curve.json", document)
+    with pytest.raises(evidence.EvidenceError, match="resolved production run set"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_a_curve_that_dropped_the_run_identity_pushdown_is_rejected(tmp_path: Path) -> None:
+    """A bundle recorded before #2417 no longer re-derives from the owner.
+
+    The named binding coverage is an exact equality against the CURRENT public
+    owner, so a curve statement without the converged run identity is refused
+    rather than compared loosely — it measured a different plan.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    names = list(query["binding"]["parameter_names"])
+    bound = list(query["binding"]["bound_parameters"])
+    for name in ("pushdown_run_ids", "pushdown_run_keys"):
+        index = names.index(name)
+        del names[index]
+        del bound[index]
+    query["binding"] = {"parameter_names": names, "bound_parameters": bound}
+    query["query_text"] = "\n".join(
+        line for line in query["query_text"].splitlines() if "pushdown_run_" not in line
+    )
+    query["query_sha256"] = hashlib.sha256(query["query_text"].encode()).hexdigest()
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "unpushed-curve.json", document)
+    with pytest.raises(evidence.EvidenceError, match="named binding coverage differs"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    ("plan_filter", "message"),
+    [
+        pytest.param(None, "does not push the recorded run keys", id="literal-absent"),
+        pytest.param(
+            "(run_key = ANY ('{9999}'::integer[]))",
+            "run-key set the recorded binding does not carry",
+            id="different-run-key",
+        ),
+        pytest.param(
+            "(run_key = ANY ('{4242,4243}'::integer[]))",
+            "run-key set the recorded binding does not carry",
+            id="wider-run-key-set",
+        ),
+        pytest.param(
+            "(run_key = ANY ('{{4242}}'::integer[]))",
+            "not a one-dimensional array literal",
+            id="unparseable-array-body",
+        ),
+        pytest.param(
+            "((run_id = ANY ('{someone_elses_run}'::text[])) AND (run_key = ANY ('{4242}'::integer[])))",
+            "run-id set the recorded binding does not carry",
+            id="different-run-id",
+        ),
+    ],
+)
+def test_a_curve_plan_that_does_not_carry_the_recorded_run_set_is_rejected(
+    tmp_path: Path,
+    plan_filter: str | None,
+    message: str,
+) -> None:
+    """#2417 fix pass 1: the recorded run set must reconcile against its own plan.
+
+    `pushdown_run_keys`/`pushdown_run_ids` are production facts, so the shape
+    check above cannot recompute them — it accepts any well-formed set. The
+    retained `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` plan does carry
+    them: psycopg2 interpolates client-side, PostgreSQL folds the array and prints
+    it back as `= ANY ('{…}'::<type>[])`. Absent, wrong, or unreadable, the bundle
+    refuses; it never silently passes.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    measurement = document["queries"][0]["after"]["measurements"][2]
+    if plan_filter is None:
+        del measurement["plan"]["Plan"]["Filter"]
+    else:
+        measurement["plan"]["Plan"]["Filter"] = plan_filter
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "curve-plan-run-set.json", document)
+    with pytest.raises(evidence.EvidenceError, match=message):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_the_mvt_plan_is_not_required_to_carry_a_curve_run_set(tmp_path: Path) -> None:
+    """Non-vacuity guard for the check above: it is scoped to the curve query.
+
+    The mvt statement binds one `run_id` scalar and has no resolved run set, so
+    requiring the literal there would reject every real bundle.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    for phase in ("before", "after"):
+        for measurement in document["queries"][1][phase]["measurements"]:
+            assert "run_key" not in json.dumps(measurement["plan"])
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert terminal["qualifies_task_4_5"] is True
 
 
 def test_retained_reference_change_after_publish_replaces_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5047,13 +5194,14 @@ def _e2e_bench_phase(
 
 
 def _e2e_benchmarks_document(starts: dict[str, datetime]) -> dict[str, Any]:
-    curve_query, curve_names, curve_parameters = benchmark._curve_query_and_binding(
+    curve_query, curve_names, curve_parameters = curve_capture.curve_query_and_binding(
         basin_version_id="basin-v1",
         river_segment_id="model_reach_000001",
         river_network_version_id="network-v1",
         issue_time=datetime(2026, 5, 28, tzinfo=UTC),
         end_time=datetime(2026, 6, 4, tzinfo=UTC),
         scenario="gfs",
+        resolve_cursor=_CURVE_RESOLVE,
     )
     mvt_request = {
         "run_id": "run-1",

@@ -3260,6 +3260,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2417 fix pass 1: the curve statement's derivation from its public owner
+        # moved out of scripts/node27_timeseries_compression_benchmark.py so the
+        # OFFLINE verifier stops importing a capture CLI to get at it. Same-name
+        # derivation cannot see the new module (there is no
+        # tests/test_forecast_curve_capture.py) and the shared `packages/common/**`
+        # add-on is core-smoke only, so without this entry a change to the derivation
+        # would reach CI with NEITHER of its two real consumers executed — a
+        # narrowing against what the benchmark script's same-name rule used to give.
+        "packages/common/forecast_curve_capture.py",
+        (
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/node27_timeseries_compression_budget.py",
         (
             "tests/test_node27_timeseries_compression.py",

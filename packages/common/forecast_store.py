@@ -50,21 +50,91 @@ WHERE {store_predicate}
   )
   -- transitional compressed-chunk pushdown aid, remove with #1342
   AND rt.variable = 'q_down'
-  AND rt.variable_e = 'q_down'::hydro.river_variable
+  AND rt.variable_e = 'q_down'::hydro.river_variable{run_pushdown}
 """
 
+# Per-call-site run-identity pushdown fragments for the slot above (#2417).
+#
+# Every one of them is ADDITIVE: the outer layer keeps each predicate it has
+# today, so a fragment can only narrow the branch to rows the outer layer was
+# going to keep anyway. Soundness rests on `h.run_key` being the unique identity
+# of `hydro.hydro_run` (db/migrations/000050_river_identity_normalization.sql:178)
+# and on both joins being `h.run_key = rt.run_key`: the run row a branch sees and
+# the one the outer join sees are the same row.
+#
+# Each fragment opens with a newline and is appended to the last predicate line,
+# so the empty default renders the template byte-identically to its pre-#2417 form.
 
-def _segment_rows_source_template(store: str) -> str:
+#: Explicit-cycle read whose caller supplied a `run_id`. Entirely in-SQL and
+#: self-contained on purpose: `scripts/node27_pgdata_workload.py` captures this
+#: statement at :127, BEFORE it opens a connection at :140, so it has no database
+#: with which to resolve a `run_key`. `hydro.hydro_run.run_id` is TEXT PRIMARY KEY
+#: (db/migrations/000006_hydro.sql), so the scalar returns at most one row.
+_BOUND_RUN_PUSHDOWN_SQL = """
+  -- transitional compressed-chunk pushdown aid, remove with #1342
+  AND rt.run_id = %(run_id)s
+  AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)"""
+
+#: Reads whose run set was resolved against `hydro.hydro_run` one layer up. The
+#: `rt.run_id` aid is legacy-only: `hydro.river_timeseries_legacy` segments its
+#: compressed chunks by `(run_id, river_network_version_id, river_segment_id)` and
+#: cannot prune on `run_key`, while the narrow table's pkey opens with `run_key`.
+_RESOLVED_RUN_PUSHDOWN_SQL = """
+  -- transitional compressed-chunk pushdown aid, remove with #1342
+  AND rt.run_id = ANY(%(pushdown_run_ids)s)
+  AND rt.run_key = ANY(%(pushdown_run_keys)s)"""
+
+#: The cycle-per-scenario read's `valid_time` window, as two constants. It is the
+#: UNION ENVELOPE over every selected scenario, never one scenario's cycle used as
+#: both bounds — the outer window at `_fetch_forecast_segment_rows` is per run, so
+#: a narrower push would delete the other scenarios' rows outright.
+_CYCLE_WINDOW_PUSHDOWN_SQL = """
+  AND rt.valid_time >= %(pushdown_window_start)s
+  AND rt.valid_time <= %(pushdown_window_end)s"""
+
+#: The analysis reads span every analysis run deliberately (`:660` splices them by
+#: valid time), so the only constraint that holds for all of them is the scenario.
+_ANALYSIS_SCENARIO_PUSHDOWN_SQL = """
+  AND h.scenario_id = 'analysis_true_field'"""
+
+#: The run-type reads span every run of the requested types deliberately.
+_RUN_TYPE_PUSHDOWN_SQL = """
+  AND LOWER(h.run_type::text) = ANY(%(run_types)s)"""
+
+
+@dataclass(frozen=True)
+class _ResolvedRuns:
+    """The runs a forecast-series read has already decided it will report.
+
+    Seeded-empty is NOT the same as unseeded: an empty key set is pushed as an
+    empty ``ANY`` array, which returns no rows — exactly what the unpushed query
+    returns when no run matches — while ``None`` means no push at all.
+    """
+
+    run_keys: tuple[int, ...]
+    run_ids: tuple[str, ...]
+
+    def pushdown_params(self) -> dict[str, Any]:
+        return {"pushdown_run_keys": list(self.run_keys), "pushdown_run_ids": list(self.run_ids)}
+
+
+def _segment_rows_source_template(store: str, run_pushdown: str = "") -> str:
     if store == "legacy":
-        return _SEGMENT_ROWS_SOURCE_SQL.format(store_predicate="h.timeseries_store = 'legacy'")
+        return _SEGMENT_ROWS_SOURCE_SQL.format(
+            store_predicate="h.timeseries_store = 'legacy'",
+            run_pushdown=run_pushdown,
+        )
     if store == "narrow":
-        return _SEGMENT_ROWS_SOURCE_SQL.format(store_predicate="h.timeseries_store = 'narrow'")
+        return _SEGMENT_ROWS_SOURCE_SQL.format(
+            store_predicate="h.timeseries_store = 'narrow'",
+            run_pushdown=run_pushdown,
+        )
     raise ValueError(f"Invalid river timeseries store: {store!r}")
 
 
-def _segment_rows_source_sql() -> str:
-    legacy = render_river_ts_sql(_segment_rows_source_template("legacy"), "legacy").sql
-    narrow = render_river_ts_sql(_segment_rows_source_template("narrow"), "narrow").sql
+def _segment_rows_source_sql(run_pushdown: str = "") -> str:
+    legacy = render_river_ts_sql(_segment_rows_source_template("legacy", run_pushdown), "legacy").sql
+    narrow = render_river_ts_sql(_segment_rows_source_template("narrow", run_pushdown), "narrow").sql
     return f"({legacy}\nUNION ALL\n{narrow})"
 
 
@@ -437,6 +507,33 @@ class PsycopgForecastStore:
                     )
                 return _empty_forecast_response(segment_id=segment_id, issue_time=None)
 
+            # Converge run identity ONCE, here, so every segment-block method keeps
+            # executing exactly one statement. Deliberately not a short circuit: an
+            # empty key set is passed down and pushed as an empty array, which
+            # leaves today's outcomes intact — an explicit issue_time with no rows
+            # still raises 404 RUN_NOT_PUBLISHED, `latest` still returns an empty
+            # 200, and the analysis splice below still runs.
+            resolved_runs: _ResolvedRuns | None = None
+            if parsed_issue_time is None:
+                if latest_cycles_by_scenario:
+                    resolved_runs = self._resolve_run_identity(
+                        cursor,
+                        cycle_times=sorted({_ensure_utc(cycle) for cycle in latest_cycles_by_scenario.values()}),
+                        scenario_ids=sorted(latest_cycles_by_scenario),
+                        scenario_filter=scenario_filter,
+                        identity_filter=identity_filter,
+                    )
+            elif "run_id" not in identity_filter.params:
+                # A bound run_id keeps the self-contained in-SQL scalar subquery
+                # (the D11 capture path), so it needs no resolve statement.
+                resolved_runs = self._resolve_run_identity(
+                    cursor,
+                    cycle_times=[selected_issue_time],
+                    scenario_ids=(),
+                    scenario_filter=scenario_filter,
+                    identity_filter=identity_filter,
+                )
+
             if include_analysis:
                 analysis_start, analysis_end = analysis_window_for_issue_time(selected_issue_time)
                 forecast_end = selected_issue_time + timedelta(days=7)
@@ -458,6 +555,7 @@ class PsycopgForecastStore:
                     identity_filter=identity_filter,
                     cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                     end_time=forecast_end,
+                    resolved_runs=resolved_runs,
                 )
                 return _spliced_response_from_rows(
                     river_segment_id=segment_id,
@@ -477,6 +575,7 @@ class PsycopgForecastStore:
                 identity_filter=identity_filter,
                 cycle_times_by_scenario=None if parsed_issue_time is not None else latest_cycles_by_scenario,
                 end_time=selected_issue_time + timedelta(days=7),
+                resolved_runs=resolved_runs,
             )
 
         if not rows and parsed_issue_time is not None:
@@ -547,6 +646,72 @@ class PsycopgForecastStore:
                     "river_network_version_id": river_network_version_id,
                 },
             )
+
+    def _resolve_run_identity(
+        self,
+        cursor: Any,
+        *,
+        cycle_times: Sequence[datetime],
+        scenario_ids: Sequence[str],
+        scenario_filter: "_ScenarioFilter",
+        identity_filter: "_ScenarioFilter",
+    ) -> _ResolvedRuns:
+        """Resolve the runs a forecast-series read has already decided to report.
+
+        Overridable seam, the same shape as ``_validate_series_target``: a capture
+        adapter that drives ``forecast_series`` over a cursor with no rows can
+        supply the real key set from a live connection instead
+        (``packages/common/forecast_curve_capture.py``).
+
+        The ``h.*`` predicate set here is a SUBSET of the consuming call site's
+        outer predicates, so the result is a SUPERSET of the runs that read keeps:
+        the pairwise ``(scenario_id, cycle_time)`` join of the cycle-per-scenario
+        read is relaxed to independent ``ANY`` sets, and nothing the outer layer
+        does not apply — ``basin_version_id``, ``status``, ``timeseries_store`` —
+        is added. It deliberately does not reduce to one run: a single
+        ``(scenario_id, cycle_time)`` can match several runs and all of them are
+        reported.
+
+        ``ORDER BY h.run_key`` is not cosmetic. The resolved pair lands in the
+        read's bindings, and the benchmark compares the before/after bindings for
+        EQUALITY across the whole compression window (``static_keys`` in
+        ``scripts/node27_timeseries_compression_benchmark.py``). Heap order would
+        let an unrelated row update reorder the same run set and reject the
+        collection round as ``benchmark query identity drift``. Before #2417 the
+        binding was a pure function of the request and could not drift; the sort
+        restores that property for everything except run MEMBERSHIP, which is a
+        real production change and should still reject.
+        """
+        scenario_clause = "AND h.scenario_id = ANY(%(resolve_scenario_ids)s)" if scenario_ids else ""
+        rows = self._fetch_all(
+            cursor,
+            f"""
+            SELECT h.run_key, h.run_id
+            FROM hydro.hydro_run h
+            WHERE h.run_type = 'forecast'
+              AND h.cycle_time = ANY(%(resolve_cycle_times)s)
+              {scenario_clause}
+              {scenario_filter.sql}
+              {identity_filter.sql}
+            ORDER BY h.run_key
+            """,
+            {
+                "resolve_cycle_times": [_ensure_utc(cycle_time) for cycle_time in cycle_times],
+                **({"resolve_scenario_ids": list(scenario_ids)} if scenario_ids else {}),
+                **scenario_filter.params,
+                **identity_filter.params,
+            },
+        )
+        run_keys: list[int] = []
+        run_ids: list[str] = []
+        for row in rows:
+            run_key = row.get("run_key")
+            run_id = row.get("run_id")
+            if run_key is None or not run_id:
+                continue
+            run_keys.append(int(run_key))
+            run_ids.append(str(run_id))
+        return _ResolvedRuns(tuple(run_keys), tuple(run_ids))
 
     def _latest_issue_time(
         self,
@@ -624,7 +789,7 @@ class PsycopgForecastStore:
             cursor,
             f"""
             SELECT h.end_time
-            FROM {_segment_rows_source_sql()} rt
+            FROM {_segment_rows_source_sql(_ANALYSIS_SCENARIO_PUSHDOWN_SQL)} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             WHERE h.scenario_id = 'analysis_true_field'
               AND h.end_time IS NOT NULL
@@ -657,7 +822,7 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM {_segment_rows_source_sql()} rt
+            FROM {_segment_rows_source_sql(_ANALYSIS_SCENARIO_PUSHDOWN_SQL)} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             WHERE h.scenario_id = 'analysis_true_field'
               AND rt.valid_time >= %(start_time)s
@@ -684,10 +849,25 @@ class PsycopgForecastStore:
         identity_filter: "_ScenarioFilter",
         cycle_times_by_scenario: Mapping[str, datetime] | None = None,
         end_time: datetime | None = None,
+        resolved_runs: "_ResolvedRuns | None" = None,
     ) -> list[dict[str, Any]]:
         if cycle_times_by_scenario is not None:
             if not cycle_times_by_scenario:
                 return []
+            run_pushdown = ""
+            pushdown_params: dict[str, Any] = {}
+            if resolved_runs is not None:
+                # The envelope spans EVERY selected scenario. `cycle_times_by_scenario`
+                # holds one cycle per scenario and the outer window below is per run,
+                # so the pushed constants must be a superset the outer predicate then
+                # narrows; one scenario's cycle as both bounds deletes the others.
+                selected_cycles = [_ensure_utc(cycle) for cycle in cycle_times_by_scenario.values()]
+                run_pushdown = _RESOLVED_RUN_PUSHDOWN_SQL + _CYCLE_WINDOW_PUSHDOWN_SQL
+                pushdown_params = {
+                    **resolved_runs.pushdown_params(),
+                    "pushdown_window_start": min(selected_cycles),
+                    "pushdown_window_end": max(selected_cycles) + timedelta(days=7),
+                }
             selected_cycle_values = ", ".join(
                 f"(%(selected_scenario_{index})s, %(selected_cycle_{index})s::timestamptz)"
                 for index in range(len(cycle_times_by_scenario))
@@ -715,7 +895,7 @@ class PsycopgForecastStore:
                     rt.valid_time,
                     rt.value,
                     rt.unit_e::text AS unit
-                FROM {_segment_rows_source_sql()} rt
+                FROM {_segment_rows_source_sql(run_pushdown)} rt
                 JOIN hydro.hydro_run h ON h.run_key = rt.run_key
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_key = rt.river_network_version_key
@@ -734,10 +914,22 @@ class PsycopgForecastStore:
                         **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
                         **scenario_filter.params,
                         **identity_filter.params,
+                        **pushdown_params,
                     },
                 ),
             )
 
+        # `run_id` bound: the push stays entirely in SQL as a scalar `run_key`
+        # subquery, because the D11 workload CLI captures this very statement with
+        # no database attached and could not seed a resolved key set.
+        explicit_pushdown_params: dict[str, Any] = {}
+        if "run_id" in identity_filter.params:
+            explicit_pushdown = _BOUND_RUN_PUSHDOWN_SQL
+        elif resolved_runs is not None:
+            explicit_pushdown = _RESOLVED_RUN_PUSHDOWN_SQL
+            explicit_pushdown_params = resolved_runs.pushdown_params()
+        else:
+            explicit_pushdown = ""
         forecast_end = end_time or issue_time + timedelta(days=7)
         return self._attach_forcing_lineage(
             cursor,
@@ -755,7 +947,7 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM {_segment_rows_source_sql()} rt
+            FROM {_segment_rows_source_sql(explicit_pushdown)} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             JOIN core.river_network_version rnv
               ON rnv.river_network_version_key = rt.river_network_version_key
@@ -773,6 +965,7 @@ class PsycopgForecastStore:
                     "end_time": forecast_end,
                     **scenario_filter.params,
                     **identity_filter.params,
+                    **explicit_pushdown_params,
                 },
             ),
         )
@@ -790,7 +983,7 @@ class PsycopgForecastStore:
             cursor,
             f"""
             SELECT MAX(rt.valid_time) AS valid_time
-            FROM {_segment_rows_source_sql()} rt
+            FROM {_segment_rows_source_sql(_RUN_TYPE_PUSHDOWN_SQL)} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             WHERE LOWER(h.run_type::text) = ANY(%(run_types)s)
             """,
@@ -828,7 +1021,7 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM {_segment_rows_source_sql()} rt
+            FROM {_segment_rows_source_sql(_RUN_TYPE_PUSHDOWN_SQL)} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             JOIN core.river_network_version rnv
               ON rnv.river_network_version_key = rt.river_network_version_key
