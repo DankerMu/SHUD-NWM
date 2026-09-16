@@ -24,99 +24,98 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 - 本文所有命令都不连 DB。写 journal 的命令默认 dry run，只有显式 `--attest` /
   `--execute` 才写。
 
-## 第一步：列出等待 operator 的候选（临时口径，直读 pass evidence）
+## 第一步：列出等待 operator 的候选（`list-operator-actions`）
 
-只读的 operator-action 列举子命令由 #1186 在后续 PR 交付；在它合入之前按本节直读最新一份
-pass evidence，本节届时由它整段取代。
+`list-operator-actions`（#1186）是只读列举面：不连 DB、不读 journal（决策只在 evidence 里）、
+不写任何字节。它扫 evidence root 顶层按 mtime 最新的 `--passes` 份终态 pass 文件
+（`scheduler_*.json`；`*.pre_execution.json` 不是终态 pass，不计），**按 decision 字面**列出四类
+等待 operator 的候选（不看 `manual_retry_required` 布尔，所以 bounded 摘要 pass 里的条目照样
+列出），并额外列出 breaker 释放了执行槽的 backfill cycle 的每个模型——这类 cycle 不构造候选，
+只出现在 not-selected `source_cycles` 里。
 
 - **evidence root 取值**（#2399）：`NHMS_SCHEDULER_EVIDENCE_ROOT` 必须取自 systemd unit
   `nhms-compute-scheduler.service` 实际加载的 `infra/env/compute.scheduler-dbfree.env`。
-  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。下面第一条命令若选不出
-  文件，说明 root 取错或该 root 下没有 pass——结论无效，先核对 root。
+  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。下面的命令若报 exit 2 或
+  `passes_scanned: 0`，说明 root 取错或该 root 下没有 pass——结论无效，先核对 root。
 
 ```bash
-# evidence root 顶层最新的终态 pass 文件（`scheduler_*.json`；`*.pre_execution.json`
-# 不是终态 pass，不计）
-PASS=$(ls -t "$NHMS_SCHEDULER_EVIDENCE_ROOT"/scheduler_*.json \
-  | grep -v '\.pre_execution\.json$' | head -1)
-echo "$PASS"
-
-# 1) 四类等待 operator 的决策：按 decision 字面筛 blocked_candidates
-jq -c '.blocked_candidates[]?
-  | {candidate_id,
-     source_id: (.source_id // .source),
-     cycle_time: (.cycle_time_utc // .cycle_time),
-     model_id,
-     decision: (.decision // .state_evidence.decision),
-     reason,
-     attempt: (.state_evidence.retry_policy.attempt // .retry_attempt),
-     retry_limit: (.state_evidence.retry_policy.retry_limit // .retry_limit),
-     occurrences: (.state_evidence.retry_policy.occurrences // .retry_occurrences),
-     recorded_init_state_id: .state_evidence.journal_predecessor_identity.recorded_init_state_id}
-  | select(.decision as $d
-           | ["permanent_failure",
-              "cancelled_manual_retry_required",
-              "blocked_strict_warm_start_init_state_mismatch",
-              "blocked_journal_predecessor_identity_quarantine"] | index($d))' "$PASS"
-
-# 2) breaker 释放了执行槽的 backfill cycle：不构造候选，只出现在 not-selected source_cycles
-jq -c '.source_cycles[]?
-  | select(.selection_status == "not_selected"
-           and .selection_reason == "journal_predecessor_identity_quarantine_breaker_engaged")
-  | {source_id, cycle_time: .cycle_time_utc,
-     decision: "blocked_journal_predecessor_identity_quarantine",
-     models: [.journal_predecessor_identity_quarantine.models[]?
-              | {model_id, occurrences, recorded_init_state_id}]}' "$PASS"
+cd /scratch/frd_muziyao/NWM
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
+  list-operator-actions \
+  --evidence-root "$NHMS_SCHEDULER_EVIDENCE_ROOT" \
+  --passes 6
+echo "exit=$?"
 ```
 
-- 只读 evidence，不读 journal——决策只在 evidence 里；本节不连 DB、不写任何字节。
-- 按 decision 字面识别，不看 `manual_retry_required` 布尔。bounded 摘要（
-  `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision`，以及
-  `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required` 里
-  **产出臂实际写过的那几个**（保留判据是 `value is not None`，所以 `0` 和 `false` 也留得住），
-  摘要 pass 里的条目照样列出（上面的 jq 两条取值路径都覆盖）。四个键不是每臂都有：
+`--evidence-root` 省略时取 `$NHMS_SCHEDULER_EVIDENCE_ROOT`；`--passes` 默认 6，必须 ≥ 1。
+输出是一行 sorted-key JSON receipt，退出码带语义：
+
+| exit | 含义 | 处置 |
+|---|---|---|
+| `1` | 列出了至少一条待办（`operator_actions` 非空） | 按第二步逐条处置 |
+| `0` | 扫过的窗口里**没有在册的四类待办，且窗口本身可信** | 不用动手；但它不是健康检查，见下 |
+| `3` | **无法判定**——命令本身跑成功了，只是这批 pass 不足以下结论 | 读 receipt 定位原因，等下一趟范围完整的 pass 再跑；**不得**当成 `0` |
+| `2` | evidence root 缺失或不可读（用法错误，多半是 root 取错） | 核对上面的 root 口径后重跑 |
+
+receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candidate_id`、`source_id`、
+`cycle_time`、`model_id`、`decision`、`reason`、`attempt`、`retry_limit`、`occurrences`、
+`recorded_init_state_id`、`first_seen_pass` / `last_seen_pass` / `seen_in_passes`）、
+`unreadable_passes`、`candidate_lists_dropped_passes`、`non_evaluating_passes`（每条带
+`pass` / `status` / `reason`）。
+
+- **`3` 是"无法判定"，不是"出错"**。命令正常跑完并打了 receipt，只是窗口里没有一趟
+  「候选构造跑过、证据完整、范围完整」的 pass 可以为"没有待办"背书。成因看
+  `non_evaluating_passes[].reason`：
+  - `status_not_evaluating`——终态 status 不在候选构造之后写的闭合白名单里（`lock_contended`、
+    `preflight_blocked`、`lease_lost`、异常路径的 `resource_limit_blocked`，以及任何未来新增的
+    未知 status 一律落在这一侧）；
+  - `size_fallback_source_cycles_absent`——超 5 MB 预算的 size fallback 产物，写入器清空了
+    `source_cycles`，breaker 释放的 cycle 因此看不见（它自己摘要里的 blocked 候选仍会被列出）；
+  - `scope_narrowed`——这趟 pass 的范围被收窄了，见下一条；
+  - `scope_unknown`——status 可求值，但 pass 文件里 `backfill.enabled` 与 `operator_filters` 的
+    `basin_ids` / `model_ids` / `expression` 这**五个字段有任一不在**（整个 `backfill` /
+    `operator_filters` 键缺失，或键在而字段残缺，都算），范围无从判断，按"可能只看了一部分"处理。
+    分界线：**字段在、值收窄 → `scope_narrowed`**（运维自己下的指令）；**字段不在 →
+    `scope_unknown`**（读不到，缺的字段不会被当成空默认值）。
+    这五个字段是写入器**无条件**写出的（`services/orchestrator/scheduler_evidence.py:248-253` 是
+    四键 dict 字面量；`services/orchestrator/scheduler_runtime.py:1394-1402` 的 if/else 两条腿都写
+    `backfill` 且都带 `enabled`），所以线上真出现 `scope_unknown`，说明这份 pass 文件被截断或被
+    外部改过——**属于要查的异常，不是正常状态**，按异常上报而不是只等下一趟。
+
+  另外 `candidate_lists_dropped_passes` 非空（`limit.candidate_lists == "dropped"`）也是 `3`：
+  丢了候选列表的 pass 既不能列出待办，也不能证明没有待办；`unreadable_passes` 同理。
+  node-22 的 pass 文件接近 5 MB 上限，size fallback 现实中会出现。
+  处置一律是**向前等**：隔一会儿重跑本命令，让窗口里出现新的范围完整 pass，**不要**自己去翻更旧的
+  pass 判"没有待办"——断路器可能在那趟旧 pass 写完之后才释放了某个 cycle。
+- **窄范围 pass 不构成"没有待办"的证据**。`plan-production` 带 `--disable-backfill` 或
+  `--model-id` / `--basin-id`（pass 文件里落成 `backfill.enabled=false`，或 `operator_filters` 的
+  `model_ids` / `basin_ids` 非空、`expression` 非 null）跑出来的 pass，没列出待办只说明**这个子集里**
+  没有；尤其 breaker 释放的条目**只在
+  backfill 腿产生**，一趟关掉 backfill 的 pass 结构性看不见它。命令把这类 pass 以
+  `scope_narrowed` 计入 `non_evaluating_passes`（它自己范围内的待办照样列出），既不清除也不
+  拉响更早那趟隐藏 pass 的警报。**整窗口都是窄范围 pass 时结果是 `3`，不是 `0`**。
+- **`0` 的含义是"没有在册的四类待办"，不是"调度器健康"**。本面只认那四个 decision 字面；别的
+  error_code 再多、再红，它也不会出现在 `operator_actions` 里。实例（#2432）：2026-09-15 13:45 CST
+  起 node-22 的 `raw → forcing → runs` 停止推进，2026-09-16 实测最近 20 趟共 760 条 blocked
+  candidate 全部是 `error_code=FORCING_VERSION_ROW_ABSENT` 且 `manual_retry_required=False`——
+  这批候选不在四类之列，于是本命令在管线已经死了一天多的情况下**照契约返回 `exit 0`**。
+  **不要拿它当健康检查**，管线是否推进看各自的监控面。
+- **窗口之外看不见**：只扫最近 `--passes` 趟，这是定义不是缺陷；`3` 的存在就是为了不把"窗口内
+  没看见"说成"没有"。需要更宽的窗口就加大 `--passes`（无上限，但每份 pass 文件接近 5 MB，按需
+  加）。
+- **摘要 pass 的 `null` 字段怎么读**。bounded 摘要（`limit.candidate_lists=summarized`）丢了
+  `state_evidence`，但保留 `decision` 以及 `retry_attempt` / `retry_limit` / `retry_occurrences` /
+  `manual_retry_required` 里**产出臂实际写过的那几个**（保留判据是 `value is not None`，所以 `0`
+  和 `false` 也留得住）。四个键不是每臂都有：
   - 预算臂（`blocked_strict_warm_start_init_state_mismatch`）写 `attempt` / `retry_limit` /
     `manual_retry_required`，**从不写** `occurrences`；
   - 断路器臂（`blocked_journal_predecessor_identity_quarantine`）写 `occurrences` /
     `manual_retry_required`，**从不写** `attempt` / `retry_limit`。
 
-  jq 把缺的那个渲染成 `null`。这里的 `null` 意思是**这一臂从来没写过这个字段**，不是
+  receipt 把缺的那个渲染成 `null`。这里的 `null` 意思是**这一臂从来没写过这个字段**，不是
   「scheduler 把数字弄丢了」——不要据此判断摘要有损、更不要据此去翻非摘要 pass 找那个数。
-- breaker 释放了执行槽的 backfill cycle 不构造候选，它的模型从上面第 2 条命令的 not-selected
-  `source_cycles` 条目读出，没有 `candidate_id`。
-- **可判定性是闭合白名单，正向判据**（过渡期没有 CLI 替你判，规则得手工执行）：只有终态
-  `status` 落在下面这 24 个之一的 pass，才算「候选构造真的跑过」，才有资格让空输出读作
-  「没有待办」。这就是被删掉的 #1186 模块里那张 `EVALUATING_PASS_STATUSES` 闭合表，原样抄在这里：
-
-  ```
-  planned                     blocked                      unavailable
-  submitted                   submitted_partial            slurm_status_synced
-  slurm_status_sync_failed    slurm_cancelled              slurm_partially_cancelled
-  slurm_cancellation_blocked  restart_reconciled           restart_reconcile_unknown
-  submission_failed           skipped_duplicate_submission reconciling
-  submit_result_ambiguous     reconcile_unverified         cancelled
-  complete                    succeeded                    parsed_partial
-  forcing_ready_partial       forcing_ready                already_done
-  ```
-
-  **凡是不在这张表里的 status，一律按不可判定处理并升级上报**——不是"大概没事"。已知的
-  非评估 status 有 `lock_contended`、`preflight_blocked`、`lease_lost`、`resource_limit_blocked`
-  （`preflight_blocked` 在候选构造前后都会写，光看 status 分不出是哪一种，所以也不可判定）；
-  **未来新增的、本表未列出的任何 status 同样落在升级一侧**。
-- **`limit.candidate_lists == "dropped"` 让被检查的那个 pass 不可判定——不限于最新 pass**，
-  窗口里任何一个被翻到的 pass 都一样：丢了候选列表，它既不能列出待办，也不能证明没有待办。
-  size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` 为
-  `summarized`/`dropped`）还被写入器清空了 `source_cycles`——breaker 释放的 cycle 看不见。
-  node-22 的 pass 文件接近 5 MB 上限，这种 pass 现实中会出现。
-- **空输出 ≠ 没有待办**：`status` 在上面的白名单里、且 `limit` 没有丢列表，两条都满足，才能下
-  「没有待办」的结论。
-- **只能向前等，不能往回翻**：最新 pass 不可判定时，**等下一个未超限的正常 pass**（隔一会儿
-  重跑第一步选 `PASS` 的 `ls -t ... | head -1`），不要退回上一个 pass。规则说正面一点：
-  **一个更旧的 pass 只能用来「找活儿」，永远不能用来断定「没有待办」**——断路器可能在那个旧
-  pass 写完之后才释放了某个 cycle，旧 pass 里的空列表对「现在」没有证明力。真要翻旧 pass 找
-  线索时（`sed -n 2p` 取次新，`*.pre_execution.json` 的过滤不能省），找到的目标仍要按第二步
-  的规则用**最新** pass 重新核对一遍。#1186 的 CLI 落地后会把这类不可判定的 pass 显式报出来
-  并用独立退出码区分。
+  breaker 释放的 backfill cycle 不构造候选，它列出来的条目没有 `candidate_id`（为 `null`），
+  同理不是丢了数据。
 
 ## 第二步：按 decision 处置
 
@@ -178,8 +177,9 @@ run 在飞或不存在时拒绝）：
     先不带 `--attest` 跑一次，从 dry-run receipt 的 `live.budget_reentry_count` 读出 pin。
     **写侧看不到预算是否已耗尽**（#2400 残余，本 PR 不关闭：pin 对了、时间错了）：耗尽前写入的
     确认物在 pin 仍等于计数时一直有效，直到被消费——预算一耗尽就会在没有新签字的情况下放行一次。
-    所以只确认**最新** pass evidence 文件的 `blocked_candidates` 当前列为
-    `blocked_strict_warm_start_init_state_mismatch` 的目标（第一步第 1 条命令），并逐字核对 `source_id` /
+    所以只确认**最新** pass evidence 文件当前列为
+    `blocked_strict_warm_start_init_state_mismatch` 的目标——第一步的命令加 `--passes 1`（只扫最新
+    一趟），取 receipt 里 `decision` 等于该值的 `operator_actions` 条目——并逐字核对 `source_id` /
     `cycle_time` / `model_id`；该模型的 rerun 仍在飞时不要确认。写错（目标、pin 或时机）时停止并
     上报，**不要**再写一条覆盖（旧确认物仍有效）。
   scheduler 只在 pin 严格相等时放行一次。确认物在 rerun **被接受提交**时即被消费：
