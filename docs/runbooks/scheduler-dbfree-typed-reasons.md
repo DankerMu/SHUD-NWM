@@ -624,9 +624,16 @@ reservation 处写，所以从别的阶段重启就意味着"计数是否 +1"取
 
 判定在**候选清单构建完成之后**统一做一次（`_build_candidates` 的返回点，晚于 §8.6
 predecessor 的头插），读的是候选自己的 `state_evidence`，与它继承自哪个 decision 无关；
-比较是**正向**的 `== "forecast"`：阶段缺失 / `null` / 空串（chain 会从第一个阶段跑起）
-和任何具名的更早或更晚阶段一样被拒。`fresh_ingestion.mode == "full_chain"` 会让 run
-manifest **不带** `restart_stage`，因此即便 evidence 写着 `forecast` 也按"阶段缺失"拒。
+比较是**正向**的 `== "forecast"`：阶段缺失 / `null` / 空串和任何具名的更早或更晚阶段
+一样被拒。`fresh_ingestion.mode == "full_chain"` 会让 run manifest 的**顶层**
+`restart_stage` 被抹掉，因此即便 evidence 写着 `forecast`，守卫算出的也是"无阶段"而被拒。
+
+这里的"无阶段"指的是**守卫算出来的**阶段，不是 chain 的起跑点——顶层键空着**不等于**
+chain 会从第一个阶段跑起（回退机制见下面「处置」第 2 条的 `null` / 缺失 那一档）。守卫的
+阶段与 chain 会解析出的阶段**并不总相等，契约也不是相等**：顶层键为真时两者读同一个值、
+一致；为假或被 full_chain 抹掉时守卫算 `None`、正向比较直接拒，**无论** chain 会从内嵌
+`state_evidence` 或 `restart_from_stage` 解析出什么。也就是说，带确认物的候选可能因为一个
+chain 其实不会起跑的阶段被拒，但绝不会因为一个 chain 会起跑的阶段被放行。
 
 ### 证据形状
 
@@ -645,8 +652,18 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
                                recovery_runbook: "node22-control-plane-manual-recovery"}
 ```
 
-`operator_reentry_confirmation` 块原样保留在 evidence 上；有界摘要保留 `decision` /
-`reason` / `manual_retry_required`。
+`operator_reentry_confirmation` 块原样保留在**未摘要**的 evidence 上。有界摘要从
+`state_evidence` 里只拉 10 个字段（`_BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS`，
+`services/orchestrator/scheduler_evidence_payload.py:33-58`）：`decision` /
+`missing_forcing_repair_status` / `quarantined_skip_reason` / `operator_action_required` /
+`predecessor_emission_blocked` / `retry_attempt` / `retry_limit` / `retry_occurrences` /
+`manual_retry_required` / `refused_restart_stage`（最后一个是 #1555 为本 decision 新加的）；
+行级字段（`candidate_id` / `model_id` / `status` / `reason` 等，`:10-32`）另行原样保留。
+其余一律消失，**包括 `operator_reentry_confirmation` 整块**和
+`operator_reentry_sink_refusal` 里除 `refused_restart_stage` 以外的**所有**字段。
+保留条件是逐字段的 `value is not None`，**产出方没写的字段保持缺失、不会被补成 null**——
+所以 `refused_restart_stage` 本身为 `null` / 缺失的那类拒绝，摘要里连这个键都不出现，
+只能靠 `decision` 辨识。要读全字段必须回到未摘要的整份 pass evidence。
 
 ### 处置
 
@@ -659,8 +676,22 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
      **带外修好 forecast 之前的那份输入**——补齐该 cycle 的 canonical 行（或修好
      canonical readiness index 的身份），不要试图让它从 convert 跑。
    - `forcing`：见 `--repair-missing-forcing` 与确认物互斥那条（见下面的相关文档）。
-   - `null` / 缺失 / `fresh_full_chain: true`：chain 会整条从头跑，同样带外先修输入。
+   - `null` / 缺失 / `fresh_full_chain: true`：run manifest 的**顶层** `restart_stage`
+     会是空的，但这**不等于** chain 会整条从头跑——`_restart_stage_from_basins`
+     （`services/orchestrator/chain_runtime_utils.py:319-336`）顶层缺失时会回退读
+     basin 内嵌的 `state_evidence.restart_stage` / `restart_from_stage`
+     （`:326-331`），manifest 把这份 evidence 一起带上了
+     （`services/orchestrator/scheduler_candidate_manifest.py:234`）。也就是说这类候选
+     顶层与内嵌两个字段互相矛盾，chain 实际会从内嵌那个阶段起跑；只有两者都不给阶段时
+     才真的从头跑。sink 正是在这种矛盾上判 `None` 并**正向比较拒掉**，不让 chain 有机会
+     按哪一个跑。处置不变：同样带外先修输入。
    - 更晚的阶段（`state_save_qc` / `parse` 等）：来自失败态重导出，同样不是本次授权覆盖的范围。
+
+   **先确认这条拒绝是不是"确认物本身坏了"**：`operator_reentry_sink_refusal.malformed_confirmation`
+   为 `true` 时，说明 `operator_reentry_confirmation` 这个键存在但不是对象（具体类型见同块的
+   `confirmation_type`），sink 与阶段无关地直接拒——这时上面按 `refused_restart_stage` 找改写源头
+   是白找。**这个判别字段不进有界摘要**（只有 `refused_restart_stage` 被拉），所以在摘要过的 pass 里
+   这类拒绝与普通的阶段不符拒绝**长得一模一样**；要分辨必须回到未摘要的整份 pass evidence。
 3. 输入修好后的**下一趟自然 pass**：确认物仍然待用、pin 仍然相等，候选从 `forecast`
    重启、在 reservation 处被戳、计数 +1，**恰好消费一次**；再之后的 pass 回到原来的
    fail-stop blocked，旧 pin 返回 `pin_mismatch`。不需要、也不应该重新签一次。

@@ -267,6 +267,11 @@ run 在飞或不存在时拒绝）：
   forced-resubmit 白名单里。处置：读 `operator_reentry_sink_refusal.refused_restart_stage` 找到改写
   源头，**带外**修好 forecast 之前的那份输入（canonical readiness index 或 raw manifest 身份），
   下一趟 pass 自己从 `forecast` 重启并消费一次签字。**不要重复签一次**——旧确认物仍然有效。
+  **evidence 被有界摘要压过时**：`operator_reentry_sink_refusal` 这个块里只有
+  `refused_restart_stage` 被保留（摘要里是同名的行级键），块内**其余字段一律消失**——
+  普通拒绝里是 `refused_restart_from_stage` / `effective_restart_stage` /
+  `fresh_full_chain` / `confirmation`，确认物损坏那类还多一对 `malformed_confirmation` /
+  `confirmation_type`。要看这些字段必须回到未摘要的整份 pass evidence。
   字段与逐项处置见
   [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)。
 - **候选仍显示 blocked ≠ 确认物未生效**：先看 dry-run receipt 的 live 计数是否已 +1（file

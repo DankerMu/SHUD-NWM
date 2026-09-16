@@ -1538,16 +1538,46 @@ OPERATOR_REENTRY_SINK_REFUSAL_REASON = "operator_reentry_restart_stage_not_forec
 
 
 def _candidate_effective_restart_stage(candidate: SchedulerCandidateLike) -> str | None:
-    """The restart stage the RUN MANIFEST would carry for this candidate.
+    """The restart stage the RUN MANIFEST's own top-level key would carry.
 
-    Not the raw evidence key: ``_candidate_basin_manifest`` copies
-    ``state_evidence["restart_stage"]`` only when the candidate is not a fresh
-    full-chain ingestion, and a manifest with no restart stage makes
-    ``_run_cycle_chain_stages`` start at stage index 0.  So a ``full_chain``
-    marker is an effective stage of ``None`` however the evidence key reads.
-    ``restart_from_stage`` is deliberately not consulted: no consumer reads it
-    while ``restart_stage`` is truthy, and a falsy ``restart_stage`` already
-    yields ``None`` here.
+    Not the raw evidence key: ``_candidate_basin_manifest``
+    (``scheduler_candidate_manifest.py:232-239``) writes the manifest's top-level
+    ``restart_stage`` from ``state_evidence["restart_stage"]`` and ONLY when the
+    candidate is not a fresh full-chain ingestion -- the same expression and the
+    same exclusion used here.  So a ``full_chain`` marker is an effective stage
+    of ``None`` however the evidence key reads.
+
+    What this value is NOT is a prediction of where the chain starts.  The chain
+    resolves its start with ``_restart_stage_from_basins``
+    (``chain_runtime_utils.py:319-336``), built into the cycle context at
+    ``chain_forecast_control.py:148`` and consumed by ``_run_cycle_chain_stages``
+    at ``chain_forecast_execution.py:173``; that helper reads the basin's
+    top-level ``restart_stage`` first and FALLS BACK to the basin's embedded
+    ``state_evidence["restart_stage"] or ["restart_from_stage"]``
+    (``chain_runtime_utils.py:326-331``), which the manifest also carries
+    (``scheduler_candidate_manifest.py:234``).  A blanked top-level key therefore
+    does not mean stage index 0.
+
+    The contract is NOT that this function equals the stage the chain would
+    resolve.  It is that every divergence points in the REFUSING direction --
+    stated as a property rather than a case list, because the case list is what
+    keeps turning out to be incomplete here:
+
+    * Truthy ``state_evidence["restart_stage"]`` and no fresh-full-chain marker:
+      the manifest's top-level key carries that value, the chain reads the same
+      value, and the two agree.
+    * Falsy key, or blanked by the fresh-full-chain exclusion: this function
+      returns ``None`` and the sink's positive ``== "forecast"`` comparison
+      refuses, WHATEVER the chain would have resolved from the embedded
+      ``state_evidence`` -- including from ``restart_from_stage``, which
+      ``chain_runtime_utils.py:329`` does read once ``restart_stage`` is falsy.
+
+    So a confirmed candidate can be refused for a stage the chain would not have
+    started at, but never admitted for one it would.  ``restart_from_stage`` is
+    deliberately not consulted here (the manifest has no top-level key of that
+    name); that asymmetry is what makes the divergence fail-closed, so it must
+    not be "fixed" by teaching this function the fallback.  #2416 tracks the
+    chain-side fallback itself, which stays out of scope.
     """
 
     state_evidence = candidate.state_evidence
@@ -1581,6 +1611,19 @@ def _refuse_confirmed_candidates_off_forecast(
     earlier OR later stage is refused on the same footing; a denylist of
     known-bad stages is exactly the shape that missed this three rounds running.
 
+    Absence and corruption are separated (C-2): the key being ABSENT is the
+    ordinary unconfirmed candidate and is kept, while the key being PRESENT with
+    a non-``Mapping`` value is refused with its own ``malformed_confirmation``
+    discriminator -- a fail-closed guard may not admit a block it cannot even
+    read.  No writer currently produces a scalar here: both writers
+    (``scheduler_candidates.py:2631-2633`` and ``:2811-2813``) build the block
+    through ``scheduler_generation.operator_reentry_confirmation_evidence``
+    (``scheduler_generation.py:1612-1615``), which always returns a ``dict``.
+    ``_merge_state_evidence``'s ``else: merged[key] = value`` branch
+    (``scheduler_candidates.py:2274-2275``) would nevertheless let a scalar
+    replace the block wholesale if any future writer emitted one, so this branch
+    is closed BY CONSTRUCTION, not because the scalar is unreachable today.
+
     Mutates ``candidates`` in place -- the §8.6 emitter already mutates this same
     list object and the caller returns it.
     """
@@ -1588,19 +1631,35 @@ def _refuse_confirmed_candidates_off_forecast(
     kept: list[SchedulerCandidateLike] = []
     for candidate in candidates:
         state_evidence = candidate.state_evidence
-        confirmation = (
-            state_evidence.get("operator_reentry_confirmation")
-            if isinstance(state_evidence, Mapping)
-            else None
-        )
-        if not isinstance(confirmation, Mapping):
+        if not isinstance(state_evidence, Mapping) or "operator_reentry_confirmation" not in state_evidence:
             kept.append(candidate)
             continue
+        confirmation = state_evidence["operator_reentry_confirmation"]
+        malformed_confirmation = not isinstance(confirmation, Mapping)
         effective_restart_stage = _candidate_effective_restart_stage(candidate)
-        if effective_restart_stage == "forecast":
+        if not malformed_confirmation and effective_restart_stage == "forecast":
             kept.append(candidate)
             continue
         assert isinstance(state_evidence, Mapping)
+        # The offending stage is NOT rewritten back to ``forecast``: the blocked
+        # row must show the operator what the chain would have done.  It is
+        # reported in its own bounded block instead.
+        sink_refusal: dict[str, Any] = {
+            "refused_restart_stage": state_evidence.get("restart_stage"),
+            "refused_restart_from_stage": state_evidence.get("restart_from_stage"),
+            "effective_restart_stage": effective_restart_stage,
+            "fresh_full_chain": _candidate_is_fresh_full_chain(candidate),
+        }
+        if malformed_confirmation:
+            # The bounded echo below cannot be built from a non-``Mapping``, so
+            # the operator gets the discriminator and the offending type instead.
+            sink_refusal["malformed_confirmation"] = True
+            sink_refusal["confirmation_type"] = type(confirmation).__name__
+        else:
+            sink_refusal["confirmation"] = {
+                "decision": confirmation.get("decision"),
+                "request_id": confirmation.get("request_id"),
+            }
         blocked.append(
             _blocked_candidate(
                 candidate,
@@ -1611,19 +1670,7 @@ def _refuse_confirmed_candidates_off_forecast(
                     "classifier": "operator_reentry_authorization_scope",
                     "native_shud_resubmitted": False,
                     "replacement_submitted": False,
-                    # The offending stage is NOT rewritten back to ``forecast``:
-                    # the blocked row must show the operator what the chain would
-                    # have done.  It is reported in its own bounded block instead.
-                    "operator_reentry_sink_refusal": {
-                        "refused_restart_stage": state_evidence.get("restart_stage"),
-                        "refused_restart_from_stage": state_evidence.get("restart_from_stage"),
-                        "effective_restart_stage": effective_restart_stage,
-                        "fresh_full_chain": _candidate_is_fresh_full_chain(candidate),
-                        "confirmation": {
-                            "decision": confirmation.get("decision"),
-                            "request_id": confirmation.get("request_id"),
-                        },
-                    },
+                    "operator_reentry_sink_refusal": sink_refusal,
                     "retry_policy": {
                         "automatic_retry_allowed": False,
                         "manual_retry_required": True,

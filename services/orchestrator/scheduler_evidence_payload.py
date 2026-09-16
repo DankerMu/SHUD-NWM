@@ -49,6 +49,12 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     ("retry_limit", ("retry_policy", "retry_limit")),
     ("retry_occurrences", ("retry_policy", "occurrences")),
     ("manual_retry_required", ("retry_policy", "manual_retry_required")),
+    # #1555: the sink refusal's only triage key -- it is what tells an operator
+    # WHICH pre-forecast input to repair.  Exactly one pull of the five-field
+    # ``operator_reentry_sink_refusal`` block: retaining the block whole is
+    # unbounded-shaped, and evidence pressure is precisely the condition under
+    # which this refusal has to stay actionable.
+    ("refused_restart_stage", ("operator_reentry_sink_refusal", "refused_restart_stage")),
 )
 _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)

@@ -139,6 +139,13 @@ exact commands, the evidence-root source and node-22 execution discipline are in
   submitted, nothing consumed, the confirmation stays armed. **Do not confirm again.**
   Read `state_evidence.operator_reentry_sink_refusal.refused_restart_stage`, repair the
   pre-forecast input out of band, and let the next pass restart the re-entry at `forecast`.
+  If the pass evidence came back bounded-summarized, only `refused_restart_stage` survives
+  (as a top-level `refused_restart_stage` on the summary row) and every other field of the
+  block is dropped — `refused_restart_from_stage`, `effective_restart_stage`,
+  `fresh_full_chain`, `confirmation`, and, on a corrupted-confirmation refusal, the
+  `malformed_confirmation` / `confirmation_type` discriminator. Read the unsummarized pass
+  evidence if you need any of them. A refusal that named no restart stage at all keeps the
+  field absent rather than null, so identify that row by its blocked decision.
   Field-by-field triage is in
   [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
 

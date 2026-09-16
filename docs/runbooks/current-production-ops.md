@@ -371,7 +371,7 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 | 来源 | 车道 | 排空通道 |
 |---|---|---|
 | #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本**（仅当改名集非空，见下）**；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`）——**除非该候选带 operator 重入确认物**，那种候选会被修复策略拒绝，见下面的块注；改名集为空时两条都不是通道，按块注里的升级路径带外修输入 |
-| #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | 下面的回补脚本**（仅当改名集非空）**，否则走块注里的升级路径。8.5 的单 cycle 修复在这条车道上**根本不会被评估**——修复策略的调用点在 `scheduler_candidates.py:674`，位于 `:657` 的 `if strict_warm_start is not None:` 之内，而 quarantine 判定发生在非 strict 车道上，所以 `--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（该"不评估"性质由 `tests/test_production_scheduler.py::test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_flag_on` 钉住） |
+| #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | 下面的回补脚本**（仅当改名集非空）**，否则走块注里的升级路径。8.5 的单 cycle 修复在这条车道上**不会改判这类候选**——但原因不是"策略没被调用"：策略有**两个**调用点，`scheduler_candidates.py:674`（在 `:657` 的 `if strict_warm_start is not None:` 之内）和 `:1860`（在 `_candidate_warm_admission_decision`，def 在 `:1838`），后者**无条件调用、且早于 `:1867-1871` 的 `strict_warm_start is None` 判断**，所以非 strict 车道上策略确实被求值。挡住它的是策略自己的第二个 early return（`:1903-1908`）：这条车道递进去的 decision 是 `skip` / `terminal_hydro_success`，不在 `_MISSING_FORCING_BLOCKER_REASONS` 里，于是原样返回、不写任何证据。净结果对 operator 不变：`--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（由 `tests/test_production_scheduler.py::test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_flag_on` 钉住，该测试用 spy 实测了"策略被调用、拿到的是 skip、没写证据"） |
 
 > **`--repair-missing-forcing` 与 operator 重入确认物互斥（r2-01）**：这个候选如果是靠
 > `confirm-operator-reentry` 的确认物才走到 missing-forcing `blocked` 的（strict warm-start 预算
@@ -382,10 +382,11 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 >   `state_evidence.missing_forcing_repair.status = rejected` +
 >   `reason = operator_reentry_confirmation_present`（并回显 `confirmation.decision` /
 >   `confirmation.request_id`），候选留在 missing-forcing `blocked` 上。
-> - **非 strict 车道**（上面表格 `#1844` 那行）：修复策略**根本不会被调用**（调用点在
->   `strict_warm_start is not None` 之内，而 quarantine 判定发生在两次 warm admission 之后），
->   所以这类候选**没有** `missing_forcing_repair` 键，只有见证闸的 missing-forcing `blocked`。
->   别去找那个键。
+> - **非 strict 车道**（上面表格 `#1844` 那行）：修复策略**会被调用**（`:1860` 那个调用点无条件
+>   执行、早于 `:1867-1871` 的 lane 判断），但它拿到的 decision 是 `skip` /
+>   `terminal_hydro_success`，不是那两个 missing-forcing blocker 之一，于是在 `:1903-1908`
+>   原样返回、**不写任何证据**。结果一样：这类候选**没有** `missing_forcing_repair` 键，只有
+>   见证闸的 missing-forcing `blocked`。别去找那个键——但别把这理解成"策略没跑"。
 > 理由：改判后的 `retry_repair_missing_forcing` 从 `forcing` 阶段重启，而重入 provenance 只在
 > forecast cohort 的 reservation 处写——forcing 成功才顺带戳到，forcing 失败就是「真提交了、
 > 计数没动、确认物还在」，并且失败的 forcing 在新 run-id 前缀下把 stage 域 attempt 打回 0/2、
@@ -415,7 +416,9 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 
 strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`，所以这个键只是提示，不是车道判据。
 分不清时以 8.5 的 `--plan` 预览为准：`state_evidence.missing_forcing_repair.status = authorized` 的候选可以走
-单 cycle 修复；其余候选不走这条通道，改用回补脚本排空。
+单 cycle 修复；其余候选不走这条通道，**仅当改名集非空时**改用回补脚本排空。改名集为空时回补脚本同样不是通道
+（它返回 `work_item_count: 0`，与指错 `--forcing-root` / NFS 没挂分不开），此时走上面那段引文里的
+**带外**升级路径：重新产出该模型的 forcing 包并落进 object store。
 
 正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
 `station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
