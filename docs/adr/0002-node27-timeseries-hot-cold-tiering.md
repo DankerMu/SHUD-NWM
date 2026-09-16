@@ -24,14 +24,17 @@ stands; isolated 2.10.2 probe freezes shell-first movement — see
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source
-retirement and isolated survivor verification are complete; effective-deployment
-handoff remains pending R5.2.**
+retirement and isolated survivor verification are complete; R5.2
+effective-deployment handoff committed 2026-09-16T04:07:55Z and independently
+observed 2026-09-16T04:08:38Z. Archive disposition is recorded in the retirement
+ledger; GitHub records the actual issue-close events.**
 
 ## Amendment (2026-09-14): selective-cold source retirement, not dormant retention
 
-The current #1891/#1895 contract is
-[`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md).
-Production selective-cold rollout is withdrawn: no fresh G1 retry, cold sample,
+The 2026-09-14 #1891/#1895 source-retirement contract is recorded in
+[`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md).
+Operator-facing effective-deployment authority is the 2026-09-16 amendment
+below. Production selective-cold rollout is withdrawn: no fresh G1 retry, cold sample,
 installation/movement or G0–G8 window is planned. R1–R3 removed the cold-only
 package/CLI/config/schema/example/test/selector closure and the source tablespace
 `CREATE` grant/positive audit; R4 corrects current authority without promoting
@@ -44,19 +47,19 @@ remain under their actual owners. Bringup-C4 production acceptance retains its
 outer reviewed-SHA/exact-byte digest and file-identity guarantee; local C4 CLI
 PASS remains insufficient for production acceptance.
 
-This is repository source authority only. It does not claim source retirement
-proves effective unit/dropin/env/ExecStartPre disposition, live privilege
-revocation, tablespace/data deletion, or production cleanup. R5.1 survivor proof
-and independent source review are recorded in
+This dated amendment records repository source authority only. It does not claim
+source retirement proves live privilege revocation, tablespace/data deletion, or
+production cleanup. R5.1 survivor proof and independent source review are
+recorded in
 [PR #2376](https://github.com/DankerMu/SHUD-NWM/pull/2376#issuecomment-5672676409)
-and the active change's `evidence/retirement-deletion-verification.json`.
-R5.2 still requires separate authorization and coordination of effective
-unit/source/env references without disabling ordinary maintenance. Repository
-templates are not deployment proof. Unexpected deployed cold state requires
-stop/preserve and a
-dedicated safe disposition. #2293/#2298/#1938 can be disposed as capability
-retired only after affected source and deployed references exit; any transferred
-defect follows its surviving owner.
+and
+[`evidence/retirement-deletion-verification.json`](../../openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/retirement-deletion-verification.json).
+R5.2 was still pending on this date; the 2026-09-16 amendment records the later
+committed handoff. Repository templates are not deployment proof. Unexpected
+deployed cold state requires stop/preserve and a dedicated safe disposition.
+Issues #2293/#2298/#1938 can be disposed as capability retired only after affected
+source and deployed references exit; any transferred defect follows its
+surviving owner.
 
 The #1370 archive retirement remains completed history. The 2026-08-29 successor
 and its 2026-08-31 refinement below are superseded historical technical evidence,
@@ -67,6 +70,50 @@ capability/rollback contract: the later user-confirmed host PGDATA is
 source location stated in that dated amendment. This correction authorizes no
 repeat relocation, deployment or cleanup. Fresh hardware/backup admission,
 pre-write rollback and the prohibition on stale post-write rollback remain intact.
+
+## Amendment (2026-09-16): R5.2 effective-deployment handoff committed
+
+Authorized R5.2 maintenance handoff committed on node-27 at
+2026-09-16T04:07:55Z; independent post-apply observation at
+2026-09-16T04:08:38Z. Scope is effective configuration, source/runtime
+identity and preserved-evidence validation — not selective-cold rollout, a
+live compression tick, v3 replay PASS, privilege revocation, or data
+deletion.
+
+Receipt (moves unchanged with the archive):
+[`evidence/retirement-effective-handoff.json`](../../openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/retirement-effective-handoff.json).
+Reviewed exact-driver SHA
+`08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988`; four
+exact-driver seats CLEAN.
+
+Observed live compression unit:
+
+- WorkingDirectory / ExecStart / ExecStartPre SOURCE
+  `/home/nwm/NWM-maintenance-reviewed-95481481` (including its `.venv`)
+- private live env
+  `/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+- wrapper 3900 s, wall 3941 s, statement 3600000 ms, bound 4, lag 172800 s
+- original timer active/enabled baseline and compression deadline preserved
+- 92 protected identities unchanged
+- installed replay unit `absent-approved`; old cold env archived privately
+- source/templates and all private replay env/plan/ledger/terminal/consumed-finalizer/recovery evidence retained
+
+SOURCE, `.venv`, STATE/config and private replay/rollback archives are active
+deployment and recovery inputs. Do not clean them. Governance and retention
+units were not rebound; business checkout SHA `415cbd1e` is unchanged. No
+maintenance service was started by this handoff; no DB/schema/role change,
+`REVOKE`, `DROP`, tablespace/data deletion, or PGDATA/evidence/container-mount
+deletion is claimed.
+
+Normal compression, retention, PGDATA, container, governance, readonly/display
+and C4 owners remain in force. Historical G0–G8 stay withdrawn, never PASS.
+Archive of this change and #1891/#1895 issue closeout are being completed in
+this PR; they are not already merged or closed. Unexpected leftover cold
+catalog/bind state still requires stop/preserve and a separately approved
+safe disposition.
+
+Operator-facing current state:
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
 
 ## Context
 
@@ -598,11 +645,11 @@ designs, is
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-14
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority); openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/retirement-effective-handoff.json
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-16
 - archive_scope: section, including all successor subsections through Lifecycle contract
-- retained_for: historical accepted cold design and isolated engine evidence; rollout withdrawn, source retirement complete, effective-deployment handoff pending
+- retained_for: historical accepted cold design and isolated engine evidence; rollout withdrawn, source retirement complete, R5.2 handoff committed 2026-09-16
 
 The 2026-08-11 revision retired the **product archive / salvage / rebuild**
 lanes after the `/dev/md0` double-disk failure (#1309/#1370). That retirement
@@ -622,7 +669,7 @@ is authorized here.
 Archive status:
 - status: superseded
 - current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
 - status_since: 2026-09-13
 - archive_scope: section
 - retained_for: dated placement and successor identities, not current live-state evidence
@@ -643,8 +690,8 @@ Archive status:
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
 - status_since: 2026-09-13
 - archive_scope: section
 - retained_for: immutable technical conclusions from isolated cold movement; no execution authority
@@ -732,8 +779,8 @@ New chunks stay in `pg_default`.
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
 - status_since: 2026-09-13
 - archive_scope: section's selective-cold admission only
 - retained_for: historical cold gates; existing PGDATA/recovery hardware and backup guards remain in force
@@ -750,8 +797,8 @@ and those gates; this amendment only freezes the policy.
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
 - status_since: 2026-09-13
 - archive_scope: section
 - retained_for: historical installer state-machine limits, not new install/rollback authorization
@@ -783,8 +830,8 @@ live execution and performance/archive closure.
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
 - status_since: 2026-09-13
 - archive_scope: section
 - retained_for: isolated cold lifecycle evidence, not a surviving runtime requirement
@@ -801,8 +848,9 @@ must leave no origin/compressed/index/TOAST catalog or files.
 **Current boundary:** this dated PGDATA capability and its real rollback guards
 survive. Its source placement and statement that cold merely “stays inactive”
 are historical: the 2026-09-14 retirement amendment records source retirement
-as implemented and effective-deployment handoff as pending. It neither reopens
-the migration nor changes its separately authorized release/recovery duties.
+as implemented, and the 2026-09-16 amendment records the committed R5.2
+handoff. It neither reopens the migration nor changes its separately authorized
+release/recovery duties.
 
 Issue #2240 adds a separately authorized alternative to selective compressed-chunk
 residency: cleanly stop the existing PostgreSQL cluster, copy its complete physical

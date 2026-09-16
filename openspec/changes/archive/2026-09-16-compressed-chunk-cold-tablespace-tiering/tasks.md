@@ -1,12 +1,11 @@
-# Mandatory selective-cold retirement — active implementation contract
+# Selective-cold retirement — closeout and evidence ledger
 
-Status: implementation in progress. R1.1/R1.2 merged via PR #2311.
-R1.3 and the corresponding PGDATA/governance portions of R1.5 have executable
-verification. R1.6 and the C4 portion of R1.5 now have node-27 synthetic
-acceptance-owner proof; this is not live browser or production deployment PASS.
-Remaining retirement and effective-deployment tasks are pending.
-The sole executable retirement plan is this file. Old cold deployment approval
-does not authorize retirement, and disabling a lane is not code retirement.
+Status: source retirement, survivor verification and authorized effective
+maintenance handoff are complete. R4.4 reviewed archive and R5.3 issue
+disposition are the final administrative closeout tracked below.
+R1.6/C4 synthetic proof is not live browser production acceptance.
+Original cold G0–G8 rollout remains withdrawn, not passed. The historical
+completed delivery ledger and immutable evidence retain their original meaning.
 
 ## Publication DAG and smallest safe merge boundaries
 
@@ -325,13 +324,19 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`
   and Ruff/Markdown checks on the changed surface. These source-retirement
   checks do not authorize or establish R5.2 effective deployment.
-- [ ] R5.2 Separately authorize effective-deployment handoff at the final release:
+- [x] R5.2 Separately authorize effective-deployment handoff at the final release:
   identify actual unit/dropins/env/ExecStartPre and referenced paths, coordinate
   owners and foreign holds, remove retired cold activation/configuration without
   disabling normal maintenance, and record observed disposition. Repository
   templates are not deployment proof. Do not delete real tablespaces/data, old
   PGDATA or private evidence. Unexpected deployed cold relations/state require
   STOP and a dedicated safe disposition, never silent DROP or ignore.
+  Authorized handoff committed on node-27 at 2026-09-16T04:07:55Z;
+  independent post-apply observations at 04:08:38Z verified the effective
+  compression source/env/precheck and 3941s wall, replay absent-approved,
+  archived cold input, unchanged 92 protected identities and timer baseline.
+  No maintenance service was manually started; no DB/schema/role change.
+  Receipt and exact-driver review: `evidence/retirement-effective-handoff.json`.
 - [ ] R5.3 Only after affected source paths and deployed references are gone,
   dispose #2293/#2298/#1938 as capability retired, not fixed; a defect carried by
   extraction follows the surviving owner. Link deletion, regression, reviewed

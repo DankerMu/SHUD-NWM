@@ -1,3 +1,11 @@
+---
+status: historical baseline
+current_authority: docs/runbooks/tier-node27-timeseries-storage.md
+status_since: 2026-09-16
+archive_scope: whole-document
+retained_for: retirement ownership and safety decisions; completed delivery and deployment evidence are in tasks.md
+---
+
 ## Context and status
 
 Selective-cold storage is withdrawn in favor of mandatory code retirement under
