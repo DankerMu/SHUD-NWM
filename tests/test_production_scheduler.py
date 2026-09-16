@@ -58321,10 +58321,16 @@ def test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_budget_arm(
 
     # A refusal that still submitted would be the entire defect.  ``run_once`` is
     # preflight-blocked on this db-free lane, so ``submitted_count`` is not
-    # measurable here (the breaker sibling below asserts it); what IS measurable
-    # is the real dispatch path handing nothing off, and no run manifest -- the
-    # chain's own artifact (``chain_forecast_orchestrator_runtime._write_run_manifest``)
-    # -- appearing for this cycle.
+    # measurable here -- the breaker sibling below is what asserts it.
+    #
+    # The two assertions below are VACUOUS on this arm and must not be read as
+    # compensating measurement: the list handed to ``_execute_candidates_async``
+    # is the very list asserted empty above, so no submitter is built and
+    # ``run_concurrent_submissions`` returns at ``reservation.py:363-364``
+    # (``if not submitters: return []``) -- ``orchestrator_factory`` is never
+    # called.  They are kept as a cheap regression tripwire only: if a future
+    # change ever admitted a candidate here, ``candidates == []`` above fails
+    # first, and these two would then have real content to measure.
     capture = FakeProductionOrchestrator()
     built.orchestrator_factory = lambda _source_id: capture
     built._execute_candidates_async(candidates)
@@ -59190,19 +59196,19 @@ def test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_fl
     B-1, measured at this head -- the previous mechanism claim here was false.
     ``_apply_explicit_missing_forcing_repair_policy`` is NOT called from inside an
     ``if strict_warm_start is not None:`` block: ``_candidate_warm_admission_decision``
-    (def ``scheduler_candidates.py:1837``) invokes it UNCONDITIONALLY at ``:1859``,
-    before it tests ``strict_warm_start is None`` at ``:1866-1870``, and the
-    policy's own early return at ``:1900-1901`` is on ``config.repair_missing_forcing``,
+    (def ``scheduler_candidates.py:1838``) invokes it UNCONDITIONALLY at ``:1860``,
+    before it tests ``strict_warm_start is None`` at ``:1867-1871``, and the
+    policy's own early return at ``:1901-1902`` is on ``config.repair_missing_forcing``,
     not on the lane.  So on this non-strict lane the policy really is reached,
     with ``strict_warm_start=None`` -- the spy below measures exactly that.
 
-    What stops it is the policy's SECOND early return (``:1902-1907``): the
+    What stops it is the policy's SECOND early return (``:1903-1908``): the
     candidate-state decision it is handed on this lane is a ``skip`` /
     ``terminal_hydro_success``, not one of the two ``_MISSING_FORCING_BLOCKER_REASONS``
     blockers, so the policy returns the decision untouched and writes no
     ``missing_forcing_repair`` evidence.  The ``blocked_missing_upstream_artifact``
     row this pass emits comes from a different site with a decision the policy
-    never saw; the r2-01 confirmation branch at ``:1921-1964`` is therefore not
+    never saw; the r2-01 confirmation branch at ``:1922-1965`` is therefore not
     what closes this lane.
 
     The contract asserted below is the one that would catch a regression: the

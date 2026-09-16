@@ -275,14 +275,64 @@ manifest 里同样带着的那份内嵌证据（`scheduler_candidate_manifest.py
 `candidate.state_evidence` 的那个 dict 上写**顶层**键」。在册的是三个真 writer
 （`scheduler_candidates.py` 12 处、`scheduler_state_failure.py` 9 处、`chain_repository_state.py` 4 处）
 加一个按位置在册的 `scheduler_backfill_predecessor.py`——后者对该键**零命中**，只经 `candidate_factory`
-造候选，本身不是 writer，它的头插位置由下表 W4 的放置钉子覆盖。其余 11 个文件逐个的实测排除理由见
-`.workplans/pr-2406/review/round-4/writer-scope.md`。
+造候选，本身不是 writer，它的头插位置由下表 W4 的放置钉子覆盖。
+
+上面那条三模式 grep 命中 15 个文件，但规格那条 SHALL 要求覆盖的是「every file that **contains** the
+restart-stage key」——那是**裸 token** 口径，`grep -rln 'restart_stage' services/orchestrator/` 实测
+**25** 个文件。两个数都对，管的不是一回事：三模式定位的是**赋值面**，裸 token 定位的是**接触面**，
+而 SHALL 要的是后者。差额的 10 个（含该 token 但不落在那三条模式上）因此也逐个实测并入下表。
+
+25 − 3 个真 writer（在下表 W1-W20）= **22 个被排除文件，逐个的实测排除理由如下**。排除只承认三种
+理由：**(1)** 只读不写（含仅出现函数名/字段名字面量/docstring）；**(2)** 在 sink 下游，消费的是已过滤的
+清单；**(3)** 不在产候选的路径上——写入落在 `chain_repository_state.candidate_state()` 从不读的数据通道里。
+「命中点」一列列的是**读/写点**，不含纯名字字面量（除非该文件只有名字字面量）。
+
+前 12 行来自三模式 grep：
+
+| 被排除文件 | 命中点 | 排除理由（实测） |
+|---|---|---|
+| `accepted_submit_identity.py` | `:732-734` 读、`:1042` **写**、`:1048-1050` 读 | (3) `:732-734`/`:1048-1050` 是对 `ACCEPTED_RESTART_STAGES` 的枚举校验；`:1042` `projection["restart_stage"] = item.get("restart_stage")` 是**下标赋值**，落在 `candidate_projections` 通道里，与 `chain_array_accounting` / `reconcile` 两行同一次零命中 grep 关闭。（此行第一版写成「(1) 只读不写」，假——下标写法被那条窄 grep 漏掉了，见下方方法说明） |
+| `scheduler_candidate_manifest.py` | `:235` 读、`:239` 写 | (2) 消费的是已建好的 `candidate.state_evidence`，写进 `manifest`——另一个 dict，从不回流 |
+| `chain_stage_execution.py` | `:382` | (3) 写进 pipeline-event 的 `details` 子 dict，是嵌套键，不是 sink 读的顶层键 |
+| `chain_array_accounting.py` | `:413-414` | (3) 写 `candidate_projections` 条目；`chain_repository_state.py` 全文 grep `candidate_projections` **零命中** |
+| `reconcile.py` | `:1652` | (3) 同一条 `candidate_projections` 通道，同一次零命中 grep |
+| `accepted_submit_cohort.py` | `:78`、`:155` | (3) 写 `cohort_members` 身份投影；`chain_repository_state.py` 中零引用 |
+| `chain_forecast_orchestrator_cycle.py` | `:685` | (3) 写作业预留记录的 `reservation_evidence`；`chain_repository_state.py` 中零引用 |
+| `file_orchestration_journal.py` | 读 `:528`/`:3109`/`:12522`/`:12613`/`:13600`；写 `:5142`/`:9212` | (1) 读的那五处是白名单字面量；(3) 两处写是回显进持久化的 `candidate_projections`/作业行负载——`chain_repository_state.py:860-881` 的 `state` 由作业字段构造、restart 键一律经自己的 `_stage_after()` 派生，从不读持久化的 `restart_stage` 列 |
+| `scheduler_runtime.py` | `:1712-1714`、`:1737` | (3) 写的是 restart-reconcile 那一趟自己的 `evidence`，作为 `SchedulerPassResult` 的独立成员返回；`:937`/`:1097` 解包出来的 `candidates` 与它不共享任何对象 |
+| `scheduler.py` | `:605`、`:615-616`、`:624-627` | (1) `candidate_restart_stage=` 是绑定投影函数的关键字实参，`:615-616` 透传到 `_scheduler_execution.candidate_restart_stage`；无赋值 |
+| `chain_forecast_control.py` | `:148` | (2) `restart_stage=_restart_stage_from_basins(...)` 是链的 `CycleOrchestrationContext` 的关键字实参，输入是调度器已经发出的 manifest——在 sink 下游 |
+| `chain_forced_resubmit.py` | `:138-141`、`:247` | (1) 读 `state_evidence.get("restart_stage")` 算强制重提的否决，`:247` 传 `context_restart_stage=context.restart_stage`；无写 |
+
+后 10 行是裸 token 口径多出来的（含 token，但不落在那三条模式上）。**全部 EXCLUDED-(1)，无一个是 writer**——
+这 10 个文件里对 `d["restart_stage"] = v` / `.update(...)` / `.setdefault(...)` 的定向 grep **零命中**：
+
+| 被排除文件 | 命中点 | 排除理由（实测） |
+|---|---|---|
+| `chain.py` | `:603`、`:608`、`:609` | (1) 三行都是从 `chain_runtime_utils` 重导出函数对象的模块级别名（`:598-612` 那一块），全文件无任何以该键的字典赋值 |
+| `chain_runtime_utils.py` | 读 `:216`、`:235`、`:237`、`:322`、`:329` | (1) 五处真读全是 `.get("restart_stage")`（落在 `state_evidence` / `basin` / `completed_stage` 上），其余是 def、形参与局部变量；消费该键，从不赋值 |
+| `chain_forecast_execution.py` | 读 `:173`、`:1140` | (1) 读的是 `context.restart_stage`——`CycleOrchestrationContext` 的**属性**（`chain_types.py:243`），不是 `state_evidence` 的键；`:129-130` 是转发 wrapper。全文件无赋值 |
+| `chain_types.py` | `:243` | (1) `restart_stage: str \| None = None` 是 `CycleOrchestrationContext`（`:235-243`）的 dataclass 字段声明，类型声明不是字典赋值；纵按「实例化即写」看也是 (3)——该 dataclass 从不是 `candidate.state_evidence` |
+| `scheduler_execution.py` | 读 `:897` | (1) `candidate_restart_stage`（def `:885-900`）取 `state_evidence.get("restart_stage")` 拼 cohort key——与 sink 自己那次读同形，只读不写；`:871`/`:904-911` 是形参与序号计算 |
+| `scheduler_state_decision.py` | 读 `:225`、`:647` | (1) `:225` 在 `completed_stage_retry`（由已定案的 `scheduler_state_failure.py` 产出）上做比较，`:647` 取值赋给**局部**变量、只在 `:660` 当布尔用；全文件无写回 |
+| `scheduler_state_identity_filter.py` | `:879` | (1) 该键是 `_strip_top_level_pipeline_decision_fields`（def `:871-889`）字段名元组里的一项，函数体对每项做 `state.pop(key, None)`——**删键，不是赋值**。顺着追了删除的后果：调用者 `_candidate_state_decision_views`（`:110-171`，由 `scheduler_state_decision.py:109` 调用）产出的 `decision_state` 是控制流用的中间物；已定案 writer `scheduler_state_failure.py:1695-1737` 拿它当 `state`，读顶层（缺失则回落嵌套 `completed_stage`，不受该 pop 影响），随后在 `{**base_evidence, ...}` 这个**全新 dict** 上自己重写 `"restart_stage"`（`:1723`）。所以此处的 pop 只改变已定案 writer 内部的回落次序，自身从不把值写到会成为 `candidate.state_evidence` 的东西上 |
+| `scheduler_evidence_payload.py` | `:57` | (1) 有界摘要白名单里的一条（`:40-58`），字面键是 `refused_restart_stage`、且嵌在 `operator_reentry_sink_refusal` 下——与 sink 读的顶层 `restart_stage` 是两个键路径。全文件无对 `restart_stage` 的赋值 |
+| `scheduler_compat_runtime.py` | `:145` | (1) `MappingProxyType` 别名表（`:142-151`）里的一条，把 wrapper 名 `_candidate_restart_stage` 映到 owner 名 `candidate_restart_stage`；匹配到的是**函数名子串**，不是字典键 |
+| `scheduler_state_manual_retry.py` | `:251`、`:974`、`:1045` | (1) 三处全在 docstring 散文里（``restart_stage`` 反引号引用）；代码级零出现 |
+
+取证过程与三基线对拍记录留在 `.workplans/pr-2406/review/round-4/writer-scope.md`（gitignored，仅作工作底稿）；
+**上面这张表是仓内的可复核件**，不依赖那份底稿——这正是 A4.4（`tasks.md`）已经就同一类判过的口径。
 
 **R4 此处写的是「三文件 grep」，R5 的第一版写的是「12 个文件」，两个都不对**：前者把 scope 缩得比
 实际写入面小（漏掉整个 `chain_repository_state.py`），后者的文件数来自一条比自己声明的方法**更窄**的
 grep（漏了 `restart_stage=` 那一支，因而漏了 `scheduler.py`、`chain_forecast_control.py`、
 `chain_forced_resubmit.py` 三个命中，同时把并非该 grep 命中项的 `scheduler_state_decision.py` 列进了
 排除表）。规格那句「未声明的 scope 不得当作空 scope」管的就是这个。
+**R5 的第二版（15 个文件 / 12 行排除表）数字没错，口径仍不够**：15 是三模式 grep 的**赋值面**，
+而 SHALL 管的是「contains the key」这个**接触面**（裸 token 25 个）。本版两个口径都写明，表按 22 行写满。
+顺带记一笔：核这一条时我第一次执行的 grep 只带了三条模式里的两条（漏 `"restart_stage"] =`），
+得 13 个文件，一度误判产物写的 15 是错的——是把声明的方法逐字重跑才推翻。
+**执行的命令必须与声明的方法逐字同一条**，这条纪律对核查方与产物同样有效。
 
 每行的结案口径有三种（规格 `specs/production-scheduler-orchestration/spec.md` 的同一条 SHALL）：
 **(i)** 有测试以**带确认物的候选**可测量地走到它（给出测试名与 premise 断言）；
@@ -294,10 +344,13 @@ grep（漏了 `restart_stage=` 那一支，因而漏了 `scheduler.py`、`chain_
 "当前 fixture 覆盖不到"三种都不算。
 
 **搜索范围（实测，不是断言）**：`services/orchestrator/` 全目录 grep `"restart_stage"] =` /
-`"restart_stage":` / `restart_stage=`，命中 **15** 个文件；判据是「是否在最终会成为
+`"restart_stage":` / `restart_stage=`，命中 **15** 个文件（赋值面）；裸 token
+`grep -rln 'restart_stage'` 同目录命中 **25** 个（接触面）——规格那条 SHALL 要的是后者，
+两个口径都写在表里。判据是「是否在最终会成为
 `candidate.state_evidence` 的那个 dict 上写**顶层**键 `restart_stage`」，因为 sink 读的正是它
 （`_candidate_effective_restart_stage` 取 `state_evidence.get("restart_stage")`）。
-逐文件的归类与排除理由见 `.workplans/pr-2406/review/round-4/writer-scope.md`。
+逐文件的归类与实测排除理由见下面「审计表」一节开头的仓内排除表（22 行 = 25 − 3 个真 writer，
+不依赖任何 gitignored 底稿）。
 round 4 的这次实测**推翻了上一版审计声明的三文件范围**：`chain_repository_state.py` 是第四个
 写入者文件（W17/W18），上一版把它漏在搜索范围外。守卫本身不受影响——sink 读最终证据、
 不问来源——但"已枚举全部 writer"这个 provenance 声明当时是假的。这是连续第四轮源枚举漏掉源、
@@ -340,7 +393,9 @@ round 4 的这次实测**推翻了上一版审计声明的三文件范围**：`c
 **上一版此处写"无未结行"，那是假的**——W16 整行漏了、W17/W18 整个文件漏在搜索范围外、
 W11 的 (i) 用了检测不到它的测试、W13 的"hybrid"闭合规格根本不承认（round 4 的 A-1/A-2/A-3）。
 这些都不是守卫的缺陷，是**审计本身**的缺陷；守卫读的是最终 `state_evidence`，与谁写的无关。
-本版每行的闭合种类逐行重判，搜索范围实测并写明排除理由，未测到的地方写"未测"而不是推断。
+本版每行的闭合种类逐行重判，搜索范围实测，22 个被排除文件的理由**逐个写在仓内**上表（round 5 的
+R5-TE-01：第一版把理由委派给了 gitignored 的工作底稿，审阅者从 PR 里拿不到——与 A4.4 判过的是同一类），
+未测到的地方写"未测"而不是推断。
 
 ## 不做（non-goals）
 
