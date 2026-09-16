@@ -20,7 +20,19 @@
   `scripts/node27_timeseries_compression_live_evidence.py:4155-4182` (`_current_verifier_head`) and
   `packages/common/node27_pgdata_host.py:717-719`:
   - **Anchor**: the repository root of the executing script itself (a module-level constant derived from
-    `Path(__file__).resolve().parents[...]`), never the process cwd.
+    `Path(__file__).resolve().parents[...]`), never the process cwd. The anchor is only believed when it is
+    *identical* to the repository git answers for: resolve `rev-parse --show-toplevel` alongside HEAD and refuse
+    unless it is the same directory, and run git with the redirecting `GIT_*` variables (`GIT_DIR`,
+    `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
+    `GIT_ALTERNATE_OBJECT_DIRECTORIES`) removed. Otherwise a deployed tree with no `.git` of its own nested inside
+    another checkout, or an inherited `GIT_DIR`, hands back the *surrounding* repository's HEAD and reports clean
+    (the nested tree is merely untracked there).
+  - **Module anchor**: the entrypoint's own path binds nothing by itself. On the `live` path only, before
+    resolving HEAD, refuse unless the modules that do the work (`packages.common.node27_pgdata_workload`, `_io`,
+    `_query`, `_plan`, `_measure`, `_http`, `_types`) resolve under the anchor. The documented #1987 runtime is
+    exactly the split form — published script bytes under `~/.local/state/issue1987-tools/<commit>/` run with
+    `PYTHONPATH=/home/nwm/NWM` (runbook §4.10.6) — so without this the receipt can attribute its samples to a
+    checkout that did not produce them.
   - **Dirty tree**: `git diff --quiet HEAD --` over *tracked* files only, i.e. untracked files do not refuse. A
     whole-tree-clean rule would refuse on node-27, whose checkout routinely carries untracked evidence
     directories. A tracked-file modification refuses: the receipt would otherwise claim a SHA that is not the code
@@ -29,9 +41,12 @@
     the supplied value.
   - **Refusal codes** (part of the public refusal surface via `format_refusal`, and consistent with the existing
     `INPUT_*` / `SQL_*` vocabulary in `packages/common/node27_pgdata_workload_io.py`):
-    `INPUT_SHA_UNBOUND` when a well-formed `--reviewed-sha` is not the executing HEAD or the tree is dirty, and
-    `INPUT_SHA_HEAD_UNAVAILABLE` when HEAD cannot be determined at all. Keep `INPUT_SHA_INVALID` for the existing
-    shape check.
+    `INPUT_SHA_UNBOUND` when a well-formed `--reviewed-sha` is not the executing HEAD or the tree is dirty,
+    `INPUT_SHA_HEAD_UNAVAILABLE` when HEAD cannot be determined at all (including when the anchor is not itself
+    the repository root git answered for), and `INPUT_RUNTIME_UNBOUND` when the working modules do not resolve
+    under the anchor. The last is its own code rather than a reuse: HEAD *is* determinable there, so
+    `INPUT_SHA_HEAD_UNAVAILABLE` would send an operator to debug `git` when the defect is the runtime layout.
+    Keep `INPUT_SHA_INVALID` for the existing shape check.
   - **Hermetic seam**: resolve HEAD through an injectable dependency in the existing `main(argv, **injected)` /
     `measure(args, *, connect=..., opener=...)` style (e.g. a `head_resolver` or `repo_root` keyword), so tests
     2.2 and 2.4 do not depend on the ambient checkout state. Add a guard test that the default resolver is the
@@ -58,6 +73,10 @@
 - [x] 2.4b Live refusal — HEAD cannot be determined (resolver raises / non-git / timeout): refusal code
   `INPUT_SHA_HEAD_UNAVAILABLE`, non-zero exit, no file at `--output`. Plus the guard test that the default
   resolver is anchored at the executing script's repository root rather than the process cwd.
+- [x] 2.4c Anchor identity — `resolve_repository_head` refuses `INPUT_SHA_HEAD_UNAVAILABLE` for a plain directory
+  nested inside an outer checkout and for a redirecting `GIT_DIR`/`GIT_WORK_TREE`, instead of returning the
+  surrounding/redirected HEAD; and the `live` CLI path refuses `INPUT_RUNTIME_UNBOUND` with no file at `--output`
+  when the working modules resolve outside the anchor, before the head resolver is consulted.
 - [x] 2.5 `--evidence-kind rehearsal` is rejected by the parser; do not restate the library-level
   `INPUT_KIND_INVALID` case already covered at `tests/test_node27_pgdata_workload.py:904-905`.
 

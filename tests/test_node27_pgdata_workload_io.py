@@ -587,11 +587,36 @@ def test_repository_head_refuses_a_staged_tracked_change(tmp_path: Path) -> None
     _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_UNBOUND")
 
 
-def test_repository_head_refuses_outside_a_git_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_repository_head_refuses_outside_a_git_checkout(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     _assert_code(lambda: workload_io.resolve_repository_head(plain), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_repository_head_refuses_a_plain_directory_nested_in_an_outer_checkout(tmp_path: Path) -> None:
+    # A deployed tree without its own .git, unpacked inside another checkout: git
+    # discovery walks up and answers with the OUTER repository. The nested tree is
+    # untracked there, and untracked is clean by policy, so nothing else catches it.
+    outer, outer_head = _tracked_checkout(tmp_path)
+    deployed = outer / "deployed"
+    deployed.mkdir()
+    (deployed / "node27_pgdata_workload.py").write_text("published bytes\n", encoding="utf-8")
+    assert _git_in(outer, "rev-parse", "HEAD") == outer_head
+    _assert_code(lambda: workload_io.resolve_repository_head(deployed), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_repository_head_refuses_a_redirected_git_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIT_DIR/GIT_WORK_TREE can hand a clean, unrelated checkout's HEAD to a
+    # directory that is not a checkout at all. The receipt would then claim a SHA
+    # that has nothing to do with the code that ran.
+    other, _other_head = _tracked_checkout(tmp_path)
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    _assert_code(lambda: workload_io.resolve_repository_head(deployed), "INPUT_SHA_HEAD_UNAVAILABLE")
 
 
 def test_repository_head_refuses_when_git_is_missing_or_times_out(
@@ -619,7 +644,10 @@ def test_repository_head_refuses_unusable_git_output(tmp_path: Path, monkeypatch
     def completed(stdout: str, returncode: int = 0) -> Any:
         return subprocess.CompletedProcess(args=["git"], returncode=returncode, stdout=stdout, stderr="")
 
-    for stdout, returncode in ((head, 128), ("not-a-sha\n", 0), (f"{head}\n{'c' * 200}\n", 0)):
+    # The last case strips to a valid 40-hex digest and so passes the shape check:
+    # only the byte ceiling rejects it, which keeps that guard independently covered.
+    cases = ((head, 128), ("not-a-sha\n", 0), (f"{head}\n{'c' * 200}\n", 0), (f"{head}{' ' * 200}\n", 0))
+    for stdout, returncode in cases:
         with monkeypatch.context() as patch:
             patch.setattr(
                 workload_io,
@@ -649,3 +677,21 @@ def test_bind_reviewed_sha_refuses_a_mismatch_and_an_undeterminable_head() -> No
         raise PgdataWorkloadError("modified tracked files", code="INPUT_SHA_UNBOUND", stage="input")
 
     _assert_code(lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=dirty), "INPUT_SHA_UNBOUND")
+
+
+def test_runtime_anchor_admits_this_checkout_and_refuses_modules_outside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchored = ("packages.common.node27_pgdata_workload_io", "packages.common.node27_pgdata_workload_query")
+    checkout = Path(workload_io.__file__).resolve().parents[2]
+    workload_io.require_runtime_anchored(checkout, anchored)
+    # Script bytes published outside the checkout that supplies the modules: the
+    # anchor no longer owns the code that does the work.
+    _assert_code(lambda: workload_io.require_runtime_anchored(tmp_path, anchored), "INPUT_RUNTIME_UNBOUND")
+    _assert_code(
+        lambda: workload_io.require_runtime_anchored(checkout, ("packages.common.node27_pgdata_workload_absent",)),
+        "INPUT_RUNTIME_UNBOUND",
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "__file__", None)
+        _assert_code(lambda: workload_io.require_runtime_anchored(checkout, anchored), "INPUT_RUNTIME_UNBOUND")

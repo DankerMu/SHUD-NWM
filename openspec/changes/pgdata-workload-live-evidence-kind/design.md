@@ -48,8 +48,12 @@ Required evidence:
   → typed refusal (`SQL_NOT_READONLY` / `DSN_ROLE_INVALID`), exit non-zero, and **no file at `--output`**.
 - `--evidence-kind live` with a `--reviewed-sha` that is well-formed but is not the resolved HEAD, or with a dirty
   tracked tree → `INPUT_SHA_UNBOUND`, exit non-zero, no file at `--output`.
-- `--evidence-kind live` where HEAD cannot be determined (non-git, `git` unavailable, timeout, malformed output)
+- `--evidence-kind live` where HEAD cannot be determined (non-git, `git` unavailable, timeout, malformed output,
+  or the anchor is not itself the repository root git answered for — nested plain tree, redirecting `GIT_*`)
   → `INPUT_SHA_HEAD_UNAVAILABLE`, exit non-zero, no file at `--output`.
+- `--evidence-kind live` where the working `node27_pgdata_workload*` modules resolve outside the anchored
+  checkout (published script bytes plus a `PYTHONPATH` checkout) → `INPUT_RUNTIME_UNBOUND`, exit non-zero, no
+  file at `--output`.
 - `--evidence-kind rehearsal` → argparse rejects it with the CLI's static usage error (no input echoed).
 
 Non-goals: collecting #1987's D11 curve receipts; changing query semantics, thresholds or sample counts;

@@ -1127,14 +1127,53 @@ def test_cli_live_refuses_a_reviewed_sha_that_is_not_the_executing_head(
 ) -> None:
     parent = _workload_run_dir(tmp_path)
     output = parent / "workload.json"
+    cursor = _MeasureCursor()
     rc = cli_main(
         _measure_argv(dsn_path=_workload_dsn_file(parent), output=output, evidence_kind="live"),
-        connection=_Connection(_MeasureCursor()),
+        connection=_Connection(cursor),
         head_resolver=lambda: "b" * 40,
         **_measure_probes(),
     )
     assert rc == 1
     assert "INPUT_SHA_UNBOUND" in capsys.readouterr().err
+    assert _run_dir_contents(parent) == ["reader.dsn"]
+    # The refusal must land before measuring, not merely before publishing: an
+    # unadmitted live run may not touch the measured session at all.
+    assert cursor.calls == []
+
+
+def test_cli_live_refuses_workload_modules_outside_the_executing_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # node-27 runs published script bytes from ~/.local/state/issue1987-tools/<commit>/
+    # with PYTHONPATH pointed at the working checkout (runbook 4.10.6). The anchor then
+    # owns the script but not the modules that capture, measure and publish, so binding
+    # the anchor's HEAD would attribute the samples to a checkout that did not produce
+    # them.
+    published = tmp_path / "issue1987-tools" / ("c" * 40)
+    published.mkdir(parents=True)
+    monkeypatch.setattr(workload_cli, "REPO_ROOT", published)
+    parent = _workload_run_dir(tmp_path)
+    dsn_path = _workload_dsn_file(parent)
+    cursor = _MeasureCursor()
+    admitting_rc = cli_main(
+        _measure_argv(dsn_path=dsn_path, output=parent / "workload.json", evidence_kind="live"),
+        connection=_Connection(cursor),
+        head_resolver=lambda: SHA,
+        **_measure_probes(),
+    )
+    assert admitting_rc == 1
+    assert "INPUT_RUNTIME_UNBOUND" in capsys.readouterr().err
+    assert cursor.calls == []
+    # The anchor check precedes HEAD resolution: a resolver that must never run does not.
+    poisoned_rc = cli_main(
+        _measure_argv(dsn_path=dsn_path, output=parent / "poisoned.json", evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=_poison_head_resolver,
+        **_measure_probes(),
+    )
+    assert poisoned_rc == 1
+    assert "INPUT_RUNTIME_UNBOUND" in capsys.readouterr().err
     assert _run_dir_contents(parent) == ["reader.dsn"]
 
 

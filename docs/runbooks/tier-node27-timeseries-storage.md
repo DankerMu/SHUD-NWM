@@ -720,8 +720,8 @@ withdrawn `node27_issue1895_performance_oracle.py`.
 
 The receipt's evidence grade is explicit. `--evidence-kind` defaults to
 `isolated`, and an isolated receipt still never implies live acceptance. Ask
-for `--evidence-kind live` only when both admissions hold in the same run; the
-CLI otherwise refuses fail-closed and leaves no file at `--output`:
+for `--evidence-kind live` only when every admission below holds in the same
+run; the CLI otherwise refuses fail-closed and leaves no file at `--output`:
 
 - the measured session proves `transaction_read_only` with `current_user =
   nhms_display_ro` (else `SQL_NOT_READONLY` / `DSN_ROLE_INVALID`);
@@ -730,6 +730,15 @@ CLI otherwise refuses fail-closed and leaves no file at `--output`:
   `INPUT_SHA_HEAD_UNAVAILABLE` when that HEAD cannot be determined at all —
   not a checkout, no usable `git`, timeout, unusable output). Untracked
   evidence directories do not refuse, so node-27's working checkout qualifies.
+  That checkout must be its own repository root: a tree unpacked inside another
+  checkout, or a redirecting `GIT_DIR`/`GIT_WORK_TREE`, refuses
+  `INPUT_SHA_HEAD_UNAVAILABLE` rather than answering with the surrounding
+  repository's HEAD (the CLI ignores those variables);
+- the `packages.common.node27_pgdata_workload*` modules resolve under that same
+  checkout (else `INPUT_RUNTIME_UNBOUND`). Run `live` from one checkout, not as
+  published script bytes with `PYTHONPATH` pointed at a different tree
+  (§4.10.6's `~/.local/state/issue1987-tools/<commit>/` layout): the HEAD would
+  then describe a tree that did not supply the measuring code.
 
 Pass the already reviewed SHA the run is accepted under and let the CLI refuse
 if the checkout is not on it. Do not derive that value from the checkout
@@ -6227,7 +6236,11 @@ canonical chunk-discovery assumptions; the compression benchmark/live-evidence
 lineage also has legacy SQL/name/token assumptions. Do not label their refusal
 or an old run as new narrow evidence. Require a reviewed store-aware executor
 or separately reviewed exact-query manual acquisition, including both network
-pins, before closing these gates. This docs slice does not repair those tools.
+pins, before closing these gates. For the SQL/API legs that executor is the
+PGDATA workload CLI under "Retained PGDATA and display workloads": acquire its
+`--evidence-kind live` receipt by that section's procedure, since an isolated
+receipt never implies live acceptance. The #1895 oracle and the compression
+benchmark/live-evidence lineage above remain unrepaired.
 Live lag and range_end may delay the first eligible one-day narrow chunk by
 days; schedule the compressed-state leg later, never force production
 compression just to fill the receipt. River-only expand does not imply forcing

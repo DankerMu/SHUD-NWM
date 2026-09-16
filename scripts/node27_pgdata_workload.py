@@ -26,6 +26,7 @@ from packages.common.node27_pgdata_workload_io import (
     prove_readonly_session,
     publish_measurement_output,
     read_private_dsn_file,
+    require_runtime_anchored,
     resolve_repository_head,
     validate_id,
     validate_origin,
@@ -40,6 +41,19 @@ DEFAULT_EVIDENCE_KIND = "isolated"
 # The checkout that owns this executing script, never the process cwd: a live
 # receipt must bind its reviewed SHA to the code that actually ran.
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# This script is a thin entrypoint; the work is done by the modules below. Anchoring
+# the script alone would admit the published-bytes layout (script under
+# ~/.local/state/issue1987-tools/<commit>/ run with PYTHONPATH at a working checkout),
+# where REPO_ROOT's HEAD describes none of the code that produced the samples.
+ANCHORED_RUNTIME_MODULES = (
+    "packages.common.node27_pgdata_workload",
+    "packages.common.node27_pgdata_workload_io",
+    "packages.common.node27_pgdata_workload_query",
+    "packages.common.node27_pgdata_workload_plan",
+    "packages.common.node27_pgdata_workload_measure",
+    "packages.common.node27_pgdata_workload_http",
+    "packages.common.node27_pgdata_workload_types",
+)
 
 
 def _default_head_resolver() -> str:
@@ -102,6 +116,9 @@ def measure(
     # before any measurement work or publication, and the readonly session proof
     # below completes the admission. The isolated path resolves no HEAD at all.
     if evidence_kind == "live":
+        # Anchor first: resolving a HEAD is only meaningful once the checkout that
+        # supplies the working code is known to be the one being asked.
+        require_runtime_anchored(REPO_ROOT, ANCHORED_RUNTIME_MODULES)
         bind_reviewed_sha(
             reviewed_sha,
             head_resolver=head_resolver if head_resolver is not None else _default_head_resolver,
