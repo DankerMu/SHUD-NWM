@@ -4717,3 +4717,25 @@ PR #2427 自身是 fixture `none`、rounds 0 的 docs-only PR，不进轮换样�
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
+
+## 2026-09-16 复核二（PR #2429 合并后）
+
+追加 #2429 行后 680 行、667 merged、13 terminal。`loop_log_audit.py` 仍报同一项
+DECIDABLE lens-rotation，且 rotation attribution 数字与前两次复核**逐字相同**
+（223 个多轮样本，core=287 / rotated=270 / phase=61 / skipped=15）——连续三次
+追加的都是 rounds 0 的 tier `none` 行，不进多轮样本，因此不可能移动这个判据。
+这本身是个信号：DECIDABLE 会一直挂着，直到出现新的多轮 PR，或维护者直接裁定。
+
+PR #2429 给 `contract-doc-accuracy` 添了本 issue 队列里的**第二个连续实例**：
+receipt 初稿把「cron 起的 prewarm 看不到 `NHMS_DISPLAY_CACHE_WARM_TOKEN`」写成范围外发现，
+实际是 `scripts/node27_autopipe_cron.sh` 以 `set -a` source `node27-ingest.env`、
+该文件与 `display.env` 的 token 同值（sha256 相同），149 MB 日志里 0 次 unset 告警；
+告警来自编排者自己那次未装 env 的手工调用。与 #2427 的前端 provenance 错误同源：
+**把单次局部观察推广成系统属性**，两次都由合并前的 advisor 复核拦下。
+
+两次都发生在 tier `none`、零 reviewer 轮次的路径上，说明缺口不在座位组合而在
+「receipt 里每条因果断言都要有独立观察」这条书写规则——继续无需新座位，但值得在
+下一次 profile 维护时把这条写进 receipt 模板的自检项。
+
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 keep、座位上限不变。
