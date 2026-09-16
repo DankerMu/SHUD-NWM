@@ -1,0 +1,59 @@
+{
+  "candidates": 1409,
+  "concurrency": 16,
+  "deadline": "2026-09-15T23:14:15+00:00",
+  "decompressed_chunks": [],
+  "dispositions": {
+    "reparsed": 1409
+  },
+  "end_time_after": null,
+  "estimated_rows": 1229253312,
+  "finished_at": "2026-09-15T19:56:15.180842+00:00",
+  "legacy_route_counts_after": [
+    {
+      "in_window": false,
+      "runs": 2685,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 234,
+      "status": "superseded"
+    }
+  ],
+  "legacy_route_counts_before": [
+    {
+      "in_window": false,
+      "runs": 2685,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 234,
+      "status": "superseded"
+    },
+    {
+      "in_window": true,
+      "runs": 1337,
+      "status": "published"
+    },
+    {
+      "in_window": true,
+      "runs": 72,
+      "status": "superseded"
+    }
+  ],
+  "limit": null,
+  "max_failures": 10,
+  "not_dispatched": 0,
+  "parser_sha256": "59b8d93ddd75f657881c523f1517a336d1319f602c3dea100ea90b78503123da",
+  "result": "complete",
+  "rows_written": 1229253312,
+  "seed_runs": [],
+  "started_at": "2026-09-15T15:14:16.086840+00:00",
+  "stop_reason": "exhausted",
+  "tool_sha256": "beb752eaaec8e5643188f7c270685531fcd2188a077ce1055f8c3d79ceaf4ea6",
+  "tool_version": "node27-river-narrow-reparse-backfill/2",
+  "transient_retries": 0,
+  "window_days": 21
+}
