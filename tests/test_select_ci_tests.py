@@ -1063,6 +1063,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # file level, so the closure guard puts it on this rule as a DIRECT
         # importer.
         "tests/test_node27_mvt_prewarm.py",
+        # #2017: same guard-derived provenance, synced from the selector's own
+        # output — the coordinate-budget harness imports postgis_tile_sql,
+        # collection_coordinate_limit and MVT_MAX_COORDINATES from this module
+        # at file level, and its suite imports the harness.
+        "tests/test_node27_river_tile_coordinate_evidence.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",

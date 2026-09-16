@@ -13,6 +13,10 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Shared model state: `packages/common`, `nhms-state`
 - Domain engines: `SHUD/`, `rSHUD/`, `AutoSHUD/`, `shud`
 - Node-27 deployment: database container, physical PGDATA placement, user-service maintenance fences
+- Display runtime configuration: `infra/env/display.env` is node-local and untracked; the display API's
+  filesystem reach is declared there (`NHMS_PRECIP_MIRROR_ROOT` for the NFS canonical tree,
+  `NHMS_MVT_FILE_CACHE_DIR` for the tile/PNG cache), while `apps/api/runtime_mode.py` forbids the
+  compute-side roots outright. Changing that file is a deployment action with its own receipt.
 
 ## Contracts
 
@@ -60,6 +64,10 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Backend: `uv run ruff check .`; `uv run pytest -q`; focused `uv run pytest -q tests/<file>.py`.
 - Contracts: `openspec validate <change> --strict --no-interactive`; JSON schemas use the `check-jsonschema` loop in `.github/workflows/ci.yml`.
 - Frontend: `cd apps/frontend && corepack pnpm test && corepack pnpm build`.
+- Node-27 display receipts: `scripts/node27_river_tile_coordinate_evidence.py` (tile coordinate budget
+  straight from `postgis_tile_sql`, read-only) and `scripts/node27_display_v2_browser_evidence.mjs`
+  (live browser layout/overlay oracle, zero mocks); mirror gaps follow
+  `docs/runbooks/canonical-precip-mirror-backfill.md`.
 
 ## Verification matrix
 

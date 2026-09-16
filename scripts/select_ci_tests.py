@@ -2005,6 +2005,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sorted, so it is INTERPOSED among them by position only and the
             # #1597 census stays true.
             "tests/test_node27_mvt_prewarm.py",
+            # #2017: the coordinate-budget harness imports
+            # postgis_tile_sql / collection_coordinate_limit / MVT_MAX_COORDINATES
+            # from services.tiles.mvt at module level, so its suite is a DIRECT
+            # non-gated importer of this guarded module too.
+            "tests/test_node27_river_tile_coordinate_evidence.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
@@ -2071,6 +2076,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #2017: the checked-in 2.4/2.5 coordinate-budget harness imports
+            # apps.api.routes.hydro_display._postgis_tile_params at module level
+            # (the whole point of the harness is that the binds match production
+            # by construction), and its suite imports the harness, so the suite
+            # is a DIRECT non-gated importer here. Without this entry a
+            # hydro_display-only diff could change the bind dict and leave the
+            # harness asserting the old shape, green in the PR lane.
+            "tests/test_node27_river_tile_coordinate_evidence.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
