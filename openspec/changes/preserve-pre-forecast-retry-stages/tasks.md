@@ -5,23 +5,25 @@
 
 ## 2. Code and behavioral regression (#2439 acceptance)
 
-- [ ] 2.1 Preserve ordinary pre-forecast resumes through real candidate decision -> strict reconciliation -> witness guard; demonstrate the captured convert-only forcing path red before fix and green after.
-- [ ] 2.2 Keep forecast and later missing/mismatched-manifest upgrade and stable per-model missing-forcing blockers unchanged.
-- [ ] 2.3 Preserve matching manifests and terminal/quarantine/successor/authorized-repair siblings with existing behavioral regression coverage.
-- [ ] 2.4 Cover canonical stage aliases, restart_stage/restart_from_stage precedence, unknown/missing stages and downstream force-resubmit decision/stage consumers.
-- [ ] 2.5 Correct the existing stale-cold-manifest test's invalid forcing-stage premise while retaining its valid forecast-or-later rerun contract; no implementation-only assertions or bypass fixtures.
+- [x] 2.1 Preserve ordinary pre-forecast resumes through real candidate decision -> strict reconciliation -> witness guard; demonstrate the captured convert-only forcing path red before fix and green after.
+- [x] 2.2 Keep forecast and later missing/mismatched-manifest upgrade and stable per-model missing-forcing blockers unchanged.
+- [x] 2.3 Preserve matching manifests and terminal/quarantine/successor/authorized-repair siblings with existing behavioral regression coverage.
+- [x] 2.4 Cover canonical stage aliases, restart_stage/restart_from_stage precedence, unknown/missing stages and downstream force-resubmit decision/stage consumers.
+- [x] 2.5 Correct the existing stale-cold-manifest test's invalid forcing-stage premise while retaining its valid forecast-or-later rerun contract; no implementation-only assertions or bypass fixtures.
 
 ## 3. Review and verification
 
-- [ ] 3.1 Run local Ruff and OpenSpec, node-27 targeted red/green regression and affected scheduler/consumer suites; record source SHA/import path and commands.
-- [ ] 3.2 Create PR and finish expanded cross-review/fix gate; preserve immutable fixture and record reviewed deployment patch identity.
+- [x] 3.1 Run local Ruff and OpenSpec, node-27 targeted red/green regression and affected scheduler/consumer suites; record source SHA/import path and commands.
+- [x] 3.2 Create PR and finish expanded cross-review/fix gate; preserve immutable fixture and record reviewed deployment patch identity. PR #2445 source checkpoint clean at `c9589e0f`; live recovery and final evidence review still gate merge.
 
 ## 4. Authorized production recovery
 
-- [ ] 4.1 Publish minimal reviewed source-only backport via GitHub on measured node-22 baseline; pause timer, drain active code readers/jobs, preserve data and environment, deploy with safe rollback admission.
-- [ ] 4.2 Verify exact deployed decision path and run bounded normal scheduler execution; observe original GFS forcing witness, forecast success, successor state and copyback identities without bypass or tracker reset.
-- [ ] 4.3 Observe GFS prior completion and IFS global-prior release/progression; record any independent failures honestly.
+- [x] 4.1 Publish minimal reviewed source-only backport via GitHub on measured node-22 baseline; pause timer, drain active code readers/jobs, preserve data and environment, deploy with safe rollback admission. Deployed `e7bd816` with source patch equivalence and unchanged environment/interpreter.
+- [x] 4.2 Verify exact deployed decision path and run bounded normal scheduler execution; observe original GFS forcing witness, forecast success, successor state and copyback identities without bypass or tracker reset. Arrays 49028/49066/49117 each completed 38/38; node-27 received and published the corresponding GFS runs.
+- [x] 4.3 Observe GFS prior completion and IFS global-prior release/progression; record any independent failures honestly. IFS convert 49156 succeeded; forcing 49174 completed 38/38 but its gateway response failed and journal became permanently_failed. Independent recovery gap tracked in #2447; no blind retry or journal mutation.
 - [ ] 4.4 On node-27 verify normal ingest/publication of later GFS and IFS cycles and API source/cycle/model/run identity plus readable result data; restore approved timer state and record live receipt.
+
+GFS portion of 4.4 passed: node-27 tick PID3339699 published 38/38 with zero failures; qhh latest-product and decoded run-bound MVT select `2026-09-14T12Z`. IFS publication remains unverified and blocked by #2447. Timer restored active; subsequent GFS execution remains in flight. See `evidence/node27-gfs-publication-monitor.txt`, `evidence/node22-ifs-acceptance-probe.txt`, `evidence/node22-ifs-forcing-completion.txt`, and `evidence/independent-blocker-issue.txt`. Full recovery, final evidence review and merge remain incomplete.
 
 ## 5. Delivery
 

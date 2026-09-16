@@ -1,0 +1,11 @@
+Wed Sep 16 03:49:15 PM UTC 2026
+MainPID=0
+Result=success
+ExecMainStartTimestamp=Wed 2026-09-16 23:40:40 CST
+ExecMainExitTimestamp=Wed 2026-09-16 23:40:50 CST
+ExecMainStatus=0
+ActiveState=inactive
+SubState=dead
+NextElapseUSecRealtime=
+ActiveState=active
+UnitFileState=enabled

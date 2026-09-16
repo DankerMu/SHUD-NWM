@@ -1,0 +1,4 @@
+gfs {"source_id": "GFS", "cycle_time": "2026-09-14T00:00:00Z", "model_id": "dg_0883c7e9c1006c6fd347df500315e9df", "run_id": "fcst_gfs_2026091400_dg_0883c7e9c1006c6fd347df500315e9df", "status": "ready", "run_status": "published", "station_count": 71, "segment_count": 1633, "valid_time_start": "2026-09-14T00:00:00Z", "valid_time_end": "2026-09-20T21:00:00Z"}
+ifs {"source_id": "IFS", "cycle_time": "2026-09-14T12:00:00Z", "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6", "run_id": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6", "status": "ready", "run_status": "published", "station_count": 71, "segment_count": 1633, "valid_time_start": "2026-09-14T12:00:00Z", "valid_time_end": "2026-09-21T11:00:00Z"}
+MIRROR_RUN_EXISTS True
+MIRROR_RUN_FILES ['output', 'input', 'logs']
