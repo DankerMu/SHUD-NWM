@@ -106,8 +106,8 @@ systemctl --user daemon-reload && systemctl --user restart nhms-display-api.serv
 ## 7. 窗口后补证（脚本窗口外，orchestrator 于 2026-09-16T07:45Z `systemctl --user show` 取证）
 
 - `nhms-node27-frontier-alert`：改后首跑 15:30:01 CST `Result=success`，`ExecStart=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh`。
-- `nhms-node27-autopipe`：改后第二个及后续自然 tick 15:23:45 / 15:33:45 / 15:44:40 CST 均 `success`（最近一次 15:44:40–15:44:51 CST，11 s）。
-- `nhms-node27-download`：15:44:40 CST `success`。
+- `nhms-node27-autopipe`：journal 实测改后的自然 tick 15:23:46–15:23:56 / 15:34:40–15:34:51 / 15:44:40–15:44:51 CST 均 `Finished`（`Result=success`，各 10–11 s）。
+- `nhms-node27-download`：15:44:40–15:45:04 CST `Finished`（`Result=success`）。
 - display MainPID 2846999 `active`，`/health` 200；`git status --porcelain` 0，分支 `master`。
 - `systemctl --user --failed` 中无 `nhms-display-api` / `nhms-node27-*`；列出的 failed 全是窗口前就存在的一次性外来 unit（`nhms-issue1987-*`、`nhms-issue2349-*`、`nhms-issue2374-*`、`nhms-issue2382-*`、`nhms-pgdata-*-prepare`、`nhms-reslice-*-d35580c6`），不属本窗口。
 - §8 提到的外来 pytest 进程已结束（07:45Z 不存在）。
