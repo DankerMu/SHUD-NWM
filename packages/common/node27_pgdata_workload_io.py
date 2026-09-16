@@ -7,7 +7,8 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ MAX_OUTPUT_BYTES = 262_144
 MAX_JSON_DEPTH = 16
 MAX_JSON_NODES = 4096
 OUTPUT_FILE_MODE = 0o600
+GIT_TIMEOUT_SECONDS = 10
+MAX_HEAD_OUTPUT_BYTES = 128
 
 
 def format_refusal(error: Exception) -> str:
@@ -55,6 +58,63 @@ def validate_sha(value: str, *, label: str) -> str:
     if HEAD_RE.fullmatch(text) is None:
         refuse("reviewed SHA must be a lowercase 40-hex digest", code="INPUT_SHA_INVALID", stage="input")
     return text
+
+
+def _run_git(repo_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        refuse("executing checkout HEAD query timed out", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    except OSError:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+
+
+def resolve_repository_head(repo_root: Path) -> str:
+    """Return the HEAD of a clean-tracked checkout, refusing rather than guessing.
+
+    Untracked files never refuse: an operator checkout routinely carries untracked
+    evidence directories. A modified tracked file does refuse, because the receipt
+    would otherwise claim a SHA that is not the code that ran.
+    """
+
+    head_result = _run_git(repo_root, "rev-parse", "HEAD")
+    head = head_result.stdout.strip()
+    if (
+        head_result.returncode != 0
+        or len(head_result.stdout) > MAX_HEAD_OUTPUT_BYTES
+        or HEAD_RE.fullmatch(head) is None
+    ):
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    clean_result = _run_git(repo_root, "diff", "--quiet", "HEAD", "--")
+    if clean_result.returncode == 1:
+        refuse("executing checkout has modified tracked files", code="INPUT_SHA_UNBOUND", stage="input")
+    if clean_result.returncode != 0:
+        refuse("executing checkout cleanliness cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    return head
+
+
+def bind_reviewed_sha(reviewed_sha: str, *, head_resolver: Callable[[], str]) -> str:
+    """Bind an already shape-checked reviewed SHA to the executing checkout's HEAD."""
+
+    try:
+        resolved = head_resolver()
+    except PgdataWorkloadError:
+        raise
+    except Exception:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    head = str(resolved or "").strip()
+    if HEAD_RE.fullmatch(head) is None:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    if head != reviewed_sha:
+        refuse("reviewed SHA is not the executing checkout HEAD", code="INPUT_SHA_UNBOUND", stage="input")
+    return head
 
 
 def validate_id(value: str, *, code: str) -> str:

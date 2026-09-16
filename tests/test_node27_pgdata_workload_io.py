@@ -7,12 +7,15 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from packages.common import node27_pgdata_workload_io as workload_io
 from packages.common.forecast_store import ForecastStoreError
 from packages.common.node27_pgdata_workload import capture_workload_query, measure_workload
 from packages.common.node27_pgdata_workload_io import (
@@ -42,10 +45,12 @@ from tests.test_node27_pgdata_workload import (
     _assert_code,
     _Connection,
     _Cursor,
+    _git_in,
     _named_parameters,
     _named_sql,
     _ok_series,
     _plan,
+    _tracked_checkout,
 )
 
 
@@ -556,3 +561,91 @@ def test_authoritative_identity_refuses_two_rows_and_distinct_mismatches() -> No
         lambda: prove_authoritative_run_identity(scenario_mismatch, captured=captured),
         "SQL_IDENTITY_MISMATCH",
     )
+
+
+def test_repository_head_binds_a_clean_checkout_and_ignores_untracked_evidence(tmp_path: Path) -> None:
+    root, head = _tracked_checkout(tmp_path)
+    assert workload_io.resolve_repository_head(root) == head
+    # node-27's operator checkout routinely carries untracked evidence directories;
+    # refusing on those would make every live run unobtainable there.
+    (root / "artifacts").mkdir()
+    (root / "artifacts" / "receipt.json").write_text("{}\n", encoding="utf-8")
+    (root / "untracked-note.txt").write_text("evidence\n", encoding="utf-8")
+    assert workload_io.resolve_repository_head(root) == head
+
+
+def test_repository_head_refuses_a_modified_tracked_file(tmp_path: Path) -> None:
+    root, _head = _tracked_checkout(tmp_path)
+    (root / "tracked.py").write_text("modified after the reviewed commit\n", encoding="utf-8")
+    _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_UNBOUND")
+
+
+def test_repository_head_refuses_a_staged_tracked_change(tmp_path: Path) -> None:
+    root, _head = _tracked_checkout(tmp_path)
+    (root / "tracked.py").write_text("staged but uncommitted\n", encoding="utf-8")
+    _git_in(root, "add", "tracked.py")
+    _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_UNBOUND")
+
+
+def test_repository_head_refuses_outside_a_git_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    _assert_code(lambda: workload_io.resolve_repository_head(plain), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_repository_head_refuses_when_git_is_missing_or_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _head = _tracked_checkout(tmp_path)
+
+    def missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("git")
+
+    def slow(*_args: Any, **_kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "subprocess", SimpleNamespace(run=missing, TimeoutExpired=subprocess.TimeoutExpired))
+        _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_HEAD_UNAVAILABLE")
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "subprocess", SimpleNamespace(run=slow, TimeoutExpired=subprocess.TimeoutExpired))
+        _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_repository_head_refuses_unusable_git_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, head = _tracked_checkout(tmp_path)
+
+    def completed(stdout: str, returncode: int = 0) -> Any:
+        return subprocess.CompletedProcess(args=["git"], returncode=returncode, stdout=stdout, stderr="")
+
+    for stdout, returncode in ((head, 128), ("not-a-sha\n", 0), (f"{head}\n{'c' * 200}\n", 0)):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                workload_io,
+                "subprocess",
+                SimpleNamespace(
+                    run=lambda *_a, stdout=stdout, returncode=returncode, **_k: completed(stdout, returncode),
+                    TimeoutExpired=subprocess.TimeoutExpired,
+                ),
+            )
+            _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_bind_reviewed_sha_refuses_a_mismatch_and_an_undeterminable_head() -> None:
+    assert workload_io.bind_reviewed_sha(SHA, head_resolver=lambda: SHA) == SHA
+    _assert_code(lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=lambda: "b" * 40), "INPUT_SHA_UNBOUND")
+    _assert_code(
+        lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=lambda: "not-a-sha"), "INPUT_SHA_HEAD_UNAVAILABLE"
+    )
+    _assert_code(lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=lambda: ""), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+    def broken() -> str:
+        raise RuntimeError("resolver blew up")
+
+    _assert_code(lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=broken), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+    def dirty() -> str:
+        raise PgdataWorkloadError("modified tracked files", code="INPUT_SHA_UNBOUND", stage="input")
+
+    _assert_code(lambda: workload_io.bind_reviewed_sha(SHA, head_resolver=dirty), "INPUT_SHA_UNBOUND")

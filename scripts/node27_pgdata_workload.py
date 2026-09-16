@@ -3,7 +3,9 @@
 
 ``measure`` always captures the shipping named query once, then discards one
 warmup and accepts 20 serial SQL and API samples. Isolated receipts never
-imply live acceptance.
+imply live acceptance, so the ``live`` evidence kind is opt-in and admitted
+only by proof: a readonly ``nhms_display_ro`` session plus a reviewed SHA
+bound to the HEAD of the checkout this script executes from.
 """
 
 from __future__ import annotations
@@ -17,12 +19,14 @@ from typing import Any
 
 from packages.common.node27_pgdata_workload import capture_workload_query, measure_workload
 from packages.common.node27_pgdata_workload_io import (
+    bind_reviewed_sha,
     close_readonly_connection,
     format_refusal,
     open_readonly_connection,
     prove_readonly_session,
     publish_measurement_output,
     read_private_dsn_file,
+    resolve_repository_head,
     validate_id,
     validate_origin,
     validate_sha,
@@ -30,6 +34,16 @@ from packages.common.node27_pgdata_workload_io import (
 )
 from packages.common.node27_pgdata_workload_query import parse_issue_time
 from packages.common.node27_pgdata_workload_types import PgdataWorkloadError
+
+EVIDENCE_KINDS = ("isolated", "live")
+DEFAULT_EVIDENCE_KIND = "isolated"
+# The checkout that owns this executing script, never the process cwd: a live
+# receipt must bind its reviewed SHA to the code that actually ran.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _default_head_resolver() -> str:
+    return resolve_repository_head(REPO_ROOT)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -53,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     measure_cmd.add_argument("--model-id", required=True)
     measure_cmd.add_argument("--source", required=True, choices=("GFS", "IFS"))
     measure_cmd.add_argument("--reviewed-sha", required=True)
+    measure_cmd.add_argument("--evidence-kind", choices=EVIDENCE_KINDS, default=DEFAULT_EVIDENCE_KIND)
     measure_cmd.add_argument("--output", required=True)
     return parser
 
@@ -70,7 +85,9 @@ def measure(
     connection: Any | None = None,
     sql_probe: Any | None = None,
     api_probe: Any | None = None,
+    head_resolver: Any | None = None,
 ) -> dict[str, Any]:
+    evidence_kind = str(args.evidence_kind)
     origin = validate_origin(args.api_origin)
     basin = validate_id(args.basin_version_id, code="INPUT_BASIN_INVALID")
     network = validate_id(args.river_network_version_id, code="INPUT_NETWORK_INVALID")
@@ -81,6 +98,14 @@ def measure(
     reviewed_sha = validate_sha(args.reviewed_sha, label="reviewed_sha")
     issue_time = parse_issue_time(args.issue_time)
     output = Path(args.output)
+    # A live receipt is admitted only by proof: the reviewed SHA is bound here,
+    # before any measurement work or publication, and the readonly session proof
+    # below completes the admission. The isolated path resolves no HEAD at all.
+    if evidence_kind == "live":
+        bind_reviewed_sha(
+            reviewed_sha,
+            head_resolver=head_resolver if head_resolver is not None else _default_head_resolver,
+        )
     dsn = read_private_dsn_file(Path(args.reader_dsn_file))
     captured = capture_workload_query(
         basin_version_id=basin,
@@ -102,7 +127,7 @@ def measure(
             connection=live,
             origin=origin,
             captured=captured,
-            evidence_kind="isolated",
+            evidence_kind=evidence_kind,
             reviewed_sha=reviewed_sha,
             opener=opener,
             sql_probe=sql_probe,

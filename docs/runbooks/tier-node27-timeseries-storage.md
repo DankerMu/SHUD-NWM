@@ -718,6 +718,30 @@ click P95 remains independent C4/river-click (`<2s`). Readonly DB remains
 §D under the hold owner's separate authorization. Do not point operators at
 withdrawn `node27_issue1895_performance_oracle.py`.
 
+The receipt's evidence grade is explicit. `--evidence-kind` defaults to
+`isolated`, and an isolated receipt still never implies live acceptance. Ask
+for `--evidence-kind live` only when both admissions hold in the same run; the
+CLI otherwise refuses fail-closed and leaves no file at `--output`:
+
+- the measured session proves `transaction_read_only` with `current_user =
+  nhms_display_ro` (else `SQL_NOT_READONLY` / `DSN_ROLE_INVALID`);
+- `--reviewed-sha` equals the HEAD of the checkout the CLI executes from, whose
+  tracked files are unmodified (else `INPUT_SHA_UNBOUND`, or
+  `INPUT_SHA_HEAD_UNAVAILABLE` when that HEAD cannot be determined at all —
+  not a checkout, no usable `git`, timeout, unusable output). Untracked
+  evidence directories do not refuse, so node-27's working checkout qualifies.
+
+Pass the already reviewed SHA the run is accepted under and let the CLI refuse
+if the checkout is not on it. Do not derive that value from the checkout
+itself (`REVIEWED_SHA=$(git rev-parse HEAD)`): that restamps whatever happens
+to be checked out instead of binding the receipt to reviewed code. Use
+`git -C <checkout> status --porcelain` beforehand if you need to see which
+tracked file is dirty. The `live` grade therefore needs a working `git` at
+runtime; the `isolated` grade resolves no HEAD and gains no such dependency.
+The invocation below is the isolated one — no flag, unchanged. For a live
+receipt append `--evidence-kind live` to the same invocation; any other value
+is an argparse usage error (`QUERY_USAGE`).
+
 ```bash
 uv run --no-sync python scripts/node27_pgdata_workload.py measure \
   --reader-dsn-file "$READER_DSN_FILE" \

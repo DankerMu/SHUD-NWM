@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from urllib.request import Request
 
 import pytest
 
+from packages.common import node27_pgdata_workload_io as workload_io
 from packages.common.node27_pgdata_workload import capture_workload_query, measure_workload
 from packages.common.node27_pgdata_workload_http import NoRedirect, open_local_get
 from packages.common.node27_pgdata_workload_io import (
@@ -42,6 +44,7 @@ from packages.common.node27_pgdata_workload_query import (
     validate_river_series_response,
 )
 from packages.common.node27_pgdata_workload_types import PgdataWorkloadError
+from scripts import node27_pgdata_workload as workload_cli
 from scripts.node27_pgdata_workload import main as cli_main
 
 BV = "bv-1"
@@ -903,3 +906,316 @@ def test_measure_requires_complete_sql_and_api_probes() -> None:
     _assert_code(lambda: measure_workload(**kwargs, api_probe=api_probe), "INJECTION_MIXED")
     rehearsal_kwargs = {**kwargs, "evidence_kind": "rehearsal"}
     _assert_code(lambda: measure_workload(**rehearsal_kwargs), "INPUT_KIND_INVALID")
+
+
+class _MeasureCursor(_Cursor):
+    """Answer the readonly proof, chunk listing and run identity a CLI run probes."""
+
+    def __init__(self, *, read_only: str = "on", current_user: str = "nhms_display_ro") -> None:
+        super().__init__()
+        self.read_only = read_only
+        self.current_user = current_user
+
+    def fetchall(self) -> list[Any]:
+        last = self.calls[-1][0] if self.calls else ""
+        if "timescaledb_information.chunks" in last:
+            return [
+                {
+                    "hypertable_schema": "hydro",
+                    "hypertable_name": "river_timeseries",
+                    "chunk_schema": "_timescaledb_internal",
+                    "chunk_name": "_hyper_1_1_chunk",
+                    "range_start": ISSUE,
+                    "range_end": WINDOW_END,
+                    "is_compressed": False,
+                    "compressed_schema": None,
+                    "compressed_name": None,
+                }
+            ]
+        if "hydro.hydro_run" in last:
+            return [
+                {
+                    "run_id": RUN,
+                    "model_id": MODEL,
+                    "source_id": "GFS",
+                    "cycle_time": datetime(2026, 8, 1, tzinfo=UTC),
+                    "scenario_id": "forecast_gfs_deterministic",
+                }
+            ]
+        return []
+
+    def fetchone(self) -> Any:
+        last = self.calls[-1][0] if self.calls else ""
+        if "transaction_read_only" in last:
+            return {"current_setting": self.read_only}
+        if "pg_roles" in last:
+            return {"current_user": self.current_user, "rolsuper": False}
+        return super().fetchone()
+
+
+def _workload_run_dir(tmp_path: Path) -> Path:
+    parent = tmp_path / "run"
+    parent.mkdir()
+    os.chmod(parent, 0o700)
+    return parent
+
+
+def _workload_dsn_file(parent: Path) -> Path:
+    dsn_path = parent / "reader.dsn"
+    dsn_path.write_text("host=127.0.0.1 port=5432 dbname=nhms user=nhms_display_ro password=secret", encoding="utf-8")
+    os.chmod(dsn_path, 0o600)
+    return dsn_path
+
+
+def _measure_argv(
+    *,
+    dsn_path: Path,
+    output: Path,
+    reviewed_sha: str = SHA,
+    evidence_kind: str | None = None,
+) -> list[str]:
+    argv = [
+        "measure",
+        "--reader-dsn-file",
+        str(dsn_path),
+        "--api-origin",
+        "http://127.0.0.1:18080",
+        "--basin-version-id",
+        BV,
+        "--river-network-version-id",
+        RNV,
+        "--segment-id",
+        SEGMENT,
+        "--issue-time",
+        ISSUE,
+        "--run-id",
+        RUN,
+        "--model-id",
+        MODEL,
+        "--source",
+        "GFS",
+        "--reviewed-sha",
+        reviewed_sha,
+        "--output",
+        str(output),
+    ]
+    if evidence_kind is not None:
+        argv += ["--evidence-kind", evidence_kind]
+    return argv
+
+
+def _measure_probes() -> dict[str, Any]:
+    plan = _plan(decompress=["_hyper_1_1_chunk"])
+
+    def sql_probe(_index: int) -> dict[str, Any]:
+        return {"duration_ms": 10, "explain_json": plan}
+
+    def api_probe(_index: int) -> dict[str, Any]:
+        return {"duration_ms": 20, "status": 200, "body_len": 32, "content_digest": "ab" * 32}
+
+    return {"sql_probe": sql_probe, "api_probe": api_probe}
+
+
+def _run_dir_contents(parent: Path) -> list[str]:
+    """Name every surviving entry, so a refused run is caught staging a partial sibling."""
+
+    return sorted(entry.name for entry in parent.iterdir())
+
+
+def _poison_head_resolver() -> str:
+    raise AssertionError("an isolated run must never resolve a repository HEAD")
+
+
+def _git_in(root: Path, *arguments: str) -> str:
+    """Run git against a repository this suite owns, isolated from ambient git state."""
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "issue-2410 workload fixture",
+            "GIT_AUTHOR_EMAIL": "workload@example.invalid",
+            "GIT_COMMITTER_NAME": "issue-2410 workload fixture",
+            "GIT_COMMITTER_EMAIL": "workload@example.invalid",
+        }
+    )
+    return subprocess.run(
+        ["git", *arguments], cwd=root, env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _tracked_checkout(tmp_path: Path) -> tuple[Path, str]:
+    """Build a checkout with one committed tracked file and return it with its HEAD."""
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    _git_in(root, "init", "--quiet")
+    (root / "tracked.py").write_text("reviewed workload tooling\n", encoding="utf-8")
+    _git_in(root, "add", "tracked.py")
+    _git_in(root, "commit", "--quiet", "--message", "reviewed workload tooling")
+    return root, _git_in(root, "rev-parse", "HEAD")
+
+
+def test_cli_default_evidence_kind_stays_isolated_and_resolves_no_head(tmp_path: Path) -> None:
+    parent = _workload_run_dir(tmp_path)
+    output = parent / "workload.json"
+    rc = cli_main(
+        _measure_argv(dsn_path=_workload_dsn_file(parent), output=output),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=_poison_head_resolver,
+        **_measure_probes(),
+    )
+    assert rc == 0
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["evidence_kind"] == "isolated"
+    assert document["isolated"] is True
+    assert document["live"] is False
+
+
+def test_cli_live_receipt_differs_from_isolated_only_in_kind_and_timestamp(tmp_path: Path) -> None:
+    parent = _workload_run_dir(tmp_path)
+    dsn_path = _workload_dsn_file(parent)
+    isolated_output = parent / "isolated.json"
+    live_output = parent / "live.json"
+    isolated_rc = cli_main(
+        _measure_argv(dsn_path=dsn_path, output=isolated_output),
+        connection=_Connection(_MeasureCursor()),
+        **_measure_probes(),
+    )
+    live_rc = cli_main(
+        _measure_argv(dsn_path=dsn_path, output=live_output, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=lambda: SHA,
+        **_measure_probes(),
+    )
+    assert (isolated_rc, live_rc) == (0, 0)
+    isolated_document = json.loads(isolated_output.read_text(encoding="utf-8"))
+    live_document = json.loads(live_output.read_text(encoding="utf-8"))
+    assert live_document["evidence_kind"] == "live"
+    assert live_document["isolated"] is False
+    assert live_document["live"] is True
+    volatile = {"evidence_kind", "isolated", "live", "measured_at"}
+    assert {key: value for key, value in live_document.items() if key not in volatile} == {
+        key: value for key, value in isolated_document.items() if key not in volatile
+    }
+    assert live_document["reviewed_sha"] == SHA
+
+
+@pytest.mark.parametrize(
+    ("session", "code"),
+    [({"read_only": "off"}, "SQL_NOT_READONLY"), ({"current_user": "postgres"}, "DSN_ROLE_INVALID")],
+)
+def test_cli_live_refuses_a_session_that_is_not_the_proven_readonly_role(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], session: dict[str, str], code: str
+) -> None:
+    parent = _workload_run_dir(tmp_path)
+    output = parent / "workload.json"
+    rc = cli_main(
+        _measure_argv(dsn_path=_workload_dsn_file(parent), output=output, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor(**session)),
+        head_resolver=lambda: SHA,
+        **_measure_probes(),
+    )
+    assert rc == 1
+    assert code in capsys.readouterr().err
+    assert _run_dir_contents(parent) == ["reader.dsn"]
+
+
+def test_cli_live_refuses_a_reviewed_sha_that_is_not_the_executing_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parent = _workload_run_dir(tmp_path)
+    output = parent / "workload.json"
+    rc = cli_main(
+        _measure_argv(dsn_path=_workload_dsn_file(parent), output=output, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=lambda: "b" * 40,
+        **_measure_probes(),
+    )
+    assert rc == 1
+    assert "INPUT_SHA_UNBOUND" in capsys.readouterr().err
+    assert _run_dir_contents(parent) == ["reader.dsn"]
+
+
+def test_cli_live_refuses_a_dirty_tracked_checkout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, head = _tracked_checkout(tmp_path)
+    (root / "tracked.py").write_text("modified after the reviewed commit\n", encoding="utf-8")
+    parent = _workload_run_dir(tmp_path)
+    output = parent / "workload.json"
+    rc = cli_main(
+        _measure_argv(dsn_path=_workload_dsn_file(parent), output=output, reviewed_sha=head, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=lambda: workload_io.resolve_repository_head(root),
+        **_measure_probes(),
+    )
+    assert rc == 1
+    assert "INPUT_SHA_UNBOUND" in capsys.readouterr().err
+    assert _run_dir_contents(parent) == ["reader.dsn"]
+
+
+def test_cli_live_refuses_when_the_executing_head_cannot_be_determined(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unavailable() -> str:
+        raise OSError("git is unavailable")
+
+    parent = _workload_run_dir(tmp_path)
+    output = parent / "workload.json"
+    rc = cli_main(
+        _measure_argv(dsn_path=_workload_dsn_file(parent), output=output, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        head_resolver=unavailable,
+        **_measure_probes(),
+    )
+    assert rc == 1
+    assert "INPUT_SHA_HEAD_UNAVAILABLE" in capsys.readouterr().err
+    assert _run_dir_contents(parent) == ["reader.dsn"]
+
+
+def test_default_head_resolver_is_anchored_at_the_executing_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The seam exists only so tests can repoint it. If the default ever drifts to
+    # the process cwd, a live run would bind its receipt to whatever repository the
+    # operator happened to stand in.
+    checkout = Path(__file__).resolve().parents[1]
+    recorded: list[Path] = []
+
+    def recorder(repo_root: Path) -> str:
+        recorded.append(repo_root)
+        return SHA
+
+    monkeypatch.setattr(workload_cli, "resolve_repository_head", recorder)
+    parent = _workload_run_dir(tmp_path)
+    dsn_path = _workload_dsn_file(parent)
+    output = parent / "workload.json"
+    monkeypatch.chdir(tmp_path)
+    rc = cli_main(
+        _measure_argv(dsn_path=dsn_path, output=output, evidence_kind="live"),
+        connection=_Connection(_MeasureCursor()),
+        **_measure_probes(),
+    )
+    assert rc == 0
+    assert workload_cli.REPO_ROOT == checkout
+    assert recorded == [checkout]
+    assert recorded[0] != Path.cwd()
+    assert (recorded[0] / "scripts" / "node27_pgdata_workload.py").exists()
+
+
+def test_cli_rejects_an_unknown_evidence_kind_without_echoing_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dsn_path = tmp_path / "reader.dsn"
+    output = tmp_path / "workload.json"
+    admitted = workload_cli.build_parser().parse_args(
+        _measure_argv(dsn_path=dsn_path, output=output, evidence_kind="live")
+    )
+    assert admitted.evidence_kind == "live"
+    with pytest.raises(SystemExit) as usage:
+        cli_main(_measure_argv(dsn_path=dsn_path, output=output, evidence_kind="rehearsal"))
+    assert usage.value.code == 2
+    err = capsys.readouterr().err
+    assert "QUERY_USAGE" in err
+    assert "rehearsal" not in err
+    assert not output.exists()
