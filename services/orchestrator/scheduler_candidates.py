@@ -1732,6 +1732,9 @@ def _apply_explicit_missing_forcing_repair_policy(
     The policy is deliberately evaluated after the normal candidate-state
     decision.  It can only reclassify the stable missing-forcing blocker; every
     other blocker and retry decision remains owned by the normal state machine.
+
+    A candidate carrying an operator re-entry confirmation is refused outright
+    (r2-01), ahead of every other precondition -- see the refusal below.
     """
 
     if not bool(getattr(config, "repair_missing_forcing", False)):
@@ -1753,6 +1756,42 @@ def _apply_explicit_missing_forcing_repair_policy(
             decision,
             reason,
             **details,
+        )
+
+    confirmation = decision.evidence.get("operator_reentry_confirmation")
+    if isinstance(confirmation, Mapping):
+        # r2-01: every event descending from a one-shot confirmation must either
+        # move the count that confirmation is pinned to or be refused before it
+        # can submit -- there is no third kind.  This reclassification is the one
+        # rewrite that can be neither: it restarts the retry at ``forcing``
+        # (``restart_stage`` below, obeyed by ``chain_forecast_execution.py:173``)
+        # while the re-entry provenance is stamped ONLY at a forecast-cohort
+        # reservation (``chain_forecast_orchestrator_cycle.py:633-635``), and the
+        # stamp site cannot be moved -- ``accepted_submit_row_kind`` returns
+        # ``None`` for a non-forecast-cohort stage, so a ``forcing`` row can
+        # never be counted.  Whether the count moves therefore depends on a stage
+        # the operator never authorized: the chain runs forward, so a forcing
+        # stage that SUCCEEDS still reaches the reservation and stamps, but a
+        # forcing stage that FAILS submits for real
+        # (``retry_repair_missing_forcing`` is whitelisted for terminal
+        # resubmission) and moves nothing -- and its new run-id prefix resets the
+        # stage-scoped attempt, so the budget verdict lapses and the candidate
+        # re-enters ``forecast`` automatically, unsigned and unstamped (round 2
+        # probes 1-3).  Refuse instead: nothing submits, nothing is consumed, the
+        # confirmation stays armed, and the operator backfills the model's own
+        # forcing -- after which the confirmed re-entry restarts at ``forecast``,
+        # is stamped, and moves the count exactly once.
+        #
+        # Lane-agnostic and arm-agnostic on purpose: both confirmable decisions
+        # reach this policy through the same missing-forcing blocker, and a
+        # candidate carrying NO confirmation keeps the #1844/§8.5 behaviour
+        # byte-for-byte (this is the only branch that reads the block).
+        return rejected(
+            "operator_reentry_confirmation_present",
+            confirmation={
+                "decision": confirmation.get("decision"),
+                "request_id": confirmation.get("request_id"),
+            },
         )
 
     if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(

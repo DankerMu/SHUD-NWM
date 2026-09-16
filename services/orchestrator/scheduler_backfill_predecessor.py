@@ -731,8 +731,12 @@ def attach_emission_summary_to_blocked(
     ``MAX_PREDECESSOR_EMISSIONS``, so sharing one record across N truncated
     successors serializes the full list N times — O(N**2) evidence bytes, which
     crosses ``MAX_EVIDENCE_BYTES`` at a few hundred successors and degrades the
-    pass into the size fallback.  The complete list stays on the top-level
-    emission record, which is serialized once.
+    pass into the size fallback.  The complete list stays on a
+    ``_build_candidates`` local (``scheduler_candidates.py:1235``, discarded
+    right after the grouping at ``:1251-1254``) that is NEVER serialized (r2-07);
+    no runtime information is lost, because the cut-off successor set is
+    byte-exactly reconstructible by scanning the blocked entries for records with
+    ``status == "truncated"``.
 
     The attach is best-effort: frozen-dataclass update failures fall back to
     direct setattr; unrecoverable failures log and drop the marker.

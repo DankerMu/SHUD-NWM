@@ -1920,8 +1920,10 @@ def test_emission_cap_truncation_names_and_flags_the_cut_off_successor(monkeypat
     assert emitted_evidence["predecessor_backfill"]["summary"]["pass_totals"] == {"emitted": 1, "truncated": 1}
     cut_off_summary = _successor_evidence(blocked, "cand_gfs_2026070612_model_b")["predecessor_backfill"]["summary"]
     assert cut_off_summary["totals"] == {"truncated": 1}
-    # r1 c-02: the record ATTACHED to a successor names only that successor;
-    # the full cut-off list lives on the top-level emission record alone.
+    # r1 c-02: the record ATTACHED to a successor names only that successor.  The
+    # full cut-off list lives on a ``_build_candidates`` local that is never
+    # serialized (r2-07); nothing is lost, since scanning the blocked entries for
+    # ``status == "truncated"`` reconstructs that set byte-exactly.
     assert cut_off_summary["records"] == [
         {
             "status": "truncated",

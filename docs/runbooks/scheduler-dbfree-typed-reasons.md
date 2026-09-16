@@ -160,8 +160,11 @@ successor `cycle_time` 早于记录 `cutover_valid_time` 的 lineage scoped-out 
 `predecessor_emission_cap_reached` 截断、`predecessor_candidate_construction_failed`、
 `predecessor_gate_failed`、successor 不早于 cutover 的 scoped-out，以及今后新增的 skip
 臂），方向是倒向升级。全部记录为 `emitted` 或瞬时 skip 时为 `false`；本 successor 没有
-任何发射记录时**不写**该键。cap 截断记录的 `successor_candidate_ids` 列出被截断的
-successor，所以被截断的 successor 自己也带 `true`。它与 `operator_action_required`
+任何发射记录时**不写**该键。cap 截断记录会挂到每个被它截断的 successor 上，所以被截断的
+successor 自己也带 `true`；**挂上去的那一份只带标量 `successor_candidate_id`（它自己）**，
+不带整张列表（r1 c-02 的 per-successor 投影）。完整列表只存在于 `_build_candidates` 的局部
+变量里（`scheduler_candidates.py:1235`，`:1251-1254` 归组后即丢弃），**从不序列化**；要还原
+被截断的 successor 全集，扫 blocked 条目里 `status == "truncated"` 的投影记录即可，逐字节等价。它与 `operator_action_required`
 正交：`operator_action_required=false` 且 `predecessor_emission_blocked=true` 就是下面
 "另一类 stall"。
 

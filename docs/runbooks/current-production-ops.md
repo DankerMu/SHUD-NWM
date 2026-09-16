@@ -370,16 +370,29 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 
 | 来源 | 车道 | 排空通道 |
 |---|---|---|
-| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`） |
+| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`）——**除非该候选带 operator 重入确认物**，那种候选会被修复策略拒绝，只能走回补脚本，见下面的块注 |
 | #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | **只用**下面的回补脚本。8.5 的单 cycle 修复在这条车道上根本不会被评估：修复策略的调用点要么在 quarantine 之前、要么只在 strict warm-start 车道或 resync 分支上，所以 `--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（读码结论，未实跑；见 design D1） |
 
-> **`--repair-missing-forcing` 与 operator 重入确认物的交互（r1 c-03）**：这个候选如果是靠
+> **`--repair-missing-forcing` 与 operator 重入确认物互斥（r2-01）**：这个候选如果是靠
 > `confirm-operator-reentry` 的确认物才走到 missing-forcing `blocked` 的（strict warm-start 预算
-> 或 §8.7 断路器两类 fail-stop），单 cycle 修复会把它改判成 `retry_repair_missing_forcing`
-> 并**真的提交**，改判后的重试带着原来的 `operator_reentry_confirmation` 块，
-> provenance 戳在 accepted-submit 时写入、对应计数 +1——**这一次修复重试就消费掉了那张确认物**
-> （恰好一次，下一 pass 回到 blocked）。也就是说这条路径既回补了 forcing，也用掉了那次人工签字；
-> 不要以为确认物还留着可以再重入一次。判据与撤销口径见
+> 或 §8.7 断路器两类 fail-stop），单 cycle 修复**拒绝**它而不是改判它，**不提交、不消费**，
+> 那张人工签字保持待用。证据按车道分，结论一样、键不一样：
+> - **strict warm-start 车道**（预算臂，以及碰巧落在该车道的断路器重入）：修复策略真的被调用并
+>   拒绝，`--plan` 里看到
+>   `state_evidence.missing_forcing_repair.status = rejected` +
+>   `reason = operator_reentry_confirmation_present`（并回显 `confirmation.decision` /
+>   `confirmation.request_id`），候选留在 missing-forcing `blocked` 上。
+> - **非 strict 车道**（上面表格 `#1844` 那行）：修复策略**根本不会被调用**（调用点在
+>   `strict_warm_start is not None` 之内，而 quarantine 判定发生在两次 warm admission 之后），
+>   所以这类候选**没有** `missing_forcing_repair` 键，只有见证闸的 missing-forcing `blocked`。
+>   别去找那个键。
+> 理由：改判后的 `retry_repair_missing_forcing` 从 `forcing` 阶段重启，而重入 provenance 只在
+> forecast cohort 的 reservation 处写——forcing 成功才顺带戳到，forcing 失败就是「真提交了、
+> 计数没动、确认物还在」，并且失败的 forcing 在新 run-id 前缀下把 stage 域 attempt 打回 0/2、
+> 让预算判定失效，随后候选还会自动重入一次 forecast（不带任何签字、不戳 provenance）。
+> **正确处置：先用下面的回补脚本补上该模型自己的 forcing，再让确认过的重入自己跑**——它从
+> `forecast` 重启、在 reservation 处被戳、计数 +1，恰好消费一次，之后的 pass 回到 blocked。
+> 判据与撤销口径见
 > [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) 的「已知限制」。
 
 strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`，所以这个键只是提示，不是车道判据。
@@ -4163,6 +4176,16 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    `raw_manifest_identity_mismatch`, `candidate_not_direct_grid`, or
    `exact_cycle_identity_mismatch`. Fix the stated precondition; do not bypass
    it.
+
+   One reason is **not** a precondition to fix: `operator_reentry_confirmation_present`
+   (r2-01) means this candidate carries an operator re-entry confirmation
+   (`confirm-operator-reentry`), and the repair channel refuses it by design —
+   the reclassified repair retry restarts at `forcing` and would not move the
+   count the confirmation is pinned to. The evidence echoes
+   `missing_forcing_repair.confirmation.{decision,request_id}`. Remedy: **do not**
+   use `--repair-missing-forcing` for it; backfill that model's own forcing with
+   the §8.5 backfill script, then let the confirmed re-entry run on an ordinary
+   pass — it restarts at `forecast` and consumes the signature exactly once.
 4. Submit the same exact cycle only after the preview admits the intended set:
 
    ```bash

@@ -1263,10 +1263,18 @@ def canonical_budget_reentry_model_ids(*, basins: Sequence[Mapping[str, Any]]) -
     Keying on the surviving block rather than on
     ``STRICT_WARM_START_TERMINAL_RETRY_DECISION`` is r1 c-03: the confirmed retry
     restarts at ``forecast`` and is therefore consulted by the per-model forcing
-    witness, and the exact-cycle repair policy can reclassify the resulting
+    witness, and the exact-cycle repair policy could reclassify the resulting
     blocker into ``retry_repair_missing_forcing`` — a literal that IS whitelisted
     for terminal resubmission.  Keyed on the literal, that submission moved no
     count and the same signature authorized a second re-entry.
+
+    The confirmed retry restarts at ``forecast`` — and so actually reaches this
+    reservation — because that reclassification is now REFUSED for any candidate
+    carrying a confirmation (r2-01: ``_apply_explicit_missing_forcing_repair_policy``
+    rejects with ``operator_reentry_confirmation_present``).  It restarted at
+    ``forcing`` before that refusal existed, which is how a confirmed submission
+    could bypass this stamp site entirely.  The block-keyed projection stays as
+    defense-in-depth for any rewrite that reappears.
 
     There is no literal-only trigger here, unlike the quarantine projection:
     an ordinary strict retry below the budget carries no confirmation and re-enters

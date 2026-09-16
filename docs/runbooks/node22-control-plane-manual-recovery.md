@@ -216,20 +216,28 @@ run 在飞或不存在时拒绝）：
 
 - **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。
   需要再次重入时，重新跑 dry run，用新的 live 计数再确认一次。
-- **forcing 见证闸（#1844）**：确认物匹配但该模型没有自己的 forcing 时，**默认**候选落到
+- **forcing 见证闸（#1844）**：确认物匹配但该模型没有自己的 forcing 时，候选落到
   forcing 缺失的具名 blocked（reason `forcing_version_row_absent` /
   `missing_forcing_package_uri`），不提交；断路器几何下该 cycle 会持续占用执行槽。确认物
-  **没有撤销手段**——先回补 forcing。
-- **同一 cycle 开着 `--repair-missing-forcing` 时不是上面那样：会提交，并且消费掉确认物**
-  （r1 c-03）。运维授权的整点修复策略只改判这两个具名 missing-forcing blocked，而确认物正是
-  走到这个 blocked 的**必要条件**（没有确认物时决策是
-  `blocked_strict_warm_start_init_state_mismatch`，不在修复策略的受理 reason 里，根本到不了）。
-  改判后的决策是 `retry_repair_missing_forcing`——该字面量在 forced-resubmit 白名单里，
-  **真的提交**；重试仍带着原来的 `operator_reentry_confirmation` 块，provenance 戳照常在
-  accepted-submit（reservation）时写入 cohort master，对应计数当场 +1，**确认物被消费掉，
-  恰好一次**，下一 pass 回到 blocked。所以：要么先回补 forcing 再确认，要么就接受「这一次修复
-  重试 = 那一次重入」。`current-production-ops.md` 里 strict 车道走
-  `--repair-missing-forcing` 的处置流程同理。
+  **没有撤销手段**——先回补 forcing。两条 fail-stop（断路器、strict 预算）同此。
+- **确认物与 `--repair-missing-forcing` 互斥**（r2-01；两条 fail-stop 都适用）：同一 cycle
+  开着单 cycle 修复时，带 `operator_reentry_confirmation` 块的候选**不会被改判、不提交、
+  不消费**，确认物保持待用。证据按车道分：
+  - strict warm-start 车道（预算臂，以及落在该车道的断路器重入）：修复策略被调用并拒绝，
+    `state_evidence.missing_forcing_repair = {status: rejected, reason:
+    operator_reentry_confirmation_present, confirmation: {decision, request_id}}`，候选留在
+    上面那个 missing-forcing blocked 上。
+  - 非 strict 车道的 §8.7 断路器重入：修复策略**根本不会被调用**（调用点在
+    `strict_warm_start is not None` 之内），候选只带见证闸的 missing-forcing blocked，
+    **没有** `missing_forcing_repair` 键——结果相同，别去找那个键。
+  理由：被改判的 `retry_repair_missing_forcing` 从 `forcing` 阶段重启，而重入 provenance 只在
+  forecast cohort 的 reservation 处写；forcing 跑成功才顺带戳到，跑失败就是「真提交了、计数没动、
+  确认物还在，且新 run-id 前缀把 stage 域 attempt 打回 0/2 让预算判定失效」——一次签字放行两次
+  forecast 重入。所以这条路被整体拒绝，而不是赌 forcing 会成功。
+  **正确顺序：先回补该模型自己的 forcing，再让确认过的重入跑**——它从 `forecast` 重启、在
+  reservation 处被戳、计数 +1，**恰好消费一次**，之后的 pass 回到 blocked、旧 pin 返回
+  `pin_mismatch`。`current-production-ops.md` 里 strict 车道走 `--repair-missing-forcing`
+  的处置流程同理：带确认物的候选不走那条通道。
 - **候选仍显示 blocked ≠ 确认物未生效**：先看 dry-run receipt 的 live 计数是否已 +1（file
   journal 的 `hydro_run` 在同一 `run_id` 重跑时不更新，#2397，即使 rerun 拿到正确 lineage
   候选也仍显示 breaker-blocked）；已 +1 就**不要重复确认**——除非该 rerun 已到失败终态且

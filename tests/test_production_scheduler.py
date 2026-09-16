@@ -15615,6 +15615,68 @@ def test_missing_forcing_repair_rejects_candidate_outside_exact_operator_cycle(
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_missing_forcing_repair_refuses_a_confirmation_ahead_of_every_other_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    confirmed: bool,
+) -> None:
+    """r2-01: the confirmation refusal outranks the repair policy's own preconditions.
+
+    Same input twice, one bit apart: with a confirmation block the policy refuses
+    with the named reason even though the operator authorized a DIFFERENT cycle
+    (so the refusal is independent of whether the exact-cycle repair was
+    authorized for this candidate); without one, the pre-existing
+    ``exact_cycle_identity_mismatch`` verdict is byte-for-byte unchanged.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    config = replace(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            dry_run=True,
+        ),
+        repair_missing_forcing_cycle_time=_dt("2026-05-21T00:00:00Z"),
+    )
+    evidence: dict[str, Any] = {
+        "decision": "blocked_missing_upstream_artifact",
+        "reason": "missing_forcing_package_uri",
+        "classifier": "missing_upstream_artifact",
+        "restart_stage": "forecast",
+    }
+    if confirmed:
+        evidence["operator_reentry_confirmation"] = {
+            "request_id": "req-1",
+            "operator": "ops-oncall",
+            "reason": "state index repaired",
+            "pin": 0,
+            "decision": "blocked_strict_warm_start_init_state_mismatch",
+        }
+    decision = CandidateStateDecision("blocked", "missing_forcing_package_uri", evidence)
+
+    classified = scheduler_candidates_module._apply_explicit_missing_forcing_repair_policy(
+        config,
+        candidate,
+        None,
+        decision,
+        strict_warm_start=None,
+    )
+
+    assert classified is not None
+    assert classified.action == "blocked"
+    repair = classified.evidence["missing_forcing_repair"]
+    if confirmed:
+        assert repair["reason"] == "operator_reentry_confirmation_present"
+        assert repair["confirmation"] == {
+            "decision": "blocked_strict_warm_start_init_state_mismatch",
+            "request_id": "req-1",
+        }
+    else:
+        assert repair["reason"] == "exact_cycle_identity_mismatch"
+
+
 def test_missing_forcing_repair_config_rejects_unbounded_or_malformed_operator_use(
     tmp_path: Path,
 ) -> None:
@@ -57829,22 +57891,82 @@ def test_budget_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even
         assert _budget_forecast_masters(root) == masters
 
 
-def test_an_explicit_missing_forcing_repair_consumes_the_budget_confirmation_exactly_once(
+def _plain_budget_scheduler(tmp_path: Path, root: Path) -> ProductionScheduler:
+    """The same lane and journal as ``_seed_budget_journal(repair_missing_forcing=True)``, WITHOUT the repair flag.
+
+    This is the pass the operator runs after backfilling the model's own forcing:
+    no ``--repair-missing-forcing`` authorization, no new confirmation.  Only the
+    repair-specific config keys are dropped; the strict db-free lane, the cycle,
+    the retry limit and the direct-grid requirement are unchanged.
+    """
+
+    from tests.test_scheduler_backfill import _DB_FREE_PACKAGE_CHECKSUM, _gfs_adapter
+
+    profile = {
+        "runnable": True,
+        "memory_gb": 8,
+        "display_capabilities": {"tiles": True},
+        **_missing_forcing_repair_direct_grid_profile(),
+        "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+    }
+    return ProductionScheduler(
+        _config(
+            tmp_path,
+            **{
+                "now": _dt(_BUDGET_CYCLE),
+                "backfill_enabled": False,
+                "max_cycles_per_source": 1,
+                "lookback_hours": 0,
+                "cycle_lag_hours": 0,
+                "retry_limit": _BUDGET_RETRY_LIMIT,
+                "require_direct_grid": True,
+            },
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a", resource_profile=profile)]),
+        adapters={"gfs": _gfs_adapter([_BUDGET_CYCLE])},
+        active_repository=file_orchestration_journal_module.FileOrchestrationJournalRepository(root),
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+
+def _backfill_budget_model_forcing() -> None:
+    """The routine remedy the runbook prescribes: publish the model's own forcing package."""
+
+    package_dir = "forcing/gfs/2026052100/basin_a_v1/model_a"
+    store = LocalObjectStore(Path(os.environ["OBJECT_STORE_ROOT"]), "s3://nhms")
+    store.write_bytes_atomic(f"{package_dir}/forcing_package.json", b'{"schema_version": "nhms.forcing_package.v1"}')
+    store.write_bytes_atomic(
+        f"{package_dir}/forcing_version_record.json",
+        json.dumps(
+            {
+                "forcing_package_uri": f"s3://nhms/{package_dir}/",
+                "forcing_version_id": "forc_gfs_2026052100_model_a",
+            }
+        ).encode("utf-8"),
+    )
+
+
+def test_an_explicit_missing_forcing_repair_refuses_a_confirmed_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """r1 c-03: a confirmed re-entry reclassified into the repair retry still moves its pin.
+    """r2-01 (option B): the exact-cycle repair refuses a confirmed candidate instead of submitting it.
 
     Both confirmed legs restart at ``forecast`` and are therefore consulted by
     the per-model forcing witness.  With the model's own forcing package gone
-    the witness hands back the stable missing-forcing blocker, and -- only on
+    the witness hands back the stable missing-forcing blocker, which -- only on
     the confirmed path, because ``strict_warm_start_retry_budget_exhausted`` is
     not a missing-forcing blocker reason -- the operator's exact-cycle repair
-    policy reclassifies it into ``retry_repair_missing_forcing``, which IS
-    whitelisted for terminal resubmission and really submits.  The stamp must
-    follow the surviving confirmation block, not the decision literal, or the
-    same signature authorizes a second re-entry.
+    policy used to reclassify into ``retry_repair_missing_forcing``.  That
+    reclassified retry restarts at ``forcing``
+    (``scheduler_candidates.py:1811-1812``) and the chain obeys it
+    (``chain_forecast_execution.py:173``), while the provenance stamp is written
+    only at a forecast-cohort reservation
+    (``chain_forecast_orchestrator_cycle.py:633-635``) -- so that submission
+    could never move the count its confirmation is pinned to.  It is therefore
+    refused before it can submit: nothing is consumed, and the signature stays
+    armed for the re-entry that DOES move the count (the sequel test below).
     """
 
     from tests.test_operator_reentry_confirmation import run_confirm
@@ -57865,42 +57987,182 @@ def test_an_explicit_missing_forcing_repair_consumes_the_budget_confirmation_exa
     assert live_pin == 0
     code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
     assert code == 0, receipt
-
-    # (a) The confirmed pass submits -- as the repair retry, carrying the block.
-    confirmed = scheduler()
-    _selected, candidates, blocked, _skipped = _budget_pass(confirmed, now=_BUDGET_CYCLE)
-    assert blocked == []
-    (retry,) = candidates
-    assert retry.state_evidence["decision"] == "retry_repair_missing_forcing"
-    assert retry.state_evidence["missing_forcing_repair"]["status"] == "authorized"
-    assert retry.state_evidence["operator_reentry_confirmation"] == {
+    confirmation_block = {
         "request_id": receipt["request_id"],
         "operator": "ops-oncall",
         "reason": "state index repaired; one more strict rerun",
         "pin": live_pin,
         "decision": "blocked_strict_warm_start_init_state_mismatch",
     }
+
+    # (a) The confirmed pass emits NO candidate: the repair policy refuses it
+    # with a named reason and the candidate stays in the forcing-witness blocked
+    # decision, still carrying the confirmation block.
     seeded_masters = _budget_forecast_masters(root)
-    result = _budget_real_reentry(tmp_path, monkeypatch, root, confirmed, candidates)
-    assert result.status == "succeeded"
-    (new_master,) = set(_budget_forecast_masters(root)) - set(seeded_masters)
-    reopened = file_orchestration_journal_module.FileOrchestrationJournalRepository(root)
-    assert reopened.get_pipeline_job(new_master)["strict_warm_start_budget_reentry_model_ids"] == ["model_a"]
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(), now=_BUDGET_CYCLE)
+    assert candidates == []
+    (refused,) = blocked
+    repair = refused.state_evidence["missing_forcing_repair"]
+    assert (repair["status"], repair["reason"]) == ("rejected", "operator_reentry_confirmation_present")
+    assert repair["confirmation"] == {
+        "decision": "blocked_strict_warm_start_init_state_mismatch",
+        "request_id": receipt["request_id"],
+    }
+    assert refused.reason in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    assert refused.state_evidence["operator_reentry_confirmation"] == confirmation_block
+    assert refused.state_evidence["restart_stage"] == "forecast"
 
-    # (b) The live pin moved, and the consumed pin is refused on the write side.
-    assert _budget_live_reentry_count(root, capsys) == live_pin + 1
-    code, stale, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
-    assert (code, stale["reason"]) == (2, "pin_mismatch")
+    # (b) Nothing submitted, so nothing was consumed: the live count is still N
+    # and the same pin still matches on the write side (dry run, no second event).
+    assert _budget_forecast_masters(root) == seeded_masters
+    assert _budget_live_reentry_count(root, capsys) == live_pin
+    code, still_matching, _err = run_confirm(
+        [item for item in _budget_confirm_argv(root, pin=live_pin) if item != "--attest"], capsys
+    )
+    assert (code, still_matching["decision"]) == (0, "dry_run")
 
-    # (c) Every later pass blocks again with nothing new reserved.
-    masters = _budget_forecast_masters(root)
+    # (c) Repeatably so: the refusal is stable and nothing drifts.
     for later_pass in range(3):
         _selected, candidates, blocked, _skipped = _budget_pass(scheduler(), now=_BUDGET_CYCLE)
         assert candidates == [], later_pass
         (after,) = blocked
-        assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
-        assert "operator_reentry_confirmation" not in after.state_evidence
-        assert _budget_forecast_masters(root) == masters
+        assert after.state_evidence["missing_forcing_repair"]["reason"] == "operator_reentry_confirmation_present"
+        assert after.state_evidence["operator_reentry_confirmation"] == confirmation_block
+        assert _budget_forecast_masters(root) == seeded_masters
+    assert _budget_live_reentry_count(root, capsys) == live_pin
+
+
+def test_backfilling_the_forcing_lets_the_confirmed_reentry_consume_the_signature_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r2-01 sequel: after the refusal, backfilling the forcing spends the signature exactly once.
+
+    The operator's remedy is the one the runbook prescribes -- publish the
+    model's own forcing package, then run an ordinary pass with no repair flag
+    and no new confirmation.  The still-armed confirmation then re-enters at
+    ``forecast``, is stamped at the cohort reservation, and the count moves to
+    N+1, after which the pin no longer matches.  One signature, one re-entry.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(
+        monkeypatch, tmp_path, _spent_full_chain_budget_rows(), repair_missing_forcing=True
+    )
+    live_pin = _budget_live_reentry_count(root, capsys)
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert code == 0, receipt
+
+    # 1. The repair-flagged pass refuses and submits nothing (pinned above).
+    seeded_masters = _budget_forecast_masters(root)
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(), now=_BUDGET_CYCLE)
+    assert candidates == []
+    assert blocked[0].state_evidence["missing_forcing_repair"]["reason"] == "operator_reentry_confirmation_present"
+
+    # 2. The operator backfills the model's own forcing and runs a plain pass.
+    _backfill_budget_model_forcing()
+    plain = _plain_budget_scheduler(tmp_path, root)
+    _selected, candidates, blocked, _skipped = _budget_pass(plain, now=_BUDGET_CYCLE)
+    assert blocked == []
+    (retry,) = candidates
+    # A2.4: the confirmed re-entry itself is what runs -- not an unsigned
+    # automatic retry.  No failed forcing job was ever written, so no new
+    # run-id prefix exists to reset the stage-scoped attempt and lapse the
+    # budget verdict; the budget arm is still the one that fires.
+    assert retry.state_evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    assert retry.state_evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert retry.state_evidence["restart_stage"] == "forecast"
+    assert "missing_forcing_repair" not in retry.state_evidence
+
+    # 3. The real reservation path stamps the cohort master and the count moves.
+    result = _budget_real_reentry(tmp_path, monkeypatch, root, plain, candidates)
+    assert result.status == "succeeded"
+    (new_master,) = set(_budget_forecast_masters(root)) - set(seeded_masters)
+    reopened = file_orchestration_journal_module.FileOrchestrationJournalRepository(root)
+    assert reopened.get_pipeline_job(new_master)["strict_warm_start_budget_reentry_model_ids"] == ["model_a"]
+    assert _budget_live_reentry_count(root, capsys) == live_pin + 1
+    code, stale, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert (code, stale["reason"]) == (2, "pin_mismatch")
+
+    # 4. Every later pass -- plain or repair-flagged -- is blocked again with
+    # nothing new reserved, and carries no confirmation.
+    masters = _budget_forecast_masters(root)
+    for later_pass in range(3):
+        for pass_scheduler in (_plain_budget_scheduler(tmp_path, root), scheduler()):
+            _selected, candidates, blocked, _skipped = _budget_pass(pass_scheduler, now=_BUDGET_CYCLE)
+            assert candidates == [], later_pass
+            assert all("operator_reentry_confirmation" not in item.state_evidence for item in blocked)
+            assert _budget_forecast_masters(root) == masters
+
+
+def _assert_confirmed_retries_restart_at_forecast(state_evidences: list[Mapping[str, Any]]) -> int:
+    """The event-path invariant, in one place: a confirmed retry restarts at ``forecast`` or it is not emitted."""
+
+    confirmed = [item for item in state_evidences if "operator_reentry_confirmation" in item]
+    for evidence in confirmed:
+        assert evidence["restart_stage"] == "forecast", evidence.get("decision")
+        assert evidence["restart_from_stage"] == "forecast", evidence.get("decision")
+    return len(confirmed)
+
+
+@pytest.mark.parametrize("family", ["budget", "breaker", "repair_flag_on"])
+def test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    family: str,
+) -> None:
+    """Phase 6.2 event-path invariant, as a structural pin (r2-01).
+
+    Provenance is stamped only at a forecast-cohort reservation, so a candidate
+    that carries a confirmation and restarts anywhere else structurally cannot
+    move the count its confirmation is pinned to.  Every confirmed retry a pass
+    emits must therefore restart at ``forecast``; the one rewrite that restarts
+    at ``forcing`` is refused and emits no candidate at all.  Parametrized over
+    the three fixture families (each needs its own lane environment) so a future
+    rewrite on any of them trips this test.
+    """
+
+    from tests.test_operator_reentry_confirmation import (
+        breaker_confirm_argv,
+        run_confirm,
+        seed_breaker_journal,
+    )
+
+    if family == "breaker":
+        # The §8.7 quarantine breaker arm, on the non-strict lane.
+        breaker_root = seed_breaker_journal(tmp_path, monkeypatch)
+        code, _receipt, _err = run_confirm(breaker_confirm_argv(breaker_root, pin=1), capsys)
+        assert code == 0
+        result, _orchestrator = _reentry_pass(tmp_path, breaker_root)
+        emitted = list(result.evidence["candidates"])
+        assert emitted, "premise broken: the breaker family emitted no candidate"
+        assert _assert_confirmed_retries_restart_at_forecast([item["state_evidence"] for item in emitted]) == 1
+        return
+
+    repair_flag_on = family == "repair_flag_on"
+    root, scheduler = _seed_budget_journal(
+        monkeypatch, tmp_path, _spent_full_chain_budget_rows(), repair_missing_forcing=repair_flag_on
+    )
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+    _selected, candidates, blocked, _skipped = _budget_pass(
+        scheduler(), now=_BUDGET_CYCLE if repair_flag_on else "2026-05-21T06:00:00Z"
+    )
+    if repair_flag_on:
+        # Option B refuses this one, so the retry set is empty by construction --
+        # the invariant here is that the confirmed candidate is BLOCKED, and the
+        # blocked entry still restarts at ``forecast`` rather than ``forcing``.
+        assert candidates == []
+        (refused,) = blocked
+        assert refused.state_evidence["missing_forcing_repair"]["reason"] == "operator_reentry_confirmation_present"
+        assert _assert_confirmed_retries_restart_at_forecast([refused.state_evidence]) == 1
+        return
+    assert candidates, "premise broken: the budget family emitted no candidate"
+    assert _assert_confirmed_retries_restart_at_forecast([item.state_evidence for item in candidates]) == 1
+    _assert_confirmed_retries_restart_at_forecast([item.state_evidence for item in blocked])
 
 
 class _NoBudgetReentryCountAccessorRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):

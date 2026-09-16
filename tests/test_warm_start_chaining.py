@@ -3021,16 +3021,27 @@ def _reentry_confirmation_block(decision: str) -> dict[str, Any]:
 
 
 def test_reentry_provenance_stamps_key_on_the_confirmation_block_not_the_decision_literal() -> None:
-    """r1 c-03: a reclassified confirmed re-entry still moves the count it is pinned to.
+    """r1 c-03: the projections key on the surviving confirmation block, not the decision literal.
 
     Both confirmed re-entry legs restart at ``forecast`` and therefore pass the
-    per-model forcing witness.  With no witness the decision becomes the
-    missing-forcing blocker, and the operator's exact-cycle repair policy
-    reclassifies it to ``retry_repair_missing_forcing`` -- a decision literal
-    that IS in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` and really submits.  The
-    confirmation block survives every one of those rewrites, so it, not the
-    literal, is what the provenance stamps key on; otherwise the pin never
-    moves and the same confirmation authorizes a second re-entry.
+    per-model forcing witness.  Every basin shape below that pairs a confirmation
+    block with a REWRITTEN decision literal is defense-in-depth rather than a
+    reachable state at this head (r2-01 / round-2 event-path audit):
+
+    * ``retry_repair_missing_forcing`` -- the exact-cycle repair policy now
+      REFUSES any candidate carrying a confirmation
+      (``scheduler_candidates.py``, reason
+      ``operator_reentry_confirmation_present``), so option B makes this shape
+      unreachable.  It stays pinned because the projection must still handle it
+      if the rewrite ever reappears.
+    * ``retry_strict_warm_start_retry_run_manifest_mismatch`` -- the manifest
+      upgrade early-returns for both confirmed arms (they set
+      ``native_shud_resubmitted=True`` with ``restart_stage="forecast"``), so no
+      confirmed retry reaches its rewrite either.
+
+    What is NOT synthetic is the requirement itself: if a rewrite is ever
+    reachable again, keying on the literal means the pin never moves and the same
+    confirmation authorizes a second re-entry.
     """
 
     from services.orchestrator.accepted_submit_identity import (
@@ -3058,7 +3069,9 @@ def test_reentry_provenance_stamps_key_on_the_confirmation_block_not_the_decisio
     assert canonical_budget_reentry_model_ids(basins=[repaired_breaker]) == ()
 
     # The sibling rewrite class: ``_upgrade_retry_for_strict_warm_start_manifest``
-    # rewrites a confirmed retry to another whitelisted resubmit literal.
+    # would rewrite a confirmed retry to another whitelisted resubmit literal --
+    # defense-in-depth, since its early return keeps both confirmed arms out (see
+    # the docstring).
     upgraded = _basin(
         "model_upgraded",
         {
