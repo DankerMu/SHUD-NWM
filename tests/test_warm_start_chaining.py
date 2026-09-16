@@ -3016,6 +3016,86 @@ def test_cohort_reservation_stamps_budget_reentry_provenance_only_for_a_confirme
     assert counts == {"model_0": 0, "model_1": 1, "model_2": 0}
 
 
+def _reentry_confirmation_block(decision: str) -> dict[str, Any]:
+    return {"request_id": "r", "operator": "ops", "reason": "why", "pin": 0, "decision": decision}
+
+
+def test_reentry_provenance_stamps_key_on_the_confirmation_block_not_the_decision_literal() -> None:
+    """r1 c-03: a reclassified confirmed re-entry still moves the count it is pinned to.
+
+    Both confirmed re-entry legs restart at ``forecast`` and therefore pass the
+    per-model forcing witness.  With no witness the decision becomes the
+    missing-forcing blocker, and the operator's exact-cycle repair policy
+    reclassifies it to ``retry_repair_missing_forcing`` -- a decision literal
+    that IS in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS`` and really submits.  The
+    confirmation block survives every one of those rewrites, so it, not the
+    literal, is what the provenance stamps key on; otherwise the pin never
+    moves and the same confirmation authorizes a second re-entry.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        canonical_budget_reentry_model_ids,
+        canonical_quarantine_rerun_model_ids,
+    )
+
+    budget_block = _reentry_confirmation_block("blocked_strict_warm_start_init_state_mismatch")
+    breaker_block = _reentry_confirmation_block("blocked_journal_predecessor_identity_quarantine")
+
+    def _basin(model_id: str, state_evidence: dict[str, Any]) -> dict[str, Any]:
+        return {"model_id": model_id, "state_evidence": state_evidence}
+
+    repaired_budget = _basin(
+        "model_budget_repair",
+        {"decision": "retry_repair_missing_forcing", "operator_reentry_confirmation": budget_block},
+    )
+    repaired_breaker = _basin(
+        "model_breaker_repair",
+        {"decision": "retry_repair_missing_forcing", "operator_reentry_confirmation": breaker_block},
+    )
+    assert canonical_budget_reentry_model_ids(basins=[repaired_budget]) == ("model_budget_repair",)
+    assert canonical_quarantine_rerun_model_ids(basins=[repaired_budget]) == ()
+    assert canonical_quarantine_rerun_model_ids(basins=[repaired_breaker]) == ("model_breaker_repair",)
+    assert canonical_budget_reentry_model_ids(basins=[repaired_breaker]) == ()
+
+    # The sibling rewrite class: ``_upgrade_retry_for_strict_warm_start_manifest``
+    # rewrites a confirmed retry to another whitelisted resubmit literal.
+    upgraded = _basin(
+        "model_upgraded",
+        {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "operator_reentry_confirmation": budget_block,
+        },
+    )
+    assert canonical_budget_reentry_model_ids(basins=[upgraded]) == ("model_upgraded",)
+
+    # No regression: an ORDINARY (unconfirmed) quarantine rerun still counts --
+    # that is the §8.7 breaker count's own semantics.
+    ordinary_quarantine = _basin(
+        "model_quarantine", {"decision": "retry_journal_predecessor_identity_mismatch"}
+    )
+    assert canonical_quarantine_rerun_model_ids(basins=[ordinary_quarantine]) == ("model_quarantine",)
+    assert canonical_budget_reentry_model_ids(basins=[ordinary_quarantine]) == ()
+
+    # A basin with neither the literal nor a block stamps nothing, and an
+    # unconfirmed strict retry below the budget stays unstamped.
+    for inert in (
+        _basin("model_plain", {"decision": "retry_missing_forecast_output"}),
+        _basin("model_strict", {"decision": "retry_strict_warm_start_terminal_init_state_mismatch"}),
+        _basin("model_no_evidence", {}),
+    ):
+        assert canonical_budget_reentry_model_ids(basins=[inert]) == ()
+        assert canonical_quarantine_rerun_model_ids(basins=[inert]) == ()
+
+    # One reservation, one stamp per model: a model reserved twice in the same
+    # cohort is booked once, and the two lists never both claim a basin.
+    assert canonical_budget_reentry_model_ids(basins=[repaired_budget, repaired_budget]) == (
+        "model_budget_repair",
+    )
+    assert canonical_quarantine_rerun_model_ids(
+        basins=[repaired_breaker, ordinary_quarantine, repaired_breaker]
+    ) == ("model_breaker_repair", "model_quarantine")
+
+
 def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:
     """Cold-seeded basins resolve no warm start, so nothing is booked for them.
 

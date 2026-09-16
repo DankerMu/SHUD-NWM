@@ -20601,11 +20601,14 @@ def test_bounded_candidate_summary_retains_budget_exhausted_retry_policy() -> No
     survive as values rather than be erased into "field absent".
     """
 
-    # Producer literals: the strict warm-start budget arm's blocked evidence
-    # (scheduler_candidates.py:2633-2650, ``_OPERATOR_REENTRY_POLICY`` at 2456).
-    # ``occurrences`` is written by the breaker arm, but the bounded-summary
-    # contract folds all four numbers into one summary shape, so the budget row
-    # carries it too.
+    # SYNTHETIC union shape — no producer emits this row (r1 c-05).  The budget
+    # arm writes ``attempt``/``retry_limit`` and never ``occurrences``
+    # (``_strict_warm_start_terminal_blocked_evidence``, pinned by the exact-dict
+    # equality at ``test_..._budget...`` around :49170); the breaker arm writes
+    # ``occurrences`` and never ``attempt``/``retry_limit``
+    # (``_journal_predecessor_identity_blocked_evidence``).  This row exists only
+    # to drive all four retained keys through one summarization at once; the two
+    # per-arm rows below cover what the real producers actually emit.
     budget_row = {
         "candidate_id": "gfs:2026-05-21T12:00:00Z:model_c:forecast_gfs_deterministic",
         "source": "gfs",
@@ -20637,8 +20640,9 @@ def test_bounded_candidate_summary_retains_budget_exhausted_retry_policy() -> No
     }
     # Synthetic falsy shape: the real budget arm hardcodes
     # ``manual_retry_required: True``, so no producer emits this row.  It exists
-    # solely to pin the ``is not None`` guard — a truthiness guard would drop all
-    # four keys here and read exactly like a pass that never had a retry policy.
+    # solely to pin the ``is not None`` guard on ``manual_retry_required`` — a
+    # truthiness guard would drop all four keys here and read exactly like a pass
+    # that never had a retry policy.
     falsy_row = {
         **budget_row,
         "candidate_id": "gfs:2026-05-21T12:00:00Z:model_d:forecast_gfs_deterministic",
@@ -20700,6 +20704,115 @@ def test_bounded_candidate_summary_retains_budget_exhausted_retry_policy() -> No
     # The verbose detail the summary exists to shed is gone from both rows.
     assert "state_evidence" not in bounded_by_model["model_c"]
     assert "state_evidence" not in bounded_by_model["model_d"]
+
+
+def _blocked_row_for(model_id: str, *, decision: str, reason: str, retry_policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": f"gfs:2026-05-21T12:00:00Z:{model_id}:forecast_gfs_deterministic",
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T12:00:00Z",
+        "cycle_time_utc": "2026-05-21T12:00:00Z",
+        "model_id": model_id,
+        "status": "blocked",
+        "reason": reason,
+        "state_evidence": {
+            "decision": decision,
+            "reason": reason,
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+            "native_shud_resubmitted": False,
+            "replacement_submitted": False,
+            "durable_output_reused": False,
+            "retry_policy": retry_policy,
+            "strict_warm_start": {"detail": _bounded_incident_verbose_text(f"{model_id}-strict-warm-start")},
+        },
+    }
+
+
+def test_bounded_candidate_summary_retains_each_arms_own_retry_policy_keys() -> None:
+    """r1 c-05: the bounded summary keeps whichever of the four keys the PRODUCING arm wrote.
+
+    The two fail-stops emit disjoint retry-policy shapes
+    (``_strict_warm_start_terminal_blocked_evidence`` vs
+    ``_journal_predecessor_identity_blocked_evidence``), and the retention guard
+    is ``value is not None``.  So a real summarized budget row can never carry
+    ``retry_occurrences`` and a real summarized breaker row can never carry
+    ``retry_attempt`` / ``retry_limit`` — absence there means "this arm never
+    wrote it", not "the scheduler lost the number".  Asserted as ABSENCE, not as
+    a null-tolerated value, because a null would be a different claim.
+    """
+
+    # Budget arm, real producer literals.  ``retry_limit: 0`` is producible --
+    # the budget blocks as soon as ``attempt >= retry_limit`` -- so this row also
+    # pins that ``0`` survives the ``is not None`` guard on the real shape.
+    budget_row = _blocked_row_for(
+        "model_budget",
+        decision="blocked_strict_warm_start_init_state_mismatch",
+        reason="strict_warm_start_retry_budget_exhausted",
+        retry_policy={
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+            "attempt": 0,
+            "retry_limit": 0,
+            "operator_reentry_command": "confirm-operator-reentry",
+            "recovery_runbook": "node22-control-plane-manual-recovery",
+        },
+    )
+    # Breaker arm, real producer literals: ``occurrences`` (+ its threshold),
+    # never ``attempt`` / ``retry_limit``.
+    breaker_row = _blocked_row_for(
+        "model_breaker",
+        decision="blocked_journal_predecessor_identity_quarantine",
+        reason="journal_predecessor_identity_quarantine_breaker_engaged",
+        retry_policy={
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+            "occurrences": 1,
+            "occurrence_threshold": 1,
+            "operator_reentry_command": "confirm-operator-reentry",
+            "recovery_runbook": "node22-control-plane-manual-recovery",
+        },
+    )
+
+    budget_summary = scheduler_evidence_payload_module._bounded_candidate_summary(budget_row)
+    assert budget_summary["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert budget_summary["retry_attempt"] == 0
+    assert budget_summary["retry_limit"] == 0
+    assert budget_summary["manual_retry_required"] is True
+    assert "retry_occurrences" not in budget_summary
+
+    breaker_summary = scheduler_evidence_payload_module._bounded_candidate_summary(breaker_row)
+    assert breaker_summary["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert breaker_summary["retry_occurrences"] == 1
+    assert breaker_summary["manual_retry_required"] is True
+    assert "retry_attempt" not in breaker_summary
+    assert "retry_limit" not in breaker_summary
+
+    # Idempotent: the already-summarized branch re-reads its own output through
+    # the same guard, so the absent key must not reappear as a null.
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(budget_summary) == budget_summary
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(breaker_summary) == breaker_summary
+
+    # End-to-end through the real receipt compaction path.
+    payload = _incident_scheduler_evidence_payload("scheduler_2026052112_per_arm_retry_policy")
+    payload["blocked_candidates"] = [budget_row, breaker_row]
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+
+    assert bounded["limit"]["candidate_lists"] == "summarized"
+    bounded_by_model = {row.get("model_id"): row for row in bounded["blocked_candidates"]}
+    assert bounded_by_model["model_budget"]["retry_attempt"] == 0
+    assert bounded_by_model["model_budget"]["retry_limit"] == 0
+    assert "retry_occurrences" not in bounded_by_model["model_budget"]
+    assert bounded_by_model["model_breaker"]["retry_occurrences"] == 1
+    assert "retry_attempt" not in bounded_by_model["model_breaker"]
+    assert "retry_limit" not in bounded_by_model["model_breaker"]
+    assert "state_evidence" not in bounded_by_model["model_budget"]
+    assert "state_evidence" not in bounded_by_model["model_breaker"]
 
 
 def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() -> None:
@@ -57248,9 +57361,21 @@ def _record_budget_attempt(root: Path, row: Mapping[str, Any]) -> None:
 
 
 def _seed_budget_journal(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, jobs: list[dict[str, Any]]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    jobs: list[dict[str, Any]],
+    *,
+    repair_missing_forcing: bool = False,
 ) -> tuple[Path, Any]:
-    """Strict db-free lane over a real journal: selected state lead 6h, recorded token lead 12h (CONFLICT)."""
+    """Strict db-free lane over a real journal: selected state lead 6h, recorded token lead 12h (CONFLICT).
+
+    ``repair_missing_forcing`` switches on the operator's one-shot exact-cycle
+    forcing repair for THIS cycle and removes the model's own forcing package,
+    so the confirmed re-entry's per-model forcing witness fails and the repair
+    policy reclassifies the blocker (r1 c-03).  It adds the three preconditions
+    that policy verifies -- ``require_direct_grid`` + a direct-grid resource
+    profile + a ready NFS raw manifest -- and changes nothing when off.
+    """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from tests.test_scheduler_backfill import (
@@ -57270,7 +57395,9 @@ def _seed_budget_journal(
         paths,
         cycle_time=_dt(_BUDGET_CYCLE),
         package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
-        generated_at=_dt("2026-05-21T06:00:00Z"),
+        # The repair lane runs AT the target cycle (its config forbids lookback),
+        # so the index may not be generated in that pass's future.
+        generated_at=_dt(_BUDGET_CYCLE if repair_missing_forcing else "2026-05-21T06:00:00Z"),
         entries=[
             _db_free_state_index_entry(
                 roots, valid_time=_dt(_BUDGET_CYCLE), producer_cycle_time=_dt("2026-05-20T18:00:00Z")
@@ -57282,13 +57409,23 @@ def _seed_budget_journal(
     )
     package_dir = "forcing/gfs/2026052100/basin_a_v1/model_a"
     store = LocalObjectStore(Path(os.environ["OBJECT_STORE_ROOT"]), "s3://nhms")
-    store.write_bytes_atomic(f"{package_dir}/forcing_package.json", b'{"schema_version": "nhms.forcing_package.v1"}')
-    store.write_bytes_atomic(
-        f"{package_dir}/forcing_version_record.json",
-        json.dumps(
-            {"forcing_package_uri": f"s3://nhms/{package_dir}/", "forcing_version_id": "forc_gfs_2026052100_model_a"}
-        ).encode("utf-8"),
-    )
+    if not repair_missing_forcing:
+        store.write_bytes_atomic(
+            f"{package_dir}/forcing_package.json", b'{"schema_version": "nhms.forcing_package.v1"}'
+        )
+        store.write_bytes_atomic(
+            f"{package_dir}/forcing_version_record.json",
+            json.dumps(
+                {
+                    "forcing_package_uri": f"s3://nhms/{package_dir}/",
+                    "forcing_version_id": "forc_gfs_2026052100_model_a",
+                }
+            ).encode("utf-8"),
+        )
+    if repair_missing_forcing:
+        _write_db_free_raw_manifest_fixture(roots, cycle_time=_dt(_BUDGET_CYCLE))
+        monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+        monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     latest_path = _seed_completed_journal_cycle(
         root,
         cycle_time=_BUDGET_CYCLE,
@@ -57308,30 +57445,47 @@ def _seed_budget_journal(
     for job in jobs:
         _record_budget_attempt(root, job)
 
+    resource_profile: dict[str, Any] = {
+        "runnable": True,
+        "memory_gb": 8,
+        "display_capabilities": {"tiles": True},
+        "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+    }
+    repair_config: dict[str, Any] = {}
+    if repair_missing_forcing:
+        resource_profile = {
+            **resource_profile,
+            **_missing_forcing_repair_direct_grid_profile(),
+            "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
+        }
+        # ``repair_missing_forcing`` is validated as a one-shot exact-cycle
+        # invocation (``scheduler_config/config.py:497``): backfill off, one
+        # cycle, no lookback.  So the repair lane runs AT the target cycle.
+        repair_config = {
+            "require_direct_grid": True,
+            "repair_missing_forcing": True,
+            "repair_missing_forcing_cycle_time": _dt(_BUDGET_CYCLE),
+            "nfs_raw_manifest_root": roots["object_store_root"],
+            "now": _dt(_BUDGET_CYCLE),
+            "backfill_enabled": False,
+            "lookback_hours": 0,
+            "cycle_lag_hours": 0,
+        }
+
     def _scheduler(repository: Any | None = None) -> ProductionScheduler:
         return ProductionScheduler(
             _config(
                 tmp_path,
-                now=_dt("2026-05-21T06:00:00Z"),
-                backfill_enabled=True,
-                max_cycles_per_source=1,
-                lookback_hours=12,
-                retry_limit=_BUDGET_RETRY_LIMIT,
+                **{
+                    "now": _dt("2026-05-21T06:00:00Z"),
+                    "backfill_enabled": True,
+                    "max_cycles_per_source": 1,
+                    "lookback_hours": 12,
+                    "retry_limit": _BUDGET_RETRY_LIMIT,
+                    **repair_config,
+                },
             ),
-            registry=FakeRegistry(
-                [
-                    _model(
-                        "model_a",
-                        "basin_a",
-                        resource_profile={
-                            "runnable": True,
-                            "memory_gb": 8,
-                            "display_capabilities": {"tiles": True},
-                            "package_checksum": _DB_FREE_PACKAGE_CHECKSUM,
-                        },
-                    )
-                ]
-            ),
+            registry=FakeRegistry([_model("model_a", "basin_a", resource_profile=resource_profile)]),
             adapters={"gfs": _gfs_adapter([_BUDGET_CYCLE])},
             active_repository=repository if repository is not None else FileOrchestrationJournalRepository(root),
             orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
@@ -57340,11 +57494,13 @@ def _seed_budget_journal(
     return root, _scheduler
 
 
-def _budget_pass(scheduler: ProductionScheduler) -> tuple[list[str], list[Any], list[Any], list[dict[str, Any]]]:
+def _budget_pass(
+    scheduler: ProductionScheduler, *, now: str = "2026-05-21T06:00:00Z"
+) -> tuple[list[str], list[Any], list[Any], list[dict[str, Any]]]:
     """One backfill discovery + candidate construction: (selected cycles, candidates, blocked, skipped)."""
 
     models = scheduler._discover_models()[0]
-    cycles, _evidence = scheduler._discover_cycles(_dt("2026-05-21T06:00:00Z"), models=models)
+    cycles, _evidence = scheduler._discover_cycles(_dt(now), models=models)
     candidates, blocked, skipped, _dup, _sync = scheduler._build_candidates(models=models, cycles=cycles)
     return [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles], candidates, blocked, skipped
 
@@ -57673,6 +57829,80 @@ def test_budget_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even
         assert _budget_forecast_masters(root) == masters
 
 
+def test_an_explicit_missing_forcing_repair_consumes_the_budget_confirmation_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """r1 c-03: a confirmed re-entry reclassified into the repair retry still moves its pin.
+
+    Both confirmed legs restart at ``forecast`` and are therefore consulted by
+    the per-model forcing witness.  With the model's own forcing package gone
+    the witness hands back the stable missing-forcing blocker, and -- only on
+    the confirmed path, because ``strict_warm_start_retry_budget_exhausted`` is
+    not a missing-forcing blocker reason -- the operator's exact-cycle repair
+    policy reclassifies it into ``retry_repair_missing_forcing``, which IS
+    whitelisted for terminal resubmission and really submits.  The stamp must
+    follow the surviving confirmation block, not the decision literal, or the
+    same signature authorizes a second re-entry.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(
+        monkeypatch, tmp_path, _spent_full_chain_budget_rows(), repair_missing_forcing=True
+    )
+
+    # Unconfirmed: the repair flag cannot reach this candidate at all -- the
+    # budget verdict is not one of the two missing-forcing blocker reasons.
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler(), now=_BUDGET_CYCLE)
+    assert candidates == []
+    (entry,) = blocked
+    assert entry.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert "missing_forcing_repair" not in entry.state_evidence
+
+    live_pin = _budget_live_reentry_count(root, capsys)
+    assert live_pin == 0
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert code == 0, receipt
+
+    # (a) The confirmed pass submits -- as the repair retry, carrying the block.
+    confirmed = scheduler()
+    _selected, candidates, blocked, _skipped = _budget_pass(confirmed, now=_BUDGET_CYCLE)
+    assert blocked == []
+    (retry,) = candidates
+    assert retry.state_evidence["decision"] == "retry_repair_missing_forcing"
+    assert retry.state_evidence["missing_forcing_repair"]["status"] == "authorized"
+    assert retry.state_evidence["operator_reentry_confirmation"] == {
+        "request_id": receipt["request_id"],
+        "operator": "ops-oncall",
+        "reason": "state index repaired; one more strict rerun",
+        "pin": live_pin,
+        "decision": "blocked_strict_warm_start_init_state_mismatch",
+    }
+    seeded_masters = _budget_forecast_masters(root)
+    result = _budget_real_reentry(tmp_path, monkeypatch, root, confirmed, candidates)
+    assert result.status == "succeeded"
+    (new_master,) = set(_budget_forecast_masters(root)) - set(seeded_masters)
+    reopened = file_orchestration_journal_module.FileOrchestrationJournalRepository(root)
+    assert reopened.get_pipeline_job(new_master)["strict_warm_start_budget_reentry_model_ids"] == ["model_a"]
+
+    # (b) The live pin moved, and the consumed pin is refused on the write side.
+    assert _budget_live_reentry_count(root, capsys) == live_pin + 1
+    code, stale, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert (code, stale["reason"]) == (2, "pin_mismatch")
+
+    # (c) Every later pass blocks again with nothing new reserved.
+    masters = _budget_forecast_masters(root)
+    for later_pass in range(3):
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler(), now=_BUDGET_CYCLE)
+        assert candidates == [], later_pass
+        (after,) = blocked
+        assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+        assert "operator_reentry_confirmation" not in after.state_evidence
+        assert _budget_forecast_masters(root) == masters
+
+
 class _NoBudgetReentryCountAccessorRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):
     """Confirmations readable, but no live budget pin to compare them with."""
 
@@ -57713,3 +57943,4 @@ def test_budget_reentry_is_inert_without_a_readable_live_reentry_count(
 
     assert candidates == []
     assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]
+

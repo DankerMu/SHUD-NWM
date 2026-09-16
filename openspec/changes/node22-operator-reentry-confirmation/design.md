@@ -71,10 +71,10 @@
   - `LINEAGE_SCOPED_OUT_REASON`：**仅当** successor 的 cycle_time 早于记录中的 `cutover_valid_time`，此时 discovery 已把该 cycle 移出评分（`scheduler_lineage.py`）；successor cycle_time 不早于 cutover 时（lead 大于 cadence 的几何），successor 会永久 blocked，因此打 `True`（F9）
 - 这样 `predecessor_raw_manifest_not_ready`、`predecessor_model_not_available`、`predecessor_emission_cap_reached`、`predecessor_candidate_construction_failed`（`:517-525`）、`predecessor_gate_failed`（`:544-552`），以及今后新增的任何 skip 臂，默认都为 `True`，方向是 fail toward escalation。
 - 本 successor 的记录全部是 emitted 或 allowlist 内的瞬时 skip 时为 `False`；没有任何记录的 successor 不写该键。
-- **截断定位**：迭代改为 `enumerate(pending)`，cap `break` 时把 `pending[i:]` 的 successor id 去重排序后，写入截断记录的 `successor_candidate_ids`（列表）。`attach_emission_summary_to_blocked` 对截断记录按该列表逐个归组，归组记录与既有截断记录相同。
+- **截断定位**：迭代改为 `enumerate(pending)`，cap `break` 时把 `pending[i:]` 的 successor id 去重排序后，写入截断记录的 `successor_candidate_ids`（列表）。`attach_emission_summary_to_blocked` 对截断记录按该列表逐个归组，**归组时做 per-successor 投影**：挂到某个 successor 的 `state_evidence` 上的那份记录只带标量 `successor_candidate_id`（即它自己），不带整张 `successor_candidate_ids`；完整列表只留在顶层 emission 记录上。
   - `status/reason/total_attempted/cap` 不变；
   - pass totals 语义不变，截断记录仍计 1 次；
-  - 列表长度以 pending 为上界。pending 本身已受 blocked 列表约束，不另设上限。
+  - 列表长度以 pending 为上界。pending 本身受的是 pass 候选上限 `MAX_CANDIDATES = 10000`（`scheduler_candidates.py:64`、`:271`），**不是** `MAX_PREDECESSOR_EMISSIONS = 256`；若把共享的那一份整表记录按引用扇出到每个被截断的 successor 下，序列化时每个 successor 各展开一份，evidence 字节数是 O(N²)（≈ N²×80 B，N≈250 就越过 `MAX_EVIDENCE_BYTES = 5_000_000`，N=744 时约 44 MB），pass 会退化成 size fallback——恰好是本 change 的 runbook 所警告的盲区。per-successor 投影把它压回线性，并由一条 pending 数量高于 cap 的规模测试钉住。
 - **白名单**：追加 `predecessor_emission_blocked ← (predecessor_emission_blocked,)`，`False` 值保留。
 - **gate 侧不动**：`operator_action_required` 的计算与语义不变，两轴正交，并有测试钉住「`operator_action_required=False` 且 `predecessor_emission_blocked=True`」这一组合。
 - **runbook**：`scheduler-dbfree-typed-reasons.md` 处置第 1 步改为两个布尔一起读；反例段改为读 `predecessor_emission_blocked`，不再依赖 summarize 后消失的 `predecessor_backfill.summary`。
@@ -156,6 +156,13 @@
   - 写侧与读侧、dry-run receipt 的 `live.*`、runbook 报告同一个量。
   - 不改 `_next_retry_attempt_for_stage`；普通 strict retry 跨前缀 attempt 泄漏属既有缺陷，单独立单。
   - 预算臂的 blocked 判定仍由 stage-scoped attempt 驱动，本修订只改确认物的 pin。
+
+- **PR-A round 1 修订（c-03，one-shot-authorization-leak）**：Round 3 的共同不变量在**写侧**又破了一次，这次是 decision 字面量被改写。
+  - 机制：两条确认 retry 都要过 `_strict_warm_start_forcing_witness_decision`；缺 per-model forcing 见证时返回 missing-forcing blocked（确认块经 `**base_evidence` 存活，未被丢弃）。若 operator 同时开了 `--repair-missing-forcing` 且 cycle 精确匹配，`_apply_explicit_missing_forcing_repair_policy` 把 `decision` 改写成 `retry_repair_missing_forcing`（`scheduler_candidates.py:1808`）——它在 forced-resubmit 白名单内，会**真提交**；但它既不等于 `accepted_submit_identity.py:1219` 的 quarantine 字面量，也不等于 `:1243` 的预算字面量，于是不戳 provenance，计数不动，确认物下一 pass 继续匹配。一次签名放行了修复提交 + 后续重入。
+  - 确认物是该泄漏的**必要条件**：没有它，决策是 `blocked/strict_warm_start_retry_budget_exhausted`，不在 `_MISSING_FORCING_BLOCKER_REASONS` 内，修复路径根本够不到该候选。
+  - 修法取 A（投影键在确认块上），不取 B（拒绝改写）：B 只躲开一个消费事件，A 才让每个消费事件都推动 pin，并顺带收窄 `_upgrade_retry_for_strict_warm_start_manifest` 那一类改写的同类风险。既有 decision 字面量触发保留（普通 quarantine rerun 仍须计数）。
+  - 同时修文档：`current-production-ops.md:373` 把 strict 车道的 missing-forcing blocked 直接导进 `--repair-missing-forcing`，而 `node22-control-plane-manual-recovery.md:186-188` 承诺「不提交」——照文档操作就会踩中。
+  - **Phase 6.2 审计（同批完成）**：枚举确认匹配之后所有改写 retry `decision` 的点——`_upgrade_retry_for_strict_warm_start_manifest`（`:2313-2320`）、`_apply_explicit_missing_forcing_repair_policy`（`:1805-1845`）、forcing 见证 blocked 构造（`:2244`）——逐个核实 `operator_reentry_confirmation` 键路存活。
 
 - **evidence 措辞**：两条 blocked evidence 的 `retry_policy` 追加 `operator_reentry_command: "confirm-operator-reentry"` 与 `recovery_runbook: "node22-control-plane-manual-recovery"`，使 `manual_retry_required: true` 指向真实通道。
 

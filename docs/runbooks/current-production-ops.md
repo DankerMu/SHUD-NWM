@@ -373,6 +373,15 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 | #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`） |
 | #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | **只用**下面的回补脚本。8.5 的单 cycle 修复在这条车道上根本不会被评估：修复策略的调用点要么在 quarantine 之前、要么只在 strict warm-start 车道或 resync 分支上，所以 `--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（读码结论，未实跑；见 design D1） |
 
+> **`--repair-missing-forcing` 与 operator 重入确认物的交互（r1 c-03）**：这个候选如果是靠
+> `confirm-operator-reentry` 的确认物才走到 missing-forcing `blocked` 的（strict warm-start 预算
+> 或 §8.7 断路器两类 fail-stop），单 cycle 修复会把它改判成 `retry_repair_missing_forcing`
+> 并**真的提交**，改判后的重试带着原来的 `operator_reentry_confirmation` 块，
+> provenance 戳在 accepted-submit 时写入、对应计数 +1——**这一次修复重试就消费掉了那张确认物**
+> （恰好一次，下一 pass 回到 blocked）。也就是说这条路径既回补了 forcing，也用掉了那次人工签字；
+> 不要以为确认物还留着可以再重入一次。判据与撤销口径见
+> [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) 的「已知限制」。
+
 strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`，所以这个键只是提示，不是车道判据。
 分不清时以 8.5 的 `--plan` 预览为准：`state_evidence.missing_forcing_repair.status = authorized` 的候选可以走
 单 cycle 修复；其余候选不走这条通道，改用回补脚本排空。

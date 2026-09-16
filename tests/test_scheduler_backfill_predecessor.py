@@ -1920,6 +1920,66 @@ def test_emission_cap_truncation_names_and_flags_the_cut_off_successor(monkeypat
     assert emitted_evidence["predecessor_backfill"]["summary"]["pass_totals"] == {"emitted": 1, "truncated": 1}
     cut_off_summary = _successor_evidence(blocked, "cand_gfs_2026070612_model_b")["predecessor_backfill"]["summary"]
     assert cut_off_summary["totals"] == {"truncated": 1}
+    # r1 c-02: the record ATTACHED to a successor names only that successor;
+    # the full cut-off list lives on the top-level emission record alone.
+    assert cut_off_summary["records"] == [
+        {
+            "status": "truncated",
+            "reason": "predecessor_emission_cap_reached",
+            "total_attempted": 1,
+            "cap": 1,
+            "successor_candidate_id": "cand_gfs_2026070612_model_b",
+        }
+    ]
+    # The non-truncated single-successor summary shape is otherwise unchanged:
+    # an emitted record keeps its own scalar id and grows no list.
+    (emitted_record,) = emitted_evidence["predecessor_backfill"]["summary"]["records"]
+    assert emitted_record["status"] == "emitted"
+    assert emitted_record["successor_candidate_id"] == "cand_gfs_2026070612_model_a"
+    assert "successor_candidate_ids" not in emitted_record
+
+
+def test_emission_cap_truncation_evidence_stays_linear_in_the_cut_off_successors(monkeypatch: Any) -> None:
+    """r1 c-02: the truncation record must not fan its whole id list out per successor.
+
+    ``pending`` is bounded by the pass candidate cap (10000), not by
+    ``MAX_PREDECESSOR_EMISSIONS``, so a shared record carrying the full
+    ``successor_candidate_ids`` list serializes once per truncated successor —
+    O(N**2) evidence bytes, which crosses ``MAX_EVIDENCE_BYTES`` at a few
+    hundred successors and degrades the whole pass into the size fallback.
+    """
+
+    _wire_manifest_ready(monkeypatch)
+    successor_count = 600
+    blocked = [
+        _pending_successor(candidate_id=f"cand_gfs_2026070612_model_{index:04d}", model_id=f"model_{index:04d}")
+        for index in range(successor_count)
+    ]
+    models = [_FakeModel(f"model_{index:04d}") for index in range(successor_count)]
+
+    evidence = _emit_and_attach(blocked, models=models)
+
+    (truncation,) = [record for record in evidence if record["status"] == "truncated"]
+    cut_off_ids = truncation["successor_candidate_ids"]
+    assert len(cut_off_ids) == successor_count - _bf.MAX_PREDECESSOR_EMISSIONS
+    attached = [
+        _successor_evidence(blocked, candidate_id)["predecessor_backfill"]["summary"] for candidate_id in cut_off_ids
+    ]
+    per_successor_bytes = [len(json.dumps(summary, sort_keys=True, default=str)) for summary in attached]
+    # Every attached record names exactly one successor -- its own.
+    for candidate_id, summary in zip(cut_off_ids, attached, strict=True):
+        assert [record["successor_candidate_id"] for record in summary["records"]] == [candidate_id]
+        assert all("successor_candidate_ids" not in record for record in summary["records"])
+    # Real serialized size, per successor: bounded by a constant, not by N.
+    # At HEAD each attached record carried all 344 ids (~12 KB); the projection
+    # leaves a single scalar id behind.
+    assert max(per_successor_bytes) < 1024
+    # ... and therefore linear in total.  The quadratic shape would be
+    # ~344 * 12 KB ~= 4.2 MB, i.e. within a whisker of MAX_EVIDENCE_BYTES.
+    assert sum(per_successor_bytes) < 300_000
+    # Pass totals are unchanged: the truncation still counts exactly once.
+    assert all(summary["pass_totals"]["truncated"] == 1 for summary in attached)
+    assert all(summary["totals"] == {"truncated": 1} for summary in attached)
 
 
 @pytest.mark.parametrize(

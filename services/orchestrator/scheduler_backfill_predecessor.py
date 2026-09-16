@@ -724,13 +724,23 @@ def attach_emission_summary_to_blocked(
     successor.
 
     A truncation record is grouped under every successor it names in
-    ``successor_candidate_ids`` (#1543).  The attach is best-effort:
-    frozen-dataclass update failures fall back to direct setattr;
-    unrecoverable failures log and drop the marker.
+    ``successor_candidate_ids`` (#1543), PROJECTED per successor: the copy
+    attached to a given successor carries only the scalar
+    ``successor_candidate_id`` of that successor, never the whole list (r1
+    c-02).  ``pending`` is bounded by the pass candidate cap (10000), not by
+    ``MAX_PREDECESSOR_EMISSIONS``, so sharing one record across N truncated
+    successors serializes the full list N times — O(N**2) evidence bytes, which
+    crosses ``MAX_EVIDENCE_BYTES`` at a few hundred successors and degrades the
+    pass into the size fallback.  The complete list stays on the top-level
+    emission record, which is serialized once.
+
+    The attach is best-effort: frozen-dataclass update failures fall back to
+    direct setattr; unrecoverable failures log and drop the marker.
     """
     if not emission_evidence:
         return
     # Compact totals across all records for a discoverable top-level count.
+    # Computed over the TOP-LEVEL list, so a truncation still counts once.
     totals: dict[str, int] = {}
     for record in emission_evidence:
         status = str(record.get("status") or "unknown")
@@ -741,8 +751,16 @@ def attach_emission_summary_to_blocked(
     for record in emission_evidence:
         successor_ids = [record.get("successor_candidate_id"), *(record.get("successor_candidate_ids") or ())]
         for successor_id in dict.fromkeys(str(item or "") for item in successor_ids):
-            if successor_id:
-                by_successor.setdefault(successor_id, []).append(record)
+            if not successor_id:
+                continue
+            if record.get("successor_candidate_ids") is None:
+                projected = record
+            else:
+                projected = {
+                    key: value for key, value in record.items() if key != "successor_candidate_ids"
+                }
+                projected["successor_candidate_id"] = successor_id
+            by_successor.setdefault(successor_id, []).append(projected)
     for successor_id, records in by_successor.items():
         _attach_summary_to_single_blocked(
             blocked, successor_id, records, totals

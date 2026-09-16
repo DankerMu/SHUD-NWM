@@ -71,19 +71,52 @@ jq -c '.source_cycles[]?
 
 - 只读 evidence，不读 journal——决策只在 evidence 里；本节不连 DB、不写任何字节。
 - 按 decision 字面识别，不看 `manual_retry_required` 布尔。bounded 摘要（
-  `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision` 与
-  `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required`，
-  所以摘要 pass 里的条目照样列出（上面的 jq 两条取值路径都覆盖）。
+  `limit.candidate_lists=summarized`）丢了 `state_evidence`，但保留 `decision`，以及
+  `retry_attempt` / `retry_limit` / `retry_occurrences` / `manual_retry_required` 里
+  **产出臂实际写过的那几个**（保留判据是 `value is not None`，所以 `0` 和 `false` 也留得住），
+  摘要 pass 里的条目照样列出（上面的 jq 两条取值路径都覆盖）。四个键不是每臂都有：
+  - 预算臂（`blocked_strict_warm_start_init_state_mismatch`）写 `attempt` / `retry_limit` /
+    `manual_retry_required`，**从不写** `occurrences`；
+  - 断路器臂（`blocked_journal_predecessor_identity_quarantine`）写 `occurrences` /
+    `manual_retry_required`，**从不写** `attempt` / `retry_limit`。
+
+  jq 把缺的那个渲染成 `null`。这里的 `null` 意思是**这一臂从来没写过这个字段**，不是
+  「scheduler 把数字弄丢了」——不要据此判断摘要有损、更不要据此去翻非摘要 pass 找那个数。
 - breaker 释放了执行槽的 backfill cycle 不构造候选，它的模型从上面第 2 条命令的 not-selected
   `source_cycles` 条目读出，没有 `candidate_id`。
-- **临时口径的盲区（只影响"没有待办"这个结论）**：最新 pass 若是 size fallback 产物
-  （`status=resource_limit_blocked` 且 `limit.candidate_lists` 为 `summarized`/`dropped`），
-  写入器已清空 `source_cycles`——breaker 释放的 cycle 看不见，`dropped` 还丢掉候选列表；
-  `lock_contended`、`lease_lost` 等 pass 也可能什么都没评估或清空了列表。node-22 的 pass 文件
-  接近 5 MB 上限，这种 pass 现实中会出现。**空输出 ≠ 没有待办**：确认 `status` 与 `limit` 后再下
-  结论，必要时换上一个未超限的正常 pass（把上面选 `PASS` 的管道末尾 `head -1` 换成
-  `sed -n 2p`，`*.pre_execution.json` 的过滤不能省）。#1186 的 CLI 会把这类不可判定的 pass
-  显式报出来并用独立退出码区分。
+- **可判定性是闭合白名单，正向判据**（过渡期没有 CLI 替你判，规则得手工执行）：只有终态
+  `status` 落在下面这 24 个之一的 pass，才算「候选构造真的跑过」，才有资格让空输出读作
+  「没有待办」。这就是被删掉的 #1186 模块里那张 `EVALUATING_PASS_STATUSES` 闭合表，原样抄在这里：
+
+  ```
+  planned                     blocked                      unavailable
+  submitted                   submitted_partial            slurm_status_synced
+  slurm_status_sync_failed    slurm_cancelled              slurm_partially_cancelled
+  slurm_cancellation_blocked  restart_reconciled           restart_reconcile_unknown
+  submission_failed           skipped_duplicate_submission reconciling
+  submit_result_ambiguous     reconcile_unverified         cancelled
+  complete                    succeeded                    parsed_partial
+  forcing_ready_partial       forcing_ready                already_done
+  ```
+
+  **凡是不在这张表里的 status，一律按不可判定处理并升级上报**——不是"大概没事"。已知的
+  非评估 status 有 `lock_contended`、`preflight_blocked`、`lease_lost`、`resource_limit_blocked`
+  （`preflight_blocked` 在候选构造前后都会写，光看 status 分不出是哪一种，所以也不可判定）；
+  **未来新增的、本表未列出的任何 status 同样落在升级一侧**。
+- **`limit.candidate_lists == "dropped"` 让被检查的那个 pass 不可判定——不限于最新 pass**，
+  窗口里任何一个被翻到的 pass 都一样：丢了候选列表，它既不能列出待办，也不能证明没有待办。
+  size fallback 产物（`status=resource_limit_blocked` 且 `limit.candidate_lists` 为
+  `summarized`/`dropped`）还被写入器清空了 `source_cycles`——breaker 释放的 cycle 看不见。
+  node-22 的 pass 文件接近 5 MB 上限，这种 pass 现实中会出现。
+- **空输出 ≠ 没有待办**：`status` 在上面的白名单里、且 `limit` 没有丢列表，两条都满足，才能下
+  「没有待办」的结论。
+- **只能向前等，不能往回翻**：最新 pass 不可判定时，**等下一个未超限的正常 pass**（隔一会儿
+  重跑第一步选 `PASS` 的 `ls -t ... | head -1`），不要退回上一个 pass。规则说正面一点：
+  **一个更旧的 pass 只能用来「找活儿」，永远不能用来断定「没有待办」**——断路器可能在那个旧
+  pass 写完之后才释放了某个 cycle，旧 pass 里的空列表对「现在」没有证明力。真要翻旧 pass 找
+  线索时（`sed -n 2p` 取次新，`*.pre_execution.json` 的过滤不能省），找到的目标仍要按第二步
+  的规则用**最新** pass 重新核对一遍。#1186 的 CLI 落地后会把这类不可判定的 pass 显式报出来
+  并用独立退出码区分。
 
 ## 第二步：按 decision 处置
 
@@ -183,9 +216,20 @@ run 在飞或不存在时拒绝）：
 
 - **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。
   需要再次重入时，重新跑 dry run，用新的 live 计数再确认一次。
-- **forcing 见证闸（#1844）**：确认物匹配但该模型没有自己的 forcing 时，候选落到
-  forcing 缺失的具名 blocked，不提交；断路器几何下该 cycle 会持续占用执行槽。确认物
+- **forcing 见证闸（#1844）**：确认物匹配但该模型没有自己的 forcing 时，**默认**候选落到
+  forcing 缺失的具名 blocked（reason `forcing_version_row_absent` /
+  `missing_forcing_package_uri`），不提交；断路器几何下该 cycle 会持续占用执行槽。确认物
   **没有撤销手段**——先回补 forcing。
+- **同一 cycle 开着 `--repair-missing-forcing` 时不是上面那样：会提交，并且消费掉确认物**
+  （r1 c-03）。运维授权的整点修复策略只改判这两个具名 missing-forcing blocked，而确认物正是
+  走到这个 blocked 的**必要条件**（没有确认物时决策是
+  `blocked_strict_warm_start_init_state_mismatch`，不在修复策略的受理 reason 里，根本到不了）。
+  改判后的决策是 `retry_repair_missing_forcing`——该字面量在 forced-resubmit 白名单里，
+  **真的提交**；重试仍带着原来的 `operator_reentry_confirmation` 块，provenance 戳照常在
+  accepted-submit（reservation）时写入 cohort master，对应计数当场 +1，**确认物被消费掉，
+  恰好一次**，下一 pass 回到 blocked。所以：要么先回补 forcing 再确认，要么就接受「这一次修复
+  重试 = 那一次重入」。`current-production-ops.md` 里 strict 车道走
+  `--repair-missing-forcing` 的处置流程同理。
 - **候选仍显示 blocked ≠ 确认物未生效**：先看 dry-run receipt 的 live 计数是否已 +1（file
   journal 的 `hydro_run` 在同一 `run_id` 重跑时不更新，#2397，即使 rerun 拿到正确 lineage
   候选也仍显示 breaker-blocked）；已 +1 就**不要重复确认**——除非该 rerun 已到失败终态且
