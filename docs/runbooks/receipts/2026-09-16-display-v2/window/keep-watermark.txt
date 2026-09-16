@@ -1,0 +1,4 @@
+retention_days=14
+display_watermark=2026-09-14 12:00:00+00
+source=gfs oldest_mirrored_cycle=2026083112 api_oldest_listed=2026-09-04T12:00:00Z
+source=ifs oldest_mirrored_cycle=2026083112 api_oldest_listed=2026-09-04T12:00:00Z

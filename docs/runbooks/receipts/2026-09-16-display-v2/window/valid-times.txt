@@ -1,0 +1,2 @@
+source=gfs cycle=2026-09-14T00:00:00Z first_valid_time=2026-09-14T00:00:00Z valid_times_available=112
+source=ifs cycle=2026-09-14T12:00:00Z first_valid_time=2026-09-14T12:00:00Z valid_times_available=112

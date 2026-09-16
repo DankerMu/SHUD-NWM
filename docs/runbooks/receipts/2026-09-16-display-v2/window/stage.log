@@ -1,0 +1,159 @@
+[2026-09-16T08:15:07Z] OUT=/home/nwm/tmp/2017/window-20260916T081507Z BK=/home/nwm/nhms-display-v2-backup-2017-20260916T081507Z
+[2026-09-16T08:15:07Z] == 1 baseline + preconditions (nothing changed before step 3)
+before: head=f2476c8c29774d40b300d4a8a13657b5d6d05139 branch=master porcelain=0
+pull-diff: files=23 non-docs=0
+mirror_root=/home/ghdc/nwm/object-store
+source=gfs cycles=28 oldest=2026083112 newest=2026091400
+source=IFS cycles=29 oldest=2026083112 newest=2026091412
+png_cache_files=0
+pbf_cache_files=11423
+[2026-09-16T08:15:13Z] == 2 stop writer/prewarm timers (trap restores)
+nhms-node27-autopipe.timer active=inactive
+nhms-node27-download.timer active=inactive
+nhms-node27-frontier-alert.timer active=inactive
+[2026-09-16T08:15:13Z] == 3 backup display.env, then append exactly one line
+display.env lines 41 -> 45; NHMS_PRECIP_MIRROR_ROOT occurrences=1
+--- key-only diff (values never printed) ---
+41a42,45
+> 
+> # 2026-09-16 (#2017 7.2): node-27 view of the NFS canonical tree node-22 mirrors into.
+> # Same tree as NODE27_RAW_RETENTION_OBJECT_STORE_ROOT; services/precip/mirror.py appends canonical/<S>/<K>/.
+> NHMS_PRECIP_MIRROR_ROOT
+[2026-09-16T08:15:13Z] == 4 git pull --ff-only
+Updating f2476c8c..7ecc46be
+Fast-forward
+ docs/adr/0003-review-lens-rotation-keep.md         |  14 +
+ docs/review-loop-log.jsonl                         |   1 +
+ .../2026-09-13-issue-2162-unpin-node27-runtime.md  |   1 +
+ .../2026-09-16-issue-2162-restore-master-node27.md | 142 +++++++++
+ .../stage-b.sh                                     | 352 +++++++++++++++++++++
+ .../window/backup-list.txt                         |  33 ++
+ .../window/df-after.txt                            |   4 +
+ .../window/df-before.txt                           |   4 +
+ .../window/frontend-build.log                      |  22 ++
+ .../window/hold-after.txt                          |   5 +
+ .../window/hold-before.txt                         |   5 +
+ .../window/ledger.txt                              |   4 +
+ .../window/prewarm.json                            |   1 +
+ .../window/stage-b.log                             | 182 +++++++++++
+ .../window/tick-prewarm.json                       |   1 +
+ .../window/timers-after.txt                        |  15 +
+ .../window/timers-before.txt                       |  15 +
+ .../unitdiff-nhms-node27-raw-retention.service.txt |   6 +
+ ...-nhms-node27-timeseries-compression.service.txt |  12 +
+ ...diff-nhms-node27-timeseries-retention.timer.txt |   4 +
+ .../window/units-before.txt                        |  61 ++++
+ .../window/units-diff.txt                          |   0
+ .../window/units-final.txt                         |  61 ++++
+ 23 files changed, 945 insertions(+)
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27.md
+ create mode 100755 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/stage-b.sh
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/backup-list.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/df-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/df-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/frontend-build.log
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/hold-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/hold-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/ledger.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/prewarm.json
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/stage-b.log
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/tick-prewarm.json
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/timers-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/timers-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-raw-retention.service.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-timeseries-compression.service.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-timeseries-retention.timer.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-diff.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-final.txt
+after pull: head=7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 branch=master porcelain=0
+[2026-09-16T08:15:15Z] == 5 restart display + gate
+restart_seconds=3 MainPID=2901698
+"data":{"service_role":"display_readonly"
+"queue_depth_mode":"display_readonly_unavailable"
+"display_readonly":true}}
+latest cycles: gfs=2026-09-14T00:00:00Z ifs=2026-09-14T12:00:00Z
+gate precip index gfs 2026-09-14T00:00:00Z -> 200 1953 0.024548
+gate precip index ifs 2026-09-14T12:00:00Z -> 200 1769 0.018159
+[2026-09-16T08:15:18Z] GATE PASSED -- deployment stands from here; later failures are recorded, not rolled back
+[2026-09-16T08:15:18Z] == 6 cold measurements (timers still stopped)
+warm token: configured (value not printed)
+[2026-09-16T08:15:18Z] -- 6.1 /api/v1/layers cold p95 (n=12, refresh header, serial)
+layers cold n=12 p95=0.111862 median=0.075677 min=0.068169 max=0.111862
+layers precip entry present: 1
+[2026-09-16T08:15:19Z] -- 6.2 per-source valid-times clamp (first item vs cycle)
+source=gfs cycle=2026-09-14T00:00:00Z first_valid_time=2026-09-14T00:00:00Z valid_times_available=112
+source=ifs cycle=2026-09-14T12:00:00Z first_valid_time=2026-09-14T12:00:00Z valid_times_available=112
+[2026-09-16T08:15:19Z] -- 6.3 precip index + PNG cold/hot/304 (both sources, lead 0 and lead 24h)
+== gfs 2026-09-14T00:00:00Z
+index cold: 200 1953 0.001911
+index hot : 200 1953 0.033058
+valid_times_count=58 first=2026-09-14T00:00:00Z lead24=2026-09-14T21:00:00Z
+png cold 2026-09-14T00:00:00Z: 200 45742 0.241503 cache=miss
+png hot  2026-09-14T00:00:00Z: 200 45742 0.004517
+png 304  2026-09-14T00:00:00Z: 304 0 0.007634
+png cold 2026-09-14T21:00:00Z: 200 43908 0.209863 cache=miss
+png hot  2026-09-14T21:00:00Z: 200 43908 0.005173
+png 304  2026-09-14T21:00:00Z: 304 0 0.004483
+== ifs 2026-09-14T12:00:00Z
+index cold: 200 1769 0.017429
+index hot : 200 1769 0.002762
+valid_times_count=50 first=2026-09-14T12:00:00Z lead24=2026-09-15T09:00:00Z
+png cold 2026-09-14T12:00:00Z: 200 51686 0.339700 cache=miss
+png hot  2026-09-14T12:00:00Z: 200 51686 0.003867
+png 304  2026-09-14T12:00:00Z: 304 0 0.003464
+png cold 2026-09-15T09:00:00Z: 200 49726 0.168581 cache=miss
+png hot  2026-09-15T09:00:00Z: 200 49726 0.003692
+png 304  2026-09-15T09:00:00Z: 304 0 0.002937
+[2026-09-16T08:15:20Z] -- 6.4 river-network-national tile cold/hot per zoom (cache-busting is not possible; cold = first touch this window)
+z3/5/2 cold: 200 1787 0.016239 hot: 200 1787 0.019392
+z4/12/6 cold: 200 149416 0.010247 hot: 200 149416 0.015569
+z5/24/12 cold: 200 31622 0.010796 hot: 200 31622 0.012985
+z6/50/24 cold: 200 28274 0.014344 hot: 200 28274 0.012820
+z7/100/49 cold: 200 22307 0.012952 hot: 200 22307 0.013785
+[2026-09-16T08:15:20Z] -- 6.5 hydro-national discharge tile cold/hot (both sources, z4)
+gfs z4/12/6 2026-09-14T00:00:00Z cold: 200 1374311 0.038619 hot: 200 1374311 0.040485
+ifs z4/12/6 2026-09-14T12:00:00Z cold: 200 1374336 0.038350 hot: 200 1374336 0.037920
+[2026-09-16T08:15:21Z] -- 6.6 public entry (nginx) spot check
+/            200 646 0.109616
+/ops         200 646 0.107928
+/api/v1/layers 200 6073 0.099933
+precip index 200 1953 0.095989
+[2026-09-16T08:15:21Z] == 7 prewarm (cron invocation verbatim)
+AUTOPIPE_MVT_PREWARM_WORKERS=<unset, cron falls back to 8> nproc=40
+prewarm rc=0 wall_seconds=2
+prewarm: NHMS_DISPLAY_CACHE_WARM_TOKEN unset; discovery may see up to 45 s stale catalog
+{"base_url": "http://127.0.0.1:8080", "bytes": 50009174, "cache_hits": 175, "deadline_seconds": 540.0, "deadline_skipped": 0, "discharge_zooms": [3, 4], "elapsed_seconds": 1.891, "failed_count": 0, "failures": [], "lead_hours": 12, "per_source": {"gfs": {"cycle": "2026-09-14T00:00:00Z", "discharge_requests": 65, "error": null, "png_failed": 0, "png_not_mirrored": 0, "png_ok": 5, "png_out_of_contract": 0, "png_window_incomplete": 0, "valid_times_available": 56, "valid_times_warmed": 5}, "ifs": {"cycle": "2026-09-14T12:00:00Z", "discharge_requests": 65, "error": null, "png_failed": 0, "png_not_mirrored": 0, "png_ok": 5, "png_out_of_contract": 0, "png_window_incomplete": 0, "valid_times_available": 56, "valid_times_warmed": 5}}, "requests_total": 183, "river_tile_count": 43, "schema": "nhms.node27-mvt-prewarm.v2", "workers": 8, "zooms": [3, 4, 5]}
+
+[2026-09-16T08:15:23Z] == 8 capacity, cache inventory, keep watermark
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   76G   18G  81% /
+/dev/mapper/ubuntu--vg-home        1.7T  477G  1.1T  31% /home
+/dev/md0                            15T  2.0T   12T  15% /data/GHDC
+cache volume: /dev/mapper/ubuntu--vg-home  1.7T  477G  1.1T  31% /home
+png_cache_files=12
+pbf_cache_files=11423
+cache_du=1.9G precip_du=616K
+png_dirs_gfs=1 mirror_cycles_gfs=28
+png_dirs_IFS=1 mirror_cycles_IFS=29
+retention_days=14
+display_watermark=2026-09-14 12:00:00+00
+source=gfs oldest_mirrored_cycle=2026083112 api_oldest_listed=2026-09-04T12:00:00Z
+source=ifs oldest_mirrored_cycle=2026083112 api_oldest_listed=2026-09-04T12:00:00Z
+[2026-09-16T08:15:23Z] == 9 timers back, final unit capture
+[2026-09-16T08:15:23Z] timers restarted: nhms-node27-autopipe.timer nhms-node27-download.timer nhms-node27-frontier-alert.timer
+[2026-09-16T08:15:23Z] 9-unit effective configuration: IDENTICAL before == final
+failed units: 12
+● nhms-issue1987-window-415-20260914.service            loaded failed failed /home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python -B /home/nwm/.local/state/issue1987-window-launch-0c58327aa137.py
+● nhms-issue1987-window-415-typed-20260914.service      loaded failed failed /home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python -B /home/nwm/.local/state/issue1987-window-launch-7c637e53a095.py
+● nhms-issue2349-catchup-bb2db64c-scan-20260914.service loaded failed failed /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce --receipt-path /home/nwm/.local/state/issue2349-catchup-bb2db64c-scan-20260914/enforce.json
+● nhms-issue2349-catchup-f53181cd-20260914.service      loaded failed failed /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce --receipt-path /home/nwm/.local/state/issue2349-catchup-f53181cd-20260914/enforce.json
+● nhms-issue2374-gov-unstage.service                    loaded failed failed /usr/bin/sh -c exec /home/nwm/NWM-i8-target-415cbd1e/.venv/bin/python -B /home/nwm/.local/state/issue1987-tools/1b8b2b5b447d07091af98eb1e4ccbd1884e5b899/governance_stage.py unstage --state-dir /home/nwm/.local/state/issue1987-governance-f24c3fb37 --runtime-root /home/nwm/NWM-governance-reviewed-1a32ebb7 > /home/nwm/.local/state/issue2374-reforward-3cdcf500-inputs/gov-unstage.stdout 2> /home/nwm/.local/state/issue2374-reforward-3cdcf500-inputs/gov-unstage.stderr
+● nhms-issue2382-reparse-pilot.service                  loaded failed failed /home/nwm/NWM/.venv/bin/python -B /home/nwm/.local/state/issue1987-tools/7b5c959e9489298a97373802c1e99f8e92cc57ef/launch2382.py /home/nwm/.local/state/issue1987-tools/7b5c959e9489298a97373802c1e99f8e92cc57ef/node27_river_narrow_reparse_backfill.py run node27-ingest.env nhms_ingest_rw --receipt-dir /home/nwm/.local/state/issue2382-pilot-7b5c959e/receipts --go Danker --limit 20 --concurrency 4 --deadline 2026-09-15T05:37:11+00:00
+● nhms-pgdata-b7w4IpTj-prepare.service                  loaded failed failed Approved whole PGDATA migration preparation
+● nhms-pgdata-lLiCTk9w-prepare.service                  loaded failed failed Approved whole PGDATA migration preparation
+● nhms-reslice-data-d35580c6.service                    loaded failed failed /home/nwm/.local/bin/uv run --no-sync python -u /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6/operator/reslice_data.py --workspace /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6 --action resume-backup --enforce
+● nhms-reslice-parity-d35580c6.service                  loaded failed failed /home/nwm/.local/bin/uv run --no-sync python -u /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6/operator/reslice_data.py --workspace /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6 --action resume-parity --enforce
+● nhms-reslice-parity-pinned-d35580c6.service           loaded failed failed /home/nwm/.local/bin/uv run --no-sync python -u /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6/operator/reslice_data.py --workspace /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6 --action resume-parity --enforce
+● nhms-reslice-proof-d35580c6.service                   loaded failed failed /home/nwm/.local/bin/uv run --no-sync python -u /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6/operator/reslice_data.py --workspace /data/GHDC/nwm-archive/reslice-20260909T161239Z-d35580c6 --action resume-proof --enforce
+[2026-09-16T08:15:23Z] DONE OUT=/home/nwm/tmp/2017/window-20260916T081507Z BK=/home/nwm/nhms-display-v2-backup-2017-20260916T081507Z head=7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 branch=master porcelain=0

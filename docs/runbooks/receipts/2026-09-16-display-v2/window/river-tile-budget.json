@@ -1,0 +1,114 @@
+{
+  "collection_coordinate_limit": 120000,
+  "csv_path": "/home/nwm/tmp/2017/window-20260916T081507Z/river-tile-budget.csv",
+  "failed_tiles": [],
+  "feature_coordinate_go_limit": 50000,
+  "go": true,
+  "layer": "river-network-national",
+  "per_zoom": {
+    "3": {
+      "failed_tiles": 0,
+      "max_coordinate_count": 86008,
+      "max_coordinate_count_tile": [
+        3,
+        6,
+        3
+      ],
+      "max_feature_coordinate_count": 5828,
+      "max_feature_coordinate_tile": [
+        3,
+        6,
+        2
+      ],
+      "max_seconds": 3.0874,
+      "max_tile_bytes": 248347,
+      "overflow_tiles": 0,
+      "tiles": 4,
+      "truncated_tiles": 0
+    },
+    "4": {
+      "failed_tiles": 0,
+      "max_coordinate_count": 52331,
+      "max_coordinate_count_tile": [
+        4,
+        12,
+        6
+      ],
+      "max_feature_coordinate_count": 5828,
+      "max_feature_coordinate_tile": [
+        4,
+        13,
+        5
+      ],
+      "max_seconds": 1.4766,
+      "max_tile_bytes": 149416,
+      "overflow_tiles": 0,
+      "tiles": 9,
+      "truncated_tiles": 0
+    },
+    "5": {
+      "failed_tiles": 0,
+      "max_coordinate_count": 52824,
+      "max_coordinate_count_tile": [
+        5,
+        25,
+        12
+      ],
+      "max_feature_coordinate_count": 5454,
+      "max_feature_coordinate_tile": [
+        5,
+        26,
+        11
+      ],
+      "max_seconds": 1.4253,
+      "max_tile_bytes": 148784,
+      "overflow_tiles": 0,
+      "tiles": 30,
+      "truncated_tiles": 0
+    },
+    "6": {
+      "failed_tiles": 0,
+      "max_coordinate_count": 56336,
+      "max_coordinate_count_tile": [
+        6,
+        52,
+        24
+      ],
+      "max_feature_coordinate_count": 14395,
+      "max_feature_coordinate_tile": [
+        6,
+        53,
+        23
+      ],
+      "max_seconds": 1.1847,
+      "max_tile_bytes": 164552,
+      "overflow_tiles": 0,
+      "tiles": 99,
+      "truncated_tiles": 0
+    },
+    "7": {
+      "failed_tiles": 0,
+      "max_coordinate_count": 52381,
+      "max_coordinate_count_tile": [
+        7,
+        107,
+        46
+      ],
+      "max_feature_coordinate_count": 19528,
+      "max_feature_coordinate_tile": [
+        7,
+        105,
+        51
+      ],
+      "max_seconds": 0.9215,
+      "max_tile_bytes": 119266,
+      "overflow_tiles": 0,
+      "tiles": 374,
+      "truncated_tiles": 0
+    }
+  },
+  "schema": "nhms.node27-river-tile-coordinate-evidence.v1",
+  "tiles_failed": 0,
+  "tiles_total": 516,
+  "unbounded_limit": 1000000000
+}

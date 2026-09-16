@@ -1,0 +1,5 @@
+png_cache_files=12
+pbf_cache_files=11423
+cache_du=1.9G precip_du=616K
+png_dirs_gfs=1 mirror_cycles_gfs=28
+png_dirs_IFS=1 mirror_cycles_IFS=29

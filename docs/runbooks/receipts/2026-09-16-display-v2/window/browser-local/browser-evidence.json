@@ -1,0 +1,184 @@
+{
+  "schema": "nhms.node27-display-v2-browser-evidence.v1",
+  "base_url": "http://127.0.0.1:8080",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "settle_budget_ms": 1000,
+  "settle_samples": 3,
+  "shifted_valid_time": "2026-09-15T00:00:00Z",
+  "captured_at": "2026-09-16T08:20:53.991Z",
+  "scenes": {
+    "default": {
+      "url": "http://127.0.0.1:8080/",
+      "settle_ms": 777,
+      "layout": {
+        "title": "全国水文模拟系统（V2.0）National Water Modeling",
+        "header": {
+          "height": 84,
+          "width": 1920,
+          "bottom": 84
+        },
+        "controlBar": {
+          "height": 64,
+          "width": 1024,
+          "bottom": 1064
+        },
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "innerHeight": 1080,
+        "precipLegend": true,
+        "precipToggle": true,
+        "mapCanvas": true,
+        "emptyNotice": null
+      },
+      "tile_urls": [
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7"
+      ],
+      "precip_png_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/gfs/2026-09-14T00:00:00Z/2026-09-14T00:00:00Z.png"
+      ],
+      "precip_index_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/gfs/2026-09-14T00%3A00%3A00Z/index"
+      ],
+      "screenshot": "overview-default.png",
+      "settle_samples_ms": [
+        535,
+        549,
+        777
+      ],
+      "settle_median_ms": 549
+    },
+    "ifs": {
+      "url": "http://127.0.0.1:8080/?source=ifs",
+      "settle_ms": 585,
+      "layout": {
+        "title": "全国水文模拟系统（V2.0）National Water Modeling",
+        "header": {
+          "height": 84,
+          "width": 1920,
+          "bottom": 84
+        },
+        "controlBar": {
+          "height": 64,
+          "width": 1024,
+          "bottom": 1064
+        },
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "innerHeight": 1080,
+        "precipLegend": true,
+        "precipToggle": true,
+        "mapCanvas": true,
+        "emptyNotice": null
+      },
+      "tile_urls": [
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/4/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/4/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/ifs/2026-09-14T12%3A00%3A00Z/q_down/2026-09-14T12%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7"
+      ],
+      "precip_png_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/ifs/2026-09-14T12:00:00Z/2026-09-14T12:00:00Z.png"
+      ],
+      "precip_index_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/ifs/2026-09-14T12%3A00%3A00Z/index"
+      ],
+      "screenshot": "overview-ifs.png"
+    },
+    "shifted_valid_time": {
+      "url": "http://127.0.0.1:8080/?cycle=2026-09-14T00%3A00%3A00Z&validTime=2026-09-15T00%3A00%3A00Z",
+      "settle_ms": 535,
+      "layout": {
+        "title": "全国水文模拟系统（V2.0）National Water Modeling",
+        "header": {
+          "height": 84,
+          "width": 1920,
+          "bottom": 84
+        },
+        "controlBar": {
+          "height": 64,
+          "width": 1024,
+          "bottom": 1064
+        },
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "innerHeight": 1080,
+        "precipLegend": true,
+        "precipToggle": true,
+        "mapCanvas": true,
+        "emptyNotice": null
+      },
+      "tile_urls": [
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/4/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/4/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-15T00%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7"
+      ],
+      "precip_png_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/gfs/2026-09-14T00:00:00Z/2026-09-15T00:00:00Z.png"
+      ],
+      "precip_index_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/gfs/2026-09-14T00%3A00%3A00Z/index"
+      ],
+      "screenshot": "overview-valid-time-plus-24h.png"
+    },
+    "precip_off": {
+      "url": "http://127.0.0.1:8080/?precip=0",
+      "settle_ms": 590,
+      "layout": {
+        "title": "全国水文模拟系统（V2.0）National Water Modeling",
+        "header": {
+          "height": 84,
+          "width": 1920,
+          "bottom": 84
+        },
+        "controlBar": {
+          "height": 64,
+          "width": 1024,
+          "bottom": 1064
+        },
+        "scrollWidth": 1920,
+        "clientWidth": 1920,
+        "innerHeight": 1080,
+        "precipLegend": false,
+        "precipToggle": true,
+        "mapCanvas": true,
+        "emptyNotice": null
+      },
+      "tile_urls": [
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7",
+        "http://127.0.0.1:8080/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=1f407385da7d16f6d946d6885d73fb7886869b29e1877a181eb5196490c323f7"
+      ],
+      "precip_png_urls": [],
+      "precip_index_urls": [
+        "http://127.0.0.1:8080/api/v1/precip/gfs/2026-09-14T00%3A00%3A00Z/index"
+      ],
+      "screenshot": "overview-precip-off.png"
+    }
+  },
+  "failures": [],
+  "pass": true
+}

@@ -1,0 +1,5 @@
+41a42,45
+> 
+> # 2026-09-16 (#2017 7.2): node-27 view of the NFS canonical tree node-22 mirrors into.
+> # Same tree as NODE27_RAW_RETENTION_OBJECT_STORE_ROOT; services/precip/mirror.py appends canonical/<S>/<K>/.
+> NHMS_PRECIP_MIRROR_ROOT

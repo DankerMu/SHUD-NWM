@@ -1,0 +1,5 @@
+mirror_root=/home/ghdc/nwm/object-store
+source=gfs cycles=28 oldest=2026083112 newest=2026091400
+source=IFS cycles=29 oldest=2026083112 newest=2026091412
+png_cache_files=0
+pbf_cache_files=11423

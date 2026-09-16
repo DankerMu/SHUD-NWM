@@ -1,0 +1,46 @@
+Updating f2476c8c..7ecc46be
+Fast-forward
+ docs/adr/0003-review-lens-rotation-keep.md         |  14 +
+ docs/review-loop-log.jsonl                         |   1 +
+ .../2026-09-13-issue-2162-unpin-node27-runtime.md  |   1 +
+ .../2026-09-16-issue-2162-restore-master-node27.md | 142 +++++++++
+ .../stage-b.sh                                     | 352 +++++++++++++++++++++
+ .../window/backup-list.txt                         |  33 ++
+ .../window/df-after.txt                            |   4 +
+ .../window/df-before.txt                           |   4 +
+ .../window/frontend-build.log                      |  22 ++
+ .../window/hold-after.txt                          |   5 +
+ .../window/hold-before.txt                         |   5 +
+ .../window/ledger.txt                              |   4 +
+ .../window/prewarm.json                            |   1 +
+ .../window/stage-b.log                             | 182 +++++++++++
+ .../window/tick-prewarm.json                       |   1 +
+ .../window/timers-after.txt                        |  15 +
+ .../window/timers-before.txt                       |  15 +
+ .../unitdiff-nhms-node27-raw-retention.service.txt |   6 +
+ ...-nhms-node27-timeseries-compression.service.txt |  12 +
+ ...diff-nhms-node27-timeseries-retention.timer.txt |   4 +
+ .../window/units-before.txt                        |  61 ++++
+ .../window/units-diff.txt                          |   0
+ .../window/units-final.txt                         |  61 ++++
+ 23 files changed, 945 insertions(+)
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27.md
+ create mode 100755 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/stage-b.sh
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/backup-list.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/df-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/df-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/frontend-build.log
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/hold-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/hold-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/ledger.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/prewarm.json
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/stage-b.log
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/tick-prewarm.json
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/timers-after.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/timers-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-raw-retention.service.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-timeseries-compression.service.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/unitdiff-nhms-node27-timeseries-retention.timer.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-before.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-diff.txt
+ create mode 100644 docs/runbooks/receipts/2026-09-16-issue-2162-restore-master-node27/window/units-final.txt
