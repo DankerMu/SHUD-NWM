@@ -79,6 +79,100 @@ SIGTERM 既有 uvicorn（10s timeout + SIGKILL 兜底）→
 原先 runbook 引用的 `/tmp/start_display.sh` 不存在于仓库，
 且其 ad-hoc 流程不 source env file，已被本脚本取代。
 
+### Display connection pool (#2346 first step)
+
+Live display workers consume `NHMS_DISPLAY_DB_POOL_SIZE` and
+`NHMS_DISPLAY_DB_MAX_OVERFLOW` in `apps/api/routes/hydro_display.py`
+(code defaults 4 / 2, hard cap 16). `infra/env/display.example` still
+documents those defaults; production `display.env` may omit the keys.
+That is not template staleness — do not raise the example defaults in
+this batch.
+
+Admission formula, evaluated at apply time against live
+`max_connections`, `superuser_reserved_connections`, and grouped
+`pg_stat_activity`:
+
+```text
+workers × (pool + overflow) + other_demand + reserved + explicit_headroom
+    ≤ max_connections
+```
+
+`other_demand` counts every session that is not attributed by
+`application_name=nhms-display-api`. Sessions on `nhms_display_ro`
+without that application name stay in `other_demand`; do not treat the
+whole readonly role as display. Desired 2 × (8 + 8) = 32 is admitted
+only when workers are actually two and measured headroom includes an
+explicit reserve (this batch uses 8). Snapshot numbers are not a
+substitute for the execution-time check.
+
+This first step only raises the exhaustion threshold. It does **not**
+isolate cold tile generation, prewarm the pool, retune roles, or change
+SQL. #2346 remains open for that second step. Do not claim latency
+improvement from `/health` smoke.
+
+Same-code restart: compare checkout HEAD, porcelain, unit
+`WorkingDirectory`, process cwd, `--workers`, and running start time
+against the intended SHA before `systemctl --user restart
+nhms-display-api.service`. Do **not** use
+`scripts/ops/start-display-api.sh` for this pool-only change: that
+wrapper reinstalls the unit, creates the cache directory, and its
+`UVICORN_PATTERN` can SIGTERM a matching `yd` instance (#2282).
+Key-only update: back up `display.env` privately, refuse symlinks /
+non-0600 / non-uid-1005 / duplicate assignments, append only the two
+pool keys, preserve unrelated lines. Rollback restores those two keys
+from the backup and refuses if someone else changed them.
+
+### PNG cache-root pairing (#2431) versus PBF retention (#2032) and canonical lock (#2360)
+
+Two runners share `NHMS_MVT_FILE_CACHE_DIR` and nothing else:
+
+| Runner | Env | Subtree | Cutoff |
+|---|---|---|---|
+| `scripts/node27_mvt_cache_retention.py` (#2032) | `infra/env/node27-mvt-cache-retention.env` | `<root>/<hh>/*.pbf`, tmp, `.locks` | wall-clock |
+| `scripts/node27_raw_retention.py` PNG lane (#2011/#2431) | `infra/env/node27-raw-retention.env` | `<root>/precip/<S>/<K>/` | display watermark |
+
+Root-equality pairings (template comments at
+`infra/env/node27-raw-retention.example`):
+
+1. `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT` == display
+   `NHMS_PRECIP_MIRROR_ROOT` (both the object-store root, not
+   `canonical/`).
+2. `NHMS_MVT_FILE_CACHE_DIR` in the retention env == the value the
+   **display process** actually has (unit fallback
+   `/home/nwm/.cache/nhms/mvt`). Copy the process value, never
+   `display.example`'s `/tmp/nhms-mvt-cache`.
+
+If the retention key is absent, the PNG lane records
+`precip_cache_root_unconfigured` and raw + canonical still prune. That
+is the #2431 defect: PNG then only grows. Activation of the PNG lane
+requires a configured non-null `precip_cache_root`, both configured
+sources (`GFS`→`gfs`, `IFS`→`IFS`) safely evaluated, and none of
+`precip_cache_root_unconfigured` / `_missing` / `_unsafe` /
+`precip_cache_source_unsafe` or other PNG unavailable/unsafe skips.
+Zero expired PNG candidates is legitimate only after that evaluation;
+it is not deletion proof. Do not create cache fixtures.
+
+Canonical copyback lock `/home/ghdc/nwm/object-store/.nhms-copyback-batch.lock`
+is `0600` uid 1103. The retention unit runs as uid 1005, so aged
+canonical cycles fail `lock_unsafe` and the oneshot returns rc=1. That
+is #2360, fail-closed, and out of this batch: never chmod / chown /
+delete / bypass the lock to green PNG pruning. Record canonical
+`lock_unsafe` separately from PNG planned/deleted/failed.
+
+Plan-only must set `NODE27_RAW_RETENTION_PLAN_ONLY=true` **after**
+sourcing the env file (the wrapper `set -a; . env`). The current
+production env does not assign that flag, so a caller export survives
+the second source; if the file later gains an assignment, refuse rather
+than silently execute. Capture the exact `--summary-path`; do not use
+"latest file". Because a live env change is visible to the next timer
+tick, stop **only** `nhms-node27-raw-retention.timer` before the key
+write, require no active tick, inspect the plan, run one
+`systemctl --user start nhms-node27-raw-retention.service`, then restore
+the original timer state. No other timers.
+
+Live receipt for this batch:
+[`receipts/2026-09-16-pool-cache-upstream.md`](receipts/2026-09-16-pool-cache-upstream.md).
+
 node-27 autopipeline 每次 publish/coverage 后调用
 `scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野的以下包络（#2013 起逐源
 cycle-aware）：

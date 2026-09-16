@@ -1,0 +1,12 @@
+[2026-09-16T10:33:20Z] host=ghdc repo=/home/nwm/NWM
+[2026-09-16T10:33:20Z] canonical_lock unchanged-check uid=1103 mode=600 path=/home/ghdc/nwm/object-store/.nhms-copyback-batch.lock
+[2026-09-16T10:33:20Z] admission head=7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 branch=master porcelain=0
+[2026-09-16T10:33:20Z] before_process pid=2901698 cwd=/home/nwm/NWM workers=2 env={"NHMS_DISPLAY_DB_MAX_OVERFLOW": "<unset>", "NHMS_DISPLAY_DB_POOL_SIZE": "<unset>", "NHMS_DISPLAY_WORKERS": "<unset>", "NHMS_MVT_FILE_CACHE_DIR": "/home/nwm/.cache/nhms/mvt", "NHMS_SERVICE_ROLE": "display_readonly"}
+[2026-09-16T10:33:21Z] budget max=100 reserved=3 other=11 desired=32 headroom=8 needed=54 admitted=True
+[2026-09-16T10:33:21Z] backup_dir=/home/nwm/nhms-ops-backup-2346-2431-20260916T103321Z
+[2026-09-16T10:33:21Z] display.env added_keys=['NHMS_DISPLAY_DB_POOL_SIZE', 'NHMS_DISPLAY_DB_MAX_OVERFLOW'] pool=8 overflow=8
+[2026-09-16T10:33:21Z] admission head=7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 branch=master porcelain=0
+[2026-09-16T10:33:21Z] restart nhms-display-api.service (not scripts/ops/start-display-api.sh)
+[2026-09-16T10:33:23Z] restart_seconds=2.4 MainPID=3023964 ActiveState=active
+[2026-09-16T10:33:23Z] budget max=100 reserved=3 other=9 desired=32 headroom=8 needed=52 admitted=True
+{"added_keys": ["NHMS_DISPLAY_DB_POOL_SIZE", "NHMS_DISPLAY_DB_MAX_OVERFLOW"], "backup": "/home/nwm/nhms-ops-backup-2346-2431-20260916T103321Z/home/nwm/NWM/infra/env/display.env", "budget_after": {"display_attributed": 0, "max_connections": 100, "other_demand": 9, "superuser_reserved_connections": 3, "total_sessions": 9, "uncertain_display_ro": 1}, "budget_before": {"admitted": true, "desired_display_budget": 32, "display_attributed": 8, "formula": "workers*(pool+overflow) + other_demand + reserved + explicit_headroom <= max_connections", "isolation_guarantee": false, "max_connections": 100, "needed": 54, "other_demand": 11, "superuser_reserved_connections": 3, "total_sessions": 19, "uncertain_display_ro": 3}, "effective": {"NHMS_DISPLAY_DB_MAX_OVERFLOW": "8", "NHMS_DISPLAY_DB_POOL_SIZE": "8", "NHMS_DISPLAY_WORKERS": "<unset>", "NHMS_MVT_FILE_CACHE_DIR": "/home/nwm/.cache/nhms/mvt", "NHMS_SERVICE_ROLE": "display_readonly"}, "head": "7ecc46bed18cc8b6f20030f49aa3bf43a77b6858", "isolation_guarantee": false, "mode": "pool-apply", "pid": 3023964}

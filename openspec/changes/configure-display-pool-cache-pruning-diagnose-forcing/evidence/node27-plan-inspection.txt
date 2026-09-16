@@ -1,0 +1,18 @@
+schema_version "nhms.node27_raw_retention.production.v5"
+object_store_root "/home/ghdc/nwm/object-store"
+raw_root "/home/ghdc/nwm/object-store/raw"
+canonical_root "/home/ghdc/nwm/object-store/canonical"
+precip_cache_root "/home/nwm/.cache/nhms/mvt"
+sources ["gfs", "ifs"]
+retention_days 14
+reference_time "2026-09-14T12:00:00Z"
+cutoff "2026-08-31T12:00:00Z"
+anchor {"decision": "issue-1407-keep-watermark-anchor", "frontier_active_lower_bound": null, "mode": "display_watermark", "reference_time": "2026-09-14T12:00:00Z", "residual_risk": "backfill cycles older than watermark - retention_days are unprotected"}
+enabled true
+dry_run true
+execution_mode "plan_only"
+counts {"deleted": 0, "failed": 0, "planned": 0, "skipped": 127}
+planned []
+deleted []
+failed []
+PNG_SKIPS [{"key": "precip-cache/gfs/2026091400", "reason": "within_retention_window"}, {"key": "precip-cache/IFS/2026091412", "reason": "within_retention_window"}]

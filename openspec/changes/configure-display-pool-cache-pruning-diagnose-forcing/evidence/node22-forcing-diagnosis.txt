@@ -1,0 +1,137 @@
+Ranked falsifiable hypotheses after exact-candidate red signal:
+1. Retry classification fires before first forcing submission: strict-warm mismatch on conversion-only state changes a fresh candidate into forecast retry, then missing-forcing guard blocks it. Predict successful convert + no forcing job and strict-warm mismatch tied to shared cohort run.
+2. Forcing producer failed before publication. Predict failed forcing job/log for the exact candidate.
+3. Producer and reader use different roots/witness identities. Predict package exists elsewhere or mismatched sidecar/journal identity.
+4. Global execution/scheduler gate disables submission. Predict explicit disabled/dry-run/circuit evidence rather than candidate-local missing-forcing guard.
+
+Exact-candidate read-only command: SSH node22 active .venv/bin/python - < diagnostic script (no DB, no environment rebuild).
+from pathlib import Path
+import json,sys
+p=Path('/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026091609_34d1f52653c6.json')
+d=json.loads(p.read_text()); b=d['blocked_candidates'][0]; e=b['state_evidence']
+print('identity',b['candidate_id']); print('state_evidence_keys',list(e))
+for k in ['forcing_provenance','artifact_guard','existing_run','retry_policy','failure','failed_job','run_state','pipeline_jobs']:
+ if k in e: print(k,json.dumps(e[k],sort_keys=True))
+print('runtime_backend',json.dumps(d['runtime_config'].get('db_free_runtime')))
+print('candidate_outer_keys',list(b))
+assert e['artifact_guard']['artifact_exists'], 'RED: exact candidate has no forcing witness; planned retry cannot execute'
+
+Output rc1:
+identity gfs:2026-09-14T12:00:00Z:dg_0883c7e9c1006c6fd347df500315e9df:forecast_gfs_deterministic
+state_evidence_keys ['artifact_guard', 'candidate_identity', 'candidate_state', 'canonical_readiness', 'classifier', 'completed_stage_evidence', 'decision', 'durable_output_reused', 'durable_shud_output_reused', 'error_code', 'forcing_provenance', 'forcing_version', 'forecast_cycle', 'generation', 'hydro_run', 'identity', 'manual_retry', 'native_shud_resubmitted', 'nfs_raw_manifest', 'pipeline_events', 'pipeline_jobs', 'production_identity_validation', 'ready', 'reason', 'registry_cutover_transition', 'replacement_submitted', 'restart_from_stage', 'restart_stage', 'retry', 'retry_policy', 'state_snapshot_index', 'status', 'strict_warm_start']
+forcing_provenance {"source": "absent", "tier_status": "sidecar_absent"}
+artifact_guard {"artifact_exists": false, "artifact_type": "forcing_package_uri", "artifact_uri": null, "planned_retry_decision": "retry_strict_warm_start_retry_run_manifest_mismatch", "planned_retry_reason": "strict_warm_start_retry_run_manifest_mismatch", "stable_classifier": "FORCING_VERSION_ROW_ABSENT", "unsafe_reason": null}
+retry_policy {"attempt": 0, "automatic_retry_allowed": false, "manual_retry_required": false, "retry_limit": 12}
+pipeline_jobs [{"cycle_id": "gfs_2026091412", "cycle_time": "2026-09-14T12:00:00Z", "job_id": "job_cycle_gfs_2026091412_convert_cohort_4f6d17de405b_convert", "job_type": "convert_canonical", "retry_count": 0, "run_id": "cycle_gfs_2026091412_convert_cohort_4f6d17de405b", "slurm_job_id": "48756", "source_id": "gfs", "stage": "convert", "status": "succeeded"}]
+runtime_backend {"accepted_submit_ownership": {"account_configured": true, "required": true, "user_configured": true}, "canonical_path_fields": ["NHMS_SCHEDULER_REGISTRY_MANIFEST", "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX", "NHMS_SCHEDULER_JOURNAL_ROOT", "NHMS_SCHEDULER_STATE_INDEX"], "canonical_selector_fields": ["NHMS_SCHEDULER_STATE_BACKEND", "NHMS_SCHEDULER_LOCK_BACKEND", "NHMS_SCHEDULER_REGISTRY_BACKEND", "NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND", "NHMS_SCHEDULER_JOURNAL_BACKEND", "NHMS_SCHEDULER_STATE_INDEX_BACKEND"], "database_url_configured": false, "paths": {"NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": {"configured": true, "kind": "file", "path": "[local-path]"}, "NHMS_SCHEDULER_JOURNAL_ROOT": {"configured": true, "kind": "directory", "path": "[local-path]"}, "NHMS_SCHEDULER_REGISTRY_MANIFEST": {"configured": true, "kind": "file", "path": "[local-path]"}, "NHMS_SCHEDULER_STATE_INDEX": {"configured": true, "kind": "file", "path": "[local-path]"}}, "required": true, "required_env": "NHMS_SCHEDULER_DB_FREE_REQUIRED", "selectors": {"NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}, "NHMS_SCHEDULER_JOURNAL_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}, "NHMS_SCHEDULER_LOCK_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}, "NHMS_SCHEDULER_REGISTRY_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}, "NHMS_SCHEDULER_STATE_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}, "NHMS_SCHEDULER_STATE_INDEX_BACKEND": {"configured": true, "required_value": "file", "selected": "file"}}}
+candidate_outer_keys ['basin_id', 'basin_version_id', 'candidate_id', 'canonical_product_id', 'cycle_id', 'cycle_time', 'cycle_time_utc', 'display_capabilities', 'forcing_version_id', 'horizon', 'hydro_run_id', 'model_id', 'model_package_uri', 'output_segment_count', 'production_identity_contract', 'published_manifest_id', 'reason', 'resource_profile', 'river_network_version_id', 'run_id', 'scenario_id', 'segment_count', 'source', 'source_id', 'state_evidence', 'status']
+Traceback (most recent call last):
+  File "<stdin>", line 10, in <module>
+AssertionError: RED: exact candidate has no forcing witness; planned retry cannot execute
+
+Pure active-helper replay; reconstructed pre-upgrade decision using actual recorded conversion evidence, not a scheduler mutation or full-pass replay:
+from pathlib import Path
+import json,sys
+sys.path.insert(0,'/scratch/frd_muziyao/NWM')
+from services.orchestrator.scheduler_candidates import _upgrade_retry_for_strict_warm_start_manifest
+from services.orchestrator.scheduler_state_decision import CandidateStateDecision
+p=Path('/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026091609_34d1f52653c6.json'); d=json.loads(p.read_text()); e=d['blocked_candidates'][0]['state_evidence']
+seed=CandidateStateDecision('retry','resume_after_completed_stage',{'restart_stage':'forcing','restart_from_stage':'forcing','completed_stage_evidence':e['completed_stage_evidence'],'pipeline_jobs':e['pipeline_jobs'],'hydro_run':e['hydro_run']})
+r=_upgrade_retry_for_strict_warm_start_manifest(seed,e['strict_warm_start'])
+print('ACTUAL_FUNCTION',_upgrade_retry_for_strict_warm_start_manifest.__code__.co_filename)
+print('REPLAY',json.dumps({'input_stage':seed.evidence['restart_stage'],'output_stage':r.evidence['restart_stage'],'output_reason':r.reason,'manifest_in_evidence':bool(e.get('run_manifest'))}))
+assert r.evidence['restart_stage']=='forcing','RED: convert-only candidate is promoted past unbuilt forcing to forecast'
+
+Output rc1:
+ACTUAL_FUNCTION /scratch/frd_muziyao/NWM/services/orchestrator/scheduler_candidates.py
+REPLAY {"input_stage": "forcing", "output_stage": "forecast", "output_reason": "strict_warm_start_retry_run_manifest_mismatch", "manifest_in_evidence": false}
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+AssertionError: RED: convert-only candidate is promoted past unbuilt forcing to forecast
+
+Active source and source-cycle causal ordering:
+SOURCE 2271
+2271:def _upgrade_retry_for_strict_warm_start_manifest(
+2272:    state_decision: CandidateStateDecision | None,
+2273:    strict_evidence: Mapping[str, Any] | None,
+2274:) -> CandidateStateDecision | None:
+2275:    if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
+2276:        return state_decision
+2277:    forcing_repair = state_decision.evidence.get("missing_forcing_repair")
+2278:    if (
+2279:        isinstance(forcing_repair, Mapping)
+2280:        and forcing_repair.get("status") == "authorized"
+2281:        and state_decision.evidence.get("restart_stage") == "forcing"
+2282:    ):
+2283:        return state_decision
+2284:    if (
+2285:        state_decision.evidence.get("native_shud_resubmitted") is True
+2286:        and state_decision.evidence.get("restart_stage") == "forecast"
+2287:    ):
+2288:        return state_decision
+2289:    if _terminal_decision_run_manifest_matches_strict_warm_start(
+2290:        state_decision.evidence,
+2291:        strict_evidence,
+2292:    ):
+2293:        return state_decision
+2294:    return CandidateStateDecision(
+2295:        "retry",
+2296:        "strict_warm_start_retry_run_manifest_mismatch",
+2297:        _strict_warm_start_retry_run_manifest_evidence(
+2298:            state_decision.evidence,
+2299:            strict_evidence,
+2300:        ),
+2301:    )
+2302:
+2303:
+2304:def _journal_predecessor_identity_quarantine(
+SOURCE 2623
+2623:def _strict_warm_start_retry_run_manifest_evidence(
+2624:    retry_evidence: Mapping[str, Any],
+2625:    strict_evidence: Mapping[str, Any],
+2626:) -> dict[str, Any]:
+2627:    payload = {
+2628:        **dict(retry_evidence),
+2629:        "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+2630:        "reason": "strict_warm_start_retry_run_manifest_mismatch",
+2631:        "restart_stage": "forecast",
+2632:        "restart_from_stage": "forecast",
+2633:        "strict_warm_start": _evidence_safe(dict(strict_evidence)),
+2634:        "native_shud_resubmitted": True,
+2635:        "durable_output_reused": False,
+2636:        "durable_shud_output_reused": False,
+2637:    }
+2638:    selected = strict_evidence.get("candidate_state")
+2639:    if isinstance(selected, Mapping):
+2640:        payload["candidate_state"] = _evidence_safe(dict(selected))
+2641:    return _evidence_safe(payload)
+2642:
+2643:
+2644:def _successor_state_terminal_can_skip(successor_state: Mapping[str, Any] | None) -> bool:
+2645:    return successor_state is None or bool(successor_state.get("ready"))
+2646:
+2647:
+2648:def _strict_warm_start_successor_retry_evidence(
+2649:    terminal_evidence: Mapping[str, Any],
+2650:    successor_state: Mapping[str, Any],
+2651:) -> dict[str, Any]:
+2652:    # A terminal forecast with the exact warm-start manifest already produced the
+2653:    # deterministic SHUD output needed by state-save/QC.  Re-running forecast
+2654:    # cannot repair a missing or rejected successor checkpoint; resume at the
+2655:    # checkpoint boundary and let the downstream artifact guards reject the
+2656:    # retry if that durable output is no longer available.
+SOURCE_CYCLES [{"available": true, "cycle_id": "gfs_2026091500", "cycle_time_utc": "2026-09-15T00:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "gfs", "status": "gap", "type": "backfill_deferred"}, {"available": true, "cycle_id": "gfs_2026091512", "cycle_time_utc": "2026-09-15T12:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "gfs", "status": "gap", "type": "backfill_deferred"}, {"complete_count": 6, "gap_count": 3, "selected_count": 1, "source_id": "gfs", "type": "backfill_audit"}, {"available": true, "cycle_id": "gfs_2026091412", "cycle_time_utc": "2026-09-14T12:00:00Z", "reason": null, "source_id": "gfs", "status": "discovered"}, {"available": true, "cycle_id": "ifs_2026091512", "cycle_time_utc": "2026-09-15T12:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "IFS", "status": "gap", "type": "backfill_deferred"}, {"complete_count": 7, "gap_count": 2, "selected_count": 1, "source_id": "IFS", "type": "backfill_audit"}, {"available": true, "cycle_id": "ifs_2026091500", "cycle_time_utc": "2026-09-15T00:00:00Z", "reason": null, "source_id": "IFS", "status": "discovered"}, {"available": true, "cycle_id": "ifs_2026091500", "cycle_time_utc": "2026-09-15T00:00:00Z", "reason": "backfill_deferred_waiting_for_global_prior_cycle", "source_id": "IFS", "status": "gap", "type": "backfill_deferred"}]
+STRICT_KEYS ['candidate_state', 'generation', 'ready', 'reason', 'registry_cutover_transition', 'state_snapshot_index', 'status']
+
+Compact stage evidence:
+SOURCES {'gfs': 38}
+CANDIDATE gfs:2026-09-14T12:00:00Z:dg_0883c7e9c1006c6fd347df500315e9df:forecast_gfs_deterministic
+STRICT {"generation": "manifest-1f6ff7ecc042", "ready": true, "reason": null, "registry_cutover_transition": {"cold_start_reason": null, "decision": "warm_continue", "declaration": {"bound_entry": {}, "present": false}, "generation": "manifest-1f6ff7ecc042", "package_checksum_prefix": "53fd4e6c3e0c", "selected_predecessor": {"cycle_id": "gfs_2026091400", "generation": "manifest-1f6ff7ecc042", "lead_hours": 12, "source_id": "gfs", "valid_time": "2026-09-14T12:00:00Z"}, "typed_reason": null}, "state_snapshot_index": {"checksum": "sha256:[redacted]", "content_checksum_verified": true, "entry_count": 7908, "entry_model_id": "dg_0883c7e9c1006c6fd347df500315e9df", "entry_source_id": "gfs", "entry_status": "ready", "entry_valid_time": "2026-09-14T12:00:00Z", "generated_at": "2026-09-16T02:48:46.383052Z", "index": "[local-path]", "index_bytes": 8254251, "object_evidence": {"checksum_verified": true, "exists": true, "size_bytes": 256303, "uri": "[object-uri]"}, "schema_version": "nhms.scheduler.file_state_snapshot_index.v1", "status": "ready"}, "status": "ready"}
+COMPLETED {"cycle_id": "gfs_2026091412", "cycle_time": "2026-09-14T12:00:00Z", "job_id": "job_cycle_gfs_2026091412_convert_cohort_4f6d17de405b_convert", "job_type": "convert_canonical", "restart_from_stage": "forcing", "restart_stage": "forcing", "slurm_job_id": "48756", "source_id": "gfs", "stage": "convert", "status": "succeeded"}
+JOBS [{"cycle_id": "gfs_2026091412", "cycle_time": "2026-09-14T12:00:00Z", "job_id": "job_cycle_gfs_2026091412_convert_cohort_4f6d17de405b_convert", "job_type": "convert_canonical", "retry_count": 0, "run_id": "cycle_gfs_2026091412_convert_cohort_4f6d17de405b", "slurm_job_id": "48756", "source_id": "gfs", "stage": "convert", "status": "succeeded"}]
+jobs_by_stage Counter({('convert', 'succeeded'): 38})
+dry_run false
+execution_mode "production_orchestration"
+counts {"blocked_candidate_count": 38, "candidate_count": 38, "failed_count": 0, "partial_count": 0, "selected_model_count": 76, "skipped_candidate_count": 0, "slurm_cancellation_blocked_count": 0, "slurm_cancellation_unknown_count": 0, "slurm_cancelled_count": 0, "slurm_status_sync_count": 0, "slurm_status_sync_unknown_count": 0, "source_cycle_count": 1, "submitted_count": 0}
+no_progress_circuit {"open": [{"consecutive_passes": 557, "first_pass_id": "scheduler_2026091209_27f3dd8d5912", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "ambiguous_fallback_match:comment_accounting_unproven", "subject_id": "job_cycle_ifs_2026091100_convert_cohort_58980881757c_forecast", "subject_kind": "job"}, {"consecutive_passes": 455, "first_pass_id": "scheduler_2026091307_5d52eacd729e", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "ambiguous_fallback_match:comment_accounting_unproven", "subject_id": "job_cycle_gfs_2026091212_convert_cohort_6ae61a5780d2_forecast", "subject_kind": "job"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0883c7e9c1006c6fd347df500315e9df:forecast_gfs_deterministic", "subject_kind": "candidate"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0a50ecb006879e7336361fc0b6191766:forecast_gfs_deterministic", "subject_kind": "candidate"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0c4e8fbeeddc5c72656bf7a20dae54f3:forecast_gfs_deterministic", "subject_kind": "candidate"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0e7627d8ab59a227926f9093030b991a:forecast_gfs_deterministic", "subject_kind": "candidate"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0eaf98b35849dfb10340f6a8b8c4b09b:forecast_gfs_deterministic", "subject_kind": "candidate"}, {"consecutive_passes": 185, "first_pass_id": "scheduler_2026091505_ab711ea34266", "last_pass_id": "scheduler_2026091609_34d1f52653c6", "reason": "blocked:forcing_version_row_absent", "subject_id": "gfs:2026-09-14T12:00:00Z:dg_0f177dc872e31814a23c39d75cab7806:forecast_gfs_deterministic", "sub
+HEAD 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc
