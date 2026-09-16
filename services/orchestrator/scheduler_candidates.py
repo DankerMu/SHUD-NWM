@@ -25,6 +25,7 @@ from services.orchestrator.scheduler_init_state_match import (
     terminal_init_state_match,
 )
 from services.orchestrator.scheduler_state import (
+    DOWNSTREAM_RESTART_STAGES,
     CandidateStateDecision,
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
@@ -35,6 +36,7 @@ from services.orchestrator.scheduler_state import (
     _candidate_state_decision,
     _candidate_state_has_identity_mismatch,
     _candidate_state_is_candidate_scoped_retry,
+    _canonical_downstream_stage,
     _ensure_utc,
     _evidence_safe,
     _format_utc,
@@ -76,6 +78,12 @@ _STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_
 #: Restart stage the strict warm-start terminal mismatch retry would re-run, and
 #: therefore the stage whose retry budget governs it (Issue #1173).
 _STRICT_WARM_START_TERMINAL_RESTART_STAGE = "forecast"
+_STRICT_WARM_START_PRE_FORECAST_RESTART_STAGES = frozenset(
+    DOWNSTREAM_RESTART_STAGES[
+        : DOWNSTREAM_RESTART_STAGES.index(_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
+    ]
+)
+
 
 #: Completed-type terminal skip reasons that the §8.7 journal predecessor
 #: identity filter may quarantine (Issue #1107).  ``terminal_completed_cycle``
@@ -2502,12 +2510,14 @@ def _upgrade_retry_for_strict_warm_start_manifest(
 ) -> CandidateStateDecision | None:
     if state_decision is None or state_decision.action != "retry" or strict_evidence is None:
         return state_decision
-    forcing_repair = state_decision.evidence.get("missing_forcing_repair")
-    if (
-        isinstance(forcing_repair, Mapping)
-        and forcing_repair.get("status") == "authorized"
-        and state_decision.evidence.get("restart_stage") == "forcing"
-    ):
+    restart_stage = (
+        state_decision.evidence.get("restart_stage")
+        or state_decision.evidence.get("restart_from_stage")
+    )
+    canonical_stage = _canonical_downstream_stage(
+        None if restart_stage in (None, "") else str(restart_stage)
+    )
+    if canonical_stage in _STRICT_WARM_START_PRE_FORECAST_RESTART_STAGES:
         return state_decision
     if (
         state_decision.evidence.get("native_shud_resubmitted") is True

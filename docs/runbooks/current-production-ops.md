@@ -4016,6 +4016,19 @@ Symptoms:
 - Forecast retry fails as a generic runtime/node failure while stderr shows a
   missing `forcing_package_uri` object-store tree.
 
+Do not treat an ordinary unfinished convert/forcing resume as this missing-forcing
+incident. Shared convert success with `restart_stage=forcing`, strict warm-start
+ready, and no forcing package yet is unfinished pre-forecast work: ordinary
+forcing remains eligible on a later scheduler pass, subject to existing
+scheduling guards. Exact-cycle `--repair-missing-forcing` is for a
+forecast/later retry that is already blocked by `forcing_version_row_absent` /
+`FORCING_VERSION_ROW_ABSENT` (or `missing_forcing_package_uri` /
+`FORCING_PACKAGE_URI_MISSING`) after a model republish or other per-model
+witness gap. Using the repair wrapper on convert-only candidates does not
+require an operator repair marker.
+
+
+
 Safe online mitigation:
 
 1. Keep node-22 compute-only. Node-22 local PostgreSQL `:55433` is historical,

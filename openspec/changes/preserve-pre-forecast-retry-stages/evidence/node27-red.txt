@@ -1,0 +1,52 @@
+source_commit=f9558fc57dfd4cde053e9afa1c20653aa61b23ab
+command=cd /home/nwm/tmp/wt-2439-red && export PATH="$HOME/.local/bin:$PATH" TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/wt-2439-red UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv && uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_production_scheduler.py::test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fd82e9917d0>
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-211/test_convert_only_strict_ready0')
+
+    def test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#2439: convert-only resume must keep forcing, not become a forecast missing-forcing block."""
+    
+        object_store_root = tmp_path / "empty-object-store"
+        object_store_root.mkdir()
+        monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+        candidate = _scheduler_candidate_fixture()
+        state = _convert_only_completed_stage_state(candidate)
+        strict = _strict_ready_without_forecast_manifest()
+    
+        state_decision = scheduler_module._candidate_state_decision(candidate, state)
+        assert state_decision is not None
+        assert state_decision.action == "retry"
+        assert state_decision.reason == "resume_after_completed_stage"
+        assert state_decision.evidence["restart_stage"] == "forcing"
+        assert state_decision.evidence.get("artifact_guard") is None
+    
+        upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+            state_decision,
+            strict,
+        )
+        guarded = scheduler_candidates_module._strict_warm_start_forcing_witness_decision(
+            candidate,
+            state,
+            upgraded,
+        )
+    
+        assert upgraded.action == "retry"
+>       assert upgraded.reason == "resume_after_completed_stage"
+E       AssertionError: assert 'strict_warm_...fest_mismatch' == 'resume_after_completed_stage'
+E         
+E         - resume_after_completed_stage
+E         + strict_warm_start_retry_run_manifest_mismatch
+
+tests/test_production_scheduler.py:267: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_production_scheduler.py::test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard
+1 failed in 10.50s
+
+exit=1
