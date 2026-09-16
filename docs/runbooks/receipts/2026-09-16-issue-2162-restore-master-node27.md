@@ -32,8 +32,9 @@
 - 读面 + 前端门禁 **0 个 500**（§6）；公网 `https://test.nwm.ac.cn` 的 `/`、5 个 bundle、`/ops`、`/api/v1/layers` 全 200，三个极端 instant 均 422 `VALIDATION_ERROR`。
 - 前端 bundle：`vite build` 在树外（`/home/nwm/tmp/2162/dist-new-…`）从 master 构建 16.3 s、2542 modules，原子 `mv` 换入 `apps/frontend/dist`。
   构建产物（15 个 asset + `index.html`）与被换出的 09-14 dist **逐字节相同**——即现网自 09-14 起服务的已是 master 前端
-  （master 上 `apps/frontend/src` 最后一次提交 `cf47ac22a` 为 2026-09-14T02:35Z，早于该 dist 的 07:19Z 构建时间；它不是当时 checkout 的 `a8db554d` 的产物，
-  `a8db554d..master` 前端 src 差 48 文件）。本次重建把这一点从推断变成实测。
+  （实测事实仅此一条：它不是当时 checkout 的 `a8db554d` 的产物，`a8db554d..master` 前端 src 差 48 文件；其 09-14 07:19Z 构建来源 reflog 无记录。
+  日期旁证不成立：`git log 415cbd1e..f2476c8c -- apps/frontend/src` 中 `92b1cfbb8`（2026-09-14T22:24Z）晚于构建，但它只改 `__tests__/receipt.test.ts`
+  一行、不进 bundle；最后一次改发射代码的 `bba92b7f7` 为 07:17Z，仅早于构建 2 分钟——因此不能用「src 无后续提交」推断来源，只能以逐字节相同为准）。
 - 手工 prewarm：`.locks/**` 前 8520 → 后 8520（**不增**）；`.pbf` 11423 → 11423（全部 173 请求 cache hit，0.72 s）；瓦片失败 **0**，10 个失败全部是
   降水 PNG `404 PRECIP_CYCLE_NOT_MIRRORED reason=mirror_root_unconfigured`（`NHMS_PRECIP_MIRROR_ROOT` 未配，#2017；脚本 rc=1 仅因 failed_count>0，与目标 1 同因）。
 - writer 停机 07:13:06Z → 07:13:45Z（**39 秒**）。首个自然 autopipe tick 从 master 跑完 `Result=success`（15:13:45–15:13:56 CST，11 s）：
