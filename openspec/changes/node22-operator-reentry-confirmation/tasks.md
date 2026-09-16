@@ -175,6 +175,10 @@ Retro：`.workplans/pr-2406/review/round-3/retro.md`。R1 修了一个**源**（
 
 ## Evidence Floor
 
+> **EF-0（合并前补记，本 PR 的一条真教训）**：本分支的 CI `Unit Tests` 自**第一个** commit（`53c39b99c`）起就是红的，红到合并门才被发现，原因全程同一条——新增的 `tests/test_operator_reentry_confirmation.py` 给 CI 选择器的 directory-rule 审计带进 6 条未定性的 importer 对（`services/orchestrator/` 的 `__init__.py` / `cli.py` / `scheduler.py` / `file_orchestration_journal.py` / `journal_root_authority.py` 加 `workers/data_adapters/base.py`），`tests/test_select_ci_tests.py` 的 5 条断言因此变红。
+> 下面 EF-1..EF-3 声明的本地测试集里**没有** `tests/test_select_ci_tests.py`，而它是唯一能抓到这类缺口的 oracle——**新增测试文件的 PR 必须把它算进本地测试集**，否则该缺口只有 CI 能发现，而 CI 结果若不看就等于没跑。处置：按兄弟先例给三条 stop rule 与 broad `services/orchestrator/**` 规则各加一行，`workers/data_adapters/base.py` 那一对按 15+ 条同型先例记 `edge-consumer`；审计断言本身一字未改。
+> 顺带堵上一个真实漏洞：`operator_reentry_confirmation.py` 是该 suite 的 subject，但 suite 经 CLI 驱动它、不 import 它，因而不产生 importer 对、审计看不见——改动前，只碰这个模块的 PR **一条自己的 oracle 都不跑**。
+
 - EF-1 本地：`uv run pytest -q tests/test_scheduler_backfill_predecessor.py tests/test_scheduler_generation.py tests/test_warm_start_chaining.py tests/test_scheduler_backfill.py` 全绿。
 - EF-2 本地：`uv run pytest -q tests/test_production_scheduler.py tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py` 全绿。
 - EF-3 本地：`uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_journal_full_tree_budget_contract.py tests/test_operator_reentry_confirmation.py` 全绿。

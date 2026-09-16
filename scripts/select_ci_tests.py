@@ -668,6 +668,15 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # repository read. It measures 17 tests in 0.36s, so it joins the rule
     # rather than riding an exclusion token.
     "tests/test_scheduler_journal_root_authority.py",
+    # #1555/#1768: the operator re-entry confirmation suite top-level-imports
+    # `services.orchestrator.scheduler` and drives the REAL scheduler seams the
+    # one-shot confirmation gates (breaker candidate re-entry, the strict
+    # warm-start budget arm). A gating or seam edit in the facade must run it.
+    # DB-free, 23 tests in 46.71s — an order of magnitude heavier than this
+    # tuple's other members, but far under the ~5 min per-module line the
+    # runtime-budget token is reserved for, and the suite's subject IS this
+    # module, so a rule is the honest disposition rather than an exclusion.
+    "tests/test_operator_reentry_confirmation.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -739,6 +748,13 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # budget, lane or sentinel edit must run it. DB-free, 11 tests in 1.85s,
     # hence a rule rather than a rule-gap exclusion.
     "tests/test_file_journal_full_tree_budget_contract.py",
+    # #1555/#1768: the operator re-entry confirmation suite seeds REAL file
+    # journals through this repository and reads the one-shot confirmation event
+    # back through it, so its whole precondition geometry rests on this module's
+    # write and read paths. DB-free, 23 tests in 46.71s — heavier than the rest
+    # of this tuple but well under the ~5 min per-module line, and the journal IS
+    # part of its subject, so a rule rather than a rule-gap exclusion.
+    "tests/test_operator_reentry_confirmation.py",
     # #1955: the journal-root lane-adoption suite builds this repository on
     # every verified root it pins and asserts that a refused root leaves zero
     # bytes anywhere the lane could have written — a claim only this module's
@@ -1440,6 +1456,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # one typed line the recovery command renders when the whole-tree replay
         # raises. An arm-ordering or exit-code edit in cli.py must run them.
         # DB-free, 87 tests in 2.07s together.
+        #
+        # #1555/#1768 added a fourth at-site target for the same reason: the
+        # operator re-entry confirmation suite's whole write side goes through
+        # the shipped `cli.main(["confirm-operator-reentry", ...])` entry, so the
+        # command's registration, argument parsing and exit codes live HERE. It
+        # does not import scheduler_journal_archive.py, so it rides the rule site
+        # rather than ORCHESTRATOR_CLI_IMPORTER_TESTS (spliced into pattern[4]).
+        # DB-free, 23 tests in 46.71s — heavier than the three targets above but
+        # far under the ~5 min per-module line, so a rule not an exclusion.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
@@ -1447,6 +1472,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_copyback_mutex.py",
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
+            "tests/test_operator_reentry_confirmation.py",
         ),
         stop_on_match=True,
     ),
@@ -1755,6 +1781,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 87 tests in 2.07s.
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
+            # #1555/#1768: the operator re-entry confirmation suite
+            # top-level-imports `services.orchestrator` itself plus
+            # journal_root_authority.py (the refusal message it pins) — modules
+            # no stop rule owns, so the directory rule is where those two
+            # importer gaps close. Its other importer pairs (cli.py,
+            # scheduler.py, file_orchestration_journal.py) are stop-rule owned
+            # and ride THEIR sites, per this rule's #1455 note above. This route
+            # is also the only one that reaches the suite for a PR touching its
+            # own subject module, services/orchestrator/operator_reentry_
+            # confirmation.py, which the suite drives through the CLI rather
+            # than importing. DB-free, 23 tests in 46.71s.
+            "tests/test_operator_reentry_confirmation.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list
