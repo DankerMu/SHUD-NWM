@@ -21,7 +21,7 @@
 ## 5. Delivery
 
 - [x] 5.1 Update existing runbook and write redacted live receipt with timestamps, commands, actual deployed SHA, results and rollback.
-- [ ] 5.2 Complete risk-scaled cross-review, CI, single-PR merge and issue updates; leave #2346 second step open.
+- [x] 5.2 Complete risk-scaled cross-review, CI, single-PR merge and issue updates; leave #2346 second step open. PR #2441 merged as `13d838063dd8a60c10f9b83c8bb26e5924262f4d`; #2431/#2432 closed, #2346 first-step checkbox completed and issue remains open.
 
 ## Evidence Floor
 

@@ -100,7 +100,7 @@ Admission (formula
 
 Later snapshot:
 
-(`openspec/changes/configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-pool-after-capacity.txt`): env file now has pool 8/8;
+(`openspec/changes/archive/2026-09-16-configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-pool-after-capacity.txt`): env file now has pool 8/8;
 workers and cache keys remain absent from `display.env` (unit/process
 fallback still supplies cache `/home/nwm/.cache/nhms/mvt`); retention
 env now includes `NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt`.
@@ -127,7 +127,7 @@ SQLAlchemy deny-write (explicit transaction): `current_user=nhms_display_ro`,
 `sqlstate=42501`, `denied=true`, rolled back. This is not a latency or
 cold-isolation claim.
 
-Public nginx (`openspec/changes/configure-display-pool-cache-pruning-diagnose-forcing/evidence/public-network-smoke.json`): `/` 200 646 B,
+Public nginx (`openspec/changes/archive/2026-09-16-configure-display-pool-cache-pruning-diagnose-forcing/evidence/public-network-smoke.json`): `/` 200 646 B,
 `/api/v1/layers` 200 6073 B, `river-network-national/4/12/6.pbf` 200
 149416 B.
 
@@ -141,7 +141,7 @@ not a pool regression.
    while declaring `source=gfs`. Latest-product 404
    `QHH_LATEST_PRODUCT_UNAVAILABLE`; jobs/status/stages 404
    `PIPELINE_STRICT_IDENTITY_NOT_FOUND`. Pinning error, not a pool change.
-2. Pinned GFS (`pool-2346-gfs-pinned-20260916`, 10:36:31Z; `openspec/changes/configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-readonly-gfs.json`) identity
+2. Pinned GFS (`pool-2346-gfs-pinned-20260916`, 10:36:31Z; `openspec/changes/archive/2026-09-16-configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-readonly-gfs.json`) identity
    `fcst_gfs_2026091400_dg_0883c7e9c1006c6fd347df500315e9df` /
    `2026-09-14T00:00:00Z`. Role `nhms_display_ro`,
    `transaction_read_only=off`, mutating/reachable/unsafe findings empty.
@@ -149,7 +149,7 @@ not a pool regression.
    `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`. Overall **BLOCKED** solely
    because jobs / pipeline_status / pipeline_stages returned HTTP 200
    without strict identity in the bodies, and job_logs BLOCKED.
-3. Pinned IFS (`pool-2346-ifs-pinned-20260916`, 10:37:51Z; `openspec/changes/configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-readonly-ifs.json`) identity
+3. Pinned IFS (`pool-2346-ifs-pinned-20260916`, 10:37:51Z; `openspec/changes/archive/2026-09-16-configure-display-pool-cache-pruning-diagnose-forcing/evidence/node27-readonly-ifs.json`) identity
    `fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6` /
    `2026-09-14T12:00:00Z`. Same 23/23 denials, same 409 PASS, same overall
    BLOCKED residual on jobs/pipeline/stages identity + job_logs.
@@ -337,7 +337,7 @@ node-22 environment.
 - Runbook: `docs/runbooks/display-readonly-live-mvt.md` (pool formula,
   PNG/PBF pairing, #2360 separation).
 - Prior PNG growth observation: `docs/runbooks/receipts/2026-09-16-display-v2.md` §6/§8.
-- [Fixture evidence directory](../../../openspec/changes/configure-display-pool-cache-pruning-diagnose-forcing/evidence/)
+- [Fixture evidence directory](../../../openspec/changes/archive/2026-09-16-configure-display-pool-cache-pruning-diagnose-forcing/evidence/)
   (`node27-pool-apply.txt`, `node27-pool-verify.txt`,
   `node27-pool-after-capacity.txt`, `node27-retention-plan.txt`,
   `node27-plan-inspection.txt`, `node27-retention-execute.txt`,
