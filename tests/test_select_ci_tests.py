@@ -706,12 +706,19 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # scheduler_runtime.py stop rule (that stop shadows the orchestrator tree
     # rule which carries the mutex partition). Additive to the redirect, exactly
     # like the safe_fs.py and journal importer targets.
+    # The scope-disposition node id is #1186 round 2's at-site addition to the
+    # same stop rule: scheduler_runtime.py writes most of the evidence keys the
+    # closure pin dispositions, and the stop rule's ten pinned node ids did not
+    # include it — so adding a top-level key there would not have run the one test
+    # that exists to go red on exactly that.
     assert selected == sorted(
         {
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
             "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py"
+            "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -850,6 +857,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
+        # #1186: the operator-action listing suite rides the broad orchestrator
+        # directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py` and scheduler_evidence_payload.py,
+        # and is the only route that reaches it for a PR touching its own subject
+        # module, operator_action_listing.py.
+        "tests/test_operator_action_listing.py",
         # #1555/#1768: the operator re-entry confirmation suite rides the broad
         # orchestrator directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and journal_root_authority.py, and
@@ -9882,6 +9895,10 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # #1555/#1768 added a fourth: the re-entry confirmation suite's entire write
     # side is `cli.main(["confirm-operator-reentry", ...])`, so cli.py is where
     # its command registration and exit codes are decided.
+    # #1186 added a fifth: the operator-action listing suite drives every case
+    # through `cli.main(["list-operator-actions", ...])` and pins the argparse
+    # fallback leg against the click leg, so cli.py owns its registration,
+    # option parsing and the 0/1/2/3 exit-code contract.
     (
         "services/orchestrator/cli.py",
         (
@@ -9890,6 +9907,7 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
             "tests/test_operator_reentry_confirmation.py",
+            "tests/test_operator_action_listing.py",
         ),
     ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
@@ -9905,7 +9923,16 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # redirect, pinned by the file-journal selection test), so only the at-site
     # target is named — the same "pin what the extension added" shape as the
     # other rows. The exact 23-element selection is pinned below.
-    ("services/orchestrator/scheduler_runtime.py", ("tests/test_retention_copyback_mutex.py",)),
+    # #1186 round 2 added a second at-site target to this same rule: one node id
+    # of the scope-dimension closure pin, because this module publishes most of a
+    # pass payload's top-level keys.
+    (
+        "services/orchestrator/scheduler_runtime.py",
+        (
+            "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+        ),
+    ),
 )
 
 
@@ -9949,6 +9976,10 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
 def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     # 22 -> 23: the stop rule for scheduler_runtime.py shadows the orchestrator
     # tree rule, so the mutex suite arrives only through the at-site extension.
+    # 23 -> 24 (#1186 round 2): the scope-dimension closure pin rides the same
+    # rule as a single node id. This module writes most of a pass payload's
+    # top-level keys, and that pin is what turns "a new key nobody dispositioned"
+    # from a silent false exit 0 into a red test.
     assert Path("services/orchestrator/scheduler_runtime.py").is_file()
 
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
@@ -9969,6 +10000,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_production_scheduler.py::test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call",
         "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion",
         "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
+        "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
         "tests/test_retention_copyback_mutex.py",
         # #2185: services/** is a river-segment write-surface root.
@@ -10018,9 +10050,15 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         # the operator re-entry confirmation suite joined the broad orchestrator
         # list AND the cli.py stop rule's at-site targets. The helper leg is
         # untouched, which is what keeps this pin able to tell the two apart.
-        ("services/orchestrator/retention.py", 54),
-        ("services/orchestrator/cli.py", 33),
-        ("services/orchestrator/__init__.py", 53),
+        # +1 on all three legs again (#1186): the operator-action listing suite
+        # joined the broad orchestrator list AND the cli.py stop rule's at-site
+        # targets. Measured, not inferred — `select_tests` run per leg gives
+        # 55 / 34 / 54, and the helper leg is deliberately still 6 (the control
+        # that tells "one more suite joined two lanes" apart from "something else
+        # moved").
+        ("services/orchestrator/retention.py", 55),
+        ("services/orchestrator/cli.py", 34),
+        ("services/orchestrator/__init__.py", 54),
         ("tests/retention_test_helpers.py", 6),
     ),
 )

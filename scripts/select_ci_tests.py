@@ -677,6 +677,17 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # runtime-budget token is reserved for, and the suite's subject IS this
     # module, so a rule is the honest disposition rather than an exclusion.
     "tests/test_operator_reentry_confirmation.py",
+    # #1186: the operator-action listing suite couples to `scheduler.py` two ways.
+    # It imports it transitively — `operator_action_listing.py` aliases
+    # `SCOPE_COMPLETE_SOURCES`/`SCOPE_COMPLETE_CYCLE_HOURS_UTC` straight from
+    # `DEFAULT_PRODUCTION_SOURCES`/`DEFAULT_ALLOWED_CYCLE_HOURS_UTC` rather than
+    # keeping copies — and it also reads `cli.py`'s independent `resolved_sources`
+    # fallback with `ast`. Either way an edit to those tuples is precisely what
+    # has to run this suite. Without this row the coupling edge is invisible to
+    # the selector: the importer closure only applies when the CHANGED path is
+    # itself a test file (`select_ci_tests.py:3809-3811`), and a production module
+    # path is routed by PATH_TEST_RULES alone.
+    "tests/test_operator_action_listing.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -1465,6 +1476,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # rather than ORCHESTRATOR_CLI_IMPORTER_TESTS (spliced into pattern[4]).
         # DB-free, 23 tests in 46.71s — heavier than the three targets above but
         # far under the ~5 min per-module line, so a rule not an exclusion.
+        #
+        # #1186 added a fifth, on the same ground and for a cheaper suite: every
+        # test in the operator-action listing suite drives the shipped
+        # `cli.main(["list-operator-actions", ...])` entry, so the command's
+        # registration, `--evidence-root` / `--passes` parsing and the 0/1/2/3
+        # exit-code contract are decided HERE — the argparse fallback leg is
+        # pinned against the click leg in the same file. It does not import
+        # scheduler_journal_archive.py, so it rides the rule site rather than
+        # ORCHESTRATOR_CLI_IMPORTER_TESTS (spliced into pattern[4]). DB-free, 75
+        # tests in 0.34s, the cheapest target on this list.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
@@ -1473,6 +1494,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
             "tests/test_operator_reentry_confirmation.py",
+            "tests/test_operator_action_listing.py",
         ),
         stop_on_match=True,
     ),
@@ -1504,8 +1526,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # packages/common/copyback_guard.py, routed below), so this stop rule is
         # where its gap closes. The sibling tests/test_retention_extra_roots.py
         # gap stays open (issue boundary, recorded known limit).
+        #
+        # #1186 round 2 adds the second at-site target. scheduler_runtime.py
+        # writes most of the top-level keys of a pass evidence payload (it keeps
+        # adding to the dict `base_evidence` returned, `counts` and
+        # `duplicate_exclusions` among them), and the scope-dimension closure pin
+        # runs a REAL pass and asserts every published key carries a disposition.
+        # A new key here without a disposition is exactly the silent false-exit-0
+        # this PR exists to close, so that one node id — not the whole 2000-test
+        # suite — rides this rule. Measured at 0.04s of call time.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11],
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_retention_copyback_mutex.py"),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1793,6 +1828,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # confirmation.py, which the suite drives through the CLI rather
             # than importing. DB-free, 23 tests in 46.71s.
             "tests/test_operator_reentry_confirmation.py",
+            # #1186: the operator-action listing suite top-level-imports
+            # `services.orchestrator` itself and scheduler_evidence_payload.py
+            # (it writes every size-fallback fixture through the REAL
+            # `bounded_evidence_payload`, so the listing's undecidability rule
+            # rests on that writer's shape) — neither is stop-rule owned, so the
+            # directory rule is where those two importer gaps close. Its third
+            # importer pair, cli.py, is stop-rule owned and rides THAT site, per
+            # this rule's #1455 note above. This route is also the only one that
+            # reaches the suite for a PR touching its own subject module,
+            # services/orchestrator/operator_action_listing.py, which the suite
+            # drives through the CLI rather than importing. DB-free, 75 tests in
+            # 0.34s.
+            "tests/test_operator_action_listing.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list
