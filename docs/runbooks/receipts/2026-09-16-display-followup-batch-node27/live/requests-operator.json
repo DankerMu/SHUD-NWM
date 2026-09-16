@@ -1,0 +1,58 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/runtime/config"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/metrics/stage-duration"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/metrics/success-rate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/status"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/stages"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/runtime/config"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/metrics/stage-duration"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/metrics/success-rate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/status"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/stages"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/jobs"
+  }
+]

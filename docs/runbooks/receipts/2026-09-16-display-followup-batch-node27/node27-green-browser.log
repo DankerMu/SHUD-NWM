@@ -1,0 +1,89 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch/apps/frontend && PLAYWRIGHT_DEV_PORT=18203 corepack pnpm exec playwright test e2e/monitoring.mocked.spec.ts e2e/m11-overlay-collision.mocked.spec.ts --project=mocked-regression-chromium --workers=1 --reporter=line'
+
+Running 31 tests using 1 worker
+
+[1A[2K[1/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1920px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1920px
+legend/attribution @ 1920 {"legend":{"x":1751.265625,"y":774,"width":152.734375,"height":186},"attribution":{"x":1766,"y":1046,"width":144,"height":24}}
+
+[1A[2K[2/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px
+bar/attribution @ 1920 {"bar":{"x":448,"y":976,"width":1024,"height":64},"attribution":{"x":1766,"y":1046,"width":144,"height":24},"map":{"x":0,"y":84,"width":1920,"height":996}}
+
+[1A[2K[3/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1920px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1920px
+overlays/bar @ 1920 {"bar":{"x":448,"y":976,"width":1024,"height":64},"legend":{"x":1751.265625,"y":774,"width":152.734375,"height":186},"notice":{"x":907.9921875,"y":862,"width":104.015625,"height":34}}
+
+[1A[2K[4/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1440px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1440px
+legend/attribution @ 1440 {"legend":{"x":1271.265625,"y":594,"width":152.734375,"height":186},"attribution":{"x":1286,"y":866,"width":144,"height":24}}
+
+[1A[2K[5/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px
+bar/attribution @ 1440 {"bar":{"x":208,"y":796,"width":1024,"height":64},"attribution":{"x":1286,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":1440,"height":816}}
+
+[1A[2K[6/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1440px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1440px
+overlays/bar @ 1440 {"bar":{"x":208,"y":796,"width":1024,"height":64},"legend":{"x":1271.265625,"y":594,"width":152.734375,"height":186},"notice":{"x":667.9921875,"y":682,"width":104.015625,"height":34}}
+
+[1A[2K[7/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1280px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 1280px
+legend/attribution @ 1280 {"legend":{"x":1111.265625,"y":594,"width":152.734375,"height":186},"attribution":{"x":1126,"y":866,"width":144,"height":24}}
+
+[1A[2K[8/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px
+bar/attribution @ 1280 {"bar":{"x":128,"y":796,"width":1024,"height":64},"attribution":{"x":1126,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":1280,"height":816}}
+
+[1A[2K[9/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1280px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 1280px
+overlays/bar @ 1280 {"bar":{"x":128,"y":796,"width":1024,"height":64},"legend":{"x":1111.265625,"y":594,"width":152.734375,"height":186},"notice":{"x":587.9921875,"y":682,"width":104.015625,"height":34}}
+
+[1A[2K[10/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 800px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 800px
+legend/attribution @ 800 {"legend":{"x":631.265625,"y":594,"width":152.734375,"height":186},"attribution":{"x":646,"y":866,"width":144,"height":24}}
+
+[1A[2K[11/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px
+bar/attribution @ 800 {"bar":{"x":16,"y":796,"width":768,"height":64},"attribution":{"x":646,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":800,"height":816}}
+
+[1A[2K[12/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 800px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 800px
+overlays/bar @ 800 {"bar":{"x":16,"y":796,"width":768,"height":64},"legend":{"x":631.265625,"y":594,"width":152.734375,"height":186},"notice":{"x":347.9921875,"y":682,"width":104.015625,"height":34}}
+
+[1A[2K[13/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 520px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:66:5 › M11 单图浮层与地图自带控件不互相压盖 › 径流量图例不压盖 MapLibre 版权归属 @ 520px
+legend/attribution @ 520 {"legend":{"x":351.265625,"y":594,"width":152.734375,"height":186},"attribution":{"x":366,"y":866,"width":144,"height":24}}
+
+[1A[2K[14/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px
+bar/attribution @ 520 {"bar":{"x":16,"y":796,"width":488,"height":64},"attribution":{"x":366,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":520,"height":816}}
+
+[1A[2K[15/31] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 520px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:115:5 › M11 单图浮层与地图自带控件不互相压盖 › 图例与空清单提示不压盖底部控制条 @ 520px
+overlays/bar @ 520 {"bar":{"x":16,"y":796,"width":488,"height":64},"legend":{"x":351.265625,"y":594,"width":152.734375,"height":186},"notice":{"x":207.9921875,"y":682,"width":104.015625,"height":34}}
+
+[1A[2K[16/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:413:3 › monitoring page › keeps viewer as the default role before local dev override is used
+[1A[2K[17/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:422:3 › monitoring page › loads summary bar, stage cards, jobs table, and trend charts
+[1A[2K[18/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:447:3 › monitoring page › expands a failed stage to show basin failures
+[1A[2K[19/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:464:3 › monitoring page › updates the jobs table when filters change
+[1A[2K[20/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:474:3 › monitoring page › opens the job log modal and shows log content
+[1A[2K[21/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:484:3 › monitoring page › shows retry for dev override operator and sends the role header
+[1A[2K[22/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:511:3 › monitoring page › proves the /ops controlled failure log and retry lifecycle
+[1A[2K[23/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:570:3 › monitoring page › shows cancel for dev override operator and hides it when role becomes viewer
+[1A[2K[24/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:597:3 › monitoring page › uses the configured API base for monitoring reads and operator actions
+[1A[2K[25/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:626:3 › monitoring page › denies monitoring access to viewer role
+[1A[2K[26/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:634:3 › monitoring page › serves monitoring deep link through the SPA fallback
+[1A[2K[27/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:817:3 › operational pages own vertical scrolling › wheels /monitoring to the bottom without moving the window
+[1A[2K[28/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:826:3 › operational pages own vertical scrolling › wheels /ops to the bottom without moving the window
+[1A[2K[29/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:835:3 › operational pages own vertical scrolling › wheels /system/model-assets to the bottom without moving the window
+[1A[2K[30/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x800 without window scroll
+[1A[2K[mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x800 without window scroll
+map-fit 1280x800 {"map":{"x":0,"y":84,"width":1280,"height":716,"bottom":800},"main":{"x":0,"y":84,"width":1280,"height":716,"bottom":800},"windowScrollY":0,"documentScrollHeight":800,"innerHeight":800}
+
+[1A[2K[31/31] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll
+[1A[2K[mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll
+map-fit 1280x600 {"map":{"x":0,"y":84,"width":1280,"height":516,"bottom":600},"main":{"x":0,"y":84,"width":1280,"height":516,"bottom":600},"windowScrollY":0,"documentScrollHeight":600,"innerHeight":600}
+
+[1A[2K  31 passed (47.6s)
+
+exit_code=0

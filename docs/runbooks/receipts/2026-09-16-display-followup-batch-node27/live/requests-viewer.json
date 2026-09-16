@@ -1,0 +1,106 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/runtime/config"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/basins"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/layers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/models"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/runs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/layers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/layers/discharge/cycles"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/precip/gfs/2026-09-14T00%3A00%3A00Z/index"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/6/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/6/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/5/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/5/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/7/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/7/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/6/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/5/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/7/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/4/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/river-network-national/3/4/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/3.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/tiles/hydro-national/gfs/2026-09-14T00%3A00%3A00Z/q_down/2026-09-14T00%3A00%3A00Z/3/4/2.pbf"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/status"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/precip/gfs/2026-09-14T00:00:00Z/2026-09-14T00:00:00Z.png"
+  }
+]

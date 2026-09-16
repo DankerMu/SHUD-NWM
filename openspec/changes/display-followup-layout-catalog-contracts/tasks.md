@@ -4,17 +4,17 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 #2023: internal wheel scrolling on /ops, /monitoring and /system/model-assets; short map fit; regression coverage.
-- [ ] 2.2 #2128: separate control bar/attribution rectangles, align adjacent overlays and active layout spec; regression coverage.
-- [ ] 2.3 #2142: no-ready-run precip catalog branch with unchanged existing contracts; route regression coverage.
-- [ ] 2.4 #2039: reconcile current API design section 9 with retired frontend lineage; preserve other provenance.
+- [x] 2.1 #2023: internal wheel scrolling on /ops, /monitoring and /system/model-assets; short map fit; regression coverage.
+- [x] 2.2 #2128: separate control bar/attribution rectangles, align adjacent overlays and active layout spec; regression coverage.
+- [x] 2.3 #2142: no-ready-run precip catalog branch with unchanged existing contracts; route regression coverage.
+- [x] 2.4 #2039: reconcile current API design section 9 with retired frontend lineage; preserve other provenance.
 
 ## 3. Evidence and review
 
-- [ ] 3.1 E1/E2/E3: node-27 red/green scrolling and collision regression with measured boxes, and map fit.
-- [ ] 3.2 E4: node-27 catalog HTTP regression red/green plus ready/missing/not-ready/pagination compatibility.
-- [ ] 3.3 E5/E6: local frontend unit/type/build/API-type checks, ruff and OpenSpec validation; current lineage consumer/schema inventory.
-- [ ] 3.4 E7: node-27 isolated target build + real display API browser smoke, no production mutation; capture screenshot/geometry and identify test-only role override.
+- [x] 3.1 E1/E2/E3: node-27 red/green scrolling and collision regression with measured boxes, and map fit.
+- [x] 3.2 E4: node-27 catalog HTTP regression red/green plus ready/missing/not-ready/pagination compatibility.
+- [x] 3.3 E5/E6: local frontend unit/type/build/API-type checks, ruff and OpenSpec validation; current lineage consumer/schema inventory.
+- [x] 3.4 E7: node-27 isolated target build + real display API browser smoke, no production mutation; capture screenshot/geometry and identify test-only role override.
 - [ ] 3.5 E8: cross-review, adjudication, clean SHA gate and green CI; close each issue only when its evidence row is satisfied.
 
 ## Evidence Floor
@@ -61,4 +61,4 @@
 
 ## Evidence receipts
 
-Pending execution; no pass is claimed by fixture creation.
+E1–E7: [node-27 receipt](../../../docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/README.md), source `e0775fde9389aea1c10fea8259956bf5e7df9626`; capture-only redaction update `9566c155805e74943d7fba6e6329f252a5b3a0a7`. Backend red: 2 failures; browser red: 9 failures/1 compatibility pass. Fixed catalog: 30 passed; mocked browser: 31 passed; all three built-role live smoke passes. Local: 81 files/1052 tests, tsc/build/API types/ruff/OpenSpec passed. Provider 403, screenshot redaction, empty current-cycle ops data and test-only build-time roles are disclosed in the receipt; no production deployment is claimed. E8 remains a pre-merge gate.

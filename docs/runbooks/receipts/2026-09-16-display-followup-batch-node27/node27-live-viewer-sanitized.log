@@ -1,0 +1,17 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch && SMOKE_ROLE=viewer SOURCE_SHA=9566c155805e74943d7fba6e6329f252a5b3a0a7 node docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/capture.cjs'
+{"role":"viewer","base":"http://127.0.0.1:18023","capabilities":{"service_role":"display_readonly","control_mutations_enabled":false,"slurm_routes_enabled":false,"queue_depth_mode":"display_readonly_unavailable","display_readonly":true},"sha":"9566c155805e74943d7fba6e6329f252a5b3a0a7"}
+{"viewport":{"width":1920,"height":1080},"boxes":{"bar":{"x":448,"y":976,"width":1024,"height":64},"attribution":{"x":1766,"y":1046,"width":144,"height":24},"legend":{"x":1685.296875,"y":613,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":1920,"height":996}}}
+{"viewport":{"width":1920,"height":1080},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+{"viewport":{"width":1440,"height":900},"boxes":{"bar":{"x":208,"y":796,"width":1024,"height":64},"attribution":{"x":1286,"y":866,"width":144,"height":24},"legend":{"x":1205.296875,"y":433,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":1440,"height":816}}}
+{"viewport":{"width":1440,"height":900},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+{"viewport":{"width":1280,"height":900},"boxes":{"bar":{"x":128,"y":796,"width":1024,"height":64},"attribution":{"x":1126,"y":866,"width":144,"height":24},"legend":{"x":1045.296875,"y":433,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":1280,"height":816}}}
+{"viewport":{"width":1280,"height":900},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+{"viewport":{"width":800,"height":900},"boxes":{"bar":{"x":16,"y":796,"width":768,"height":64},"attribution":{"x":646,"y":866,"width":144,"height":24},"legend":{"x":565.296875,"y":433,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":800,"height":816}}}
+{"viewport":{"width":800,"height":900},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+{"viewport":{"width":520,"height":900},"boxes":{"bar":{"x":16,"y":796,"width":488,"height":64},"attribution":{"x":366,"y":866,"width":144,"height":24},"legend":{"x":285.296875,"y":433,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":520,"height":816}}}
+{"viewport":{"width":520,"height":900},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+{"viewport":{"width":1280,"height":600},"boxes":{"bar":{"x":128,"y":496,"width":1024,"height":64},"attribution":{"x":1126,"y":566,"width":144,"height":24},"legend":{"x":1045.296875,"y":133,"width":218.703125,"height":347},"map":{"x":0,"y":84,"width":1280,"height":516}}}
+{"viewport":{"width":1280,"height":600},"providerErrorVisible":true,"screenshotRedaction":"map-source-error banner (URL key)"}
+PASS isolated live-API browser smoke role=viewer
+
+exit_code=0

@@ -1,0 +1,29 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch/apps/frontend && VITE_API_BASE_URL= VITE_AUTH_ROLE=model_admin corepack pnpm build'
+
+> frontend@1.0.0 build /home/nwm/worktrees/issue-2023-display-batch/apps/frontend
+> vite build
+
+vite v6.4.2 building for production...
+transforming...
+✓ 2542 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                            0.65 kB │ gzip:   0.36 kB
+dist/assets/sponsors-BEXj96XY.png        133.29 kB
+dist/assets/logo-W-foGt6x.png            389.60 kB
+dist/assets/index-CRFlIjp9.css            58.62 kB │ gzip:  10.86 kB
+dist/assets/OverviewPage-PhPnDjd-.css     65.47 kB │ gzip:   9.22 kB
+dist/assets/maplibre-gl-BFOygm_7.js        0.50 kB │ gzip:   0.36 kB
+dist/assets/button-MPpizwBH.js             5.16 kB │ gzip:   2.16 kB
+dist/assets/runtime-BGlpYFX4.js            8.41 kB │ gzip:   3.67 kB
+dist/assets/ModelAssetsPage-DR5QtQ2l.js   32.50 kB │ gzip:   9.87 kB
+dist/assets/MonitoringPage-BcCZrEKY.js    39.63 kB │ gzip:  12.49 kB
+dist/assets/index-YZzOuvRU.js             51.46 kB │ gzip:  16.58 kB
+dist/assets/vendor-Dhrtl9aN.js            98.58 kB │ gzip:  33.87 kB
+dist/assets/OverviewPage-NxQGNZr4.js     149.45 kB │ gzip:  47.27 kB
+dist/assets/react-RJ6AW5ww.js            181.83 kB │ gzip:  59.85 kB
+dist/assets/vendor-charts-BMeovC4a.js    625.70 kB │ gzip: 210.57 kB
+dist/assets/vendor-map-2JX48g6q.js       825.52 kB │ gzip: 225.46 kB
+✓ built in 17.20s
+
+exit_code=0
