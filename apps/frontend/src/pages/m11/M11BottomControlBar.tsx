@@ -168,7 +168,7 @@ export function M11BottomControlBar({
   return (
     <section
       className={cn(
-        'absolute bottom-4 left-1/2 z-[115] flex w-[min(64rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 px-3',
+        'absolute bottom-10 left-1/2 z-[115] flex w-[min(64rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 px-3',
         controlBarHeightClass,
         GLASS_PANEL,
       )}

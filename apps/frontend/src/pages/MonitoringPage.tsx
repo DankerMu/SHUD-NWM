@@ -220,7 +220,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="h-full min-h-0 space-y-4 overflow-y-auto">
       <div>
         <h1 className="text-xl font-semibold text-foreground">{canonicalRoute === '/ops' ? '内部诊断' : '监控工作台'}</h1>
         <p className="mt-1 text-sm text-muted">

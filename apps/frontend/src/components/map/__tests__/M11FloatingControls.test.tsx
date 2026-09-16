@@ -7,7 +7,6 @@ import {
   M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
-  M11FloatingNotice,
   M11OpsLink,
   type M11PrecipAvailability,
 } from '@/components/map/M11FloatingControls'
@@ -54,17 +53,6 @@ function expectSizedToContent(card: HTMLElement) {
   expect(classes).toContain('w-max')
   expect(classes.filter((name) => /^w-(?!max$|fit$)/.test(name))).toHaveLength(0)
   expect(classes.some((name) => name.startsWith('max-w-'))).toBe(true)
-}
-
-/**
- * 底部偏移不变量：按**空白切 token** 比对，不用子串。
- * 朴素的 `not.toContain('bottom-4')` 会被 `bottom-40` 假红（反之 `toContain('bottom-4')` 会被
- * `bottom-40` 假绿），而这三个类名恰好两两互为前缀。
- */
-function expectBottomOffset(element: HTMLElement, expected: string, replaced: string) {
-  const classes = element.className.split(/\s+/)
-  expect(classes).toContain(expected)
-  expect(classes).not.toContain(replaced)
 }
 
 /** jsdom 把 `style.backgroundColor` 归一成 `rgb(...)`；用同一条 CSSOM 路径把期望值也归一，
@@ -309,22 +297,6 @@ describe('M11FloatingLegend', () => {
   })
 })
 
-/**
- * spec map-layer-timeline-controls「Floating controls clear the control bar」：
- * `M11BottomControlBar` 自身 `bottom-4` + 固定 `h-16`（64px）占据 16–80px 这一带，
- * 浮层必须整体抬到它上面。
- */
-describe('floating controls clear the bottom control bar', () => {
-  it('lifts the legend from bottom-12 to bottom-24', () => {
-    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
-    expectBottomOffset(screen.getByTestId('m11-floating-legend'), 'bottom-24', 'bottom-12')
-  })
-
-  it('lifts the floating notice from bottom-20 to bottom-40', () => {
-    render(<M11FloatingNotice testId="m11-offset-notice">降水提示</M11FloatingNotice>)
-    expectBottomOffset(screen.getByTestId('m11-offset-notice'), 'bottom-40', 'bottom-20')
-  })
-})
 
 describe('M11OpsLink', () => {
   it('hides the ops link for non-operator roles', () => {

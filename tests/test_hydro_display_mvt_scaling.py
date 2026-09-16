@@ -2671,8 +2671,8 @@ def test_layer_catalog_never_advertises_a_cycle_whose_timeline_came_back_empty(m
     assert metadata["default_source"] == "gfs"
 
 
-def test_layer_catalog_is_empty_when_no_run_is_display_ready(monkeypatch: Any) -> None:
-    """The other empty state: no ghost discharge entry when nothing is renderable at all."""
+def test_layer_catalog_is_precip_only_when_no_run_is_display_ready(monkeypatch: Any) -> None:
+    """No ghost discharge/river/met-station entries when nothing hydrological is renderable."""
     session = _NationalDiscoverySession([])
     monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: None)
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
@@ -2685,7 +2685,19 @@ def test_layer_catalog_is_empty_when_no_run_is_display_ready(monkeypatch: Any) -
         app.dependency_overrides.clear()
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"] == []
+    data = response.json()["data"]
+    assert [item["layer_id"] for item in data] == ["precip"]
+    assert data[0] == {
+        "layer_id": "precip",
+        "layer_name": "Precipitation (past 24h)",
+        "layer_type": "meteorology",
+        "variables": ["precip_24h"],
+        "metadata": layer_metadata("precip"),
+    }
+    for sibling in ("discharge", "river-network", "met-stations"):
+        assert sibling not in {item["layer_id"] for item in data}
+    # No-run precip must not consult run identity, coverage, or digest queries.
+    assert session.executions == []
 
 
 def test_layer_catalog_rejects_an_unknown_run_without_a_discharge_side_channel(monkeypatch: Any) -> None:
@@ -2700,6 +2712,36 @@ def test_layer_catalog_rejects_an_unknown_run_without_a_discharge_side_channel(m
     assert response.status_code == 404, response.text
     assert response.json()["error"]["code"] == "RUN_NOT_FOUND"
     assert "data" not in response.json()
+
+
+def test_layer_catalog_rejects_an_explicit_not_ready_run(monkeypatch: Any) -> None:
+    session = _Session(
+        [
+            {
+                "run_id": "run_not_ready",
+                "status": "running",
+                "model_id": "model-a",
+                "basin_version_id": "bv_a",
+                "source_id": "GFS",
+                "cycle_time": "2026-09-02T12:00:00Z",
+                "updated_at": "2026-09-02T13:00:00Z",
+                "river_network_version_id": "rnv_a",
+                "timeseries_store": "narrow",
+            }
+        ]
+    )
+    app = _national_catalog_app(monkeypatch, session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers", params={"run_id": "run_not_ready"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "DISPLAY_PRODUCT_NOT_READY"
+    assert "data" not in response.json()
+    assert len(session.executions) == 1
+    assert "FROM hydro.hydro_run h" in session.executions[0][0]
 
 
 def test_layer_catalog_advertises_the_list_the_valid_times_endpoint_serves(monkeypatch: Any) -> None:

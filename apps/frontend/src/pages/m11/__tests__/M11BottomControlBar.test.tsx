@@ -11,11 +11,9 @@ import {
   type LayerState,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
-import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import {
   M11BottomControlBar,
   deriveM11ControlBarModel,
-  m11ControlBarHeightClass,
   type M11ControlBarInput,
 } from '@/pages/m11/M11BottomControlBar'
 import { M11Timeline, m11SourceOptions } from '@/pages/m11/M11Controls'
@@ -573,17 +571,6 @@ describe('M11BottomControlBar', () => {
     expect([...select.options].map((option) => option.textContent)).toEqual(['无可用起报时次'])
     // `M11Timeline` 收到 `cycle={null}` → 刻度行由 prop 门控不渲染、底行回来 → 右列恢复 3 行。
     expect(screen.getByTestId('m11-timeline-rows').children.length).toBe(3)
-  })
-
-  it('sits 16px above the viewport bottom at the shared timeline height token', () => {
-    // AC6：高度类名由 token 经被测映射函数得出（token 改 '80px' → 类名变 h-20，本断言变红）。
-    renderControlBar(inputFor(defaultM11QueryState))
-    const classes = screen.getByTestId('m11-bottom-control-bar').className.split(/\s+/)
-
-    expect(m11ControlBarHeightClass('64px')).toBe('h-16')
-    expect(classes).toContain(m11ControlBarHeightClass(m11VisualTokens.timelineHeight))
-    expect(classes).toContain('h-16')
-    expect(classes).toContain('bottom-4')
   })
 
   it('lets the tick row replace the bottom metadata row so the rows still fit 64px', () => {

@@ -251,13 +251,13 @@ export function M11FloatingLegend({
       // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
       // 把卡片撑过地图。
       //
-      // bottom-24 而不是 bottom-12：底部控制条（`M11BottomControlBar`）自身 `bottom-4`
-      // 且固定 `h-16`（64px，`m11VisualTokens.timelineHeight`），占据 16–80px 这一带；
-      // bottom-12（48px）会被它压掉。96px = 80px 条顶 + 16px 间隙
+      // bottom-[7.5rem] 而不是 bottom-24：底部控制条（`M11BottomControlBar`）自身 `bottom-10`
+      // 且固定 `h-16`（64px，`m11VisualTokens.timelineHeight`），占据 40–104px 这一带；
+      // bottom-24（96px）会被它压掉。120px = 104px 条顶 + 16px 间隙
       // （spec map-layer-timeline-controls「Floating controls clear the control bar」）。
-      // 这也顺带继续避开离底 10px、高 24px 的 MapLibre 版权归属带——版权标注是瓦片供应商的
+      // 这也顺带继续避开离底约 10px、高 24px 的 MapLibre 版权归属带——版权标注是瓦片供应商的
       // 硬要求，几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住（它量矩形，不钉类名）。
-      className={cn('absolute bottom-24 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
+      className={cn('absolute bottom-[7.5rem] right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
@@ -347,10 +347,10 @@ export function M11FloatingNotice({ children, testId }: { children: ReactNode; t
   return (
     <div
       className={cn(
-        // bottom-40：与图例同因抬过 16–80px 的控制条，并保持提示条原先就比
-        // 图例卡片再高一层的相对关系（bottom-20 之于 bottom-12）。
+        // bottom-[11.5rem]：与图例同因抬过 40–104px 的控制条，并保持提示条原先就比
+        // 图例卡片再高一层的相对关系（bottom-20 之于 bottom-12；再整体 +24px）。
         // 注意本值只保证越过控制条：卡片高度不定，居中提示与右下图例的水平交叠归 I15 的实机 receipt。
-        'absolute left-1/2 bottom-40 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
+        'absolute left-1/2 bottom-[11.5rem] z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
         GLASS_PANEL,
       )}
       role="status"

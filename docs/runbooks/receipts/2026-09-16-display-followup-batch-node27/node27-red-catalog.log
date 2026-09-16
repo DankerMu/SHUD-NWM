@@ -1,0 +1,62 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch && TMPDIR=/home/nwm/tmp /home/nwm/.local/bin/uv run --no-sync pytest -q tests/test_precip_overlay.py tests/test_hydro_display_mvt_scaling.py -k "catalog_is_precip_only_when_no_run"'
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_______ test_layers_catalog_is_precip_only_when_no_run_is_display_ready ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fb04d0e4fd0>
+
+    def test_layers_catalog_is_precip_only_when_no_run_is_display_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default catalog without a ready run still advertises precip, never run-scoped siblings."""
+        app = _catalog_app(monkeypatch)
+        monkeypatch.setattr(hydro_display, "display_ready_run", lambda _s: None)
+        try:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                no_run = client.get("/api/v1/layers")
+                ready_scoped = client.get("/api/v1/layers", params={"run_id": "run_other"})
+                first_page = client.get("/api/v1/layers", params={"limit": 1, "offset": 0})
+                beyond = client.get("/api/v1/layers", params={"limit": 1, "offset": 1})
+        finally:
+            app.dependency_overrides.clear()
+    
+        assert no_run.status_code == 200, no_run.text
+        assert ready_scoped.status_code == 200, ready_scoped.text
+        precip = _entry(ready_scoped.json()["data"], "precip")
+>       assert no_run.json()["data"] == [precip]
+E       AssertionError: assert [] == [{'layer_id':...', ...}, ...}]
+E         
+E         Right contains one more item: {'layer_id': 'precip', 'layer_name': 'Precipitation (past 24h)', 'layer_type': 'meteorology', 'metadata': {'bounds': [...326', 'fallback_available': False, 'image_url_template': '/api/v1/precip/{source}/{cycle}/{valid_time}.png', ...}, ...}
+E         Use -v to get more diff
+
+tests/test_precip_overlay.py:1768: AssertionError
+________ test_layer_catalog_is_precip_only_when_no_run_is_display_ready ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fb04d43d1d0>
+
+    def test_layer_catalog_is_precip_only_when_no_run_is_display_ready(monkeypatch: Any) -> None:
+        """No ghost discharge/river/met-station entries when nothing hydrological is renderable."""
+        session = _NationalDiscoverySession([])
+        monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: None)
+        monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
+        app = main.create_app()
+        app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+        try:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/api/v1/layers")
+        finally:
+            app.dependency_overrides.clear()
+    
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+>       assert [item["layer_id"] for item in data] == ["precip"]
+E       AssertionError: assert [] == ['precip']
+E         
+E         Right contains one more item: 'precip'
+E         Use -v to get more diff
+
+tests/test_hydro_display_mvt_scaling.py:2689: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_precip_overlay.py::test_layers_catalog_is_precip_only_when_no_run_is_display_ready
+FAILED tests/test_hydro_display_mvt_scaling.py::test_layer_catalog_is_precip_only_when_no_run_is_display_ready
+2 failed, 302 deselected in 2.45s
+
+exit_code=1

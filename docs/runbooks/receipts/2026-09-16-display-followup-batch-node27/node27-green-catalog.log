@@ -1,0 +1,5 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch && TMPDIR=/home/nwm/tmp /home/nwm/.local/bin/uv run --no-sync pytest -q tests/test_precip_overlay.py tests/test_hydro_display_mvt_scaling.py -k "catalog or layers"'
+..............................                                           [100%]
+30 passed, 274 deselected in 4.89s
+
+exit_code=0

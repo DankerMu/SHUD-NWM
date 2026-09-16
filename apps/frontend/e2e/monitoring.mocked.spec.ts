@@ -641,3 +641,245 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('heading', { name: '监控工作台' })).toHaveCount(0)
   })
 })
+
+async function wheelPageToBottom(page: Page, heading: string) {
+  const headingLocator = page.getByRole('heading', { name: heading })
+  await expect(headingLocator).toBeVisible()
+
+  const geometry = await headingLocator.evaluate((node) => {
+    const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+    if (!(root instanceof HTMLElement)) {
+      throw new Error('operational page root under main was not found')
+    }
+    const firstChild = root.firstElementChild
+    return {
+      scrollTop: root.scrollTop,
+      scrollHeight: root.scrollHeight,
+      clientHeight: root.clientHeight,
+      contentY: firstChild instanceof HTMLElement ? firstChild.getBoundingClientRect().y : null,
+      windowScrollY: window.scrollY,
+    }
+  })
+  expect(geometry.scrollHeight, 'fixture content must overflow the short viewport').toBeGreaterThan(geometry.clientHeight)
+  expect(geometry.contentY).not.toBeNull()
+
+  const rootBox = await headingLocator.evaluate((node) => {
+    const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+    if (!(root instanceof HTMLElement)) throw new Error('missing operational scroll root')
+    const box = root.getBoundingClientRect()
+    return { x: box.x + box.width / 2, y: box.y + Math.min(40, box.height / 2) }
+  })
+  await page.mouse.move(rootBox.x, rootBox.y)
+  await page.mouse.wheel(0, 2400)
+
+  await expect
+    .poll(async () =>
+      headingLocator.evaluate((_node, startTop: number) => {
+        const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+        if (!(root instanceof HTMLElement)) return null
+        return {
+          moved: root.scrollTop > startTop,
+          windowScrollY: window.scrollY,
+        }
+      }, geometry.scrollTop),
+    )
+    .toEqual(expect.objectContaining({ moved: true, windowScrollY: 0 }))
+
+  const afterFirstWheel = await headingLocator.evaluate(() => {
+    const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+    if (!(root instanceof HTMLElement)) throw new Error('missing operational scroll root')
+    const firstChild = root.firstElementChild
+    return {
+      scrollTop: root.scrollTop,
+      maxScroll: root.scrollHeight - root.clientHeight,
+      contentY: firstChild instanceof HTMLElement ? firstChild.getBoundingClientRect().y : null,
+      windowScrollY: window.scrollY,
+    }
+  })
+  expect(afterFirstWheel.scrollTop, 'wheel must move the internal page, not only the window').toBeGreaterThan(geometry.scrollTop)
+  expect(afterFirstWheel.contentY).not.toBeNull()
+  expect(afterFirstWheel.contentY!).toBeLessThan(geometry.contentY!)
+  expect(afterFirstWheel.windowScrollY).toBe(0)
+
+  const remaining = afterFirstWheel.maxScroll - afterFirstWheel.scrollTop
+  if (remaining > 1) {
+    await page.mouse.wheel(0, remaining + 400)
+  }
+
+  await expect
+    .poll(async () =>
+      headingLocator.evaluate(() => {
+        const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+        if (!(root instanceof HTMLElement)) return null
+        return {
+          remaining: root.scrollHeight - root.clientHeight - root.scrollTop,
+          windowScrollY: window.scrollY,
+        }
+      }),
+    )
+    .toEqual(expect.objectContaining({ windowScrollY: 0 }))
+  const settled = await headingLocator.evaluate(() => {
+    const root = document.querySelector('main')?.querySelector(':scope > :last-child')
+    if (!(root instanceof HTMLElement)) throw new Error('missing operational scroll root')
+    return root.scrollHeight - root.clientHeight - root.scrollTop
+  })
+  expect(settled, 'wheel must be able to reach the page bottom').toBeLessThanOrEqual(1)
+}
+
+function modelAssetDetailPayload() {
+  return {
+    model_id: 'basins_basin_a_shud',
+    model_name: 'alias-a',
+    basin_id: 'basins_basin_a',
+    basin_name: 'Basin A',
+    basin_version_id: 'basins_basin_a_vbasins',
+    river_network_version_id: 'basins_basin_a_rivnet_vbasins',
+    mesh_version_id: 'basins_basin_a_mesh_vbasins',
+    calibration_version_id: 'basins_basin_a_shud_calib_vbasins',
+    segment_count: 42,
+    mesh_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh',
+    mesh_checksum: 'mesh-sha-1',
+    shud_code_version: 'basins-shud',
+    active_flag: false,
+    lifecycle_state: 'inactive',
+    model_package_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/package/',
+    package_checksum: 'package-sha-1',
+    manifest_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/manifest.json',
+    source_inventory_checksum: 'inventory-sha-1',
+    basin_slug: 'basin-a',
+    shud_input_name: 'alias-a',
+    source_path: 's3://nhms/sources/basin-a',
+    resolved_source_path: 'https://assets.example.test/basin-a',
+    source_uri: 's3://nhms/sources/basin-a',
+    source_is_symlink: false,
+    resource_profile: {
+      basin_slug: 'basin-a',
+      shud_input_name: 'alias-a',
+      manifest_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/manifest.json',
+      package_checksum: 'package-sha-1',
+      source_inventory_checksum: 'inventory-sha-1',
+      segment_count: 42,
+      mesh: {
+        uri: 's3://nhms/models/basins_basin_a_shud/vbasins/package/alias-a.sp.mesh',
+        checksum: 'mesh-sha-1',
+      },
+      source_lineage: {
+        source_path: 's3://nhms/sources/basin-a',
+        source_uri: 's3://nhms/sources/basin-a',
+      },
+    },
+    created_at: '2026-05-14T00:00:00Z',
+  }
+}
+
+async function mockModelAssetsApi(page: Page) {
+  const model = modelAssetDetailPayload()
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/v1/runtime/config') return fulfill(route, runtimeConfig)
+    if (url.pathname === '/api/v1/models' && route.request().method() === 'GET') {
+      return fulfill(route, { items: [model], total: 1, limit: 50, offset: 0 })
+    }
+    if (url.pathname === `/api/v1/models/${model.model_id}` && route.request().method() === 'GET') {
+      return fulfill(route, model)
+    }
+    throw new Error(`Unhandled mocked API route: ${route.request().method()} ${url.pathname}`)
+  })
+}
+
+async function mockOverviewApi(page: Page) {
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/v1/runtime/config') return fulfill(route, runtimeConfig)
+    if (url.pathname === '/api/v1/layers') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'ok',
+          data: [
+            {
+              layer_id: 'discharge',
+              layer_name: 'Discharge',
+              layer_type: 'hydrology',
+              variables: ['q_down'],
+              metadata: { layer_id: 'discharge', valid_times: [] },
+            },
+          ],
+        }),
+      })
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data: [] }) })
+  })
+}
+
+test.describe('operational pages own vertical scrolling', () => {
+  test('wheels /monitoring to the bottom without moving the window', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await mockMonitoringApi(page)
+    await page.goto(`/monitoring?source=gfs&cycle=${encodeURIComponent(cycleTime)}`)
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await selectRole(page, 'Operator')
+    await wheelPageToBottom(page, '监控工作台')
+  })
+
+  test('wheels /ops to the bottom without moving the window', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await mockControlledOpsApi(page)
+    await page.goto(`/ops?source=gfs&cycle=${encodeURIComponent(controlledCycleTime)}`)
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await selectRole(page, 'Operator')
+    await wheelPageToBottom(page, '内部诊断')
+  })
+
+  test('wheels /system/model-assets to the bottom without moving the window', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await mockModelAssetsApi(page)
+    await page.goto('/system/model-assets?modelId=basins_basin_a_shud')
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await selectRole(page, 'Model Admin')
+    await expect(page.getByRole('heading', { name: '模型资产管理' })).toBeVisible()
+    await expect(page.getByText('生命周期操作')).toBeVisible()
+    await wheelPageToBottom(page, '模型资产管理')
+  })
+})
+
+test.describe('map fits the available height', () => {
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 1280, height: 600 },
+  ]) {
+    test(`map fills below the header at ${viewport.width}x${viewport.height} without window scroll`, async ({ page }) => {
+      await page.setViewportSize(viewport)
+      await mockOverviewApi(page)
+      await page.goto('/?source=gfs&layer=discharge&basemap=vector')
+
+      const map = page.locator('[data-testid="m11-fullscreen-map"]')
+      await expect(map).toBeVisible()
+
+      const boxes = await page.evaluate(() => {
+        const mapNode = document.querySelector('[data-testid="m11-fullscreen-map"]')
+        const main = document.querySelector('main')
+        if (!(mapNode instanceof HTMLElement) || !(main instanceof HTMLElement)) {
+          throw new Error('map or main missing')
+        }
+        const mapBox = mapNode.getBoundingClientRect()
+        const mainBox = main.getBoundingClientRect()
+        return {
+          map: { x: mapBox.x, y: mapBox.y, width: mapBox.width, height: mapBox.height, bottom: mapBox.bottom },
+          main: { x: mainBox.x, y: mainBox.y, width: mainBox.width, height: mainBox.height, bottom: mainBox.bottom },
+          windowScrollY: window.scrollY,
+          documentScrollHeight: document.documentElement.scrollHeight,
+          innerHeight: window.innerHeight,
+        }
+      })
+      console.log(`map-fit ${viewport.width}x${viewport.height}`, JSON.stringify(boxes))
+
+      expect(boxes.windowScrollY).toBe(0)
+      expect(boxes.documentScrollHeight).toBeLessThanOrEqual(boxes.innerHeight + 1)
+      expect(boxes.map.bottom).toBeLessThanOrEqual(boxes.main.bottom + 1)
+      expect(boxes.map.bottom).toBeGreaterThan(boxes.main.y + boxes.main.height * 0.5)
+      expect(boxes.map.height).toBeGreaterThan(0)
+    })
+  }
+})

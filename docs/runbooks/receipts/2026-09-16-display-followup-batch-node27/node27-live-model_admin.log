@@ -1,0 +1,6 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch && SMOKE_ROLE=model_admin SOURCE_SHA=e0775fde9389aea1c10fea8259956bf5e7df9626 node docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/capture.cjs'
+{"role":"model_admin","base":"http://127.0.0.1:18023","capabilities":{"service_role":"display_readonly","control_mutations_enabled":false,"slurm_routes_enabled":false,"queue_depth_mode":"display_readonly_unavailable","display_readonly":true},"sha":"e0775fde9389aea1c10fea8259956bf5e7df9626"}
+{"route":"/system/model-assets","role":"model_admin","before":{"scrollTop":0,"scrollHeight":5606,"clientHeight":516,"x":0,"y":84,"width":1280,"height":516,"overflow":"auto"},"after":{"scrollTop":5090,"scrollHeight":5606,"clientHeight":516,"windowY":0,"windowX":0}}
+PASS isolated live-API browser smoke role=model_admin
+
+exit_code=0

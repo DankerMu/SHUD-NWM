@@ -1,0 +1,228 @@
+$ ssh -p 32099 nwm@210.77.77.27 'cd /home/nwm/worktrees/issue-2023-display-batch/apps/frontend && PLAYWRIGHT_DEV_PORT=18203 corepack pnpm exec playwright test e2e/monitoring.mocked.spec.ts e2e/m11-overlay-collision.mocked.spec.ts --project=mocked-regression-chromium --workers=1 --reporter=line --grep "wheels|map fills|底部控制条不压盖"'
+
+Running 10 tests using 1 worker
+
+[1A[2K[1/10] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px
+bar/attribution @ 1920 {"bar":{"x":448,"y":1000,"width":1024,"height":64},"attribution":{"x":1766,"y":1046,"width":144,"height":24},"map":{"x":0,"y":84,"width":1920,"height":996}}
+
+[1A[2K  1) [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m40[39m
+    Received: [31m16[39m
+
+      100 |         expect(boxes.map, `地图应有可测量的布局矩形 ${JSON.stringify(boxes.map)}`).not.toBeNull()
+      101 |         expect(boxes.bar!.height).toBe(64)
+    > 102 |         expect(boxes.map!.y + boxes.map!.height - (boxes.bar!.y + boxes.bar!.height)).toBe(40)
+          |                                                                                       ^
+      103 |         expect(boxes.bar!.x).toBeGreaterThanOrEqual(0)
+      104 |         expect(boxes.bar!.x + boxes.bar!.width).toBeLessThanOrEqual(viewport.width)
+      105 |         expect(
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/m11-overlay-collision.mocked.spec.ts:102:87
+
+    Error Context: test-results/m11-overlay-collision.mock-4df2a-控制条不压盖-MapLibre-版权归属-1920px-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[2/10] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px
+bar/attribution @ 1440 {"bar":{"x":208,"y":820,"width":1024,"height":64},"attribution":{"x":1286,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":1440,"height":816}}
+
+[1A[2K  2) [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m40[39m
+    Received: [31m16[39m
+
+      100 |         expect(boxes.map, `地图应有可测量的布局矩形 ${JSON.stringify(boxes.map)}`).not.toBeNull()
+      101 |         expect(boxes.bar!.height).toBe(64)
+    > 102 |         expect(boxes.map!.y + boxes.map!.height - (boxes.bar!.y + boxes.bar!.height)).toBe(40)
+          |                                                                                       ^
+      103 |         expect(boxes.bar!.x).toBeGreaterThanOrEqual(0)
+      104 |         expect(boxes.bar!.x + boxes.bar!.width).toBeLessThanOrEqual(viewport.width)
+      105 |         expect(
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/m11-overlay-collision.mocked.spec.ts:102:87
+
+    Error Context: test-results/m11-overlay-collision.mock-0c16f-控制条不压盖-MapLibre-版权归属-1440px-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[3/10] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px
+bar/attribution @ 1280 {"bar":{"x":128,"y":820,"width":1024,"height":64},"attribution":{"x":1126,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":1280,"height":816}}
+
+[1A[2K  3) [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m40[39m
+    Received: [31m16[39m
+
+      100 |         expect(boxes.map, `地图应有可测量的布局矩形 ${JSON.stringify(boxes.map)}`).not.toBeNull()
+      101 |         expect(boxes.bar!.height).toBe(64)
+    > 102 |         expect(boxes.map!.y + boxes.map!.height - (boxes.bar!.y + boxes.bar!.height)).toBe(40)
+          |                                                                                       ^
+      103 |         expect(boxes.bar!.x).toBeGreaterThanOrEqual(0)
+      104 |         expect(boxes.bar!.x + boxes.bar!.width).toBeLessThanOrEqual(viewport.width)
+      105 |         expect(
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/m11-overlay-collision.mocked.spec.ts:102:87
+
+    Error Context: test-results/m11-overlay-collision.mock-2f555-控制条不压盖-MapLibre-版权归属-1280px-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[4/10] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px
+bar/attribution @ 800 {"bar":{"x":16,"y":820,"width":768,"height":64},"attribution":{"x":646,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":800,"height":816}}
+
+[1A[2K  4) [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m40[39m
+    Received: [31m16[39m
+
+      100 |         expect(boxes.map, `地图应有可测量的布局矩形 ${JSON.stringify(boxes.map)}`).not.toBeNull()
+      101 |         expect(boxes.bar!.height).toBe(64)
+    > 102 |         expect(boxes.map!.y + boxes.map!.height - (boxes.bar!.y + boxes.bar!.height)).toBe(40)
+          |                                                                                       ^
+      103 |         expect(boxes.bar!.x).toBeGreaterThanOrEqual(0)
+      104 |         expect(boxes.bar!.x + boxes.bar!.width).toBeLessThanOrEqual(viewport.width)
+      105 |         expect(
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/m11-overlay-collision.mocked.spec.ts:102:87
+
+    Error Context: test-results/m11-overlay-collision.mock-9c98d-部控制条不压盖-MapLibre-版权归属-800px-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[5/10] [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px
+[1A[2K[mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px
+bar/attribution @ 520 {"bar":{"x":16,"y":820,"width":488,"height":64},"attribution":{"x":366,"y":866,"width":144,"height":24},"map":{"x":0,"y":84,"width":520,"height":816}}
+
+[1A[2K  5) [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32m40[39m
+    Received: [31m16[39m
+
+      100 |         expect(boxes.map, `地图应有可测量的布局矩形 ${JSON.stringify(boxes.map)}`).not.toBeNull()
+      101 |         expect(boxes.bar!.height).toBe(64)
+    > 102 |         expect(boxes.map!.y + boxes.map!.height - (boxes.bar!.y + boxes.bar!.height)).toBe(40)
+          |                                                                                       ^
+      103 |         expect(boxes.bar!.x).toBeGreaterThanOrEqual(0)
+      104 |         expect(boxes.bar!.x + boxes.bar!.width).toBeLessThanOrEqual(viewport.width)
+      105 |         expect(
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/m11-overlay-collision.mocked.spec.ts:102:87
+
+    Error Context: test-results/m11-overlay-collision.mock-28216-部控制条不压盖-MapLibre-版权归属-520px-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[6/10] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:817:3 › operational pages own vertical scrolling › wheels /monitoring to the bottom without moving the window
+[1A[2K  6) [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:817:3 › operational pages own vertical scrolling › wheels /monitoring to the bottom without moving the window 
+
+    Error: fixture content must overflow the short viewport
+
+    [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: > [32m1546[39m
+    Received:   [31m1546[39m
+
+      661 |     }
+      662 |   })
+    > 663 |   expect(geometry.scrollHeight, 'fixture content must overflow the short viewport').toBeGreaterThan(geometry.clientHeight)
+          |                                                                                     ^
+      664 |   expect(geometry.contentY).not.toBeNull()
+      665 |
+      666 |   const rootBox = await headingLocator.evaluate((node) => {
+        at wheelPageToBottom (/home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:663:85)
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:823:5
+
+    Error Context: test-results/monitoring.mocked-operatio-82d47-m-without-moving-the-window-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[7/10] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:826:3 › operational pages own vertical scrolling › wheels /ops to the bottom without moving the window
+[1A[2K  7) [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:826:3 › operational pages own vertical scrolling › wheels /ops to the bottom without moving the window 
+
+    Error: fixture content must overflow the short viewport
+
+    [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: > [32m1294[39m
+    Received:   [31m1294[39m
+
+      661 |     }
+      662 |   })
+    > 663 |   expect(geometry.scrollHeight, 'fixture content must overflow the short viewport').toBeGreaterThan(geometry.clientHeight)
+          |                                                                                     ^
+      664 |   expect(geometry.contentY).not.toBeNull()
+      665 |
+      666 |   const rootBox = await headingLocator.evaluate((node) => {
+        at wheelPageToBottom (/home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:663:85)
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:832:5
+
+    Error Context: test-results/monitoring.mocked-operatio-1cf05-m-without-moving-the-window-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[8/10] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:835:3 › operational pages own vertical scrolling › wheels /system/model-assets to the bottom without moving the window
+[1A[2K  8) [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:835:3 › operational pages own vertical scrolling › wheels /system/model-assets to the bottom without moving the window 
+
+    Error: fixture content must overflow the short viewport
+
+    [2mexpect([22m[31mreceived[39m[2m).[22mtoBeGreaterThan[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: > [32m1626[39m
+    Received:   [31m1626[39m
+
+      661 |     }
+      662 |   })
+    > 663 |   expect(geometry.scrollHeight, 'fixture content must overflow the short viewport').toBeGreaterThan(geometry.clientHeight)
+          |                                                                                     ^
+      664 |   expect(geometry.contentY).not.toBeNull()
+      665 |
+      666 |   const rootBox = await headingLocator.evaluate((node) => {
+        at wheelPageToBottom (/home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:663:85)
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:843:5
+
+    Error Context: test-results/monitoring.mocked-operatio-3964b-m-without-moving-the-window-mocked-regression-chromium/error-context.md
+
+
+[1A[2K[9/10] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x800 without window scroll
+[1A[2K[mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x800 without window scroll
+map-fit 1280x800 {"map":{"x":0,"y":84,"width":1280,"height":716,"bottom":800},"main":{"x":0,"y":84,"width":1280,"height":716,"bottom":800},"windowScrollY":0,"documentScrollHeight":800,"innerHeight":800}
+
+[1A[2K[10/10] [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll
+[1A[2K[mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll
+map-fit 1280x600 {"map":{"x":0,"y":84,"width":1280,"height":640,"bottom":724},"main":{"x":0,"y":84,"width":1280,"height":516,"bottom":600},"windowScrollY":0,"documentScrollHeight":600,"innerHeight":600}
+
+[1A[2K  9) [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeLessThanOrEqual[2m([22m[32mexpected[39m[2m)[22m
+
+    Expected: <= [32m601[39m
+    Received:    [31m724[39m
+
+      878 |       expect(boxes.windowScrollY).toBe(0)
+      879 |       expect(boxes.documentScrollHeight).toBeLessThanOrEqual(boxes.innerHeight + 1)
+    > 880 |       expect(boxes.map.bottom).toBeLessThanOrEqual(boxes.main.bottom + 1)
+          |                                ^
+      881 |       expect(boxes.map.bottom).toBeGreaterThan(boxes.main.y + boxes.main.height * 0.5)
+      882 |       expect(boxes.map.height).toBeGreaterThan(0)
+      883 |     })
+        at /home/nwm/worktrees/issue-2023-display-batch/apps/frontend/e2e/monitoring.mocked.spec.ts:880:32
+
+    Error Context: test-results/monitoring.mocked-map-fits-04d1b-0x600-without-window-scroll-mocked-regression-chromium/error-context.md
+
+
+[1A[2K  9 failed
+    [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1920px 
+    [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1440px 
+    [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 1280px 
+    [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 800px 
+    [mocked-regression-chromium] › e2e/m11-overlay-collision.mocked.spec.ts:87:5 › M11 单图浮层与地图自带控件不互相压盖 › 底部控制条不压盖 MapLibre 版权归属 @ 520px 
+    [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:817:3 › operational pages own vertical scrolling › wheels /monitoring to the bottom without moving the window 
+    [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:826:3 › operational pages own vertical scrolling › wheels /ops to the bottom without moving the window 
+    [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:835:3 › operational pages own vertical scrolling › wheels /system/model-assets to the bottom without moving the window 
+    [mocked-regression-chromium] › e2e/monitoring.mocked.spec.ts:852:5 › map fits the available height › map fills below the header at 1280x600 without window scroll 
+  1 passed (27.7s)
+
+exit_code=1

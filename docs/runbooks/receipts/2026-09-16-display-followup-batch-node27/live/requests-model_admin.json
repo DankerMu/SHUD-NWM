@@ -1,0 +1,10 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/runtime/config"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/models"
+  }
+]
