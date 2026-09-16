@@ -7,12 +7,16 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from fastapi import FastAPI
 
 from services.production_closure import readonly_db_validation
+from services.production_closure.readonly_db_route_smoke import (
+    _bounded_database_url,
+    _validation_pgoptions,
+)
 from services.production_closure.readonly_db_validation import (
     ProbeTarget,
     PsycopgReadonlyDbProbeAdapter,
@@ -342,9 +346,48 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
     assert {item["service_role"] for item in observed_env} == {"display_readonly"}
     assert all("connect_timeout=5" in str(item["database_url"]) for item in observed_env)
     assert all("statement_timeout%3D10000" in str(item["database_url"]) for item in observed_env)
+    assert {unquote(_raw_query_value(str(item["database_url"]), "options")) for item in observed_env} == {
+        _validation_pgoptions()
+    }
     assert {item["pgoptions"] for item in observed_env} == {
         "-c statement_timeout=10000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
     }
+
+
+def _raw_query_value(url: str, key: str) -> str:
+    """Return one query value with its percent-encoding intact, the way libpq sees it.
+
+    ``parse_qs`` / ``parse_qsl`` decode ``+`` to a space, which is exactly the blindness
+    under test here, so the raw pair is split by hand.
+    """
+
+    for pair in urlsplit(url).query.split("&"):
+        name, _, value = pair.partition("=")
+        if name == key:
+            return value
+    raise AssertionError(f"query parameter {key!r} is absent from the rebuilt URL")
+
+
+def test_bounded_database_url_options_survive_percent_only_decoding() -> None:
+    """The emitted ``options`` value must decode to ``_validation_pgoptions()`` under libpq.
+
+    libpq percent-decodes and does *not* read ``+`` as a space, so a form-encoded
+    options value reaches the server as ``-c+statement_timeout=...`` and the connection
+    is refused with ``unrecognized configuration parameter "+statement_timeout"``
+    (issue #2413).
+
+    The neighbouring ``statement_timeout%3D10000`` substring assertion holds for the
+    broken and the fixed output alike and is therefore no guard for this. Decoding with
+    ``unquote`` is deliberate: ``unquote_plus`` and ``parse_qsl`` both turn ``+`` back
+    into a space and would restore that blindness.
+    """
+
+    bounded = _bounded_database_url("postgresql://readonly:secret@db.example/nhms?sslmode=require")
+
+    raw_options = _raw_query_value(bounded, "options")
+
+    assert "+" not in raw_options
+    assert unquote(raw_options) == _validation_pgoptions()
 
 
 def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> None:
