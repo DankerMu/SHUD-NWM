@@ -42,7 +42,11 @@ const overlap = (a, b) => Math.min(a.x+a.width,b.x+b.width)>Math.max(a.x,b.x) &&
         const scroll = await page.evaluate(() => ({y:window.scrollY,x:window.scrollX,height:document.documentElement.scrollHeight,client:document.documentElement.clientHeight,width:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth}))
         assert.equal(scroll.y,0); assert.equal(scroll.x,0)
         assert.ok(scroll.height<=scroll.client+1 && scroll.width<=scroll.cw+1,'document overflow')
-        await page.screenshot({path:path.join(out,`map-${viewport.width}-${viewport.height}.jpg`),type:'jpeg',quality:70})
+        // Provider errors can echo a client key in the URL; retain the error fact
+        // in the receipt but redact that banner from published screenshots.
+        const providerError = page.getByTestId('m11-map-source-error')
+        console.log(JSON.stringify({viewport,providerErrorVisible:await providerError.isVisible(),screenshotRedaction:'map-source-error banner (URL key)'}))
+        await page.screenshot({path:path.join(out,`map-${viewport.width}-${viewport.height}.jpg`),type:'jpeg',quality:70,mask:[providerError]})
       }
     } else {
       const routes = role==='operator' ? ['/ops','/monitoring'] : ['/system/model-assets']
