@@ -307,8 +307,8 @@ class PsycopgReadonlyDbProbeAdapter:
                     {set_option} AS can_set,
                     {inherit_option} AS can_inherit
                 FROM pg_auth_members m
-                JOIN pg_roles current_role ON current_role.oid = m.member
-                WHERE current_role.rolname = current_user
+                JOIN pg_roles member_role ON member_role.oid = m.member
+                WHERE member_role.rolname = current_user
 
                 UNION ALL
 
