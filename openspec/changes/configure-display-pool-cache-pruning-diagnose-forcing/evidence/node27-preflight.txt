@@ -1,0 +1,39 @@
+Wed Sep 16 09:56:34 AM UTC 2026
+7ecc46bed18cc8b6f20030f49aa3bf43a77b6858
+MainPID=2901698
+ExecMainStartTimestamp=Wed 2026-09-16 16:15:16 CST
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash -lc set -a; . /home/nwm/NWM/infra/env/display.env; set +a; export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"; exec /home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host "${NHMS_DISPLAY_HOST:-127.0.0.1}" --port "${NHMS_DISPLAY_API_PORT:-8080}" --workers "${NHMS_DISPLAY_WORKERS:-2}" ; ignore_errors=no ; start_time=[Wed 2026-09-16 16:15:16 CST] ; stop_time=[n/a] ; pid=2901698 ; code=(null) ; status=0/0 }
+WorkingDirectory=/home/nwm/NWM
+FragmentPath=/home/nwm/.config/systemd/user/nhms-display-api.service
+DropInPaths=
+Result=success
+ExecMainStatus=0
+ExecStart={ path=/home/nwm/NWM/scripts/node27_raw_retention_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_raw_retention_once.sh ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+WorkingDirectory=/home/nwm/NWM
+ActiveState=inactive
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   76G   18G  81% /
+/dev/mapper/ubuntu--vg-home        1.7T  477G  1.1T  31% /home
+/dev/md0                            15T  2.0T   12T  15% /data/GHDC
+/usr/bin/psql
+
+CONFIG {"NHMS_DISPLAY_DB_POOL_SIZE": null, "NHMS_DISPLAY_DB_MAX_OVERFLOW": null, "NHMS_DISPLAY_WORKERS": null, "NHMS_MVT_FILE_CACHE_DIR": null, "NHMS_SERVICE_ROLE": "display_readonly"}
+PROCESS 2901698 /home/nwm/NWM /home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 --workers 2 
+PROCESS_CONFIG {"NHMS_DISPLAY_DB_POOL_SIZE": "<unset>", "NHMS_DISPLAY_DB_MAX_OVERFLOW": "<unset>", "NHMS_DISPLAY_WORKERS": "<unset>", "NHMS_MVT_FILE_CACHE_DIR": "/home/nwm/.cache/nhms/mvt", "NHMS_SERVICE_ROLE": "display_readonly"}
+RETENTION_KEYS ["NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store", "NODE27_RAW_RETENTION_SOURCES=GFS,IFS", "NODE27_RAW_RETENTION_DAYS=14"]
+SQL SHOW max_connections [["100"]]
+SQL SHOW superuser_reserved_connections [["3"]]
+SQL SELECT current_user [["nhms_display_ro"]]
+SQL SELECT usename,state,count(*) FROM pg_stat_activity GROUP BY usename,state ORDER BY usename,state [["nhms", null, 4], ["nhms_display_ro", "active", 1], ["nhms_display_ro", "idle", 10], [null, null, 4]]
+
+7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 HEAD@{2026-09-16 16:15:15 +0800} pull --ff-only: Fast-forward
+f2476c8c29774d40b300d4a8a13657b5d6d05139 HEAD@{2026-09-16 15:13:17 +0800} checkout: moving from issue1987-reviewed-new-415cbd1e to master
+415cbd1e9d0eee39ba0dfb623a586b02cbb340f2 HEAD@{2026-09-15 14:23:12 +0800} checkout: moving from feat/issue-1739-batch5-clone-gate-provenance to issue1987-reviewed-new-415cbd1e
+ac0567a5a06b9c45d5043cc2bd32ad7e975d7906 HEAD@{2026-09-15 14:22:17 +0800} checkout: moving from issue1987-reviewed-new-415cbd1e to feat/issue-1739-batch5-clone-gate-provenance
+415cbd1e9d0eee39ba0dfb623a586b02cbb340f2 HEAD@{2026-09-15 10:28:32 +0800} checkout: moving from hotfix/node27-rollback-pre-2073 to issue1987-reviewed-new-415cbd1e
+ActiveState=active
+SubState=running
+600 1005 1005 /home/nwm/NWM/infra/env/display.env
+600 1005 1005 /home/nwm/NWM/infra/env/node27-raw-retention.env
+600 1103 1078 /home/ghdc/nwm/object-store/.nhms-copyback-batch.lock
+{"request_id":"4729eda2-bd6b-420f-b739-9027ca616a29","status":"ok","data":{"service_role":"display_readonly","control_mutations_enabled":false,"slurm_routes_enabled":false,"queue_depth_mode":"display_readonly_unavailable","display_readonly":true}}

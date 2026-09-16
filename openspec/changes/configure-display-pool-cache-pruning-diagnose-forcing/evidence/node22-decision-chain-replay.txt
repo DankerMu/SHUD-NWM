@@ -1,0 +1,28 @@
+Read-only replay of captured provider-state members, not a production scheduler invocation. No state submission, DB or journal writes.
+from pathlib import Path
+from datetime import datetime
+from dataclasses import fields
+import json,sys
+sys.path.insert(0,'/scratch/frd_muziyao/NWM')
+from services.orchestrator.scheduler import SchedulerCandidate
+from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+from services.orchestrator.scheduler_candidates import _upgrade_retry_for_strict_warm_start_manifest,_strict_warm_start_forcing_witness_decision
+p=Path('/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026091609_34d1f52653c6.json');d=json.loads(p.read_text()); b=d['blocked_candidates'][0]; e=b['state_evidence']
+args={f.name:b[f.name] for f in fields(SchedulerCandidate) if f.name in b}; args['cycle_time_utc']=datetime.fromisoformat(b['cycle_time_utc'].replace('Z','+00:00'));c=SchedulerCandidate(**args)
+# Rehydrate captured provider-state members only, excluding downstream decision annotations.
+raw={k:e[k] for k in ['hydro_run','forcing_version','forecast_cycle','pipeline_jobs','pipeline_events','completed_stage_evidence'] if k in e}
+first=_candidate_state_decision(c,raw)
+second=_upgrade_retry_for_strict_warm_start_manifest(first,e['strict_warm_start'])
+third=_strict_warm_start_forcing_witness_decision(c,raw,second)
+for name,r in [('state_decision',first),('strict_upgrade',second),('forcing_guard',third)]:
+ print(name,json.dumps(None if r is None else {'action':r.action,'reason':r.reason,'restart_stage':r.evidence.get('restart_stage'),'artifact_guard':r.evidence.get('artifact_guard')}))
+assert first.action=='retry' and first.evidence['restart_stage']=='forcing'
+assert second.evidence['restart_stage']=='forcing','RED: actual decision chain skips required forcing stage'
+
+Output:
+state_decision {"action": "retry", "reason": "resume_after_completed_stage", "restart_stage": "forcing", "artifact_guard": null}
+strict_upgrade {"action": "retry", "reason": "strict_warm_start_retry_run_manifest_mismatch", "restart_stage": "forecast", "artifact_guard": null}
+forcing_guard {"action": "blocked", "reason": "forcing_version_row_absent", "restart_stage": "forecast", "artifact_guard": {"artifact_type": "forcing_package_uri", "artifact_uri": null, "artifact_exists": false, "unsafe_reason": null, "stable_classifier": "FORCING_VERSION_ROW_ABSENT", "planned_retry_decision": "retry_strict_warm_start_retry_run_manifest_mismatch", "planned_retry_reason": "strict_warm_start_retry_run_manifest_mismatch"}}
+Traceback (most recent call last):
+  File "<stdin>", line 19, in <module>
+AssertionError: RED: actual decision chain skips required forcing stage

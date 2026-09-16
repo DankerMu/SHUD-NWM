@@ -1,0 +1,5 @@
+Fixture reviewer: FixtureReview
+Round 1: revise — require actual PNG lane evaluation; missing/unsafe-root or source skips cannot count as activation.
+Revision: tasks/design/spec explicitly prohibit all unavailable/unsafe PNG skips and permit zero expired candidates only after safe source evaluation.
+Round 2: pass; required additions: None.
+Validation: openspec validate configure-display-pool-cache-pruning-diagnose-forcing --strict --no-interactive => valid.

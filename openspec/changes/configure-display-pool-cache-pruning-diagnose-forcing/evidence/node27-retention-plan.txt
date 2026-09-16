@@ -1,0 +1,9 @@
+[2026-09-16T10:33:46Z] host=ghdc repo=/home/nwm/NWM
+[2026-09-16T10:33:46Z] canonical_lock unchanged-check uid=1103 mode=600 path=/home/ghdc/nwm/object-store/.nhms-copyback-batch.lock
+[2026-09-16T10:33:46Z] admission head=7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 branch=master porcelain=0
+[2026-09-16T10:33:46Z] stopping nhms-node27-raw-retention.timer only
+[2026-09-16T10:33:46Z] timer_now ActiveState=inactive UnitFileState=enabled
+[2026-09-16T10:33:46Z] wrapper source will preserve caller NODE27_RAW_RETENTION_PLAN_ONLY and NODE27_RAW_RETENTION_SUMMARY_PATH (absent in env file)
+[2026-09-16T10:33:46Z] plan-only wrapper: PLAN_ONLY applied after asserting env file cannot override; summary=/home/nwm/nhms-ops-backup-2346-2431-20260916T103321Z/raw-retention-plan-20260916T103346Z.json
+[2026-09-16T10:33:46Z] plan wrapper rc=0
+{"added_keys": ["NHMS_MVT_FILE_CACHE_DIR"], "canonical_lock_untouched": true, "counts": {"deleted": 0, "failed": 0, "planned": 0, "skipped": 127}, "dry_run": true, "execution_mode": "plan_only", "mode": "retention-plan", "note": "inspect this summary before retention-execute; timer remains stopped until execute/rollback", "png": {"activation_ok": true, "canonical_lock_failures": 0, "evaluated_storage_sources": ["IFS", "gfs"], "missing_source_evaluation": [], "png_deleted": 0, "png_failed": 0, "png_planned": 0, "png_skips": [{"key": "precip-cache/gfs/2026091400", "reason": "within_retention_window"}, {"key": "precip-cache/IFS/2026091412", "reason": "within_retention_window"}], "png_unsafe_or_missing": [], "precip_cache_root": "/home/nwm/.cache/nhms/mvt", "zero_expired_ok": true}, "precip_cache_root": "/home/nwm/.cache/nhms/mvt", "sha256": "b0b50ce198aa584b0d71bfdf9f7362ee49f972472ac08abde04247d2dc4df1f1", "summary_path": "/home/nwm/nhms-ops-backup-2346-2431-20260916T103321Z/raw-retention-plan-20260916T103346Z.json", "timer_left_stopped": true, "wrapper_rc": 0}
