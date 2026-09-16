@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import secrets
 import stat
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,21 @@ MAX_OUTPUT_BYTES = 262_144
 MAX_JSON_DEPTH = 16
 MAX_JSON_NODES = 4096
 OUTPUT_FILE_MODE = 0o600
+GIT_TIMEOUT_SECONDS = 10
+MAX_HEAD_OUTPUT_BYTES = 128
+# A repository root is a path, not a digest: the head ceiling would reject ordinary
+# deep checkout paths, so bound it separately.
+MAX_TOPLEVEL_OUTPUT_BYTES = 4096
+# Variables that let an inherited environment make git answer for a different
+# repository than the directory we are asking about.
+REDIRECTING_GIT_ENVIRONMENT = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
 
 
 def format_refusal(error: Exception) -> str:
@@ -55,6 +72,120 @@ def validate_sha(value: str, *, label: str) -> str:
     if HEAD_RE.fullmatch(text) is None:
         refuse("reviewed SHA must be a lowercase 40-hex digest", code="INPUT_SHA_INVALID", stage="input")
     return text
+
+
+def _run_git(repo_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    environment = {key: value for key, value in os.environ.items() if key not in REDIRECTING_GIT_ENVIRONMENT}
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repo_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        refuse("executing checkout HEAD query timed out", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    except OSError:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+
+
+def resolve_repository_head(repo_root: Path) -> str:
+    """Return the HEAD of a clean-tracked checkout, refusing rather than guessing.
+
+    ``repo_root`` must itself be the repository git answers for. Git discovery
+    otherwise walks upwards, so a deployed tree without its own ``.git`` unpacked
+    inside another checkout would be handed the OUTER repository's HEAD and report
+    clean, the nested tree being merely untracked there. The redirecting ``GIT_*``
+    variables are dropped for the same reason: an inherited environment must not be
+    able to answer for a checkout that is not the one running.
+
+    Untracked files never refuse: an operator checkout routinely carries untracked
+    evidence directories. A modified tracked file does refuse, because the receipt
+    would otherwise claim a SHA that is not the code that ran.
+    """
+
+    head_result = _run_git(repo_root, "rev-parse", "HEAD")
+    head = head_result.stdout.strip()
+    if (
+        head_result.returncode != 0
+        or len(head_result.stdout) > MAX_HEAD_OUTPUT_BYTES
+        or HEAD_RE.fullmatch(head) is None
+    ):
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    toplevel_result = _run_git(repo_root, "rev-parse", "--show-toplevel")
+    toplevel = toplevel_result.stdout.strip()
+    if (
+        toplevel_result.returncode != 0
+        or len(toplevel_result.stdout) > MAX_TOPLEVEL_OUTPUT_BYTES
+        or not toplevel
+        or not Path(toplevel).is_absolute()
+    ):
+        refuse("executing checkout root cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    try:
+        answered_for_this_root = Path(toplevel).resolve() == Path(repo_root).resolve()
+    except OSError:
+        refuse("executing checkout root cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    if not answered_for_this_root:
+        refuse("executing directory is not its own git checkout", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    clean_result = _run_git(repo_root, "diff", "--quiet", "HEAD", "--")
+    if clean_result.returncode == 1:
+        refuse("executing checkout has modified tracked files", code="INPUT_SHA_UNBOUND", stage="input")
+    if clean_result.returncode != 0:
+        refuse("executing checkout cleanliness cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    return head
+
+
+def bind_reviewed_sha(reviewed_sha: str, *, head_resolver: Callable[[], str]) -> str:
+    """Bind an already shape-checked reviewed SHA to the executing checkout's HEAD."""
+
+    try:
+        resolved = head_resolver()
+    except PgdataWorkloadError:
+        raise
+    except Exception:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    head = str(resolved or "").strip()
+    if HEAD_RE.fullmatch(head) is None:
+        refuse("executing checkout HEAD cannot be determined", code="INPUT_SHA_HEAD_UNAVAILABLE", stage="input")
+    if head != reviewed_sha:
+        refuse("reviewed SHA is not the executing checkout HEAD", code="INPUT_SHA_UNBOUND", stage="input")
+    return head
+
+
+def require_runtime_anchored(repo_root: Path, module_names: Sequence[str]) -> None:
+    """Refuse unless the modules that do the work resolve under the anchored checkout.
+
+    The entrypoint's own location proves nothing on its own: published script bytes
+    are routinely run against a separate ``PYTHONPATH`` checkout, and binding the
+    entrypoint's HEAD would then attribute the samples to a tree that did not supply
+    the code that captured, measured and published them.
+    """
+
+    try:
+        root = Path(repo_root).resolve()
+    except OSError:
+        refuse("executing checkout root cannot be resolved", code="INPUT_RUNTIME_UNBOUND", stage="input")
+    for name in module_names:
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            refuse("a workload module is not importable", code="INPUT_RUNTIME_UNBOUND", stage="input")
+        origin = getattr(module, "__file__", None)
+        if not origin:
+            refuse("a workload module has no resolvable file", code="INPUT_RUNTIME_UNBOUND", stage="input")
+        try:
+            resolved = Path(str(origin)).resolve()
+        except OSError:
+            refuse("a workload module path cannot be resolved", code="INPUT_RUNTIME_UNBOUND", stage="input")
+        if not resolved.is_relative_to(root):
+            refuse(
+                "workload modules do not resolve under the executing checkout",
+                code="INPUT_RUNTIME_UNBOUND",
+                stage="input",
+            )
 
 
 def validate_id(value: str, *, code: str) -> str:
