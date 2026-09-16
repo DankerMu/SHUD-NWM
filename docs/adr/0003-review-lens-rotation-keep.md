@@ -4717,3 +4717,28 @@ PR #2427 自身是 fixture `none`、rounds 0 的 docs-only PR，不进轮换样�
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
+
+### Revisit 2026-09-16（post PR #2406 / issues #1543 + #1555 + #1768 + #1820）
+
+追加 #2406 行后，`loop_log_audit.py` 仍报同一项 DECIDABLE，但**数字第一次朝一个方向明显动了**：
+224 个多轮 merged PR，later-round catches **core=313**（上次 287）/ **rotated=270**（不变）/ phase=61。
+比值由 ≈1.06 变为 ≈1.16。
+
+增量全部来自 #2406，而这正是它值得单独记一笔的原因：**该 PR 从 round 3 到 round 5 一次都没有轮换过席位**
+（三轮同为 `invariant-state` / `test-evidence+spec-compliance` / `correctness`，符合 post-fix 默认的
+pinned-core-only 规则，其间既无 critical/major，也无 class repeat 触发自由位轮换），
+却在 round 4 与 round 5 又产出 18 条 later-round catches。
+
+所以这条证据只支持一个方向，不支持另一个：它说明**钉住的核心席位在后续轮次里持续产出**，
+不说明轮换没用——本 PR 压根没给轮换机会，因此对「轮换能抓到什么」零信息量。
+把 rotated=270 不变读成「轮换贡献停滞」是错的读法，样本里根本没有新的轮换事件。
+
+另有一条与座位无关、但对本 ADR 的 keep 论据同源的观察：#2406 五轮全部由同一批席位跑完，
+**没有任何一轮读过 CI**，而 CI 从第一个 commit 起就是红的（新测试文件给 CI 选择器带进未定性的
+importer 对）。这不是席位配置能修的缺口——增加或轮换 lens 都不会让谁去读 CI——
+而是 Evidence Floor 的声明面缺了一个 oracle。已在该 change 的 `tasks.md` 记为 EF-0。
+它对本 ADR 的意义是：**later-round catches 这个指标衡量的是「人/席位读代码找到了什么」，
+不衡量「更便宜的机器门本可以先抓到什么」**，因此不能单凭它给席位数定价。
+
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 keep、座位上限不变。
