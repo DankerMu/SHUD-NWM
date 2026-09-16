@@ -93,20 +93,20 @@
 - [x] 2.11 That script's placeholder check (`:262-272`) is an **exact set equality** — extend it with the
       new bindings. `_REQUIRED_PRESENT_KEYS` (`node27_pgdata_workload_query.py:64-74`) is a subset check
       and needs nothing.
-- [ ] 2.12 `scripts/node27_timeseries_compression_live_evidence.py::_validate_benchmarks` re-derives the
+- [x] 2.12 `scripts/node27_timeseries_compression_live_evidence.py::_validate_benchmarks` re-derives the
       curve query and **every** binding from the public owner by exact equality. Two bindings become
       database facts it cannot recompute offline. Replay the bundle's recorded run set back into the owner
       rather than excluding those names from the comparison, and keep every other binding exactly
       re-derived. The recorded set must be non-empty, aligned and well-typed, so an
       `= ANY('{}')` ghost measurement is refused rather than measured.
-- [ ] 2.13 Bind the recorded run set to something the bundle already proves. The bundle retains the full
+- [x] 2.13 Bind the recorded run set to something the bundle already proves. The bundle retains the full
       `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` plan and already recomputes `shared_hit_blocks`
       from it (`:2535-2578`); psycopg2 interpolates client-side
       (`scripts/node27_timeseries_compression_benchmark.py:488,676`), so the plan's `Index Cond` / `Filter`
       text contains the literal `= ANY ('{…}'::integer[])`. Cross-check `pushdown_run_keys` against that
       plan text. Without it those two bindings are the only values in the bundle that reconcile against
       nothing.
-- [ ] 2.14 `_resolve_run_identity` must carry a deterministic `ORDER BY h.run_key`. The benchmark lists
+- [x] 2.14 `_resolve_run_identity` must carry a deterministic `ORDER BY h.run_key`. The benchmark lists
       `binding` in `static_keys` and compares before/after for equality
       (`scripts/node27_timeseries_compression_benchmark.py:897-902`); an unordered result makes the
       binding non-deterministic across the compression window, so heap-order drift or a new run rejects
@@ -116,7 +116,9 @@
 ## 3. Tests
 
 - [x] 3.1 Row-equivalence regression asserting the digest defined in the Evidence Floor, not a row count.
-      **Written but not yet executed**: it lives in
+      **Executed on node-27 2026-09-16: `2 passed, 2 deselected in 25.49s`, rc 0** (legacy and narrow
+      parameterisations), on a throwaway database created and dropped per test by
+      `tests/conftest.py::throwaway_database_url`, DSN supplied only through the environment. It lives in
       `tests/test_forecast_series_run_identity_pushdown_integration.py::test_run_identity_pushdown_returns_byte_identical_rows_on_every_forecast_shape`
       and is gated on `NHMS_RUN_INTEGRATION=1` + `NHMS_INTEGRATION_DATABASE_URL`, so it skips locally.
       It only counts once run on node-27.
@@ -177,16 +179,39 @@
 
 ## 4. Production evidence
 
-- [ ] 4.1 node-27 warm EXPLAIN × 3, `:758` with `run_id` bound, in-SQL scalar subquery form:
-      `shared hit <= 5000` (validated 560, no resolve step).
-- [ ] 4.2 node-27 warm EXPLAIN × 3, `:758` with `run_id` unbound: `shared hit <= 5000` (validated 2 548,
-      plus 265 resolve).
-- [ ] 4.3 node-27 warm EXPLAIN × 3, `:718`: `shared hit <= 5000` (validated 3 049, plus 265 resolve).
-- [ ] 4.4 Digest equivalence pre/post on all three paths, **probe-side**, against the raw-row
-      serialisation that produced `b3b3f1bdd79a5e6c`. Task 3.1's test uses a different, response-side
-      digest and does not discharge this.
-- [ ] 4.5 `scripts/node27_pgdata_workload.py measure --evidence-kind live` no longer refuses with
-      `PLAN_BUFFERS_EXCEEDED`; capture the receipt #1987 task 5.2 needs.
-- [ ] 4.6 Re-time the public API default shape (`issue_time=latest`) against D11's 500 ms API warm P95.
-      Record honestly if it still exceeds it because #2424's `:594` cost (647 275 blocks / 9.6 s) remains
-      — this change cannot fix that, and the fixture must not claim otherwise.
+Measured 2026-09-16 on node-27, read-only `nhms_display_ro`, against the **shipped code** of both
+checkouts — `/home/nwm/tmp/2417-wt` at `fd3d4869a5b8dbf5370ddfc12c21e6eccf8ab5fd` and
+`/home/nwm/tmp/2417-base` at `b40d0015a`. The probe drives the real `PsycopgForecastStore` through a
+recording pass-through cursor, so every number below is what `forecast_series` itself issues, not a
+hand-rebuilt statement. Probe and raw output: `/home/nwm/tmp/2417/probe2417.py`, `probe-{before,after}.json`.
+
+| shape | before | after | fact stmt | resolve | rows | digest |
+|---|---|---|---|---|---|---|
+| `:758` `run_id` bound | 18 621 | **560** | 560 | — | 168 | `b3b3f1bdd79a5e6c` |
+| `:758` `run_id` unbound | 18 621 | **2 813** | 2 548 | 265 | 168 | `b3b3f1bdd79a5e6c` |
+| `:718` `issue_time=latest` | 1 331 390 | **650 589** | 3 049 | 265 | 168 | `b3b3f1bdd79a5e6c` |
+
+- [x] 4.1 node-27 warm EXPLAIN × 3, `:758` with `run_id` bound, in-SQL scalar subquery form:
+      `shared hit <= 5000` — **560**, no resolve step. Independently confirmed by the 4.5 receipt.
+- [x] 4.2 node-27 warm EXPLAIN × 3, `:758` with `run_id` unbound: `shared hit <= 5000` — **2 548** on the
+      fact statement plus **265** resolve, 2 813 total.
+- [x] 4.3 node-27 warm EXPLAIN × 3, `:718`: the forecast-series fact read is **3 049** plus **265**
+      resolve, from 684 115. It clears 5000.
+      **But the shape as a whole does not**: `_per_source_latest_cycles` (`:594`) still costs
+      **647 275** blocks to return one row, so the end-to-end `latest` request is 650 589. That is #2424
+      and this change cannot fix it. The D11 gate measures the `:758`-bound statement, which is why 4.5
+      passes; nothing here should be read as "the default path now clears the bound".
+- [x] 4.4 Digest equivalence pre/post, probe-side, raw-row serialisation: **all three shapes return
+      `b3b3f1bdd79a5e6c` over 168 rows, before and after, identical.** `:594`'s own one-row statement is
+      likewise unchanged at `2add3314ffd65bc7`.
+- [x] 4.5 `scripts/node27_pgdata_workload.py measure --evidence-kind live` → `{"ok": true, "status":
+      "PASS", "evidence_kind": "live"}`, rc 0. `sql/buffers` **560** of 5000, `sql/p95_ms` **5.97** of 300,
+      `api/p95_ms` **204.86** of 500, 168 rows, 0 shared reads, 20 accepted samples. Receipt at
+      `/home/nwm/tmp/2417/measure-live.json`. This is the receipt #1987 task 5.2 needs, and it also
+      settles the two gates that could not be judged statically — `PLAN_FILTER_RATIO`
+      (`node27_pgdata_workload_plan.py:503-515`) and the segment-bound index requirement (`:475-490`)
+      both pass on the new plan shape.
+- [x] 4.6 API warm P95 on the shape D11 measures (`run_id` bound) is **204.86 ms**, inside the 500 ms
+      bound. The **default** `issue_time=latest` shape is *not* re-timed as passing: its 650 589 blocks
+      are dominated by #2424's `:594`, and the honest statement is that this change removes 680 000 of
+      the 1 331 390 blocks it used to cost while leaving it above the API bound.
