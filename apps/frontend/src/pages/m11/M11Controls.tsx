@@ -391,8 +391,8 @@ export function M11Timeline({
           流高 = 20（当前时次行）+ (8+16)（滑块）+ (4+12)（刻度行）+ (4+16)（底行）= 80px，而控制条
           是固定 `h-16`（64px，`m11VisualTokens.timelineHeight`）+ `items-center` 且无 overflow 控制，
           上下各溢出 8px，底行会压进 MapLibre 版权归属带。改 `min-h-16` 不可接受（token 是高度不是
-          下限，会让 AC6 的耦合断言不再校验「条真的是 64px」；且 #2015 的 bottom-24 / bottom-40 是
-          按控制条占 16–80px 推出来的）。二选一后流高回到 20 + 24 + 20 = 64px 整。
+          下限，会让 AC6 的耦合断言不再校验「条真的是 64px」；且图例/提示条的 bottom-[7.5rem] /
+          bottom-[11.5rem] 是按控制条占 40–104px 推出来的）。二选一后流高回到 20 + 24 + 20 = 64px 整。
           缺省（不传 cycle）时刻度行不渲染、底行照旧，默认路径 DOM 逐字不变。
         */}
         {cycle ? null : (

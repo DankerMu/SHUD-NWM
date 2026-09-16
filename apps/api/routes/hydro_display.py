@@ -293,7 +293,21 @@ def list_layers(
     def _load() -> list[dict[str, Any]]:
         run = _require_display_ready(session, run_id) if run_id is not None else display_ready_run(session)
         if run is None:
-            return []
+            # Precipitation is independent of hydrological run identity. When
+            # nothing is display-ready, advertise only that public definition
+            # and its existing metadata — no fabricated run, digest, or
+            # run-scoped siblings.
+            precip = next(definition for definition in PUBLIC_LAYER_DEFINITIONS if definition[0] == "precip")
+            layer_id, name, layer_type, variables = precip
+            return [
+                Layer(
+                    layer_id=layer_id,
+                    layer_name=name,
+                    layer_type=layer_type,
+                    variables=variables,
+                    metadata=layer_metadata(layer_id),
+                ).model_dump()
+            ]
         resolved_run_id = str(run["run_id"])
         basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
         source_version = _run_source_version(run)

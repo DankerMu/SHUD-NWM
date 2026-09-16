@@ -1749,6 +1749,33 @@ def test_layers_catalog_carries_the_precip_entry_identically_runless_and_run_sco
         }
 
 
+def test_layers_catalog_is_precip_only_when_no_run_is_display_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default catalog without a ready run still advertises precip, never run-scoped siblings."""
+    app = _catalog_app(monkeypatch)
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _s: None)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            no_run = client.get("/api/v1/layers")
+            ready_scoped = client.get("/api/v1/layers", params={"run_id": "run_other"})
+            first_page = client.get("/api/v1/layers", params={"limit": 1, "offset": 0})
+            beyond = client.get("/api/v1/layers", params={"limit": 1, "offset": 1})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert no_run.status_code == 200, no_run.text
+    assert ready_scoped.status_code == 200, ready_scoped.text
+    precip = _entry(ready_scoped.json()["data"], "precip")
+    assert no_run.json()["data"] == [precip]
+    assert [item["layer_id"] for item in no_run.json()["data"]] == ["precip"]
+    for sibling in ("discharge", "river-network", "met-stations"):
+        assert sibling not in {item["layer_id"] for item in no_run.json()["data"]}
+
+    assert first_page.status_code == 200, first_page.text
+    assert first_page.json()["data"] == [precip]
+    assert beyond.status_code == 200, beyond.text
+    assert beyond.json()["data"] == []
+
+
 def test_precip_entry_metadata_is_independent_of_run_and_postgis_readiness() -> None:
     baseline = layer_metadata("precip")
 

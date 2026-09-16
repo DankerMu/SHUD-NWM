@@ -267,7 +267,7 @@ export function ModelAssetsPage() {
   const rollbackSelectionRequired = pendingOperation === 'rollback_version' && !selectedRollbackCandidate
 
   return (
-    <section className="space-y-4" aria-label="模型资产管理">
+    <section className="h-full min-h-0 space-y-4 overflow-y-auto" aria-label="模型资产管理">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-normal text-foreground">模型资产管理</h1>

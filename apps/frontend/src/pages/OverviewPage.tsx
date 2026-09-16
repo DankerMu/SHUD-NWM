@@ -158,7 +158,7 @@ function M11FullscreenMap({
   const opsVisible = OPERATOR_ROLES.includes(role)
 
   return (
-    <div className="flex h-full min-h-[40rem] w-full flex-col overflow-hidden bg-[#d7e7ef]">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#d7e7ef]">
       <section
         className="relative w-full flex-1 overflow-hidden"
         aria-label={mapLabel}
@@ -206,13 +206,13 @@ function M11FullscreenMap({
           region="起报时次与时间轴"
           testId="region-error-control-bar"
           resetKeys={[state.source, state.cycle]}
-          className="absolute bottom-4 left-1/2 z-[115] -translate-x-1/2"
+          className="absolute bottom-10 left-1/2 z-[115] -translate-x-1/2"
         >
           <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} />
         </RegionErrorBoundary>
       ) : null}
       {/* `state.layer` 恒为 'discharge'，拿它当 key 永远不会复位，故只靠「重试」。 */}
-      <RegionErrorBoundary region="图例" testId="region-error-legend" resetKeys={[]} className="absolute bottom-24 right-4 z-[120]">
+      <RegionErrorBoundary region="图例" testId="region-error-legend" resetKeys={[]} className="absolute bottom-[7.5rem] right-4 z-[120]">
         <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
       </RegionErrorBoundary>
       </section>

@@ -997,3 +997,9 @@ Minimal mergeable slice（issue 原文，逐字记录）：「首刀 = 6.4 原�
 - owner 裁决：流域详情车道**删除**（issue #2109 评论 https://github.com/DankerMu/SHUD-NWM/issues/2109#issuecomment-5657234086）。本 change 内所有「blocked by #2109」「流域详情半边」「still offered in basin detail」的待办与未满足记录（`### #2014` 范围裁定与 Non-goals、`### #2015` Non-goals、task 6.5）一律读作**已取消**，原文保留不改写。
 - 本 change 的 spec delta 已就地删去流域详情条款（见 `design.md` D8 下的 #2109 注记）；代码删除与正式规格退役由 `openspec/changes/retire-basin-detail-lane` 承担。
 - 连带：#2110、#2132 在前端删除 PR 合并后以 superseded 关闭；#2039 仅剩后端/API 文档口径。
+
+### #2023 / #2128 / #2142 / #2039 后续闭环（2026-09-16）
+
+- 本文件 6.5/6.6、#2014 决策 9/10、#2015 决策 10 与 AC5 的旧底距/类名断言是历史交付记录，现由 `../display-followup-layout-catalog-contracts/` 取代：64px 控制条底距 40px，图例与 notice 同步上移 24px，实际浏览器矩形必须与 attribution 分离。规范性 layout delta 已就地更新，防止未来归档恢复旧 16px 值。
+- #2142 明确补齐 #2010 目录的零 display-ready run 分支：仅保留与 run 无关的 precip，显式无效 run 的错误合同不变；#2039 按 2026-09-14 评论仅清理现行 API 文档承诺，不恢复已删除的流域详情/lineage 调用。
+- 此注记是范围与权威指向，不提前声明验收通过；各 issue 的红绿、live 与 CI 证据以新 change 的 Evidence Floor 为准。

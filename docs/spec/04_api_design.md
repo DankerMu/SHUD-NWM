@@ -223,7 +223,7 @@ alerts summary 响应示例：
 
 ## 9. 数据血缘接口
 
-系统核心卖点之一是可追溯。以下接口支持从任意前端曲线点反查完整数据链路，满足路线图"任意曲线点可追溯到 run_id、forcing_version、source cycle"的验收要求。
+系统核心卖点之一是可追溯。以下三条展示端血缘路由曾作为路线图提案写入本设计文档，用于从任意前端曲线点反查完整数据链路。它们**当前均未实现、未注册、不在现行 OpenAPI 中，也不是现网承诺的 API**：
 
 ```http
 GET /api/v1/lineage/river-point?run_id=&segment_id=&valid_time=&variable=
@@ -231,27 +231,7 @@ GET /api/v1/lineage/forcing-point?forcing_version_id=&station_id=&valid_time=&va
 GET /api/v1/lineage/product/{product_id}
 ```
 
-river-point 响应示例：
-
-```json
-{
-  "segment_id": "yangtze_v12_riv_000123",
-  "valid_time": "2026-05-01T06:00:00Z",
-  "variable": "q_down",
-  "lineage": {
-    "run_id": "fcst_gfs_2026043000_yangtze_v12",
-    "model_id": "yangtze_shud_v12",
-    "init_state_id": "state_yangtze_v12_2026042918",
-    "forcing_version_id": "forc_gfs_2026043000_yangtze_v12",
-    "source_id": "GFS",
-    "cycle_time": "2026-04-30T00:00:00Z",
-    "canonical_product_ids": ["can_gfs_2026043000_prcp_030", "can_gfs_2026043000_temp_030"],
-    "parser_job_id": "parse_fcst_gfs_2026043000_yangtze_v12",
-    "qc_result_ids": ["qc_001", "qc_002"],
-    "published_layer_id": "hydro_q_fcst_gfs_2026043000"
-  }
-}
-```
+先前前端对 `GET /api/v1/lineage/river-point` 的调用已随流域详情通道下线一并删除（PR #2331 / OpenSpec #2329），当前展示端不再请求、也不再承诺任何展示端血缘 UI。本节不把扁平 `lineage` 对象或 `nodes`/`edges` 图表述为当前支持的响应形状；任一未来血缘接口须另立契约后再交付。模型资产管理中的 provenance / source_lineage 字段不受影响，仍由既有模型资产接口提供。
 
 ## 10. 权限策略
 
