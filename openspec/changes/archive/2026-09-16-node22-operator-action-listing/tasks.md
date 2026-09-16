@@ -30,6 +30,7 @@ round 2 撞了 same-invariant 门：同一条不变量（**每个闭合集合都
 - [x] B2-3 CI 选择器耦合：`scripts/select_ci_tests.py` 的 `SCHEDULER_IMPORTER_TESTS` 常量补本测试文件（改常量不是 at-site，#2238 的教训）。
 - [x] B2-4 R2-01：`recorded_init_state_id` 活过 bounded 摘要——写侧加保留条目 **+ 读侧加行级双读**，缺一即 no-op。
 - [x] B2-5 文本面：help 的 exit-3 口径（现状两种读法各错一边）、`spec.md` 的 decidable 术语与那句假命题、runbook 补第五条决策的三-null 形状那一臂，以及**四条**成文边界（时间窗、单槽、**inactive-model**、**discovery-retraction**）。
+- [x] B2-6 **第七扇门判 (ii) 成文而非判据**：`registry.model_count` 是 manifest 登记总数（含 inactive），`active_model_count` 是 `list_models(active=True, …)` 的返回，该过滤发生在 `discover_models` 拿到行**之前**，故这段落差 `exclusions` **结构上记录不到**。不判——要求两数相等等于规定 manifest 不许退役模型，仓内无此权威（与 `cycle_window` 拒绝发明阈值同理）。spec + runbook + help 三处成文。
 
 ### B3 —— round 3 修复集（4 条 CONFIRMED，全 P2；裁决见 `.workplans/pr-2440/review/round-3-verdicts.md`）
 
@@ -42,7 +43,6 @@ round 2 撞了 same-invariant 门：同一条不变量（**每个闭合集合都
 
 - [x] EF-8a **闭合 fixture 的分支覆盖**：断言闭合测试至少跑两条求值态腿（planning-only 与 Slurm-enabled），且 `slurm_preflight` 出现在并集权威里并有处置行。通过判据是**去掉 Slurm 腿会让测试变红**，不是"看一眼两条腿都在"。
 - [x] EF-8b **C2 的红证据可复现**：按 B3-3 的合成 writer 形状，确认修复前该决策两边皆不入、修复后进 `unresolved`。
-- [x] B2-6 **第七扇门判 (ii) 成文而非判据**：`registry.model_count` 是 manifest 登记总数（含 inactive），`active_model_count` 是 `list_models(active=True, …)` 的返回，该过滤发生在 `discover_models` 拿到行**之前**，故这段落差 `exclusions` **结构上记录不到**。不判——要求两数相等等于规定 manifest 不许退役模型，仓内无此权威（与 `cycle_window` 拒绝发明阈值同理）。spec + runbook + help 三处成文。
 
 ## C — runbook
 

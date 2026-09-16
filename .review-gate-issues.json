@@ -3570,6 +3570,11 @@
           "pr": 2398,
           "outcome": "superseded-by-split",
           "rounds": 5
+        },
+        {
+          "pr": 2440,
+          "outcome": "merged",
+          "rounds": 3
         }
       ]
     },
