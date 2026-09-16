@@ -11,6 +11,7 @@ test.
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import os
 from pathlib import Path
@@ -165,8 +166,9 @@ def _unrelated_blocked_row() -> dict[str, Any]:
 #: What the scheduler writes on a pass that looked everywhere: backfill on
 #: (``scheduler_runtime.py:1396``) and the four-key filter mapping at its empty
 #: defaults (``scheduler_evidence.py:248``).  The mapping is NON-empty on such a
-#: pass -- all 169 live node-22 passes measured on 2026-09-16 carry it that way --
-#: which is why scope-completeness is read from the filter VALUES.
+#: pass -- every live node-22 pass measured on 2026-09-16 (EF-8) carries it that
+#: way, without exception -- which is why scope-completeness is read from the
+#: filter VALUES.
 _SCOPE_COMPLETE_BACKFILL: dict[str, Any] = {"enabled": True, "lookback_hours": 48, "audit": []}
 _SCOPE_COMPLETE_OPERATOR_FILTERS: dict[str, Any] = {
     "model_ids": [],
@@ -180,13 +182,54 @@ _SCOPE_COMPLETE_OPERATOR_FILTERS: dict[str, Any] = {
 #: fallback), written into the pass by ``scheduler_evidence.py:268`` as
 #: ``list(config.sources)``.
 _SCOPE_COMPLETE_SOURCES: list[str] = ["gfs", "IFS"]
+#: The fourth scope dimension, in the producer's own five-key shape
+#: (``scheduler_evidence.py:270-276``, written unconditionally in
+#: ``base_evidence``).  Only ``lookback_hours`` is read; the live node-22 value is
+#: 96 on every pass without exception (measured 2026-09-16, EF-8), and the two
+#: timestamps are derived from it plus ``cycle_lag_hours``
+#: (``scheduler_evidence.py:244-245``).
+_SCOPE_COMPLETE_CYCLE_WINDOW: dict[str, Any] = {
+    "start_time_utc": "2026-05-17T08:00:00Z",
+    "end_time_utc": "2026-05-21T08:00:00Z",
+    "lookback_hours": 96,
+    "cycle_lag_hours": 16,
+    "max_cycles_per_source": 1,
+}
+#: #2443: the counter block, in the producer's own shape
+#: (``scheduler_runtime.py:1346-1350``, the same dict literal that carries
+#: ``blocked_candidates``).  ``selected_model_count`` is ``len(models)``; every
+#: live node-22 pass measured 2026-09-16 carried 76, without exception.  Only
+#: the model count is read, so the other counters are kept at a plain shape.
+_SCOPE_COMPLETE_COUNTS: dict[str, Any] = {
+    "candidate_count": 0,
+    "blocked_candidate_count": 0,
+    "skipped_candidate_count": 0,
+    "selected_model_count": 76,
+    "source_cycle_count": 1,
+}
+#: The sixth scope dimension's carrier, in the producer's own shape
+#: (``scheduler_evidence.py:293-297``, written unconditionally in ``base_evidence``
+#: and never overwritten).  Only ``allowed_cycle_hours_utc`` is read; every live
+#: node-22 pass measured 2026-09-16 carried ``[0, 12]``, the code default.  The
+#: other entries are kept because the reader must tolerate them, not because it
+#: reads them -- each is a copy of a key judged elsewhere or a throughput knob.
+_SCOPE_COMPLETE_RUNTIME_CONFIG: dict[str, Any] = {
+    "allowed_cycle_hours_utc": [0, 12],
+    "sources": ["gfs", "IFS"],
+    "lookback_hours": 96,
+    "cycle_lag_hours": 16,
+    "max_cycles_per_source": 1,
+    "dry_run": True,
+    "interval_seconds": 900,
+}
 #: The statuses written here that the scheduler only reaches AFTER candidate
-#: construction, so only those passes carry the three scope keys at all.  A
+#: construction, so only those passes carry the six scope keys at all.  A
 #: transparent pass is written before construction and structurally has no
 #: ``backfill`` key, and ``bounded_evidence_payload`` drops those keys, so
 #: defaulting the keys onto every status would write shapes production can not
 #: produce.  A pass written with a status outside this set and no explicit scope
-#: keys is therefore ``scope_unknown``, which is loud, not silent.
+#: keys is therefore ``scope_unknown``, which is loud, not silent.  (Six scope
+#: keys since round 2: ``counts`` and ``runtime_config`` joined the four.)
 _SCOPE_KEY_BEARING_STATUSES = frozenset(("blocked", "planned", "submitted", "submission_failed"))
 #: ``_write_pass`` default: fill the scope keys in per the rule above.  Passing
 #: ``None`` omits the key, any mapping writes it verbatim.
@@ -221,6 +264,9 @@ def _write_pass(
     backfill: Any = _DEFAULT_SCOPE,
     operator_filters: Any = _DEFAULT_SCOPE,
     sources: Any = _DEFAULT_SCOPE,
+    cycle_window: Any = _DEFAULT_SCOPE,
+    counts: Any = _DEFAULT_SCOPE,
+    runtime_config: Any = _DEFAULT_SCOPE,
 ) -> Path:
     payload: dict[str, Any] = {
         "schema_version": "nhms.production_scheduler.pass_evidence.v1",
@@ -246,12 +292,24 @@ def _write_pass(
         operator_filters = _SCOPE_COMPLETE_OPERATOR_FILTERS if bears_scope_keys else None
     if sources is _DEFAULT_SCOPE:
         sources = _SCOPE_COMPLETE_SOURCES if bears_scope_keys else None
+    if cycle_window is _DEFAULT_SCOPE:
+        cycle_window = _SCOPE_COMPLETE_CYCLE_WINDOW if bears_scope_keys else None
+    if counts is _DEFAULT_SCOPE:
+        counts = _SCOPE_COMPLETE_COUNTS if bears_scope_keys else None
+    if runtime_config is _DEFAULT_SCOPE:
+        runtime_config = _SCOPE_COMPLETE_RUNTIME_CONFIG if bears_scope_keys else None
     if backfill is not None:
         payload["backfill"] = backfill
     if operator_filters is not None:
         payload["operator_filters"] = operator_filters
     if sources is not None:
         payload["sources"] = sources
+    if cycle_window is not None:
+        payload["cycle_window"] = cycle_window
+    if counts is not None:
+        payload["counts"] = counts
+    if runtime_config is not None:
+        payload["runtime_config"] = runtime_config
     path = root / name
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.utime(path, (mtime, mtime))
@@ -263,6 +321,9 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
 
     Without it, dropping ``reason=row.get("reason")`` from the module -- or
     aliasing it onto ``decision`` -- left the whole suite green.
+    ``recorded_init_state_id`` is projected for the same reason (R2-01): it is the
+    ONLY executable output of the breaker arm, and the suite stayed green while a
+    summarized pass reported it as ``null``.
     """
 
     return [
@@ -273,6 +334,7 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
             item["attempt"],
             item["retry_limit"],
             item["occurrences"],
+            item["recorded_init_state_id"],
         )
         for item in payload["operator_actions"]
     ]
@@ -281,10 +343,10 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
 @pytest.mark.parametrize(
     ("row_factory", "expected"),
     [
-        (_permanent_failure_row, ("model_a", "permanent_failure", "retry_limit_exhausted", 3, 3, None)),
+        (_permanent_failure_row, ("model_a", "permanent_failure", "retry_limit_exhausted", 3, 3, None, None)),
         (
             _cancelled_row,
-            ("model_b", "cancelled_manual_retry_required", "manual_retry_required_after_cancelled", 1, 3, None),
+            ("model_b", "cancelled_manual_retry_required", "manual_retry_required_after_cancelled", 1, 3, None, None),
         ),
         (
             _budget_row,
@@ -294,6 +356,7 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
                 "strict_warm_start_retry_budget_exhausted",
                 12,
                 12,
+                None,
                 None,
             ),
         ),
@@ -306,6 +369,7 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
                 None,
                 None,
                 1,
+                "state_gfs_model_d_2026052112_gfs_2026052100_f012",
             ),
         ),
         (
@@ -314,6 +378,7 @@ def _action_projection(payload: dict[str, Any]) -> list[tuple[Any, ...]]:
                 "model_e",
                 "blocked_operator_reentry_restart_stage_refused",
                 "operator_reentry_restart_stage_not_forecast",
+                None,
                 None,
                 None,
                 None,
@@ -397,6 +462,7 @@ def test_summarized_pass_still_lists_a_budget_exhausted_candidate_from_bounded_k
             12,
             12,
             None,
+            None,
         ),
         (
             "model_d",
@@ -405,6 +471,9 @@ def test_summarized_pass_still_lists_a_budget_exhausted_candidate_from_bounded_k
             None,
             None,
             1,
+            # R2-01: the summary keeps the token at the row level, so the listing
+            # reports it instead of the ``null`` it used to.
+            "state_gfs_model_d_2026052112_gfs_2026052100_f012",
         ),
     ]
 
@@ -521,6 +590,61 @@ def test_a_candidate_seen_in_several_passes_reports_the_newest_passs_values(
     assert action["first_seen_pass"] == names[0]
     assert action["last_seen_pass"] == names[2]
     assert action["seen_in_passes"] == 3
+
+
+def test_the_newest_passs_token_survives_that_pass_being_bounded_summarized(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2-01: newest-wins must not silently mean "newest, unless it overflowed".
+
+    The whole window is scanned, the newest pass is a REAL
+    ``_bounded_candidate_summary`` product, and the merged entry must report THAT
+    pass's token.  Before the fix the summary projected no token at all and the
+    reader only looked in ``state_evidence``, so the receipt named the newest pass
+    and reported ``recorded_init_state_id: null`` -- leaving the operator without
+    the one value ``confirm-operator-reentry --recorded-init-state-id`` requires,
+    with no other surface in the repo printing it and the refusal payload not
+    echoing it either.
+    """
+
+    stale = "state_gfs_model_d_2026052112_gfs_2026052100_f012"
+    live = "state_gfs_model_d_2026052112_gfs_2026052112_f000"
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        blocked=[_breaker_row(recorded_init_state_id=stale, occurrences=1)],
+    )
+    summarized = scheduler_evidence_payload._bounded_candidate_summary(
+        _breaker_row(recorded_init_state_id=live, occurrences=2)
+    )
+    assert "state_evidence" not in summarized
+    assert summarized["recorded_init_state_id"] == live
+    # The summary name must not collide with a row-level key, or the row-level
+    # second read in ``_pass_actions`` would read a different producer's value.
+    assert "recorded_init_state_id" not in scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS
+    # Idempotent: a second summary pass (a re-summarized row) keeps it too.
+    assert scheduler_evidence_payload._bounded_candidate_summary(summarized) == summarized
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        mtime=2_000,
+        blocked=[summarized],
+        candidate_lists="summarized",
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert payload is not None
+    (action,) = payload["operator_actions"]
+    assert action["recorded_init_state_id"] == live
+    assert action["occurrences"] == 2
+    assert (action["first_seen_pass"], action["last_seen_pass"], action["seen_in_passes"]) == (
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        2,
+    )
 
 
 def test_a_candidate_id_from_an_older_pass_survives_a_newer_pass_that_has_none(
@@ -1307,6 +1431,7 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
             12,
             12,
             None,
+            None,
         ),
     ]
     assert [item["reason"] for item in payload["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
@@ -1325,6 +1450,23 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
         ("backfill_disabled", {"backfill": {"enabled": False}}),
         # ``plan-production --source gfs``: the pass never looked at IFS.
         ("sources", {"sources": ["gfs"]}),
+        # R2-02, the fourth dimension: ``--lookback-hours 0`` is a zero-width
+        # window, blind to every older cycle -- and the breaker release sits by
+        # construction on the oldest side (``scheduler_discovery.py:824-832``).
+        # ``0`` is the exact reachable value: ``cli.py:431-435`` has no lower
+        # bound and ``scheduler_config/config.py:458`` clamps negatives to it.
+        ("lookback_hours_zero", {"cycle_window": {**_SCOPE_COMPLETE_CYCLE_WINDOW, "lookback_hours": 0}}),
+        # The fifth dimension: ``discover_cycles`` drops every cycle whose hour is
+        # outside this set, so a pass allowed only 00Z never evaluated the 12Z slot.
+        (
+            "allowed_cycle_hours_subset",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": [0]}},
+        ),
+        # The degenerate end of the same dimension: no cycle hour is allowed at all.
+        (
+            "allowed_cycle_hours_empty",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": []}},
+        ),
     ],
 )
 def test_a_window_of_only_narrowed_passes_is_undecidable(
@@ -1335,12 +1477,16 @@ def test_a_window_of_only_narrowed_passes_is_undecidable(
 ) -> None:
     """r5-01: a narrowed pass listed nothing *inside its own scope*, which is not an answer.
 
-    Each shape is one of the three narrowings the pass file records (spec:
-    backfill disabled, operator filters selecting a subset, or ``sources`` naming
-    a subset of the production set), written in the producer's own four-key
-    ``operator_filters`` shape (``scheduler_evidence.py:248``), ``backfill`` shape
-    (``scheduler_runtime.py:1396-1402``) and ``sources`` list
-    (``scheduler_evidence.py:268``).
+    Each shape is one of the five narrowings the pass file records (spec:
+    backfill disabled, operator filters selecting a subset, ``sources`` naming
+    less than the production set, a zero-width cycle window, or an
+    ``allowed_cycle_hours_utc`` narrower than the code default), written in the
+    producer's own four-key ``operator_filters`` shape
+    (``scheduler_evidence.py:248``), ``backfill`` shape
+    (``scheduler_runtime.py:1396-1402``), ``sources`` list
+    (``scheduler_evidence.py:268``), five-key ``cycle_window``
+    (``scheduler_evidence.py:270-276``) and ``runtime_config`` block
+    (``scheduler_evidence.py:293-297``).
     """
 
     names = [f"scheduler_2026052112_{index:012d}.json" for index in range(2)]
@@ -1362,6 +1508,96 @@ def test_a_window_of_only_narrowed_passes_is_undecidable(
     assert payload["non_evaluating_passes"] == [
         {"pass": name, "status": "planned", "reason": "scope_narrowed"} for name in names
     ]
+
+
+@pytest.mark.parametrize(
+    ("shape", "sources"),
+    [
+        ("superset", ["gfs", "IFS", "ERA5"]),
+        ("reordered", ["IFS", "gfs"]),
+    ],
+)
+def test_a_pass_covering_the_whole_production_source_set_is_scope_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str, sources: list[str]
+) -> None:
+    """R2-03: the test is COVERAGE of the production set, not equality with it.
+
+    ``--source gfs --source IFS --source ERA5`` did look at gfs and IFS, so it can
+    answer for them; only a SUBSET answers for less than everywhere.  Equality
+    called such a pass narrowed and forced exit 3 -- conservative, but it made
+    ``scope_narrowed`` mean two different things.  Not case-folded on purpose:
+    ``scheduler_config/config.py:448`` normalizes spellings through
+    ``normalize_source_id`` and raises on an unknown one, so a case variant can not
+    reach the pass file at all, while the adapter's manifest path is case-sensitive.
+    """
+
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+        sources=sources,
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 0, shape
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == []
+
+
+@pytest.mark.parametrize(
+    ("shape", "allowed_hours"),
+    [
+        ("superset", [0, 6, 12, 18]),
+        ("reordered", [12, 0]),
+    ],
+)
+def test_a_pass_allowing_more_cycle_hours_than_the_default_is_scope_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str, allowed_hours: list[int]
+) -> None:
+    """The cycle-hour dimension is coverage of the DEFAULT, exactly like ``sources``.
+
+    A pass that let 06Z and 18Z through as well still evaluated both default
+    slots, so it can answer for them.  And the completeness authority is the code
+    default rather than the whole 0-23 day on purpose: production runs the default,
+    so judging against the full day would report every production pass narrowed and
+    manufacture a false exit 3 -- the same invented threshold this change already
+    refused for ``cycle_lag_hours``.
+    """
+
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+        runtime_config={**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": allowed_hours},
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 0, shape
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == []
+
+
+def test_the_cycle_hour_authority_is_the_scheduler_default_not_a_local_copy() -> None:
+    """The sixth closed set of this surface is ALIASED from its authority, not copied.
+
+    Round 2's recurring invariant: every closed set on this surface must be
+    reverse-derived from the module that owns it.  Both production closed sets are
+    therefore bound to ``scheduler.py``'s own names -- identity, not equality, so a
+    stale copy is not even expressible.
+    """
+
+    from services.orchestrator import operator_action_listing, scheduler
+
+    assert operator_action_listing.SCOPE_COMPLETE_CYCLE_HOURS_UTC is scheduler.DEFAULT_ALLOWED_CYCLE_HOURS_UTC
+    assert operator_action_listing.SCOPE_COMPLETE_SOURCES is scheduler.DEFAULT_PRODUCTION_SOURCES
 
 
 def test_a_narrowed_pass_does_not_re_arm_a_flag_an_earlier_scope_complete_pass_cleared(
@@ -1388,8 +1624,128 @@ def test_a_narrowed_pass_does_not_re_arm_a_flag_an_earlier_scope_complete_pass_c
     ]
 
 
-def test_a_narrowed_pass_does_not_clear_a_flag_a_size_fallback_armed(
+def test_a_pass_that_selected_no_models_arms_the_flag_instead_of_answering_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2443: a pass that evaluated NOTHING must not be the pass that says "nothing waits".
+
+    Reachable with no operator instruction at all: the db-free registry manifest
+    accepts ``models: []`` (``scheduler_file_providers.py:883-940`` has no lower
+    bound) and a manifest whose rows are all excluded by
+    ``scheduler_models.py:137-145`` lands in the same place with the registry still
+    ``ready`` -- and the evidence still records ``backfill.enabled: true``, because
+    the writer records the CONFIGURED leg while ``scheduler_discovery.py:700`` also
+    requires a non-empty model set to take it.  So every other scope key reads
+    complete and only the model count tells the truth.
+
+    The older scope-complete pass is here on purpose: it CLEARS the flag first, so
+    the exit 3 is produced by this pass arming it, not by ``evaluating_count < 1``.
+    """
+
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        mtime=2_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+        counts={**_SCOPE_COMPLETE_COUNTS, "selected_model_count": 0},
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == [
+        {"pass": "scheduler_2026052112_bbbbbbbbbbbb.json", "status": "planned", "reason": "no_models_evaluated"}
+    ]
+
+
+def test_a_zero_model_pass_that_is_also_narrowed_reports_the_arming_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2443 ordering: "evaluated nothing" outranks "the operator narrowed it".
+
+    ``scope_narrowed`` LEAVES the flag because such a pass still answered for its
+    own scope.  A zero-model pass answered for nothing, not even for its own scope,
+    so the two must not be collapsed -- reporting ``scope_narrowed`` here would let
+    an earlier pass's exit 0 stand.
+    """
+
+    _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_bbbbbbbbbbbb.json",
+        mtime=2_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+        backfill={"enabled": False},
+        counts={**_SCOPE_COMPLETE_COUNTS, "selected_model_count": 0},
+    )
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 3
+    assert payload is not None
+    assert payload["non_evaluating_passes"] == [
+        {"pass": "scheduler_2026052112_bbbbbbbbbbbb.json", "status": "planned", "reason": "no_models_evaluated"}
+    ]
+
+
+def test_a_newer_scope_complete_pass_clears_the_flag_a_zero_model_pass_armed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2443 is POSITIONAL, like every other arming reason on this surface.
+
+    A zero-model pass arms the flag because nobody knows what it would have found;
+    a LATER pass that did evaluate the whole scope knows, and its answer supersedes.
+    Without this the first empty registry manifest would wedge the surface at exit 3
+    for the rest of the retention window.
+    """
+
+    _write_pass(
+        tmp_path,
+        "scheduler_2026052112_aaaaaaaaaaaa.json",
+        mtime=1_000,
+        status="planned",
+        blocked=[_unrelated_blocked_row()],
+        counts={**_SCOPE_COMPLETE_COUNTS, "selected_model_count": 0},
+    )
+    _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="planned")
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 0
+    assert payload is not None
+    assert payload["operator_actions"] == []
+    assert payload["non_evaluating_passes"] == [
+        {"pass": "scheduler_2026052112_aaaaaaaaaaaa.json", "status": "planned", "reason": "no_models_evaluated"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("narrowing", "write_kwargs"),
+    [
+        (
+            "operator_filters",
+            {"operator_filters": _narrowed_operator_filters(
+                model_ids=("model_a",), expression="model_id in [model_a]"
+            )},
+        ),
+        # The round-2 dimension gets its own row: "leaves the flag as it found it"
+        # is asserted for the newest narrowing dimension, not only the oldest one.
+        (
+            "allowed_cycle_hours",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": [0]}},
+        ),
+    ],
+)
+def test_a_narrowed_pass_does_not_clear_a_flag_a_size_fallback_armed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    narrowing: str,
+    write_kwargs: dict[str, Any],
 ) -> None:
     """design.md D3 row 2: the one shape where "narrowed CLEARS" would read as exit 0.
 
@@ -1416,12 +1772,12 @@ def test_a_narrowed_pass_does_not_clear_a_flag_a_size_fallback_armed(
         mtime=3_000,
         status="planned",
         blocked=[_unrelated_blocked_row()],
-        operator_filters=_narrowed_operator_filters(model_ids=("model_a",), expression="model_id in [model_a]"),
+        **write_kwargs,
     )
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
-    assert code == 3
+    assert code == 3, narrowing
     assert payload is not None
     assert payload["operator_actions"] == []
     assert [(item["pass"], item["reason"]) for item in payload["non_evaluating_passes"]] == [
@@ -1455,6 +1811,7 @@ def test_a_narrowed_pass_that_lists_a_blocked_action_still_reports_it(
             "strict_warm_start_retry_budget_exhausted",
             12,
             12,
+            None,
             None,
         )
     ]
@@ -1556,6 +1913,49 @@ def test_an_evaluating_pass_missing_the_backfill_key_arms_the_hidden_pass_flag(
         ("missing_sources", {"sources": None}),
         ("string_sources", {"sources": "gfs"}),
         ("non_string_source_element", {"sources": [["gfs"]]}),
+        # The seventh: ``cycle_window.lookback_hours``.  R2-02 through a different
+        # door -- a missing window read as "unnarrowed" is the same "absent means
+        # complete" defect the reason split exists to prevent.  ``True`` is
+        # explicitly not an integer here (``bool`` is an ``int`` subclass, and the
+        # writer only ever stores ``max(int(...), 0)``).
+        ("missing_cycle_window", {"cycle_window": None}),
+        ("empty_cycle_window", {"cycle_window": {}}),
+        (
+            "cycle_window_without_lookback_hours",
+            {"cycle_window": {key: value for key, value in _SCOPE_COMPLETE_CYCLE_WINDOW.items()
+                              if key != "lookback_hours"}},
+        ),
+        ("string_lookback_hours", {"cycle_window": {**_SCOPE_COMPLETE_CYCLE_WINDOW, "lookback_hours": "96"}}),
+        ("bool_lookback_hours", {"cycle_window": {**_SCOPE_COMPLETE_CYCLE_WINDOW, "lookback_hours": True}}),
+        # #2443, the eighth: ``counts.selected_model_count``.  A missing counter
+        # block must not read as "some models were evaluated".
+        ("missing_counts", {"counts": None}),
+        ("empty_counts", {"counts": {}}),
+        ("string_selected_model_count", {"counts": {**_SCOPE_COMPLETE_COUNTS, "selected_model_count": "76"}}),
+        # The ninth: ``runtime_config.allowed_cycle_hours_utc``.  A missing block
+        # must not read as "the default hours were allowed"; the writer stores a
+        # list of plain ints, so a string or a bool element is a shape it can not
+        # produce -- and ``set()`` over an unhashable element would escape the
+        # 0/1/2/3 contract as a TypeError instead of an exit code.
+        ("missing_runtime_config", {"runtime_config": None}),
+        ("empty_runtime_config", {"runtime_config": {}}),
+        (
+            "runtime_config_without_allowed_cycle_hours",
+            {"runtime_config": {key: value for key, value in _SCOPE_COMPLETE_RUNTIME_CONFIG.items()
+                                if key != "allowed_cycle_hours_utc"}},
+        ),
+        (
+            "string_allowed_cycle_hours",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": "0,12"}},
+        ),
+        (
+            "bool_allowed_cycle_hour_element",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": [0, True]}},
+        ),
+        (
+            "unhashable_allowed_cycle_hour_element",
+            {"runtime_config": {**_SCOPE_COMPLETE_RUNTIME_CONFIG, "allowed_cycle_hours_utc": [[0], [12]]}},
+        ),
     ],
 )
 def test_a_partial_scope_mapping_is_unknown_scope_not_complete_scope(
@@ -1570,9 +1970,10 @@ def test_a_partial_scope_mapping_is_unknown_scope_not_complete_scope(
     scope-complete, clear the hidden-pass flag and permit exit 0 off a pass whose
     scope nobody established -- r5-01's failure mode through a different door.
     Production can not write these shapes (``scheduler_evidence.py:248-253`` is an
-    unconditional four-key literal and both legs of ``scheduler_runtime.py``
-    1394-1402 carry ``enabled``), which is exactly why the rule must be keyed on
-    presence rather than assumed.
+    unconditional four-key literal, ``:270-276`` an unconditional five-key
+    ``cycle_window`` literal, and both legs of ``scheduler_runtime.py`` 1394-1402
+    carry ``enabled``), which is exactly why the rule must be keyed on presence
+    rather than assumed.
     """
 
     _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
@@ -1721,8 +2122,22 @@ def test_bounded_candidate_summary_retains_every_retry_policy_key_including_fals
 #: and never import them: the listing surface is db-free on purpose, and importing
 #: the writers here would add importer pairs to the CI selector's directory rules.
 _ORCHESTRATOR_DIR = Path(__file__).resolve().parents[1] / "services" / "orchestrator"
-#: Both modules that write a ``manual_retry_required: True`` decision.
-_MANUAL_ACTION_WRITER_FILES = ("scheduler_candidates.py", "scheduler_state_failure.py")
+#: EVERY module of the orchestrator package, derived rather than listed (R2-05).
+#: The previous two-name literal made the closure pin below unclosed one level up:
+#: a ``manual_retry_required: True`` decision written by any THIRD module was
+#: invisible to it, which is the same silent-exit-0 failure the pin exists to
+#: catch.  ``rglob``, not ``glob`` -- ``scheduler_config/`` is a sub-package and
+#: its modules would otherwise sit outside the scan.  ``Path`` elements, not
+#: basenames, for the same reason: a sub-package module does not resolve under
+#: ``_ORCHESTRATOR_DIR / name``.  Measured: 106 files, both legs together ~0.6s.
+_MANUAL_ACTION_WRITER_FILES: tuple[Path, ...] = tuple(sorted(_ORCHESTRATOR_DIR.rglob("*.py")))
+
+
+@functools.cache
+def _parsed_orchestrator_module(path: Path) -> ast.Module:
+    """One parse per module; both ``literal_true`` legs walk the same tree."""
+
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
@@ -1740,6 +2155,37 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     return constants
 
 
+def _module_dict_constants(tree: ast.Module) -> dict[str, ast.Dict]:
+    """Module-level ``NAME = {...}`` assignments, so a ``**NAME`` spread resolves."""
+
+    constants: dict[str, ast.Dict] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = node.value
+    return constants
+
+
+def _is_module_constant_spelling(node: ast.expr) -> bool:
+    """A ``**NAME`` spread whose NAME is spelled like a module constant.
+
+    The line between "must resolve" and "known limit".  Measured over the whole
+    package: 3 spreads name a module-level dict literal (the
+    ``**_OPERATOR_REENTRY_POLICY`` trio), 123 name a lowercase local such as
+    ``**base_evidence``, 81 are ``**dict(...)``/other calls, 16 are comprehensions,
+    attributes or conditionals, and ZERO are constant-spelled but unresolvable.
+    Reporting the locals and the calls would keep this pin permanently red over
+    the very shapes documented as known limits in
+    :func:`_written_manual_action_decisions`; reporting a constant-spelled name
+    that stopped resolving (moved to another module, renamed, rebuilt by a call)
+    catches the one refactor that could silently drop a listed decision.
+    """
+
+    return isinstance(node, ast.Name) and node.id.lstrip("_").isupper()
+
+
 def _dict_literal_value(node: ast.Dict, key: str) -> ast.expr | None:
     for literal_key, value in zip(node.keys, node.values, strict=True):
         # ``**spread`` entries carry a ``None`` key.
@@ -1748,49 +2194,104 @@ def _dict_literal_value(node: ast.Dict, key: str) -> ast.expr | None:
     return None
 
 
-def _marks_manual_retry_required(node: ast.Dict, *, literal_true: bool) -> bool:
-    """True when the dict sets ``manual_retry_required``, directly or nested, in the asked-for way.
+def _marks_manual_retry_required(
+    node: ast.Dict,
+    *,
+    literal_true: bool,
+    dict_constants: dict[str, ast.Dict],
+    _seen: frozenset[str] = frozenset(),
+) -> tuple[bool, list[int]]:
+    """``(marks the flag, line numbers of spreads that would not resolve)``.
 
     Nested matters: the flag lives in the ``retry_policy`` sub-dict of the
     decision dict on four of the five listed writers.  ``literal_true=True``
     matches a literal ``True`` only -- an expression cannot be judged statically;
     ``literal_true=False`` matches the expression spellings instead, so the pin can
     close over those too rather than being silently blind to them.
+
+    A ``**MODULE_CONSTANT`` spread is resolved against the module's dict
+    constants, and one spelled like a module constant that does NOT resolve is
+    REPORTED rather than read as "no flag here".  That shape is the one with real
+    risk: ``scheduler_candidates.py:1677,2739,2857`` already spread
+    ``**_OPERATOR_REENTRY_POLICY`` into ``retry_policy`` right beside the two
+    literal flag lines, so DRY-ing the pair into that constant is the obvious
+    refactor -- and doing it at only one of the three sites would make a listed
+    decision vanish from this pin while it stayed green.  A spread can also
+    OVERRIDE a literal flag, so the gaps are reported even when one was found.
     """
 
+    marked = False
+    unresolved_spreads: list[int] = []
     for literal_key, value in zip(node.keys, node.values, strict=True):
+        if literal_key is None:
+            if isinstance(value, ast.Name) and value.id in dict_constants and value.id not in _seen:
+                nested_marked, nested_spreads = _marks_manual_retry_required(
+                    dict_constants[value.id],
+                    literal_true=literal_true,
+                    dict_constants=dict_constants,
+                    _seen=_seen | {value.id},
+                )
+                marked = marked or nested_marked
+                unresolved_spreads.extend(nested_spreads)
+            elif _is_module_constant_spelling(value):
+                unresolved_spreads.append(value.lineno)
+            continue
         if isinstance(literal_key, ast.Constant) and literal_key.value == "manual_retry_required":
             if literal_true:
                 if isinstance(value, ast.Constant) and value.value is True:
-                    return True
+                    marked = True
             elif not isinstance(value, ast.Constant):
-                return True
-        if isinstance(value, ast.Dict) and _marks_manual_retry_required(value, literal_true=literal_true):
-            return True
-    return False
+                marked = True
+        if isinstance(value, ast.Dict):
+            nested_marked, nested_spreads = _marks_manual_retry_required(
+                value, literal_true=literal_true, dict_constants=dict_constants, _seen=_seen
+            )
+            marked = marked or nested_marked
+            unresolved_spreads.extend(nested_spreads)
+    return marked, unresolved_spreads
 
 
 def _written_manual_action_decisions(*, literal_true: bool = True) -> tuple[set[str], list[str]]:
-    """Every decision the writers pair with ``manual_retry_required``, plus what would not resolve."""
+    """Every decision the writers pair with ``manual_retry_required``, plus what would not resolve.
+
+    Known limits, all of them shapes no writer uses today (checked: every
+    ``retry_policy`` value in the package is a dict literal): a flag or decision
+    reached through ``dict(...)``, through a function return, or through a
+    list-of-dicts comprehension is not resolved statically and would be missed.
+    """
 
     decisions: set[str] = set()
     unresolved: list[str] = []
-    for file_name in _MANUAL_ACTION_WRITER_FILES:
-        path = _ORCHESTRATOR_DIR / file_name
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path in _MANUAL_ACTION_WRITER_FILES:
+        where = path.relative_to(_ORCHESTRATOR_DIR).as_posix()
+        tree = _parsed_orchestrator_module(path)
         constants = _module_string_constants(tree)
+        dict_constants = _module_dict_constants(tree)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict) or not _marks_manual_retry_required(node, literal_true=literal_true):
+            if not isinstance(node, ast.Dict):
+                continue
+            marked, spread_gaps = _marks_manual_retry_required(
+                node, literal_true=literal_true, dict_constants=dict_constants
+            )
+            if not marked and not spread_gaps:
                 continue
             value = _dict_literal_value(node, "decision")
             if value is None:
+                continue
+            # Only dicts that NAME a decision can hide one, so the spread gaps are
+            # recorded here rather than at the walk: the flag alone sits in the
+            # five inner ``retry_policy`` sub-dicts (scheduler_candidates.py
+            # 1674/2732/2852, scheduler_state_failure.py 1987/2183) whose decision
+            # is one level up, and reporting those would be pure noise.
+            unresolved.extend(f"{where}:{lineno} **spread" for lineno in spread_gaps)
+            if not marked:
                 continue
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 decisions.add(value.value)
             elif isinstance(value, ast.Name) and value.id in constants:
                 decisions.add(constants[value.id])
             else:
-                unresolved.append(f"{file_name}:{value.lineno}")
+                unresolved.append(f"{where}:{value.lineno}")
     return decisions, unresolved
 
 
@@ -1802,6 +2303,10 @@ def test_operator_action_decisions_are_closed_over_every_manual_retry_writer() -
     ``blocked_operator_reentry_restart_stage_refused`` went unlisted, so the pin is
     the deliverable, not the literal.  Source text + ``ast`` only: no import of the
     writers, and an unresolvable ``decision`` is a failure rather than a silent gap.
+
+    R2-05: the SCAN DOMAIN is derived too -- every module under
+    ``services/orchestrator/``, sub-packages included -- because a hand-listed one
+    reproduced the same unclosed-set defect one level up.
     """
 
     from services.orchestrator import operator_action_listing
@@ -1847,6 +2352,49 @@ def test_operator_action_decisions_are_closed_over_every_manual_retry_writer() -
     assert not expression_decisions & set(operator_action_listing.OPERATOR_ACTION_DECISIONS)
 
 
+def test_the_help_text_names_every_decision_and_every_non_evaluating_reason() -> None:
+    """R2-04: the operator's only online index of this surface must enumerate it.
+
+    The decisions are read from :data:`OPERATOR_ACTION_DECISIONS` rather than
+    typed, so a sixth one the closure pin above forces into the module also has to
+    reach the help.  ``scope_unknown`` is pinned because the help never mentioned
+    it at all, which left an operator holding that reason with nowhere to look it
+    up.  ENUMERATION ONLY: the prose logic is not asserted here -- that is what the
+    exit-code tests are for.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    help_text = operator_action_listing.LIST_OPERATOR_ACTIONS_HELP
+
+    for decision in operator_action_listing.OPERATOR_ACTION_DECISIONS:
+        assert decision in help_text, decision
+    for reason in (
+        operator_action_listing.SCOPE_NARROWED_REASON,
+        operator_action_listing.SCOPE_UNKNOWN_REASON,
+        operator_action_listing.STATUS_NOT_EVALUATING_REASON,
+        operator_action_listing.SIZE_FALLBACK_NON_EVALUATING_REASON,
+        operator_action_listing.NO_MODELS_EVALUATED_REASON,
+    ):
+        assert reason in help_text, reason
+    # The six scope keys the reason split is keyed on, and the three documented
+    # boundaries of exit 0 (time window, single oldest-cycle slot, inactive models).
+    for key in ("backfill", "operator_filters", "sources", "cycle_window", "counts", "runtime_config"):
+        assert key in help_text, key
+    assert "--lookback-hours 0" in help_text
+    assert "allowed_cycle_hours_utc" in help_text
+    # Both closed sets are rendered FROM the constants, not re-typed into the
+    # prose: a help string that spells a stale ``gfs/IFS`` or ``(0, 12)`` is the
+    # same hand-copy defect one layer out.
+    assert "/".join(operator_action_listing.SCOPE_COMPLETE_SOURCES) in help_text
+    assert ", ".join(str(hour) for hour in operator_action_listing.SCOPE_COMPLETE_CYCLE_HOURS_UTC) in help_text
+    assert "backfill_deferred_waiting_for_prior_cycle" in help_text
+    # The inactive-model boundary names the two numbers an operator has to compare,
+    # because `exclusions` structurally can not show that gap.
+    assert "model_count" in help_text
+    assert "active_model_count" in help_text
+
+
 def _only_string_tuple_literal(node: ast.AST, where: str) -> tuple[str, ...]:
     tuples = [
         item
@@ -1860,13 +2408,15 @@ def _only_string_tuple_literal(node: ast.AST, where: str) -> tuple[str, ...]:
 
 
 def test_the_three_spellings_of_the_production_source_set_agree() -> None:
-    """``SCOPE_COMPLETE_SOURCES`` is a local copy; drift in any of the three must be loud.
+    """Drift in any of the three spellings of the production source set must be loud.
 
-    The authority is ``scheduler.py``'s ``DEFAULT_PRODUCTION_SOURCES``, but that
-    module is far too heavy to import from a db-free listing surface, and
-    ``cli.py``'s ``resolved_sources`` fallback is what a pass without
-    ``--source``/``NHMS_SCHEDULER_SOURCES`` actually records.  Read with ``ast``,
-    not imported, for the same reason.
+    The authority is ``scheduler.py``'s ``DEFAULT_PRODUCTION_SOURCES``.  The
+    listing surface no longer keeps a copy of it -- ``SCOPE_COMPLETE_SOURCES`` is
+    an alias, asserted by identity elsewhere in this file -- but ``cli.py``'s
+    ``resolved_sources`` fallback IS an independent literal, and it is what a pass
+    run without ``--source``/``NHMS_SCHEDULER_SOURCES`` actually records.  Both are
+    read with ``ast`` rather than imported so this pin still fails loudly if either
+    literal is edited to a different tuple.
     """
 
     from services.orchestrator import operator_action_listing

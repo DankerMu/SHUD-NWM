@@ -706,12 +706,19 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # scheduler_runtime.py stop rule (that stop shadows the orchestrator tree
     # rule which carries the mutex partition). Additive to the redirect, exactly
     # like the safe_fs.py and journal importer targets.
+    # The scope-disposition node id is #1186 round 2's at-site addition to the
+    # same stop rule: scheduler_runtime.py writes most of the evidence keys the
+    # closure pin dispositions, and the stop rule's ten pinned node ids did not
+    # include it — so adding a top-level key there would not have run the one test
+    # that exists to go red on exactly that.
     assert selected == sorted(
         {
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
             "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py"
+            "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -9916,7 +9923,16 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # redirect, pinned by the file-journal selection test), so only the at-site
     # target is named — the same "pin what the extension added" shape as the
     # other rows. The exact 23-element selection is pinned below.
-    ("services/orchestrator/scheduler_runtime.py", ("tests/test_retention_copyback_mutex.py",)),
+    # #1186 round 2 added a second at-site target to this same rule: one node id
+    # of the scope-dimension closure pin, because this module publishes most of a
+    # pass payload's top-level keys.
+    (
+        "services/orchestrator/scheduler_runtime.py",
+        (
+            "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+        ),
+    ),
 )
 
 
@@ -9960,6 +9976,10 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
 def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     # 22 -> 23: the stop rule for scheduler_runtime.py shadows the orchestrator
     # tree rule, so the mutex suite arrives only through the at-site extension.
+    # 23 -> 24 (#1186 round 2): the scope-dimension closure pin rides the same
+    # rule as a single node id. This module writes most of a pass payload's
+    # top-level keys, and that pin is what turns "a new key nobody dispositioned"
+    # from a silent false exit 0 into a red test.
     assert Path("services/orchestrator/scheduler_runtime.py").is_file()
 
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
@@ -9980,6 +10000,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_production_scheduler.py::test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call",
         "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion",
         "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
+        "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
         "tests/test_retention_copyback_mutex.py",
         # #2185: services/** is a river-segment write-surface root.

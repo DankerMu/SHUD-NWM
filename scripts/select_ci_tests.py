@@ -677,6 +677,17 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # runtime-budget token is reserved for, and the suite's subject IS this
     # module, so a rule is the honest disposition rather than an exclusion.
     "tests/test_operator_reentry_confirmation.py",
+    # #1186: the operator-action listing suite couples to `scheduler.py` two ways.
+    # It imports it transitively — `operator_action_listing.py` aliases
+    # `SCOPE_COMPLETE_SOURCES`/`SCOPE_COMPLETE_CYCLE_HOURS_UTC` straight from
+    # `DEFAULT_PRODUCTION_SOURCES`/`DEFAULT_ALLOWED_CYCLE_HOURS_UTC` rather than
+    # keeping copies — and it also reads `cli.py`'s independent `resolved_sources`
+    # fallback with `ast`. Either way an edit to those tuples is precisely what
+    # has to run this suite. Without this row the coupling edge is invisible to
+    # the selector: the importer closure only applies when the CHANGED path is
+    # itself a test file (`select_ci_tests.py:3809-3811`), and a production module
+    # path is routed by PATH_TEST_RULES alone.
+    "tests/test_operator_action_listing.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -1515,8 +1526,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # packages/common/copyback_guard.py, routed below), so this stop rule is
         # where its gap closes. The sibling tests/test_retention_extra_roots.py
         # gap stays open (issue boundary, recorded known limit).
+        #
+        # #1186 round 2 adds the second at-site target. scheduler_runtime.py
+        # writes most of the top-level keys of a pass evidence payload (it keeps
+        # adding to the dict `base_evidence` returned, `counts` and
+        # `duplicate_exclusions` among them), and the scope-dimension closure pin
+        # runs a REAL pass and asserts every published key carries a disposition.
+        # A new key here without a disposition is exactly the silent false-exit-0
+        # this PR exists to close, so that one node id — not the whole 2000-test
+        # suite — rides this rule. Measured at 0.04s of call time.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11],
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_retention_copyback_mutex.py"),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            "tests/test_retention_copyback_mutex.py",
+            "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(

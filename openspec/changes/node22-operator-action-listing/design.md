@@ -44,7 +44,7 @@
 
 这条分界线有源头，不是拍的：`scheduler_evidence.py:248-253` 把顶层 `operator_filters` 写成无条件的四键 dict 字面量，`scheduler_evidence.py:268` 无条件写 `sources`，`scheduler_runtime.py:1394-1402` 的 `if/else` **两条腿都写** `backfill` 且都带 `enabled`——所以字段缺失不是 pass 记录下来的一种收窄，而是 writer 造不出的形状。**易错点**：`scheduler_evidence.py:995` 的 `empty_model_discovery()` 只写两个键，看着像反例，但那是 `model_discovery.operator_filters` 这个**嵌套镜像**，本模块读顶层键，不受影响。
 
-这个选择有可观察后果，必须说清楚：置位是**位置相关**的，一趟更新的范围完整 pass 会把它清零。所以 `[缺键, D] → 0`（更新的那趟确实看过全部，旧的不确定性被取代），而 `[D, 缺键] → 3`。另一种写法是把它做成与 `dropped` 同类的**全局**否决（一旦出现就 exit 3，不论位置）——那需要自己的分支、自己的判据和自己的覆盖行，而 D2 实测 169/169 生产 pass 两个键都在，这是纯防御路径。
+这个选择有可观察后果，必须说清楚：置位是**位置相关**的，一趟更新的范围完整 pass 会把它清零。所以 `[缺键, D] → 0`（更新的那趟确实看过全部，旧的不确定性被取代），而 `[D, 缺键] → 3`。另一种写法是把它做成与 `dropped` 同类的**全局**否决（一旦出现就 exit 3，不论位置）——那需要自己的分支、自己的判据和自己的覆盖行，而 D2 实测 188/188 生产 pass 两个键都在，这是纯防御路径。
 
 **"纯防御路径"这句查过 D2b 那条压缩阶梯，不是断言**：`scope_unknown` 若是生产可达的，D2b 的 89.6% 余量就意味着它随时会到，runbook 与 EF-6 的预期退出码都得改写。实测三级阶梯都不剥 scope 键——`_compact_admissible_pass_payload`（`scheduler_evidence_payload.py:309-348`）从 `dict(payload)` 起手，只动 `skipped_candidates` / `retention` / `evidence_compaction`，两个 scope 键原样留下；`bounded_evidence_payload`（`:1093-1155`）的白名单投影确实**丢掉**两个键，但它同时把 status 改写成 `resource_limit_blocked`，在 scope 判之前就被 size-fallback 分支接走（这也是 F-04 删掉两行 `[SF, scoped]` 的同一条证据）。因此体积压力不会把生产 pass 推成 `scope_unknown`。按 KISS 取位置相关的那条，D3 表里用 `[缺键, D]` 这一行把两种读法区分开。
 
@@ -52,30 +52,37 @@
 
 这是本 change 唯一一处**先实测再落笔**的地方，因为写反了会让线上每一趟都判成收窄。
 
-2026-09-16 在 node-22 活动证据根 `/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence` 上只读探查（`/scratch/frd_muziyao/NWM/.venv/bin/python`，不连任何 DB、不写任何文件），**169 趟全部保留的 pass**：
+在 node-22 活动证据根 `/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence` 上只读探查（`/scratch/frd_muziyao/NWM/.venv/bin/python`，不连任何 DB、不写任何文件）。**下面是 EF-7 / EF-7b 在本 PR 修复后的 head 上的重测值**，取代初稿那次 169 趟的快照——证据根随保留计时器滚动，趟数会变，形状不会：
 
 ```
-169 个 pass，operator_filters 取值完全一致：
-  (basin_ids, model_ids, expression, excluded_runnable_count) = ((), (), None, 0)
-  backfill.enabled = True （169/169）
-  status            = "planned" （169/169，在 EVALUATING_PASS_STATUSES 里）
+188 个 pass（EF-7b 重测；EF-7 时 184，初稿时 169），unreadable = 0
+operator_filters 取值完全一致：
+  (basin_ids, model_ids, expression, excluded_runnable_count) = ((), (), None, 0)   （188/188）
+  backfill.enabled  = True                        （188/188）
+  sources           = ['IFS','gfs']（全集）        （188/188，零缺键）
+  cycle_window      = 五个子键全在                 （188/188）
+    lookback_hours = 96 · cycle_lag_hours = 16 · max_cycles_per_source = 1
+  duplicate_exclusions = list(len=0)              （188/188）
+  status            = "planned"                   （在 EVALUATING_PASS_STATUSES 里）
 ```
+
+**文件口径**用模块自己的 `is_scheduler_pass_evidence_filename`，不是手搓的 `*.json` 过滤——第一版探针用松过滤多算进 9 个外来 JSON（`no-progress-tracker.json`、若干 `repair_stale_*` / `stale-lock-clear-*`），得出过错误的计数。
 
 即：**生产 pass 从不收窄，但 `operator_filters` 这个 mapping 恒为非空**（四个键，取值都是空默认值）。`expression` 也**不在顶层**——它在 `operator_filters.expression`（并在 `filters.expression` 与 `model_discovery.operator_filters.expression` 各有一份镜像）。
 
-推论，写进规格：**范围完整性按过滤值判，不按 mapping 的有无或大小判**。若按 mapping 为空判，169/169 都会被判成收窄、`hidden_after_decidable` 永不清零、`exit 0` 永不可达——线上 EF-8 会直接 exit 3。拆分计划要求"实现前必须在真实 pass 文件上只读确认该键路径"，这条要求抓到的就是它。
+推论，写进规格：**范围完整性按过滤值判，不按 mapping 的有无或大小判**。若按 mapping 为空判，188/188 都会被判成收窄、`hidden_after_decidable` 永不清零、`exit 0` 永不可达——线上 EF-6 的实机收据会直接给出 exit 3。拆分计划要求"实现前必须在真实 pass 文件上只读确认该键路径"，这条要求抓到的就是它。
 
 顺带澄清两条**被这次实测否掉的担心**（记下来免得下一轮重走）：
 
 - `limit` / `limit.pre_limit_status` 在真实 pass 上**不存在**——但模块只在 `status == resource_limit_blocked` 的 size-fallback 分支里用 `limit.get(...)` 读它，正常 pass 走不到，无碍。
-- `status` 在 169 趟上全是 `"planned"`，一度看着像"没有 terminal pass"——但 `planned` 本就在 `EVALUATING_PASS_STATUSES` 里，是可判定状态。
+- `status` 在 188 趟上全是 `"planned"`，一度看着像"没有 terminal pass"——但 `planned` 本就在 `EVALUATING_PASS_STATUSES` 里，是可判定状态。
 
 ## D2b — 生产 pass 已占读取上限的 89.6%（实测，不是本 PR 的缺陷，但要写明）
 
-同一次只读探查顺带量了体积（170 个文件）：
+同一次只读探查顺带量了体积（EF-7 重测，184 个文件）：
 
 ```
-min = 4 278 545 B   median = 4 317 412 B   max = 4 479 122 B
+min = 4 278 545 B   median = 4 317 401 B   max = 4 479 122 B
 MAX_EVIDENCE_BYTES = 5 000 000 B
 max / limit = 89.6%      超限 0 个      超过上限 90% 的 0 个
 ```
@@ -91,7 +98,7 @@ max / limit = 89.6%      超限 0 个      超过上限 90% 的 0 个
 
 ## D2c — 样本取自一台**已知停摆**的机器，以及由此测到的一条边界
 
-诚实交代取样条件：上面两次探查都在 2026-09-16 做，而 node-22 的 `raw → forcing → runs` 自 2026-09-15 13:45 CST 起不再推进（#2432）。所以 169/169 的 `status == "planned"` 描述的是**停摆态**，不是健康态的样子。
+诚实交代取样条件：上面两次探查都在 2026-09-16 做，而 node-22 的 `raw → forcing → runs` 自 2026-09-15 13:45 CST 起不再推进（#2432）。所以 188/188 的 `status == "planned"` 描述的是**停摆态**，不是健康态的样子。
 
 这对 D2 的结论**不构成削弱**：`operator_filters` 的四键形状是写侧 schema 的事实，与管线是否推进无关；而 `planned` 与健康态可能出现的 `submitted` 同在 `EVALUATING_PASS_STATUSES` 里，两种取值都不改变"这些 pass 是可求值的"这一判断。
 
@@ -183,8 +190,125 @@ round 5 判定排序表（pass 类别 × 收窄状态 → 期望退出码）缺�
   receipt 列表与 `evaluating_count` 的减项**不是同一个集合**，因为扫描期消失的文件从来没进过
   `selected`，减它会算错。
 
-## 待测（未测的地方写"未测"，不写推断）
+## D5 — 收窄维度的**处置表**（round 2 的 same-invariant 门产出）
 
-- 本设计尚未在 node-22 实机跑过 `list-operator-actions`（EF-8）。D2 的取证只覆盖**输入形状**，不覆盖命令在真实证据根上的端到端退出码。
-- 169 趟样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 各行全部只能靠构造的 fixture 立论，线上无对照样本。
-- D2 的**原始**三次只读探查没有采集顶层 `sources` 的取值分布（round 1 A2 之前 `sources` 不是判据），但该分布在 round 1 裁决 A2 时已由编排者在 node-22 活动证据根上单独实测：**177/177 趟 `sources` 均为 `("gfs","IFS")` 全集，零趟缺键**——这正是"加 `sources` 判据不会把线上打成 exit 3"的依据，不是推断。EF-7 在本 PR 修复后的 head 上复核时把它并入 D2 正式重测一次，届时以重测值为准。
+round 2 撞了 review 流程的 same-invariant 门。复发的不变量是：**本面每一个「闭合集合」都必须从它的权威处反算，而不是手工誊写一份副本再寄望它不漂移。** 同一条规则在两轮里失败了五次——A1（决策集合手抄四条漏第五条）、A2（收窄维度手工列举漏 `sources`）、R2-02（仍是手工列举，漏时间窗）、R2-05（A1 那条 pin 自己的 writer 文件清单也是手抄的）、R2-06（三方一致性 pin 的耦合边对 CI 选择器不可见，因为选择器目标清单同样手工列）。
+
+所以 round 2 的纠正动作不是「再补一条 `if`」，而是把判据从**列举**改成**处置**：writer 发布的每一个键都必须拿到一个归类，并由一条从 writer 侧反算的测试保证漏一个就变红。
+
+### D5.0 — 闭合权威的准确表述（**不是**「42 个键」）
+
+> **闭合权威 = 一趟处于「求值态」的 pass 所发布的顶层键集合**，由**真跑一次 writer** 取得，不由阅读 writer 源码列举。
+
+两条支撑，缺一不可：
+
+1. **为什么只算求值态**：`_scope_reason` 只在求值态 pass 上运行；非求值态由四态 status 逻辑各自处置（`lock_contended` / `preflight_blocked` → TRANSPARENT 保持标志，其余 → arm）。而每一条早退分支都**重写了 `status`**（例：progress_guard 跳闸 → `scheduler_runtime.py:1473` 字面量 `"resource_limit_blocked"`）。所以早退分支少写的键**永远到不了范围判据面前**，不欠一行。
+2. **为什么必须真跑而不是读源码**：本表的第一版正是**阅读两个 writer 文件**（`scheduler_evidence.py` 的 `base_evidence` + `scheduler_runtime.py` 的 `backfill` 块）得出的，覆盖 14 个顶层键。实测证明写侧是 **42 个**——通过阅读源码列举权威，只是换个地方手抄。**这条不变量因此在纠正动作自身上复发了一次**，记录见 `.workplans/pr-2440/deviations.md` DEV-2。
+
+**实测背书**（node-22 生产证据根，head `c76a69d0`，194 趟 live pass）：全部 `status='planned'`、`execution_boundary='planning_only'`、**42 个顶层键，无一参差**（「本状态下并非趟趟都有的键：无」）。源码上写作条件写入的 `retention` / `no_progress_circuit` / `restart_reconcile` / `restart_reconcile_proof`，在生产求值态 pass 上同样趟趟都在。
+
+**闭合深度 = 处置深度**：本表在**子键级**处置的键（`backfill` / `cycle_window` / `operator_filters` / `counts` / `runtime_config` / `model_discovery`），测试就从真实 payload 下钻枚举其子键并施加同一套双向断言；整体判 (iii) 的键到此为止。否则往 `cycle_window` 里新加一个旋钮不会变红——同一条不变量下沉一层原样复发。
+
+**双向断言**：(a) 产出的每个键都有处置（新写者加键 ⇒ 红）；(b) 处置表每个键都出现在产出里（陈旧表项 ⇒ 红）。
+
+### D5.1 — 顶层键处置表（42/42）
+
+| 键 | 处置 | 理由 |
+|---|---|---|
+| `sources` | **(i) 判**（本轮改判定形状） | 改**覆盖**判定（`not COMPLETE <= set(sources)`）而非集合相等：超集确实看过每个生产源。拼写无需归一化——`ProductionSchedulerConfig.__post_init__`（`config.py:448`）已把每个 `--source` 过 `normalize_source_id`（大写查闭表、未知值抛错），大小写变体落不了盘；读侧 casefold 反而会给 db-free adapter 那条大小写敏感的清单路径开一扇**假 exit 0** 的门 |
+| `cycle_window` | **下钻**，见 D5.2 | |
+| `operator_filters` | **下钻**，见 D5.2 | |
+| `backfill` | **下钻**，见 D5.2 | |
+| `counts` | **下钻**（本轮新增读取），见 D5.2 | 承载 `selected_model_count`，即「这趟到底求值了几个模型」 |
+| `runtime_config` | **下钻**（本轮新增读取），见 D5.3 | 由 `base_evidence`（`scheduler_evidence.py:293-297`）**无条件写、此后从不被覆盖**，是运行时配置的唯一顶层权威；`scheduler_evidence.py:860` 的嵌套镜像不读 |
+| `model_discovery` | **下钻**，见 D5.4 | |
+| `duplicate_exclusions` | (iii) | 语义是「**重复的** source 折叠掉」（唯一写者 `scheduler_runtime_roots.py:539-548`，`reason: "duplicate_source"`），`--source gfs --source gfs` 使其非空而覆盖面一点没少。判「非空即收窄」是**假 exit 3** 入口。**编排者初测把它列为收窄维度，错了** |
+| `filters` | (iii) | `operator_filters` 的第二份拷贝（`scheduler_evidence.py:278` 建、`scheduler_runtime.py:1321` 重赋）。判两遍只会在将来分叉时产生互相矛盾的裁决 |
+| `progress_guard` | (iii) | 它确是真断路器（`scheduler_runtime.py:57-63` 连续无进展达上界即 raise），但**跳闸必改顶层 `status`**：异常唯一落点 `:1468-1502` 在 `:1473` 字面量写死 `"resource_limit_blocked"`；未跳闸时 `:1374` 又把 `status="passed"` 硬编码传入。**不存在「跳闸却仍为求值态」的第三态**，故由 status 处置覆盖 |
+| `no_progress_circuit` | (iii) | 模块自述 observe-only（`scheduler_no_progress.py:1-6`「never feeds a scheduling decision」）；`observe_pass` 在 `:1434` 调用，**晚于** `:1328-1379` 把候选列表写进 evidence，读的是成品，结构上不可能删掉某一行。开路条目的 `reason`/`decision` 原样留在 `blocked_candidates` 里。`truncated` 截的是本趟证据里 `open` 数组的展示条数（cap 50），不是跟踪状态本身 |
+| `status` | (iii) | 由四态 status 逻辑处置，不是范围判据的输入 |
+| `candidates`、`blocked_candidates`、`skipped_candidates`、`model_run_evidence`、`source_cycles`、`slurm_cancellation_evidence`、`timing` | (iii) | **记录这趟扫出了什么，不声明这趟被允许扫什么**。`source_cycles` 尤其容易误判：它是 `allowed_cycle_hours_utc` + `lookback_hours` + `cycle_lag_hours` + `max_cycles_per_source` 共同作用后的**结果**清单，判它等于判各旋钮的影子 |
+| `no_mutation_proof`、`execution_write_proof`、`restart_reconcile_proof`、`slurm_cancellation_proof`、`slurm_status_sync_proof`、`restart_reconcile`、`execution_boundary` | (iii) | 事后证明与阶段标签：证明的是「本趟没有副作用 / 在哪一步封顶」，与扫了多少东西无因果。`execution_boundary` 由字面量或 `scheduler_evidence_proofs.py:22-27` 派生 |
+| `schema_version`、`review_contract`、`production_contract`、`pass_id`、`started_at`、`finished_at`、`artifact_path` | (iii) | 元数据、时间锚与落盘路径。本面的时序判定用文件 mtime，不用这些 |
+| `execution_mode`、`readiness_interpretation`、`dry_run` | (iii) | 三者同源于 `config.dry_run`（`scheduler_evidence.py:244/247/267`）。`dry_run` 只 gate 提交/取消/保留（`scheduler_runtime.py:954,1013,1123,2081`），窗口与候选构造不变。「dry-run pass 该不该背书 exit 0」是**另一条 requirement，已路由出去** |
+| `readiness` | (iii) | 「这份证据能否被当作最终生产就绪证明」的元判断标签，与本趟扫描量无关 |
+| `lock`、`root_preflight`、`resolved_runtime_roots` | (iii) | 互斥锁状态、根目录可用性、根目录身份。三者都是**全有全无式二元阻断**（阻断即整趟归零并改 `status`），不存在「部分放行」的分级收窄 |
+| `retention` | (iii) | 清理多老的历史产物，输入维度是**文件年龄**，与调度窗口正交 |
+| `journal_read_attribution` | (iii) | 本趟 journal I/O 计数快照（每趟入口 `reset_journal_read_counters()` 清零），伴生观测指标 |
+
+### D5.2 — 已有四组的子键处置
+
+| 子键 | 处置 | 理由 |
+|---|---|---|
+| `backfill.enabled` | (i) 已有 | 见 D1 / D2 |
+| `backfill.lookback_hours` | (iii) | 与 `cycle_window.lookback_hours` 同源 `config.lookback_hours`，实测两者恒等；且它**只存在于 `enabled=True` 那条腿**（`scheduler_runtime.py:1401` 的 else 腿不带），升为必需字段会让存在性检查与 `backfill.enabled` 判定产生顺序耦合 |
+| `backfill.audit` | (iii) | 事后审计明细；size-fallback 会清空它，判它会与 `scheduler_evidence.py:303-309` 的 size-fallback 路径打架 |
+| `cycle_window.lookback_hours` | **(i) 本轮新增** | 只判**退化值** `<= 0`：零宽发现窗使 backfill 腿对窗口边界以外的所有更旧 cycle 全盲，而断路器释放按构造坐在最旧那侧（`scheduler_discovery.py:824-832`）。可达输入精确是 `0`（`cli.py:431-435` 不校验下界，`config.py:458` 只把负值夹成 0）。读顶层 `cycle_window` 而非 `backfill.lookback_hours`，理由同上 |
+| `cycle_window.cycle_lag_hours` | **(ii) 成文边界** | 平移窗口而非归零，负值不可达（`config.py:462` 的 `max(...,0)`），无客观退化点。与 `lookback > 0` 的一般情形**合并成一条**：`exit 0` 只对该 pass 自己的窗口 `[start_time_utc, end_time_utc]` 作答；生产 96h/16h 意味着最近 16 小时的 cycle 不在任何窗口内。仓内不存在可比的「完整窗口」权威（生产值与代码默认 24 不一致），所以不发明阈值，只把边界写明 |
+| `cycle_window.max_cycles_per_source` | (iii) | `< 1` 在 `config.py:464-465` 直接抛错；且对任何 `backfill.enabled=True` 的 pass **完全 inert**——截断在 `_select_legacy_source_cycles`（`:904-906`）里，只在不走 backfill 腿时执行，而 legacy 腿的前提 `backfill_enabled=False` 已被判 narrowed。**编排者一度据「生产恒为 1」推断该截断始终生效，被裁决席证伪**：生产恒为 1 不是因为截断在起作用，而是因为它对生产 pass 无关紧要 |
+| `cycle_window.start_time_utc` / `end_time_utc` | (iii) | `started_at - lag - lookback` 的派生值（`scheduler_evidence.py:244-245`），判源头即可 |
+| `operator_filters.model_ids` / `basin_ids` / `expression` | (i) 已有 | 见 D1 / D2 |
+| `operator_filters.excluded_runnable_count` | (iii) | 顶层这份恒为字面量 `0`（真实计数只进 `model_discovery`）。**且即便读真实那份也无新信息**：`scheduler_models.py:303-306` 的 `_matches_filters` 在 `model_ids=()` 且 `basin_ids=()` 时双重短路恒返回 `True`，故 `excluded_runnable_count > 0` 与「三个过滤全空」**代数互斥**——它纯由已判的三个输入派生，不存在第三条排除路径 |
+| `counts.selected_model_count` | **(i) 本轮新增** | 「这趟求值了几个模型」。`== 0` 时这趟**什么都没观测到**，不是运维指令收窄，落 arm 分支而非 `scope_narrowed`（详见 D6）|
+| `counts` 其余 12 个子键（`candidate_count`、`blocked_candidate_count`、`skipped_candidate_count`、`source_cycle_count`、`submitted_count`、`failed_count`、`partial_count`、`slurm_status_sync_count`、`slurm_status_sync_unknown_count`、`slurm_cancelled_count`、`slurm_cancellation_blocked_count`、`slurm_cancellation_unknown_count`） | (iii) | 均为**产出计数**而非覆盖面声明。**记一条同名陷阱**：顶层 `counts.candidate_count` 是三个列表长度之和（`scheduler_runtime.py:1327`），而 `progress_guard.checkpoints[].details.candidate_count`（`:942`/`:1112`）只是 `len(candidates)`——同名不同义，混用会算错 |
+
+### D5.3 — `runtime_config` 的 26 个子键
+
+| 子键 | 处置 | 理由 |
+|---|---|---|
+| `allowed_cycle_hours_utc` | **(i) 本轮新增** | **`runtime_config` 里唯一别处没有第二份声明的收窄旋钮**。`discover_cycles` 用 `_filter_allowed_cycle_hours` 把不在允许小时集合里的 cycle 直接过滤掉，默认 `(0, 12)` 意味着每天 24 个潜在 cycle 时刻只有 2 个进入候选评估。判**对代码侧默认值的覆盖**（`scheduler.py:293` 的 `DEFAULT_ALLOWED_CYCLE_HOURS_UTC`，**import 而非敲字面量**——这是本轮第六个闭合集合）。完整性权威取默认值而非 0-23 全域：按全域判会把每趟生产 pass 打成 narrowed ⇒ 假 exit 3 |
+| `sources`、`lookback_hours`、`cycle_lag_hours`、`max_cycles_per_source`、`model_ids`、`basin_ids`、`dry_run` | (iii) | 顶层同名键/块的第二份拷贝（`scheduler_evidence.py:856-865`）。判权威那一份即可；判两遍只会在将来分叉时产生互相矛盾的裁决 |
+| `continuous` | (iii) | 纯多趟循环控制，代码在 `run_once()` **外层**（`cli.py:400-414`）；`config.py:492` 只用它做与 `repair_missing_forcing` 的互斥校验。`scheduler_discovery.py` / `scheduler_candidates.py` / `scheduler_models.py` **无任何读取点** |
+| `missing_forcing_repair.enabled` | (iii) | 两处消费点都在候选**已被发现且已被状态机判过之后**（`scheduler_candidates.py:1890-1908` 自述 "evaluated **after** the normal candidate-state decision... can only **reclassify**"；`:433` 是分类循环内的 `continue` 分支），不产生也不删除候选。该模式确实强制 `lookback_hours=0` 且 `max_cycles_per_source=1`（`config.py:496-499` 构造期校验），但这个收窄**完全由那两个字段本身承载**，不是这个布尔独立产生的 |
+| `missing_forcing_repair.exact_cycle_time` | (iii) | 派生；`--cycle-time` 同时把 `lookback` 置 0 **且** `disable_backfill=True`，两个后果都已被判——且 `backfill.enabled is not True` **先命中**，`lookback <= 0` 对这类 pass 根本不会被求值。因此 `lookback <= 0` 这条判据的**可达入口只有**「`--lookback-hours 0` 且不带 `--cycle-time`」（即 R2-02 那条） |
+| `missing_forcing_repair.plan_only` | (iii) | `config.dry_run` 的第六份派生 |
+| `missing_forcing_repair.default_policy` | (iii) | `scheduler_evidence.py:877` 是**写死的字符串常量** `"fail_closed"`，不读任何 config 属性——连派生值都不是 |
+| `require_direct_grid` | **(iii)，但理由必须写全** | 两条机制效果不同。候选层（`scheduler_candidates.py:1971`）只决定已发现的候选能否走精确重试路径，候选行照写、只换 `reason`，**不收窄**。注册表层（`scheduler_file_providers.py:908-919`）则是：manifest 里**只要有一个**模型不合直连网格契约就 `raise`，被 `:213-221` 接住后整个 `_models` 清空、`registry.status="blocked"`，进而触发 `scheduler_runtime.py:892-914` 的 `db_free_registry_blocked` **早退分支**（改写 `status`，非求值态）。即这条机制的收窄效果由 `registry.status` 与早退 status 承载，**这个字面量本身只是开关声明** |
+| `require_runtime_roots`、`service_role`、`database_url_configured`、`scheduler_db_free_required`、六个 `scheduler_*_backend` | (iii) | db-free 模式的后端选择与契约声明。后端不可用时走 `root_preflight` / `registry` 的二元阻断并改 `status`，不产生分级收窄 |
+| `db_free_runtime` 整块 | (iii) | `config.py:677-707` 的 `db_free_runtime_evidence()`：各后端是否切到 `file`、必需 env/路径是否配置的**契约自检快照**。八个子键无一出现在 `scheduler_discovery.py` / `scheduler_candidates.py` / `scheduler_models.py` 的筛选逻辑里 |
+| `interval_seconds`、`retry_limit`、`concurrent_submit_bound`、`slurm_array_concurrency_bound` | (iii) | 吞吐与重试参数，决定「多快 / 并发多少 / 重试几次」，不决定「扫了哪些东西」 |
+
+### D5.4 — `model_discovery` 的 8 个子键，以及第七扇门
+
+| 子键 | 处置 | 理由 |
+|---|---|---|
+| `selected_model_count` | (iii) | `counts.selected_model_count` 的第二份拷贝（`registry.selected_model_count` 是第三份）。判权威那一份，见 D5.2 |
+| `operator_filters.excluded_runnable_count` | (iii) | 见 D5.2：与「三个过滤全空」代数互斥 |
+| `operator_filters.expression` | (iii) | `scheduler_models.py:309-315` 的 `filter_expression([], [])` 在两列表皆空时返回 `None`，与顶层 `operator_filters.expression` 同源同构 |
+| `excluded_model_count` / `exclusions` | (iii) | 排除原因是 inactive / not_runnable / not_shud_model / 元数据不全 / 重复身份——这些模型**本来就跑不了，没有可列的待办**，不是「本可以扫却被过滤掉」。且 `discover_models`（`scheduler_models.py:65-121`）两段循环**穷举无旁路**：`active_model_count = selected_model_count + excluded_model_count` 是该函数内部的不变式 |
+| `models` | (iii) | 选中模型明细，产出记录 |
+| `active_model_count` / `runnable_model_count` | (iii) | 计数，其为零的退化情形已由 `counts.selected_model_count == 0` 判据覆盖（D6）|
+| `registry` 整块 | **(ii) 成文边界**，见下 | |
+
+**第七扇门（勘察 Q5 发现，实测后判 (ii)）**：`registry.model_count` **不是** `active_model_count` 的同层拷贝，而是**更上游的更大数**——它取自 `_validate_registry_manifest` 的 `len(rows)`（`scheduler_file_providers.py:936`），是 manifest 里登记的模型**总数，含 inactive**；而 `active_model_count` 的 `rows` 来自 `list_models(active=True, ...)`，该过滤（`scheduler_file_providers.py:152-157`，按 `active_flag` 与 `lifecycle_state`）发生在 `discover_models` **拿到行之前**。因此 `registry.model_count − active_model_count` 这段落差，`exclusions` 数组**结构上记录不到**。（这与 `coerce_registered_model` 的 `inactive_model` 排除原因不是同一处——那是 list 与 get 之间状态翻转的 TOCTOU 二次复查，只覆盖已进入 `rows` 的模型。）
+
+**为什么判 (ii) 而不是 (i)**：判 `active_model_count == registry.model_count` 为必要条件，等于规定「manifest 里不许留退役模型」——manifest 里退役一个模型就会把生产**永久**翻成 exit 3。仓内不存在「manifest 应含多少模型」的权威，这正是本 change 对 `cycle_window` 已经拒绝过的**发明阈值**。成文边界的内容是：`exit 0` 对 manifest 标为 inactive 的模型不作任何断言，且该差额在证据里**只能**通过 `registry.model_count` 与 `active_model_count` 的差值看见，`exclusions` 反查不到。
+
+**实测**（node-22，195 趟 live pass）：`registry.model_count = active = runnable = selected = 76`、`excluded_model_count = 0`、`exclusions = []`，**195/195 落差为零**。即这条边界今天在生产上是空的，但它结构上存在。
+
+### D6 — 零模型 pass：`counts.selected_model_count` 判 arm 而非 narrowed
+
+一趟模型注册表解析为空的 pass 会正常发现 cycle、写证据、以求值态终止，**却什么都没求值**。按 D5 其余各行它会是「运维过滤全空 + 源集完整 + 窗口为正 + 默认 cycle 小时」⇒ 判为范围完整 ⇒ **清掉隐藏标志**、背书 exit 0。这就是本 PR 的假 0。
+
+- **判据**：`counts.selected_model_count == 0` ⇒ 不判范围完整，用**一条与 `scope_narrowed`/`scope_unknown` 都不同**的 reason 报出，并 **arm** 隐藏标志。
+- **为什么是 arm 不是 narrowed**：沿用本 change 已定的 presence/value 纪律——字段在且**值在收窄** = 运维自己的指令，保持标志；一趟**什么观测都没有**，正是 arming 存在的理由。
+- **为什么判进本轮**（范围扩张，记在 `.workplans/pr-2440/deviations.md` DEV-3）：与 round-1 A1 同一把尺子——本 PR 赋予 `exit 0` 运维语义，同一把尺子不能对 A1 用、对这条不用。
+- **写侧留在 #2443**：evidence 的 `backfill.enabled` 记的是 `config.backfill_enabled` 的**意图**，而实际走哪条腿由 `scheduler_discovery.py:700` 的 `backfill_mode = bool(config.backfill_enabled and models)` 决定，零模型时两者不一致。那半边不在本轮。
+- **可达性**（issue-scribe 本地复现 + 勘察确认）：db-free 清单 `models: []` 合法（`scheduler_file_providers.py:883-940` 只校验 schema/freshness/checksum/上限，**无下限**，返回 `status:"ready"`）；清单非空但被 `scheduler_models.py:137-145` 全部排除同样落到零模型而 registry 仍 ready。只有 `registry.status=="blocked"` 才走早退（那条改写 `status`，安全），零模型**不触发**。
+- **实测安全**（EF-7c/7d/7e/7f）：生产 195/195 趟 `selected_model_count = 76`，新判据不翻动生产退出码。
+
+**真正的限流器不在这张表里，必须单独成文**：backfill 腿每源每趟只求值**最旧的一个**未完成 cycle，更新的 gap 记为 `backfill_deferred_waiting_for_prior_cycle`。减轻因素要一并写，否则会被读得比实际悲观——gap 是老→新排序，被推迟的是**更新的** cycle；未解决的待办会让它自己那个 cycle 保持为 gap、继续占槽，于是每趟都重新求值、重新列出，而更新 cycle 上的待办在旧 cycle 清空前根本无法被创建。且 `blocked_journal_predecessor_identity_quarantine` **不受此限**：断路器释放在单槽切分**之前**完成，释放的是「从最旧起连续的全部」，所以这条决策的可见性是完整的。
+
+## 已测 / 待测（未测的地方写"未测"，不写推断）
+
+**已测（EF-6 / EF-7 / EF-7b，全部在本 PR 修复后的 head 上取）**：
+
+- 端到端退出码**已在 node-22 实机取到**（EF-6）：`--passes 6` 与 `--passes 200`（整个证据根）都返回 `exit 0`，`candidate_lists_dropped_passes` / `non_evaluating_passes` / `unreadable_passes` 三个列表全空。这是本 change 最要紧的一条收据——round 1 给列举面加了第五条决策与 `sources` 判据，round 2 又加了时间窗判据，三者都可能把线上 pass 判成"范围不完整"，实测**没有**。
+- `sources` 的取值分布已并入 D2 正式重测：**188/188 趟为全集、零缺键**（round 1 A2 裁决时的单独实测是 177/177，两个数字各自带日期，证据根随保留计时器滚动）。
+- `cycle_window` 五个子键 **188/188 全在**（EF-7b），所以 round 2 新加的时间窗判据同样不会把线上打成 `scope_unknown` 或 `scope_narrowed`。
+
+**仍未测**：
+
+- 该样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 各行全部只能靠构造的 fixture 立论，线上无对照样本。D2b 实测 188/188 趟处在字节上限的 85.6%–89.6%，即 size-fallback 分支离线上只差一成多，但今天确实 0 趟触发。
+- `blocked_operator_reentry_restart_stage_refused`（round 1 A1 补的第五条决策）线上发生率为 **0 行 / 184 趟**（EF-7）。它是**潜伏**缺陷而非正在发生的故障；这不削弱修它的理由（runbook 第二步为它立了专门处置行，一旦发生旧实现的 `exit 0` 就是在说谎），但收据要诚实：EF-6 的 `exit 0` 因此是**真**的 0，不是漏判出来的 0。
+- `scope_unknown`、零宽时间窗（`--lookback-hours 0`）两条路径线上均未出现，只有构造 fixture 的覆盖。

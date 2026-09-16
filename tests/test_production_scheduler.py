@@ -21303,17 +21303,20 @@ def test_bounded_evidence_keeps_summarized_marker_when_only_model_discovery_is_d
 
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_model_discovery_only")
 
-    # Measured for this payload (budget scan 4_000..8_000 step 1): 5_693-5_884 is the
+    # Measured for this payload (budget scan 4_000..9_000 step 1): 5_890-6_081 is the
     # contiguous band where the drop loop fits right after emptying `model_discovery`, so
-    # all three candidate lists keep their summary rows. 5_790 is an interior point.
+    # all three candidate lists keep their summary rows. 5_985 is an interior point.
+    # The band moved +197 B (from 5_693-5_884) when `recorded_init_state_id` joined the
+    # retained state-evidence pulls: two summarized rows now each carry the token.  The
+    # band's WIDTH is unchanged at 192 B, so nothing about the drop order moved.
     bounded = scheduler_module._bounded_evidence_payload(
         payload,
         reason="evidence_size_limit_exceeded",
-        max_evidence_bytes=5_790,
+        max_evidence_bytes=5_985,
     )
     rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
 
-    assert len(rendered.encode("utf-8")) <= 5_790
+    assert len(rendered.encode("utf-8")) <= 5_985
     assert bounded["model_discovery"] == {}
     assert bounded["candidates"] == [_expected_bounded_selected_candidate_summary()]
     assert bounded["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
@@ -35642,32 +35645,41 @@ def _large_scheduler_evidence_payload(pass_id: str) -> dict[str, Any]:
     }
 
 
+# #1186 round 2: REVERSE-DERIVED from the writer's own projection instead of
+# hand-copied.  The assertion is ``set(row) <= ...``: what it exists to catch is
+# a summary row carrying a key the writer never declared (a leaked raw
+# ``state_evidence`` key, say), and the authority for "declared" is the two
+# tuples below -- the fixed row keys and the state-evidence pulls.  A hand-copy
+# goes stale the moment either tuple gains an entry, which is exactly what
+# happened when ``recorded_init_state_id`` joined the pulls.
 _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS = frozenset(
-    {
-        "candidate_id",
-        "source",
-        "source_id",
-        "cycle_time",
-        "cycle_time_utc",
-        "scenario_id",
-        "run_id",
-        "forcing_version_id",
-        "basin_id",
-        "model_id",
-        "status",
-        "reason",
-        "decision",
-        "missing_forcing_repair_status",
-        "quarantined_skip_reason",
-        "operator_action_required",
-        "summary_error",
-    }
-)
+    scheduler_evidence_payload_module._BOUNDED_CANDIDATE_SUMMARY_KEYS
+) | frozenset(name for name, _path in scheduler_evidence_payload_module._BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS)
 _BOUNDED_INCIDENT_VERBOSE_MARKER = "verbose-candidate-detail-"
 
 
 def _bounded_incident_verbose_text(marker: str) -> str:
     return f"{_BOUNDED_INCIDENT_VERBOSE_MARKER}{marker}-" + "v" * 3_000
+
+
+def _incident_recorded_init_state_id() -> str:
+    """A production-shaped journal token for the incident fixture's own candidate.
+
+    Derived, not spelled: ``state_snapshot_id`` composes the token, so this is
+    the same length class the writer really stores (tens of characters).  It
+    matters because ``recorded_init_state_id`` is now RETAINED by the bounded
+    candidate summary (``scheduler_evidence_payload.py`` state-evidence pulls) --
+    modelling it as three kilobytes of droppable noise would assert a shape the
+    producer can not make and would spend the whole byte budget on one field.
+    """
+
+    _expected_base, token = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id="gfs",
+        model_id="model_a",
+        candidate_valid_time=_dt("2026-07-26T12:00:00Z"),
+        required_lead_hours=12,
+    )
+    return token
 
 
 def _incident_scheduler_evidence_payload(
@@ -35702,7 +35714,12 @@ def _incident_scheduler_evidence_payload(
                     "canonical_readiness": {"detail": _bounded_incident_verbose_text("selected-repair")},
                 },
                 "journal_predecessor_identity": {
-                    "recorded_init_state_id": _bounded_incident_verbose_text("selected-journal"),
+                    "recorded_init_state_id": _incident_recorded_init_state_id(),
+                    # The unretained sibling of the same block (writer:
+                    # ``scheduler_candidates.py:2690``) carries the verbose noise,
+                    # so the block still proves SELECTIVE retention: the token
+                    # survives, everything beside it is dropped.
+                    "expected_init_state_id": _bounded_incident_verbose_text("selected-journal"),
                 },
             },
         }
@@ -35728,7 +35745,8 @@ def _incident_scheduler_evidence_payload(
                 },
                 "journal_predecessor_identity": {
                     "quarantined_skip_reason": "journal_predecessor_quarantined",
-                    "recorded_init_state_id": _bounded_incident_verbose_text("blocked-journal"),
+                    "recorded_init_state_id": _incident_recorded_init_state_id(),
+                    "expected_init_state_id": _bounded_incident_verbose_text("blocked-journal"),
                 },
             },
         }
@@ -35829,6 +35847,10 @@ def _expected_bounded_selected_candidate_summary() -> dict[str, Any]:
         "status": "selected",
         "decision": "repair_missing_forcing",
         "missing_forcing_repair_status": "requested",
+        # #1186 round 2: retained, while its verbose sibling in the same identity
+        # block is not -- the operator re-entry token is the listing surface's
+        # only executable output and has to survive the byte budget.
+        "recorded_init_state_id": _incident_recorded_init_state_id(),
     }
 
 
@@ -35846,6 +35868,7 @@ def _expected_bounded_blocked_candidate_summary() -> dict[str, Any]:
         "decision": "blocked_missing_forcing_package_uri",
         "missing_forcing_repair_status": "rejected",
         "quarantined_skip_reason": "journal_predecessor_quarantined",
+        "recorded_init_state_id": _incident_recorded_init_state_id(),
     }
 
 
@@ -59366,3 +59389,415 @@ def test_budget_reentry_is_inert_without_a_readable_live_reentry_count(
     assert candidates == []
     assert [item.state_evidence["decision"] for item in blocked] == ["blocked_strict_warm_start_init_state_mismatch"]
 
+
+
+# ---------------------------------------------------------------------------
+# #1186 round 2 (invariant I-1): closure of the scope-dimension disposition
+# table over the REAL pass evidence payload.
+#
+# History that dictates the shape of this pin: the listing surface's scope test
+# was extended three times by hand (round 1 added ``sources``, round 2 added the
+# cycle window), and each time the hand-written list of "the dimensions a pass
+# records" was shorter than what the writer actually publishes.  The first
+# attempt at closing it -- reverse-deriving the key set from ``base_evidence``'s
+# returned dict literal with ``ast`` -- covered 14 keys while the writer
+# publishes 42 on a live pass, because ``scheduler_runtime.py`` keeps adding to
+# the same top-level dict long after ``base_evidence`` returned it.  So the
+# authority here is a pass that was actually RUN, never a source-text reading of
+# any one writer.
+# ---------------------------------------------------------------------------
+
+_SCOPE_DIMENSION_JUDGED = "JUDGED"
+_SCOPE_DIMENSION_DOCUMENTED_BOUNDARY = "DOCUMENTED_BOUNDARY"
+_SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION = "NOT_A_SCOPE_DIMENSION"
+
+#: Keys whose SUB-keys carry dispositions of their own, so the closure has to
+#: reach into them: a new knob added inside ``cycle_window`` or ``runtime_config``
+#: must be as loud as a new top-level key.  Anything dispositioned whole is not
+#: drilled.  ``runtime_config`` and ``model_discovery`` are here even though both
+#: are dispositioned ``NOT_A_SCOPE_DIMENSION`` as containers: they are the two
+#: places a new narrowing knob would most naturally land.
+_SCOPE_DIMENSION_DRILLDOWN = (
+    "backfill",
+    "counts",
+    "cycle_window",
+    "model_discovery",
+    "operator_filters",
+    "runtime_config",
+)
+
+#: Every dimension the writer publishes, and what this surface does with it.
+#: The rows for the ``base_evidence`` block (``schema_version`` .. ``filters``,
+#: ``cycle_window.*``, ``operator_filters.*``, ``backfill.*``) are the round-2
+#: orchestrator audit's disposition table verbatim; the remaining rows are
+#: dispositioned here on the same rule: judge the AUTHORITY, never a copy, and
+#: never judge a key that records an outcome rather than a coverage claim.
+_SCOPE_DIMENSION_DISPOSITIONS: dict[str, str] = {
+    # -- the four judged dimensions and their containers -------------------
+    "sources": _SCOPE_DIMENSION_JUDGED,  # the production source set must be covered
+    "backfill": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
+    "backfill.enabled": _SCOPE_DIMENSION_JUDGED,  # off ⇒ the breaker leg never ran
+    "operator_filters": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
+    "operator_filters.model_ids": _SCOPE_DIMENSION_JUDGED,  # non-empty ⇒ operator narrowed
+    "operator_filters.basin_ids": _SCOPE_DIMENSION_JUDGED,  # non-empty ⇒ operator narrowed
+    "operator_filters.expression": _SCOPE_DIMENSION_JUDGED,  # non-null ⇒ operator narrowed
+    "cycle_window": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
+    "cycle_window.lookback_hours": _SCOPE_DIMENSION_JUDGED,  # <= 0 ⇒ zero-width window
+    "counts": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field (#2443)
+    "counts.selected_model_count": _SCOPE_DIMENSION_JUDGED,  # 0 ⇒ the pass evaluated nothing
+    "runtime_config": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
+    # The only knob in runtime_config with no second declaration anywhere else in
+    # the payload: discover_cycles drops every cycle outside this hour set, so a
+    # set narrower than the code default evaluated fewer slots per day.  Judged
+    # against the DEFAULT, not the 0-23 day -- see the reader's constant.
+    "runtime_config.allowed_cycle_hours_utc": _SCOPE_DIMENSION_JUDGED,
+    # -- the documented boundaries -----------------------------------------
+    # No objective degenerate value: it shifts the window rather than collapsing
+    # it, and negatives are unreachable (config clamps at 0).  Written up with
+    # the general ``lookback > 0`` case as ONE time-window boundary of exit 0.
+    "cycle_window.cycle_lag_hours": _SCOPE_DIMENSION_DOCUMENTED_BOUNDARY,
+    # The seventh door.  ``registry.model_count`` is NOT a sibling copy of
+    # ``active_model_count``: it is ``len(rows)`` of the manifest itself
+    # (``scheduler_file_providers.py:936``), inactive models included, while
+    # ``active_model_count`` counts what ``list_models(active=True, ...)`` returned
+    # and that filter runs BEFORE ``discover_models`` sees a row.  So
+    # ``exclusions`` structurally can not record the gap.  Requiring the two to
+    # agree would forbid retiring a model from the manifest -- an invented
+    # threshold, refused here for the same reason ``cycle_lag_hours`` was.
+    "model_discovery.registry": _SCOPE_DIMENSION_DOCUMENTED_BOUNDARY,
+    # -- derived values: judge the source, not the derivation --------------
+    "cycle_window.start_time_utc": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # started_at - lag - lookback
+    "cycle_window.end_time_utc": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # started_at - lag
+    "execution_mode": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # derived from dry_run
+    "readiness_interpretation": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # derived from dry_run
+    # -- copies: judged at their authority, never twice --------------------
+    "filters": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # verbatim copy of operator_filters
+    "backfill.lookback_hours": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of cycle_window.lookback_hours
+    "model_discovery.operator_filters": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # nested mirror of the top-level one
+    # copy of counts.selected_model_count
+    "model_discovery.selected_model_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "runtime_config.sources": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of the top-level sources
+    "runtime_config.lookback_hours": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of cycle_window.lookback_hours
+    "runtime_config.cycle_lag_hours": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of cycle_window.cycle_lag_hours
+    "runtime_config.max_cycles_per_source": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of cycle_window's
+    "runtime_config.model_ids": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of operator_filters.model_ids
+    "runtime_config.basin_ids": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of operator_filters.basin_ids
+    "runtime_config.dry_run": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # copy of the top-level dry_run
+    # -- knobs that are not coverage claims --------------------------------
+    # A side-effect switch, not a coverage one: it gates commit/cancel/retention
+    # only, never the window or candidate construction.  "May a dry-run pass
+    # answer exit 0" is a separate requirement, routed out of this surface.
+    "dry_run": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # "the DUPLICATE sources were folded away" (the only writer stamps
+    # reason=duplicate_source), so `--source gfs --source gfs` makes it non-empty
+    # with the coverage unchanged: judging it would be a false-exit-3 door.
+    "duplicate_exclusions": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # `< 1` is rejected at config construction, and it is wholly inert on any
+    # pass with backfill enabled (its truncation lives on the legacy leg only).
+    "cycle_window.max_cycles_per_source": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # Always the literal 0 at the top level; the real count only reaches the
+    # nested mirror.  And reading the real one would add nothing either:
+    # ``_matches_filters`` short-circuits to True when model_ids and basin_ids are
+    # both empty, so "excluded_runnable_count > 0" is algebraically exclusive with
+    # "all three filters empty" -- it is derived from inputs already judged.
+    "operator_filters.excluded_runnable_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # After-the-fact audit detail, not a scope declaration -- and a size fallback
+    # empties it, so judging it would fight the size-fallback path.
+    "backfill.audit": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # -- metadata, time anchors, contracts ---------------------------------
+    "schema_version": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # payload version
+    "review_contract": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # review provenance block
+    "production_contract": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # contract matrix
+    "pass_id": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # identity
+    "started_at": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # time anchor (this surface orders by file mtime)
+    "finished_at": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # time anchor
+    "artifact_path": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # where this file was written
+    "status": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # judged, but by the STATUS test that runs first
+    "timing": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # phase durations
+    "lock": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # which lock this pass held
+    "readiness": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # production-readiness claim block
+    "resolved_runtime_roots": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # path resolution
+    "model_discovery": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # container: registry-side funnel
+    "journal_read_attribution": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # journal read provenance
+    "execution_boundary": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # which execution lane the pass took
+    # Root availability, lock state and root identity are all-or-nothing binary
+    # blocks: blocking zeroes the whole pass AND rewrites ``status``, so there is
+    # no graded narrowing for this surface to read.
+    "root_preflight": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # -- outcome records: what the pass DID, not what it could look at -----
+    "candidates": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # the runnable candidate rows
+    "blocked_candidates": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # this surface's INPUT rows
+    "skipped_candidates": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # skipped rows
+    "source_cycles": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # per-cycle rows (the breaker leg is read from here)
+    "model_run_evidence": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # per-run outcomes
+    "execution_write_proof": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # proof of the writes performed
+    "no_mutation_proof": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # dry-run proof
+    # Observe-only by its own module docstring ("never feeds a scheduling
+    # decision"), and ``observe_pass`` runs AFTER the candidate lists are already
+    # in the evidence, so it structurally can not remove a row.  Its ``truncated``
+    # caps how many open entries this pass DISPLAYS, not what it tracked.
+    "no_progress_circuit": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # A real breaker, but tripping it always rewrites the top-level ``status``
+    # (the exception path writes the literal "resource_limit_blocked"), and the
+    # untripped path hard-codes ``status="passed"``.  There is no "tripped yet
+    # still evaluating" third state, so the status test covers it.
+    "progress_guard": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "retention": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # retention plan/outcome
+    "restart_reconcile": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # reconcile outcome, conditional
+    "restart_reconcile_proof": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # reconcile proof, conditional
+    "slurm_status_sync_proof": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm sync proof
+    "slurm_cancellation_evidence": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # cancellation outcomes
+    "slurm_cancellation_proof": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # cancellation proof
+    # The two keys the non-dry leg publishes that the live planning-only passes do
+    # not: the pre-execution evidence RESERVATION outcome (written when the
+    # reservation status is not "not_required") and the overlapping-submit
+    # receipt.  Both record what this pass did with the artifact/submission lane,
+    # never what it was allowed to look at.  They are dispositioned rather than
+    # fixtured away: the closure is over what the writer CAN publish on an
+    # evaluating pass, and a key seen once must not be able to slip back in
+    # unjudged.
+    "evidence_pre_execution": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "submit_overlap_receipt": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # -- counters: tallies of what WAS evaluated ---------------------------
+    # Name trap: THIS one is the sum of the three candidate list lengths
+    # (scheduler_runtime.py:1327), while progress_guard.checkpoints[].details
+    # carries a same-named key that is only len(candidates) (:942/:1112).
+    "counts.candidate_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "counts.blocked_candidate_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # outcome tally
+    "counts.skipped_candidate_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # outcome tally
+    # Zero here is a legitimate "no cycle fell in the window" answer, not
+    # blindness; the window itself is judged above.
+    "counts.source_cycle_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "counts.submitted_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # submission tally
+    "counts.failed_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # submission tally
+    "counts.partial_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # submission tally
+    "counts.slurm_status_sync_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm tally
+    "counts.slurm_status_sync_unknown_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm tally
+    "counts.slurm_cancelled_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm tally
+    "counts.slurm_cancellation_blocked_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm tally
+    "counts.slurm_cancellation_unknown_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # slurm tally
+    # -- the registry funnel upstream of the judged count ------------------
+    "model_discovery.active_model_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # funnel tally
+    "model_discovery.runnable_model_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # funnel tally
+    "model_discovery.excluded_model_count": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # funnel tally
+    "model_discovery.models": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # the selected rows; the count is judged
+    "model_discovery.exclusions": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # per-model exclusion reasons
+    # -- runtime_config: backends, bounds and switches ---------------------
+    # Pure multi-pass loop control, implemented OUTSIDE run_once (cli.py's loop);
+    # config only uses it for a mutual-exclusion check with repair_missing_forcing.
+    # No read site in discovery, candidates or model selection.
+    "runtime_config.continuous": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "runtime_config.interval_seconds": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # loop cadence
+    "runtime_config.retry_limit": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # retry budget
+    "runtime_config.concurrent_submit_bound": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # throughput bound
+    "runtime_config.slurm_array_concurrency_bound": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # throughput bound
+    # Two mechanisms, neither of them a graded narrowing.  In the candidate layer
+    # it only decides whether an already-discovered candidate may take the exact
+    # retry path -- the row is still written, only its ``reason`` changes.  In the
+    # registry layer a single non-conforming model raises, empties ``_models`` and
+    # sets registry.status="blocked", which takes the db_free_registry_blocked
+    # EARLY EXIT and rewrites ``status``.  The literal itself is a switch
+    # declaration; its narrowing effect is carried by status.
+    "runtime_config.require_direct_grid": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "runtime_config.require_runtime_roots": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # preflight switch
+    # Four sub-keys, all (iii): ``enabled``'s two consumers both run AFTER the
+    # candidate state machine has judged a candidate and can only RECLASSIFY it;
+    # the mode does force lookback=0 and max_cycles_per_source=1, but those two
+    # fields carry that narrowing themselves.  ``exact_cycle_time`` is derived --
+    # --cycle-time sets lookback 0 AND disable_backfill, and the
+    # ``backfill.enabled is not True`` test fires FIRST, so ``lookback <= 0`` is
+    # never even evaluated for such a pass (its only reachable entrance is
+    # ``--lookback-hours 0`` without ``--cycle-time``).  ``plan_only`` is the sixth
+    # derivative of config.dry_run, and ``default_policy`` is a hard-coded string
+    # constant (scheduler_evidence.py:877) that reads no config attribute at all.
+    "runtime_config.missing_forcing_repair": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    "runtime_config.database_url_configured": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.db_free_runtime": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_db_free_required": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_journal_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_lock_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_registry_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_state_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_state_index_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.scheduler_canonical_readiness_backend": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # backend fact
+    "runtime_config.service_role": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,  # role label
+}
+
+
+class _ScopeDimensionRegistry(FakeRegistry):
+    """``FakeRegistry`` plus the optional manifest-evidence hook production uses.
+
+    ``scheduler_models.py:117-120`` publishes ``model_discovery.registry`` only
+    when the injected registry exposes ``scheduler_registry_evidence``, which the
+    real ``FileSchedulerModelRegistry`` does (``scheduler_file_providers.py:183``)
+    and the plain double does not.  Without the hook the closure double would be
+    one sub-key short of a live pass, and the honest fix is to model the producer
+    rather than to annotate the gap away.  Only the block's PRESENCE matters here:
+    the table dispositions ``model_discovery.registry`` whole (the inactive-model
+    boundary), so it is not drilled.
+    """
+
+    def scheduler_registry_evidence(self) -> dict[str, Any]:
+        return {
+            "status": "ready",
+            "schema_version": "nhms.scheduler_registry_manifest.v1",
+            "model_count": len(self.models),
+            "model_ids": [model["model_id"] for model in self.models],
+        }
+
+
+def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str, Any]]:
+    """One real ``run_once()`` per leg that writes a different set of keys.
+
+    Both legs are needed because ``backfill`` publishes three sub-keys when it is
+    enabled and one when it is not, and a union of two runs is still the WRITER
+    talking -- unlike a hand-kept list, which is what drifted three times.
+
+    The legs run with approved runtime roots and ``dry_run=False`` on purpose:
+    ``root_preflight`` is written only when the preflight status is not
+    ``not_required`` (so it needs ``NHMS_SCHEDULER_REQUIRE_ROOTS`` and a root set
+    that actually passes), and ``restart_reconcile``/``restart_reconcile_proof``
+    are skipped outright on a dry-run pass (``scheduler_runtime.py:1534``).  A
+    narrower fixture leaves those three keys unpublished, and annotating them as
+    "the double can not reach this" would have been a hand-written excuse in the
+    middle of the one test whose whole job is to stop hand-written lists.  Both
+    legs still terminate in an EVALUATING status, which is what makes their key
+    set the closure authority (the caller asserts it).
+    """
+
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
+
+    payloads: list[dict[str, Any]] = []
+    for backfill_enabled in (False, True):
+        config = _config(
+            roots["workspace_root"],
+            now=_dt("2026-05-21T12:00:00Z"),
+            sources=("gfs", "IFS"),
+            max_cycles_per_source=2,
+            backfill_enabled=backfill_enabled,
+            dry_run=False,
+        )
+        scheduler = ProductionScheduler(
+            config,
+            registry=_ScopeDimensionRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+            adapters={
+                "gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)]),
+                "IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)]),
+            },
+            orchestrator_factory=lambda *_args, **_kwargs: FakeProductionOrchestrator(),
+        )
+        payloads.append(scheduler.run_once().evidence)
+    return payloads
+
+
+def _published_scope_dimension_paths(payloads: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Top-level keys, plus the sub-keys of every drilled container."""
+
+    paths: set[str] = set()
+    for payload in payloads:
+        paths |= set(payload)
+        for container in _SCOPE_DIMENSION_DRILLDOWN:
+            value = payload.get(container)
+            if isinstance(value, Mapping):
+                paths |= {f"{container}.{key}" for key in value}
+    return paths
+
+
+def test_every_dimension_a_real_pass_publishes_has_a_scope_disposition(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """#1186 invariant I-1: the scope test's closed set is derived from a pass that RAN.
+
+    The closure authority is "the top-level key set an EVALUATING pass publishes",
+    obtained by running the writer, never by reading it.  Both halves of that
+    sentence are load-bearing:
+
+      * only evaluating passes, because ``_scope_reason`` runs on no other kind --
+        every early-exit branch rewrites ``status`` first (a tripped progress guard
+        writes the literal ``"resource_limit_blocked"`` at
+        ``scheduler_runtime.py:1473``), so the keys those branches skip can never
+        reach the scope test and owe the table no row;
+      * by running it, because the first version of this table WAS a source-text
+        reading -- ``base_evidence``'s returned dict literal plus the ``backfill``
+        block -- and covered 14 keys while a live pass carries 42.  The writer side
+        is three times the size of the hand-copy, which is the same defect the
+        table exists to close, one level down.
+
+    Both directions are asserted, because only one of them was ever checked before
+    and the other is how a table goes stale:
+
+      * every path the writer publishes is dispositioned -- a new knob is a RED
+        test, not a silently unjudged narrowing dimension;
+      * every dispositioned path is really published -- a row that stopped matching
+        the writer can not sit in the table looking like coverage.  There is no
+        conditional-row escape hatch: where the double fell short of a live pass
+        the FIXTURE was opened (approved roots, non-dry leg, the registry evidence
+        hook), never the table annotated.
+
+    Depth follows the table: a container dispositioned key-by-key is drilled, so a
+    knob added inside ``cycle_window`` or ``runtime_config`` is as loud as a new
+    top-level key.
+    """
+
+    payloads = _scope_dimension_payloads(monkeypatch, tmp_path)
+
+    from services.orchestrator import operator_action_listing
+
+    statuses = [payload.get("status") for payload in payloads]
+    assert set(statuses) <= operator_action_listing.EVALUATING_PASS_STATUSES, statuses
+
+    published = _published_scope_dimension_paths(payloads)
+
+    undispositioned = sorted(published - set(_SCOPE_DIMENSION_DISPOSITIONS))
+    assert undispositioned == [], f"published but not dispositioned: {undispositioned}"
+
+    stale = sorted(set(_SCOPE_DIMENSION_DISPOSITIONS) - published)
+    assert stale == [], f"dispositioned but never published: {stale}"
+
+    assert set(_SCOPE_DIMENSION_DISPOSITIONS.values()) <= {
+        _SCOPE_DIMENSION_JUDGED,
+        _SCOPE_DIMENSION_DOCUMENTED_BOUNDARY,
+        _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    }
+
+
+def test_the_judged_dispositions_are_exactly_what_the_listing_surface_reads() -> None:
+    """The other half of the table: ``JUDGED`` must mean "and here is the code that judges it".
+
+    Read back from the reader's own required-key tuples, so demoting a dimension
+    in ``operator_action_listing`` without re-dispositioning it here fails, and a
+    row marked ``JUDGED`` that nothing actually reads fails too.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    judged = {path for path, verdict in _SCOPE_DIMENSION_DISPOSITIONS.items() if verdict == _SCOPE_DIMENSION_JUDGED}
+
+    assert judged == (
+        {
+            "sources",
+            "backfill",
+            "backfill.enabled",
+            "operator_filters",
+            "cycle_window",
+            "counts",
+            "runtime_config",
+        }
+        | {f"operator_filters.{key}" for key in operator_action_listing._REQUIRED_OPERATOR_FILTER_KEYS}
+        | {f"cycle_window.{key}" for key in operator_action_listing._REQUIRED_CYCLE_WINDOW_KEYS}
+        | {f"counts.{key}" for key in operator_action_listing._REQUIRED_COUNTS_KEYS}
+        | {f"runtime_config.{key}" for key in operator_action_listing._REQUIRED_RUNTIME_CONFIG_KEYS}
+    )
+    # The documented boundaries are decided, not forgotten: each one is written up
+    # in the command help so an operator reading exit 0 can find it.
+    documented = {
+        path
+        for path, verdict in _SCOPE_DIMENSION_DISPOSITIONS.items()
+        if verdict == _SCOPE_DIMENSION_DOCUMENTED_BOUNDARY
+    }
+    assert documented == {"cycle_window.cycle_lag_hours", "model_discovery.registry"}
+    assert "cycle_lag_hours" in operator_action_listing.LIST_OPERATOR_ACTIONS_HELP
+    assert "inactive" in operator_action_listing.LIST_OPERATOR_ACTIONS_HELP
