@@ -141,6 +141,7 @@ curl -s -o /dev/null -D - "http://127.0.0.1:8080/api/v1/precip/$S/$CYCLE/$VT.png
   需要 `infra/env/node27-raw-retention.env` 里配 `NHMS_MVT_FILE_CACHE_DIR`（模板
   `infra/env/node27-raw-retention.example:63` 有该行）。未配时该 lane 记
   `skipped: precip_cache_root_unconfigured`，缓存只增不减——2026-09-16 实测即为此状态（#2011 面）。
-- `scripts/node27_autopipe_cron.sh` 不 source `display.env`，cron 起的 prewarm 因此看不到
-  `NHMS_DISPLAY_CACHE_WARM_TOKEN`，目录发现可能读到最多 45 s 陈旧的 catalog。
+- cron 起的 prewarm 是**带 warm token** 的特权调用：`scripts/node27_autopipe_cron.sh` 以 `set -a` source
+  `infra/env/node27-ingest.env`，该文件与 `display.env` 的 `NHMS_DISPLAY_CACHE_WARM_TOKEN` 同值。手工复现 prewarm 时
+  若只抄命令行不抄 env 装载，会降级为非特权调用，目录发现最多读到 45 s 陈旧的 catalog。
 - 镜像 hook 是 fail-open 的：源缺失只记 `precip_mirror: failed` 回执并继续，不会让 pipeline 失败。
