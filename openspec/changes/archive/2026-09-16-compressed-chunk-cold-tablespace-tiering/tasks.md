@@ -1,12 +1,12 @@
-# Mandatory selective-cold retirement — active implementation contract
+# Selective-cold retirement — closeout and evidence ledger
 
-Status: implementation in progress. R1.1/R1.2 merged via PR #2311.
-R1.3 and the corresponding PGDATA/governance portions of R1.5 have executable
-verification. R1.6 and the C4 portion of R1.5 now have node-27 synthetic
-acceptance-owner proof; this is not live browser or production deployment PASS.
-Remaining retirement and effective-deployment tasks are pending.
-The sole executable retirement plan is this file. Old cold deployment approval
-does not authorize retirement, and disabling a lane is not code retirement.
+Status: source retirement, survivor verification, authorized effective
+maintenance handoff, reviewed archive and defect disposition are complete.
+The closeout PR gates parent-issue closure on final-head review and CI;
+GitHub records the actual #1895/#1891 closing events at merge.
+R1.6/C4 synthetic proof is not live browser production acceptance.
+Original cold G0–G8 rollout remains withdrawn, not passed. The historical
+completed delivery ledger and immutable evidence retain their original meaning.
 
 ## Publication DAG and smallest safe merge boundaries
 
@@ -273,7 +273,7 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   no blocking candidates, round 1 clean and exact-head CI passed. Final
   `023e79e1a597e2bc4a29121f9d99b573eb677b80` evidence/selector readers:
   1124 passed. This completes source review, not R4.4 archive or R5.2 deployment.
-- [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
+- [x] R4.4 At final closeout obtain reviewed archive/disposition that preserves
   surviving-spec updates and the G7-only REMOVED delta but never promotes withdrawn
   cold-enabling ADDED requirements. There is no canonical
   `compressed-chunk-cold-residency` capability to remove. If using
@@ -281,6 +281,12 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   including removal of the empty G7 capability; skipping promotion must not
   discard them. Never use `--no-validate`. Do not archive during this
   specification revision or while implementation remains pending.
+  Archived 2026-09-16 with `--skip-specs --yes`, never `--no-validate`.
+  Strict change/five-survivor validation passed; 92 original history/delta
+  files retain their Git blob identities, five canonical spec digests remain
+  unchanged, and neither cold nor G7 capability was created. Independent
+  spec/invariant and evidence/integration seats returned CLEAN.
+  Record: `evidence/retirement-archive-disposition.json`.
 
 ## R5 — Verify survivors, authorize deployment handoff, then close
 
@@ -325,18 +331,31 @@ R3 source completion does not complete R4.3 review or R5 deployment/closure.
   `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`
   and Ruff/Markdown checks on the changed surface. These source-retirement
   checks do not authorize or establish R5.2 effective deployment.
-- [ ] R5.2 Separately authorize effective-deployment handoff at the final release:
+- [x] R5.2 Separately authorize effective-deployment handoff at the final release:
   identify actual unit/dropins/env/ExecStartPre and referenced paths, coordinate
   owners and foreign holds, remove retired cold activation/configuration without
   disabling normal maintenance, and record observed disposition. Repository
   templates are not deployment proof. Do not delete real tablespaces/data, old
   PGDATA or private evidence. Unexpected deployed cold relations/state require
   STOP and a dedicated safe disposition, never silent DROP or ignore.
-- [ ] R5.3 Only after affected source paths and deployed references are gone,
+  Authorized handoff committed on node-27 at 2026-09-16T04:07:55Z;
+  independent post-apply observations at 04:08:38Z verified the effective
+  compression source/env/precheck and 3941s wall, replay absent-approved,
+  archived cold input, unchanged 92 protected identities and timer baseline.
+  No maintenance service was manually started; no DB/schema/role change.
+  Receipt and exact-driver review: `evidence/retirement-effective-handoff.json`.
+- [x] R5.3 Only after affected source paths and deployed references are gone,
   dispose #2293/#2298/#1938 as capability retired, not fixed; a defect carried by
   extraction follows the surviving owner. Link deletion, regression, reviewed
   authority and deployment evidence before closing #1895/#1891. No optional
   dormant-retention backlog substitutes for code removal.
+  Applicability review found no carried defect in the surviving workload
+  digest or connection owner. #2293 and #2298 closed **not planned / capability
+  retired**, not fixed, on 2026-09-16; #1938 retains its prior CLOSED disposition.
+  Record and closing comments: `evidence/retirement-defect-disposition.json`.
+  This closeout PR links all evidence and closes #1895/#1891 only on merge
+  after its exact-head review/CI gate; these checkboxes do not claim earlier
+  GitHub closing events.
 
 Cold samples, I9, I8, #2162 and #2017 are not blanket retirement dependencies.
 No new RPO/RTO, capacity-construction or general storage-acceptance epic is

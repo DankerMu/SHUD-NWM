@@ -342,7 +342,7 @@ def _bounded_database_url(database_url: str) -> str:
             parsed.scheme,
             parsed.netloc,
             parsed.path,
-            urlencode(query_items),
+            urlencode(query_items, quote_via=quote),
             parsed.fragment,
         )
     )

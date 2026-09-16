@@ -84,3 +84,38 @@ The two-node Docker E2E SHALL only pass when display readonly boundaries and str
 - **WHEN** retry/cancel behavior is validated
 - **THEN** 27 proves fail-closed read-only behavior and 22 proves any actual retry/cancel receipt
 - **AND** 27 only displays the resulting state and logs after 22 acts.
+
+### Requirement: Reachable-roles probe MUST execute on a real PostgreSQL
+
+The statement the readonly-DB validation lane uses to discover the roles reachable by the tested login SHALL be
+executable by a real PostgreSQL server, and the lane's regression suite SHALL prove that against a real database
+rather than against a recording double. Satisfying string assertions on the statement text is not evidence that the
+probe runs.
+
+#### Scenario: Reachable-roles probe runs against a live database
+
+- **WHEN** the readonly-DB validation lane gathers reachable roles for the tested login on a real PostgreSQL
+- **THEN** the statement SHALL parse and execute, returning the reachable-role rows
+- **AND** it SHALL NOT use a PostgreSQL reserved word as a relation alias
+- **AND** an automated test SHALL execute that probe against a real PostgreSQL, so restoring a reserved-word alias
+  fails the suite instead of surfacing only as a `BLOCKED` verdict with an unexpected-error blocker on production
+
+### Requirement: The readonly validation DSN MUST carry its libpq options in a form libpq accepts
+
+The readonly-DB validation lane SHALL encode the bounded connection options it writes into the display
+connection URL so that a libpq client recovers the intended option string. Encoding conventions that only a
+form decoder understands MUST NOT be used for this value.
+
+The lane's regression suite SHALL prove this by opening a real connection with the emitted URL through the
+libpq-direct client, not only through a driver that applies form decoding of its own.
+
+#### Scenario: A bounded connection URL is handed to a libpq client
+
+- **WHEN** the lane rebuilds the display connection URL with its bounded connection options and a client
+  passes that URL directly to libpq
+- **THEN** percent-decoding the emitted options value alone SHALL yield the lane's intended option string
+  verbatim
+- **AND** the connection SHALL open, reporting the lane's configured statement, lock and
+  idle-in-transaction timeouts
+- **AND** an automated test SHALL execute that connection against a real PostgreSQL, so reintroducing a
+  form-encoded options value fails the suite instead of surfacing only as a connection `FATAL` on production

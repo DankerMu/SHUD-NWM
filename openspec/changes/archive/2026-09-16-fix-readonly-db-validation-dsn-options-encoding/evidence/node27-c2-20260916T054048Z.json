@@ -1,0 +1,851 @@
+{
+ "database_url": "postgresql://127.0.0.1:55432/nhms",
+ "display_identity": {
+  "cycle_time": "2026-09-14T12:00:00Z",
+  "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+  "run_id": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6",
+  "source": "IFS"
+ },
+ "evidence_dir": "artifacts/issue2413-c2/issue2413-c2-20260916T054048Z/db/readonly-db-boundary",
+ "generated_at": "2026-09-16T05:40:52.767931+00:00",
+ "manual_action_probes": [
+  {
+   "database_url_configured": true,
+   "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+   "http_status": 409,
+   "method": "POST",
+   "name": "display_retry_manual_action",
+   "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+   "path": "/api/v1/runs/fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6/retry",
+   "status": "PASS",
+   "write_dependency_constructed": false,
+   "write_executed": false
+  },
+  {
+   "database_url_configured": true,
+   "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+   "http_status": 409,
+   "method": "POST",
+   "name": "display_cancel_manual_action",
+   "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+   "path": "/api/v1/runs/fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6/cancel",
+   "status": "PASS",
+   "write_dependency_constructed": false,
+   "write_executed": false
+  }
+ ],
+ "permission_probe_summary": {
+  "blocked_count": 0,
+  "failed_mutating_count": 0,
+  "operation_count": 23,
+  "passed_denial_count": 23,
+  "target_count": 12
+ },
+ "permission_probes": [
+  {
+   "database_privileges": {
+    "create": false,
+    "database_name": "nhms"
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "CATALOG CHECK CREATE privilege on current database nhms",
+     "database_name": "nhms",
+     "database_privilege_allowed": false,
+     "execution_outcome": "catalog_checked_no_database_create_privilege",
+     "operation": "DATABASE_CREATE",
+     "privilege_allowed": false,
+     "reason": "tested_credential_lacks_database_create_privilege",
+     "rolled_back": false,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "status": "PASS",
+   "surface": "current_database_create_catalog",
+   "target": "nhms"
+  },
+  {
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "CATALOG CHECK sequence USAGE/UPDATE privileges in audited schemas",
+     "database_privilege_allowed": false,
+     "execution_outcome": "catalog_checked_no_audited_schema_sequence_mutating_privilege",
+     "operation": "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE",
+     "privilege_allowed": false,
+     "reason": "tested_credential_lacks_audited_schema_sequence_mutating_privilege",
+     "rolled_back": false,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "hydro.hydro_run_run_key_seq",
+     "sequence_name": "hydro_run_run_key_seq",
+     "sequence_schema": "hydro",
+     "update": false,
+     "usage": false
+    },
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "met.best_available_selection_selection_id_seq",
+     "sequence_name": "best_available_selection_selection_id_seq",
+     "sequence_schema": "met",
+     "update": false,
+     "usage": false
+    },
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "met.interp_weight_weight_id_seq",
+     "sequence_name": "interp_weight_weight_id_seq",
+     "sequence_schema": "met",
+     "update": false,
+     "usage": false
+    },
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "ops.audit_log_log_id_seq",
+     "sequence_name": "audit_log_log_id_seq",
+     "sequence_schema": "ops",
+     "update": false,
+     "usage": false
+    },
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "ops.pipeline_event_event_id_seq",
+     "sequence_name": "pipeline_event_event_id_seq",
+     "sequence_schema": "ops",
+     "update": false,
+     "usage": false
+    },
+    {
+     "columns": [],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "ops.qc_result_qc_id_seq",
+     "sequence_name": "qc_result_qc_id_seq",
+     "sequence_schema": "ops",
+     "update": false,
+     "usage": false
+    }
+   ],
+   "status": "PASS",
+   "surface": "audited_schema_sequence_catalog",
+   "target": "audited_schema_sequences"
+  },
+  {
+   "operations": [],
+   "reachable_role_findings": [],
+   "status": "PASS",
+   "surface": "reachable_role_membership",
+   "target": "reachable_roles"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO hydro.hydro_run (run_id) SELECT run_id FROM hydro.hydro_run WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table hydro_run",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE hydro.hydro_run SET run_id = run_id WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table hydro_run",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM hydro.hydro_run WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table hydro_run",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [
+    {
+     "columns": [
+      "run_key"
+     ],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "hydro.hydro_run_run_key_seq",
+     "sequence_name": "hydro_run_run_key_seq",
+     "sequence_schema": "hydro",
+     "update": false,
+     "usage": false
+    }
+   ],
+   "status": "PASS",
+   "surface": "hydro_run_terminal_state",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "hydro.hydro_run"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO hydro.river_timeseries (run_key) SELECT run_key FROM hydro.river_timeseries WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table river_timeseries",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE hydro.river_timeseries SET run_key = run_key WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table river_timeseries",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM hydro.river_timeseries WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table river_timeseries",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [],
+   "status": "PASS",
+   "surface": "hydro_display_timeseries",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "hydro.river_timeseries"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO met.forecast_cycle (cycle_id) SELECT cycle_id FROM met.forecast_cycle WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forecast_cycle",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE met.forecast_cycle SET cycle_id = cycle_id WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forecast_cycle",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM met.forecast_cycle WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forecast_cycle",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [],
+   "status": "PASS",
+   "surface": "met_cycle_state",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "met.forecast_cycle"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO met.forcing_station_timeseries (forcing_version_id) SELECT forcing_version_id FROM met.forcing_station_timeseries WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forcing_station_timeseries",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE met.forcing_station_timeseries SET forcing_version_id = forcing_version_id WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forcing_station_timeseries",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM met.forcing_station_timeseries WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table forcing_station_timeseries",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [],
+   "status": "PASS",
+   "surface": "met_station_timeseries",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "met.forcing_station_timeseries"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO ops.pipeline_job (job_id) SELECT job_id FROM ops.pipeline_job WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_job",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE ops.pipeline_job SET job_id = job_id WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_job",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM ops.pipeline_job WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_job",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [],
+   "status": "PASS",
+   "surface": "pipeline_job_state",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "ops.pipeline_job"
+  },
+  {
+   "column_privileges": {
+    "insert": [],
+    "update": []
+   },
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "INSERT INTO ops.pipeline_event (event_id) SELECT event_id FROM ops.pipeline_event WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_event",
+     "operation": "INSERT",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "UPDATE ops.pipeline_event SET event_id = event_id WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_event",
+     "operation": "UPDATE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    },
+    {
+     "column_privilege_allowed": false,
+     "command": "DELETE FROM ops.pipeline_event WHERE FALSE",
+     "execution_outcome": "denied",
+     "message": "permission denied for table pipeline_event",
+     "operation": "DELETE",
+     "privilege_allowed": false,
+     "reason": "mutating_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "sequence_privileges": [
+    {
+     "columns": [
+      "event_id"
+     ],
+     "mutating_privilege_allowed": false,
+     "qualified_name": "ops.pipeline_event_event_id_seq",
+     "sequence_name": "pipeline_event_event_id_seq",
+     "sequence_schema": "ops",
+     "update": false,
+     "usage": false
+    }
+   ],
+   "status": "PASS",
+   "surface": "pipeline_event_audit",
+   "table_privileges": {
+    "delete": false,
+    "insert": false,
+    "maintain": false,
+    "maintain_supported": false,
+    "references": false,
+    "trigger": false,
+    "truncate": false,
+    "update": false
+   },
+   "target": "ops.pipeline_event"
+  },
+  {
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "CREATE TABLE hydro.__nhms_readonly_validation_probe_issue2413_c2_20260916t054048z (id integer)",
+     "execution_outcome": "denied",
+     "message": "permission denied for schema hydro",
+     "operation": "DDL_CREATE_TABLE",
+     "privilege_allowed": false,
+     "reason": "ddl_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "schema_privileges": {
+    "create": false
+   },
+   "status": "PASS",
+   "surface": "schema_table_ddl",
+   "target": "hydro.*"
+  },
+  {
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "CREATE TABLE met.__nhms_readonly_validation_probe_issue2413_c2_20260916t054048z (id integer)",
+     "execution_outcome": "denied",
+     "message": "permission denied for schema met",
+     "operation": "DDL_CREATE_TABLE",
+     "privilege_allowed": false,
+     "reason": "ddl_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "schema_privileges": {
+    "create": false
+   },
+   "status": "PASS",
+   "surface": "schema_table_ddl",
+   "target": "met.*"
+  },
+  {
+   "operations": [
+    {
+     "column_privilege_allowed": false,
+     "command": "CREATE TABLE ops.__nhms_readonly_validation_probe_issue2413_c2_20260916t054048z (id integer)",
+     "execution_outcome": "denied",
+     "message": "permission denied for schema ops",
+     "operation": "DDL_CREATE_TABLE",
+     "privilege_allowed": false,
+     "reason": "ddl_probe_denied_before_commit",
+     "rolled_back": true,
+     "schema_privilege_allowed": false,
+     "sequence_privilege_allowed": false,
+     "sqlstate": "42501",
+     "status": "PASS",
+     "table_privilege_allowed": false
+    }
+   ],
+   "schema_privileges": {
+    "create": false
+   },
+   "status": "PASS",
+   "surface": "schema_table_ddl",
+   "target": "ops.*"
+  }
+ ],
+ "redaction": {
+  "database_url_redacted": true,
+  "evidence_root_approved": true,
+  "sensitive_values_redacted": true
+ },
+ "role": {
+  "current_user": "nhms_display_ro",
+  "mutating_privilege_findings": [],
+  "reachable_role_findings": [],
+  "role_name": "nhms_display_ro",
+  "role_type": "readonly_candidate",
+  "session_user": "nhms_display_ro",
+  "transaction_read_only": "off",
+  "unsafe_role_attributes": {}
+ },
+ "route_smoke": [
+  {
+   "http_status": 200,
+   "method": "GET",
+   "name": "health",
+   "path": "/health",
+   "reason": "display_read_route_succeeded",
+   "status": "PASS"
+  },
+  {
+   "http_status": 200,
+   "method": "GET",
+   "name": "runtime_config",
+   "path": "/api/v1/runtime/config",
+   "reason": "display_read_route_succeeded",
+   "status": "PASS"
+  },
+  {
+   "http_status": 200,
+   "method": "GET",
+   "name": "models",
+   "path": "/api/v1/models?active=all&limit=1",
+   "reason": "display_read_route_succeeded",
+   "status": "PASS"
+  },
+  {
+   "http_status": 200,
+   "method": "GET",
+   "name": "stations",
+   "path": "/api/v1/met/stations?model_id=dg_9ccb261a39d51c24f4de9173fb4461b6&limit=1",
+   "reason": "display_read_route_succeeded",
+   "status": "PASS"
+  },
+  {
+   "http_status": 200,
+   "method": "GET",
+   "name": "latest_product",
+   "path": "/api/v1/mvp/qhh/latest-product?source=IFS&cycle_time=2026-09-14T12%3A00%3A00Z&run_id=fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+   "reason": "display_read_route_succeeded",
+   "response_identity": {
+    "cycle_time": "2026-09-14T12:00:00Z",
+    "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+    "run_id": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6",
+    "source": "IFS",
+    "source_id": "IFS"
+   },
+   "status": "PASS"
+  },
+  {
+   "http_status": 200,
+   "identity_blockers": [
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "IFS",
+     "field": "source"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "2026-09-14T12:00:00Z",
+     "field": "cycle_time"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "run_id"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "model_id"
+    }
+   ],
+   "method": "GET",
+   "name": "jobs",
+   "path": "/api/v1/jobs?source=IFS&cycle_time=2026-09-14T12%3A00%3A00Z&run_id=fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6&limit=1",
+   "reason": "display_read_route_response_identity_invalid",
+   "status": "BLOCKED"
+  },
+  {
+   "http_status": 200,
+   "identity_blockers": [
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "IFS",
+     "field": "source"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "2026-09-14T12:00:00Z",
+     "field": "cycle_time"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "run_id"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "model_id"
+    }
+   ],
+   "method": "GET",
+   "name": "pipeline_status",
+   "path": "/api/v1/pipeline/status?source=IFS&cycle_time=2026-09-14T12%3A00%3A00Z&run_id=fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+   "reason": "display_read_route_response_identity_invalid",
+   "status": "BLOCKED"
+  },
+  {
+   "http_status": 200,
+   "identity_blockers": [
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "IFS",
+     "field": "source"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "2026-09-14T12:00:00Z",
+     "field": "cycle_time"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "run_id"
+    },
+    {
+     "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+     "expected": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+     "field": "model_id"
+    }
+   ],
+   "method": "GET",
+   "name": "pipeline_stages",
+   "path": "/api/v1/pipeline/stages?source=IFS&cycle_time=2026-09-14T12%3A00%3A00Z&run_id=fcst_ifs_2026091412_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+   "reason": "display_read_route_response_identity_invalid",
+   "status": "BLOCKED"
+  },
+  {
+   "method": "GET",
+   "missing_identity_fields": [
+    "job_id"
+   ],
+   "name": "job_logs",
+   "path": null,
+   "reason": "source_cycle_run_model_job_required_for_job_log_smoke",
+   "required_identity_fields": [
+    "source",
+    "cycle_time",
+    "run_id",
+    "model_id",
+    "job_id"
+   ],
+   "status": "BLOCKED",
+   "strict_identity_required": true
+  }
+ ],
+ "run_id": "issue2413-c2-20260916T054048Z",
+ "runtime": {
+  "control_mutations_expected": false,
+  "service_role": "display_readonly"
+ },
+ "schema": "nhms.readonly_db_boundary.evidence.v1",
+ "source_env_vars": [
+  "NHMS_DISPLAY_READONLY_DATABASE_URL",
+  "NHMS_READONLY_DB_VALIDATION_DATABASE_URL"
+ ],
+ "status": "BLOCKED",
+ "validation_provenance": {
+  "injected_components": [],
+  "live_readonly_proof": true,
+  "mode": "live"
+ },
+ "validation_timeouts": {
+  "connect_timeout_seconds": 5,
+  "idle_in_transaction_session_timeout_ms": 10000,
+  "lock_timeout_ms": 2000,
+  "statement_timeout_ms": 10000
+ }
+}
