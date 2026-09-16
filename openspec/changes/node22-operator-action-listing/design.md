@@ -211,7 +211,35 @@ round 2 撞了 review 流程的 same-invariant 门。复发的不变量是：**�
 
 **双向断言**：(a) 产出的每个键都有处置（新写者加键 ⇒ 红）；(b) 处置表每个键都出现在产出里（陈旧表项 ⇒ 红）。
 
-### D5.1 — 顶层键处置表（42/42）
+**I-4 —— fixture 的可达面也是一份副本（round 3 补，C1 的教训）**：
+「跑 writer」本身**不等于**闭合。它只是把枚举从「手抄一份清单」搬成「手抄一条路径」——
+**fixture 走到哪儿，权威就只到哪儿**。本表第一版的闭合测试是绿的，而
+`slurm_preflight`（`scheduler_runtime.py:1389-1390`，求值态主路径上与已处置的
+`submit_overlap_receipt`/`evidence_pre_execution` 并列）**一行处置都没有**——
+因为两条 fixture 腿都没打开 `slurm_execution_enabled`，双向断言的两边同时为空。
+更糟的是 `stale == []` 那一半**封死了显而易见的补救**：只往表里加一行会立刻红成「已处置但从未发布」。
+
+**所以闭合纪律有第二层**：凡是会改变「求值态 pass 发布哪些键」的配置开关，
+fixture 必须**逐个打开**，权威取各条腿产出的**并集**。今天已知的开关是
+`slurm_execution_enabled`（`scheduler_config/config.py:130-133`，环境变量
+`NHMS_PRODUCTION_SLURM_ENABLED`）；仓内**已有**能走通该路的 db-free double——
+`tests/test_production_scheduler.py:24246-24275` 的 `FakeProductionOrchestrator`
+断言了 `result.status == "submitted"` 且 `evidence["slurm_preflight"]["status"] == "ready"`，
+而 `submitted ∈ EVALUATING_PASS_STATUSES`。
+**因此不需要 conditional 标注行，也不需要回退到 AST**：这条腿是开得起来的，开它就是了。
+（规格里原有的「造不出来的键单独标注 conditional」条款据此删除——它既与
+`assert stale == []` 结构性互斥，也会把一条本可打开的 fixture 腿用文档掩盖过去。）
+
+### D5.1 — 顶层键处置表（生产 planning-only 面：42/42）
+
+> **本表的覆盖面不等于闭合测试的权威面。** 这 42 个键是 node-22 生产证据根上
+> `execution_boundary='planning_only'` 的求值态 pass 实际发布的全集。
+> 打开 `slurm_execution_enabled` 的那条腿会**多发布**若干键（今天已知的是
+> `slurm_preflight`，与 `submit_overlap_receipt`、`evidence_pre_execution` 同在
+> `scheduler_runtime.py:1380-1442` 的主求值路径上）。
+> **这些键不在本表里逐个列举，是故意的**——按 I-4，权威是各条 fixture 腿产出的**并集**，
+> 由测试在运行时取得；本表只承担「逐键给出处置理由」的说明职责。
+> 若有人想知道「到底有几个键」，正确答案永远是「跑一次闭合测试」，不是读这一行标题。
 
 | 键 | 处置 | 理由 |
 |---|---|---|
@@ -309,6 +337,6 @@ round 2 撞了 review 流程的 same-invariant 门。复发的不变量是：**�
 
 **仍未测**：
 
-- 该样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 各行全部只能靠构造的 fixture 立论，线上无对照样本。D2b 实测 188/188 趟处在字节上限的 85.6%–89.6%，即 size-fallback 分支离线上只差一成多，但今天确实 0 趟触发。
+- 该样本里**没有**任何 size-fallback、不可读或收窄的 pass，因此 D3 各行全部只能靠构造的 fixture 立论，线上无对照样本。D2b 实测 **184/184** 趟处在字节上限的 85.6%–89.6%，即 size-fallback 分支离线上只差一成多，但今天确实 0 趟触发。（这个 184 是 D2b 自己那次取样的趟数，与上面 `sources` / `cycle_window` 的 188 不是同一次测量——证据根随保留计时器滚动，本 change 前后六次测量得到六个总数：184/188/191/192/194/195。绝对趟数一律只在它自己的测量语境里成立。）
 - `blocked_operator_reentry_restart_stage_refused`（round 1 A1 补的第五条决策）线上发生率为 **0 行 / 184 趟**（EF-7）。它是**潜伏**缺陷而非正在发生的故障；这不削弱修它的理由（runbook 第二步为它立了专门处置行，一旦发生旧实现的 `exit 0` 就是在说谎），但收据要诚实：EF-6 的 `exit 0` 因此是**真**的 0，不是漏判出来的 0。
 - `scope_unknown`、零宽时间窗（`--lookback-hours 0`）两条路径线上均未出现，只有构造 fixture 的覆盖。

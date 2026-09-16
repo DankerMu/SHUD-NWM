@@ -22,15 +22,27 @@
 
 round 2 撞了 same-invariant 门：同一条不变量（**每个闭合集合都必须从权威反算，不能手抄副本**）在两轮里失败了五次。纠正动作是结构性闭合，不是再补一条 `if`。retro 见 `.workplans/pr-2440/review/review-failure-retro.md`，处置表见 `design.md` D5。
 
-- [ ] B2-1 收窄维度改**处置**而非列举：`_scope_reason` 加 `cycle_window.lookback_hours`（`<= 0` → `scope_narrowed`；缺失/非整数 → `scope_unknown`），`sources` 由集合相等改**覆盖**判定。
-- [ ] B2-1b **闭合测试必须跑 writer，不许解析 writer**：用仓内既有 db-free double 真跑一次 `run_once()`，取落盘 payload 自己的键集合作唯一权威；双向断言（产出的键无处置 ⇒ 红；处置表有陈旧项 ⇒ 红）；**闭合深度 = 处置深度**（`backfill`/`cycle_window`/`operator_filters`/`counts`/`runtime_config`/`model_discovery` 六块下钻枚举子键）。权威只算**求值态** pass 的键集合——早退分支都重写了 `status`，其少写的键到不了范围判据面前（论证见 design.md D5.0）。**这一条是 EF-7c 证伪第一版处置表之后改的口径**：第一版通过阅读两个 writer 文件列举权威，只覆盖 42 个顶层键里的 14 个，等于换个地方手抄（DEV-2）。
-- [ ] B2-1c **第六个闭合集合**：`runtime_config.allowed_cycle_hours_utc` 判 (i)，判对 `DEFAULT_ALLOWED_CYCLE_HOURS_UTC` 的覆盖，常量 **import 不得敲字面量**；`runtime_config` 块与该键纳入必需字段。完整性权威取默认值而非 0-23 全域（按全域判 ⇒ 每趟生产 pass 被打成 narrowed ⇒ 假 exit 3）。
-- [ ] B2-1d **零模型假 exit 0**（#2443 读侧，范围扩张见 DEV-3）：`counts.selected_model_count == 0` ⇒ 用一条与 `scope_narrowed`/`scope_unknown` **都不同**的 reason 报出并 **arm**；`counts` 块与该键纳入必需字段。写侧留 #2443。
-- [ ] B2-2 决策闭合 pin 自身闭合：`_MANUAL_ACTION_WRITER_FILES` 改 `rglob("*.py")` 全目录反算（**rglob 不是 glob**，`scheduler_config/` 是子包；元素须是 `Path`）；`_marks_manual_retry_required` 对 `**Name` 展开按模块常量解析，解析不了记 `unresolved` 而非静默略过。
-- [ ] B2-3 CI 选择器耦合：`scripts/select_ci_tests.py` 的 `SCHEDULER_IMPORTER_TESTS` 常量补本测试文件（改常量不是 at-site，#2238 的教训）。
-- [ ] B2-4 R2-01：`recorded_init_state_id` 活过 bounded 摘要——写侧加保留条目 **+ 读侧加行级双读**，缺一即 no-op。
-- [ ] B2-5 文本面：help 的 exit-3 口径（现状两种读法各错一边）、`spec.md` 的 decidable 术语与那句假命题、runbook 补第五条决策的三-null 形状那一臂，以及**三条**成文边界（时间窗、单槽、**inactive-model**）。
-- [ ] B2-6 **第七扇门判 (ii) 成文而非判据**：`registry.model_count` 是 manifest 登记总数（含 inactive），`active_model_count` 是 `list_models(active=True, …)` 的返回，该过滤发生在 `discover_models` 拿到行**之前**，故这段落差 `exclusions` **结构上记录不到**。不判——要求两数相等等于规定 manifest 不许退役模型，仓内无此权威（与 `cycle_window` 拒绝发明阈值同理）。spec + runbook + help 三处成文。
+- [x] B2-1 收窄维度改**处置**而非列举：`_scope_reason` 加 `cycle_window.lookback_hours`（`<= 0` → `scope_narrowed`；缺失/非整数 → `scope_unknown`），`sources` 由集合相等改**覆盖**判定。
+- [x] B2-1b **闭合测试必须跑 writer，不许解析 writer**：用仓内既有 db-free double 真跑一次 `run_once()`，取落盘 payload 自己的键集合作唯一权威；双向断言（产出的键无处置 ⇒ 红；处置表有陈旧项 ⇒ 红）；**闭合深度 = 处置深度**（`backfill`/`cycle_window`/`operator_filters`/`counts`/`runtime_config`/`model_discovery` 六块下钻枚举子键）。权威只算**求值态** pass 的键集合——早退分支都重写了 `status`，其少写的键到不了范围判据面前（论证见 design.md D5.0）。**这一条是 EF-7c 证伪第一版处置表之后改的口径**：第一版通过阅读两个 writer 文件列举权威，只覆盖 42 个顶层键里的 14 个，等于换个地方手抄（DEV-2）。
+- [x] B2-1c **第六个闭合集合**：`runtime_config.allowed_cycle_hours_utc` 判 (i)，判对 `DEFAULT_ALLOWED_CYCLE_HOURS_UTC` 的覆盖，常量 **import 不得敲字面量**；`runtime_config` 块与该键纳入必需字段。完整性权威取默认值而非 0-23 全域（按全域判 ⇒ 每趟生产 pass 被打成 narrowed ⇒ 假 exit 3）。
+- [x] B2-1d **零模型假 exit 0**（#2443 读侧，范围扩张见 DEV-3）：`counts.selected_model_count == 0` ⇒ 用一条与 `scope_narrowed`/`scope_unknown` **都不同**的 reason 报出并 **arm**；`counts` 块与该键纳入必需字段。写侧留 #2443。
+- [x] B2-2 决策闭合 pin 自身闭合：`_MANUAL_ACTION_WRITER_FILES` 改 `rglob("*.py")` 全目录反算（**rglob 不是 glob**，`scheduler_config/` 是子包；元素须是 `Path`）；`_marks_manual_retry_required` 对 `**Name` 展开按模块常量解析，解析不了记 `unresolved` 而非静默略过。
+- [x] B2-3 CI 选择器耦合：`scripts/select_ci_tests.py` 的 `SCHEDULER_IMPORTER_TESTS` 常量补本测试文件（改常量不是 at-site，#2238 的教训）。
+- [x] B2-4 R2-01：`recorded_init_state_id` 活过 bounded 摘要——写侧加保留条目 **+ 读侧加行级双读**，缺一即 no-op。
+- [x] B2-5 文本面：help 的 exit-3 口径（现状两种读法各错一边）、`spec.md` 的 decidable 术语与那句假命题、runbook 补第五条决策的三-null 形状那一臂，以及**四条**成文边界（时间窗、单槽、**inactive-model**、**discovery-retraction**）。
+
+### B3 —— round 3 修复集（4 条 CONFIRMED，全 P2；裁决见 `.workplans/pr-2440/review/round-3-verdicts.md`）
+
+- [x] B3-1 **C1 / 覆盖缺口 —— 闭合 fixture 的可达面**：`_scope_dimension_payloads` 增开**第三条腿**，`_config(...)` 设 `slurm_execution_enabled=True`（仓内已有走通该路的 db-free double：`tests/test_production_scheduler.py:24246-24275` 的 `FakeProductionOrchestrator`，断言 `status == "submitted"` 且 `slurm_preflight.status == "ready"`，而 `submitted ∈ EVALUATING_PASS_STATUSES`）。权威改取**各腿产出的并集**；补 `slurm_preflight` 的处置行。**不许用 conditional 标注绕过，不许回退到 AST**（理由见 design.md D5.0 的 I-4）。
+- [x] B3-2 **C1b —— 规格与测试互斥**：spec 里「造不出来的键单独标注 conditional」条款已由编排者删除（本次 fixture 冻结的一部分）；实现侧确认 `_SCOPE_DIMENSION_DISPOSITIONS` 值域仍是三值、docstring 与规格不再冲突。
+- [x] B3-3 **C2 —— 守卫自身的静默截断**：`tests/test_operator_action_listing.py:2276-2288` 的 `continue` 不再连同 `spread_gaps` 一起丢弃。取不到字面 `decision` 但存在未解析 `**spread` 时记入 `unresolved`（与 flag 侧对称——现状是 decision 取不到响亮、flag 取不到静默）。已知限制清单 `:2257-2260` 补这一形状。**红证据**：writer 侧构造 `_NEW = {"decision": ...}` + `{**_NEW, "retry_policy": {"manual_retry_required": True}}`，修复前既不入 `decisions` 也不入 `unresolved`。
+- [x] B3-4 **候选 B —— exit-0 边界账目**：`operator_action_listing.py:243` 的 "Three known boundaries of exit 0" 改四条，新增 discovery-retraction（小时集收回 / 窗口缩短后，被过滤的 cycle 不再被发现，其未决动作不再被列出）。`:586` 判据本身**不动**（按全天判已被否决，会造假 exit 3）。
+
+### EF —— round 3 追加
+
+- [x] EF-8a **闭合 fixture 的分支覆盖**：断言闭合测试至少跑两条求值态腿（planning-only 与 Slurm-enabled），且 `slurm_preflight` 出现在并集权威里并有处置行。通过判据是**去掉 Slurm 腿会让测试变红**，不是"看一眼两条腿都在"。
+- [x] EF-8b **C2 的红证据可复现**：按 B3-3 的合成 writer 形状，确认修复前该决策两边皆不入、修复后进 `unresolved`。
+- [x] B2-6 **第七扇门判 (ii) 成文而非判据**：`registry.model_count` 是 manifest 登记总数（含 inactive），`active_model_count` 是 `list_models(active=True, …)` 的返回，该过滤发生在 `discover_models` 拿到行**之前**，故这段落差 `exclusions` **结构上记录不到**。不判——要求两数相等等于规定 manifest 不许退役模型，仓内无此权威（与 `cycle_window` 拒绝发明阈值同理）。spec + runbook + help 三处成文。
 
 ## C — runbook
 

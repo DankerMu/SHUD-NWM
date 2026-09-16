@@ -59558,6 +59558,21 @@ _SCOPE_DIMENSION_DISPOSITIONS: dict[str, str] = {
     # unjudged.
     "evidence_pre_execution": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
     "submit_overlap_receipt": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # The third sibling of those two, and the one that went undispositioned for a
+    # whole review round because no fixture leg opened it (round-3 C1).  It is a
+    # readiness PROOF for the submission lane -- DATABASE_URL reachability, the
+    # four storage roots, the sbatch template allowlist, the sanitized Slurm env,
+    # the SHUD executable, the gateway and the grib env -- computed at
+    # ``scheduler_runtime.py:1180``, which is AFTER cycle discovery, model
+    # selection and candidate construction have all finished.  It can not shrink
+    # what the pass looked at: the only narrowing outcome is ``blocked``, and that
+    # arm rewrites the top-level ``status`` to ``preflight_blocked``
+    # (``:1183-1195``), which the status test catches before this surface runs --
+    # the same shape as ``progress_guard``.  There is no "gated yet still
+    # evaluating" third state, because ``not_required`` is returned for exactly
+    # one reason (``slurm_execution_enabled`` off, ``scheduler_gateway.py:11``)
+    # and that pass submits nothing at all.
+    "slurm_preflight": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
     # -- counters: tallies of what WAS evaluated ---------------------------
     # Name trap: THIS one is the sum of the three candidate list lengths
     # (scheduler_runtime.py:1327), while progress_guard.checkpoints[].details
@@ -59649,9 +59664,27 @@ class _ScopeDimensionRegistry(FakeRegistry):
 def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str, Any]]:
     """One real ``run_once()`` per leg that writes a different set of keys.
 
-    Both legs are needed because ``backfill`` publishes three sub-keys when it is
-    enabled and one when it is not, and a union of two runs is still the WRITER
-    talking -- unlike a hand-kept list, which is what drifted three times.
+    Three legs, because the union of what the legs publish is the closure
+    authority and a leg nobody opens is a key nobody sees:
+
+      * ``backfill`` publishes three sub-keys when it is enabled and one when it
+        is not, so both settings are run;
+      * ``slurm_preflight`` is published on the MAIN evaluating path -- the write
+        at ``scheduler_runtime.py:1389`` is guarded only by
+        ``status != "not_required"``, and ``_slurm_preflight``
+        (``scheduler_gateway.py:11``) returns ``not_required`` for exactly one
+        reason: ``slurm_execution_enabled`` is off.  A planning-only fixture
+        therefore can not see it, which is how it sat undispositioned while both
+        directions of the closure were green (round-3 C1).  So the third leg
+        turns the switch on and lands ``status == "submitted"``, an evaluating
+        status, with the preflight ``ready``.
+
+    ``slurm_execution_enabled`` is passed EXPLICITLY on every leg, never left to
+    the ``NHMS_PRODUCTION_SLURM_ENABLED`` / ``SLURM_EXECUTION_ENABLED`` default
+    (``scheduler_config/config.py:130-133``): an ambient value would make the
+    planning-only legs publish a different key set on a developer's machine than
+    in CI, and the whole point of the third leg is that the difference between
+    the two settings is visible here rather than accidental.
 
     The legs run with approved runtime roots and ``dry_run=False`` on purpose:
     ``root_preflight`` is written only when the preflight status is not
@@ -59660,25 +59693,48 @@ def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str
     are skipped outright on a dry-run pass (``scheduler_runtime.py:1534``).  A
     narrower fixture leaves those three keys unpublished, and annotating them as
     "the double can not reach this" would have been a hand-written excuse in the
-    middle of the one test whose whole job is to stop hand-written lists.  Both
-    legs still terminate in an EVALUATING status, which is what makes their key
-    set the closure authority (the caller asserts it).
+    middle of the one test whose whole job is to stop hand-written lists.  All
+    three legs still terminate in an EVALUATING status, which is what makes their
+    key set the closure authority (the caller asserts it).
     """
 
     roots = _scheduler_env_roots(tmp_path)
     _set_scheduler_root_env(monkeypatch, roots)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
+    # `_slurm_preflight` runs `_storage_root_check` over four roots including
+    # `log_root`, which `_scheduler_env_roots` does not make; put it UNDER the
+    # workspace root so it is covered by NHMS_SCHEDULER_ALLOWED_ROOTS.
+    log_root = roots["workspace_root"] / "slurm-logs"
+    make_directory_with_explicit_mode(log_root)
+
+    legs: tuple[dict[str, Any], ...] = (
+        {"backfill_enabled": False, "slurm_execution_enabled": False},
+        {"backfill_enabled": True, "slurm_execution_enabled": False},
+        {
+            "backfill_enabled": True,
+            "slurm_execution_enabled": True,
+            # The four things `_slurm_preflight` (scheduler_gateway.py:19-95) needs
+            # before it returns `ready` rather than `blocked`; copied from the
+            # already-passing db-free double at `:24246`.  A `blocked` preflight
+            # rewrites the pass status to `preflight_blocked` and would take this
+            # leg straight back out of the evaluating set.
+            "database_url": "postgresql://nhms:secret@db.prod.example/nhms",
+            "log_root": log_root,
+            "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
+            "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        },
+    )
 
     payloads: list[dict[str, Any]] = []
-    for backfill_enabled in (False, True):
+    for leg in legs:
         config = _config(
             roots["workspace_root"],
             now=_dt("2026-05-21T12:00:00Z"),
             sources=("gfs", "IFS"),
             max_cycles_per_source=2,
-            backfill_enabled=backfill_enabled,
             dry_run=False,
+            **leg,
         )
         scheduler = ProductionScheduler(
             config,
@@ -59735,7 +59791,18 @@ def test_every_dimension_a_real_pass_publishes_has_a_scope_disposition(
         the writer can not sit in the table looking like coverage.  There is no
         conditional-row escape hatch: where the double fell short of a live pass
         the FIXTURE was opened (approved roots, non-dry leg, the registry evidence
-        hook), never the table annotated.
+        hook, Slurm execution enabled), never the table annotated.
+
+    I-4, learned the eighth time this invariant broke: RUNNING the writer is not
+    the same as CLOSING over it.  A run only enumerates the branches the fixture
+    happens to walk, so the doubles' reachable surface is itself a copy -- and the
+    first version of this closure was green in BOTH directions while
+    ``slurm_preflight`` had no row at all, purely because neither leg turned Slurm
+    execution on.  Hence the authority is the UNION over legs, and every
+    configuration switch that changes which keys an evaluating pass publishes has
+    to be opened here one by one.  ``_scope_dimension_payloads`` is where that
+    obligation lives; deleting a leg from it has to redden this test, not quieten
+    it.
 
     Depth follows the table: a container dispositioned key-by-key is drilled, so a
     knob added inside ``cycle_window`` or ``runtime_config`` is as loud as a new
@@ -59748,6 +59815,15 @@ def test_every_dimension_a_real_pass_publishes_has_a_scope_disposition(
 
     statuses = [payload.get("status") for payload in payloads]
     assert set(statuses) <= operator_action_listing.EVALUATING_PASS_STATUSES, statuses
+    # EF-8a, read off the PAYLOADS rather than off the leg table: a Slurm-enabled
+    # leg ran and terminated evaluating.  Both halves matter -- a leg whose
+    # preflight came back ``blocked`` rewrites its status to ``preflight_blocked``
+    # (``scheduler_runtime.py:1183-1195``), which is not an evaluating status, so
+    # the union would silently shrink back to the planning-only authority while
+    # the assertion above still passed.
+    slurm_legs = [payload for payload in payloads if isinstance(payload.get("slurm_preflight"), Mapping)]
+    assert [payload["slurm_preflight"]["status"] for payload in slurm_legs] == ["ready"]
+    assert [payload.get("status") for payload in slurm_legs] == ["submitted"]
 
     published = _published_scope_dimension_paths(payloads)
 

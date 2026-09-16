@@ -2186,12 +2186,47 @@ def _is_module_constant_spelling(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id.lstrip("_").isupper()
 
 
-def _dict_literal_value(node: ast.Dict, key: str) -> ast.expr | None:
-    for literal_key, value in zip(node.keys, node.values, strict=True):
-        # ``**spread`` entries carry a ``None`` key.
-        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
-            return value
-    return None
+def _dict_decision_value(
+    node: ast.Dict,
+    *,
+    dict_constants: dict[str, ast.Dict],
+    _seen: frozenset[str] = frozenset(),
+) -> ast.expr | None:
+    """The ``decision`` value of a dict literal, read through ``**MODULE_CONSTANT`` too.
+
+    Symmetric with :func:`_marks_manual_retry_required`, and that symmetry is the
+    point (round-3 C2).  The flag side has resolved spreads since round 2, while
+    this side matched ``ast.Constant`` keys ONLY -- a ``**spread`` entry carries a
+    ``None`` key and was skipped -- so a writer that named its decision in a
+    module constant and spread it in was invisible: marked as needing an operator,
+    with no decision to add, dropped by the caller's ``continue``.  That is the
+    round-1 A1 failure (a decision missing from the listed set answers ``exit 0``
+    for a candidate the runbook still handles) reappearing inside the guard built
+    to close it, and the shape is one DRY refactor away -- 30-odd dicts in this
+    package already carry a literal ``decision`` beside an outer ``**spread``.
+
+    Last write wins, as in Python itself: a literal ``decision`` after a spread
+    overrides the spread's, and a spread after a literal overrides the literal.
+    Unresolvable constant-spelled spreads are NOT reported here -- the caller
+    already has them from the flag side, which walks exactly the same entries of
+    exactly the same node, and reporting them twice would double every line.
+    """
+
+    value: ast.expr | None = None
+    for literal_key, item in zip(node.keys, node.values, strict=True):
+        if literal_key is None:
+            if isinstance(item, ast.Name) and item.id in dict_constants and item.id not in _seen:
+                nested = _dict_decision_value(
+                    dict_constants[item.id],
+                    dict_constants=dict_constants,
+                    _seen=_seen | {item.id},
+                )
+                if nested is not None:
+                    value = nested
+            continue
+        if isinstance(literal_key, ast.Constant) and literal_key.value == "decision":
+            value = item
+    return value
 
 
 def _marks_manual_retry_required(
@@ -2258,6 +2293,11 @@ def _written_manual_action_decisions(*, literal_true: bool = True) -> tuple[set[
     ``retry_policy`` value in the package is a dict literal): a flag or decision
     reached through ``dict(...)``, through a function return, or through a
     list-of-dicts comprehension is not resolved statically and would be missed.
+    A ``decision`` or a flag reached through a ``**spread`` is NOT in that list --
+    a spread of a same-module dict constant is resolved, and one spelled like a
+    module constant that does not resolve is reported.  It was in that list until
+    round 3, silently: the decision lookup ignored spreads entirely and the caller
+    then dropped the flag side's spread gaps along with the node.
     """
 
     decisions: set[str] = set()
@@ -2275,15 +2315,23 @@ def _written_manual_action_decisions(*, literal_true: bool = True) -> tuple[set[
             )
             if not marked and not spread_gaps:
                 continue
-            value = _dict_literal_value(node, "decision")
+            # The gaps are reported BEFORE the decision is looked for, and that
+            # order is the round-3 C2 fix.  The old code looked the decision up
+            # first and ``continue``d on a miss, which threw the spread gaps away
+            # with it -- so a node the flag side had explicitly flagged as
+            # unreadable went unreported precisely because its decision was
+            # unreadable too.  Two standards inside one pin: a decision that would
+            # not resolve was loud, a flag that would not resolve was silent.
+            # The five inner ``retry_policy`` sub-dicts this ``continue`` used to
+            # swallow stay quiet on their own merits now, not by being dropped:
+            # scheduler_candidates.py 1674/2732/2852 spread only
+            # ``**_OPERATOR_REENTRY_POLICY``, which RESOLVES against that module's
+            # own constants, and scheduler_state_failure.py 1987/2183 spread
+            # nothing at all.  Either way they contribute no gaps to report.
+            unresolved.extend(f"{where}:{lineno} **spread" for lineno in spread_gaps)
+            value = _dict_decision_value(node, dict_constants=dict_constants)
             if value is None:
                 continue
-            # Only dicts that NAME a decision can hide one, so the spread gaps are
-            # recorded here rather than at the walk: the flag alone sits in the
-            # five inner ``retry_policy`` sub-dicts (scheduler_candidates.py
-            # 1674/2732/2852, scheduler_state_failure.py 1987/2183) whose decision
-            # is one level up, and reporting those would be pure noise.
-            unresolved.extend(f"{where}:{lineno} **spread" for lineno in spread_gaps)
             if not marked:
                 continue
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
@@ -2377,8 +2425,9 @@ def test_the_help_text_names_every_decision_and_every_non_evaluating_reason() ->
         operator_action_listing.NO_MODELS_EVALUATED_REASON,
     ):
         assert reason in help_text, reason
-    # The six scope keys the reason split is keyed on, and the three documented
-    # boundaries of exit 0 (time window, single oldest-cycle slot, inactive models).
+    # The six scope keys the reason split is keyed on, and the four documented
+    # boundaries of exit 0 (time window, single oldest-cycle slot, inactive models,
+    # discovery retraction).
     for key in ("backfill", "operator_filters", "sources", "cycle_window", "counts", "runtime_config"):
         assert key in help_text, key
     assert "--lookback-hours 0" in help_text
@@ -2393,6 +2442,12 @@ def test_the_help_text_names_every_decision_and_every_non_evaluating_reason() ->
     # because `exclusions` structurally can not show that gap.
     assert "model_count" in help_text
     assert "active_model_count" in help_text
+    # The fourth boundary, and the qualifier it puts on the second.  Without the
+    # qualifier, (2) reads as an unconditional promise that an unresolved action is
+    # re-listed every pass -- which is false for a cycle the current configuration
+    # no longer discovers.  Enumeration only, as above: the prose is not asserted.
+    assert "discovery retraction" in help_text
+    assert "Four known boundaries" in help_text
 
 
 def _only_string_tuple_literal(node: ast.AST, where: str) -> tuple[str, ...]:

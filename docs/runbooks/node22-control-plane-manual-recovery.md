@@ -141,7 +141,7 @@ receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candi
   每一趟生产 pass 打成收窄，制造假 `3`。
   命令把这类 pass 以 `scope_narrowed` 计入 `non_evaluating_passes`（它自己范围内的待办照样列出），
   既不清除也不拉响更早那趟隐藏 pass 的警报。**整窗口都是窄范围 pass 时结果是 `3`，不是 `0`**。
-- **`0` 的三条已知边界（已裁决，不是缺陷，但读 `0` 时必须知道）**：
+- **`0` 的四条已知边界（已裁决，不是缺陷，但读 `0` 时必须知道）**：
   1. **时间窗**：`0` 断言的是「这趟 pass 在**它自己的**时间窗
      `[cycle_window.start_time_utc, cycle_window.end_time_utc]` 内没有待办」。生产跑
      `lookback_hours=96` + `cycle_lag_hours=16`，即最近 16 小时的 cycle 不落在任何窗口里。仓内
@@ -151,7 +151,8 @@ receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candi
      （`scheduler_discovery.py:836`），更新的 gap 记为
      `backfill_deferred_waiting_for_prior_cycle`。**不要读得比实际悲观**：`remaining_gaps` 是
      老→新排序（`:733`），被推迟的是**更新的** gap；一条没解决的待办会让它自己那个 cycle 一直是
-     gap、继续占着槽，于是它每趟都被重新求值、重新列出。真正被推迟的是「更新 cycle 上的待办」，
+     gap、继续占着槽，于是——**只要那个 cycle 仍落在后续各趟的发现范围内**（见第 4 条）——它每趟
+     都被重新求值、重新列出。真正被推迟的是「更新 cycle 上的待办」，
      而它们在旧 cycle 清空之前也无法被创建。
      **`blocked_journal_predecessor_identity_quarantine` 不受此限**：断路器释放在 `:824-832`
      完成、逐条证据在 `:844-853` 写出，**都在 `:836` 的单槽切分之前**，且释放的是「从最旧起连续
@@ -170,6 +171,25 @@ receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candi
      查法：直接比 `registry.model_count` 与 `active_model_count` 的差值，别去 `exclusions` 里找。
      2026-09-16 实测每一趟 `model_count = active = runnable = selected = 76`、`exclusions = []`，
      无一例外落差为零——这条边界今天在生产上是空的，但它结构上存在。
+  4. **发现面收回（discovery retraction）**：`0` 对「更早、更宽的配置能看见而当前配置看不见的
+     cycle 上的待办」**不作任何断言**。第 2 条的缓解之所以带「只要 cycle 仍在发现范围内」这个限定，
+     就是因为它依赖**重新发现**，而重新发现跨配置变更不成立：小时过滤
+     （`scheduler_discovery.py:728` 的 `_filter_allowed_cycle_hours`）跑在 `:744` 的单槽
+     `_select_backfill_source_cycles` **之前**，而候选只从本趟已发现的 cycle 构造
+     （`scheduler_candidates.py:257` 的 `for cycle in cycles:`）。于是一个 cycle 的小时离开
+     `allowed_cycle_hours_utc`（或 `lookback_hours` 调小把它移出窗口）之后，它不是被「推迟」，而是
+     **不再被发现 → 不再产生候选 → 它已经列出过的未决待办从 `blocked_candidates` 与
+     `source_cycles` 里同时消失**。
+     **为什么不判**：读侧只看得到当前这趟 pass 自己的配置，仓内不存在「上一次配置是什么」的权威，
+     与第 1、3 条拒绝发明阈值同理。`allowed_cycle_hours_utc` 是**环境变量专有**旋钮
+     （`cli.py` 无对应 flag），要走到这一步需要刻意地把服务环境放宽再收回，不是普通一跑。
+     这条边界**与 `max_cycles_per_source` 无关**（理由同第 2 条：它对 `backfill.enabled=true` 的
+     pass 完全 inert）。
+     **与第 2 条不同，这一条对 `blocked_journal_predecessor_identity_quarantine` 没有豁免**：
+     断路器释放走的是 `_select_backfill_source_cycles` 里**已经过小时过滤**的 `discoveries`
+     （`:728` 在 `:744` 之前），所以被收回的 cycle 对它同样不可见。
+     查法：怀疑收回过就把 `runtime_config.allowed_cycle_hours_utc` 与 `cycle_window.lookback_hours`
+     在窗口内各趟之间比一遍，变过就别把 `0` 读成「全都没待办」。
 - **`0` 的含义是"没有在册的五类待办"，不是"调度器健康"**。本面只认第二步表里那五个 decision 字面；别的
   error_code 再多、再红，它也不会出现在 `operator_actions` 里。实例（#2432）：2026-09-15 13:45 CST
   起 node-22 的 `raw → forcing → runs` 停止推进，2026-09-16 实测最近 20 趟共 760 条 blocked
