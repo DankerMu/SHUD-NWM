@@ -1616,7 +1616,7 @@ def _refuse_confirmed_candidates_off_forecast(
     a non-``Mapping`` value is refused with its own ``malformed_confirmation``
     discriminator -- a fail-closed guard may not admit a block it cannot even
     read.  No writer currently produces a scalar here: both writers
-    (``scheduler_candidates.py:2631-2633`` and ``:2811-2813``) build the block
+    (``scheduler_candidates.py:2632-2633`` and ``:2812-2813``) build the block
     through ``scheduler_generation.operator_reentry_confirmation_evidence``
     (``scheduler_generation.py:1612-1615``), which always returns a ``dict``.
     ``_merge_state_evidence``'s ``else: merged[key] = value`` branch

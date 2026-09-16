@@ -99,7 +99,7 @@ When the §8.7 quarantine breaker is engaged, the scheduler SHALL emit the exist
 
 #### Scenario: A confirmed candidate with no restart stage at all is refused
 - **WHEN** a confirmed candidate reaches the end of the pass carrying no restart stage
-- **THEN** it SHALL be refused by the same check, because the chain would otherwise run from its first stage and reach the reservation only if every stage the operator did not authorize succeeds
+- **THEN** it SHALL be refused by the same check, because a blank top-level key does not mean the chain starts at its first stage — the chain falls back to the manifest's embedded state evidence and then to the restart-from key before resolving — so the guard cannot read a blank key as `forecast`, and refusing is the direction the divergence contract above requires
 
 #### Scenario: A candidate whose confirmation block cannot be read is refused, and one with no block is not
 - **GIVEN** a candidate whose `operator_reentry_confirmation` key holds something that is not a readable confirmation block — a null, a string, a number, a list
