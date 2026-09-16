@@ -23,6 +23,7 @@ from packages.common.forecast_store import (
     PsycopgForecastStore,
     _forecast_response_from_rows,
     _PsycopgTransaction,
+    _ResolvedRuns,
     _spliced_response_from_rows,
     _timeseries_segment_id,
     analysis_window_for_issue_time,
@@ -476,6 +477,9 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         }
         self.latest_analysis_issue_time: datetime | None = _dt("2026-05-07T18:00:00Z")
         self.forecast_fetches: list[dict[str, Any]] = []
+        # #2417: forecast_series converges run identity before reading facts.
+        self.resolve_calls: list[dict[str, Any]] = []
+        self.resolved_runs = _ResolvedRuns((101, 202), ("run_gfs", "run_ifs"))
         self.analysis_rows = [
             {
                 "scenario_id": "analysis_true_field",
@@ -521,6 +525,11 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         del cursor
         return dict(self.latest_cycles)
 
+    def _resolve_run_identity(self, cursor: Any, **kwargs: Any) -> _ResolvedRuns:
+        del cursor
+        self.resolve_calls.append(kwargs)
+        return self.resolved_runs
+
     def _latest_analysis_issue_time(self, cursor: Any, **_kwargs: Any) -> datetime | None:
         del cursor
         return self.latest_analysis_issue_time
@@ -541,12 +550,14 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         identity_filter: Any,
         cycle_times_by_scenario: dict[str, datetime] | None = None,
         end_time: datetime | None = None,
+        resolved_runs: _ResolvedRuns | None = None,
     ) -> list[dict[str, Any]]:
         del cursor, basin_version_id, segment_id, river_network_version_id, scenario_filter, identity_filter, end_time
         self.forecast_fetches.append(
             {
                 "issue_time": issue_time,
                 "cycle_times_by_scenario": cycle_times_by_scenario,
+                "resolved_runs": resolved_runs,
             }
         )
         if cycle_times_by_scenario is None:
@@ -1092,6 +1103,9 @@ def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_
             [{"basin_version_id": "basin_v1"}],
             [{"river_segment_id": "seg_001", "river_network_version_id": "rnv_selected", "properties_json": {}}],
             [{"scenario_id": "forecast_gfs_deterministic", "cycle_time": issue_time}],
+            # #2417: run identity is converged against hydro.hydro_run before the
+            # fact reads, so the resolve answers here.
+            [{"run_key": 101, "run_id": "run_gfs"}],
             [],
             selected_rows,
             [],
@@ -1147,6 +1161,9 @@ def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> N
         [
             [{"basin_version_id": "basin_v1"}],
             [{"river_segment_id": "seg_001", "river_network_version_id": "rnv_selected", "properties_json": {}}],
+            # #2417: the explicit-cycle read with no bound run_id resolves its run
+            # set first, then pushes it into both UNION branches.
+            [{"run_key": 101, "run_id": "run_gfs"}],
             [row],
         ]
     )
@@ -1160,7 +1177,13 @@ def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> N
         scenarios=["GFS", "IFS"],
     )
 
-    statement, parameters = store.cursor.executions[2]
+    resolve_statement, resolve_parameters = store.cursor.executions[2]
+    assert "FROM hydro.hydro_run h" in resolve_statement
+    assert "UNION ALL" not in resolve_statement
+    assert resolve_parameters["resolve_cycle_times"] == [issue_time]
+    statement, parameters = store.cursor.executions[3]
+    assert parameters["pushdown_run_keys"] == [101]
+    assert parameters["pushdown_run_ids"] == ["run_gfs"]
     assert response["series"][0]["scenario_id"] == "forecast_gfs_deterministic"
     assert "{scenario_filter.sql}" not in statement
     assert "LOWER(h.source_id) = ANY(%(scenario_tokens)s)" in statement

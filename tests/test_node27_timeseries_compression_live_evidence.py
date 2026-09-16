@@ -55,6 +55,12 @@ _REAL_GIT_BLOB_BYTES = evidence._git_blob_bytes
 # provenance seam, so the source-level default can be asserted.
 _DEFAULT_PROVENANCE_REPO_ROOT = evidence.PROVENANCE_REPO_ROOT
 _DEFAULT_VERIFIER_REPO_ROOT = evidence.VERIFIER_REPO_ROOT
+# Since #2417 the curve owner converges run identity against the database before
+# it reads the fact table. These fixtures never touch one, so they replay a fixed
+# resolved run set — the same seam the offline verifier uses to re-derive a
+# recorded bundle's curve statement exactly.
+_CURVE_RESOLVED_RUNS = ({"run_key": 4242, "run_id": "fcst_gfs_2026052800_basins_heihe_shud"},)
+_CURVE_RESOLVE = benchmark.seeded_resolve_cursor(_CURVE_RESOLVED_RUNS)
 RECEIPT_SCHEMA = json.loads((ROOT / "schemas/timeseries_compression_receipt.schema.json").read_text(encoding="utf-8"))
 EVIDENCE_SCHEMA = json.loads(
     (ROOT / "schemas/timeseries_compression_live_evidence.schema.json").read_text(encoding="utf-8")
@@ -650,6 +656,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
         issue_time=datetime(2026, 5, 28, tzinfo=UTC),
         end_time=datetime(2026, 6, 4, tzinfo=UTC),
         scenario="gfs",
+        resolve_cursor=_CURVE_RESOLVE,
     )
     mvt_request = {
         "run_id": "run-1",
@@ -3761,6 +3768,7 @@ def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
         issue_time=issue_time,
         end_time=end_time,
         scenario=query["request"]["scenario"],
+        resolve_cursor=_CURVE_RESOLVE,
     )
     query["request"]["issue_time"] = "2026-06-04T00:00:00Z"
     query["request"]["end_time"] = "2026-06-11T00:00:00Z"
@@ -3772,6 +3780,67 @@ def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
     }
     bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "exclusive-end-curve.json", document)
     with pytest.raises(evidence.EvidenceError, match="selected chunk range"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize(
+    ("keys", "ids"),
+    [
+        pytest.param([], [], id="no-run-resolved"),
+        pytest.param([4242, 4243], ["fcst_gfs_2026052800_basins_heihe_shud"], id="misaligned"),
+        pytest.param(["4242"], ["fcst_gfs_2026052800_basins_heihe_shud"], id="key-is-not-a-surrogate"),
+        pytest.param([4242], [""], id="empty-run-id"),
+    ],
+)
+def test_a_curve_whose_recorded_run_identity_is_not_a_production_run_set_is_rejected(
+    tmp_path: Path,
+    keys: list[Any],
+    ids: list[Any],
+) -> None:
+    """#2417: the two resolved bindings are production facts, so they fail closed.
+
+    The offline verifier cannot recompute a run set — it replays the recorded
+    one back through the public owner so everything else stays exactly
+    re-derived. That replay is only sound while the recorded pair is a
+    well-formed, non-empty, aligned run set; ``= ANY('{}')`` in particular would
+    be a benchmark that measured zero rows and a phantom improvement.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    names = list(query["binding"]["parameter_names"])
+    bound = list(query["binding"]["bound_parameters"])
+    bound[names.index("pushdown_run_keys")] = keys
+    bound[names.index("pushdown_run_ids")] = ids
+    query["binding"]["bound_parameters"] = bound
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "unresolved-curve.json", document)
+    with pytest.raises(evidence.EvidenceError, match="resolved production run set"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_a_curve_that_dropped_the_run_identity_pushdown_is_rejected(tmp_path: Path) -> None:
+    """A bundle recorded before #2417 no longer re-derives from the owner.
+
+    The named binding coverage is an exact equality against the CURRENT public
+    owner, so a curve statement without the converged run identity is refused
+    rather than compared loosely — it measured a different plan.
+    """
+    bundle = _bundle(tmp_path)
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    names = list(query["binding"]["parameter_names"])
+    bound = list(query["binding"]["bound_parameters"])
+    for name in ("pushdown_run_ids", "pushdown_run_keys"):
+        index = names.index(name)
+        del names[index]
+        del bound[index]
+    query["binding"] = {"parameter_names": names, "bound_parameters": bound}
+    query["query_text"] = "\n".join(
+        line for line in query["query_text"].splitlines() if "pushdown_run_" not in line
+    )
+    query["query_sha256"] = hashlib.sha256(query["query_text"].encode()).hexdigest()
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "unpushed-curve.json", document)
+    with pytest.raises(evidence.EvidenceError, match="named binding coverage differs"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
@@ -5054,6 +5123,7 @@ def _e2e_benchmarks_document(starts: dict[str, datetime]) -> dict[str, Any]:
         issue_time=datetime(2026, 5, 28, tzinfo=UTC),
         end_time=datetime(2026, 6, 4, tzinfo=UTC),
         scenario="gfs",
+        resolve_cursor=_CURVE_RESOLVE,
     )
     mvt_request = {
         "run_id": "run-1",

@@ -4810,6 +4810,46 @@ def test_a_conjunct_that_merely_holds_an_aid_is_still_accounted_for() -> None:
         _assert_key_predicates_retained(template, stripped, removed_aids, "exists-holder")
 
 
+def test_an_aid_whose_value_is_a_grouped_expression_renders_and_still_protects_its_counterpart() -> None:
+    """``AND rt.run_id = ANY(%(ids)s)`` is a legal aid: its NESTED conjunct leaves with it.
+
+    ``_collect_conjuncts`` walks into every bracket, so an aid whose compared
+    value is grouped contributes ``%(ids)s`` to the legacy census as a conjunct
+    in its own right. That nested conjunct is deleted together with the aid
+    line, and before #2417 the retention check reported it as a lost key
+    predicate — ``the narrow variant lost the predicate '%(ids)s' that is not a
+    transitional aid`` — which made the shape unrenderable.
+
+    The exemption is computed from each aid's OWN text, so it is still exact:
+    the counterpart ``rt.run_key = ANY(%(keys)s)`` shares the ``ANY(...)`` shape
+    but NOT the text, and deleting it is still reported. Without that second
+    half this test would pass for a renderer that exempted every grouped value.
+    """
+    template = f"""
+        SELECT rt.value
+        FROM hydro.river_timeseries rt
+        WHERE rt.river_segment_key = %(segment_key)s
+          {MARKER}
+          AND rt.run_id = ANY(%(ids)s)
+          AND rt.run_key = ANY(%(keys)s)
+          AND rt.valid_time >= %(window_start)s
+    """
+    rendered = render_river_ts_sql(template, "narrow", entry="grouped-aid")
+
+    assert "rt.run_id" not in rendered.sql
+    assert "%(ids)s" not in rendered.sql
+    assert "AND rt.run_key = ANY(%(keys)s)" in rendered.sql
+    assert "AND rt.valid_time >= %(window_start)s" in rendered.sql
+
+    _sql, _placeholders, removed_aids = _strip_aids(template, "grouped-aid")
+    _assert_key_predicates_retained(template, rendered.sql, removed_aids, "grouped-aid")
+
+    mutated = rendered.sql.replace("AND rt.run_key = ANY(%(keys)s)", "", 1)
+    assert mutated != rendered.sql
+    with pytest.raises(RiverTemplateError, match="lost the predicate"):
+        _assert_key_predicates_retained(template, mutated, removed_aids, "grouped-aid")
+
+
 # ---------------------------------------------------------------------------
 # Round-2 review (#1996): an independent reference counter
 # ---------------------------------------------------------------------------

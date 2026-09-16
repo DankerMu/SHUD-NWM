@@ -2581,9 +2581,19 @@ def _assert_key_predicates_retained(
     (review #1996, C8).
     """
     exempt = {_canonical(aid) for aid in removed_aids}
+    # An aid whose compared value is a GROUPED expression (`= ANY(%(keys)s)`)
+    # contributes nested conjuncts of its own to the census — `_collect_conjuncts`
+    # walks into every bracket — and those leave with the aid line. Accounted for
+    # from each aid's OWN text, so the exemption stays an exact statement of what
+    # was deleted; it is still equality, never containment, and therefore does not
+    # reopen the hole review #1996 C8 closed (for every aid whose value is a bare
+    # literal or placeholder this set is the aid itself and nothing more).
+    removed = set(exempt)
+    for aid in removed_aids:
+        removed.update(sql_conjunct_census(aid))
     narrow_conjuncts = sql_conjunct_census(narrow_sql)
     for conjunct, count in sql_conjunct_census(legacy_sql).items():
-        if conjunct in exempt or narrow_conjuncts[conjunct] >= count:
+        if conjunct in removed or narrow_conjuncts[conjunct] >= count:
             continue
         expected = _canonical(_without_aids(conjunct, exempt))
         if expected != conjunct and narrow_conjuncts[expected] >= count:

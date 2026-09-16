@@ -179,7 +179,15 @@ OUTER_CLAUSES = {
 }
 
 
-def assert_spanning_route(sql: str, params: Mapping) -> str:
+def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) -> str:
+    """``legacy_aids`` is 4 exactly when this capture seeded a resolved run set.
+
+    #2417's run-identity convergence adds one marker-guarded ``rt.run_id`` aid to
+    the legacy branch, and only there — the narrow table has no such column and
+    the renderer strips it. Owners whose capture pushes nothing keep the three
+    historical aids, which is why this is a per-call argument and not a new
+    global constant.
+    """
     assert isinstance(params, Mapping)
     assert "%s" not in sql
     assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
@@ -205,7 +213,7 @@ def assert_spanning_route(sql: str, params: Mapping) -> str:
         ):
             assert predicate in branch
         assert not re.search(r"\b(MAX|DISTINCT|ORDER BY|GROUP BY|LIMIT)\b", branch)
-    assert legacy.count(PUSHDOWN_AID_MARKER) == 3
+    assert legacy.count(PUSHDOWN_AID_MARKER) == legacy_aids
     assert "rt.river_segment_id = %(river_segment_id)s" in legacy
     assert "rt.river_network_version_id = %(river_network_version_id)s" in legacy
     assert "rt.variable = 'q_down'" in legacy
@@ -337,12 +345,18 @@ def _forecast_rows():
     ]
 
 
+RESOLVED_RUNS = [
+    {"run_key": 101, "run_id": "run_gfs_2026090106"},
+    {"run_key": 202, "run_id": "run_ifs_2026090100"},
+]
+
+
 def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     cycles = [
         {"scenario_id": "forecast_ifs_deterministic", "cycle_time": IFS},
         {"scenario_id": "forecast_gfs_deterministic", "cycle_time": GFS},
     ]
-    store = SqlCaptureForecastStore(_target_rows() + [cycles, _forecast_rows()])
+    store = SqlCaptureForecastStore(_target_rows() + [cycles, RESOLVED_RUNS, _forecast_rows()])
     response = store.forecast_series(**IDENTITY, issue_time="latest", variables=["q_down"], scenarios=["GFS", "IFS"])
     assert response == {
         "segment_id": "seg_001",
@@ -371,8 +385,10 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     }
     facts = [(sql, params) for sql, params in store.cursor.executions if "hydro.river_timeseries" in sql]
     assert len(facts) == 2
-    for sql, params in facts:
-        assert_spanning_route(sql, params)
+    # The cycle discovery read spans runs by design and pushes nothing (#2424);
+    # the fact read it feeds is the one that converges on a resolved run set.
+    for (sql, params), legacy_aids in zip(facts, (3, 4), strict=True):
+        assert_spanning_route(sql, params, legacy_aids=legacy_aids)
         assert params["scenario_tokens"] == ["gfs", "ifs"]
         assert params["scenario_ids"] == ["forecast_gfs_deterministic", "forecast_ifs_deterministic", "gfs", "ifs"]
     selected = facts[1][1]
@@ -380,6 +396,157 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     assert selected["selected_cycle_0"] == GFS
     assert selected["selected_scenario_1"] == "forecast_ifs_deterministic"
     assert selected["selected_cycle_1"] == IFS
+    # #2417 task 3.2: two scenarios on two DISTINCT cycles. The window pushed into
+    # each UNION branch must be the ENVELOPE over both — the outer window at
+    # `rt.valid_time >= h.cycle_time` is per run and narrows it back. One
+    # scenario's cycle used as both bounds would delete the other's rows, and no
+    # row digest over a single-scenario measurement could see that.
+    assert selected["pushdown_window_start"] == IFS
+    assert selected["pushdown_window_end"] == GFS + timedelta(days=7)
+    assert selected["pushdown_run_keys"] == [101, 202]
+    assert selected["pushdown_run_ids"] == ["run_gfs_2026090106", "run_ifs_2026090100"]
+    # Both scenarios survive the push, at the public response boundary.
+    assert {series["scenario_id"] for series in response["series"]} == {
+        "forecast_gfs_deterministic",
+        "forecast_ifs_deterministic",
+    }
+    resolve = [
+        (sql, params) for sql, params in store.cursor.executions if "FROM hydro.hydro_run h" in sql and "rt" not in sql
+    ]
+    assert len(resolve) == 1
+    assert resolve[0][1]["resolve_cycle_times"] == [IFS, GFS]
+    assert resolve[0][1]["resolve_scenario_ids"] == [
+        "forecast_gfs_deterministic",
+        "forecast_ifs_deterministic",
+    ]
+
+
+def _fact_reads(store):
+    return [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+
+
+def _resolve_reads(store):
+    return [
+        (sql, params)
+        for sql, params in store.cursor.executions
+        if "FROM hydro.hydro_run h" in sql and "UNION ALL" not in sql
+    ]
+
+
+def test_run_identity_is_resolved_once_in_forecast_series_and_never_for_a_bound_run():
+    """#2417 tasks 2.1/2.2: one resolve per request, and none when run_id is bound.
+
+    The bound shape is the D11 capture path — it has no database at capture time
+    — so its push has to be the in-SQL scalar sub-select. The unbound shape is
+    the live frontend one (`apps/frontend/src/stores/forecast.ts` never sends
+    `run_id`) and it resolves.
+    """
+    bound = SqlCaptureForecastStore(_target_rows() + [_forecast_rows()[:1]])
+    bound.forecast_series(
+        **IDENTITY,
+        issue_time="2026-09-01T06:00:00Z",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        run_id="run_gfs_2026090106",
+        model_id="model_a",
+    )
+    assert _resolve_reads(bound) == []
+    facts = _fact_reads(bound)
+    assert len(facts) == 1
+    assert "AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)" in facts[0][0]
+    assert "pushdown_run_keys" not in facts[0][0]
+
+    unbound = SqlCaptureForecastStore(_target_rows() + [RESOLVED_RUNS[:1], _forecast_rows()[:1]])
+    unbound.forecast_series(
+        **IDENTITY,
+        issue_time="2026-09-01T06:00:00Z",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        model_id="model_a",
+    )
+    resolves = _resolve_reads(unbound)
+    assert len(resolves) == 1
+    resolve_sql, resolve_params = resolves[0]
+    # Subset discipline: only predicates the outer layer also applies.
+    assert "h.run_type = 'forecast'" in resolve_sql
+    assert "h.cycle_time = ANY(%(resolve_cycle_times)s)" in resolve_sql
+    assert "h.model_id = %(model_id)s" in resolve_sql
+    for absent in ("basin_version_id", "h.status", "timeseries_store"):
+        assert absent not in resolve_sql
+    assert set(re.findall(r"%\((\w+)\)s", resolve_sql)) <= set(resolve_params)
+
+
+def test_an_empty_run_resolution_still_raises_the_explicit_cycle_404():
+    """#2417 task 3.4: converging run identity must not become a short circuit.
+
+    Returning early on an empty resolve would turn today's 404 RUN_NOT_PUBLISHED
+    into a 200 with an empty series. The empty key set is pushed instead — an
+    empty ``ANY`` array selects nothing, which is exactly what the unpushed query
+    returns when no run matches — and the existing flow produces the same answer.
+    """
+    store = SqlCaptureForecastStore(_target_rows() + [[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.forecast_series(
+            **IDENTITY,
+            issue_time="2026-09-01T06:00:00Z",
+            variables=["q_down"],
+            scenarios=["GFS"],
+        )
+
+    assert error.value.status_code == 404
+    assert error.value.code == "RUN_NOT_PUBLISHED"
+    facts = _fact_reads(store)
+    assert len(facts) == 1, "the fact read must still be issued, not skipped"
+    assert facts[0][1]["pushdown_run_keys"] == []
+    assert facts[0][1]["pushdown_run_ids"] == []
+
+
+def test_an_empty_run_resolution_keeps_the_latest_shape_at_an_empty_200():
+    store = SqlCaptureForecastStore(_target_rows() + [[{"scenario_id": "forecast_gfs_deterministic",
+                                                        "cycle_time": GFS}], [], []])
+
+    response = store.forecast_series(**IDENTITY, issue_time="latest", variables=["q_down"], scenarios=["GFS"])
+
+    assert response["series"] == []
+    assert response["issue_time"] == "2026-09-01T06:00:00Z"
+    # cycle discovery + the pushed fact read; the read is not skipped.
+    assert len(_fact_reads(store)) == 2
+
+
+def test_an_empty_run_resolution_still_splices_the_analysis_curve():
+    """The dangerous half: a short circuit would delete the analysis series too."""
+    analysis = [
+        {
+            "scenario_id": "analysis_true_field",
+            "source_id": "analysis",
+            "valid_time": datetime(2026, 8, 31, 23, tzinfo=UTC),
+            "value": 2,
+            "unit": "m3/s",
+        }
+    ]
+    store = SqlCaptureForecastStore(
+        _target_rows()
+        + [
+            [{"scenario_id": "forecast_gfs_deterministic", "cycle_time": GFS}],
+            [],
+            analysis,
+            [],
+        ]
+    )
+
+    response = store.forecast_series(
+        **IDENTITY,
+        issue_time="latest",
+        variables=["q_down"],
+        scenarios=["GFS"],
+        include_analysis=True,
+    )
+
+    assert [segment["scenario_id"] for segment in response["segments"]] == ["analysis_true_field"]
+    assert response["segments"][0]["data"] == [{"valid_time": "2026-08-31T23:00:00Z", "value": 2.0}]
+    # cycle discovery, analysis rows, forecast rows — all three still executed.
+    assert len(_fact_reads(store)) == 3
 
 
 def test_public_splice_preserves_cross_store_analysis_winner():
@@ -480,7 +647,7 @@ def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload
         ],
     }
     for result_rows in (legacy_rows, narrow_rows):
-        store = SqlCaptureForecastStore(_target_rows() + [result_rows])
+        store = SqlCaptureForecastStore(_target_rows() + [RESOLVED_RUNS[:1], result_rows])
         response = store.forecast_series(
             **IDENTITY,
             issue_time="2026-09-01T06:00:00Z",
@@ -488,7 +655,12 @@ def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload
             scenarios=["GFS"],
         )
         assert response == expected
-        facts = [(sql, params) for sql, params in store.cursor.executions if "hydro.river_timeseries" in sql]
+        facts = [
+            (sql, params)
+            for sql, params in store.cursor.executions
+            if "hydro.river_timeseries" in sql and "UNION ALL" in sql
+        ]
         assert len(facts) == 1
-        outer = assert_spanning_route(*facts[0])
+        outer = assert_spanning_route(*facts[0], legacy_aids=4)
         assert "h.cycle_time = %(issue_time)s" in outer
+        assert facts[0][1]["pushdown_run_keys"] == [101]

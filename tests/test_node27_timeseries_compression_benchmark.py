@@ -127,12 +127,20 @@ def test_blocking_driver_cleanup_cannot_extend_hard_wall() -> None:
     assert time.monotonic() - started < 0.25
 
 
+#: What the curve's run-identity resolve (#2417) finds on the live connection the
+#: capture phase opens for it. The recording cursor cannot answer it: the owner
+#: converges run identity against `hydro.hydro_run` before reading facts, and an
+#: unresolved set would make the measured statement `= ANY('{}')`.
+_RESOLVED_CURVE_RUNS = [{"run_key": 4242, "run_id": "fcst_ifs_2026070500_basins_heihe_shud"}]
+
+
 def _capture(
     *,
     curve_reads: list[int],
     mvt_reads: list[int],
     phase: str = "after",
     curve_scenario: str = "forecast_ifs_deterministic",
+    resolved_runs: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[_FakeConnection]]:
     curve_cursor = _FakeCursor(
         result_rows=[
@@ -159,7 +167,12 @@ def _capture(
     )
     curve_monitor = _FakeCursor(result_rows=[], plan_reads=[])
     mvt_monitor = _FakeCursor(result_rows=[], plan_reads=[])
+    resolve_cursor = _FakeCursor(
+        result_rows=_RESOLVED_CURVE_RUNS if resolved_runs is None else resolved_runs,
+        plan_reads=[],
+    )
     connections = [
+        _FakeConnection(resolve_cursor),
         _FakeConnection(curve_cursor),
         _FakeConnection(curve_monitor),
         _FakeConnection(mvt_cursor),
@@ -221,6 +234,8 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
         "basin_version_id",
         "end_time",
         "issue_time",
+        "pushdown_run_ids",
+        "pushdown_run_keys",
         "river_network_version_id",
         "river_segment_id",
         "scenario_ids",
@@ -230,14 +245,25 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
         "basin-heihe-v1",
         "2026-07-12T00:00:00Z",
         "2026-07-05T00:00:00Z",
+        ["fcst_ifs_2026070500_basins_heihe_shud"],
+        [4242],
         "heihe-network-v1",
         "heihe_shud_riv_000001",
         scenario_ids,
         scenario_tokens,
     ]
+    # The run set really came off the live resolve connection, not the recorder.
+    resolve_statements = [
+        statement
+        for statement, _parameters in connections[0].fake_cursor.executions
+        if "FROM hydro.hydro_run h" in statement
+    ]
+    assert len(resolve_statements) == 1
+    assert "h.cycle_time = ANY(%(resolve_cycle_times)s)" in resolve_statements[0]
+    assert connections[0].closed
     curve_executions = [
         (statement, parameters)
-        for statement, parameters in connections[0].fake_cursor.executions
+        for statement, parameters in connections[1].fake_cursor.executions
         if "FROM hydro.river_timeseries rt" in statement
     ]
     assert len(curve_executions) == 11  # result query, cold, two warmups, seven measurements
@@ -247,6 +273,8 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
             "basin_version_id": "basin-heihe-v1",
             "end_time": datetime(2026, 7, 12, tzinfo=UTC),
             "issue_time": datetime(2026, 7, 5, tzinfo=UTC),
+            "pushdown_run_ids": ["fcst_ifs_2026070500_basins_heihe_shud"],
+            "pushdown_run_keys": [4242],
             "river_network_version_id": "heihe-network-v1",
             "river_segment_id": "heihe_shud_riv_000001",
             "scenario_ids": scenario_ids,
@@ -269,16 +297,16 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
     )
     assert all(
         connection.session == {"isolation_level": "REPEATABLE READ", "readonly": True, "autocommit": False}
-        for connection in (connections[0], connections[2])
+        for connection in (connections[0], connections[1], connections[3])
     )
     assert all(
-        connection.session == {"readonly": True, "autocommit": True} for connection in (connections[1], connections[3])
+        connection.session == {"readonly": True, "autocommit": True} for connection in (connections[2], connections[4])
     )
-    assert all(connection.rolled_back and connection.closed for connection in (connections[0], connections[2]))
-    assert all(connection.closed for connection in (connections[1], connections[3]))
+    assert all(connection.rolled_back and connection.closed for connection in (connections[1], connections[3]))
+    assert all(connection.closed for connection in (connections[2], connections[4]))
     mvt_statements = [
         statement
-        for statement, _parameters in connections[2].fake_cursor.executions
+        for statement, _parameters in connections[3].fake_cursor.executions
         if "hydro.river_timeseries ts" in statement
     ]
     assert mvt_statements
@@ -586,6 +614,9 @@ def test_cli_failure_is_generic_does_not_publish_or_leak_secret(
 
 
 def test_partial_connection_acquisition_closes_primary() -> None:
+    # Call 1 is the curve's run-identity resolve connection (#2417); the curve
+    # primary is call 2 and the monitor it fails to acquire is call 3.
+    resolve = _FakeConnection(_FakeCursor(result_rows=_RESOLVED_CURVE_RUNS, plan_reads=[]))
     primary = _FakeConnection(_FakeCursor(result_rows=[], plan_reads=[]))
     calls = 0
 
@@ -593,12 +624,36 @@ def test_partial_connection_acquisition_closes_primary() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
+            return resolve
+        if calls == 2:
             return primary
         raise RuntimeError("monitor unavailable")
 
     with pytest.raises(RuntimeError, match="monitor unavailable"):
         benchmark.capture_benchmark_phase(**_inputs(), connect=connect)
+    assert resolve.closed is True
     assert primary.closed is True
+
+
+def test_capture_refuses_a_curve_whose_run_identity_resolves_to_nothing() -> None:
+    """An empty resolve makes the measured statement `= ANY('{}')` — a phantom win.
+
+    The benchmark must refuse rather than publish a zero-row "improvement", and it
+    must refuse before it opens the measured connections.
+    """
+    resolve = _FakeConnection(_FakeCursor(result_rows=[], plan_reads=[]))
+    calls = 0
+
+    def connect(_database_url: str) -> _FakeConnection:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return resolve
+        pytest.fail("an unresolved curve run set must not reach the measured connections")
+
+    with pytest.raises(benchmark.BenchmarkCaptureError, match="matched no production run"):
+        benchmark.capture_benchmark_phase(**_inputs(), connect=connect)
+    assert resolve.closed is True
 
 
 def test_monitor_connect_failure_bounds_blocking_primary_close() -> None:

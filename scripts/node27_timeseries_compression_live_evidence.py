@@ -2819,6 +2819,10 @@ def _validate_benchmarks(
                 "end_time",
                 "scenario_ids",
                 "scenario_tokens",
+                # #2417: the run identity the owner converged before reading the
+                # fact table, pushed down on both the text and the key column.
+                "pushdown_run_ids",
+                "pushdown_run_keys",
             }
             # The curve query filters on the surrogate keys and the enum since
             # #1442; the bindings stay text (required_parameter_names above), the
@@ -2877,6 +2881,7 @@ def _validate_benchmarks(
             from scripts.node27_timeseries_compression_benchmark import (
                 _curve_query_and_binding,
                 _json_value,
+                seeded_resolve_cursor,
             )
 
             _require_exact_keys(
@@ -2890,14 +2895,6 @@ def _validate_benchmarks(
                     "scenario",
                 },
                 "benchmark curve request",
-            )
-            expected_query, expected_names, expected_parameters = _curve_query_and_binding(
-                basin_version_id=str(request["basin_version_id"]),
-                river_segment_id=str(request["river_segment_id"]),
-                river_network_version_id=str(request["river_network_version_id"]),
-                issue_time=_parse_utc(request["issue_time"], "curve request issue_time"),
-                end_time=_parse_utc(request["end_time"], "curve request end_time"),
-                scenario=str(request["scenario"]),
             )
             _require_exact_keys(
                 binding,
@@ -2916,6 +2913,38 @@ def _validate_benchmarks(
                 or re.search(r"(?<!%)%s", str(query["query_text"]))
             ):
                 raise EvidenceError("benchmark curve named binding coverage differs from the query")
+            # Since #2417 the curve owner converges run identity against the
+            # database before it reads the fact table, so two of the bindings
+            # are production facts this offline verifier cannot recompute. It
+            # replays the RECORDED pair back into the owner instead of relaxing
+            # the comparison: the statement text, the parameter order and every
+            # other bound value stay re-derived exactly, and the recorded pair
+            # is still required to be a well-formed, non-empty, aligned run set
+            # that the owner itself places in those slots.
+            recorded = dict(zip(parameter_names, bound_parameters, strict=True))
+            recorded_keys = _require_list(recorded["pushdown_run_keys"], "benchmark curve pushdown_run_keys")
+            recorded_ids = _require_list(recorded["pushdown_run_ids"], "benchmark curve pushdown_run_ids")
+            if (
+                not recorded_keys
+                or len(recorded_keys) != len(recorded_ids)
+                or any(not isinstance(key, int) or isinstance(key, bool) for key in recorded_keys)
+                or any(not isinstance(run_id, str) or not run_id for run_id in recorded_ids)
+            ):
+                raise EvidenceError("benchmark curve did not record a resolved production run set")
+            expected_query, expected_names, expected_parameters = _curve_query_and_binding(
+                basin_version_id=str(request["basin_version_id"]),
+                river_segment_id=str(request["river_segment_id"]),
+                river_network_version_id=str(request["river_network_version_id"]),
+                issue_time=_parse_utc(request["issue_time"], "curve request issue_time"),
+                end_time=_parse_utc(request["end_time"], "curve request end_time"),
+                scenario=str(request["scenario"]),
+                resolve_cursor=seeded_resolve_cursor(
+                    [
+                        {"run_key": key, "run_id": run_id}
+                        for key, run_id in zip(recorded_keys, recorded_ids, strict=True)
+                    ]
+                ),
+            )
             if (
                 query["query_text"] != expected_query
                 or parameter_names != expected_names

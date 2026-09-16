@@ -162,9 +162,10 @@ class _RecordingCursor:
 class _CaptureForecastStore(PsycopgForecastStore):
     """Recording adapter that exercises the public forecast-series owner."""
 
-    def __init__(self, cursor: _RecordingCursor) -> None:
+    def __init__(self, cursor: _RecordingCursor, resolve_cursor: Callable[[], Any]) -> None:
         super().__init__("recording-only")
         object.__setattr__(self, "_capture_cursor", cursor)
+        object.__setattr__(self, "_resolve_cursor", resolve_cursor)
 
     @contextmanager
     def _transaction(self):  # type: ignore[no-untyped-def]
@@ -174,6 +175,20 @@ class _CaptureForecastStore(PsycopgForecastStore):
         # Target existence is a separate production query. The benchmark is
         # recording the public curve-owner's primary timeseries statement.
         return None
+
+    def _resolve_run_identity(self, cursor: Any, **kwargs: Any) -> Any:
+        """Resolve the curve's run set against a LIVE connection, not the recorder.
+
+        The owner drives the unbound explicit-cycle read, which converges run
+        identity before touching the fact table. The recording cursor returns no
+        rows, so the production resolve would yield an empty key set and the
+        benchmark would end up timing ``= ANY('{}')`` — a phantom win. The
+        override therefore resolves through the caller's ``connect`` factory (the
+        render site holds no connection of its own: ``_curve_query_and_binding``
+        runs before ``_capture_with_connections`` acquires any).
+        """
+        with self._resolve_cursor() as live_cursor:
+            return super()._resolve_run_identity(live_cursor, **kwargs)
 
 
 def _utc(value: str) -> datetime:
@@ -227,20 +242,34 @@ def _file_ref(path: Path) -> dict[str, Any]:
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
 
 
-def _curve_query_and_binding(
+#: Exact placeholder set of the production curve statement. `pushdown_run_keys`
+#: and `pushdown_run_ids` arrived with #2417's run-identity convergence; the
+#: check is an exact equality, so additive bindings must be declared here.
+_CURVE_PLACEHOLDER_NAMES = {
+    "basin_version_id",
+    "end_time",
+    "issue_time",
+    "pushdown_run_ids",
+    "pushdown_run_keys",
+    "river_network_version_id",
+    "river_segment_id",
+    "scenario_ids",
+    "scenario_tokens",
+}
+
+
+def _record_curve_query(
     *,
     basin_version_id: str,
     river_segment_id: str,
     river_network_version_id: str,
     issue_time: datetime,
-    end_time: datetime,
     scenario: str,
-) -> tuple[str, list[str], tuple[Any, ...]]:
-    if end_time != issue_time + timedelta(days=7):
-        raise BenchmarkCaptureError("public curve owner supports the frozen seven-day window only")
+    resolve_cursor: Callable[[], Any],
+) -> tuple[str, Mapping[str, Any]]:
     cursor = _RecordingCursor()
     try:
-        _CaptureForecastStore(cursor).forecast_series(
+        _CaptureForecastStore(cursor, resolve_cursor).forecast_series(
             basin_version_id=basin_version_id,
             segment_id=river_segment_id,
             river_network_version_id=river_network_version_id,
@@ -267,21 +296,93 @@ def _curve_query_and_binding(
     placeholder_names = set(re.findall(r"(?<!%)%\(([^)]+)\)s", query_text))
     if (
         re.search(r"(?<!%)%s", query_text)
-        or placeholder_names != {
-            "basin_version_id",
-            "end_time",
-            "issue_time",
-            "river_network_version_id",
-            "river_segment_id",
-            "scenario_ids",
-            "scenario_tokens",
-        }
+        or placeholder_names != _CURVE_PLACEHOLDER_NAMES
         or any(not isinstance(name, str) or not name for name in parameters)
         or placeholder_names != set(parameters)
     ):
         raise BenchmarkCaptureError("production curve SQL named binding coverage changed")
+    return query_text, parameters
+
+
+def _curve_query_and_binding(
+    *,
+    basin_version_id: str,
+    river_segment_id: str,
+    river_network_version_id: str,
+    issue_time: datetime,
+    end_time: datetime,
+    scenario: str,
+    resolve_cursor: Callable[[], Any],
+) -> tuple[str, list[str], tuple[Any, ...]]:
+    if end_time != issue_time + timedelta(days=7):
+        raise BenchmarkCaptureError("public curve owner supports the frozen seven-day window only")
+    # Two passes, and the ordering is the point (#2417). The first runs with a
+    # seeded-empty resolver and touches NO database, so every statement-shape
+    # refusal still happens before a connection is acquired — the property
+    # `test_capture_refuses_*_before_connecting` pins. The SQL TEXT and the
+    # placeholder set do not depend on the resolved values, so the second pass,
+    # which does reach the database through the caller's `connect` factory,
+    # produces the identical statement with the real bindings.
+    shape_query, _shape_parameters = _record_curve_query(
+        basin_version_id=basin_version_id,
+        river_segment_id=river_segment_id,
+        river_network_version_id=river_network_version_id,
+        issue_time=issue_time,
+        scenario=scenario,
+        resolve_cursor=_empty_resolve_cursor,
+    )
+    query_text, parameters = _record_curve_query(
+        basin_version_id=basin_version_id,
+        river_segment_id=river_segment_id,
+        river_network_version_id=river_network_version_id,
+        issue_time=issue_time,
+        scenario=scenario,
+        resolve_cursor=resolve_cursor,
+    )
+    if query_text != shape_query:
+        raise BenchmarkCaptureError("production curve SQL text depends on the resolved run set")
+    if not parameters["pushdown_run_keys"]:
+        # An empty key set is a legitimate production answer, but it makes the
+        # measured statement `= ANY('{}')` — zero rows and a phantom improvement.
+        raise BenchmarkCaptureError("curve run-identity resolution matched no production run")
     names = sorted(parameters)
     return query_text, names, tuple(parameters[name] for name in names)
+
+
+class _SeededResolveCursor:
+    """A cursor that answers the resolve from a fixed row list, offline.
+
+    Two callers: the shape pass seeds it empty (no database, so every
+    statement-shape refusal still precedes connection acquisition), and the
+    offline verifier in ``node27_timeseries_compression_live_evidence`` seeds it
+    with the run identity a recorded bundle already carries, so the bundle's
+    curve statement can be re-derived from the public owner EXACTLY rather than
+    approximately.
+    """
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._rows = [dict(row) for row in rows]
+
+    def execute(self, statement: str, parameters: Any) -> None:
+        return None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows]
+
+
+@contextmanager
+def _empty_resolve_cursor():  # type: ignore[no-untyped-def]
+    yield _SeededResolveCursor(())
+
+
+def seeded_resolve_cursor(rows: Sequence[Mapping[str, Any]]) -> Callable[[], Any]:
+    """A resolve-cursor factory replaying ``rows`` (``run_key``/``run_id`` maps)."""
+
+    @contextmanager
+    def acquire():  # type: ignore[no-untyped-def]
+        yield _SeededResolveCursor(rows)
+
+    return acquire
 
 
 def _named_to_pyformat(statement: str) -> str:
@@ -630,6 +731,38 @@ def _capture_with_connections(
     )
 
 
+def _live_resolve_cursor(
+    *,
+    connect: Callable[[str], Any],
+    database_url: str,
+    deadline: _Deadline,
+) -> Callable[[], Any]:
+    """A short-lived read-only cursor for the curve's run-identity resolve.
+
+    Its own connection, acquired and released inside the same wall as the phase:
+    the render site has none, and the measured connections must not carry an
+    extra statement into their plan/warmup accounting.
+    """
+
+    @contextmanager
+    def acquire():  # type: ignore[no-untyped-def]
+        deadline.remaining("curve run-identity resolve connection")
+        remaining = max(1, math.ceil(deadline.remaining("curve run-identity resolve connect bound")))
+        if connect is _default_connect:
+            connection = connect(database_url, connect_timeout=min(CONNECT_TIMEOUT_SECONDS, remaining))
+        else:
+            connection = connect(database_url)
+        try:
+            connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
+            cursor = connection.cursor()
+            _set_statement_bounds(cursor, deadline=deadline)
+            yield cursor
+        finally:
+            _bounded_connection_cleanup(deadline, connection)
+
+    return acquire
+
+
 def capture_benchmark_phase(
     *,
     database_url: str,
@@ -661,6 +794,7 @@ def capture_benchmark_phase(
         issue_time=curve_issue_time,
         end_time=curve_end_time,
         scenario=curve_scenario,
+        resolve_cursor=_live_resolve_cursor(connect=connect, database_url=database_url, deadline=deadline),
     )
     mvt_query = postgis_tile_sql("hydro")
     mvt_binding = _postgis_tile_params(

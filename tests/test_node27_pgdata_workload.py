@@ -375,6 +375,42 @@ def test_shipping_named_capture_preserves_unique_mapping_and_reaches_explain() -
     assert passed is not parameters
 
 
+def test_d11_capture_keeps_the_bound_run_pushdown_self_contained() -> None:
+    """#2417 task 3.9: the D11 receipt path survives run-identity convergence.
+
+    ``scripts/node27_pgdata_workload.py`` captures this statement at :127, before
+    it opens a connection at :140, so the bound-run push MUST stay an in-SQL
+    scalar sub-select: a resolve-then-push shape would resolve zero runs against
+    the unseeded ``_RecordingCursor`` and every outcome loses the receipt
+    (``QUERY_PRIMARY_INVALID`` / ``PLAN_NO_ROWS`` / ``PLAN_BUFFERS_EXCEEDED``).
+    """
+    recorded = record_explicit_cycle_curve(
+        basin_version_id=BV,
+        segment_id=SEGMENT,
+        river_network_version_id=RNV,
+        issue_time=ISSUE,
+        run_id=RUN,
+        model_id=MODEL,
+        source="GFS",
+    )
+    sql = recorded["sql"]
+
+    # Exactly one primary statement, and the push is inside it — no resolve call.
+    assert sql.count("UNION ALL") == 1
+    assert "AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)" in sql
+    assert "AND rt.run_id = %(run_id)s" in sql
+    assert "pushdown_run_keys" not in sql
+    assert "resolve_cycle_times" not in sql
+    # The run set is bound by the caller's own identity, not by a resolved array,
+    # so the EXPLAIN is not vacuous.
+    assert recorded["parameters"]["run_id"] == RUN
+    # The outer identity equalities `_REQUIRED_EQUALS` demands are still there:
+    # the pushdown is additive.
+    for predicate in ("h.cycle_time = %(issue_time)s", "h.run_id = %(run_id)s", "h.model_id = %(model_id)s"):
+        assert predicate in sql
+    assert validate_captured_explicit_cycle_query(sql, recorded["parameters"], _identity()) == recorded["parameters"]
+
+
 def test_named_validator_accepts_arbitrary_order_and_repeated_issue_name() -> None:
     first = _named_parameters()
     second = {key: first[key] for key in reversed(tuple(first))}
