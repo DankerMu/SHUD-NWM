@@ -1,0 +1,224 @@
+{
+  "schema_version": "1.0",
+  "operation": "openspec archive compressed-chunk-cold-tablespace-tiering --skip-specs --yes",
+  "validation_bypass": false,
+  "archive_path": "openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering",
+  "survivor_requirements": [
+    {
+      "capability": "c4-live-display-evidence",
+      "requirement": "私有闭集证据接受链",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "ci-contract-baseline",
+      "requirement": "every node-27 service unit change MUST reach the sibling systemd.err lane set pin",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": false,
+      "disposition": "Applied by PR2376; canonical omits deleted test-name negatives, and governance sampling belongs to the surviving resource-governance suite selected at scripts/select_ci_tests.py:3564-3565. No retired target retained."
+    },
+    {
+      "capability": "ci-contract-baseline",
+      "requirement": "node-27 unit files with a content-asserting owner suite MUST select that suite",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": false,
+      "disposition": "Applied by PR2376; canonical omits deleted test-name negatives, and governance sampling belongs to the surviving resource-governance suite selected at scripts/select_ci_tests.py:3564-3565. No retired target retained."
+    },
+    {
+      "capability": "hypertable-compression",
+      "requirement": "Recurring tiering functions SHALL run as the hypertable owner role, never as superuser",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "hypertable-compression",
+      "requirement": "Normal compression SHALL launch safely without cold configuration",
+      "canonical_present": true,
+      "exact_block_match": true,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "node27-pgdata-relocation",
+      "requirement": "Placement-aware observation and truthful evidence",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "node27-pgdata-relocation",
+      "requirement": "PGDATA relocation SHALL own its retained command, container and evidence behavior",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "node27-pgdata-relocation",
+      "requirement": "Retained SQL performance evidence SHALL keep query identity",
+      "canonical_present": true,
+      "exact_block_match": true,
+      "whitespace_insensitive_match": true,
+      "disposition": "Applied; identical requirement after ignoring formatting whitespace."
+    },
+    {
+      "capability": "runtime-service-role-boundary",
+      "requirement": "node-27 write-path components SHALL authenticate as non-superuser roles provisioned idempotently",
+      "canonical_present": true,
+      "exact_block_match": false,
+      "whitespace_insensitive_match": false,
+      "disposition": "Applied by PR2376; canonical uses production-database wording and formatted CREATE/DROP, retains all role-security scenarios and explicit no live REVOKE/DROP authorization."
+    }
+  ],
+  "withdrawn_capability": {
+    "name": "compressed-chunk-cold-residency",
+    "canonical_exists": false,
+    "disposition": "Do not promote either withdrawn cold enablement or temporary retirement-only ADDED delta into a canonical capability."
+  },
+  "removed_capability": {
+    "name": "explicit-cycle-query-binding",
+    "canonical_exists": false,
+    "disposition": "Three G7-only requirements and empty canonical capability removed by PR2376; never recreate during archive."
+  },
+  "historical_evidence": "Move unchanged; original completed delivery ledger remains historical, G0-G8 remains withdrawn, no new PASS interpretation. Only active closeout tasks and authority markers updated.",
+  "source_retirement": "PR2376 merge7f5d720f4cbe57b4953f39828429e3063f8b7d60",
+  "authority_alignment": "PR2378 merge9548148104a7980898d6dbf56e2e953359c4687a",
+  "effective_handoff": "retirement-effective-handoff.json",
+  "review_status": "CLEAN: independent spec-compliance/invariant-state and test-evidence/integration seats; final administrative metadata rebind in closeout PR.",
+  "validation_status": "PASS: retirement change and all five surviving canonical specs strict/no-interactive",
+  "validation": [
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "compressed-chunk-cold-tablespace-tiering",
+        "--type",
+        "change",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Change 'compressed-chunk-cold-tablespace-tiering' is valid\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "c4-live-display-evidence",
+        "--type",
+        "spec",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Specification 'c4-live-display-evidence' is valid\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "ci-contract-baseline",
+        "--type",
+        "spec",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Specification 'ci-contract-baseline' is valid\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "hypertable-compression",
+        "--type",
+        "spec",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Specification 'hypertable-compression' is valid\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "node27-pgdata-relocation",
+        "--type",
+        "spec",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Specification 'node27-pgdata-relocation' is valid\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "openspec",
+        "validate",
+        "runtime-service-role-boundary",
+        "--type",
+        "spec",
+        "--strict",
+        "--no-interactive"
+      ],
+      "exit": 0,
+      "stdout": "Specification 'runtime-service-role-boundary' is valid\n",
+      "stderr": ""
+    }
+  ],
+  "archive_execution": {
+    "exit": 0,
+    "spec_updates": "skipped",
+    "no_validate_used": false,
+    "canonical_sha256_unchanged": {
+      "c4-live-display-evidence": "1614870672449df96db03162086e8dcbbae31ef3696e543d45cc77afe1c037f0",
+      "ci-contract-baseline": "fa07311cd8afbc53ae7aea4fe9a9b18a9625dedd38d08c4c70a03427e4095698",
+      "hypertable-compression": "afaca9eef0b0635083facae643c152160bdb80f49dad9ad9ed5923f6bb0d49e4",
+      "node27-pgdata-relocation": "8004f49128024aa05eb8adf91e42a22406cd825641deaad0c837843b43ee94e2",
+      "runtime-service-role-boundary": "f7c8b1b1859b7d79327bbca73771b6496a795935997befcb3102306da0192b09"
+    },
+    "committed_history_and_delta_files_preserved": 92,
+    "all_git_blob_identities_match": true,
+    "warnings": [
+      "Proposal heuristic warnings: SHALL/MUST/scenario detection and >10 deltas; strict change validation had passed.",
+      "53/55 tasks at archive command: only administrative R4.4 review and R5.3 disposition remained; no implementation/deployment task pending. --yes acknowledged task warning."
+    ],
+    "original_active_path_absent": true,
+    "withdrawn_or_removed_capability_created": false
+  },
+  "reviews": [
+    {
+      "seat": "RetirementArchiveSpecReview",
+      "verdict": "CLEAN",
+      "reviewed_commit": "f9c6cf39a5db69cda05979b40508d3bda8c9e11b",
+      "lenses": [
+        "spec-compliance",
+        "invariant-state"
+      ],
+      "findings": []
+    },
+    {
+      "seat": "RetirementArchiveEvidenceReview",
+      "verdict": "CLEAN",
+      "reviewed_commit": "f9c6cf39a5db69cda05979b40508d3bda8c9e11b",
+      "lenses": [
+        "test-evidence",
+        "integration"
+      ],
+      "findings": []
+    }
+  ]
+}

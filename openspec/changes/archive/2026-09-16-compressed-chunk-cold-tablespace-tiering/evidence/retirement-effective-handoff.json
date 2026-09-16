@@ -1,0 +1,537 @@
+{
+  "schema_version": "1.0",
+  "scope": "R5.2 effective maintenance handoff; not selective-cold rollout or maintenance execution PASS",
+  "effective_observation": {
+    "observed_at": "2026-09-16T04:08:38.715244+00:00",
+    "phase": "committed",
+    "started_at": "2026-09-16T04:07:45.288708+00:00",
+    "finished_at": "2026-09-16T04:07:55.502328+00:00",
+    "driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+    "source_sha": "9548148104a7980898d6dbf56e2e953359c4687a",
+    "source_root": "/home/nwm/NWM-maintenance-reviewed-95481481",
+    "business_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+    "runtime_tree_sha256": "ca52c0c4325060a2cba4e44dbf0d9a0cf87aabe49c34a93f01219335ac136e09",
+    "units": {
+      "nhms-node27-autopipe.timer": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "waiting",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-autopipe.timer",
+        "DropInPaths": "",
+        "UnitFileState": "enabled",
+        "Job": "",
+        "NeedDaemonReload": "no",
+        "InvocationID": "eec00364ad6b4c8983e0aca3943f6961"
+      },
+      "nhms-node27-timeseries-compression.timer": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "waiting",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.timer",
+        "DropInPaths": "",
+        "UnitFileState": "enabled",
+        "Job": "",
+        "NeedDaemonReload": "no",
+        "InvocationID": "dfbbcea16f804eed90c9bee34eedc9fe"
+      },
+      "nhms-node27-timeseries-retention.timer": {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "waiting",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.timer",
+        "DropInPaths": "",
+        "UnitFileState": "enabled",
+        "Job": "",
+        "NeedDaemonReload": "no",
+        "InvocationID": "769bcffcdd7c469cb748f34552f78a1c"
+      },
+      "nhms-node27-timeseries-compression.service": {
+        "TimeoutStartUSec": "1h 5min 41s",
+        "MainPID": "0",
+        "ControlPID": "0",
+        "ExecMainStartTimestampMonotonic": "2304135127749",
+        "ExecStartPre": "{ path=/home/nwm/NWM-maintenance-reviewed-95481481/.venv/bin/python ; argv[]=/home/nwm/NWM-maintenance-reviewed-95481481/.venv/bin/python -E /home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_budget_preflight.py --compression-env /home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env --check ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+        "ExecStart": "{ path=/home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_compression_once.sh ; argv[]=/home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_compression_once.sh --enforce ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+        "WorkingDirectory": "/home/nwm/NWM-maintenance-reviewed-95481481",
+        "LoadState": "loaded",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "FragmentPath": "/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service",
+        "DropInPaths": "",
+        "UnitFileState": "static",
+        "Job": "",
+        "NeedDaemonReload": "no",
+        "InvocationID": "85f695cdef4041658ba588a5ddcfd783"
+      },
+      "nhms-node27-timeseries-compression-replay.service": {
+        "TimeoutStartUSec": "1min 30s",
+        "MainPID": "0",
+        "ControlPID": "0",
+        "ExecMainStartTimestampMonotonic": "0",
+        "WorkingDirectory": "",
+        "LoadState": "not-found",
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "FragmentPath": "",
+        "DropInPaths": "",
+        "UnitFileState": "",
+        "Job": "",
+        "NeedDaemonReload": "no",
+        "InvocationID": ""
+      }
+    },
+    "original_comp_deadline_us": 1789532700000000,
+    "deadline_unchanged": true,
+    "protected_file_count": 92,
+    "protected_identities_unchanged": true,
+    "archive_identities_unchanged": true,
+    "replay_disposition": "absent-approved",
+    "old_cold_env_absent": true,
+    "owned_fences_absent": true,
+    "active_env_path": "/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env",
+    "active_env_identity": {
+      "dev": 64769,
+      "ino": 87176745,
+      "mode": 384,
+      "uid": 1005,
+      "size": 638,
+      "mtime_ns": 1789529519452925702,
+      "sha256": "fac81d0eee4bf14ba96014d81bb7ed1d96918b942fd10698209aa330b4c93a06"
+    },
+    "origin": {
+      "runner": "/home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_compression.py",
+      "python": "/home/nwm/NWM-maintenance-reviewed-95481481/.venv/bin/python",
+      "working_directory": "/home/nwm/NWM-maintenance-reviewed-95481481",
+      "budget": [
+        3900,
+        3941,
+        3600000,
+        4
+      ],
+      "launch_executed": false
+    },
+    "maintenance_services_started": false,
+    "data_schema_roles_changed": false,
+    "scope": "read-only effective configuration, source/runtime identity and preserved evidence validation; no maintenance tick or DB operation"
+  },
+  "authorization": {
+    "controlled_handoff": "Previously authorized conditionally; old issue1987 pin released and configs reconciled",
+    "replay": "User explicitly selected 归档旧 replay 部署实例 after historical recovery disposition was found in PR1085. Archive installed one-off unit as absent-approved; preserve source/templates and ALL private replay env/plan/ledger/terminal/consumed-finalizer/recovery evidence unchanged; any new replay requires separate authorization.",
+    "timer_boundary": "User required AutoPipe/compression/retention paused until reparse ends. Owner receipt now records result=complete, exhausted, not_dispatched=0 and no in-window legacy routes; verify.out reports pass50. Existing owner restored all three at2026-09-15T20:18:29Z. Main did not start them. Preserve observed active/enabled states, only temporarily stop/restart compression timer inside the controlled switch, with >600s next-deadline guard and unchanged deadline check. No maintenance service start, no autopipe/retention control.",
+    "lock": "User reports lock released; do not re-probe for confirmation. Acquire the canonical nonblocking lifecycle mutex at actual mutation as a race guard. Fail closed on new contention. Never unlink or replace the mutex."
+  },
+  "review": {
+    "driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+    "fix_passes": 1,
+    "verdict": "CLEAN",
+    "seats": [
+      {
+        "lens": "correctness",
+        "verdict": "CLEAN",
+        "driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+        "reviewed_artifacts": [
+          ".workplans/epic-1891/r5_effective_handoff.py",
+          ".workplans/epic-1891/r5-approved-effective-handoff-plan.json",
+          "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:328-334",
+          "r5-fix1-prepare-output.txt",
+          "r5-fix1-prepared-manifest.json",
+          "r5-staged-runtime-fingerprint.json",
+          "r5-fix1-files-proof.txt",
+          "r5-fix1-runtime-proof.txt",
+          "r5-fix1-native-green-proof.txt",
+          "r5-fix1-native-r1-red-proof.txt"
+        ],
+        "summary": "FIX PASS 1 driver 08ae93d2613d closes the independently CONFIRMED R1 correctness failures and implements prepare/apply/rollback caller closure, SOURCE/env bootstrap, 3600000/3900/3941/4 budgets, and the named success conditions. No new P0/P1/P2 correctness defect on this SHA. R1 failure is not counted as approval. No production apply.",
+        "findings": [],
+        "scope": "Changed functions/call sites on r5_effective_handoff.py SHA08ae93d2613d and named FIX1 proofs/manifest only. Inherited safe_fs/lifecycle semantics treated as documented. Unchanged library internals, old incidents, and production apply are out of scope.",
+        "r1_closure": [
+          {
+            "id": "stop-bookkeeping-gap",
+            "r1": "CONFIRMED",
+            "fix1": "stop_compression_timer persists compression_stop_intent then stops; restore_compression_timer reconciles observed ActiveState/deadline to admitted baseline. Native green: handled SIGTERM after real stop restores timer active, phase=rolled-back. R1 red: timer inactive, false rolled-back."
+          },
+          {
+            "id": "late-source-refusal-unfenced",
+            "r1": "CONFIRMED",
+            "fix1": "rollback_entry_barriers stop+fence before business/source/foreign identity gates. Native green: late refusal leaves timer inactive, typed false fence effective, phase=rollback-required. R1 red: unfenced/active."
+          },
+          {
+            "id": "unbound-replace-rename",
+            "r1": "CONFIRMED",
+            "fix1": "capture_admitted rebinds identity then no-follow rename; create_absent O_EXCL; last-check-to-rename preserves foreign archive and refuses. Files proof 12 cases including same-bytes new inode and exclusive collision."
+          },
+          {
+            "id": "venv-and-workingdirectory",
+            "r1": "CONFIRMED",
+            "fix1": "WorkingDirectory=SOURCE; runtime_identity pins venv tree/python link/resolved interpreter/pyvenv.cfg/entrypoints; apply/validate rebind. Runtime proof: same-size/mtime site-package change and same-byte interpreter retarget differ; bytecode cache stable. Prepare: 11474 entries/529926970 bytes."
+          }
+        ],
+        "correctness_checks": {
+          "prepare": "phase=prepared, driver_sha256 08ae93d2613d, source 95481481, business 415cbd1e, origin budget [3900,3941,3600000,4], launch_executed=false, 92 protected identities, active_configuration_changed=false. expected_old matched live 3940/BIZ unit (mkdir-only ExecStartPre).",
+          "apply_order": "lock → admit identities/timers/>600s → fences → persist stop intent → stop compression timer → capture+validate COMP → exclusive candidate install → capture replay → capture cold → reload → validate fenced → unfence → restore timer/deadline → validate released → commit.",
+          "caller_closure": "Daily unit ExecStart/Pre/WD/Environment bind SOURCE + STATE/config env; replay unit and cold env archived only after both old roots are captured; replay env/evidence/BIZ compression env protected; no maintenance StartUnit; no DB/schema/role mutation.",
+          "budgets": "assembly_values (3900,3941,3600000,4); TimeoutStartSec=3941 → TimeoutStartUSec 1h 5min 41s; wrapper 3900 covers 3600+300; service 3941 > 3900+40; lag 172800 and bound 4 preserved; DSN/receipt/lock paths unchanged.",
+          "rollback_success": "Barriers first; restore originals only into absent names or identity-matching dest; foreign/unknown remains rollback-required fenced/stopped; rolled-back requires restored bytes/mode/uid, protected set, and baseline timer activation.",
+          "apply_success": "phase=committed; effective WD=SOURCE, ExecStart SOURCE wrapper, ExecStartPre SOURCE preflight+NEW_ENV, wall 3941s; replay LoadState not-found; COLD/REPLAY pathnames absent; archives equal originals; 92 protected unchanged; original timer ActiveState/UnitFileState preserved; maintenance_services_started=false."
+        },
+        "verification_gaps": [
+          "No production apply (authorized). Post-apply effective systemd proof is therefore not in this packet.",
+          "Files-mode stubs systemd/timer probes; native-mode is the timer/fence/signal proof. Both are SHA-bound.",
+          "Review ran no tests, lint, build, or SSH."
+        ],
+        "residual_risks": [
+          "SIGKILL/crash mid-mutation remains operator recovery, as declared.",
+          "Host stdlib and same-UID total compromise are not attested.",
+          "A later rollback-required after original files are restored still needs an operator to restart the timer if restore_compression_timer itself fails; that path does not publish rolled-back."
+        ],
+        "out_of_scope_escalations": [],
+        "blocking": false
+      },
+      {
+        "lens": "invariant-state",
+        "mode": "hybrid-review",
+        "risk": "high",
+        "verdict": "CLEAN",
+        "blocking": false,
+        "reviewed_driver": ".workplans/epic-1891/r5_effective_handoff.py",
+        "reviewed_driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+        "execution_path_claimed": "/home/nwm/tmp/epic1891-retirement-20260914/r5_effective_handoff_fix1.py",
+        "reviewed_head_sha": "9548148104a7980898d6dbf56e2e953359c4687a",
+        "oracle": "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:328-334",
+        "scope": "Invariant-state seat over FIX PASS 1 only: timer stop-intent/reconciliation, rollback-entry barriers, admitted capture + exclusive creation, under-fence validation and release. Changed functions/call sites in r5_effective_handoff.py and named proofs. Not a re-audit of unchanged safe_fs/lock internals, not runtime/venv admission, not production apply.",
+        "summary": "Both independently CONFIRMED R1 state-transition defects are closed on the exact SHA08ae93d2613d driver. Native red/green on the same disposable systemd harness shows R1 false rolled-back+timer-inactive and late unfenced/schedulable candidate (exit1) versus fix1 restored timer after real stop+SIGTERM and late source refusal remaining fenced/stopped/rollback-required (exit0). New failure paths fail closed with barriers and preserved foreign bytes; they do not claim CAS or force successful rollback over unknown identities.",
+        "findings": [],
+        "closed_r1_transitions": [
+          {
+            "id": "stop-bookkeeping-gap",
+            "r1_severity": "P1",
+            "failure_class": "state-transition",
+            "r1_verdict": "CONFIRMED",
+            "closure": "stop_compression_timer persists compression_stop_intent and durable state.json before systemctl stop; restore_compression_timer reconciles observed ActiveState/deadline against admitted before_units rather than an after-effect flag; rollback publishes phase=rolled-back only after verify_timer_baseline. Native green: handled signal after real stop → timer_state=active, phase=rolled-back, marker_absent. Native red (SHA1acd8d61669c): same case → timer_state=inactive, phase=rolled-back.",
+            "evidence": [
+              "r5_effective_handoff.py:227-234",
+              "r5_effective_handoff.py:237-255",
+              "r5_effective_handoff.py:739-775",
+              "r5-fix1-native-green-proof.txt cases[0]",
+              "r5-fix1-native-r1-red-proof.txt cases[0]",
+              "r5_handoff_smoke_fix1.py:native_cases stop_then_signal"
+            ]
+          },
+          {
+            "id": "late-unfence-identity-abort-before-barriers",
+            "r1_severity": "P1",
+            "failure_class": "state-transition",
+            "r1_verdict": "CONFIRMED",
+            "closure": "rollback sets phase=rollback-required then rollback_entry_barriers (stop timer + install/verify owned fences) before the BIZ HEAD/protected/foreign-file gates that may refuse. Unknown identity remains rollback-required, fenced, compression timer inactive. Native green late source refusal: timer_state=inactive, effective_dropin=true, typed_false_condition=true, phase=rollback-required, marker_absent even after systemctl start of the fenced oneshot. Native red: timer_state=active, effective_dropin=false, typed_false_condition=false.",
+            "evidence": [
+              "r5_effective_handoff.py:697-708",
+              "r5_effective_handoff.py:739-750",
+              "r5-fix1-native-green-proof.txt cases[1]",
+              "r5-fix1-native-r1-red-proof.txt cases[1]",
+              "r5-approved-effective-handoff-plan.json rollback"
+            ]
+          }
+        ],
+        "admitted_capture_and_exclusive_creation": {
+          "status": "closed relative to R1 path-safety/concurrency overwrite",
+          "behavior": "capture_admitted rebinds full identity immediately before no-follow rename, journals file_intent, and treats dest identity mismatch as preserved foreign archive plus refusal (not CAS). create_absent is O_EXCL|O_NOFOLLOW into an absent public name; no os.replace of the compression unit. rollback restores originals only into absent names or no-ops when the live identity already matches; owned candidate is captured to rollback-candidates only when it equals installed_comp_identity; otherwise remain fenced.",
+          "proof": "r5-fix1-files-proof.txt bound to SHA08ae93d2613d: unit_only/unit_replay/all_swapped restore originals and drop own fences; foreign_active_unit preserves foreign inode/bytes, phase=rollback-required, fences retained; six source-substitution cases (including same-bytes new inode) refuse before capture; last-check-to-rename retains FOREIGN-RACE in archive and refuses; exclusive install collision leaves foreign destination bytes.",
+          "evidence": [
+            "r5_effective_handoff.py:585-650",
+            "r5_effective_handoff.py:723-737",
+            "r5_effective_handoff.py:751-760",
+            "r5_effective_handoff.py:848-867",
+            "r5-fix1-files-proof.txt"
+          ]
+        },
+        "under_fence_validation_and_release": {
+          "apply_order": "lock → admit identities/timers/>600s deadline → owned fences → persist stop intent → stop compression timer → quiescent → capture COMP → exclusive candidate → capture REPLAY/COLD → daemon-reload → validate_installed(fenced=True) → validated-fenced → remove only owned fences → restore timer/deadline → validate_installed(fenced=False) → commit",
+          "matches_plan_transaction": true,
+          "evidence": [
+            "r5_effective_handoff.py:819-911",
+            "r5_effective_handoff.py:778-817",
+            "r5-approved-effective-handoff-plan.json transaction"
+          ]
+        },
+        "inspected_new_failure_paths_not_findings": [
+          "Last-check-to-rename: foreign bytes retained in archive, public name absent, require('captured foreign entry'), phase stays rollback-required under barriers; original still in STATE/backup for operator. Approved, not claimed CAS.",
+          "Exclusive-create collision or foreign COMP after candidate install: FileExistsError / identity != installed_comp_identity → remain fenced, do not os.replace, do not publish rolled-back.",
+          "Partial create_absent (handled interrupt): installed_comp_identity unset, live name != original → remain fenced; original in ARCHIVE_COMP.",
+          "Protected/BIZ HEAD/archive-identity refusal after barriers: explicit rollback-required, fences held, timer stopped. Do not demand restore over unknown foreign bytes.",
+          "rollback_entry_barriers always stop+fence even when apply never mutated files; successful compensation then restores admitted timer baseline (native signal case) or stays recovery-required if a later gate refuses (native late-refusal case)."
+        ],
+        "non_blocking_notes": [
+          "SIGKILL/crash mid-mutation remains explicitly out of automatic recovery; driver does not claim it.",
+          "Native harness exercises stop_compression_timer+rollback and constructed post-unfence rollback, not a full production apply(); apply() except BaseException always calls rollback() after persisting rollback-required, so the proven compensation functions are the defect sites.",
+          "Files mode stubs systemd/timer probes; native mode is the timer/fence oracle. Host stdlib and total same-UID compromise are not attested.",
+          "R5.2 tasks.md:328-334 remains open as authorization/deployment floor; this review is the one-off handoff driver, not production apply. No maintenance service invocation in proofs (harmless touch/true only).",
+          "compression_stop_intent is write-ahead journal; restoration is observation-based against before_units, which is the stronger closure of the R1 flag gap."
+        ],
+        "verification_gaps": [
+          "This seat ran no tests, lint, builds, SSH, or production commands (assignment).",
+          "No live production apply; native proofs are disposable user units/timers with injected source drift.",
+          "Cannot observe node27 DropInPaths/Conditions except as recorded in r5-fix1-native-green-proof.txt.",
+          "Prepare receipt used as given: r5-fix1-prepare-output.txt phase=prepared, driver_sha256=08ae93d2613d..., 92 protected files, active_configuration_changed=false."
+        ],
+        "residual_risks": [
+          "Crash/SIGKILL after remove_owned_fences and before restore_compression_timer or commit remains operator recovery; not auto-compensated.",
+          "A captured foreign archive plus absent public name stays rollback-required until a human reconciles; that is the approved safe outcome.",
+          "Same-UID total malicious compromise and host stdlib are out of attested threat model."
+        ],
+        "out_of_scope_escalations": [],
+        "r1_correctness_failure": "Never counted as approval.",
+        "production_apply": false
+      },
+      {
+        "seat": "test-evidence+spec-compliance",
+        "lens_ids": [
+          "test-evidence",
+          "spec-compliance"
+        ],
+        "mode": "high-risk hybrid operational artifact review",
+        "risk": "high",
+        "scope": "FIX PASS 1 pre-apply evidence and R5.2 spec compliance for driver SHA 08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988; no production apply; no independent local-byte hash of the worktree file",
+        "verdict": "CLEAN",
+        "blocking": false,
+        "findings": [],
+        "sha_binding": {
+          "requested_driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+          "claim": "supplied execution evidence bound to SHA 08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988; this seat did not independently hash the local worktree file",
+          "execution_path": "/home/nwm/tmp/epic1891-retirement-20260914/r5_effective_handoff_fix1.py",
+          "worktree_driver": ".workplans/epic-1891/r5_effective_handoff.py",
+          "source_sha": "9548148104a7980898d6dbf56e2e953359c4687a",
+          "business_sha": "415cbd1e9d0eee39ba0dfb623a586b02cbb340f2",
+          "fixture_binding": "r5_handoff_smoke_fix1.py asserts exact driver bytes before import, after import, and again at emit()",
+          "bound_artifacts": [
+            "r5-fix1-files-proof.txt",
+            "r5-fix1-runtime-proof.txt",
+            "r5-fix1-native-green-proof.txt",
+            "r5-fix1-native-r1-red-proof.txt",
+            "r5-fix1-prepare-output.txt",
+            "r5-fix1-prepared-manifest.json",
+            "r5-staged-runtime-fingerprint.json",
+            "r5-approved-effective-handoff-plan.json"
+          ]
+        },
+        "positive_and_red_boundaries": {
+          "filesystem": {
+            "sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+            "positive": [
+              "unit_only",
+              "unit_replay",
+              "all_swapped restorations with archives preserved and own fences removed"
+            ],
+            "red": [
+              "foreign_active_unit remains rollback-required and fenced",
+              "six source substitutions including same-bytes/new-inode refuse before capture",
+              "last-check-to-rename race preserves foreign archive and refuses, not CAS",
+              "exclusive destination collision does not overwrite foreign file"
+            ],
+            "limit": "real files; systemd/source/timer probes stubbed; not native timer/fence proof"
+          },
+          "runtime": {
+            "sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+            "positive": "unchanged disposable venv plus bytecode cache keeps fingerprint",
+            "red": [
+              "same-size/same-mtime site-package content change differs",
+              "same-byte interpreter symlink retarget differs"
+            ],
+            "limit": "disposable venv only; staged production venv untouched; fixture interpreter not executed; host stdlib not attested"
+          },
+          "native_green": {
+            "sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+            "positive": [
+              "handled SIGTERM after real stop restores disposable timer, phase rolled-back",
+              "late refusal leaves timer inactive, effective drop-in and typed false ConditionPathExists, phase rollback-required, harmless touch skipped"
+            ],
+            "limit": "disposable user units/timer; /usr/bin/touch and /usr/bin/true only; injected git-head stub, not a business checkout edit; not production handoff"
+          },
+          "native_r1_red": {
+            "sha256": "1acd8d61669c4b650bfd2332252694ccae9cd6bf9df7dd97d97cdb44a4dce438",
+            "red": [
+              "false rolled-back with timer inactive after stop+SIGTERM",
+              "late refusal left candidate unfenced/active"
+            ],
+            "role": "regression evidence for frozen R1 driver; never approval of fix1"
+          },
+          "prepare": {
+            "sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+            "recorded": [
+              "source 95481481",
+              "business 415cbd1e",
+              "venv 11474 entries / 529926970 bytes tree ca52c0c4325060a2",
+              "origin python/runner/WorkingDirectory=SOURCE",
+              "budget 3900/3941/3600000/4",
+              "launch_executed false",
+              "92 protected identities",
+              "active_configuration_changed false"
+            ],
+            "limit": "fresh prepare is candidate admission, not deployment"
+          }
+        },
+        "r5_2_oracle": {
+          "anchor": "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:328-334",
+          "status": "unchecked, expected before apply; not a defect and not a demand for new authorization beyond the supplied operator decision",
+          "authorization_in_scope": [
+            "user-authorized archival of installed historical replay as absent-approved, preserving source/templates and all private evidence",
+            "owner reparse complete and timers restored 2026-09-15T20:18:29Z; preserve current activation/enablement; pause/restore only compression timer with >600s future-deadline guard",
+            "canonical lock at mutation; no maintenance-service invocation; no DB/schema/role/API/frontend mutation; no shared checkout/venv update"
+          ],
+          "templates_are_not_deployment_proof": true,
+          "historical_failed_replay_is_not_pass": "r5-replay-archive-authorization.json and plan non_goals forbid treating PR1085 historical recovery or live v3 as PASS; prepare/apply record archival/absent-approved only"
+        },
+        "post_apply_evidence": {
+          "status": "explicitly planned and encoded in apply()/validate_installed(); not yet collected because production apply has not run",
+          "driver_checks_after_unfence": [
+            "effective compression LoadState loaded, WorkingDirectory=SOURCE, ExecStart SOURCE wrapper, ExecStartPre SOURCE preflight + private env, TimeoutStartUSec 1h 5min 41s",
+            "replay LoadState not-found and public replay/cold names absent",
+            "archive identities equal admitted originals",
+            "92 protected identities unchanged",
+            "business HEAD and staged runtime_identity unchanged",
+            "timer UnitFileState/ActiveState restored to admitted baseline; deadline equal original_comp_deadline_us",
+            "no DropInPaths after release",
+            "maintenance_services_started false"
+          ],
+          "not_established_by_current_proofs": "actual loaded production unit/root/env/precheck/3941s wall, replay not-found, old cold input absent, archived-byte equality, protected-identity preservation, and original timer activation/enablement/deadline after a real apply"
+        },
+        "r1_correctness_seat": "independently CONFIRMED R1 findings are the defect baseline; the failed R1 correctness-review seat is not approval and is not counted",
+        "spec_compliance": {
+          "done_for_pre_apply": [
+            "R5.2 identification of actual unit/dropins/env/ExecStartPre/referenced paths recorded in prepared manifest before_units/origin/original/protected",
+            "retired replay/cold configuration disposition is archival, not DROP of tablespaces/PGDATA/private evidence",
+            "normal maintenance not disabled in the planned apply path: only compression timer is briefly stopped under >600s guard, then activation/enablement/deadline reconciled",
+            "owned never-satisfied ConditionPathExists fences, exclusive create, capture+immediate identity validation, stop-intent-before-side-effect, barriers-before-unknown-source-refusal"
+          ],
+          "still_open_by_oracle": "R5.2 observed deployment disposition after authorized apply; R4.4 archive; R5.3 issue close"
+        },
+        "honest_limits": [
+          "filesystem mode stubs control probes",
+          "native fixtures prove two disposable systemd failure transitions, not successful production handoff",
+          "fresh prepare does not preserve post-apply production identities",
+          "host stdlib and total same-UID compromise are not attested",
+          "do not rerun unchanged-source full suites as a substitute for these named SHA-bound proofs"
+        ],
+        "out_of_scope_escalations": [],
+        "non_blocking_notes": []
+      },
+      {
+        "mode": "hybrid-review",
+        "risk": "high",
+        "lens_pair": "security-perf+integration",
+        "seat": "R5FinalSecurity",
+        "driver_sha256": "08ae93d2613d5a84f58be887442eabb8a7f6bc7dd467140969efee6083009988",
+        "driver_path_reviewed": ".worktrees/issue-1895-deletion-integration/.workplans/epic-1891/r5_effective_handoff.py",
+        "oracle": [
+          "r5-approved-effective-handoff-plan.json",
+          "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:328-334",
+          "r5-fix-pass1-plan.json"
+        ],
+        "verdict": "CLEAN",
+        "summary": "FIX PASS 1 closes the independently CONFIRMED R1 security-perf and integration gaps on exact driver SHA 08ae93d2613d. Public names are captured then exclusively created, never os.replace'd; mismatched captures are retained and refused under barriers; SOURCE WorkingDirectory plus bounded venv/interpreter fingerprint bind the retained inventory; STATE/config remains the live env after commit. No P0/P1/P2 findings from this seat. R1 failure is not counted as approval. No production apply.",
+        "findings": [],
+        "r1_gap_closure": [
+          {
+            "r1": "Admitted file identities not rebound at replace/rename; archive proof after unfence",
+            "failure_class": "concurrency",
+            "status": "CLOSED",
+            "evidence": [
+              "capture_admitted:601-608 identity==expected, durable intent, rebind, rename, then identity(dest)==expected else 'captured foreign entry; preserved at'",
+              "apply:863-872 capture COMP then create_absent O_EXCL, then REPLAY/COLD capture; validate_installed fenced=True at 874 before remove_owned_fences 877",
+              "r5-fix1-files-proof.txt: compression/replay/cold foreign_bytes and same_bytes_new_inode refused before capture; last-check-to-rename retains FOREIGN-RACE in archive and refuses, not CAS"
+            ]
+          },
+          {
+            "r1": "Compression-unit replacement overwrites a foreign regular file via os.replace",
+            "failure_class": "path-safety",
+            "status": "CLOSED",
+            "evidence": [
+              "create_absent:611-637 O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, never os.replace of a public name",
+              "atomic_write_bytes_no_follow used only for private STATE/manifest.json and state.json at save:128-133",
+              "restore_original:724-731 exclusive-create into absent names or require live identity==expected; never overwrite foreign",
+              "r5-fix1-files-proof.txt exclusive install collision: NEW-FOREIGN-DESTINATION retained; foreign_active_unit: FOREIGN-OPERATOR-EDIT preserved, phase rollback-required, own fences retained"
+            ]
+          },
+          {
+            "r1": "Reviewed executable binding omits gitignored staged venv/python",
+            "failure_class": "contract",
+            "status": "CLOSED",
+            "evidence": [
+              "runtime_identity:301-362 non-bytecode venv walk, 50k/1GiB bound, python link+resolved target identity, pyvenv.cfg, wrapper/preflight/runner entrypoints; host stdlib not attested",
+              "apply:827 require runtime_identity()==manifest['runtime_identity'] before fences; validate_installed:811 re-requires under/after fences",
+              "r5-fix1-prepared-manifest.json and r5-staged-runtime-fingerprint.json: tree_sha256 ca52c0c4325060a2cba4e44dbf0d9a0cf87aabe49c34a93f01219335ac136e09, 11474 entries, 529926970 bytes",
+              "r5-fix1-runtime-proof.txt: same-size/same-mtime site-package change and same-byte interpreter retarget differ; bytecode cache stable; staged venv untouched"
+            ]
+          },
+          {
+            "r1": "WorkingDirectory inventories BIZ instead of executing SOURCE",
+            "failure_class": "contract",
+            "status": "CLOSED",
+            "evidence": [
+              "prepare candidate unit:532 WorkingDirectory={SOURCE}, Environment REPO_ROOT and ENV_FILE={NEW_ENV}, ExecStart/Pre SOURCE paths",
+              "validate_installed:788-793 WorkingDirectory==SOURCE and SOURCE scripts plus NEW_ENV in ExecStart/Pre",
+              "origin_check:437 working_directory SOURCE; r5-fix1-prepare-output.txt origin.working_directory=/home/nwm/NWM-maintenance-reviewed-95481481",
+              "node27_pgdata_host.py:573-578,623-628 inventories/verifies from WorkingDirectory; DISPLAY/autopipe OLD_RUNTIME pin unchanged; receipt/lock remain BIZ absolute paths in preserved nonbudget env"
+            ]
+          }
+        ],
+        "protected_and_secrets": {
+          "protected_file_count": 92,
+          "business_env_untouched": "ENV/REPLAY_ENV/retention/governance env+units+timers and scheduled-receipt remain in protected_files:370-391; prepare require ENV mode 0600 and exact receipt/lock/DSN-bearing nonbudget parse equality:486-528",
+          "live_env": "NEW_ENV=STATE/config/node27-timeseries-compression.env mode 384/0o600 in prepared manifest; unit Environment points at NEW_ENV rather than embedding DATABASE_URL; validate_installed:780 requires NEW_ENV identity",
+          "state_retention": "apply commit and rollback never unlink STATE, NEW_ENV, SOURCE, or private archives; active_configuration_retention in approved plan requires SOURCE and STATE/config plus replay/rollback archives to survive as live inputs",
+          "manager_env": "prepare refuses PYTHONPATH/PYTHONHOME/COMPRESSION_PYTHON/SCRIPT and NODE27_COLD_/SEQUENTIAL_ keys:533-547; digest rechecked at apply:832-836 and validate_installed:814-817"
+        },
+        "collaborative_owner_races": {
+          "model": "same-UID neighboring regular-file edits of UNITS/COMP, UNITS/REPLAY, COLD; not total malicious same-UID compromise; lifecycle flock does not serialize those writers",
+          "linearization": "named-entry capture plus immediate post-identity validation and O_EXCL install; last-check-to-rename preserves the captured object in the private archive and stops for operator reconciliation",
+          "unknown_state": "rollback_entry_barriers:710-721 stop timer and reinstall typed fences before source/foreign gates; foreign or unbound COMP remains fenced/stopped rollback-required (rollback:753-759); native late-refusal proof timer inactive, DropInPaths+typed false ConditionPathExists, phase rollback-required, marker absent"
+        },
+        "proof_binding": {
+          "files": "r5-fix1-files-proof.txt bound to 08ae93d2613d; real disposable file identities; systemd/source/timer probes stubbed; no production configuration or lock touched",
+          "runtime": "r5-fix1-runtime-proof.txt bound to 08ae93d2613d; disposable tree only; no staged venv mutation and no fixture interpreter executed",
+          "native_fix1": "r5-fix1-native-green-proof.txt bound to 08ae93d2613d exit0; real stop+SIGTERM restores timer to active/rolled-back; late source refusal fenced/stopped; only /usr/bin/touch and /usr/bin/true; no production maintenance or DB",
+          "native_r1": "r5-fix1-native-r1-red-proof.txt bound to 1acd8d61669c exit1; false rolled-back with timer inactive; late refusal unfenced/schedulable. R1 red is contrast, not approval.",
+          "prepare": "r5-fix1-prepare-output.txt phase prepared, active_configuration_changed false, launch_executed false, 92 protected identities; not post-apply production proof"
+        },
+        "verification_gaps": [
+          "This seat ran no tests, lint, build, SSH, or production mutation.",
+          "Filesystem proof does not prove live systemd; native disposable harness does.",
+          "Runtime proof does not mutate the staged SOURCE/.venv.",
+          "Prepare is not apply; post_apply effective systemd/root/env/precheck/3941s/92-protected/timer-preservation claims remain unexercised until authorized apply.",
+          "Host stdlib and total same-UID compromise of the uv interpreter store are not attested, per runtime_identity docstring and approved plan."
+        ],
+        "residual_risks": [
+          "SIGKILL/crash during apply remains operator-reconciled; not claimed automatically recoverable.",
+          "A last-check-to-rename race is preserve-and-stop, not kernel CAS and not an untouched public pathname.",
+          "After a successful future apply, STATE/config is live compression input; throwing it away would disable the lane. Driver does not delete it.",
+          "runtime_identity hashes ~530MB (~6.7s observed at prepare). Apply re-runs it before mutation and in both validate_installed passes inside the 180s alarm. Not scored as a performance defect; caching would weaken freshness."
+        ],
+        "out_of_scope_escalations": [],
+        "non_blocking_notes": [
+          "No production apply has occurred; CLEAN is a driver+proof closure verdict for this seat, not an apply authorization.",
+          "PGDATA runtime_identity still does not fingerprint a directory .venv package tree; the handoff driver now does. Changing WorkingDirectory to SOURCE makes the subsequent units_snapshot record SOURCE HEAD 95481481 rather than BIZ 415cbd1e, which is the required inventory fix."
+        ],
+        "blocking": false
+      }
+    ]
+  },
+  "pre_apply_proof": {
+    "completed_preparation": "Fix1 SHA08ae93d2613d reprepare exit0: source95481481, business415cbd1e, venv11474 entries/529926970 bytes, resolved interpreter/pyvenv.cfg/entrypoint identities; full private env equality except authorized root/budget fields; import-origin and inert check; candidate systemd verify;92 protected file identities. No active configuration changes.",
+    "filesystem_smoke": "Exact-SHA-bound fix1 files mode exit0: three partial-swap restorations; foreign active inode refusal; six source substitution cases including identical bytes/new inode; last-check-to-rename race preserves foreign archive and refuses; exclusive destination collision preserves foreign file. Systemd/timer probes stubbed only in this mode.",
+    "post_apply": "Actual effective systemd source/root/env/precheck and3941s wall; replay LoadState not-found; old cold input absent; archived bytes equal;92 protected identities unchanged; business HEAD unchanged; original timer activation/enablement preserved; no manual maintenance service invocation.",
+    "native_systemd": "Identical disposable native-unit harness: R1 SHA1acd8d61669c exit1 reproduces false rolled-back with timer inactive and late refusal unfenced/active. Fix1 SHA08ae93d2613d exit0 restores native timer after real stop+SIGTERM; late source refusal leaves native timer inactive and typed false fence effective, harmless touch service skipped. Source drift injected; no business source edit, production maintenance service or DB command. Fixture files/timers cleaned.",
+    "runtime_drift": "Disposable venv fingerprint unchanged and bytecode cache tolerated; same-size/same-mtime site-package content mutation and same-byte interpreter symlink retarget both change identity. Actual staged venv untouched."
+  },
+  "retention": "After commit SOURCE and STATE/config are active deployment inputs, not disposable test evidence; keep them and every private replay/rollback archive. Only throwaway drivers/fixtures may be cleaned or archived.",
+  "non_goals": [
+    "No production-main pull",
+    "No API/frontend deployment",
+    "No DB data/schema/role changes",
+    "No migration/DROP/REVOKE",
+    "No deletion of PGDATA/evidence/container mounts",
+    "No old replay/finalize/recover/unstage",
+    "No governance/retention rebinding just for consistency",
+    "No claim of live v3 PASS or new normal maintenance tick"
+  ],
+  "private_receipt": "/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/state.json"
+}

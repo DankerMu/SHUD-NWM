@@ -117,9 +117,9 @@ display API `active` 且本地 `:8080` 与公网 `https://test.nwm.ac.cn` 均 20
 
 Archive status:
 - status: superseded
-- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R5.2 effective-deployment handoff)
-- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
-- status_since: 2026-09-14
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority); openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/retirement-effective-handoff.json
+- superseded_by: openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-16
 - archive_scope: section
 - retained_for: #1894 installation/probe safety history
 
@@ -128,12 +128,16 @@ and positive audit have been retired from the repository. This document no longe
 contains a runnable installation, `CREATE TABLESPACE`, rollback, or Docker-oracle
 procedure for that withdrawn capability.
 
-Source retirement does not authorize a live `REVOKE`, `DROP`, tablespace/data
-deletion, or change to deployed unit/dropin/env references. R5.2 must separately
-observe and authorize any effective-deployment disposition while normal PGDATA,
-container restart, governance, compression, and retention operations remain under
-their existing owners. Historical probe records and completed receipts remain
-evidence, not current commands.
+R5.2 committed the 2026-09-16 effective-maintenance handoff
+([`retirement-effective-handoff.json`](../../openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/retirement-effective-handoff.json)).
+It does not authorize a live `REVOKE`, `DROP`, tablespace/data deletion, or
+cleanup of SOURCE `/home/nwm/NWM-maintenance-reviewed-95481481`, its `.venv`,
+or STATE/config
+`/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/`. Those
+paths remain active deployment inputs. Normal PGDATA, container restart,
+governance, compression, and retention operations remain under their existing
+owners. Historical probe records and completed receipts remain evidence, not
+current commands. Archive and issue closeout are being completed in this PR.
 
 ## 6. 口令轮换
 
