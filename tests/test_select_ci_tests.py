@@ -850,6 +850,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
+        # #1555/#1768: the operator re-entry confirmation suite rides the broad
+        # orchestrator directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py` and journal_root_authority.py, and
+        # is the only route that reaches it for a PR touching its own subject
+        # module, operator_reentry_confirmation.py.
+        "tests/test_operator_reentry_confirmation.py",
         "tests/test_orchestration_chain.py",
         "tests/test_orchestrator.py",
         "tests/test_orchestrator_demote_cli_security.py",
@@ -8806,6 +8812,15 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # `services/orchestrator/**` and by the journal module's own stop rule.
     ("workers/data_adapters/base.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
+    # #1555/#1768: the operator re-entry confirmation suite imports
+    # `CycleDiscovery` and nothing else from the adapters — fixture material for
+    # the §8.7 breaker geometry it seeds into a real file journal. Its subject is
+    # the orchestrator's one-shot confirmation, so it is selected by
+    # `services/orchestrator/**` and by the cli.py, scheduler.py and
+    # file_orchestration_journal.py stop rules; copying it into
+    # `workers/data_adapters/**` would put a 47s scheduler suite on every
+    # GFS/IFS/ERA5 adapter PR.
+    ("workers/data_adapters/base.py", "tests/test_operator_reentry_confirmation.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
     # -- runtime-budget ----------------------------------------------------
     # Two of the 74 suites do not fit the lane. tests/test_orchestration_chain.py
@@ -9864,6 +9879,9 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # #1955/#1953 added two more at-site targets to the same cli.py rule, for
     # the same reason the copyback-mutex one is here: both are stop-shadowed
     # and both are cli.py's own exit-code/stderr-rendering oracles.
+    # #1555/#1768 added a fourth: the re-entry confirmation suite's entire write
+    # side is `cli.main(["confirm-operator-reentry", ...])`, so cli.py is where
+    # its command registration and exit codes are decided.
     (
         "services/orchestrator/cli.py",
         (
@@ -9871,6 +9889,7 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_retention_copyback_mutex.py",
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
+            "tests/test_operator_reentry_confirmation.py",
         ),
     ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
@@ -9995,9 +10014,13 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         # +2 on all three legs (#1955/#1953): the lane-adoption and full-tree
         # budget suites joined the broad orchestrator list (which retention.py
         # and __init__.py take) and the cli.py stop rule's at-site targets.
-        ("services/orchestrator/retention.py", 53),
-        ("services/orchestrator/cli.py", 32),
-        ("services/orchestrator/__init__.py", 52),
+        # +1 on all three legs (#1555/#1768), for the same reason one more time:
+        # the operator re-entry confirmation suite joined the broad orchestrator
+        # list AND the cli.py stop rule's at-site targets. The helper leg is
+        # untouched, which is what keeps this pin able to tell the two apart.
+        ("services/orchestrator/retention.py", 54),
+        ("services/orchestrator/cli.py", 33),
+        ("services/orchestrator/__init__.py", 53),
         ("tests/retention_test_helpers.py", 6),
     ),
 )

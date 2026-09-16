@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -581,6 +582,14 @@ def build_candidates(
                             state_decision.evidence,
                             strict_warm_start,
                             raw_candidate_state,
+                            reentry_match=functools.partial(
+                                _scheduler_generation.operator_reentry_confirmation_match,
+                                context.active_repository,
+                                source_id=candidate.source_id,
+                                cycle_time=candidate.cycle_time_utc,
+                                model_id=candidate.model_id,
+                                decision=_scheduler_generation.OPERATOR_REENTRY_BUDGET_DECISION,
+                            ),
                         )
                         # Same emitting point ruling as the run-manifest leg above
                         # (#1826).  The budget-exhausted ``blocked`` leg of this
@@ -1243,6 +1252,13 @@ def build_candidates(
         _bf.attach_emission_summary_to_blocked(
             blocked, predecessor_emission_evidence
         )
+    # #1555 round 4 (c3-01): THE SINK.  Every site that writes a candidate's
+    # restart stage is a source; this list is the single sink, and the one-shot
+    # confirmation invariant is a property of the sink.  Three review rounds each
+    # found a different source and fixed only that one, so enforcement moves here
+    # -- after EVERY writer, including the §8.6 emission above, which prepends to
+    # this same list object after the main loop has ended.
+    _refuse_confirmed_candidates_off_forecast(candidates, blocked)
     return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
 
@@ -1512,6 +1528,160 @@ def _candidate_is_fresh_full_chain(candidate: SchedulerCandidateLike) -> bool:
     return bool(marker.get("required")) and str(marker.get("mode") or "") == "full_chain"
 
 
+#: #1555 round 4: the sink refusal for a confirmed candidate whose effective
+#: restart stage is not ``forecast``.  A ``blocked_*`` token, so it is absent
+#: from both forced-resubmit whitelists by construction -- both are closed sets
+#: of ``retry_*`` literals (``chain_forced_resubmit.py``,
+#: ``chain_runtime_utils.py``) and nothing can revive it into a submission.
+OPERATOR_REENTRY_SINK_REFUSAL_DECISION = "blocked_operator_reentry_restart_stage_refused"
+OPERATOR_REENTRY_SINK_REFUSAL_REASON = "operator_reentry_restart_stage_not_forecast"
+
+
+def _candidate_effective_restart_stage(candidate: SchedulerCandidateLike) -> str | None:
+    """The restart stage the RUN MANIFEST's own top-level key would carry.
+
+    Not the raw evidence key: ``_candidate_basin_manifest``
+    (``scheduler_candidate_manifest.py:232-239``) writes the manifest's top-level
+    ``restart_stage`` from ``state_evidence["restart_stage"]`` and ONLY when the
+    candidate is not a fresh full-chain ingestion -- the same expression and the
+    same exclusion used here.  So a ``full_chain`` marker is an effective stage
+    of ``None`` however the evidence key reads.
+
+    What this value is NOT is a prediction of where the chain starts.  The chain
+    resolves its start with ``_restart_stage_from_basins``
+    (``chain_runtime_utils.py:319-336``), built into the cycle context at
+    ``chain_forecast_control.py:148`` and consumed by ``_run_cycle_chain_stages``
+    at ``chain_forecast_execution.py:173``; that helper reads the basin's
+    top-level ``restart_stage`` first and FALLS BACK to the basin's embedded
+    ``state_evidence["restart_stage"] or ["restart_from_stage"]``
+    (``chain_runtime_utils.py:326-331``), which the manifest also carries
+    (``scheduler_candidate_manifest.py:234``).  A blanked top-level key therefore
+    does not mean stage index 0.
+
+    The contract is NOT that this function equals the stage the chain would
+    resolve.  It is that every divergence points in the REFUSING direction --
+    stated as a property rather than a case list, because the case list is what
+    keeps turning out to be incomplete here:
+
+    * Truthy ``state_evidence["restart_stage"]`` and no fresh-full-chain marker:
+      the manifest's top-level key carries that value, the chain reads the same
+      value, and the two agree.
+    * Falsy key, or blanked by the fresh-full-chain exclusion: this function
+      returns ``None`` and the sink's positive ``== "forecast"`` comparison
+      refuses, WHATEVER the chain would have resolved from the embedded
+      ``state_evidence`` -- including from ``restart_from_stage``, which
+      ``chain_runtime_utils.py:329`` does read once ``restart_stage`` is falsy.
+
+    So a confirmed candidate can be refused for a stage the chain would not have
+    started at, but never admitted for one it would.  ``restart_from_stage`` is
+    deliberately not consulted here (the manifest has no top-level key of that
+    name); that asymmetry is what makes the divergence fail-closed, so it must
+    not be "fixed" by teaching this function the fallback.  #2416 tracks the
+    chain-side fallback itself, which stays out of scope.
+    """
+
+    state_evidence = candidate.state_evidence
+    if not isinstance(state_evidence, Mapping):
+        return None
+    if _candidate_is_fresh_full_chain(candidate):
+        return None
+    stage = state_evidence.get("restart_stage")
+    return str(stage) if stage not in (None, "") else None
+
+
+def _refuse_confirmed_candidates_off_forecast(
+    candidates: list[SchedulerCandidateLike],
+    blocked: list[SchedulerCandidateLike],
+) -> None:
+    """Refuse, at the sink, any confirmed candidate that would not restart at ``forecast``.
+
+    The re-entry provenance is stamped ONLY at a forecast-cohort reservation, so
+    a confirmed candidate that restarts anywhere else submits work whose ability
+    to move the count its confirmation is pinned to depends on a stage the
+    operator never authorized -- succeed and it stamps, fail and it has submitted
+    for real, moved nothing, and left the signature armed.  There is no third
+    kind of event: move the count, or be refused before submitting.
+
+    Keyed on ``candidate.state_evidence``, never on the originating decision's
+    evidence: ``scheduler_candidates.py`` has a rewrite that builds the
+    candidate's evidence as a NEW dict, copies the decision's evidence into it
+    (confirmation block included) and overwrites the restart stage there, without
+    ever touching the decision -- a decision-keyed check cannot see it.  The
+    comparison is positive (``== "forecast"``), so an absent, null, empty,
+    earlier OR later stage is refused on the same footing; a denylist of
+    known-bad stages is exactly the shape that missed this three rounds running.
+
+    Absence and corruption are separated (C-2): the key being ABSENT is the
+    ordinary unconfirmed candidate and is kept, while the key being PRESENT with
+    a non-``Mapping`` value is refused with its own ``malformed_confirmation``
+    discriminator -- a fail-closed guard may not admit a block it cannot even
+    read.  No writer currently produces a scalar here: both writers
+    (``scheduler_candidates.py:2632-2633`` and ``:2812-2813``) build the block
+    through ``scheduler_generation.operator_reentry_confirmation_evidence``
+    (``scheduler_generation.py:1612-1615``), which always returns a ``dict``.
+    ``_merge_state_evidence``'s ``else: merged[key] = value`` branch
+    (``scheduler_candidates.py:2274-2275``) would nevertheless let a scalar
+    replace the block wholesale if any future writer emitted one, so this branch
+    is closed BY CONSTRUCTION, not because the scalar is unreachable today.
+
+    Mutates ``candidates`` in place -- the §8.6 emitter already mutates this same
+    list object and the caller returns it.
+    """
+
+    kept: list[SchedulerCandidateLike] = []
+    for candidate in candidates:
+        state_evidence = candidate.state_evidence
+        if not isinstance(state_evidence, Mapping) or "operator_reentry_confirmation" not in state_evidence:
+            kept.append(candidate)
+            continue
+        confirmation = state_evidence["operator_reentry_confirmation"]
+        malformed_confirmation = not isinstance(confirmation, Mapping)
+        effective_restart_stage = _candidate_effective_restart_stage(candidate)
+        if not malformed_confirmation and effective_restart_stage == "forecast":
+            kept.append(candidate)
+            continue
+        assert isinstance(state_evidence, Mapping)
+        # The offending stage is NOT rewritten back to ``forecast``: the blocked
+        # row must show the operator what the chain would have done.  It is
+        # reported in its own bounded block instead.
+        sink_refusal: dict[str, Any] = {
+            "refused_restart_stage": state_evidence.get("restart_stage"),
+            "refused_restart_from_stage": state_evidence.get("restart_from_stage"),
+            "effective_restart_stage": effective_restart_stage,
+            "fresh_full_chain": _candidate_is_fresh_full_chain(candidate),
+        }
+        if malformed_confirmation:
+            # The bounded echo below cannot be built from a non-``Mapping``, so
+            # the operator gets the discriminator and the offending type instead.
+            sink_refusal["malformed_confirmation"] = True
+            sink_refusal["confirmation_type"] = type(confirmation).__name__
+        else:
+            sink_refusal["confirmation"] = {
+                "decision": confirmation.get("decision"),
+                "request_id": confirmation.get("request_id"),
+            }
+        blocked.append(
+            _blocked_candidate(
+                candidate,
+                OPERATOR_REENTRY_SINK_REFUSAL_REASON,
+                state_evidence={
+                    "decision": OPERATOR_REENTRY_SINK_REFUSAL_DECISION,
+                    "reason": OPERATOR_REENTRY_SINK_REFUSAL_REASON,
+                    "classifier": "operator_reentry_authorization_scope",
+                    "native_shud_resubmitted": False,
+                    "replacement_submitted": False,
+                    "operator_reentry_sink_refusal": sink_refusal,
+                    "retry_policy": {
+                        "automatic_retry_allowed": False,
+                        "manual_retry_required": True,
+                        **_OPERATOR_REENTRY_POLICY,
+                    },
+                },
+            )
+        )
+    candidates[:] = kept
+
+
 def _nfs_raw_manifest_gate(raw_state: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(raw_state, Mapping):
         return None
@@ -1723,6 +1893,9 @@ def _apply_explicit_missing_forcing_repair_policy(
     The policy is deliberately evaluated after the normal candidate-state
     decision.  It can only reclassify the stable missing-forcing blocker; every
     other blocker and retry decision remains owned by the normal state machine.
+
+    A candidate carrying an operator re-entry confirmation is refused outright
+    (r2-01), ahead of every other precondition -- see the refusal below.
     """
 
     if not bool(getattr(config, "repair_missing_forcing", False)):
@@ -1744,6 +1917,51 @@ def _apply_explicit_missing_forcing_repair_policy(
             decision,
             reason,
             **details,
+        )
+
+    confirmation = decision.evidence.get("operator_reentry_confirmation")
+    if isinstance(confirmation, Mapping):
+        # r2-01: every event descending from a one-shot confirmation must either
+        # move the count that confirmation is pinned to or be refused before it
+        # can submit -- there is no third kind.  This reclassification is the one
+        # rewrite that can be neither: it restarts the retry at ``forcing``
+        # (``restart_stage`` below, obeyed by ``chain_forecast_execution.py:173``)
+        # while the re-entry provenance is stamped ONLY at a forecast-cohort
+        # reservation (``chain_forecast_orchestrator_cycle.py:673-684``), and the
+        # stamp site cannot be moved -- ``accepted_submit_row_kind``
+        # (``accepted_submit_identity.py:519``) returns ``None`` for a
+        # non-forecast-cohort stage, so a ``forcing`` row can never be counted.
+        # Whether the count moves therefore depends on a stage
+        # the operator never authorized: the chain runs forward, so a forcing
+        # stage that SUCCEEDS still reaches the reservation and stamps, but a
+        # forcing stage that FAILS submits for real
+        # (``retry_repair_missing_forcing`` is whitelisted for terminal
+        # resubmission) and moves nothing -- and its new run-id prefix resets the
+        # stage-scoped attempt, so the budget verdict lapses and the candidate
+        # re-enters ``forecast`` automatically, unsigned and unstamped (round 2
+        # probes 1-3).  Refuse instead: nothing submits, nothing is consumed, the
+        # confirmation stays armed, and the operator restores the model's own
+        # forcing (rename backfill only when the rename set is non-empty;
+        # otherwise out of band -- see the runbook) -- after which the confirmed
+        # re-entry restarts at ``forecast``, is stamped, and moves the count
+        # exactly once.
+        #
+        # Lane-agnostic and arm-agnostic on purpose: both confirmable decisions
+        # reach this policy through the same missing-forcing blocker, and a
+        # candidate carrying NO confirmation keeps the #1844/§8.5 behaviour
+        # byte-for-byte (this is the only branch that reads the block).
+        #
+        # Round 4: kept as DEFENCE IN DEPTH ahead of the sink guard
+        # (``_refuse_confirmed_candidates_off_forecast``).  This one is keyed on
+        # the DECISION's evidence because that is what the policy is handed, and
+        # it lets the operator see the repair's own refusal reason rather than a
+        # downstream one; the sink is what makes the invariant total.
+        return rejected(
+            "operator_reentry_confirmation_present",
+            confirmation={
+                "decision": confirmation.get("decision"),
+                "request_id": confirmation.get("request_id"),
+            },
         )
 
     if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(
@@ -2387,6 +2605,36 @@ def _journal_predecessor_identity_quarantine(
         recorded_init_state_id=str(recorded_init_state_id),
     )
     if _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
+        # #1555: a confirmation pinned to the model's live quarantine rerun count
+        # re-emits the ordinary quarantine retry exactly once: the rerun's stamped
+        # master moves the count at acceptance (whatever its outcome or token) and
+        # the pin stops matching.
+        confirmation = _scheduler_generation.operator_reentry_confirmation_match(
+            context.active_repository,
+            source_id=candidate.source_id,
+            cycle_time=candidate.cycle_time_utc,
+            model_id=candidate.model_id,
+            decision=_scheduler_generation.OPERATOR_REENTRY_BREAKER_DECISION,
+        )
+        if confirmation is not None:
+            return CandidateStateDecision(
+                "retry",
+                "journal_predecessor_identity_mismatch",
+                _evidence_safe(
+                    {
+                        **_journal_predecessor_identity_retry_evidence(
+                            state_decision.evidence,
+                            recorded_init_state_id=str(recorded_init_state_id),
+                            expected_init_state_id=expected_init_state_id,
+                            required_lead_hours=required_lead_hours,
+                            skipped_reason=str(state_decision.reason or ""),
+                        ),
+                        "operator_reentry_confirmation": (
+                            _scheduler_generation.operator_reentry_confirmation_evidence(confirmation)
+                        ),
+                    }
+                ),
+            )
         return CandidateStateDecision(
             "blocked",
             "journal_predecessor_identity_quarantine_breaker_engaged",
@@ -2410,6 +2658,14 @@ def _journal_predecessor_identity_quarantine(
             skipped_reason=str(state_decision.reason or ""),
         ),
     )
+
+
+#: #1555/#1768: where ``manual_retry_required`` actually leads for the two
+#: completed-skip fail-stops — the pinned confirmation command and its runbook.
+_OPERATOR_REENTRY_POLICY = {
+    "operator_reentry_command": "confirm-operator-reentry",
+    "recovery_runbook": "node22-control-plane-manual-recovery",
+}
 
 
 def _journal_predecessor_identity_retry_evidence(
@@ -2480,6 +2736,7 @@ def _journal_predecessor_identity_blocked_evidence(
                 "occurrence_threshold": (
                     _scheduler_generation._JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
                 ),
+                **_OPERATOR_REENTRY_POLICY,
             },
         }
     )
@@ -2505,8 +2762,15 @@ def _strict_warm_start_terminal_mismatch_decision(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
     raw_candidate_state: Mapping[str, Any] | None,
+    reentry_match: Callable[..., Mapping[str, Any] | None] | None = None,
 ) -> CandidateStateDecision:
     """Emit the terminal-mismatch retry, or a stable blocked decision once spent.
+
+    ``reentry_match`` (#1768), bound by the caller to the candidate and the
+    budget decision, is asked for a confirmation pinned to the model's live
+    budget re-entry count; a match emits the ordinary retry once (the re-entry
+    is stamped on its cohort master at reservation, which moves the count past
+    the pin -- round 3 r3-02).  ``None`` keeps the decision byte-identical.
 
     Without a budget this decision re-selected every already-completed candidate
     of the cycle on every pass. The demoted decision uses ``action="blocked"`` so
@@ -2537,6 +2801,20 @@ def _strict_warm_start_terminal_mismatch_decision(
     attempt = _state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)
     retry_limit = _state_retry_limit(state)
     if retry_limit is not None and attempt >= retry_limit:
+        confirmation = reentry_match() if reentry_match is not None else None
+        if confirmation is not None:
+            return CandidateStateDecision(
+                "retry",
+                "strict_warm_start_terminal_init_state_mismatch",
+                _evidence_safe(
+                    {
+                        **_strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence),
+                        "operator_reentry_confirmation": (
+                            _scheduler_generation.operator_reentry_confirmation_evidence(confirmation)
+                        ),
+                    }
+                ),
+            )
         return CandidateStateDecision(
             "blocked",
             "strict_warm_start_retry_budget_exhausted",
@@ -2576,6 +2854,7 @@ def _strict_warm_start_terminal_blocked_evidence(
             "manual_retry_required": True,
             "attempt": attempt,
             "retry_limit": retry_limit,
+            **_OPERATOR_REENTRY_POLICY,
         },
     }
     selected = strict_evidence.get("candidate_state")

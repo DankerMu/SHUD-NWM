@@ -6,12 +6,14 @@ from typing import Any
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    BUDGET_REENTRY_PROVENANCE_FIELD,
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     QUARANTINE_RERUN_PROVENANCE_FIELD,
     accepted_submit_contract_is_current,
     accepted_submit_pipeline_job_model_id,
     accepted_submit_row_kind,
+    canonical_budget_reentry_model_ids,
     canonical_forecast_cohort_init_state_identities,
     canonical_forecast_cohort_members,
     canonical_quarantine_rerun_model_ids,
@@ -664,6 +666,13 @@ class ForecastOrchestratorCycleMixin:
             quarantine_rerun_model_ids = canonical_quarantine_rerun_model_ids(
                 basins=context.active_basins,
             )
+            # r3-02: same capture for a confirmed strict warm-start budget
+            # re-entry.  The stamp is the budget confirmation's pin; the
+            # stage-scoped attempt can not be, because a re-entry minted under
+            # another job-id prefix restarts its retry suffix.
+            budget_reentry_model_ids = canonical_budget_reentry_model_ids(
+                basins=context.active_basins,
+            )
             expected_user = self.config.reconcile_slurm_user
             expected_account = self.config.reconcile_slurm_account
             reservation_evidence = {
@@ -672,6 +681,7 @@ class ForecastOrchestratorCycleMixin:
                 "cohort_members": list(members),
                 INIT_STATE_IDENTITY_FIELD: list(init_state_identities),
                 QUARANTINE_RERUN_PROVENANCE_FIELD: list(quarantine_rerun_model_ids),
+                BUDGET_REENTRY_PROVENANCE_FIELD: list(budget_reentry_model_ids),
                 "restart_stage": "forecast",
                 "submission_attempt": submission_attempt,
                 "submission_attempt_started_at": datetime.now(UTC),

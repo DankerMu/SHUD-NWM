@@ -103,6 +103,52 @@ transition it, and its `reconcile-inventory` anchor can abort the whole reconcil
 [`current-production-ops.md`](current-production-ops.md) §8.11 for the census and the recovery
 path, and §8.10 for the journal-root realpath precondition both depend on.
 
+### Operator-action decisions (`manual_retry_required: true`)
+
+Four DB-free decisions wait on an operator. Until the read-only operator-action listing
+CLI lands (#1186, follow-up PR), list them by reading the newest `scheduler_*.json` pass
+evidence file under the evidence root and filtering `blocked_candidates` by the decision
+literal (plus the not-selected `source_cycles` entries for breaker-released cycles); the
+exact commands, the evidence-root source and node-22 execution discipline are in
+[`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md).
+
+- `permanent_failure` — the failure classifier called the error permanent (for example
+  `ARTIFACT_NOT_FOUND`), so the run never retries by itself. Fix the cause, then mark the
+  run once with `scripts/node22_manual_retry_failed_runs.py` (preview, then `--execute`).
+- `cancelled_manual_retry_required` — a cancelled run is not retried automatically. Confirm
+  the cancellation was not intentional, then use the same manual-retry script.
+- `blocked_journal_predecessor_identity_quarantine` — the §8.7 breaker. The journal row is
+  terminal-success, so a manual-retry marker never reaches it. Re-enter once with
+  `confirm-operator-reentry --pin <quarantine_rerun_count> --recorded-init-state-id <token>`; triage
+  first per [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
+  The breaker pin is the model's quarantine rerun count (cohort masters whose quarantine
+  provenance names the model, whatever their terminal status or token), not `occurrences`;
+  read it from the dry-run receipt's `live.quarantine_rerun_count`. The confirmation is
+  consumed when the rerun is accepted for submission: a Slurm failure does not restore it, so
+  re-confirm with the new live count if another re-entry is needed.
+  **A candidate still showing blocked does not mean the confirmation did not take effect:**
+  first check whether the dry-run receipt's live count already moved +1 (the file journal does
+  not update the `hydro_run` row on a same-`run_id` rerun, #2397, so even a rerun with the
+  correct lineage still shows as breaker-blocked). If it moved, do not confirm again.
+- `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
+  the next section (`confirm-operator-reentry --pin <budget_reentry_count>`).
+- `blocked_operator_reentry_restart_stage_refused` — the sink refusal (#1555). The
+  confirmation matched, but the candidate would have restarted somewhere other than
+  `forecast` (typically a `convert` rewrite provoked by incomplete canonical readiness),
+  and the re-entry provenance is stamped only at a forecast-cohort reservation. Nothing
+  submitted, nothing consumed, the confirmation stays armed. **Do not confirm again.**
+  Read `state_evidence.operator_reentry_sink_refusal.refused_restart_stage`, repair the
+  pre-forecast input out of band, and let the next pass restart the re-entry at `forecast`.
+  If the pass evidence came back bounded-summarized, only `refused_restart_stage` survives
+  (as a top-level `refused_restart_stage` on the summary row) and every other field of the
+  block is dropped — `refused_restart_from_stage`, `effective_restart_stage`,
+  `fresh_full_chain`, `confirmation`, and, on a corrupted-confirmation refusal, the
+  `malformed_confirmation` / `confirmation_type` discriminator. Read the unsummarized pass
+  evidence if you need any of them. A refusal that named no restart stage at all keeps the
+  field absent rather than null, so identify that row by its blocked decision.
+  Field-by-field triage is in
+  [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
+
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
 
 The candidate ladder now checks the stage-scoped retry budget before emitting
@@ -153,9 +199,49 @@ Manual re-entry, in order:
 2. Decide whether re-running is actually correct. If the init-state identity mismatch is a
    data defect, fix the data first — the budget is protecting you from re-submitting the
    same mismatch forever.
-3. To re-open the ladder, raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt`
-   and restart the scheduler service. Below-budget behaviour is byte-identical to the old
-   retry decision, so the candidate is selected again.
+3. To re-open the ladder for ONE candidate, record a pinned one-shot confirmation (#1768):
+
+   ```bash
+   /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
+     confirm-operator-reentry \
+     --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+     --source-id <source_id> --cycle-time <cycle_time> --model-id <model_id> \
+     --decision blocked_strict_warm_start_init_state_mismatch \
+     --pin <budget_reentry_count> \
+     --operator "<operator>" --reason "<why>"
+   # dry run first; append --attest once the receipt checks out
+   ```
+
+   The blocked evidence names this channel in `retry_policy.operator_reentry_command` /
+   `retry_policy.recovery_runbook`. The pin is the model's **budget re-entry count** (cohort
+   masters whose `strict_warm_start_budget_reentry_model_ids` provenance names the model,
+   whatever their terminal status, job id or retry suffix), not `retry_policy.attempt`: read
+   it from the dry-run receipt's `live.budget_reentry_count`. The writer refuses any other
+   pin with `pin_mismatch` (exit 2).
+   **The writer can not see whether the budget is exhausted** (#2400 residual, not closed by
+   this change: right pin, wrong time). A confirmation written before exhaustion stays armed
+   until it is consumed, so once the budget is exhausted it releases one re-entry with no new
+   signature. Only confirm a target that the NEWEST pass evidence file currently lists in
+   `blocked_candidates` as `blocked_strict_warm_start_init_state_mismatch`, checking `source_id`,
+   `cycle_time` and `model_id` verbatim, and never while that model's rerun is in flight. If
+   a confirmation was written in error (target, pin or timing), stop and escalate; do NOT
+   write another one over it (the earlier one stays armed). While the confirmation's `pin` equals that live count,
+   the next pass emits `retry_strict_warm_start_terminal_init_state_mismatch` once (with an
+   `operator_reentry_confirmation` block in `state_evidence`). The confirmation is consumed
+   when that rerun is accepted for submission: the reservation stamps the provenance on the
+   cohort master, the count moves +1 whatever the rerun's outcome or the job-id prefix it
+   mints under, and the candidate is not re-entered again. A Slurm failure does not restore
+   it; re-confirm with the new live count if another re-entry is needed.
+   `NHMS_SCHEDULER_RETRY_LIMIT` is not touched; see
+   [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) for
+   the receipt, refusals and known limitations. The same precondition below (a
+   higher-attempt retry row must outrank a released base row) applies.
+
+   Raising the global budget is the fallback only when the confirmation channel is not
+   available (a DB-backed repository without the confirmation accessor keeps the budget
+   fail-stop): raise `NHMS_SCHEDULER_RETRY_LIMIT` above the recorded `attempt` and restart
+   the scheduler service. Below-budget behaviour is byte-identical to the old retry
+   decision, so the candidate is selected again.
    **`NHMS_SCHEDULER_RETRY_LIMIT` is one GLOBAL budget shared by every retry decision
    family in the deployment** (`scheduler_config.py` `retry_limit` is injected into every
    `scheduler_candidates.py` state provider, not per-decision), so raise it only

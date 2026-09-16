@@ -364,19 +364,61 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 唯一的回补执行槽，其后的 gap 全部停在 `backfill_deferred_waiting_for_prior_cycle`
 （`services/orchestrator/scheduler_discovery.py` 的回补选槽段），直到回补脚本把它清掉。
 这与此前一个失败 rerun 占槽的行为相同，不是回归。这是已接受的成本，裁决与对 #1843 三条否决理由的
-逐条回应见 [design D3](../../openspec/changes/model-swap-forcing-witness-completion/design.md)
-（归档后位于 `openspec/changes/archive/<归档日期>-model-swap-forcing-witness-completion/`）。
+逐条回应见 [design D3](../../openspec/changes/archive/2026-09-15-model-swap-forcing-witness-completion/design.md)。
 
 回补脚本排空的 `blocked` 有两个来源，排空通道**按车道分**：
 
 | 来源 | 车道 | 排空通道 |
 |---|---|---|
-| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`） |
-| #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | **只用**下面的回补脚本。8.5 的单 cycle 修复在这条车道上根本不会被评估：修复策略的调用点要么在 quarantine 之前、要么只在 strict warm-start 车道或 resync 分支上，所以 `--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（读码结论，未实跑；见 design D1） |
+| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本**（仅当改名集非空，见下）**；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`）——**除非该候选带 operator 重入确认物**，那种候选会被修复策略拒绝，见下面的块注；改名集为空时两条都不是通道，按块注里的升级路径带外修输入 |
+| #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | 下面的回补脚本**（仅当改名集非空）**，否则走块注里的升级路径。8.5 的单 cycle 修复在这条车道上**不会改判这类候选**——但原因不是"策略没被调用"：策略有**两个**调用点，`scheduler_candidates.py:674`（在 `:657` 的 `if strict_warm_start is not None:` 之内）和 `:1860`（在 `_candidate_warm_admission_decision`，def 在 `:1838`），后者**无条件调用、且早于 `:1867-1871` 的 `strict_warm_start is None` 判断**，所以非 strict 车道上策略确实被求值。挡住它的是策略自己的第二个 early return（`:1903-1908`）：这条车道递进去的 decision 是 `skip` / `terminal_hydro_success`，不在 `_MISSING_FORCING_BLOCKER_REASONS` 里，于是原样返回、不写任何证据。净结果对 operator 不变：`--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（由 `tests/test_production_scheduler.py::test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_flag_on` 钉住，该测试用 spy 实测了"策略被调用、拿到的是 skip、没写证据"） |
+
+> **`--repair-missing-forcing` 与 operator 重入确认物互斥（r2-01）**：这个候选如果是靠
+> `confirm-operator-reentry` 的确认物才走到 missing-forcing `blocked` 的（strict warm-start 预算
+> 或 §8.7 断路器两类 fail-stop），单 cycle 修复**拒绝**它而不是改判它，**不提交、不消费**，
+> 那张人工签字保持待用。证据按车道分，结论一样、键不一样：
+> - **strict warm-start 车道**（预算臂，以及碰巧落在该车道的断路器重入）：修复策略真的被调用并
+>   拒绝，`--plan` 里看到
+>   `state_evidence.missing_forcing_repair.status = rejected` +
+>   `reason = operator_reentry_confirmation_present`（并回显 `confirmation.decision` /
+>   `confirmation.request_id`），候选留在 missing-forcing `blocked` 上。
+> - **非 strict 车道**（上面表格 `#1844` 那行）：修复策略**会被调用**（`:1860` 那个调用点无条件
+>   执行、早于 `:1867-1871` 的 lane 判断），但它拿到的 decision 是 `skip` /
+>   `terminal_hydro_success`，不是那两个 missing-forcing blocker 之一，于是在 `:1903-1908`
+>   原样返回、**不写任何证据**。结果一样：这类候选**没有** `missing_forcing_repair` 键，只有
+>   见证闸的 missing-forcing `blocked`。别去找那个键——但别把这理解成"策略没跑"。
+> 理由：改判后的 `retry_repair_missing_forcing` 从 `forcing` 阶段重启，而重入 provenance 只在
+> forecast cohort 的 reservation 处写——forcing 成功才顺带戳到，forcing 失败就是「真提交了、
+> 计数没动、确认物还在」，并且失败的 forcing 在新 run-id 前缀下把 stage 域 attempt 打回 0/2、
+> 让预算判定失效，随后候选还会自动重入一次 forecast（不带任何签字、不戳 provenance）。
+> **正确处置：先把该模型自己的 forcing 补回来，再让确认过的重入自己跑**——它从
+> `forecast` 重启、在 reservation 处被戳、计数 +1，恰好消费一次，之后的 pass 回到 blocked。
+>
+> **"补回来"分两种情况，别默认就是下面那个回补脚本。**
+> `scripts/node22_backfill_forcing_for_model_ids.py` 是**纯改名工具**：它要求同时给出改名前后
+> 两份 registry manifest（`scripts/node22_backfill_forcing_for_model_ids.py:605-606`），待办
+> **完全**由改名集推导（`discover_work` 在 `:409`，`for rename in renames` 在 `:420-421`；
+> `main` 的 `resolve_renames → probe_coverage → discover_work` 流水线在 `:648-651`）。
+> - **改名集非空**（该模型的 forcing 确实以另一个 model id 存在）：用下面的回补脚本。
+> - **改名集为空**（不是改名造成的缺失——例如 retention 在 fail-stop 生效之后删掉了
+>   `forcing/<source>/<cycle>/...`，见 `services/orchestrator/retention.py:75` 与 `:684-687`）：
+>   回补脚本**不是通道**，它会返回 `work_item_count: 0`（receipt 字段在 `:705` / `:715`），
+>   而这个形状与 `--forcing-root` 指错 / NFS 没挂在条目数上**分不开**（本文 §3.1.1 就是为此要求
+>   先读 `coverage`）。**升级路径：带外**重新产出该模型的 forcing 包并落进 object store
+>   （或修好触发改写的那份 canonical readiness / raw manifest 身份），不要用
+>   `--repair-missing-forcing` 绕。修好之前确认物保持待用、候选保持 blocked；修好后的下一趟
+>   自然 pass 让确认过的重入从 `forecast` 重启、被戳、计数 +1，恰好消费一次。
+>   （retention 的删除前沿是否钉住 blocked / 带确认物的候选**尚未实测**，两个方向都不要断言；
+>   设计缺口记在 #2412。）
+>
+> 判据与撤销口径见
+> [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) 的「已知限制」。
 
 strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`，所以这个键只是提示，不是车道判据。
 分不清时以 8.5 的 `--plan` 预览为准：`state_evidence.missing_forcing_repair.status = authorized` 的候选可以走
-单 cycle 修复；其余候选不走这条通道，改用回补脚本排空。
+单 cycle 修复；其余候选不走这条通道，**仅当改名集非空时**改用回补脚本排空。改名集为空时回补脚本同样不是通道
+（它返回 `work_item_count: 0`，与指错 `--forcing-root` / NFS 没挂分不开），此时走上面那段引文里的
+**带外**升级路径：重新产出该模型的 forcing 包并落进 object store。
 
 正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
 `station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
@@ -4155,6 +4197,46 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    `raw_manifest_identity_mismatch`, `candidate_not_direct_grid`, or
    `exact_cycle_identity_mismatch`. Fix the stated precondition; do not bypass
    it.
+
+   One reason is **not** a precondition to fix: `operator_reentry_confirmation_present`
+   (r2-01) means this candidate carries an operator re-entry confirmation
+   (`confirm-operator-reentry`), and the repair channel refuses it by design.
+   The reclassified repair retry restarts at `forcing`, while the re-entry
+   provenance is stamped only at a forecast-cohort reservation — so **whether
+   that submission moves the count depends on a stage the operator did not
+   authorize**: a `forcing` stage that succeeds does reach the reservation and
+   does stamp, while one that fails has submitted for real, moved nothing, and
+   left the signature armed (plus a new run-id prefix that resets the
+   stage-scoped attempt). That dependence is the reason it is refused, not a
+   claim that the count could never move. The evidence echoes
+   `missing_forcing_repair.confirmation.{decision,request_id}`.
+
+   Remedy: **do not** use `--repair-missing-forcing` for it. Restore that
+   model's own forcing first, then let the confirmed re-entry run on an ordinary
+   pass — it restarts at `forecast` and consumes the signature exactly once.
+   Which channel restores it depends on the cause:
+
+   - **The model's forcing exists under a different model id** (a rename; the
+     rename set is non-empty): use `scripts/node22_backfill_forcing_for_model_ids.py`,
+     documented in §3.1.1 hop 5 above. It is a **rename-only** tool — it requires
+     both the pre- and post-rename registry manifests
+     (`scripts/node22_backfill_forcing_for_model_ids.py:605-606`) and derives its
+     work solely from the rename set (`discover_work` at `:409`, `for rename in renames`
+     at `:420-421`; the `resolve_renames → probe_coverage → discover_work` pipeline
+     in `main` at `:648-651`).
+   - **Any other cause** (e.g. retention deleted `forcing/<source>/<cycle>/...`
+     under the primary root — `services/orchestrator/retention.py:75`, `:684-687`):
+     that tool is **not** the channel. It returns `work_item_count: 0` (receipt
+     fields at `:705` / `:715`), a shape §3.1.1 itself calls indistinguishable
+     from a misconfigured `--forcing-root` / unmounted NFS by item count alone.
+     **Escalation path:** repair the pre-forecast input out of band — re-produce
+     that model's forcing package into the object store (or repair the canonical
+     readiness / raw manifest identity that provoked the rewrite) — and leave the
+     candidate blocked until it is fixed. The confirmation stays armed; the next
+     pass then restarts the confirmed re-entry at `forecast`, stamps it at the
+     reservation, and moves the count exactly once. Whether the retention frontier
+     pins blocked or confirmed candidates is **not measured**; do not assume
+     either way. That design gap is tracked as #2412.
 4. Submit the same exact cycle only after the preview admits the intended set:
 
    ```bash

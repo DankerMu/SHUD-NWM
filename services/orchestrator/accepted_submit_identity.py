@@ -223,6 +223,24 @@ INIT_STATE_IDENTITY_FIELD = "init_state_identities"
 QUARANTINE_RERUN_PROVENANCE_FIELD = "journal_predecessor_quarantine_rerun_model_ids"
 #: The candidate-state decision whose reruns carry the provenance stamp.
 JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION = "retry_journal_predecessor_identity_mismatch"
+#: ... and the §8.7 breaker's blocked decision, as a confirmation names it.
+#: Parallel literal of ``scheduler_generation.OPERATOR_REENTRY_BREAKER_DECISION``
+#: (this module is below the scheduler in the import order and must not import it),
+#: exactly like ``STRICT_WARM_START_BUDGET_BLOCKED_DECISION`` below.
+JOURNAL_PREDECESSOR_QUARANTINE_BLOCKED_DECISION = "blocked_journal_predecessor_identity_quarantine"
+#: Models of this cohort whose submission RE-ENTERS a spent strict warm-start
+#: retry budget on an operator confirmation (#1768, round 3 r3-02).  Same
+#: capture-once reservation shape as the quarantine provenance; it is the pin a
+#: budget confirmation is compared with, because the stage-scoped attempt does
+#: not move when the re-entry mints under a different job-id prefix.
+BUDGET_REENTRY_PROVENANCE_FIELD = "strict_warm_start_budget_reentry_model_ids"
+#: The retry decision a confirmed budget re-entry is FIRST emitted as.  Named
+#: for readers, but deliberately NOT the budget stamp's key: the scheduler may
+#: reclassify the retry afterwards (r1 c-03), so the stamp keys on the surviving
+#: confirmation block below instead.
+STRICT_WARM_START_TERMINAL_RETRY_DECISION = "retry_strict_warm_start_terminal_init_state_mismatch"
+#: ... and the blocked decision its ``operator_reentry_confirmation`` names.
+STRICT_WARM_START_BUDGET_BLOCKED_DECISION = "blocked_strict_warm_start_init_state_mismatch"
 INIT_STATE_IDENTITY_ENTRY_FIELDS = frozenset(
     {
         "array_task_id",
@@ -302,6 +320,9 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     # decided by the basins this reservation was built from and must never be
     # rewritten afterwards, or the breaker could be armed retroactively.
     QUARANTINE_RERUN_PROVENANCE_FIELD,
+    # Same capture-once shape (r3-02): a rewritten budget re-entry stamp would
+    # move the confirmation pin after the fact.
+    BUDGET_REENTRY_PROVENANCE_FIELD,
 )
 
 # The derived per-model row's own frozen evidence (#1187). Deliberately
@@ -855,6 +876,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     normalized[QUARANTINE_RERUN_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
         normalized.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
     )
+    normalized[BUDGET_REENTRY_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
+        normalized.get(BUDGET_REENTRY_PROVENANCE_FIELD)
+    )
     decision = normalized.get("reconciliation_decision")
     source = normalized.get("reconciliation_source")
     matched_id = normalized.get("matched_slurm_job_id")
@@ -1183,16 +1207,35 @@ def canonical_forecast_cohort_init_state_identities(
     return tuple(identities)
 
 
+def _confirmed_reentry_blocked_decision(state_evidence: Mapping[str, Any]) -> str | None:
+    """The blocked decision a reserved basin's surviving confirmation block names.
+
+    ``None`` when the basin carries no confirmation — the ordinary case, and the
+    one where both stamps stay decision-literal driven.
+    """
+
+    confirmation = state_evidence.get("operator_reentry_confirmation")
+    if not isinstance(confirmation, Mapping):
+        return None
+    decision = confirmation.get("decision")
+    return decision if isinstance(decision, str) else None
+
+
 def canonical_quarantine_rerun_model_ids(*, basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     """Project which basins of this cohort are §8.7 quarantine RERUNS (#1157).
 
     Reservation is the last point that still holds the scheduler's decision for
     each basin, so the provenance is captured here alongside the warm-start
-    identity map.  Only basins whose ``state_evidence.decision`` is the
-    quarantine retry are listed; every other submission — including the
-    whitelisted ``retry_terminal_run_manifest_missing`` /
-    ``retry_missing_forecast_output`` replacements that also re-record the
-    token — yields an empty list and therefore cannot arm the breaker.
+    identity map.  Listed are basins whose ``state_evidence.decision`` is the
+    quarantine retry — the ordinary, UNCONFIRMED rerun, which is what the
+    breaker count means — and basins carrying an ``operator_reentry_confirmation``
+    naming the breaker's blocked decision whatever their final decision literal
+    reads (r1 c-03: the scheduler may reclassify a confirmed retry, notably into
+    ``retry_repair_missing_forcing``, and the count a confirmation is pinned to
+    must still move).  Every other submission — including the whitelisted
+    ``retry_terminal_run_manifest_missing`` / ``retry_missing_forecast_output``
+    replacements that also re-record the token — yields an empty list and
+    therefore cannot arm the breaker.
     """
 
     model_ids: list[str] = []
@@ -1200,7 +1243,52 @@ def canonical_quarantine_rerun_model_ids(*, basins: Sequence[Mapping[str, Any]])
         state_evidence = basin.get("state_evidence")
         if not isinstance(state_evidence, Mapping):
             continue
-        if state_evidence.get("decision") != JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION:
+        if (
+            state_evidence.get("decision") != JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION
+            and _confirmed_reentry_blocked_decision(state_evidence)
+            != JOURNAL_PREDECESSOR_QUARANTINE_BLOCKED_DECISION
+        ):
+            continue
+        model_id = str(basin.get("model_id") or "")
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return tuple(model_ids)
+
+
+def canonical_budget_reentry_model_ids(*, basins: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Project which basins of this cohort re-enter a spent strict warm-start budget (r3-02).
+
+    Listed is every basin carrying an ``operator_reentry_confirmation`` naming
+    the budget's blocked decision, whatever its final ``decision`` literal reads.
+    Keying on the surviving block rather than on
+    ``STRICT_WARM_START_TERMINAL_RETRY_DECISION`` is r1 c-03: the confirmed retry
+    restarts at ``forecast`` and is therefore consulted by the per-model forcing
+    witness, and the exact-cycle repair policy could reclassify the resulting
+    blocker into ``retry_repair_missing_forcing`` — a literal that IS whitelisted
+    for terminal resubmission.  Keyed on the literal, that submission moved no
+    count and the same signature authorized a second re-entry.
+
+    The confirmed retry restarts at ``forecast`` — and so actually reaches this
+    reservation — because that reclassification is now REFUSED for any candidate
+    carrying a confirmation (r2-01: ``_apply_explicit_missing_forcing_repair_policy``
+    rejects with ``operator_reentry_confirmation_present``).  It restarted at
+    ``forcing`` before that refusal existed, which is how a confirmed submission
+    could bypass this stamp site entirely.  The block-keyed projection stays as
+    defense-in-depth for any rewrite that reappears.
+
+    There is no literal-only trigger here, unlike the quarantine projection:
+    an ordinary strict retry below the budget carries no confirmation and re-enters
+    nothing, so it must not move the pin.  A confirmed §8.7 breaker re-entry names
+    the breaker decision and lands in the quarantine list instead.  The list shape
+    (and its normalizer) is the quarantine provenance's.
+    """
+
+    model_ids: list[str] = []
+    for basin in basins:
+        state_evidence = basin.get("state_evidence")
+        if not isinstance(state_evidence, Mapping):
+            continue
+        if _confirmed_reentry_blocked_decision(state_evidence) != STRICT_WARM_START_BUDGET_BLOCKED_DECISION:
             continue
         model_id = str(basin.get("model_id") or "")
         if model_id and model_id not in model_ids:
@@ -1240,6 +1328,7 @@ def init_state_identity_for_task(value: Any, array_task_id: Any) -> dict[str, An
 
 __all__ = (
     "ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS",
+    "BUDGET_REENTRY_PROVENANCE_FIELD",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD",
     "ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS",
@@ -1256,6 +1345,7 @@ __all__ = (
     "IDENTITY_MISMATCH_RELEASED_DECISION",
     "INIT_STATE_IDENTITY_ENTRY_FIELDS",
     "INIT_STATE_IDENTITY_FIELD",
+    "JOURNAL_PREDECESSOR_QUARANTINE_BLOCKED_DECISION",
     "JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION",
     "MAX_FORECAST_COHORT_MEMBERS",
     "OPERATOR_VERIFIED_ABSENCE_DECISION",
@@ -1276,6 +1366,7 @@ __all__ = (
     "apply_accepted_submit_transition",
     "canonical_forecast_cohort_init_state_identities",
     "canonical_forecast_cohort_members",
+    "canonical_budget_reentry_model_ids",
     "canonical_forecast_stage",
     "canonical_quarantine_rerun_model_ids",
     "forecast_cohort_digest",

@@ -2925,6 +2925,190 @@ def test_cohort_reservation_stamps_quarantine_rerun_provenance(tmp_path: Path) -
     assert _occurrences(quarantined_model_id, "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
 
 
+def test_cohort_reservation_stamps_budget_reentry_provenance_only_for_a_confirmed_budget_retry(
+    tmp_path: Path,
+) -> None:
+    """r3-02: the master row books WHICH models this submission re-enters past a spent strict budget.
+
+    Only a strict warm-start retry carrying a BUDGET ``operator_reentry_confirmation``
+    block is stamped: an ordinary strict retry (no block) and a confirmed §8.7
+    breaker re-entry (breaker block, quarantine decision) are not.  Pinned as a
+    write -> read round trip through ``budget_reentry_count``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    cycle = "2026050100"
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _basins(3)
+
+    def _confirmation(decision: str) -> dict[str, Any]:
+        return {"request_id": "r", "operator": "ops", "reason": "why", "pin": 0, "decision": decision}
+
+    state_evidences: list[dict[str, Any]] = [
+        # model_0: an ordinary strict retry below the budget.
+        {"decision": "retry_strict_warm_start_terminal_init_state_mismatch"},
+        # model_1: the confirmed budget re-entry.
+        {
+            "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
+            "operator_reentry_confirmation": _confirmation("blocked_strict_warm_start_init_state_mismatch"),
+        },
+        # model_2: a confirmed breaker re-entry.
+        {
+            "decision": "retry_journal_predecessor_identity_mismatch",
+            "operator_reentry_confirmation": _confirmation("blocked_journal_predecessor_identity_quarantine"),
+        },
+    ]
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast", **state_evidences[index]},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026050100/state.cfg.ic",
+                "init_state_checksum": f"sha256:state-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "complete"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = next(
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+    assert master["strict_warm_start_budget_reentry_model_ids"] == ["model_1"]
+    assert master["journal_predecessor_quarantine_rerun_model_ids"] == ["model_2"]
+
+    # Capture-once: a divergent stamp is REJECTED, never merged away.
+    durable = repository.get_pipeline_job(str(master["job_id"]))
+    replayed = {
+        key: value
+        for key, value in durable.items()
+        if "[object-uri]" not in json.dumps(value) and "[uri]" not in json.dumps(value)
+    }
+    with pytest.raises(FileOrchestrationJournalError) as forged_error:
+        repository.upsert_pipeline_job({**replayed, "strict_warm_start_budget_reentry_model_ids": ["model_0"]})
+    assert forged_error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert forged_error.value.field == "strict_warm_start_budget_reentry_model_ids"
+    assert repository.get_pipeline_job(str(master["job_id"])) == durable
+
+    counts = {
+        f"model_{index}": reopened.budget_reentry_count(
+            source_id="gfs", cycle_time=cycle_time, model_id=f"model_{index}"
+        )
+        for index in range(3)
+    }
+    assert counts == {"model_0": 0, "model_1": 1, "model_2": 0}
+
+
+def _reentry_confirmation_block(decision: str) -> dict[str, Any]:
+    return {"request_id": "r", "operator": "ops", "reason": "why", "pin": 0, "decision": decision}
+
+
+def test_reentry_provenance_stamps_key_on_the_confirmation_block_not_the_decision_literal() -> None:
+    """r1 c-03: the projections key on the surviving confirmation block, not the decision literal.
+
+    Both confirmed re-entry legs restart at ``forecast`` and therefore pass the
+    per-model forcing witness.  Every basin shape below that pairs a confirmation
+    block with a REWRITTEN decision literal is defense-in-depth rather than a
+    reachable state at this head (r2-01 / round-2 event-path audit):
+
+    * ``retry_repair_missing_forcing`` -- the exact-cycle repair policy now
+      REFUSES any candidate carrying a confirmation
+      (``scheduler_candidates.py``, reason
+      ``operator_reentry_confirmation_present``), so option B makes this shape
+      unreachable.  It stays pinned because the projection must still handle it
+      if the rewrite ever reappears.
+    * ``retry_strict_warm_start_retry_run_manifest_mismatch`` -- the manifest
+      upgrade early-returns for both confirmed arms (they set
+      ``native_shud_resubmitted=True`` with ``restart_stage="forecast"``), so no
+      confirmed retry reaches its rewrite either.
+
+    What is NOT synthetic is the requirement itself: if a rewrite is ever
+    reachable again, keying on the literal means the pin never moves and the same
+    confirmation authorizes a second re-entry.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        canonical_budget_reentry_model_ids,
+        canonical_quarantine_rerun_model_ids,
+    )
+
+    budget_block = _reentry_confirmation_block("blocked_strict_warm_start_init_state_mismatch")
+    breaker_block = _reentry_confirmation_block("blocked_journal_predecessor_identity_quarantine")
+
+    def _basin(model_id: str, state_evidence: dict[str, Any]) -> dict[str, Any]:
+        return {"model_id": model_id, "state_evidence": state_evidence}
+
+    repaired_budget = _basin(
+        "model_budget_repair",
+        {"decision": "retry_repair_missing_forcing", "operator_reentry_confirmation": budget_block},
+    )
+    repaired_breaker = _basin(
+        "model_breaker_repair",
+        {"decision": "retry_repair_missing_forcing", "operator_reentry_confirmation": breaker_block},
+    )
+    assert canonical_budget_reentry_model_ids(basins=[repaired_budget]) == ("model_budget_repair",)
+    assert canonical_quarantine_rerun_model_ids(basins=[repaired_budget]) == ()
+    assert canonical_quarantine_rerun_model_ids(basins=[repaired_breaker]) == ("model_breaker_repair",)
+    assert canonical_budget_reentry_model_ids(basins=[repaired_breaker]) == ()
+
+    # The sibling rewrite class: ``_upgrade_retry_for_strict_warm_start_manifest``
+    # would rewrite a confirmed retry to another whitelisted resubmit literal --
+    # defense-in-depth, since its early return keeps both confirmed arms out (see
+    # the docstring).
+    upgraded = _basin(
+        "model_upgraded",
+        {
+            "decision": "retry_strict_warm_start_retry_run_manifest_mismatch",
+            "operator_reentry_confirmation": budget_block,
+        },
+    )
+    assert canonical_budget_reentry_model_ids(basins=[upgraded]) == ("model_upgraded",)
+
+    # No regression: an ORDINARY (unconfirmed) quarantine rerun still counts --
+    # that is the §8.7 breaker count's own semantics.
+    ordinary_quarantine = _basin(
+        "model_quarantine", {"decision": "retry_journal_predecessor_identity_mismatch"}
+    )
+    assert canonical_quarantine_rerun_model_ids(basins=[ordinary_quarantine]) == ("model_quarantine",)
+    assert canonical_budget_reentry_model_ids(basins=[ordinary_quarantine]) == ()
+
+    # A basin with neither the literal nor a block stamps nothing, and an
+    # unconfirmed strict retry below the budget stays unstamped.
+    for inert in (
+        _basin("model_plain", {"decision": "retry_missing_forecast_output"}),
+        _basin("model_strict", {"decision": "retry_strict_warm_start_terminal_init_state_mismatch"}),
+        _basin("model_no_evidence", {}),
+    ):
+        assert canonical_budget_reentry_model_ids(basins=[inert]) == ()
+        assert canonical_quarantine_rerun_model_ids(basins=[inert]) == ()
+
+    # One reservation, one stamp per model: a model reserved twice in the same
+    # cohort is booked once, and the two lists never both claim a basin.
+    assert canonical_budget_reentry_model_ids(basins=[repaired_budget, repaired_budget]) == (
+        "model_budget_repair",
+    )
+    assert canonical_quarantine_rerun_model_ids(
+        basins=[repaired_breaker, ordinary_quarantine, repaired_breaker]
+    ) == ("model_breaker_repair", "model_quarantine")
+
+
 def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:
     """Cold-seeded basins resolve no warm start, so nothing is booked for them.
 

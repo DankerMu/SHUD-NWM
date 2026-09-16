@@ -3683,6 +3683,9 @@ def test_build_candidates_breaker_demotes_quarantine_after_a_stamped_rerun(
         "manual_retry_required": True,
         "occurrences": 1,
         "occurrence_threshold": 1,
+        # #1555: the fail-stop names its real re-entry channel.
+        "operator_reentry_command": "confirm-operator-reentry",
+        "recovery_runbook": "node22-control-plane-manual-recovery",
     }
 
 

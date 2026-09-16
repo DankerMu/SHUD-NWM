@@ -51,6 +51,21 @@ log = logging.getLogger(__name__)
 # construction; the scheduler pass max candidate cap (10000) still applies.
 MAX_PREDECESSOR_EMISSIONS = 256
 
+#: #1543: the closed set of skip reasons that heal without an operator, so a
+#: successor whose own records carry only these (or emissions) reads
+#: ``predecessor_emission_blocked=False``.  Defined in the TRANSIENT direction on
+#: purpose: any skip arm added later defaults to ``True`` (fail toward
+#: escalation).  The lineage scope-out is transient only for a successor that
+#: itself predates the cutover — see :func:`_record_blocks_emission`.
+TRANSIENT_PREDECESSOR_SKIP_REASONS = frozenset(
+    (
+        "predecessor_already_present",
+        "predecessor_backfill_active_pipeline",
+        # A config gap, already surfaced by the one-per-pass warning.
+        "predecessor_raw_manifest_env_unwired",
+    )
+)
+
 
 def _parse_iso(value: Any) -> datetime | None:
     if not value:
@@ -361,9 +376,14 @@ def emit_predecessor_candidates(
         probe = getattr(active_repository, "has_active_pipeline", None)
         if callable(probe):
             has_active_pipeline_probe = probe
-    for record in pending:
+    truncated_successor_ids: list[str] = []
+    for index, record in enumerate(pending):
         if total_attempted >= MAX_PREDECESSOR_EMISSIONS:
             truncated = True
+            # #1543: name every successor the cap cut off so each one is flagged.
+            truncated_successor_ids = sorted(
+                {str(item["successor_candidate_id"] or "") for item in pending[index:]} - {""}
+            )
             break
         total_attempted += 1
         # #1735 §3.2: refuse the prepend BEFORE any dedup / manifest / gate
@@ -684,6 +704,7 @@ def emit_predecessor_candidates(
                 "reason": "predecessor_emission_cap_reached",
                 "total_attempted": total_attempted,
                 "cap": MAX_PREDECESSOR_EMISSIONS,
+                "successor_candidate_ids": truncated_successor_ids,
             }
         )
     return emission_evidence
@@ -702,13 +723,28 @@ def attach_emission_summary_to_blocked(
     §8.6 fired or did not fire, in the same evidence chain that gated the
     successor.
 
-    No-op when no successor is referenced (e.g. a truncation record).  The
-    attach is best-effort: frozen-dataclass update failures fall back to
+    A truncation record is grouped under every successor it names in
+    ``successor_candidate_ids`` (#1543), PROJECTED per successor: the copy
+    attached to a given successor carries only the scalar
+    ``successor_candidate_id`` of that successor, never the whole list (r1
+    c-02).  ``pending`` is bounded by the pass candidate cap (10000), not by
+    ``MAX_PREDECESSOR_EMISSIONS``, so sharing one record across N truncated
+    successors serializes the full list N times — O(N**2) evidence bytes, which
+    crosses ``MAX_EVIDENCE_BYTES`` at a few hundred successors and degrades the
+    pass into the size fallback.  The complete list stays on a
+    ``_build_candidates`` local (``scheduler_candidates.py:1235``, discarded
+    right after the grouping at ``:1251-1254``) that is NEVER serialized (r2-07);
+    no runtime information is lost, because the cut-off successor set is
+    byte-exactly reconstructible by scanning the blocked entries for records with
+    ``status == "truncated"``.
+
+    The attach is best-effort: frozen-dataclass update failures fall back to
     direct setattr; unrecoverable failures log and drop the marker.
     """
     if not emission_evidence:
         return
     # Compact totals across all records for a discoverable top-level count.
+    # Computed over the TOP-LEVEL list, so a truncation still counts once.
     totals: dict[str, int] = {}
     for record in emission_evidence:
         status = str(record.get("status") or "unknown")
@@ -717,14 +753,45 @@ def attach_emission_summary_to_blocked(
     # entry only carries its own subset.
     by_successor: dict[str, list[dict[str, Any]]] = {}
     for record in emission_evidence:
-        successor_id = str(record.get("successor_candidate_id") or "")
-        if not successor_id:
-            continue
-        by_successor.setdefault(successor_id, []).append(record)
+        successor_ids = [record.get("successor_candidate_id"), *(record.get("successor_candidate_ids") or ())]
+        for successor_id in dict.fromkeys(str(item or "") for item in successor_ids):
+            if not successor_id:
+                continue
+            if record.get("successor_candidate_ids") is None:
+                projected = record
+            else:
+                projected = {
+                    key: value for key, value in record.items() if key != "successor_candidate_ids"
+                }
+                projected["successor_candidate_id"] = successor_id
+            by_successor.setdefault(successor_id, []).append(projected)
     for successor_id, records in by_successor.items():
         _attach_summary_to_single_blocked(
             blocked, successor_id, records, totals
         )
+
+
+def _record_blocks_emission(record: Mapping[str, Any], *, successor_cycle_time: Any) -> bool:
+    """Whether one emission record means this pass cannot close the successor's gap.
+
+    Emitted and ``blocked`` records never flag (the predecessor's own blocked
+    entry carries its own ``operator_action_required``).  A skip or truncation
+    flags unless its reason is transient.  The lineage scope-out is transient
+    only when the successor itself predates the recorded cutover — discovery
+    then scopes the successor out too; at or after the cutover the successor
+    stays blocked for good.
+    """
+    if str(record.get("status") or "") not in {"skipped", "truncated"}:
+        return False
+    reason = str(record.get("reason") or "")
+    if reason in TRANSIENT_PREDECESSOR_SKIP_REASONS:
+        return False
+    if reason == _scheduler_lineage.LINEAGE_SCOPED_OUT_REASON:
+        lineage = record.get("lineage")
+        cutover = _parse_iso(lineage.get("cutover_valid_time")) if isinstance(lineage, Mapping) else None
+        if cutover is not None and isinstance(successor_cycle_time, datetime):
+            return not successor_cycle_time.astimezone(UTC) < cutover
+    return True
 
 
 def _attach_summary_to_single_blocked(
@@ -749,6 +816,12 @@ def _attach_summary_to_single_blocked(
         backfill = dict(existing.get("predecessor_backfill") or {})
         backfill["summary"] = summary_payload
         existing["predecessor_backfill"] = backfill
+        # #1543: top level so it survives bounded summarization, which drops
+        # the whole ``predecessor_backfill`` block.
+        successor_cycle_time = getattr(entry, "cycle_time_utc", None)
+        existing["predecessor_emission_blocked"] = any(
+            _record_blocks_emission(record, successor_cycle_time=successor_cycle_time) for record in records
+        )
         try:
             import dataclasses as _dataclasses
             from dataclasses import replace as _dataclass_replace
@@ -771,6 +844,7 @@ def _attach_summary_to_single_blocked(
 
 __all__ = (
     "MAX_PREDECESSOR_EMISSIONS",
+    "TRANSIENT_PREDECESSOR_SKIP_REASONS",
     "attach_emission_summary_to_blocked",
     "emit_predecessor_candidates",
 )

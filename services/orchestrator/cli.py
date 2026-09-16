@@ -31,6 +31,12 @@ from .journal_scope_census import (
     register_click_census_command,
     run_argparse_census_command,
 )
+from .operator_reentry_confirmation import (
+    CONFIRM_OPERATOR_REENTRY_COMMAND,
+    add_argparse_confirm_reentry_subparser,
+    register_click_confirm_reentry_command,
+    run_argparse_confirm_reentry_command,
+)
 from .operator_released_reservation_recovery import (
     RELEASED_RESERVATION_RECOVERY_COMMAND,
     add_argparse_recovery_subparser,
@@ -691,6 +697,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     register_click_recovery_command(cli)
     register_click_demote_command(cli)
     register_click_census_command(cli)
+    register_click_confirm_reentry_command(cli)
 
     @cli.command("plan-production")
     @click.option(
@@ -834,6 +841,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     add_argparse_recovery_subparser(subparsers)
     add_argparse_demote_subparser(subparsers)
     add_argparse_census_subparser(subparsers)
+    add_argparse_confirm_reentry_subparser(subparsers)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
@@ -969,6 +977,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return run_argparse_demote_command(args)
     if args.command == CENSUS_JOB_ID_SCOPE_COMMAND:
         return run_argparse_census_command(args)
+    if args.command == CONFIRM_OPERATOR_REENTRY_COMMAND:
+        return run_argparse_confirm_reentry_command(args)
     if args.command == "plan-production":
         try:
             payload = _plan_production(

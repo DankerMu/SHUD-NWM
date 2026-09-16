@@ -9194,6 +9194,214 @@ def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> No
     assert _breaker_occurrences(repository, cycle_time) == 1
 
 
+def _quarantine_rerun_count(
+    repository: FileOrchestrationJournalRepository, cycle_time: datetime, *, model_id: str = "model_a"
+) -> int | None:
+    return repository.quarantine_rerun_count(source_id="gfs", cycle_time=cycle_time, model_id=model_id)
+
+
+@pytest.mark.parametrize(
+    ("leg", "expected"),
+    [
+        # The original defect run and an unrelated whitelisted replacement: no provenance.
+        ("no_provenance", {"model_a": 0}),
+        # round 1 cand-01: the terminal outcome does not matter -- the stamp is
+        # written at acceptance, so a failed stamped rerun still counts once
+        # (the occurrence count, which requires completion, stays 0 for it).
+        ("partial_cohort_target_failed", {"model_a": 1, "model_b": 0}),
+        ("partial_cohort_target_succeeded", {"model_a": 1, "model_b": 0}),
+        # Two stamped reruns that recorded DIFFERENT tokens each count (#1555 F2).
+        ("different_tokens_each_count", {"model_a": 2}),
+        # Master + its reconcile-copied terminal row is one submission.
+        ("master_and_terminal_copy", {"model_a": 1}),
+        ("another_models_provenance", {"model_a": 0, "model_b": 1}),
+        ("unsucceeded_master", {"model_a": 1}),
+        ("failed_master", {"model_a": 1}),
+        ("no_journal", {"model_a": 0}),
+    ],
+)
+def test_quarantine_rerun_count_counts_stamped_masters_whatever_their_status_or_token(
+    tmp_path: Path, leg: str, expected: dict[str, int]
+) -> None:
+    """#1555: the breaker confirmation pin -- stamped cohort masters, no status and no token compare."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    model_ids = tuple(expected)
+    both = [_breaker_identity_entry(), _breaker_identity_entry(model_id="model_b", array_task_id=1)]
+    jobs: list[dict[str, Any]] = []
+    if leg == "no_provenance":
+        jobs = [_cohort_master_job(cycle_time), _cohort_master_job(cycle_time, job_suffix="_retry_1")]
+    elif leg in {"partial_cohort_target_failed", "partial_cohort_target_succeeded"}:
+        outcome = "failed" if leg == "partial_cohort_target_failed" else "succeeded"
+        jobs = [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[_projection("model_a", outcome), _projection("model_b", "failed")],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ]
+    elif leg == "different_tokens_each_count":
+        jobs = [
+            _cohort_master_job(cycle_time, job_suffix="_retry_1", quarantine_rerun_model_ids=["model_a"]),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_2",
+                identities=[_breaker_identity_entry(init_state_id=_BREAKER_OTHER_TOKEN)],
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ]
+    elif leg == "master_and_terminal_copy":
+        jobs = [
+            _cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+            _reconciled_terminal_job(cycle_time),
+        ]
+    elif leg == "another_models_provenance":
+        jobs = [_cohort_master_job(cycle_time, identities=both, quarantine_rerun_model_ids=["model_b"])]
+    elif leg in {"unsucceeded_master", "failed_master"}:
+        status = "running" if leg == "unsucceeded_master" else "failed"
+        jobs = [_cohort_master_job(cycle_time, status=status, quarantine_rerun_model_ids=["model_a"])]
+
+    repository = (
+        FileOrchestrationJournalRepository(tmp_path / "journal")
+        if leg == "no_journal"
+        else _breaker_journal(tmp_path, cycle_time, jobs, model_ids=model_ids)
+    )
+
+    assert {model_id: _quarantine_rerun_count(repository, cycle_time, model_id=model_id) for model_id in model_ids} == (
+        expected
+    )
+    if leg in {"partial_cohort_target_failed", "unsucceeded_master", "failed_master"}:
+        # The §8.7 occurrence count keeps requiring a COMPLETED convergence attempt.
+        assert _breaker_occurrences(repository, cycle_time) == 0
+    if leg == "different_tokens_each_count":
+        # The per-token count sees each lineage once -- the reason the pin can not use it.
+        assert _breaker_occurrences(repository, cycle_time) == 1
+        assert _breaker_occurrences(repository, cycle_time, init_state_id=_BREAKER_OTHER_TOKEN) == 1
+
+
+def test_quarantine_rerun_count_is_none_when_the_journal_can_not_be_read(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path, cycle_time, [_cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"])]
+    )
+    assert _quarantine_rerun_count(repository, cycle_time) == 1
+    latest = tmp_path / "journal" / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json"
+    latest.write_text("{not json\n", encoding="utf-8")
+
+    assert _quarantine_rerun_count(FileOrchestrationJournalRepository(tmp_path / "journal"), cycle_time) is None
+    # An unsafe source id is a read failure too, never a count.
+    assert (
+        FileOrchestrationJournalRepository(tmp_path / "journal").quarantine_rerun_count(
+            source_id="not a source/..", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def _budget_reentry_master_job(
+    cycle_time: datetime,
+    *,
+    run_suffix: str = "_forecast_model_a",
+    job_suffix: str = "",
+    status: str = "succeeded",
+    budget_reentry_model_ids: list[str] | None = None,
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """A cohort master under the scheduler's per-model run prefix (``cycle_gfs_<stamp><run_suffix>``).
+
+    ``budget_reentry_model_ids=None`` omits the provenance field, the shape of
+    every master that is not a confirmed budget re-entry.
+    """
+    row = _cohort_master_job(
+        cycle_time, status=status, quarantine_rerun_model_ids=quarantine_rerun_model_ids
+    )
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}{run_suffix}"
+    row.update({"job_id": f"job_{run_id}_forecast{job_suffix}", "run_id": run_id, "candidate_id": run_id})
+    if budget_reentry_model_ids is not None:
+        row["strict_warm_start_budget_reentry_model_ids"] = list(budget_reentry_model_ids)
+    return row
+
+
+def _budget_reentry_count(
+    repository: FileOrchestrationJournalRepository, cycle_time: datetime, *, model_id: str = "model_a"
+) -> int | None:
+    return repository.budget_reentry_count(source_id="gfs", cycle_time=cycle_time, model_id=model_id)
+
+
+@pytest.mark.parametrize(
+    ("leg", "expected"),
+    [
+        # Retries that spent the budget, and a quarantine rerun: no budget stamp.
+        ("no_stamp", {"model_a": 0}),
+        ("stamp_names_another_model", {"model_a": 0, "model_b": 1}),
+        # Stamped at acceptance: the terminal outcome does not matter.
+        ("failed_master", {"model_a": 1}),
+        # r3-02: neither the run prefix nor the retry suffix matters.
+        ("two_across_prefixes", {"model_a": 2}),
+        ("master_and_terminal_copy", {"model_a": 1}),
+        ("no_journal", {"model_a": 0}),
+    ],
+)
+def test_budget_reentry_count_counts_stamped_masters_whatever_their_status_prefix_or_suffix(
+    tmp_path: Path, leg: str, expected: dict[str, int]
+) -> None:
+    """r3-02: the budget confirmation pin -- stamped cohort masters, journal-direct."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    model_ids = tuple(expected)
+    jobs: list[dict[str, Any]] = []
+    if leg == "no_stamp":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, run_suffix="_full_model_a", job_suffix="_retry_1_retry_2"),
+            _budget_reentry_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+        ]
+    elif leg == "stamp_names_another_model":
+        jobs = [_budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_b"])]
+    elif leg == "failed_master":
+        jobs = [_budget_reentry_master_job(cycle_time, status="failed", budget_reentry_model_ids=["model_a"])]
+    elif leg == "two_across_prefixes":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"]),
+            _budget_reentry_master_job(
+                cycle_time, run_suffix="_full_model_a", job_suffix="_retry_1", budget_reentry_model_ids=["model_a"]
+            ),
+        ]
+    elif leg == "master_and_terminal_copy":
+        jobs = [
+            _budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"]),
+            _reconciled_terminal_job(cycle_time),
+        ]
+
+    repository = (
+        FileOrchestrationJournalRepository(tmp_path / "journal")
+        if leg == "no_journal"
+        else _breaker_journal(tmp_path, cycle_time, jobs, model_ids=model_ids)
+    )
+
+    assert {model_id: _budget_reentry_count(repository, cycle_time, model_id=model_id) for model_id in model_ids} == (
+        expected
+    )
+    if leg == "no_stamp":
+        # The two provenances never stand in for each other.
+        assert _quarantine_rerun_count(repository, cycle_time) == 1
+
+
+def test_budget_reentry_count_is_none_when_the_journal_can_not_be_read(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path, cycle_time, [_budget_reentry_master_job(cycle_time, budget_reentry_model_ids=["model_a"])]
+    )
+    assert _budget_reentry_count(repository, cycle_time) == 1
+    latest = tmp_path / "journal" / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json"
+    latest.write_text("{not json\n", encoding="utf-8")
+
+    assert _budget_reentry_count(FileOrchestrationJournalRepository(tmp_path / "journal"), cycle_time) is None
+    assert (
+        FileOrchestrationJournalRepository(tmp_path / "journal").budget_reentry_count(
+            source_id="not a source/..", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "leg",
     [
@@ -19925,3 +20133,349 @@ def test_public_evidence_scalar_classifier_matches_file_provider_classifier() ->
         assert public_evidence_module._sanitize_public_path_or_uri_scalar(
             value
         ) == scheduler_file_providers_module._sanitize_file_provider_scalar(value), value
+
+
+# ---------------------------------------------------------------------------
+# #1820: the released-identity recovery LISTING isolates one malformed flat row
+# (or one unreadable confirming cycle) instead of aborting, and never swallows a
+# budget refusal, an unreadable file, or a containment fault.  Only the operator
+# command's two legs change; the scheduler hot path keeps failing closed.
+# ---------------------------------------------------------------------------
+
+#: A flat file name that resolves to a DIFFERENT cycle than the wedged master's,
+#: so only the first flat scan reads it -- the cycle-scoped confirmation for
+#: ``2026072000`` filters it out by name.
+_MALFORMED_FLAT_JOB_ID = "job_cycle_gfs_2026072100_forecast"
+
+
+def _released_row_on_disk(repository: Any, record: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads((repository.root / "pipeline-jobs" / f"{record['job_id']}.json").read_text(encoding="utf-8"))
+
+
+def _write_malformed_flat_row(
+    repository: Any, record: Mapping[str, Any], mutate: Callable[[dict[str, Any]], Any]
+) -> str:
+    """Copy the wedged master under another job id, then break exactly one thing.
+
+    The copy alone already fails the accepted-submit invariant (``cohort_digest``
+    covers the job identity), so every mutator below lands on an EARLIER raise
+    site of the same validation chain.
+    """
+
+    row = _released_row_on_disk(repository, record)
+    row["job_id"] = _MALFORMED_FLAT_JOB_ID
+    row["payload"]["job_id"] = _MALFORMED_FLAT_JOB_ID
+    replacement = mutate(row)
+    path = repository.root / "pipeline-jobs" / f"{_MALFORMED_FLAT_JOB_ID}.json"
+    if isinstance(replacement, str):
+        path.write_text(replacement, encoding="utf-8")
+    else:
+        path.write_text(json.dumps(row), encoding="utf-8")
+    return f"pipeline-jobs/{_MALFORMED_FLAT_JOB_ID}.json"
+
+
+def _set_payload(key: str, value: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda row: row["payload"].__setitem__(key, value)
+
+
+def _nested(depth: int) -> Any:
+    value: Any = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+_ROW_CONTENT_SKIP_CASES: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "file_journal_malformed_json": lambda row: "{not json",
+    "file_journal_expected_object": lambda row: "[1, 2]",
+    "file_journal_record_type_mismatch": lambda row: row.__setitem__("record_type", "hydro_run"),
+    "file_journal_schema_mismatch": lambda row: row.__setitem__("schema_version", "nhms.other.v0"),
+    "file_journal_missing_identity": lambda row: row.pop("source_id") and None,
+    "file_journal_invalid_identity": lambda row: row.__setitem__("source_id", "notasource"),
+    "file_journal_invalid_cycle_time": lambda row: row.__setitem__("cycle_time", "not-a-time"),
+    "file_journal_source_mismatch": _set_payload("source_id", "IFS"),
+    "file_journal_cycle_mismatch": _set_payload("cycle_time", "2026-07-21T00:00:00Z"),
+    "file_journal_cycle_id_mismatch": _set_payload("cycle_id", "gfs_2026072100"),
+    "file_journal_run_mismatch": _set_payload("run_id", "cycle_gfs_2026072100"),
+    "file_journal_model_mismatch": lambda row: (
+        row.__setitem__("model_id", "model_0"),
+        row["payload"].__setitem__("model_id", "model_1"),
+    )
+    and None,
+    # File name != recorded job id.
+    "file_journal_job_mismatch": _set_payload("job_id", "job_cycle_gfs_2026072000_forecast_other"),
+    "file_journal_evidence_invariant_invalid": lambda row: None,
+    "file_journal_evidence_enum_invalid": _set_payload("submit_outcome", "not_an_outcome"),
+    "file_journal_evidence_type_invalid": _set_payload("submission_attempt", "one"),
+    "file_journal_evidence_required": _set_payload(
+        "init_state_identities", [{"array_task_id": 0, "model_id": "model_0", "init_state_id": ""}]
+    ),
+    "file_journal_evidence_field_not_allowed": _set_payload(
+        "init_state_identities", [{"array_task_id": 0, "model_id": "model_0", "init_state_id": "s", "extra": 1}]
+    ),
+    "file_journal_evidence_limit_exceeded": _set_payload("init_state_identities", [{}] * 5000),
+    "file_journal_json_node_limit_exceeded": _set_payload("slurm_comment_padding", [0] * 300_001),
+    "file_journal_json_depth_exceeded": _set_payload("slurm_comment_padding", _nested(70)),
+    "file_journal_unsafe_identity": lambda row: row.__setitem__("source_id", "gfs/../ifs"),
+    "file_journal_invalid_field": _set_payload("status", {"not": "a scalar"}),
+}
+
+
+def test_row_content_skip_reasons_are_exactly_the_tabled_single_row_reasons() -> None:
+    """The allowlist is closed: every member has a real-row case below, and no budget/containment token."""
+
+    assert set(journal_module.ROW_CONTENT_SKIP_REASONS) == set(_ROW_CONTENT_SKIP_CASES)
+    for never_skipped in (
+        "file_journal_unsafe_path_segment",
+        "file_journal_file_limit_exceeded",
+        "file_journal_depth_limit_exceeded",
+        "file_journal_record_limit_exceeded",
+        "file_journal_byte_limit_exceeded",
+        "file_journal_unsafe_scanned_entry",
+        "file_journal_quiescence_authority_changed",
+        "file_journal_unreadable",
+    ):
+        assert never_skipped not in journal_module.ROW_CONTENT_SKIP_REASONS
+
+
+@pytest.mark.parametrize("reason", sorted(_ROW_CONTENT_SKIP_CASES))
+def test_released_listing_skips_one_malformed_flat_row_for_each_content_reason(tmp_path: Path, reason: str) -> None:
+    repository, record = _released_identity_blocked_master(tmp_path)
+    relative = _write_malformed_flat_row(repository, record, _ROW_CONTENT_SKIP_CASES[reason])
+    fresh = FileOrchestrationJournalRepository(repository.root)
+
+    jobs, skipped = fresh.query_released_identity_blocked_jobs_with_skips()
+
+    assert [job["job_id"] for job in jobs] == [record["job_id"]]
+    assert [(item["path"], item["reason"]) for item in skipped] == [(relative, reason)]
+    assert "cycle_scope" not in skipped[0]
+    # The list-returning seam keeps its signature and the same rows.
+    assert [job["job_id"] for job in fresh.query_released_identity_blocked_jobs()] == [record["job_id"]]
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_recovery_listing_receipt_reports_the_skipped_invariant_invalid_row(
+    tmp_path: Path, capsys: Any, entrypoint: str
+) -> None:
+    """C.1: one current-contract but invariant-invalid row no longer blinds the listing."""
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    relative = _write_malformed_flat_row(repository, record, lambda row: None)
+
+    code, listing = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
+
+    assert code == 0
+    assert listing["decision"] == "listed"
+    assert listing["wedged_count"] == 1
+    assert [row["job_id"] for row in listing["wedged"]] == [record["job_id"]]
+    assert listing["skipped_count"] >= 1
+    assert {"path": relative, "reason": "file_journal_evidence_invariant_invalid", "field": "cohort_digest"} in listing[
+        "skipped"
+    ]
+    assert str(repository.root) not in json.dumps(listing)
+
+
+def _released_master_at_second_cycle(tmp_path: Path) -> dict[str, Any]:
+    """The same wedge one cycle later (``2026072100``), in the SAME journal root."""
+
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+
+    def _shift(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace("2026072000", "2026072100").replace("2026-07-20T00:00:00Z", "2026-07-21T00:00:00Z")
+        if isinstance(value, datetime):
+            return _dt("2026-07-21T00:00:00Z")
+        if isinstance(value, list):
+            return [_shift(item) for item in value]
+        if isinstance(value, dict):
+            return {key: _shift(item) for key, item in value.items()}
+        return value
+
+    shifted = _shift(record)
+    shifted["cohort_digest"] = forecast_cohort_digest(shifted)
+    assert repository.reserve_pipeline_job(dict(shifted)) is not None
+    reserved = repository.get_pipeline_job(str(shifted["job_id"]))
+    assert (
+        repository.release_identity_blocked_reservation(
+            str(shifted["job_id"]),
+            accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+    return shifted
+
+
+def test_released_listing_skips_a_bad_row_of_a_confirming_cycle_without_poisoning_the_memo(tmp_path: Path) -> None:
+    """C.3 (round 1): the bad flat row sits in a confirming cycle but is not the candidate row itself.
+
+    The confirming replay skips that row only (never the cycle), and its filtered
+    read is not memoized: the same instance's scheduler reads of that cycle keep
+    failing closed afterwards.
+    """
+
+    repository, first = _released_identity_blocked_master(tmp_path)
+    second = _released_master_at_second_cycle(tmp_path)
+    bad_row = repository.root / "pipeline-jobs" / "job_cycle_gfs_2026072000_forecast_retry_9.json"
+    bad_row.write_text("{not json", encoding="utf-8")
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    cycle_query = {
+        "source_id": "gfs",
+        "cycle_time": _dt("2026-07-20T00:00:00Z"),
+        "model_id": "model_0",
+        "run_id": "fcst_gfs_2026072000_model_0",
+        "forcing_version_id": "forc_gfs_2026072000_model_0",
+        "candidate_id": "gfs:2026-07-20T00:00:00Z:model_0:forecast_gfs_deterministic",
+    }
+    # Warm every memo of this instance on the fail-closed read first.
+    assert fresh.candidate_state(**cycle_query)["file_journal"]["reason"] == "file_journal_malformed_json"
+
+    jobs, skipped = fresh.query_released_identity_blocked_jobs_with_skips()
+
+    assert sorted(job["job_id"] for job in jobs) == sorted([first["job_id"], second["job_id"]])
+    assert [(item["path"], item["reason"]) for item in skipped] == [
+        ("pipeline-jobs/job_cycle_gfs_2026072000_forecast_retry_9.json", "file_journal_malformed_json")
+    ]
+    again_jobs, again_skipped = fresh.query_released_identity_blocked_jobs_with_skips()
+    assert sorted(job["job_id"] for job in again_jobs) == sorted(job["job_id"] for job in jobs)
+    assert again_skipped == skipped
+    # The listing's filtered replay never reached the cycle memo.
+    assert fresh.candidate_state(**cycle_query)["file_journal"]["reason"] == "file_journal_malformed_json"
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_malformed_json"):
+        list(fresh._iter_pipeline_job_records_scoped(("gfs", _dt("2026-07-20T00:00:00Z"))))
+
+
+def test_released_listing_keeps_the_wedged_row_beside_a_bad_row_of_the_same_cycle(tmp_path: Path) -> None:
+    """round 1 cand-04: an invariant-invalid row in the wedged row's own cycle skips once, hides nothing."""
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    same_cycle_job_id = "job_cycle_gfs_2026072000_forecast_retry_8"
+    assert str(record["job_id"]).startswith("job_cycle_gfs_2026072000_")
+    # A copy of the wedged master under another job id of the SAME cycle: the
+    # cohort digest covers the job identity, so the row is invariant-invalid.
+    row = _released_row_on_disk(repository, record)
+    row["job_id"] = same_cycle_job_id
+    row["payload"]["job_id"] = same_cycle_job_id
+    (repository.root / "pipeline-jobs" / f"{same_cycle_job_id}.json").write_text(json.dumps(row), encoding="utf-8")
+
+    listing = FileOrchestrationJournalRepository(repository.root)
+    jobs, skipped = listing.query_released_identity_blocked_jobs_with_skips()
+
+    assert [job["job_id"] for job in jobs] == [record["job_id"]]
+    assert [(item["path"], item["reason"]) for item in skipped] == [
+        (f"pipeline-jobs/{same_cycle_job_id}.json", "file_journal_evidence_invariant_invalid")
+    ]
+
+
+def test_released_listing_keeps_every_wedged_row_beside_a_bad_row_with_an_unscoped_name(tmp_path: Path) -> None:
+    """round 1 cand-04: a name that resolves to no cycle is read by every cycle replay, reported once."""
+
+    repository, first = _released_identity_blocked_master(tmp_path)
+    second = _released_master_at_second_cycle(tmp_path)
+    (repository.root / "pipeline-jobs" / "job_operator_scratch.json").write_text("{not json", encoding="utf-8")
+
+    listing = FileOrchestrationJournalRepository(repository.root)
+    jobs, skipped = listing.query_released_identity_blocked_jobs_with_skips()
+
+    assert sorted(job["job_id"] for job in jobs) == sorted([first["job_id"], second["job_id"]])
+    assert [(item["path"], item["reason"]) for item in skipped] == [
+        ("pipeline-jobs/job_operator_scratch.json", "file_journal_malformed_json")
+    ]
+
+
+def test_released_listing_still_raises_a_malformed_confirming_cycle_journal_log(tmp_path: Path) -> None:
+    """round 1 cand-04: only flat rows are skippable; the cycle's own journal log is not a row."""
+
+    repository, _first = _released_identity_blocked_master(tmp_path)
+    _released_master_at_second_cycle(tmp_path)
+    (repository.root / "journal" / "gfs" / "2026072000.jsonl").write_text("{not json\n", encoding="utf-8")
+
+    with pytest.raises(FileOrchestrationJournalError, match="file_journal_malformed_json"):
+        FileOrchestrationJournalRepository(repository.root).query_released_identity_blocked_jobs_with_skips()
+
+
+def test_released_listing_still_raises_the_scoped_record_budget_beside_a_malformed_row(tmp_path: Path) -> None:
+    """C.4: a budget refusal on the confirming cycle is never turned into a cycle skip."""
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _write_malformed_flat_row(repository, record, lambda row: None)
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=1)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        budgeted.query_released_identity_blocked_jobs_with_skips()
+
+    assert caught.value.reason == "file_journal_record_limit_exceeded"
+
+
+def test_released_listing_still_raises_the_flat_file_budget_beside_a_malformed_row(tmp_path: Path) -> None:
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _write_malformed_flat_row(repository, record, lambda row: None)
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_files=1)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        budgeted.query_released_identity_blocked_jobs_with_skips()
+
+    assert caught.value.reason == "file_journal_file_limit_exceeded"
+
+
+def test_released_listing_still_raises_a_row_over_the_byte_budget(tmp_path: Path) -> None:
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _write_malformed_flat_row(repository, record, _set_payload("slurm_comment_padding", "x" * 20_000))
+    good_size = (repository.root / "pipeline-jobs" / f"{record['job_id']}.json").stat().st_size
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_bytes=good_size + 1_000)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        budgeted.query_released_identity_blocked_jobs_with_skips()
+
+    assert caught.value.reason == "file_journal_byte_limit_exceeded"
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode-000 files")
+def test_released_listing_still_raises_an_unreadable_flat_row(tmp_path: Path) -> None:
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _write_malformed_flat_row(repository, record, lambda row: None)
+    unreadable = repository.root / "pipeline-jobs" / f"{_MALFORMED_FLAT_JOB_ID}.json"
+    unreadable.chmod(0)
+    try:
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            FileOrchestrationJournalRepository(repository.root).query_released_identity_blocked_jobs_with_skips()
+    finally:
+        unreadable.chmod(0o600)
+
+    assert caught.value.reason == "file_journal_unreadable"
+
+
+def test_scheduler_reads_keep_failing_closed_on_the_row_the_listing_skips(tmp_path: Path) -> None:
+    """C.5: the hot path is untouched -- a malformed row in the cycle still blocks candidate_state."""
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    in_cycle = repository.root / "pipeline-jobs" / "job_cycle_gfs_2026072000_forecast_retry_9.json"
+    in_cycle.write_text("{not json", encoding="utf-8")
+    fresh = FileOrchestrationJournalRepository(repository.root)
+
+    jobs, skipped = fresh.query_released_identity_blocked_jobs_with_skips()
+    state = fresh.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-07-20T00:00:00Z"),
+        model_id="model_0",
+        run_id="fcst_gfs_2026072000_model_0",
+        forcing_version_id="forc_gfs_2026072000_model_0",
+        candidate_id="gfs:2026-07-20T00:00:00Z:model_0:forecast_gfs_deterministic",
+    )
+
+    assert {
+        "path": "pipeline-jobs/job_cycle_gfs_2026072000_forecast_retry_9.json",
+        "reason": "file_journal_malformed_json",
+    } in [{key: item[key] for key in ("path", "reason")} for item in skipped]
+    # round 1: the same-cycle bad row no longer hides the wedged row.
+    assert [job["job_id"] for job in jobs] == [record["job_id"]]
+    assert state["file_journal"] == {
+        "status": "blocked",
+        "reason": "file_journal_malformed_json",
+        "field": "pipeline-jobs/job_cycle_gfs_2026072000_forecast_retry_9.json",
+        "evidence": {"error_type": "JSONDecodeError"},
+    }
