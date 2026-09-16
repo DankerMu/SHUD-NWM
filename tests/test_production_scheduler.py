@@ -287,7 +287,10 @@ def test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_
         "candidate_id": candidate.candidate_id,
         "state_evidence": dict(guarded.evidence),
     }
-    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin]) is False
+    # Completed-stage resumes with a recognized restart_stage are cohort
+    # replacement-eligible; that is not forced terminal forecast replay.
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin]) is True
+
     assert (
         _terminal_stage_needs_forced_resubmit(
             SimpleNamespace(active_basins=[basin], restart_stage="forcing"),

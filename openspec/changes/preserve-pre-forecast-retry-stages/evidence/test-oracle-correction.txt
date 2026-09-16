@@ -1,0 +1,4 @@
+The new regression first passed every fixed scheduler/guard assertion but failed an unrelated assumed consumer expectation: _replacement_retry_scoped_cycle_execution was asserted False.
+Existing unchanged chain_runtime_utils.py:228-246 returns True for successful completed-stage resumes with a recognized restart stage; this is replacement cohort eligibility, not forced terminal forecast resubmission.
+The test expectation is corrected to True and its independent terminal-forecast forced-resubmit assertion remains False. Runtime source and approved fixture are unchanged. The original pre-fix scheduler regression remains red at the stage-upgrade assertion.
+First full verification: 1 failed,2196passed; retained in node27-verification-attempt1.txt. Final full rerun follows on corrected test-only commit.
