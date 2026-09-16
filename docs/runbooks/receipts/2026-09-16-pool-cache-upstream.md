@@ -245,9 +245,14 @@ Pass counts: 38 candidate observations, 38 blocked, 0 submitted. Those
 `job_cycle_gfs_2026091412_convert_cohort_4f6d17de405b_convert` Slurm
 48756 (`jobs_by_stage` Counter convert/succeeded=38 is not 38 distinct
 Slurm jobs). No forcing job. `dry_run=false`,
-`execution_mode=production_orchestration`. `no_progress_circuit` is
-open on older unrelated jobs (`ambiguous_fallback_match:comment_accounting_unproven`);
-it is not the candidate-local missing-forcing guard.
+`execution_mode=production_orchestration`. `no_progress_circuit.open`
+contains both older `subject_kind=job` entries with
+`ambiguous_fallback_match:comment_accounting_unproven` and
+`subject_kind=candidate` entries, including this exact GFS candidate
+with `reason=blocked:forcing_version_row_absent` and
+`consecutive_passes=185` (plus siblings). The forcing-witness guard is
+the observed current candidate blocker. Circuit behavior was neither
+replayed nor bypassed here and remains a recovery consideration for #2439.
 
 ### Ranked hypotheses after the red signal
 
@@ -262,9 +267,12 @@ it is not the candidate-local missing-forcing guard.
    elsewhere or sidecar/journal mismatch. **Not evidenced** here;
    provenance is `sidecar_absent`, URI null.
 4. Global execution gate disables submission. Predict dry-run / disabled
-   / circuit rather than candidate-local missing-forcing. **Ruled out
-   as the blocking reason** — pass is production_orchestration,
-   dry_run false, blocker is the candidate artifact guard.
+   / circuit rather than candidate-local missing-forcing. **Does not
+   independently explain the captured candidate decision**: the pass is
+   production_orchestration with `dry_run=false`, while the artifact guard
+   blocks this candidate. Candidate-level no-progress tracking exists for
+   it; its recovery implications remain for #2439. This diagnosis neither
+   replayed nor bypassed circuit behavior.
 Later GFS cycles `gfs_2026091500` / `gfs_2026091512` are
 `backfill_deferred_waiting_for_prior_cycle`. Observed IFS:
 `ifs_2026091500` is `backfill_deferred_waiting_for_global_prior_cycle`;
