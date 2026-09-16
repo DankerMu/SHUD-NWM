@@ -1,0 +1,4 @@
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   76G   18G  81% /
+/dev/mapper/ubuntu--vg-home        1.7T  477G  1.1T  31% /home
+/dev/md0                            15T  2.0T   12T  15% /data/GHDC

@@ -1,0 +1,15 @@
+NEXT                        LEFT       LAST                        PASSED       UNIT                                     ACTIVATES
+Wed 2026-09-16 15:21:40 CST 8min left  Wed 2026-09-16 14:51:40 CST 21min ago    nhms-node27-download.timer               nhms-node27-download.service
+Wed 2026-09-16 15:21:40 CST 8min left  Wed 2026-09-16 14:51:40 CST 21min ago    yd-node27-download.timer                 yd-node27-download.service
+Wed 2026-09-16 15:30:00 CST 16min left Wed 2026-09-16 15:00:06 CST 12min ago    nhms-node27-frontier-alert.timer         nhms-node27-frontier-alert.service
+Thu 2026-09-17 11:35:00 CST 20h left   Wed 2026-09-16 11:35:32 CST 3h 37min ago nhms-node27-raw-retention.timer          nhms-node27-raw-retention.service
+Thu 2026-09-17 12:05:00 CST 20h left   Wed 2026-09-16 12:05:32 CST 3h 7min ago  nhms-node27-mvt-cache-retention.timer    nhms-node27-mvt-cache-retention.service
+Thu 2026-09-17 12:05:00 CST 20h left   Wed 2026-09-16 12:05:32 CST 3h 7min ago  yd-node27-raw-retention.timer            yd-node27-raw-retention.service
+Thu 2026-09-17 12:10:00 CST 20h left   Wed 2026-09-16 12:10:32 CST 3h 2min ago  nhms-node27-resource-governance.timer    nhms-node27-resource-governance.service
+Thu 2026-09-17 12:25:00 CST 21h left   Wed 2026-09-16 12:25:32 CST 2h 47min ago nhms-node27-timeseries-compression.timer nhms-node27-timeseries-compression.service
+Thu 2026-09-17 13:15:00 CST 22h left   Wed 2026-09-16 13:15:32 CST 1h 57min ago nhms-node27-timeseries-retention.timer   nhms-node27-timeseries-retention.service
+Thu 2026-09-17 13:45:00 CST 22h left   Wed 2026-09-16 13:45:32 CST 1h 27min ago yd-node27-timeseries-retention.timer     yd-node27-timeseries-retention.service
+n/a                         n/a        Wed 2026-09-16 15:13:05 CST 166ms ago    nhms-node27-autopipe.timer               nhms-node27-autopipe.service
+n/a                         n/a        Wed 2026-09-16 15:13:05 CST 166ms ago    yd-node27-autopipe.timer                 yd-node27-autopipe.service
+
+12 timers listed.

@@ -1,0 +1,182 @@
+[2026-09-16T07:13:01Z] OUT=/home/nwm/tmp/2162/out-b-20260916T071301Z BK=/home/nwm/nhms-restore-master-backup-2162-20260916T071301Z DIST_NEW=/home/nwm/tmp/2162/dist-new-20260916T071301Z
+[2026-09-16T07:13:01Z] == 2.1 baseline + preconditions (nothing changed before 2.4)
+before: head=415cbd1e9d0eee39ba0dfb623a586b02cbb340f2 branch=issue1987-reviewed-new-415cbd1e upstream=origin/issue1987-frozen-new-415cbd1e porcelain=0 dist_index_mtime=2026-09-14 15:19:23 dist_assets=assets/index-DLe5e3Ad.js,assets/index-Dyk-LUrk.css,assets/react-RJ6AW5ww.js,assets/vendor-Dhrtl9aN.js,assets/vendor-map-2JX48g6q.js,
+behind/ahead: 196 0
+dep-diff-lines(pyproject uv.lock .python-version)=0 venv=Python 3.11.15
+frontend-dep-diff-lines(package.json pnpm-lock.yaml)=0 frontend-files-changed=49
+migrations-diff-lines=0 roles-diff-lines=1
+toolchain: node=v22.22.2 pnpm=10.11.0 packageManager="packageManager": "pnpm@10.11.0"
+replay unit: not-found (absent-approved per #1895 R5.2)
+lifecycle lock: no holder
+display MainPID=1086781 uvicorn_8080_pids=[1086781 ] ActiveState=active cwd=/home/nwm/NWM cmd=/home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --p
+display env: NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt token_key=1
+display.env keys lacking vs master example: NHMS_DISPLAY_DB_MAX_OVERFLOW NHMS_DISPLAY_DB_POOL_SIZE NHMS_DISPLAY_WORKERS NHMS_MVT_FILE_CACHE_DIR 
+NEXT                        LEFT       LAST                        PASSED       UNIT                                     ACTIVATES
+Wed 2026-09-16 15:21:40 CST 8min left  Wed 2026-09-16 14:51:40 CST 21min ago    nhms-node27-download.timer               nhms-node27-download.service
+Wed 2026-09-16 15:30:00 CST 16min left Wed 2026-09-16 15:00:06 CST 12min ago    nhms-node27-frontier-alert.timer         nhms-node27-frontier-alert.service
+Thu 2026-09-17 11:35:00 CST 20h left   Wed 2026-09-16 11:35:32 CST 3h 37min ago nhms-node27-raw-retention.timer          nhms-node27-raw-retention.service
+Thu 2026-09-17 12:05:00 CST 20h left   Wed 2026-09-16 12:05:32 CST 3h 7min ago  nhms-node27-mvt-cache-retention.timer    nhms-node27-mvt-cache-retention.service
+Thu 2026-09-17 12:10:00 CST 20h left   Wed 2026-09-16 12:10:32 CST 3h 2min ago  nhms-node27-resource-governance.timer    nhms-node27-resource-governance.service
+Thu 2026-09-17 12:25:00 CST 21h left   Wed 2026-09-16 12:25:32 CST 2h 47min ago nhms-node27-timeseries-compression.timer nhms-node27-timeseries-compression.service
+Thu 2026-09-17 13:15:00 CST 22h left   Wed 2026-09-16 13:15:32 CST 1h 57min ago nhms-node27-timeseries-retention.timer   nhms-node27-timeseries-retention.service
+n/a                         n/a        Wed 2026-09-16 15:13:05 CST 166ms ago    nhms-node27-autopipe.timer               nhms-node27-autopipe.service
+yd :8081 pid=3163766 health=200
+cache locks=8520 pbf=11423 size=1.9G
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   76G   18G  81% /
+/dev/mapper/ubuntu--vg-home        1.7T  477G  1.1T  31% /home
+/dev/md0                            15T  2.0T   12T  15% /data/GHDC
+000056_hydro_run_parsed_at.sql|2026-09-12 11:31:55.725341+00
+000057_river_network_version_geometry_generation.sql|2026-09-12 11:31:56.411303+00
+000058_hot_timeseries_chunk_interval_3d.sql|2026-09-12 11:31:57.27682+00
+000059_river_timeseries_narrow_expand.sql|2026-09-14 21:10:42.990816+00
+total 12
+drwx------  2 nwm nwm 4096 Sep 12 13:49 .
+drwxrwxr-x 53 nwm nwm 4096 Sep 16 13:39 ..
+-rw-------  1 nwm nwm    0 Sep 12 13:49 resume-approved
+-rw-------  1 nwm nwm 3282 Sep 12 15:11 state.json
+91-fences=0
+unit-vs-master nhms-display-api.service: 0 lines
+unit-vs-master nhms-node27-autopipe.service: 0 lines
+unit-vs-master nhms-node27-autopipe.timer: 0 lines
+unit-vs-master nhms-node27-download.service: 0 lines
+unit-vs-master nhms-node27-download.timer: 0 lines
+unit-vs-master nhms-node27-raw-retention.service: 6 lines
+unit-vs-master nhms-node27-raw-retention.timer: 0 lines
+unit-vs-master nhms-node27-timeseries-retention.service: 0 lines
+unit-vs-master nhms-node27-timeseries-retention.timer: 4 lines
+unit-vs-master nhms-node27-timeseries-compression.service: 12 lines
+unit-vs-master nhms-node27-timeseries-compression.timer: 0 lines
+unit-vs-master nhms-node27-resource-governance.service: 0 lines
+unit-vs-master nhms-node27-resource-governance.timer: 0 lines
+unit-vs-master nhms-node27-frontier-alert.service: 0 lines
+unit-vs-master nhms-node27-frontier-alert.timer: 0 lines
+unit-vs-master nhms-node27-mvt-cache-retention.service: 0 lines
+unit-vs-master nhms-node27-mvt-cache-retention.timer: 0 lines
+dist before: 2026-09-14 15:19:23 assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ] geo=2
+local  / : 200
+  served assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ]
+public / : 200
+  served assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ]
+local  /api/v1/layers: 200 6073 0.081396
+public /api/v1/layers: 200 6073 0.100347
+local  river-network-national/5/25/12 (pre): 200 142594 0.013853 etag=W/"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83" cache=hit
+run_id sample=fcst_ifs_2026091412_dg_fa180301403c9833e11bfa933ffd5a27
+public pre hydro-national 9999-12-31T23:59:59-08:00: 422 261 0.097960
+public pre hydro-national 0001-01-01T00:00:00+08:00: 422 261 0.096504
+public pre hydro-national not-an-instant: 422 298 0.099090
+public pre offset=999999999: 200 77 0.098209
+raw-retention last: success Wed 2026-09-16 11:35:32 CST 
+[2026-09-16T07:13:06Z] == 2.2 stop in-window timers (nhms-node27-autopipe.timer nhms-node27-download.timer nhms-node27-frontier-alert.timer)
+settled after 20s: autopipe=inactive download=inactive frontier=inactive
+other processes referencing /home/nwm/NWM/ (excluding display tree + this script): [2839596:/home/nwm/NWM/.venv/bin/python3 /home/nwm/NWM/.venv/bin/pyte ]
+autopipe per-tick log: /home/nwm/autopipe-logs/autopipe.log (149031466 bytes)
+[2026-09-16T07:13:17Z] == 2.3 backup -> /home/nwm/nhms-restore-master-backup-2162-20260916T071301Z
+33
+[2026-09-16T07:13:17Z] == 2.4 checkout master @ NEW_SHA (single tree rewrite; display keeps serving old modules until 2.7)
+git pull --ff-only: Already up to date.
+after checkout: head=f2476c8c29774d40b300d4a8a13657b5d6d05139 branch=master upstream=origin/master porcelain=0 dist_index_mtime=2026-09-14 15:19:23 dist_assets=assets/index-DLe5e3Ad.js,assets/index-Dyk-LUrk.css,assets/react-RJ6AW5ww.js,assets/vendor-Dhrtl9aN.js,assets/vendor-map-2JX48g6q.js,
+[2026-09-16T07:13:20Z] == 2.5 vite build out of tree -> /home/nwm/tmp/2162/dist-new-20260916T071301Z
+vite build rc=0 elapsed=19s log_lines=22
+../../../tmp/2162/dist-new-20260916T071301Z/assets/OverviewPage-DZzPc27E.js     149.44 kB │ gzip:  47.26 kB
+../../../tmp/2162/dist-new-20260916T071301Z/assets/react-RJ6AW5ww.js            181.83 kB │ gzip:  59.85 kB
+../../../tmp/2162/dist-new-20260916T071301Z/assets/vendor-charts-BMeovC4a.js    625.70 kB │ gzip: 210.57 kB
+../../../tmp/2162/dist-new-20260916T071301Z/assets/vendor-map-2JX48g6q.js       825.52 kB │ gzip: 225.46 kB
+✓ built in 16.30s
+built assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ] old=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ] changed=no
+12M
+[2026-09-16T07:13:39Z] == 2.6 atomic dist swap
+swapped: head=f2476c8c29774d40b300d4a8a13657b5d6d05139 branch=master upstream=origin/master porcelain=0 dist_index_mtime=2026-09-16 15:13:39 dist_assets=assets/index-DLe5e3Ad.js,assets/index-Dyk-LUrk.css,assets/react-RJ6AW5ww.js,assets/vendor-Dhrtl9aN.js,assets/vendor-map-2JX48g6q.js,
+[2026-09-16T07:13:39Z] == 2.7 restart display (systemd unit, by hand)
+/health ok at 2026-09-16T07:13:42Z
+display MainPID=2846999 (before 1086781) cwd=/home/nwm/NWM cmd=/home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8080 --workers 2 
+smoke: basin_id=basins_wj
+yd :8081 pid=3163766 (before 3163766) health=200
+[2026-09-16T07:13:42Z] == 2.8 read-surface gate on :8080 + frontend gate
+/api/v1/layers: 200 6073 0.118883
+/api/v1/runs: 200 59765 0.088207
+/api/v1/models: 200 1333 0.040273
+cycles: http=200 source=gfs cycle=2026-09-14T00:00:00Z vt=2026-09-14T00:00:00Z
+river-network-national/5/25/12: 200 142594 0.024200 etag=W/"m16-bd3332e733a97a3a49626d1692bd2440770be308ccf9b60c77f67bf7ef624a83" cache=hit
+hydro-national/q_down/2026-09-14T00:00:00Z/4/12/6: 200 1374299 0.295053 cache=hit
+hydro-national/gfs/2026-09-14T00:00:00Z/q_down/2026-09-14T00:00:00Z/4/12/6: 200 1374311 0.084167 cache=hit
+hydro/fcst_ifs_2026091412_dg_fa180301403c9833e11bfa933ffd5a27/q_down/2026-09-14T00:00:00Z/7/100/50: 404 473 0.068576
+local offset=999999999: 200 77 0.098748
+local  / : 200
+  served assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ] == built: yes
+  assets/index-DLe5e3Ad.js: 200 51452 0.006083
+  assets/index-Dyk-LUrk.css: 200 58725 0.001976
+  assets/react-RJ6AW5ww.js: 200 181828 0.001718
+  assets/vendor-Dhrtl9aN.js: 200 98579 0.001664
+  assets/vendor-map-2JX48g6q.js: 200 825523 0.001644
+local /ops: 200 646 0.002683
+local /geo/national-basin-river.geojson: 200 8853352 0.001889
+read-surface + frontend gate: zero 500, bundle served == built
+[2026-09-16T07:13:44Z] == 2.9 prewarm lock counts (writers still stopped)
+before prewarm: locks=8520 pbf=11423
+prewarm rc=1 elapsed=0s token_unset_warnings=0
+{"requests_total":183,"failed_count":10,"cache_hits":173,"deadline_skipped":0,"elapsed_seconds":0.719,"tile_failed":0,"png_out_of_contract":0,"per_source":{"gfs":{"cycle":"2026-09-14T00:00:00Z","discharge_requests":65,"png_ok":0,"png_failed":5,"error":null},"ifs":{"cycle":"2026-09-14T12:00:00Z","discharge_requests":65,"png_ok":0,"png_failed":5,"error":null}}}
+     10   failure: status=404 error=HTTP 404 code=PRECIP_CYCLE_NOT_MIRRORED reason=mirror_root_unconfigured kind=png
+tile failures by class: 
+after prewarm: locks=8520 pbf=11423 (delta locks=0 pbf=0)
+lock gate: after <= before
+river-network-national/5/25/12 (2nd): 200 142594 0.016218 cache=hit
+[2026-09-16T07:13:45Z] == 2.10 start timers
+[2026-09-16T07:13:45Z] timers started: nhms-node27-autopipe.timer nhms-node27-download.timer nhms-node27-frontier-alert.timer (EXIT trap or step 2.10)
+window: stop=2026-09-16T07:13:06Z checkout=2026-09-16T07:13:17Z restart_display=2026-09-16T07:13:40Z start=2026-09-16T07:13:45Z
+[2026-09-16T07:13:45Z] waiting for first natural autopipe tick from /home/nwm/NWM @ master (<= 30 min)
+first tick: done Result=success ExecMainStartTimestamp=Wed 2026-09-16 15:13:45 CST ExecMainExitTimestamp=Wed 2026-09-16 15:13:56 CST 
+tick log lines=687 seed_failed_import=0 token_unset=0 prewarm_rc_lines=1
+[2026-09-16T07:13:45Z] autopipe: start
+[2026-09-16T07:13:54Z] autopipe: phase=ingest elapsed_sec=9
+[2026-09-16T07:13:55Z] autopipe: phase=coverage_backstop elapsed_sec=1
+[2026-09-16T07:13:55Z] autopipe: national MVT prewarm (z=3,4,5)
+[2026-09-16T07:13:56Z] autopipe: MVT prewarm rc=0 (non-fatal)
+[2026-09-16T07:13:56Z] autopipe: phase=mvt_prewarm elapsed_sec=1
+[2026-09-16T07:13:56Z] autopipe: done rc=0 elapsed_sec=11
+{"requests_total":183,"failed_count":10,"cache_hits":173,"tile_failed":0,"png_failed":10}
+after first tick: locks=8520 pbf=11423
+nhms-node27-download first run after restore: OBSERVED start=Wed 2026-09-16 15:13:45 CST success { path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_download_once.sh 
+nhms-node27-frontier-alert first run after restore: NOT OBSERVED in window (last start=Wed 2026-09-16 15:00:06 CST < T_START=2026-09-16T07:13:45Z)
+[2026-09-16T07:14:05Z] == 2.11 public re-tests
+public / : 200
+  served assets=[assets/index-DLe5e3Ad.js assets/index-Dyk-LUrk.css assets/react-RJ6AW5ww.js assets/vendor-Dhrtl9aN.js assets/vendor-map-2JX48g6q.js ] == built: yes
+  public assets/index-DLe5e3Ad.js: 200 51452 0.094994
+  public assets/index-Dyk-LUrk.css: 200 58725 0.098544
+  public assets/react-RJ6AW5ww.js: 200 181828 0.093734
+  public assets/vendor-Dhrtl9aN.js: 200 98579 0.097335
+  public assets/vendor-map-2JX48g6q.js: 200 825523 0.098792
+public /api/v1/layers: 200 6073 0.098338
+public /ops: 200 646 0.098699
+public hydro-national 9999-12-31T23:59:59-08:00: 422 VALIDATION_ERROR
+public hydro/{run} 9999-12-31T23:59:59-08:00: 422 VALIDATION_ERROR
+public hydro-national 0001-01-01T00:00:00+08:00: 422 VALIDATION_ERROR
+public hydro/{run} 0001-01-01T00:00:00+08:00: 422 VALIDATION_ERROR
+public hydro-national not-an-instant: 422 VALIDATION_ERROR
+public hydro/{run} not-an-instant: 422 VALIDATION_ERROR
+public offset=999999999: 200 data_len=0
+warm /api/v1/runs ttfb x3: 0.002023 0.001844 0.082515 
+[2026-09-16T07:14:07Z] == 2.12 final state
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   76G   18G  81% /
+/dev/mapper/ubuntu--vg-home        1.7T  477G  1.1T  31% /home
+/dev/md0                            15T  2.0T   12T  15% /data/GHDC
+unit invariant: final == before (9 units, 0 lines)
+foreign fence: compression still bound to /home/nwm/NWM-maintenance-reviewed-95481481
+capacity-hold dir: unchanged
+df: identical
+drop-ins remaining: 0
+env/unit files vs backup: compared
+head=f2476c8c29774d40b300d4a8a13657b5d6d05139 branch=master upstream=origin/master porcelain=0 dist_index_mtime=2026-09-16 15:13:39 dist_assets=assets/index-DLe5e3Ad.js,assets/index-Dyk-LUrk.css,assets/react-RJ6AW5ww.js,assets/vendor-Dhrtl9aN.js,assets/vendor-map-2JX48g6q.js,
+old branch retained: 415cbd1e9d0eee39ba0dfb623a586b02cbb340f2 (origin/issue1987-frozen-new-415cbd1e untouched: 415cbd1e9d0eee39ba0dfb623a586b02cbb340f2)
+NEXT                        LEFT       LAST                        PASSED       UNIT                                     ACTIVATES
+Wed 2026-09-16 15:23:45 CST 9min left  Wed 2026-09-16 15:13:45 CST 22s ago      nhms-node27-autopipe.timer               nhms-node27-autopipe.service
+Wed 2026-09-16 15:30:00 CST 15min left Wed 2026-09-16 15:00:06 CST 14min ago    nhms-node27-frontier-alert.timer         nhms-node27-frontier-alert.service
+Wed 2026-09-16 15:43:45 CST 29min left Wed 2026-09-16 15:13:45 CST 22s ago      nhms-node27-download.timer               nhms-node27-download.service
+Thu 2026-09-17 11:35:00 CST 20h left   Wed 2026-09-16 11:35:32 CST 3h 38min ago nhms-node27-raw-retention.timer          nhms-node27-raw-retention.service
+Thu 2026-09-17 12:05:00 CST 20h left   Wed 2026-09-16 12:05:32 CST 3h 8min ago  nhms-node27-mvt-cache-retention.timer    nhms-node27-mvt-cache-retention.service
+Thu 2026-09-17 12:10:00 CST 20h left   Wed 2026-09-16 12:10:32 CST 3h 3min ago  nhms-node27-resource-governance.timer    nhms-node27-resource-governance.service
+Thu 2026-09-17 12:25:00 CST 21h left   Wed 2026-09-16 12:25:32 CST 2h 48min ago nhms-node27-timeseries-compression.timer nhms-node27-timeseries-compression.service
+Thu 2026-09-17 13:15:00 CST 22h left   Wed 2026-09-16 13:15:32 CST 1h 58min ago nhms-node27-timeseries-retention.timer   nhms-node27-timeseries-retention.service
+no failed nhms-display/node27 units
+[2026-09-16T07:14:07Z] DONE rc=0
