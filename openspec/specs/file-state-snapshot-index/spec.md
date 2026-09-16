@@ -481,7 +481,7 @@ When `NHMS_REQUIRE_FORECAST_WARM_START` is not true and a basin carries quaranti
 
 ### Requirement: A non-convergent quarantine SHALL be broken once a quarantine rerun re-records the stale identity
 
-A forecast cohort reservation whose basin carries the `retry_journal_predecessor_identity_mismatch` decision SHALL stamp quarantine-rerun provenance onto the cohort MASTER row (the affected model ids, written by the reservation writer — the §8.7 scoring and filtering surfaces themselves remain strictly read-only). When the stale recorded `init_state_id` for one cycle and model has been re-recorded by at least one qualifying cohort MASTER row carrying that provenance for that model — counted read-only from the journal, never from the bounded candidate-state payload — the scheduler SHALL treat that row as a completed convergence attempt when either the master has aggregate terminal-success status or the master has `partially_failed` status and its bounded `candidate_projections` contains the exact model with `array_task_outcome="succeeded"`. An aggregate terminal-success master SHALL remain countable without `candidate_projections`; a `partially_failed` master whose exact model projection is failed, missing, malformed, or unavailable after the 256-entry bound SHALL NOT count. Per-model terminal rows that reconcile copies the identity onto are excluded, so one submission's master row plus its per-model terminal row count as one. Masters minted by non-quarantine replacements (for example a missing-run-manifest or missing-forecast-output resubmission) carry no such provenance and SHALL NOT arm the breaker; journals written before this change carry no provenance field and SHALL leave the breaker disengaged. Once the count reaches the existing threshold, the scheduler SHALL stop producing the quarantine retry: the candidate-side filter SHALL demote the decision to a blocked decision carrying a typed reason, the recorded and expected identity tokens, the occurrence count, and a manual-retry-required retry policy; the discovery-side backfill selection SHALL exclude a cycle from the single oldest-first execution slot only when every model keeping that cycle a gap is breaker-engaged (a cycle with any genuinely incomplete model SHALL keep taking the slot), while still reporting the excluded cycle as a gap (never as complete) and emitting a not-selected evidence entry that carries both identity tokens. No journal row SHALL be written or deleted, and an unavailable or failed occurrence count SHALL leave the breaker disengaged and the quarantine retry decision unchanged (fail toward liveness).
+A forecast cohort reservation whose basin carries the `retry_journal_predecessor_identity_mismatch` decision SHALL stamp quarantine-rerun provenance onto the cohort MASTER row (the affected model ids, written by the reservation writer — the §8.7 scoring and filtering surfaces themselves remain strictly read-only). When the stale recorded `init_state_id` for one cycle and model has been re-recorded by at least one qualifying cohort MASTER row carrying that provenance for that model — counted read-only from the journal, never from the bounded candidate-state payload — the scheduler SHALL treat that row as a completed convergence attempt when either the master has aggregate terminal-success status or the master has `partially_failed` status and its bounded `candidate_projections` contains the exact model with `array_task_outcome="succeeded"`. An aggregate terminal-success master SHALL remain countable without `candidate_projections`; a `partially_failed` master whose exact model projection is failed, missing, malformed, or unavailable after the 256-entry bound SHALL NOT count. Per-model terminal rows that reconcile copies the identity onto are excluded, so one submission's master row plus its per-model terminal row count as one. Masters minted by non-quarantine replacements (for example a missing-run-manifest or missing-forecast-output resubmission) carry no such provenance and SHALL NOT arm the breaker; journals written before this change carry no provenance field and SHALL leave the breaker disengaged. Once the count reaches the existing threshold, the scheduler SHALL stop producing the quarantine retry: the candidate-side filter SHALL demote the decision to a blocked decision carrying a typed reason, the recorded and expected identity tokens, the occurrence count, and a manual-retry-required retry policy; the discovery-side backfill selection SHALL exclude a cycle from the single oldest-first execution slot only when every model keeping that cycle a gap is breaker-engaged (a cycle with any genuinely incomplete model SHALL keep taking the slot), while still reporting the excluded cycle as a gap (never as complete) and emitting a not-selected evidence entry that carries both identity tokens. No journal row SHALL be written or deleted, and an unavailable or failed occurrence count SHALL leave the breaker disengaged and the quarantine retry decision unchanged (fail toward liveness). A breaker-engaged model for which a pinned operator re-entry confirmation matches the model's current count of provenance-stamped quarantine rerun masters (as defined by the operator re-entry requirement of `production-scheduler-orchestration`) SHALL NOT be demoted: the candidate-side filter SHALL emit the quarantine retry once, and the discovery-side selection SHALL treat that model as having real work, so its cycle keeps the execution slot. Reading confirmations SHALL NOT write the journal.
 
 #### Scenario: Breaker demotes the quarantine to blocked after a provenance-stamped rerun re-records the token
 
@@ -537,6 +537,11 @@ A forecast cohort reservation whose basin carries the `retry_journal_predecessor
 
 - **WHEN** the breaker engages for cycle T
 - **THEN** the journal's on-disk content is byte-identical after the pass
+
+#### Scenario: Matching operator confirmation keeps the slot and re-emits the quarantine retry once
+
+- **WHEN** every model keeping the oldest gap a gap is breaker-engaged, and one of them has an operator re-entry confirmation whose pin equals the model's live quarantine rerun count
+- **THEN** that cycle keeps the backfill execution slot, the confirmed model's candidate-side decision is `retry_journal_predecessor_identity_mismatch` carrying the confirmation block, and the other breaker-engaged models of the cycle remain blocked
 
 ### Requirement: Copyback root sameness SHALL be decided by filesystem identity rather than resolved-path string equality
 
@@ -759,4 +764,27 @@ malformed.
 - **GIVEN** a blocked successor whose `selected_predecessor` has `valid_time` 2026-07-06T12:00Z and `lead_hours` 12 but no `cycle_id`
 - **WHEN** predecessor backfill emission runs
 - **THEN** the emitted predecessor candidate is for cycle 2026-07-06T00:00Z
+
+### Requirement: Blocked successors SHALL carry a §8.6 predecessor emission feasibility flag
+
+When the §8.6 predecessor emitter produces records for a blocked successor, the successor's `state_evidence` SHALL carry the top-level boolean `predecessor_emission_blocked`. The flag SHALL be true when any of the successor's own skipped or truncated records carries a reason outside a closed transient allowlist, and false when all of its records are emitted or transient. The transient allowlist SHALL be exactly `predecessor_already_present`, `predecessor_backfill_active_pipeline`, `predecessor_raw_manifest_env_unwired`, and the lineage scoped-out reason only when the successor's cycle time precedes the recorded cutover valid time. Every other skip reason — including `predecessor_raw_manifest_not_ready`, `predecessor_model_not_available`, `predecessor_emission_cap_reached`, `predecessor_candidate_construction_failed`, and `predecessor_gate_failed` — SHALL set it true. The emission-cap truncation record SHALL name the successors it cut off in `successor_candidate_ids`, so those successors are flagged. The flag SHALL be orthogonal to `operator_action_required`: the gate's computation of that signal SHALL be unchanged. `predecessor_emission_blocked` SHALL survive the bounded-evidence summarization tier, including false values. Operator triage SHALL read both booleans.
+
+#### Scenario: Missing predecessor manifest is not reported as self-healing
+- **GIVEN** a blocked successor whose predecessor slot verifies ready, so `operator_action_required` is false
+- **WHEN** the emitter skips its predecessor with `predecessor_raw_manifest_not_ready`
+- **THEN** the successor evidence SHALL carry `predecessor_emission_blocked: true`
+- **AND** the flag SHALL remain present after bounded summarization
+
+#### Scenario: Cap truncation flags the cut-off successors
+- **WHEN** the emitter reaches its emission cap before iterating a successor's pending record
+- **THEN** the truncation record SHALL list that successor in `successor_candidate_ids`
+- **AND** that successor's evidence SHALL carry `predecessor_emission_blocked: true`
+
+#### Scenario: Deterministic gate failure is flagged
+- **WHEN** a successor's predecessor skip reason is `predecessor_gate_failed`
+- **THEN** the successor evidence SHALL carry `predecessor_emission_blocked: true`
+
+#### Scenario: Transient skip is not flagged
+- **WHEN** a successor's only record is a `predecessor_backfill_active_pipeline` skip
+- **THEN** the successor evidence SHALL carry `predecessor_emission_blocked: false`
 
