@@ -4694,3 +4694,17 @@ Phase 6.2 不变量审计（`contract-doc-accuracy` 跨 round 1/2 重复），�
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
+
+## 2026-09-16 复核（PR #2427 合并后）
+
+`loop_log_audit.py` 在追加 #2427 行后仍报同一项 DECIDABLE lens-rotation：
+223 个多轮 merged PR，later-round catches core=287 / rotated=270 / phase=61。
+相对上次复核，样本增长未改变结论方向——轮换进来的席位贡献与核心席位同量级。
+
+PR #2427 自身是 fixture `none`、rounds 0 的 docs-only PR，不进轮换样本；但它给
+`contract-doc-accuracy` 这一类又添一个实例：receipt 首版用 `git log … | tail -3`
+取到的是范围内**最早**而非最晚的前端 src 提交，据此写下的日期旁证不成立，
+在最后一推更正为只凭逐字节相同立论。与上面那条书写规则同源，无需新座位。
+
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 keep、座位上限不变。
