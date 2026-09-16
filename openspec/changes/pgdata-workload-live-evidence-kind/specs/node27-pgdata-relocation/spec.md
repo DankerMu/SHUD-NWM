@@ -20,7 +20,8 @@ receipt `live` only when the same run proved its admission. Without that explici
 #### Scenario: A live receipt is requested without proven admission
 
 - **WHEN** a `live` receipt is requested but the session is not read-only, the session role is not the display
-  read-only role, or the reviewed SHA is not the executing checkout's HEAD
+  read-only role, the reviewed SHA is not the executing checkout's HEAD, or the modules that perform the run do
+  not resolve under that same executing checkout
 - **THEN** the run SHALL refuse with a typed code before measuring or publishing
 - **AND** no receipt file SHALL exist at the requested output path, not even a partial one
 

@@ -79,6 +79,36 @@ def _write_dsn(parent: Path, text: str | bytes, *, name: str = "reader.dsn") -> 
     return path
 
 
+def _assert_refusal(call: Any, code: str, message: str) -> None:
+    """Assert both the typed code and the message, so sibling branches cannot stand in."""
+
+    with pytest.raises(PgdataWorkloadError) as refused:
+        call()
+    assert refused.value.code == code
+    assert message in str(refused.value)
+
+
+def _git_answers(
+    *,
+    head: str,
+    toplevel: str,
+    head_returncode: int = 0,
+    toplevel_returncode: int = 0,
+    diff_returncode: int = 0,
+) -> SimpleNamespace:
+    """Answer per git subcommand, so one guard can be exercised without moving the others."""
+
+    def run(command: Any, *_args: Any, **_kwargs: Any) -> Any:
+        arguments = list(command)[1:]
+        if arguments[:1] == ["diff"]:
+            return subprocess.CompletedProcess(args=command, returncode=diff_returncode, stdout="", stderr="")
+        if "--show-toplevel" in arguments:
+            return subprocess.CompletedProcess(args=command, returncode=toplevel_returncode, stdout=toplevel, stderr="")
+        return subprocess.CompletedProcess(args=command, returncode=head_returncode, stdout=head, stderr="")
+
+    return SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired)
+
+
 def _identity_row(**overrides: Any) -> dict[str, Any]:
     row = {
         "run_id": RUN,
@@ -608,15 +638,47 @@ def test_repository_head_refuses_a_plain_directory_nested_in_an_outer_checkout(t
 def test_repository_head_refuses_a_redirected_git_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # GIT_DIR/GIT_WORK_TREE can hand a clean, unrelated checkout's HEAD to a
-    # directory that is not a checkout at all. The receipt would then claim a SHA
-    # that has nothing to do with the code that ran.
+    # An environment aimed at the other checkout's own work tree: the toplevel identity
+    # check alone already refuses here, because git answers with a root that is not the
+    # directory being asked about. Kept as the shallower half of the redirection pair.
     other, _other_head = _tracked_checkout(tmp_path)
     deployed = tmp_path / "deployed"
     deployed.mkdir()
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     _assert_code(lambda: workload_io.resolve_repository_head(deployed), "INPUT_SHA_HEAD_UNAVAILABLE")
+
+
+def test_repository_head_refuses_a_git_environment_aimed_at_the_executing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The configuration where dropping the redirecting GIT_* variables is the only
+    # defence: GIT_WORK_TREE names THIS directory, so the toplevel matches the anchor,
+    # while GIT_DIR points at another repository that supplies the HEAD and the index.
+    other, other_head = _tracked_checkout(tmp_path)
+    deployed = tmp_path / "deployed"
+    deployed.mkdir()
+    # Content-identical to the other checkout's tree, so the cleanliness query is clean
+    # too: with the variables inherited, nothing downstream notices the substitution.
+    (deployed / "tracked.py").write_text((other / "tracked.py").read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(deployed))
+    redirected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=deployed,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # The hazard is real in this fixture: git hands the other repository's HEAD to a
+    # directory that is not a checkout at all.
+    assert redirected.stdout.strip() == other_head
+    _assert_refusal(
+        lambda: workload_io.resolve_repository_head(deployed),
+        "INPUT_SHA_HEAD_UNAVAILABLE",
+        "executing checkout HEAD cannot be determined",
+    )
 
 
 def test_repository_head_refuses_when_git_is_missing_or_times_out(
@@ -640,24 +702,51 @@ def test_repository_head_refuses_when_git_is_missing_or_times_out(
 
 def test_repository_head_refuses_unusable_git_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, head = _tracked_checkout(tmp_path)
+    # Every case below answers the toplevel and cleanliness queries truthfully, so the
+    # HEAD answer is the only thing under test: no other guard can supply the refusal.
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "subprocess", _git_answers(head=f"{head}\n", toplevel=f"{root}\n"))
+        assert workload_io.resolve_repository_head(root) == head
 
-    def completed(stdout: str, returncode: int = 0) -> Any:
-        return subprocess.CompletedProcess(args=["git"], returncode=returncode, stdout=stdout, stderr="")
-
-    # The last case strips to a valid 40-hex digest and so passes the shape check:
+    # The padded case strips to a valid 40-hex digest and so passes the shape check:
     # only the byte ceiling rejects it, which keeps that guard independently covered.
-    cases = ((head, 128), ("not-a-sha\n", 0), (f"{head}\n{'c' * 200}\n", 0), (f"{head}{' ' * 200}\n", 0))
+    padded = f"{head}{' ' * workload_io.MAX_HEAD_OUTPUT_BYTES}\n"
+    assert padded.strip() == head
+    cases = ((head, 128), ("not-a-sha\n", 0), (f"{head}\n{'c' * 200}\n", 0), (padded, 0))
     for stdout, returncode in cases:
         with monkeypatch.context() as patch:
             patch.setattr(
                 workload_io,
                 "subprocess",
-                SimpleNamespace(
-                    run=lambda *_a, stdout=stdout, returncode=returncode, **_k: completed(stdout, returncode),
-                    TimeoutExpired=subprocess.TimeoutExpired,
-                ),
+                _git_answers(head=stdout, head_returncode=returncode, toplevel=f"{root}\n"),
             )
-            _assert_code(lambda: workload_io.resolve_repository_head(root), "INPUT_SHA_HEAD_UNAVAILABLE")
+            _assert_refusal(
+                lambda: workload_io.resolve_repository_head(root),
+                "INPUT_SHA_HEAD_UNAVAILABLE",
+                "executing checkout HEAD cannot be determined",
+            )
+
+
+def test_repository_head_refuses_an_oversized_checkout_root_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, head = _tracked_checkout(tmp_path)
+    # A repository root is a path, not a digest, so it has its own wider ceiling. The
+    # padded answer strips back to the real root and would otherwise pass every other
+    # root guard — absolute, and identical to the anchor — so only the ceiling rejects it.
+    oversized = f"{root}{' ' * (workload_io.MAX_TOPLEVEL_OUTPUT_BYTES + 1)}\n"
+    assert oversized.strip() == str(root)
+    assert len(oversized) > workload_io.MAX_TOPLEVEL_OUTPUT_BYTES
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "subprocess", _git_answers(head=f"{head}\n", toplevel=f"{root}\n"))
+        assert workload_io.resolve_repository_head(root) == head
+    with monkeypatch.context() as patch:
+        patch.setattr(workload_io, "subprocess", _git_answers(head=f"{head}\n", toplevel=oversized))
+        _assert_refusal(
+            lambda: workload_io.resolve_repository_head(root),
+            "INPUT_SHA_HEAD_UNAVAILABLE",
+            "executing checkout root cannot be determined",
+        )
 
 
 def test_bind_reviewed_sha_refuses_a_mismatch_and_an_undeterminable_head() -> None:
