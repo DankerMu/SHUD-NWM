@@ -4740,5 +4740,28 @@ importer 对）。这不是席位配置能修的缺口——增加或轮换 lens
 它对本 ADR 的意义是：**later-round catches 这个指标衡量的是「人/席位读代码找到了什么」，
 不衡量「更便宜的机器门本可以先抓到什么」**，因此不能单凭它给席位数定价。
 
+## 2026-09-16 复核三（PR #2429 合并后）
+
+追加 #2429 行后 681 行、668 merged、13 terminal。`loop_log_audit.py` 仍报同一项
+DECIDABLE lens-rotation，数字与上一节（#2406）相同：224 个多轮样本，
+core=313 / rotated=270 / phase=61 / skipped=15。
+
+本节与上一节是同日并行落地的两条链路，合并时撞了车：#2429 的问责 PR 先按 master
+当时的 680 行/223 样本写好，推上去时 #2406 的行已经先合入，冲突解开后数字换成上面这组。
+留痕于此是因为它复现了上一节的结论：**#2429 自身是 rounds 0 的 tier `none` 行，不进多轮样本**，
+core 的增量全部来自 #2406。连续三条 tier `none` 行按构造移不动这个判据——
+DECIDABLE 会一直挂着，直到出现新的多轮 PR，或维护者直接裁定。
+
+PR #2429 给 `contract-doc-accuracy` 添了本 issue 队列里的**第二个连续实例**：
+receipt 初稿把「cron 起的 prewarm 看不到 `NHMS_DISPLAY_CACHE_WARM_TOKEN`」写成范围外发现，
+实际是 `scripts/node27_autopipe_cron.sh` 以 `set -a` source `node27-ingest.env`、
+该文件与 `display.env` 的 token 同值（sha256 相同），149 MB 日志里 0 次 unset 告警；
+告警来自编排者自己那次未装 env 的手工调用。与 #2427 的前端 provenance 错误同源：
+**把单次局部观察推广成系统属性**，两次都由合并前的 advisor 复核拦下。
+
+两次都发生在 tier `none`、零 reviewer 轮次的路径上，说明缺口不在座位组合而在
+「receipt 里每条因果断言都要有独立观察」这条书写规则——继续无需新座位，但值得在
+下一次 profile 维护时把这条写进 receipt 模板的自检项。
+
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
