@@ -132,6 +132,15 @@ exact commands, the evidence-root source and node-22 execution discipline are in
   correct lineage still shows as breaker-blocked). If it moved, do not confirm again.
 - `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
   the next section (`confirm-operator-reentry --pin <budget_reentry_count>`).
+- `blocked_operator_reentry_restart_stage_refused` — the sink refusal (#1555). The
+  confirmation matched, but the candidate would have restarted somewhere other than
+  `forecast` (typically a `convert` rewrite provoked by incomplete canonical readiness),
+  and the re-entry provenance is stamped only at a forecast-cohort reservation. Nothing
+  submitted, nothing consumed, the confirmation stays armed. **Do not confirm again.**
+  Read `state_evidence.operator_reentry_sink_refusal.refused_restart_stage`, repair the
+  pre-forecast input out of band, and let the next pass restart the re-entry at `forecast`.
+  Field-by-field triage is in
+  [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
 
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
 

@@ -602,11 +602,69 @@ identity 可匹配"被误报为 `canonical_identity_mismatch`。
    policy / 源对象，重转或清理后再让下一个自然 pass 重新判定。不要为了放行去改
    期望 identity。
 2. **零行新鲜周期**（`candidate_row_count == 0`）：正常新鲜 ingest，scheduler 的
-   fresh-zero-row 判定照常送 convert / forecast，无需处置。
+   fresh-zero-row 判定照常送 convert / forecast，无需处置。**例外：候选带
+   `operator_reentry_confirmation` 块时**，这条 convert 改写会被 sink 拒绝
+   （见下面的 `blocked_operator_reentry_restart_stage_refused`）——那不是零行判定
+   出错，是一次性授权只覆盖 `forecast`。
 3. **旧冻结 index**：#2042 之前写入的 forecast_index（如 node-22 上
    `gfs_2026090312` 的 `forecast_index_*.json`）里零行候选仍带旧的假
    `canonical_identity_mismatch`；这些文件不回写，按上表用
    `candidate_row_count == 0` 识别为零行即可。
+
+## `blocked_operator_reentry_restart_stage_refused`
+
+### 含义
+
+reason `operator_reentry_restart_stage_not_forecast`。#1555 round-4 的 **sink 拒绝**：
+候选带 `operator_reentry_confirmation` 块（断路器或 strict 预算的一次性签字），但它
+**实际会重启的阶段不是 `forecast`**。重入 provenance 只在 forecast cohort 的
+reservation 处写，所以从别的阶段重启就意味着"计数是否 +1"取决于 operator 没有授权的那个
+阶段是否跑成功——成功才顺带戳到，失败就是「真提交了、计数没动、确认物还在」。这类事件被
+整体拒绝：**不提交、不消费、确认物保持待用**。
+
+判定在**候选清单构建完成之后**统一做一次（`_build_candidates` 的返回点，晚于 §8.6
+predecessor 的头插），读的是候选自己的 `state_evidence`，与它继承自哪个 decision 无关；
+比较是**正向**的 `== "forecast"`：阶段缺失 / `null` / 空串（chain 会从第一个阶段跑起）
+和任何具名的更早或更晚阶段一样被拒。`fresh_ingestion.mode == "full_chain"` 会让 run
+manifest **不带** `restart_stage`，因此即便 evidence 写着 `forecast` 也按"阶段缺失"拒。
+
+### 证据形状
+
+```
+state_evidence.decision = "blocked_operator_reentry_restart_stage_refused"
+state_evidence.reason   = "operator_reentry_restart_stage_not_forecast"
+state_evidence.operator_reentry_sink_refusal = {
+  refused_restart_stage,        # 被拒的那个阶段，原样保留（不改写回 forecast）
+  refused_restart_from_stage,
+  effective_restart_stage,      # run manifest 真正会带的那个（full_chain 时为 null）
+  fresh_full_chain,             # true 表示 manifest 会被剥掉 restart_stage
+  confirmation: {decision, request_id}
+}
+state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_required: true,
+                               operator_reentry_command: "confirm-operator-reentry",
+                               recovery_runbook: "node22-control-plane-manual-recovery"}
+```
+
+`operator_reentry_confirmation` 块原样保留在 evidence 上；有界摘要保留 `decision` /
+`reason` / `manual_retry_required`。
+
+### 处置
+
+1. 该 decision **不在**两处 forced-resubmit 白名单里
+   （`_FORCE_TERMINAL_RESUBMIT_DECISIONS` / `force_replacement_decisions`，两者都是
+   `retry_*` 的封闭集合），不要为了放行去加。
+2. 看 `operator_reentry_sink_refusal.refused_restart_stage` 判断改写源头：
+   - `convert` + `restart_reason = raw_manifest_ready_without_canonical`：canonical
+     readiness 不 ready 而 NFS raw manifest 就绪，触发了"复用 raw 再 convert"改写。
+     **带外修好 forecast 之前的那份输入**——补齐该 cycle 的 canonical 行（或修好
+     canonical readiness index 的身份），不要试图让它从 convert 跑。
+   - `forcing`：见 `--repair-missing-forcing` 与确认物互斥那条（见下面的相关文档）。
+   - `null` / 缺失 / `fresh_full_chain: true`：chain 会整条从头跑，同样带外先修输入。
+   - 更晚的阶段（`state_save_qc` / `parse` 等）：来自失败态重导出，同样不是本次授权覆盖的范围。
+3. 输入修好后的**下一趟自然 pass**：确认物仍然待用、pin 仍然相等，候选从 `forecast`
+   重启、在 reservation 处被戳、计数 +1，**恰好消费一次**；再之后的 pass 回到原来的
+   fail-stop blocked，旧 pin 返回 `pin_mismatch`。不需要、也不应该重新签一次。
+4. 修不好输入时不要绕：没有把这类候选放行的合法通道。
 
 ## 相关文档
 

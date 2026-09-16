@@ -33,6 +33,11 @@ CONFIRMATION_EVENT_TYPE = "operator_reentry_confirmation"
 BREAKER_CYCLE = "2026-05-21T00:00:00Z"
 BREAKER_NOW = "2026-05-21T06:00:00Z"
 
+#: Local "caller said nothing" sentinel for :func:`breaker_scheduler`; forwarding
+#: it would shadow the test subclass's own OMITTED sentinel, so the kwarg is
+#: simply not passed when the caller leaves it alone.
+_BREAKER_CANONICAL_READINESS_PROVIDER_UNSET = object()
+
 
 def _dt(value: str) -> datetime:
     from tests.test_production_scheduler import _dt as production_dt
@@ -162,24 +167,42 @@ def breaker_scheduler(
     *,
     model_ids: tuple[str, ...] = ("model_a",),
     repository: Any | None = None,
+    canonical_readiness_provider: Any = _BREAKER_CANONICAL_READINESS_PROVIDER_UNSET,
+    **config_overrides: Any,
 ) -> Any:
-    """A FRESH non-dry-run scheduler over a FRESH repository, backfill enabled, single cycle."""
+    """A FRESH non-dry-run scheduler over a FRESH repository, backfill enabled, single cycle.
+
+    ``config_overrides`` exists because the defaults below (``backfill_enabled=True``,
+    ``lookback_hours=12``) are rejected outright by
+    ``scheduler_config/config.py:496-500`` when ``repair_missing_forcing`` is on
+    (it demands an exact-cycle, single-cycle, backfill-disabled invocation).
+    Round-4's ``breaker_repair_flag_on`` family overrides them here rather than
+    forking a second copy of this fixture.  ``canonical_readiness_provider``
+    defaults to the test subclass's OMITTED sentinel, exactly as before.
+    """
 
     from tests.test_production_scheduler import FakeAdapter, FakeRegistry, ProductionScheduler, _config, _model
 
+    provider_kwargs: dict[str, Any] = {}
+    if canonical_readiness_provider is not _BREAKER_CANONICAL_READINESS_PROVIDER_UNSET:
+        provider_kwargs["canonical_readiness_provider"] = canonical_readiness_provider
     return ProductionScheduler(
         _config(
             tmp_path,
-            now=_dt(BREAKER_NOW),
-            dry_run=False,
-            backfill_enabled=True,
-            max_cycles_per_source=1,
-            lookback_hours=12,
+            **{
+                "now": _dt(BREAKER_NOW),
+                "dry_run": False,
+                "backfill_enabled": True,
+                "max_cycles_per_source": 1,
+                "lookback_hours": 12,
+                **config_overrides,
+            },
         ),
         registry=FakeRegistry([_model(model_id, _basin_id(model_id)) for model_id in model_ids]),
         adapters={"gfs": FakeAdapter("gfs", [(BREAKER_CYCLE, True)])},
         active_repository=repository if repository is not None else FileOrchestrationJournalRepository(root),
         orchestrator_factory=lambda _source_id: orchestrator,
+        **provider_kwargs,
     )
 
 

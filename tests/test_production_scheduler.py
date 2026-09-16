@@ -57428,6 +57428,7 @@ def _seed_budget_journal(
     jobs: list[dict[str, Any]],
     *,
     repair_missing_forcing: bool = False,
+    canonical_readiness_provider: Any = _TEST_CANONICAL_READINESS_PROVIDER_UNSET,
 ) -> tuple[Path, Any]:
     """Strict db-free lane over a real journal: selected state lead 6h, recorded token lead 12h (CONFLICT).
 
@@ -57437,6 +57438,13 @@ def _seed_budget_journal(
     policy reclassifies the blocker (r1 c-03).  It adds the three preconditions
     that policy verifies -- ``require_direct_grid`` + a direct-grid resource
     profile + a ready NFS raw manifest -- and changes nothing when off.
+
+    ``canonical_readiness_provider`` defaults to the test subclass's OMITTED
+    sentinel, under which ``_canonical_readiness_for_candidate`` returns ``None``
+    and ``scheduler_candidates.py:901-963`` never runs.  Round-4 sink families
+    pass ``None`` explicitly so ``scheduler_core`` builds the REAL
+    ``FileCanonicalReadinessProvider`` and the raw-manifest ``convert`` rewrite
+    is actually reached.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
@@ -57550,6 +57558,7 @@ def _seed_budget_journal(
             registry=FakeRegistry([_model("model_a", "basin_a", resource_profile=resource_profile)]),
             adapters={"gfs": _gfs_adapter([_BUDGET_CYCLE])},
             active_repository=repository if repository is not None else FileOrchestrationJournalRepository(root),
+            canonical_readiness_provider=canonical_readiness_provider,
             orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
         )
 
@@ -57960,13 +57969,14 @@ def test_an_explicit_missing_forcing_repair_refuses_a_confirmed_candidate(
     not a missing-forcing blocker reason -- the operator's exact-cycle repair
     policy used to reclassify into ``retry_repair_missing_forcing``.  That
     reclassified retry restarts at ``forcing``
-    (``scheduler_candidates.py:1811-1812``) and the chain obeys it
+    (``scheduler_candidates.py:1973-1974``) and the chain obeys it
     (``chain_forecast_execution.py:173``), while the provenance stamp is written
     only at a forecast-cohort reservation
-    (``chain_forecast_orchestrator_cycle.py:633-635``) -- so that submission
-    could never move the count its confirmation is pinned to.  It is therefore
-    refused before it can submit: nothing is consumed, and the signature stays
-    armed for the re-entry that DOES move the count (the sequel test below).
+    (``chain_forecast_orchestrator_cycle.py:673-684``) -- so whether that
+    submission moves the count its confirmation is pinned to depends on whether
+    the unauthorized ``forcing`` stage succeeds.  It is therefore refused before
+    it can submit: nothing is consumed, and the signature stays armed for the
+    re-entry that DOES move the count (the sequel test below).
     """
 
     from tests.test_operator_reentry_confirmation import run_confirm
@@ -58163,6 +58173,609 @@ def test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast(
     assert candidates, "premise broken: the budget family emitted no candidate"
     assert _assert_confirmed_retries_restart_at_forecast([item.state_evidence for item in candidates]) == 1
     _assert_confirmed_retries_restart_at_forecast([item.state_evidence for item in blocked])
+
+
+# ---------------------------------------------------------------------------
+# Round 4 (c3-01): the SINK guard.  The three families above are enumerated by
+# confirmation ARM, and none of them supplies a ``canonical_readiness_provider``
+# -- so the test subclass returns ``None`` and the raw-manifest ``convert``
+# rewrite never executes in any of them.  That axis is what let c3-01 through.
+# The families below are enumerated by ``restart_stage`` WRITER SITE, and each
+# one asserts the branch it targets actually executed before asserting the
+# verdict, so a refactor that stops reaching the branch turns them red.
+# ---------------------------------------------------------------------------
+
+_SINK_REFUSAL_DECISION = "blocked_operator_reentry_restart_stage_refused"
+_SINK_REFUSAL_REASON = "operator_reentry_restart_stage_not_forecast"
+
+
+class _FreshZeroRowCanonicalReadinessProvider:
+    """The minimum shape ``_canonical_evidence_is_fresh_zero_row`` accepts as a genuine zero-row read.
+
+    Keys are exactly the ones that predicate inspects: a ``candidate_row_count``
+    of 0, a non-empty ``expected_leads``, and a status/reason outside its two
+    exclusions (``canonical_unavailable`` / ``no_expected_leads``).
+    """
+
+    def canonical_readiness(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "canonical_incomplete",
+            "ready": False,
+            "reason": "missing_canonical_variables",
+            "candidate_row_count": 0,
+            "row_count": 0,
+            "expected_leads": [0, 3, 6, 9, 12],
+            "source_id": kwargs.get("source_id"),
+            "model_id": kwargs.get("model_id"),
+            "basin_id": kwargs.get("basin_id"),
+            "canonical_product_id": kwargs.get("canonical_product_id"),
+        }
+
+
+def _publish_empty_canonical_readiness_index(generated_at: str) -> None:
+    """A REAL, valid, EMPTY index, so the real provider evaluates a genuine zero-row readiness."""
+
+    from services.orchestrator import scheduler_file_providers
+
+    scheduler_file_providers.publish_canonical_readiness_index(
+        [],
+        os.environ["NHMS_SCHEDULER_CANONICAL_READINESS_INDEX"],
+        object_store_root=os.environ["OBJECT_STORE_ROOT"],
+        object_store_prefix="s3://nhms",
+        generated_at=_dt(generated_at),
+    )
+
+
+def _arm_nfs_raw_manifest(monkeypatch: pytest.MonkeyPatch, *, cycle_time: str) -> None:
+    """Raw manifest present AND required: the precondition of the ``convert`` rewrite."""
+
+    object_store_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    _write_db_free_raw_manifest_fixture({"object_store_root": object_store_root}, cycle_time=_dt(cycle_time))
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(object_store_root))
+
+
+def _assert_sink_refusal(entry: Any, *, refused_stage: Any, fresh_full_chain: bool = False) -> Mapping[str, Any]:
+    """The dedicated sink decision, its evidence shape, and the still-armed confirmation."""
+
+    evidence = entry.state_evidence
+    assert entry.reason == _SINK_REFUSAL_REASON
+    assert evidence["decision"] == _SINK_REFUSAL_DECISION
+    assert evidence["reason"] == _SINK_REFUSAL_REASON
+    assert evidence["native_shud_resubmitted"] is False
+    assert evidence["replacement_submitted"] is False
+    refusal = evidence["operator_reentry_sink_refusal"]
+    assert refusal["refused_restart_stage"] == refused_stage
+    assert refusal["fresh_full_chain"] is fresh_full_chain
+    # The confirmation the refusal descends from travels with it, in the same
+    # bounded shape the round-2 policy refusal uses.
+    assert set(refusal["confirmation"]) == {"decision", "request_id"}
+    assert evidence["operator_reentry_confirmation"]["request_id"] == refusal["confirmation"]["request_id"]
+    policy = evidence["retry_policy"]
+    assert policy["automatic_retry_allowed"] is False
+    assert policy["manual_retry_required"] is True
+    assert policy["operator_reentry_command"] == "confirm-operator-reentry"
+    assert policy["recovery_runbook"] == "node22-control-plane-manual-recovery"
+    return evidence
+
+
+def test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_budget_arm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Writer site ``_source_raw_manifest_restart_evidence`` reached through the REAL readiness provider (c3-01).
+
+    ``canonical_readiness_provider=None`` is NOT the subclass's omitted sentinel,
+    so ``scheduler_core`` builds the real ``FileCanonicalReadinessProvider``; an
+    empty-but-valid published index makes it return a genuine zero-row
+    ``canonical_incomplete``.  With the NFS raw manifest present and required,
+    the fresh-zero-row branch builds a NEW evidence dict, copies the confirmed
+    retry decision's evidence into it, and overwrites the restart stage with
+    ``convert`` -- never touching the decision.  The sink refuses it.
+    """
+
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(
+        monkeypatch, tmp_path, _spent_full_chain_budget_rows(), canonical_readiness_provider=None
+    )
+    _publish_empty_canonical_readiness_index("2026-05-21T00:00:00Z")
+    _arm_nfs_raw_manifest(monkeypatch, cycle_time=_BUDGET_CYCLE)
+
+    live_pin = _budget_live_reentry_count(root, capsys)
+    code, receipt, _err = run_confirm(_budget_confirm_argv(root, pin=live_pin), capsys)
+    assert code == 0, receipt
+
+    seeded_masters = _budget_forecast_masters(root)
+    built = scheduler()
+    assert type(built.canonical_readiness_provider).__name__ == "FileCanonicalReadinessProvider"
+    _selected, candidates, blocked, _skipped = _budget_pass(built)
+
+    # Premise: the branch under test really executed.  Both halves are the
+    # branch's OWN evidence, not the verdict.
+    (refused,) = blocked
+    readiness = refused.state_evidence["canonical_readiness"]
+    assert readiness["status"] == "canonical_incomplete"
+    assert readiness["candidate_row_count"] == 0
+    assert refused.state_evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+    assert refused.state_evidence["raw_manifest_reuse"]["status"] == "ready"
+
+    # Verdict: refused at the sink, nothing admitted, nothing submitted.
+    assert candidates == []
+    evidence = _assert_sink_refusal(refused, refused_stage="convert")
+    assert evidence["operator_reentry_confirmation"]["request_id"] == receipt["request_id"]
+    # The offending stage is NOT rewritten back to ``forecast``: the blocked row
+    # shows the operator what the chain would have done.
+    assert evidence["restart_stage"] == "convert"
+
+    # Nothing consumed: the live count is unchanged and the pin still matches.
+    assert _budget_forecast_masters(root) == seeded_masters
+    assert _budget_live_reentry_count(root, capsys) == live_pin
+    code, still_matching, _err = run_confirm(
+        [item for item in _budget_confirm_argv(root, pin=live_pin) if item != "--attest"], capsys
+    )
+    assert (code, still_matching["decision"]) == (0, "dry_run")
+
+
+def test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_breaker_arm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same writer site on the non-strict lane, driven through a whole ``run_once`` pass.
+
+    The readiness provider here is a stub (the breaker geometry has no published
+    canonical index to empty out); it returns the minimum shape the fresh-zero-row
+    predicate accepts, which is exactly what the real provider produced for the
+    budget arm above.
+    """
+
+    from tests.test_operator_reentry_confirmation import (
+        BREAKER_CYCLE,
+        breaker_confirm_argv,
+        breaker_scheduler,
+        run_confirm,
+        seed_breaker_journal,
+    )
+
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
+    assert code == 0, receipt
+    _arm_nfs_raw_manifest(monkeypatch, cycle_time=BREAKER_CYCLE)
+
+    orchestrator = FakeProductionOrchestrator()
+    result = breaker_scheduler(
+        tmp_path,
+        root,
+        orchestrator,
+        canonical_readiness_provider=_FreshZeroRowCanonicalReadinessProvider(),
+    ).run_once()
+
+    (blocked,) = result.evidence["blocked_candidates"]
+    evidence = blocked["state_evidence"]
+    # Premise: the fresh-zero-row raw-manifest branch executed.
+    assert evidence["canonical_readiness"]["candidate_row_count"] == 0
+    assert evidence["restart_reason"] == "raw_manifest_ready_without_canonical"
+    assert evidence["restart_stage"] == "convert"
+
+    # Verdict.
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert evidence["decision"] == _SINK_REFUSAL_DECISION
+    assert evidence["operator_reentry_sink_refusal"]["refused_restart_stage"] == "convert"
+    assert evidence["retry_policy"]["recovery_runbook"] == "node22-control-plane-manual-recovery"
+    # Still armed: the same pin still matches on the write side.
+    code, still_matching, _err = run_confirm(
+        [item for item in breaker_confirm_argv(root, pin=1) if item != "--attest"], capsys
+    )
+    assert (code, still_matching["decision"]) == (0, "dry_run")
+
+
+def test_sink_refuses_a_confirmed_predecessor_prepended_after_the_main_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Placement pin: the guard runs AFTER the §8.6 emitter, which prepends to the same list.
+
+    ``scheduler_backfill_predecessor.py`` assigns no restart stage of its own, so
+    no natural geometry produces a confirmed predecessor at a non-``forecast``
+    stage.  What must be pinned is the guard's PLACEMENT, so the emitter is
+    replaced by one that prepends the way the real one does
+    (``candidates[:0] = ...``) with a confirmed candidate rewritten to
+    ``convert``.  A guard placed at ``candidates.append`` instead would let it
+    through.
+    """
+
+    from dataclasses import replace as _dataclass_replace
+
+    from services.orchestrator import scheduler_backfill_predecessor as backfill_predecessor_module
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+
+    real_emit = backfill_predecessor_module.emit_predecessor_candidates
+    prepended: list[Any] = []
+
+    def _emit_with_confirmed_convert_prepend(*, candidates: list[Any], **kwargs: Any) -> Any:
+        evidence = real_emit(candidates=candidates, **kwargs)
+        assert candidates, "premise broken: the main loop admitted no confirmed candidate to clone"
+        clone = _dataclass_replace(
+            candidates[0],
+            state_evidence={
+                **dict(candidates[0].state_evidence),
+                "restart_stage": "convert",
+                "restart_from_stage": "convert",
+            },
+        )
+        candidates[:0] = [clone]
+        prepended.append(clone)
+        return evidence
+
+    monkeypatch.setattr(
+        backfill_predecessor_module, "emit_predecessor_candidates", _emit_with_confirmed_convert_prepend
+    )
+    _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+
+    # Premise: the emitter really ran and really prepended.
+    assert len(prepended) == 1
+
+    # The prepended confirmed ``convert`` candidate is refused; the genuine
+    # ``forecast`` one the main loop admitted survives.
+    (admitted,) = candidates
+    assert admitted.state_evidence["restart_stage"] == "forecast"
+    assert "operator_reentry_confirmation" in admitted.state_evidence
+    (refused,) = blocked
+    _assert_sink_refusal(refused, refused_stage="convert")
+
+
+@pytest.mark.parametrize(
+    ("case", "drop_keys", "patch", "refused_stage", "fresh_full_chain", "admitted"),
+    [
+        ("absent", ("restart_stage", "restart_from_stage"), {}, None, False, False),
+        ("null", (), {"restart_stage": None, "restart_from_stage": None}, None, False, False),
+        ("empty", (), {"restart_stage": "", "restart_from_stage": ""}, "", False, False),
+        ("earlier_convert", (), {"restart_stage": "convert", "restart_from_stage": "convert"}, "convert", False, False),
+        ("earlier_forcing", (), {"restart_stage": "forcing", "restart_from_stage": "forcing"}, "forcing", False, False),
+        (
+            "later_state_save_qc",
+            (),
+            {"restart_stage": "state_save_qc", "restart_from_stage": "state_save_qc"},
+            "state_save_qc",
+            False,
+            False,
+        ),
+        ("later_parse", (), {"restart_stage": "parse", "restart_from_stage": "parse"}, "parse", False, False),
+        (
+            "fresh_full_chain_strips_the_manifest_stage",
+            (),
+            {"fresh_ingestion": {"required": True, "mode": "full_chain"}},
+            "forecast",
+            True,
+            False,
+        ),
+        ("forecast", (), {}, None, False, True),
+        (
+            "forecast_with_a_disagreeing_restart_from_stage",
+            (),
+            {"restart_from_stage": "convert"},
+            None,
+            False,
+            True,
+        ),
+    ],
+)
+def test_the_sink_is_a_positive_forecast_check_over_the_stage_the_manifest_obeys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+    drop_keys: tuple[str, ...],
+    patch: Mapping[str, Any],
+    refused_stage: Any,
+    fresh_full_chain: bool,
+    admitted: bool,
+) -> None:
+    """Every non-``forecast`` effective stage is refused, including absent/null/empty and LATER stages.
+
+    The effective stage is the one ``scheduler_candidate_manifest.py`` writes into
+    the run manifest, which is why ``fresh_ingestion.mode == "full_chain"`` --
+    under which the manifest carries NO restart stage and the chain runs from its
+    first stage -- is refused even though the evidence key reads ``forecast``.
+    ``restart_from_stage`` is deliberately NOT part of the check: no consumer
+    reads it while ``restart_stage`` is truthy, and a falsy ``restart_stage`` is
+    already refused.
+    """
+
+    from dataclasses import replace as _dataclass_replace
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+    _selected, candidates, _blocked, _skipped = _budget_pass(scheduler())
+    (base,) = candidates
+    assert base.state_evidence["restart_stage"] == "forecast"
+    assert "operator_reentry_confirmation" in base.state_evidence
+
+    evidence = {key: value for key, value in base.state_evidence.items() if key not in drop_keys}
+    evidence.update(patch)
+    candidate = _dataclass_replace(base, state_evidence=evidence)
+
+    admitted_list = [candidate]
+    blocked_list: list[Any] = []
+    scheduler_candidates_module._refuse_confirmed_candidates_off_forecast(admitted_list, blocked_list)
+
+    if admitted:
+        assert admitted_list == [candidate], case
+        assert blocked_list == [], case
+        return
+    assert admitted_list == [], case
+    (entry,) = blocked_list
+    _assert_sink_refusal(entry, refused_stage=refused_stage, fresh_full_chain=fresh_full_chain)
+
+
+def test_the_sink_leaves_an_unconfirmed_off_forecast_candidate_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Blast radius: the guard reads ONLY candidates carrying a confirmation block."""
+
+    from dataclasses import replace as _dataclass_replace
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+    _selected, candidates, _blocked, _skipped = _budget_pass(scheduler())
+    (base,) = candidates
+
+    unconfirmed = _dataclass_replace(
+        base,
+        state_evidence={
+            **{key: value for key, value in base.state_evidence.items() if key != "operator_reentry_confirmation"},
+            "restart_stage": "convert",
+            "restart_from_stage": "convert",
+        },
+    )
+    admitted_list = [unconfirmed]
+    blocked_list: list[Any] = []
+    scheduler_candidates_module._refuse_confirmed_candidates_off_forecast(admitted_list, blocked_list)
+    assert admitted_list == [unconfirmed]
+    assert blocked_list == []
+
+
+def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Measured, not reasoned: what ``_candidate_basin_manifest`` actually writes.
+
+    The retro's rule for this pass is that "unreachable by reading" is not a
+    verdict, so the two shapes the guard's effective-stage rule rests on are
+    measured here against the real manifest builder rather than argued from the
+    source.
+    """
+
+    from dataclasses import replace as _dataclass_replace
+
+    from services.orchestrator import scheduler_candidate_manifest as scheduler_candidate_manifest_module
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+    _selected, candidates, _blocked, _skipped = _budget_pass(scheduler())
+    (base,) = candidates
+
+    def _manifest(candidate: Any) -> Mapping[str, Any]:
+        return scheduler_candidate_manifest_module._candidate_basin_manifest(
+            candidate, output_uri="s3://nhms/runs/out.nc"
+        )
+
+    # 1. Baseline: a ``forecast`` restart really does reach the manifest.
+    assert _manifest(base)["restart_stage"] == "forecast"
+
+    # 2. ``fresh_ingestion.mode == "full_chain"`` STRIPS it, so the chain starts
+    #    at stage 0 even though the evidence key still reads ``forecast``.  This
+    #    is why the guard's effective stage is ``None`` for such a candidate.
+    full_chain = _dataclass_replace(
+        base,
+        state_evidence={
+            **dict(base.state_evidence),
+            "fresh_ingestion": {"required": True, "mode": "full_chain"},
+        },
+    )
+    assert full_chain.state_evidence["restart_stage"] == "forecast"
+    assert "restart_stage" not in _manifest(full_chain)
+
+    # 3. ``restart_from_stage`` is NOT copied into the manifest, so a disagreeing
+    #    value cannot move where the chain starts -- which is why the guard does
+    #    not consult it.
+    disagreeing = _dataclass_replace(
+        base,
+        state_evidence={**dict(base.state_evidence), "restart_from_stage": "convert"},
+    )
+    manifest = _manifest(disagreeing)
+    assert manifest["restart_stage"] == "forecast"
+    assert "restart_from_stage" not in manifest
+
+
+def test_a_post_block_state_rederivation_cannot_hide_a_confirmed_candidate_from_the_sink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """c3-02: the failure arm writes ``restart_stage = failed_stage`` onto an already-confirmed candidate.
+
+    ``_build_candidates`` re-derives the candidate state after a Slurm status sync
+    and merges the new decision's evidence into a candidate whose evidence may
+    already carry the confirmation block.  ``_merge_state_evidence`` never removes
+    a key, so the block survives while ``restart_stage`` is overwritten by the
+    failure arm's ``failed_stage`` -- which may be BEFORE or AFTER ``forecast``.
+    Both halves run for real here: the shipped state decider produces the value,
+    and the shipped merge helper applies it to the real confirmed candidate.  The
+    in-pass route to that merge (active Slurm jobs + a ``sync_cycle_statuses``
+    that returns terminal updates) is not reconstructed; the sink closes the row
+    either way, because it reads the merged ``state_evidence`` and nothing else.
+    """
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from tests.test_operator_reentry_confirmation import run_confirm
+
+    object_store_root = tmp_path / "downstream-object-store"
+    copyback_source = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    copyback_source.parent.mkdir(parents=True)
+    copyback_source.write_text("{}", encoding="utf-8")
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _spent_full_chain_budget_rows())
+    code, _receipt, _err = run_confirm(_budget_confirm_argv(root, pin=_budget_live_reentry_count(root, capsys)), capsys)
+    assert code == 0
+    _selected, candidates, _blocked, _skipped = _budget_pass(scheduler())
+    (confirmed,) = candidates
+    assert confirmed.state_evidence["restart_stage"] == "forecast"
+    assert "operator_reentry_confirmation" in confirmed.state_evidence
+
+    # The REAL decider, on a downstream failure state, takes the failure arm.
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    rederived = scheduler_module._candidate_state_decision(
+        _scheduler_candidate_fixture(),
+        _copyback_downstream_failure_state(
+            _scheduler_candidate_fixture(),
+            _production_identity_fixture(),
+            copyback_source=copyback_source,
+            error_code="NODE_FAILURE",
+        ),
+    )
+    # Premise: the failure arm really ran and really wrote a non-``forecast`` stage.
+    assert (rederived.action, rederived.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert rederived.evidence["restart_stage"] == "parse"
+
+    # The merge the re-derivation performs, through the shipped helper.
+    merged = scheduler_candidates_module._candidate_with_state_evidence(confirmed, rederived.evidence)
+    # Premise: the block survives the merge while the stage is overwritten.
+    assert "operator_reentry_confirmation" in merged.state_evidence
+    assert merged.state_evidence["restart_stage"] == "parse"
+
+    admitted_list = [merged]
+    blocked_list: list[Any] = []
+    scheduler_candidates_module._refuse_confirmed_candidates_off_forecast(admitted_list, blocked_list)
+    assert admitted_list == []
+    (entry,) = blocked_list
+    _assert_sink_refusal(entry, refused_stage="parse")
+
+
+def test_sink_refusal_decision_is_absent_from_both_forced_resubmit_whitelists() -> None:
+    """Nothing may revive the refused candidate into a replacement submission."""
+
+    from services.orchestrator import chain_forced_resubmit, chain_runtime_utils
+
+    assert _SINK_REFUSAL_DECISION not in chain_forced_resubmit._FORCE_TERMINAL_RESUBMIT_DECISIONS
+    sibling_whitelist = inspect.getsource(chain_runtime_utils._replacement_retry_scoped_cycle_execution)
+    assert _SINK_REFUSAL_DECISION not in sibling_whitelist
+    assert all(token.startswith("retry_") for token in chain_forced_resubmit._FORCE_TERMINAL_RESUBMIT_DECISIONS)
+
+
+def test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_flag_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """c-04 / spec non-strict-lane scenario: the repair policy is not EVALUATED off the strict lane.
+
+    ``_apply_explicit_missing_forcing_repair_policy`` is called from inside the
+    ``if strict_warm_start is not None:`` block, so on the non-strict breaker lane
+    an authorized exact-cycle repair never sees this candidate at all.  That is a
+    different statement from "the policy refuses it" (the strict-lane case), and
+    the premise assertion below is exactly that difference: the repair flag really
+    targets this cycle, and no repair evidence was written.
+    """
+
+    import shutil
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from tests.test_operator_reentry_confirmation import (
+        BREAKER_CYCLE,
+        breaker_confirm_argv,
+        breaker_scheduler,
+        run_confirm,
+        seed_breaker_journal,
+    )
+
+    root = seed_breaker_journal(tmp_path, monkeypatch)
+    code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
+    assert code == 0, receipt
+    shutil.rmtree(tmp_path / "object-store" / "forcing")
+    # ``repair_missing_forcing`` turns on the db-free runtime preflight even on a
+    # database-backed lane (scheduler_config/config.py:709-710), which adjudicates
+    # the raw-manifest authority roots against the configured containment bases.
+    # Without them the pass never reaches candidate construction at all
+    # (``status: preflight_blocked``, zero source cycles) and the family would
+    # assert nothing.
+    object_store_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    _write_db_free_raw_manifest_fixture({"object_store_root": object_store_root}, cycle_time=_dt(BREAKER_CYCLE))
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(object_store_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
+    monkeypatch.setattr(
+        source_cycle_raw_manifest_module,
+        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
+        object_store_root,
+        raising=False,
+    )
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = breaker_scheduler(
+        tmp_path,
+        root,
+        orchestrator,
+        # ``repair_missing_forcing`` is validated as an exact-cycle, single-cycle,
+        # backfill-disabled invocation, which the breaker fixture's own defaults
+        # violate (scheduler_config/config.py:496-500).
+        now=_dt(BREAKER_CYCLE),
+        backfill_enabled=False,
+        lookback_hours=0,
+        cycle_lag_hours=0,
+        repair_missing_forcing=True,
+        repair_missing_forcing_cycle_time=_dt(BREAKER_CYCLE),
+    )
+    # Premise (a): the operator's repair really is authorized FOR THIS CYCLE.
+    assert scheduler.config.repair_missing_forcing is True
+    assert scheduler_candidates_module._is_explicit_missing_forcing_repair_target(
+        scheduler.config, _dt(BREAKER_CYCLE)
+    )
+
+    result = scheduler.run_once()
+
+    # Premise (b): the pass really got past the repair lane's preflight and built
+    # candidates for this cycle.
+    assert result.evidence["status"] == "planned"
+    (blocked,) = result.evidence["blocked_candidates"]
+    evidence = blocked["state_evidence"]
+    # Premise (c): the policy was never EVALUATED -- it wrote no evidence at all.
+    assert "missing_forcing_repair" not in evidence
+    # Verdict: the missing-forcing blocked decision, nothing submitted, armed.
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["operator_reentry_confirmation"]["pin"] == 1
+    code, still_matching, _err = run_confirm(
+        [item for item in breaker_confirm_argv(root, pin=1) if item != "--attest"], capsys
+    )
+    assert (code, still_matching["decision"]) == (0, "dry_run")
 
 
 class _NoBudgetReentryCountAccessorRepository(file_orchestration_journal_module.FileOrchestrationJournalRepository):

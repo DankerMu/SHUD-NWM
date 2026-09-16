@@ -126,6 +126,7 @@ jq -c '.source_cycles[]?
 | `cancelled_manual_retry_required` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker） |
 | `blocked_journal_predecessor_identity_quarantine` | `confirm-operator-reentry`（§8.7 断路器） |
 | `blocked_strict_warm_start_init_state_mismatch` | `confirm-operator-reentry`（strict warm-start 预算） |
+| `blocked_operator_reentry_restart_stage_refused` | **不要再签一次**；带外修好 forecast 之前的输入，见下面「已知限制」的 sink 拒绝那条 |
 
 ### `permanent_failure` / `cancelled_manual_retry_required`
 
@@ -234,10 +235,40 @@ run 在飞或不存在时拒绝）：
   forecast cohort 的 reservation 处写；forcing 跑成功才顺带戳到，跑失败就是「真提交了、计数没动、
   确认物还在，且新 run-id 前缀把 stage 域 attempt 打回 0/2 让预算判定失效」——一次签字放行两次
   forecast 重入。所以这条路被整体拒绝，而不是赌 forcing 会成功。
-  **正确顺序：先回补该模型自己的 forcing，再让确认过的重入跑**——它从 `forecast` 重启、在
+  **正确顺序：先把该模型自己的 forcing 补回来，再让确认过的重入跑**——它从 `forecast` 重启、在
   reservation 处被戳、计数 +1，**恰好消费一次**，之后的 pass 回到 blocked、旧 pin 返回
   `pin_mismatch`。`current-production-ops.md` 里 strict 车道走 `--repair-missing-forcing`
   的处置流程同理：带确认物的候选不走那条通道。
+
+  **"补回来"有前提，别默认就是回补脚本**：`scripts/node22_backfill_forcing_for_model_ids.py`
+  是**纯改名工具**——它要求同时给出改名前后两份 registry manifest
+  （`scripts/node22_backfill_forcing_for_model_ids.py:605-606`），待办**完全**由改名集推导
+  （`discover_work` 在 `:409`，`for rename in renames` 在 `:420-421`；`main` 的
+  `resolve_renames → probe_coverage → discover_work` 流水线在 `:648-651`）。
+  **只有"该模型的 forcing 以另一个 model id 存在、即改名集非空"时它才有活儿**。不是改名造成的
+  forcing 缺失，它返回 `work_item_count: 0`（receipt 字段在 `:705` / `:715`），而这个形状与
+  `--forcing-root` 指错、NFS 没挂、环境不对**在条目数上分不开**——所以先读 receipt 的
+  `coverage`，见 `current-production-ops.md` §3.1.1。非改名成因是真实存在的：retention 会删除
+  primary root 下的 `forcing/<source>/<cycle>/...`（`services/orchestrator/retention.py:75`、
+  `:684-687`），即 fail-stop 生效之后 forcing 仍可能在带内消失。
+
+  **改名集为空时的升级路径**：回补脚本不是通道，`--repair-missing-forcing` 也不是。只能**带外**
+  把 forecast 之前的那份输入修好（重新产出该模型的 forcing 包并落进 object store；或修好
+  canonical readiness / raw manifest 身份），修好之前确认物保持待用、候选保持 blocked。修好后的
+  下一趟自然 pass 让确认过的重入从 `forecast` 重启、被戳、计数 +1，恰好消费一次。
+  （retention 的删除前沿是否钉住 blocked / 带确认物的候选**尚未实测**，两个方向都不要断言；
+  设计缺口记在 #2412。）
+
+- **sink 拒绝 `blocked_operator_reentry_restart_stage_refused`**（#1555 round 4）：确认物匹配，
+  但候选实际会重启的阶段不是 `forecast`（典型是 canonical 不 ready + raw manifest 就绪触发的
+  `convert` 改写）。判定在候选清单构建完成后统一做一次，读候选自己的 `state_evidence`，正向比较
+  `== "forecast"`，阶段缺失/`null`/空串以及 `fresh_ingestion.mode == "full_chain"`（run manifest
+  会被剥掉 `restart_stage`）一并拒。**不提交、不消费，确认物保持待用**，该 decision 不在两处
+  forced-resubmit 白名单里。处置：读 `operator_reentry_sink_refusal.refused_restart_stage` 找到改写
+  源头，**带外**修好 forecast 之前的那份输入（canonical readiness index 或 raw manifest 身份），
+  下一趟 pass 自己从 `forecast` 重启并消费一次签字。**不要重复签一次**——旧确认物仍然有效。
+  字段与逐项处置见
+  [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)。
 - **候选仍显示 blocked ≠ 确认物未生效**：先看 dry-run receipt 的 live 计数是否已 +1（file
   journal 的 `hydro_run` 在同一 `run_id` 重跑时不更新，#2397，即使 rerun 拿到正确 lineage
   候选也仍显示 breaker-blocked）；已 +1 就**不要重复确认**——除非该 rerun 已到失败终态且

@@ -25,9 +25,11 @@
   - `test-evidence`：每个切片先红后绿；闭环测试走公开入口 `build_candidates` / scheduler pass。
 - **Risk packs not selected**：`integration`。gateway、reservation、producer 不改；display API 只新增 slug 文件存在性测试，payload 不变。
 
-## 事实基线（HEAD `49cf31316`，已读码核实）
+## 事实基线（merge-base `49cf31316c`，已读码核实）
 
-| 事实 | 位置 |
+**本表每一处坐标都以 `49cf31316c:` 为前缀读取**（例：`git show 49cf31316c:services/orchestrator/scheduler_candidates.py`），在本分支 HEAD 上一律**不成立**——本 PR 改动了其中多个文件。这是刻意的：这张表记的是「动手之前长什么样」，重解到 HEAD 会毁掉它的用途。与 D4 里 `53c39b99c:` / `92140f2e1:` 的 SHA 限定引用同一办法。round-3 c-02 曾把本表按 HEAD 判为坐标漂移，是误判。
+
+| 事实 | 位置（均相对 `49cf31316c`） |
 |---|---|
 | breaker 臂返回 `blocked` + `retry_policy{manual_retry_required, occurrences, occurrence_threshold}` | `scheduler_candidates.py:2389-2402`、`:2432-2475` |
 | breaker 的计数来自 journal `_cycle_rows`（不读 bounded candidate_state），只统计带 quarantine provenance 的 completed master | `file_orchestration_journal.py:1423` |
@@ -158,23 +160,23 @@
   - 预算臂的 blocked 判定仍由 stage-scoped attempt 驱动，本修订只改确认物的 pin。
 
 - **PR-A round 1 修订（c-03，one-shot-authorization-leak）**：Round 3 的共同不变量在**写侧**又破了一次，这次是 decision 字面量被改写。
-  - 机制：两条确认 retry 都要过 `_strict_warm_start_forcing_witness_decision`；缺 per-model forcing 见证时返回 missing-forcing blocked（确认块经 `**base_evidence` 存活，未被丢弃）。若 operator 同时开了 `--repair-missing-forcing` 且 cycle 精确匹配，`_apply_explicit_missing_forcing_repair_policy` 把 `decision` 改写成 `retry_repair_missing_forcing`（`scheduler_candidates.py:1808`）——它在 forced-resubmit 白名单内，会**真提交**；但它既不等于 `53c39b99c:accepted_submit_identity.py:1219` 的 quarantine 字面量，也不等于同一 blob `:1243` 的预算字面量（两处坐标均为修复前；修复后 quarantine 字面量在 `:1247`，预算字面量已整条删除，只剩 `:1283` 的块比较），于是不戳 provenance，计数不动，确认物下一 pass 继续匹配。一次签名放行了修复提交 + 后续重入。
+  - 机制：两条确认 retry 都要过 `_strict_warm_start_forcing_witness_decision`；缺 per-model forcing 见证时返回 missing-forcing blocked（确认块经 `**base_evidence` 存活，未被丢弃）。若 operator 同时开了 `--repair-missing-forcing` 且 cycle 精确匹配，`_apply_explicit_missing_forcing_repair_policy` 把 `decision` 改写成 `retry_repair_missing_forcing`（`scheduler_candidates.py:1970`）——它在 forced-resubmit 白名单内，会**真提交**；但它既不等于 `53c39b99c:accepted_submit_identity.py:1219` 的 quarantine 字面量，也不等于同一 blob `:1243` 的预算字面量（两处坐标均为修复前；修复后 quarantine 字面量在 `:1247`，预算字面量已整条删除，只剩 `:1291` 的块比较），于是不戳 provenance，计数不动，确认物下一 pass 继续匹配。一次签名放行了修复提交 + 后续重入。
   - 确认物是该泄漏的**必要条件**：没有它，决策是 `blocked/strict_warm_start_retry_budget_exhausted`，不在 `_MISSING_FORCING_BLOCKER_REASONS` 内，修复路径根本够不到该候选。
   - Round 1 取 A（投影键在确认块上），不取 B（拒绝改写），理由是「B 只躲开一个消费事件，A 才让每个消费事件都推动 pin」。**Round 2 实测推翻了这个理由**，见下一条。既有 decision 字面量触发保留（普通 quarantine rerun 仍须计数）。
-  - 同时修文档：`current-production-ops.md:373` 把 strict 车道的 missing-forcing blocked 直接导进 `--repair-missing-forcing`，而 `node22-control-plane-manual-recovery.md:186-188` 承诺「不提交」——照文档操作就会踩中。
-  - **Phase 6.2 键路审计（round 1 完成）**：枚举确认匹配之后所有改写 retry `decision` 的点——`_upgrade_retry_for_strict_warm_start_manifest`（`:2313-2320`）、`_apply_explicit_missing_forcing_repair_policy`（`:1805-1845`）、forcing 见证 blocked 构造（`:2244`）——逐个核实 `operator_reentry_confirmation` 键路存活。这是一次**键路**审计（块活没活），它全绿，而 r2-01 就躺在它旁边没被看见：缺的那一维是**事件路径**（改写后这个候选从哪个 stage 重启，那个 stage 到不到得了 stamp 点）。
+  - 同时修文档：`current-production-ops.md:373` 把 strict 车道的 missing-forcing blocked 直接导进 `--repair-missing-forcing`，而 `node22-control-plane-manual-recovery.md:223` 承诺「不提交」——照文档操作就会踩中。
+  - **Phase 6.2 键路审计（round 1 完成）**：枚举确认匹配之后所有改写 retry `decision` 的点——`_upgrade_retry_for_strict_warm_start_manifest`（def `:2452`，改写点 `:2475`）、`_apply_explicit_missing_forcing_repair_policy`（def `:1836`，改写点 `:1970`）、forcing 见证 blocked 构造（`_strict_warm_start_forcing_witness_decision` def `:2389`，blocked 构造 `:2435-2439`）——逐个核实 `operator_reentry_confirmation` 键路存活。这是一次**键路**审计（块活没活），它全绿，而 r2-01 就躺在它旁边没被看见：缺的那一维是**事件路径**（改写后这个候选从哪个 stage 重启，那个 stage 到不到得了 stamp 点）。
 
 - **PR-A round 2 修订（r2-01，同一 one-shot-authorization-leak 类第二次复发）**：A 不够，B 现在是必需的。
-  - 实测（三个 scratchpad 探针，见 `.workplans/pr-2406/review/round-2/verdicts.md`）：被改判的 repair retry 把 `restart_stage` 设成 `"forcing"`（`scheduler_candidates.py:1811-1812`），链路真的照办（`chain_forecast_execution.py:173`）；而 provenance 只在 forecast cohort reservation 处写（`chain_forecast_orchestrator_cycle.py:633-635`，字段 `:683-684`，`chain_stage_execution.py:37` 的别名集不含 forcing）。
+  - 实测（三个 scratchpad 探针，见 `.workplans/pr-2406/review/round-2/verdicts.md`）：被改判的 repair retry 把 `restart_stage` 设成 `"forcing"`（`scheduler_candidates.py:1973-1974`），链路真的照办（`chain_forecast_execution.py:173`）；而 provenance 只在 forecast cohort reservation 处写（`chain_forecast_orchestrator_cycle.py:666` quarantine 投影 / `:673` 预算投影，字段写入 `:683-684`，`chain_stage_execution.py:37` 的别名集不含 forcing）。round-3 verifier 把此处旧写的 `:633-635` 列为「已核实正确」，实为原生错误——该文件本 PR 从未改动，坐标从一开始就不对，round 4 修正。
 
   - **一处措辞更正（round 2 fix pass 实测推翻）**：不能说「这个消费者结构上不可能推动 pin」。链路是按 index 起跑并**向前跑完**的，forcing 成功时它仍会到达 forecast cohort reservation 并真的盖戳——`92140f2e1:tests/test_production_scheduler.py:57888` 当时是绿的，就是这个形状。真正的缺陷是更弱但为真的那句：**确认物是否被消费，取决于一个 operator 从未授权的 stage 的成败**。forcing 失败时才出现「真提交了、计数没动、确认物还在」。这恰恰就是 B 的理由，不是脚注。
   - 且 stamp 点不能搬：`accepted_submit_row_kind`（`accepted_submit_identity.py:519-524`）对非 forecast cohort stage 返回 `None`，`_quarantine_rerun_masters`（`file_orchestration_journal.py:13516-13550`）按 `!= "master"` 过滤，forcing 行永远数不进去——搬 stamp 就得同时换计数口径。
   - 更糟的是这次 forcing 失败会**让预算判定失效**：失败的 forcing 跑在新的 run-id 前缀下，stage 域的 `attempt` 从 2/2 掉回 0/2（探针 2），operator 照 runbook 回补 forcing 后，候选会以 `retry_strict_warm_start_retry_run_manifest_mismatch` **自动**重入 forecast，不带任何确认块、不戳 provenance（探针 3）。一次签名 → 两次 forecast 重入，可重复，计数始终不动。
   - 因此不变量收紧为：**每个从确认物派生的事件，要么在 reservation writer 处推动计数，要么在提交之前被拒绝，没有第三种。** A 覆盖所有「仍从 forecast 重启」的改写（manifest 升级、见证标注——均已验证块存活），B 覆盖唯一那条「从 forcing 重启」的改判。
 
-  - **A 在 B 之后没有可达实例，是纯纵深防御**（round 2 fix pass 实测）：`_upgrade_retry_for_strict_warm_start_manifest` 的早退在 `scheduler_candidates.py:2303-2307`（`native_shud_resubmitted is True` 且 `restart_stage == "forecast"`），断路器臂（`:2477`/`:2475`）与预算臂（`:2671`/`:2668`）**都正好命中**——预算臂在 strict 车道上救它的是 `:2303` 那道而非 `:2294`。佐证：`tests/test_production_scheduler.py:57102`、`:57558`、`:57762` 的 decision 字面量在 HEAD 就未被改写。因此规格里不再拿 manifest 升级给 A 举例，A 的理由改成「`decision` 字面量在改写下不稳定、块稳定，投影不该依赖是哪一次改写触发」。`tests/test_warm_start_chaining.py` 里的 `upgraded` 与 `model_budget_repair` 两个 basin 相应都是**合成形状**，已在该测试 docstring 标注。这条与 #2408 的可达性追问同源（#2407 守的正是这道早退所依赖的隐式耦合）。
-  - B 的落点：`_apply_explicit_missing_forcing_repair_policy` 在 flag 判定之后的第一个前置条件——`decision.evidence` 带 `operator_reentry_confirmation` 即走既有 reject 构造（`:1575`）并给出具名 reason，候选留在 forcing 见证 blocked 决策上，确认物**保持待用**（没有任何东西被消费，这是正确的）。operator 先回补 forcing，下一 pass 确认 retry 从 `forecast` 起跑、正常戳、计数到 N+1。未确认候选的 #1844/8.5 修复行为完全不变，既有 repair 测试就是这条的回归闸。
-  - **Phase 6.2 事件路径审计（round 2 扩展）**：对「确认匹配 → Slurm 提交」的每一条路径，记录 `candidates.append` 时的 `restart_stage`，并判定该 stage 是否到达 `chain_forecast_orchestrator_cycle.py:633-635`。全表见 `.workplans/pr-2406/review/round-2/invariant-audit.md`。留在仓库里的闸是一条结构测试：任何一 pass 产出的候选，只要 `action == "retry"` 且 `state_evidence` 带 `operator_reentry_confirmation`，就必须 `restart_stage == "forecast"`。
+  - **A 在 B 之后没有可达实例，是纯纵深防御**（round 2 fix pass 实测）：`_upgrade_retry_for_strict_warm_start_manifest` 的早退在 `scheduler_candidates.py:2465-2469`（`native_shud_resubmitted is True` 且 `restart_stage == "forecast"`），断路器臂（`:2637` restart_stage / `:2639` native_shud_resubmitted）与预算臂（`:2830` / `:2833`）**都正好命中**——预算臂在 strict 车道上救它的是 `:2465` 那道，而非 `:2462-2464`（forcing_repair authorized + `restart_stage == "forcing"`）那道。佐证：`tests/test_production_scheduler.py:57165`（断路器臂）、`:57629`、`:57833`（预算臂）的 decision 字面量断言在 HEAD 就未被改写。因此规格里不再拿 manifest 升级给 A 举例，A 的理由改成「`decision` 字面量在改写下不稳定、块稳定，投影不该依赖是哪一次改写触发」。`tests/test_warm_start_chaining.py` 里的 `upgraded` 与 `model_budget_repair` 两个 basin 相应都是**合成形状**，已在该测试 docstring 标注。这条与 #2408 的可达性追问同源（#2407 守的正是这道早退所依赖的隐式耦合）。
+  - B 的落点：`_apply_explicit_missing_forcing_repair_policy` 在 flag 判定之后的第一个前置条件——`decision.evidence` 带 `operator_reentry_confirmation` 即走既有 reject 构造（`_missing_forcing_repair_rejected_decision`，def `:1682`）并给出具名 reason，候选留在 forcing 见证 blocked 决策上，确认物**保持待用**（没有任何东西被消费，这是正确的）。operator 先回补 forcing，下一 pass 确认 retry 从 `forecast` 起跑、正常戳、计数到 N+1。未确认候选的 #1844/8.5 修复行为完全不变，既有 repair 测试就是这条的回归闸。
+  - **Phase 6.2 事件路径审计（round 2 扩展）**：对「确认匹配 → Slurm 提交」的每一条路径，记录 `candidates.append` 时的 `restart_stage`，并判定该 stage 是否到达 `chain_forecast_orchestrator_cycle.py:666`/`:673` 的投影。全表见 `.workplans/pr-2406/review/round-2/invariant-audit.md`。留在仓库里的闸是一条结构测试：任何一 pass 产出的候选，只要 `action == "retry"` 且 `state_evidence` 带 `operator_reentry_confirmation`，就必须 `restart_stage == "forecast"`。
 
 - **evidence 措辞**：两条 blocked evidence 的 `retry_policy` 追加 `operator_reentry_command: "confirm-operator-reentry"` 与 `recovery_runbook: "node22-control-plane-manual-recovery"`，使 `manual_retry_required: true` 指向真实通道。
 
@@ -205,6 +207,65 @@
 - **`--job-id` 模式不改**（F5）：它走 `get_pipeline_job` + `_diagnose_released_reservation_recovery` 的 typed refusal（`operator_released_reservation_recovery.py:161-174`），不经过 listing；改成新函数会把带原因的 refusal 退化为 not-found。
 - **热路径行为零改动**：`_cycle_job_records_memoized`、`_cycle_rows`、`_cycle_source_discoveries` 不改；`_iter_flat_direct_pipeline_job_records_for_cycle` 只加默认 `None` 的 `skip_collector`（round 1 cand-04），调度侧调用不传，行为逐字节不变。理由：它们服务 `candidate_state` / `get_pipeline_job`，在那里逐行跳过等于静默窄化候选集，比响亮中止更糟。
 - **预算契约**：`tests/test_file_journal_full_tree_budget_contract.py` 原样全绿，并新增断言：一行畸形与预算超限同时存在时，预算拒绝仍 raise。
+
+## Round 4 — restart_stage writer audit (sink enforcement)
+
+三轮审查各自找到一个**不同**的 `restart_stage` 改写点（r1 c-03 → 决策字面量；r2 r2-01 →
+repair 改判；r3 c3-01 → raw-manifest `convert`），每轮只修那一个。Round 4 把执法点从
+**源**移到**汇**：候选清单在 `_build_candidates` 返回前统一过一遍
+（`services/orchestrator/scheduler_candidates.py:1261`，晚于 §8.6 的头插
+`scheduler_backfill_predecessor.py:699`），拒绝任何带 `operator_reentry_confirmation`
+块、而**有效重启阶段**不是 `forecast` 的候选。
+
+**有效重启阶段**（`_candidate_effective_restart_stage`，`scheduler_candidates.py:1540-1559`）
+不是裸读 evidence 键，而是 run manifest 真正会带的那个：
+`scheduler_candidate_manifest.py:238` 在 `fresh_ingestion.mode == "full_chain"` 时**不写**
+`restart_stage`，manifest 不带该键时 `chain_forecast_execution.py:173` 从第 0 个 stage 起跑，
+所以 `full_chain` 的有效阶段是 `None`。`restart_from_stage` **不参与**判定：manifest 不复制它
+（实测见 `tests/test_production_scheduler.py::test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries`），
+而 `chain_runtime_utils.py:215-218`、`scheduler_state_failure.py:604-605` 只在 `restart_stage`
+为假值时回退读它——那种情况正向检查已经拒了。
+
+### 审计表
+
+方法：对 `scheduler_candidates.py`、`scheduler_state_failure.py`、
+`scheduler_backfill_predecessor.py` 机械 grep `restart_stage` / `restart_from_stage`，**每个赋值
+一行**（读取不算）。`scheduler_backfill_predecessor.py` **零个赋值**（grep 无命中），它只经
+`candidate_factory` 造候选，所以它本身不是 writer；它的头插位置由下表 W4 的放置钉子覆盖。
+
+每行的结案口径只有两种：**(i)** 有测试以**带确认物的候选**可测量地走到它（给出测试名与
+premise 断言），或 **(ii)** 结构性证明该点跑在任何确认物匹配之前 / 不可能落到带确认物的候选上。
+"当前 fixture 覆盖不到"不算结案。
+
+| # | 赋值坐标（final head 实读） | 产出的阶段 | 结案 |
+|---|---|---|---|
+| W1 | `scheduler_candidates.py:921-922` | `forecast` | **(ii)** 只构造 `blocked` 条目后 `continue`（`:925-932`），永不产生已录取候选；且值本身就是 `forecast` |
+| W2 | `scheduler_candidates.py:1973-1974`（+ `:1991` 的 `missing_forcing_repair.restart_stage`）`_apply_explicit_missing_forcing_repair_policy` | `forcing` | **(i)** `test_an_explicit_missing_forcing_repair_refuses_a_confirmed_candidate`（premise：`missing_forcing_repair.status == "rejected"` 且 `reason == "operator_reentry_confirmation_present"`）；带确认物时在 `:1875-1876` 就被拒，永远到不了 `:1973` |
+| W3 | `scheduler_candidates.py:2141-2142` `_source_raw_manifest_restart_evidence`，经 `:938-951` 落到候选 | `convert` | **(i)** `test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_budget_arm`（premise：`canonical_readiness.status == "canonical_incomplete"`、`candidate_row_count == 0`、`restart_reason == "raw_manifest_ready_without_canonical"`、`raw_manifest_reuse.status == "ready"`，真 `FileCanonicalReadinessProvider`）与 `..._on_the_breaker_arm`（同 premise，stub provider） |
+| W4 | §8.6 头插（`scheduler_backfill_predecessor.py:699`，无自有赋值） | 继承 | **(i)** `test_sink_refuses_a_confirmed_predecessor_prepended_after_the_main_loop`（premise：emitter 真的跑过且真的头插了一个候选）。这是**放置**钉子：写在 `candidates.append` 处的 guard 会漏掉它 |
+| W5 | `scheduler_candidates.py:2637-2638` `_journal_predecessor_identity_retry_evidence` | `forecast` | **(i)** `test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast[breaker]` |
+| W6 | `scheduler_candidates.py:2673-2674` `_journal_predecessor_identity_blocked_evidence` | `forecast` | **(ii)** `blocked` 决策，不进候选清单；值为 `forecast` |
+| W7 | `scheduler_candidates.py:2706-2707` `_terminal_run_manifest_retry_evidence` | `forecast` | **(ii)** 与两个确认物匹配点（`:581` 预算、`:622` 断路器）同属 `:536-652` 的同一条 if/elif 链，互斥；值为 `forecast` |
+| W8 | `scheduler_candidates.py:2799-2800` `_strict_warm_start_terminal_blocked_evidence`（`_STRICT_WARM_START_TERMINAL_RESTART_STAGE = "forecast"`，`:78`） | `forecast` | **(ii)** `blocked` 决策；值为 `forecast` |
+| W9 | `scheduler_candidates.py:2830-2831` `_strict_warm_start_terminal_retry_evidence` | `forecast` | **(i)** `test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast[budget]` |
+| W10 | `scheduler_candidates.py:2853-2854` `_strict_warm_start_run_manifest_retry_evidence` | `forecast` | **(ii)** 同 W7 的互斥链（`:545-552`）；值为 `forecast` |
+| W11 | `scheduler_candidates.py:2873-2874` `_strict_warm_start_retry_run_manifest_evidence`（`_upgrade_retry_for_strict_warm_start_manifest`，调用点 `:653`） | `forecast` | **(i)** 跑在确认物匹配**之后**，由 `test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast[budget]` 覆盖（premise：候选带确认物且 `restart_stage == "forecast"`）；值为 `forecast` |
+| W12 | `scheduler_candidates.py:2904-2905` `_strict_warm_start_successor_retry_evidence` | **`state_save_qc`** | **(ii)** 唯一两个调用点 `:564` 与 `:610` 与两个确认物匹配点 `:581`、`:622` 同属 `:536-652` 的同一条 if/elif 链，同一趟 pass 内**结构互斥**；`:1066` 的重导出不调用它 |
+| W13 | `scheduler_state_failure.py:505-506` `_downstream_retry_evidence` | `failed_stage`（可能早于或晚于 `forecast`） | **(i)** `test_a_post_block_state_rederivation_cannot_hide_a_confirmed_candidate_from_the_sink`：真 decider 产出 `parse`，真 `_candidate_with_state_evidence` 把它并到真·带确认物候选上（premise：并后确认物块仍在、`restart_stage == "parse"`），sink 拒。**未复现的部分**：pass 内从 `:1066` 走到 `:1115` 的几何（活跃 Slurm 作业 + `sync_cycle_statuses` 返回终态更新）未构造——sink 读的是合并后的 `state_evidence`，与它怎么来的无关（这就是 r3 c3-02） |
+| W14 | `scheduler_state_failure.py:558-559`、`:1723-1724`、`:1948-1949`、`:2033`、`:2251-2252` | `forecast` 或派生下游阶段 | **(ii)** 与 W13 同一类：`scheduler_state_failure.py` 全模块**零次**出现 `operator_reentry_confirmation`（grep 计数 0），它是确认物匹配**之前**的 decider；其输出要落到带确认物的候选上只能经 `_merge_state_evidence`（`scheduler_candidates.py:2217-2229`，从不删键），而合并后的值一律由 sink 的正向检查裁决 |
+| W15 | `scheduler_state_failure.py:1786-1787`（+ `fresh_ingestion {"required": True, "mode": "full_chain"}`，`:1788`）、`:1859-1860` | `None` / `download` | **(ii)** 同 W14；并且这正是 Task 3 第 4 问的形状——`full_chain` 会让 manifest **不带** `restart_stage`（实测：`test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries`），所以 guard 的有效阶段对它返回 `None` 并拒，`restart_stage: None` 同理（`test_the_sink_is_a_positive_forecast_check_over_the_stage_the_manifest_obeys[absent|null|fresh_full_chain_strips_the_manifest_stage]`） |
+
+正向检查对**值域**的完备性单独钉住（不依赖任一 writer 是否可达）：
+`test_the_sink_is_a_positive_forecast_check_over_the_stage_the_manifest_obeys` 枚举
+缺失 / `None` / 空串 / `convert` / `forcing` / `state_save_qc` / `parse` / `full_chain` /
+`forecast` / `forecast` + 不一致的 `restart_from_stage` 十种；
+`test_the_sink_leaves_an_unconfirmed_off_forecast_candidate_alone` 钉住爆炸半径；
+`test_sink_refusal_decision_is_absent_from_both_forced_resubmit_whitelists` 钉住
+`blocked_operator_reentry_restart_stage_refused` 不在 `chain_forced_resubmit.py:14-28` 与
+`chain_runtime_utils.py:200-211` 两处白名单内（两者都是 `retry_*` 的封闭集合）。
+
+**无未结行。** W13 是唯一一个 (i) 带保留的行：writer 与合并都是真的、目标候选也是真的带确认物，
+但 pass 内到达该合并的路径未复现，已在表内写明。
 
 ## 不做（non-goals）
 
