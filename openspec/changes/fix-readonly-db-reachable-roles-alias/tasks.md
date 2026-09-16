@@ -24,7 +24,8 @@
 
   Evidence floor — both runs recorded verbatim in the implementer report:
   - Positive: `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://<admin-url> uv run pytest -q -rs
-    -m integration tests/test_real_readonly_db_probe_integration.py` → `1 passed`.
+    -m integration tests/test_real_readonly_db_probe_integration.py` → `2 passed` (the file ships two
+    tests: the public seam and both membership-column branches).
   - Negative: restore BOTH `current_role` references in the statement, rerun the same command → fails with
     `psycopg2.errors.SyntaxError: syntax error at or near "current_role"`; then revert.
   - `1 skipped` is NOT evidence in either direction: `tests/conftest.py:165-205` calls `pytest.skip` when
@@ -66,12 +67,19 @@
 - [x] 3.2 `uv run ruff check .` PASS.
 - [x] 3.3 `uv run pytest -q tests/test_readonly_db_validation.py tests/test_readonly_db_validation_probes.py
   tests/test_readonly_db_validation_routes.py` PASS.
-- [ ] 3.4 Real-database lane: the new integration test PASS with the exact invocation in 1.2, plus the recorded
+- [x] 3.4 Real-database lane: the new integration test PASS with the exact invocation in 1.2, plus the recorded
   negative run with the alias restored. The test file name is chosen so CI's `real-db-integration` job does run it
   on this non-draft PR; per `CLAUDE.md` the authoritative real-DB oracle is still node-27, so record the node-27
   run as well.
 
-- [ ] 3.5 node-27 canonical-entrypoint rerun (issue #2409 acceptance criterion 4), read-only: with
+  Evidence: local disposable PostgreSQL 15.19 — positive `2 passed` (no skips, `-rs`), negative with both
+  `current_role` references restored `2 failed` with `psycopg2.errors.SyntaxError: syntax error at or near
+  "current_role"`, revert `2 passed`; extra PostgreSQL 18.6 `2 passed`. node-27 half at PR head
+  `bed35f44d2cef7123e455dee1259982a488ac15e`, disposable production-image container
+  `nwm-i8-1987-window-volume-6fb30b552` (image `sha256:ad39c4fbc5c4`): `2 passed in 0.42s`. CI
+  `real-db-integration` ("SQL Migration Dry Run") pass on the same head.
+
+- [x] 3.5 node-27 canonical-entrypoint rerun (issue #2409 acceptance criterion 4), read-only: with
   `NHMS_DISPLAY_READONLY_DATABASE_URL` built in memory from `infra/env/display.env` (role `nhms_display_ro`; DSN
   never in argv or receipts), run `scripts/validate_readonly_db_boundary.py` against the production database and
   record the JSON summary. Expected: `status` is no longer `BLOCKED` and no
@@ -79,3 +87,14 @@
   verdict stage. The final `PASS`/`FAIL` is deliberately NOT part of this acceptance: it depends on the production
   grants, which this change does not touch. This run creates no roles and mutates nothing, so it does not conflict
   with section 2's non-goal, and it is not the #1987 task 5.2 C2 receipt (that one requires `PASS`).
+
+  Evidence: node-27 2026-09-16T01:51:24Z at PR head, worktree `/home/nwm/tmp/2409-wt`, role `nhms_display_ro`.
+  `status` is `FAIL`, `blockers` is `null` — no `READONLY_DB_VALIDATION_UNEXPECTED_ERROR` and no `SyntaxError`:
+  the lane now reaches its verdict stage. Permission matrix: 12 targets, 23 operations, 23 denials PASS,
+  `blocked_count` 0, `failed_mutating_count` 0. `reachable_role_findings` is `[]` — the statement executed and
+  `nhms_display_ro` holds no role memberships, so the seven per-role finding statements stay unexercised on a real
+  server (recorded as residual risk, not closed by this change). Manual-action probes returned 409
+  `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` with no write executed. The `FAIL` comes from display route smoke, which
+  is outside this change: `models`/`stations`/`latest-product` fail on a malformed connection option
+  (`unrecognized configuration parameter "+statement_timeout"`), and the job/pipeline routes are `BLOCKED` on
+  response identity plus an empty `ops.pipeline_job`. Those belong to #1987 task 5.2 and are filed separately.
