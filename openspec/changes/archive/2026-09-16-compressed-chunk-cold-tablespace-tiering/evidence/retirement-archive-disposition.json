@@ -91,7 +91,7 @@
   "source_retirement": "PR2376 merge7f5d720f4cbe57b4953f39828429e3063f8b7d60",
   "authority_alignment": "PR2378 merge9548148104a7980898d6dbf56e2e953359c4687a",
   "effective_handoff": "retirement-effective-handoff.json",
-  "review_status": "Exact-head independent archive review is required in the enclosing closeout PR; the R5.2 deployment review is not substituted.",
+  "review_status": "CLEAN: independent spec-compliance/invariant-state and test-evidence/integration seats; final administrative metadata rebind in closeout PR.",
   "validation_status": "PASS: retirement change and all five surviving canonical specs strict/no-interactive",
   "validation": [
     {
@@ -198,5 +198,27 @@
     ],
     "original_active_path_absent": true,
     "withdrawn_or_removed_capability_created": false
-  }
+  },
+  "reviews": [
+    {
+      "seat": "RetirementArchiveSpecReview",
+      "verdict": "CLEAN",
+      "reviewed_commit": "f9c6cf39a5db69cda05979b40508d3bda8c9e11b",
+      "lenses": [
+        "spec-compliance",
+        "invariant-state"
+      ],
+      "findings": []
+    },
+    {
+      "seat": "RetirementArchiveEvidenceReview",
+      "verdict": "CLEAN",
+      "reviewed_commit": "f9c6cf39a5db69cda05979b40508d3bda8c9e11b",
+      "lenses": [
+        "test-evidence",
+        "integration"
+      ],
+      "findings": []
+    }
+  ]
 }

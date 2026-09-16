@@ -3,12 +3,16 @@
   "disposition": "capability retired, not defects fixed",
   "issues": {
     "2293": {
-      "decision": "close as not planned after closeout review",
-      "reason": "Cold catalog type-display inventory/parity owner and all named consumers deleted; retained workload query digest has only SQL text plus typed parameters, not catalog format_type/type tags."
+      "decision": "CLOSED as not planned: capability retired, not fixed",
+      "reason": "Cold catalog type-display inventory/parity owner and all named consumers deleted; retained workload query digest has only SQL text plus typed parameters, not catalog format_type/type tags.",
+      "closed_at": "2026-09-16T04:45:23Z",
+      "comment_url": "https://github.com/DankerMu/SHUD-NWM/issues/2293#issuecomment-5692169935"
     },
     "2298": {
-      "decision": "close as not planned after closeout review",
-      "reason": "G8 post-target package/CLI/opener owner deleted; retained PGDATA workload owner already maps connection failures to SQL_CONNECT_FAILED. No transferred G8 boundary identified."
+      "decision": "CLOSED as not planned: capability retired, not fixed",
+      "reason": "G8 post-target package/CLI/opener owner deleted; retained PGDATA workload owner already maps connection failures to SQL_CONNECT_FAILED. No transferred G8 boundary identified.",
+      "closed_at": "2026-09-16T04:45:28Z",
+      "comment_url": "https://github.com/DankerMu/SHUD-NWM/issues/2298#issuecomment-5692170545"
     },
     "1938": {
       "decision": "retain existing CLOSED disposition; do not reopen",
