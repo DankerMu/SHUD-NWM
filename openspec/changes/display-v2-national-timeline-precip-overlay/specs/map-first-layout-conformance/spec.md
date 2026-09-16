@@ -13,4 +13,5 @@ THEN collapsible panels use default-left behavior and maintain map/timeline usab
 
 #### Scenario: Layout oracle
 WHEN a supported desktop viewport renders a map-first page
-THEN the top nav (site header) is 84px high, the bottom control bar (timeline) is 64px high where present and sits 16px above the viewport bottom, the document has no horizontal body scroll, and panels, the legend and status notices do not cover the control bar or required map controls, legends, charts, or page action controls
+THEN the top nav (site header) is 84px high, the bottom control bar (timeline) is 64px high where present and sits 40px above the map bottom to reserve the attribution band, the document has no horizontal body scroll, and panels, the legend and status notices do not cover the control bar or required map controls, legends, charts, or page action controls
+AND the control bar itself does not intersect visible map attribution at 1920, 1440, 1280, 800 or 520px viewport widths; dependent legend and notice offsets preserve separation from the raised bar
