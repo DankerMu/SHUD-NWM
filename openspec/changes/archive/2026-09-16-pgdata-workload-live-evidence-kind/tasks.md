@@ -117,5 +117,37 @@
   `live: true` and its `status`, and one no-flag run on the same inputs producing the isolated triple. For both,
   record `stat -c '%a' <output>` = `600`. Per `CLAUDE.md` the real-DB oracle is node-27; §4.1-4.4 are local-only.
 
+  **ATTEMPTED, BLOCKED UPSTREAM — deliberately left unchecked.** node-27 2026-09-16T13:11Z, detached worktree
+  `/home/nwm/tmp/2410-wt` at PR head `652b520739db0785549b126509de45bb472cab9b`, role `nhms_display_ro`, DSN via
+  a mode-0600 private file (never in argv). Pin: basin `basins_wj_vbasins`, network `basins_wj_rivnet_vbasins`,
+  segment `basins_wj_shud_reach_000001`, run `fcst_ifs_2026091412_dg_a8116c66fb52fe0b47c86034e7d46b02`, model
+  `dg_a8116c66fb52fe0b47c86034e7d46b02`, IFS, cycle 2026-09-14T12:00:00Z.
+
+  Both runs refused identically and wrote nothing:
+
+  ```text
+  == isolated (no flag)   rc=1   PLAN_BUFFERS_EXCEEDED: shared buffers exceed the 5000 ceiling
+  == live                 rc=1   PLAN_BUFFERS_EXCEEDED: shared buffers exceed the 5000 ceiling
+  isolated MISSING
+  live MISSING
+  ```
+
+  The refusal is downstream of every admission this change adds. `measure()`
+  (`scripts/node27_pgdata_workload.py:113-125`) runs `require_runtime_anchored` and `bind_reviewed_sha` before
+  any database work, and `prove_readonly_session` before `measure_workload`. None of `INPUT_RUNTIME_UNBOUND`,
+  `INPUT_SHA_HEAD_UNAVAILABLE`, `INPUT_SHA_UNBOUND`, `SQL_NOT_READONLY` or `DSN_ROLE_INVALID` fired, so on
+  production the live path passed runtime anchoring, reviewed-SHA binding and the read-only session proof and
+  reached the measurement stage. The receipt bytes are unchanged publication code, covered by 2.2.
+
+  No pin can satisfy this today. `PLAN_BUFFER_LIMIT = 5000`
+  (`packages/common/node27_pgdata_workload_plan.py:27`, enforced `:520`) has no CLI knob — it *is* the D11
+  gate — and the shipped forecast-series query measures 18621 shared hits warm for 168 rows, 13608 of them
+  (73%) from two un-memoized per-row `hydro_run` index lookups inside the UNION branches of
+  `packages/common/forecast_store.py:28-53`. Every active basin carries 75 forecast runs, so every honest pin
+  lands at ~2350 rows; an earlier `basins_shj_nj_vbasins` pin measured 18626. That is a #1987 task 5.2 /
+  #1988 finding about the API query, filed separately and out of scope here.
+
+  A live receipt for this CLI is therefore gated on a D11-passing query, not on this change.
+
 - [ ] 4.6 Not part of this change: producing #1987 task 5.2's D11 curve receipts. The follow-up run belongs to
   #1987 and needs pins re-derived live per the runbook.

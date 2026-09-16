@@ -1,0 +1,71 @@
+{
+  "candidates": 20,
+  "concurrency": 4,
+  "deadline": "2026-09-15T05:54:22+00:00",
+  "decompressed_chunks": [],
+  "dispositions": {
+    "reparsed": 20
+  },
+  "end_time_after": null,
+  "estimated_rows": 21218232,
+  "finished_at": "2026-09-15T04:02:04.850299+00:00",
+  "legacy_route_counts_after": [
+    {
+      "in_window": false,
+      "runs": 2646,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 228,
+      "status": "superseded"
+    },
+    {
+      "in_window": true,
+      "runs": 3671,
+      "status": "published"
+    },
+    {
+      "in_window": true,
+      "runs": 78,
+      "status": "superseded"
+    }
+  ],
+  "legacy_route_counts_before": [
+    {
+      "in_window": false,
+      "runs": 2646,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 228,
+      "status": "superseded"
+    },
+    {
+      "in_window": true,
+      "runs": 3691,
+      "status": "published"
+    },
+    {
+      "in_window": true,
+      "runs": 78,
+      "status": "superseded"
+    }
+  ],
+  "limit": 20,
+  "max_failures": 10,
+  "not_dispatched": 0,
+  "parser_sha256": "59b8d93ddd75f657881c523f1517a336d1319f602c3dea100ea90b78503123da",
+  "result": "complete",
+  "rows_written": 21218232,
+  "seed_runs": [
+    "fcst_gfs_2026091400_dg_95b0a3efb58fc525a1401d0c8f2b416f"
+  ],
+  "started_at": "2026-09-15T03:54:22.364491+00:00",
+  "stop_reason": "exhausted",
+  "tool_sha256": "beb752eaaec8e5643188f7c270685531fcd2188a077ce1055f8c3d79ceaf4ea6",
+  "tool_version": "node27-river-narrow-reparse-backfill/2",
+  "transient_retries": 0,
+  "window_days": 21
+}

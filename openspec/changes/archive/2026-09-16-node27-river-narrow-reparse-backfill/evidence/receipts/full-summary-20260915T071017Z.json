@@ -1,0 +1,73 @@
+{
+  "candidates": 3493,
+  "concurrency": 16,
+  "deadline": "2026-09-15T15:10:17+00:00",
+  "decompressed_chunks": [],
+  "dispositions": {
+    "reparsed": 2039
+  },
+  "end_time_after": null,
+  "estimated_rows": 3289326600,
+  "finished_at": "2026-09-15T15:14:15.853540+00:00",
+  "legacy_route_counts_after": [
+    {
+      "in_window": false,
+      "runs": 2685,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 234,
+      "status": "superseded"
+    },
+    {
+      "in_window": true,
+      "runs": 1337,
+      "status": "published"
+    },
+    {
+      "in_window": true,
+      "runs": 72,
+      "status": "superseded"
+    }
+  ],
+  "legacy_route_counts_before": [
+    {
+      "in_window": false,
+      "runs": 2646,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 228,
+      "status": "superseded"
+    },
+    {
+      "in_window": true,
+      "runs": 3415,
+      "status": "published"
+    },
+    {
+      "in_window": true,
+      "runs": 78,
+      "status": "superseded"
+    }
+  ],
+  "limit": null,
+  "max_failures": 10,
+  "not_dispatched": 1454,
+  "parser_sha256": "59b8d93ddd75f657881c523f1517a336d1319f602c3dea100ea90b78503123da",
+  "result": "partial",
+  "rows_written": 2031695400,
+  "seed_runs": [
+    "fcst_ifs_2026081812_dg_fb3242d8537bd729d7a00a2984624e89",
+    "fcst_ifs_2026082712_dg_fa180301403c9833e11bfa933ffd5a27",
+    "fcst_ifs_2026090412_dg_fa180301403c9833e11bfa933ffd5a27"
+  ],
+  "started_at": "2026-09-15T07:10:17.362902+00:00",
+  "stop_reason": "deadline",
+  "tool_sha256": "beb752eaaec8e5643188f7c270685531fcd2188a077ce1055f8c3d79ceaf4ea6",
+  "tool_version": "node27-river-narrow-reparse-backfill/2",
+  "transient_retries": 0,
+  "window_days": 21
+}

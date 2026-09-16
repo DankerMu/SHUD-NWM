@@ -1,0 +1,169 @@
+{
+  "generated_at": "2026-09-15T04:04:55.828793+00:00",
+  "runs": [
+    {
+      "legacy_rows": 633360,
+      "mismatched_rows": 0,
+      "narrow_rows": 633360,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_95b0a3efb58fc525a1401d0c8f2b416f",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 36288,
+      "mismatched_rows": 0,
+      "narrow_rows": 36288,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_0a50ecb006879e7336361fc0b6191766",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 274344,
+      "mismatched_rows": 0,
+      "narrow_rows": 274344,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_0883c7e9c1006c6fd347df500315e9df",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 277872,
+      "mismatched_rows": 0,
+      "narrow_rows": 277872,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_0f177dc872e31814a23c39d75cab7806",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 903336,
+      "mismatched_rows": 0,
+      "narrow_rows": 903336,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_0c4e8fbeeddc5c72656bf7a20dae54f3",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 983808,
+      "mismatched_rows": 0,
+      "narrow_rows": 983808,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_0eaf98b35849dfb10340f6a8b8c4b09b",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 412608,
+      "mismatched_rows": 0,
+      "narrow_rows": 412608,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_3070d2b99b220dec4fcd4d03f6aadde4",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1493520,
+      "mismatched_rows": 0,
+      "narrow_rows": 1493520,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_26bb6a4de13dfc70ac34f6533ce9e70d",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1693272,
+      "mismatched_rows": 0,
+      "narrow_rows": 1693272,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_2d558b59f8e229e934bf52fab24e3d76",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 10584,
+      "mismatched_rows": 0,
+      "narrow_rows": 10584,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_510fbd39433e9cd2ee948980efd523e1",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1339128,
+      "mismatched_rows": 0,
+      "narrow_rows": 1339128,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_33f721d9ff702a1b45b7257e91804ac1",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1022616,
+      "mismatched_rows": 0,
+      "narrow_rows": 1022616,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_4f13cf325df6fbad8660b1c4b0bfcebb",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 231672,
+      "mismatched_rows": 0,
+      "narrow_rows": 231672,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_63f9fbca402ecb56e951d3c89a5100bf",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 415632,
+      "mismatched_rows": 0,
+      "narrow_rows": 415632,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_6203010c32c1e589255e95ef900ae80e",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 2238264,
+      "mismatched_rows": 0,
+      "narrow_rows": 2238264,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_307ffb06f27fbfd84cd7753cbbf31d30",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1588272,
+      "mismatched_rows": 0,
+      "narrow_rows": 1588272,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_5bd9935f3c32ac5b2936f68588489575",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1336440,
+      "mismatched_rows": 0,
+      "narrow_rows": 1336440,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_69ed273912e7a00bd30bdf8aff234fa6",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 1483272,
+      "mismatched_rows": 0,
+      "narrow_rows": 1483272,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_7f170474408627a7278fbadee42b572f",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 2154432,
+      "mismatched_rows": 0,
+      "narrow_rows": 2154432,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_6c0ed1923fc759387502e37d581b23b8",
+      "verdict": "pass"
+    },
+    {
+      "legacy_rows": 2689512,
+      "mismatched_rows": 0,
+      "narrow_rows": 2689512,
+      "route": "narrow",
+      "run_id": "fcst_gfs_2026091400_dg_6f9ed9377bd5e52240d3ebfc17291e28",
+      "verdict": "pass"
+    }
+  ],
+  "tool_version": "node27-river-narrow-reparse-backfill/2",
+  "verdicts": {
+    "pass": 20
+  }
+}
