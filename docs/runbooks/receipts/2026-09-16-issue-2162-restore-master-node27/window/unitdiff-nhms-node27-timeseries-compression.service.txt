@@ -1,0 +1,12 @@
+6c6,8
+< WorkingDirectory=/home/nwm/NWM
+---
+> WorkingDirectory=/home/nwm/NWM-maintenance-reviewed-95481481
+> Environment="NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM-maintenance-reviewed-95481481"
+> Environment="NODE27_TIMESERIES_COMPRESSION_ENV_FILE=/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env"
+8,9c10,11
+< ExecStartPre=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env --check
+< ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce
+---
+> ExecStartPre=/home/nwm/NWM-maintenance-reviewed-95481481/.venv/bin/python -E /home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_budget_preflight.py --compression-env /home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env --check
+> ExecStart=/home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_compression_once.sh --enforce

@@ -17,6 +17,7 @@
 **复查时间点** = #1987 task 5.2 的施加窗口；届时 GO 记录按 `docs/runbooks/tier-node27-timeseries-storage.md` §4.10.1 写明各项 owner，
 并**逐项**核对 8 个 unit（本 receipt §3 的 `systemctl --user show` 捕获即为基线），不得自动解除任何容量 HOLD。
 本 receipt 只交付目标 1：解钉到活动树 `a8db554d`（#2145 已证明它适配当前库）+ #2032 5.3 部署。issue #2162 保持 open。
+目标 2（恢复 master + 8 unit 逐项复核）于 2026-09-16 完成，见 `2026-09-16-issue-2162-restore-master-node27.md`。
 
 ## 2. 结论
 
