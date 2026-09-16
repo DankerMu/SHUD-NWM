@@ -471,6 +471,10 @@ def test_run_identity_is_resolved_once_in_forecast_series_and_never_for_a_bound_
     assert "h.run_type = 'forecast'" in resolve_sql
     assert "h.cycle_time = ANY(%(resolve_cycle_times)s)" in resolve_sql
     assert "h.model_id = %(model_id)s" in resolve_sql
+    # #2417 fix pass 1: the resolved pair is compared for EQUALITY across the
+    # compression window by the node-27 benchmark, so heap order would reject a
+    # collection round as `benchmark query identity drift`.
+    assert "ORDER BY h.run_key" in resolve_sql
     for absent in ("basin_version_id", "h.status", "timeseries_store"):
         assert absent not in resolve_sql
     assert set(re.findall(r"%\((\w+)\)s", resolve_sql)) <= set(resolve_params)

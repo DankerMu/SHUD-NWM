@@ -661,7 +661,7 @@ class PsycopgForecastStore:
         Overridable seam, the same shape as ``_validate_series_target``: a capture
         adapter that drives ``forecast_series`` over a cursor with no rows can
         supply the real key set from a live connection instead
-        (``scripts/node27_timeseries_compression_benchmark.py``).
+        (``packages/common/forecast_curve_capture.py``).
 
         The ``h.*`` predicate set here is a SUBSET of the consuming call site's
         outer predicates, so the result is a SUPERSET of the runs that read keeps:
@@ -671,6 +671,16 @@ class PsycopgForecastStore:
         is added. It deliberately does not reduce to one run: a single
         ``(scenario_id, cycle_time)`` can match several runs and all of them are
         reported.
+
+        ``ORDER BY h.run_key`` is not cosmetic. The resolved pair lands in the
+        read's bindings, and the benchmark compares the before/after bindings for
+        EQUALITY across the whole compression window (``static_keys`` in
+        ``scripts/node27_timeseries_compression_benchmark.py``). Heap order would
+        let an unrelated row update reorder the same run set and reject the
+        collection round as ``benchmark query identity drift``. Before #2417 the
+        binding was a pure function of the request and could not drift; the sort
+        restores that property for everything except run MEMBERSHIP, which is a
+        real production change and should still reject.
         """
         scenario_clause = "AND h.scenario_id = ANY(%(resolve_scenario_ids)s)" if scenario_ids else ""
         rows = self._fetch_all(
@@ -683,6 +693,7 @@ class PsycopgForecastStore:
               {scenario_clause}
               {scenario_filter.sql}
               {identity_filter.sql}
+            ORDER BY h.run_key
             """,
             {
                 "resolve_cycle_times": [_ensure_utc(cycle_time) for cycle_time in cycle_times],

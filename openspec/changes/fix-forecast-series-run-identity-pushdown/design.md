@@ -4,8 +4,10 @@
 `_segment_rows_source_template` (`:57-63`), `_segment_rows_source_sql` (`:65-68`), and the eight call
 sites at `:564, :594, :627, :660, :718, :758, :793, :831`; plus the two capture harnesses that drive
 `forecast_series` — `packages/common/node27_pgdata_workload_query.py` and
-`scripts/node27_timeseries_compression_benchmark.py` (see "The two production capture harnesses"). Test
-surface:
+`scripts/node27_timeseries_compression_benchmark.py` (see "The two production capture harnesses"); and
+`scripts/node27_timeseries_compression_live_evidence.py`, the offline verifier that re-derives the
+benchmark's curve query and every binding from the public owner by exact equality — two of the bindings
+become database facts it cannot recompute, so it must change too (task 2.12). Test surface:
 `tests/test_forecast_store_routing.py`, `tests/test_river_ts_text_identity_cleanup.py`,
 `tests/test_river_ts_template_golden.py`, `tests/test_sql_shape_helpers.py`,
 `tests/test_river_ts_read_path_surrogate_keys.py`, `tests/river_ts_template_registry.py`.

@@ -97,8 +97,6 @@
     "tests/test_canonical_converter.py",
     "packages/common/forecast_store.py",
     "packages/common/river_ts_render.py",
-    "scripts/node27_timeseries_compression_benchmark.py",
-    "tests/test_display_coverage_residual_debt_integration.py",
     "tests/test_forecast_api.py",
     "tests/test_node27_pgdata_workload.py",
     "tests/test_river_ts_render.py",

@@ -93,14 +93,39 @@
 - [x] 2.11 That script's placeholder check (`:262-272`) is an **exact set equality** — extend it with the
       new bindings. `_REQUIRED_PRESENT_KEYS` (`node27_pgdata_workload_query.py:64-74`) is a subset check
       and needs nothing.
+- [ ] 2.12 `scripts/node27_timeseries_compression_live_evidence.py::_validate_benchmarks` re-derives the
+      curve query and **every** binding from the public owner by exact equality. Two bindings become
+      database facts it cannot recompute offline. Replay the bundle's recorded run set back into the owner
+      rather than excluding those names from the comparison, and keep every other binding exactly
+      re-derived. The recorded set must be non-empty, aligned and well-typed, so an
+      `= ANY('{}')` ghost measurement is refused rather than measured.
+- [ ] 2.13 Bind the recorded run set to something the bundle already proves. The bundle retains the full
+      `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` plan and already recomputes `shared_hit_blocks`
+      from it (`:2535-2578`); psycopg2 interpolates client-side
+      (`scripts/node27_timeseries_compression_benchmark.py:488,676`), so the plan's `Index Cond` / `Filter`
+      text contains the literal `= ANY ('{…}'::integer[])`. Cross-check `pushdown_run_keys` against that
+      plan text. Without it those two bindings are the only values in the bundle that reconcile against
+      nothing.
+- [ ] 2.14 `_resolve_run_identity` must carry a deterministic `ORDER BY h.run_key`. The benchmark lists
+      `binding` in `static_keys` and compares before/after for equality
+      (`scripts/node27_timeseries_compression_benchmark.py:897-902`); an unordered result makes the
+      binding non-deterministic across the compression window, so heap-order drift or a new run rejects
+      the whole round as `benchmark query identity drift`. Before this change the binding was a pure
+      function of the request and could not drift.
 
 ## 3. Tests
 
 - [x] 3.1 Row-equivalence regression asserting the digest defined in the Evidence Floor, not a row count.
       **Written but not yet executed**: it lives in
-      `tests/test_display_coverage_residual_debt_integration.py::test_run_identity_pushdown_returns_byte_identical_rows_on_every_forecast_shape`
+      `tests/test_forecast_series_run_identity_pushdown_integration.py::test_run_identity_pushdown_returns_byte_identical_rows_on_every_forecast_shape`
       and is gated on `NHMS_RUN_INTEGRATION=1` + `NHMS_INTEGRATION_DATABASE_URL`, so it skips locally.
-      It only counts once run on node-27 — tracked as part of task 4.4.
+      It only counts once run on node-27.
+      **It is a different digest from the Evidence Floor's.** `_series_row_digest` (`:960-974`) hashes
+      *response* fields — `scenario_id`, `source_id`, `cycle_time`, `valid_time`, `value` — while the
+      node-27 probe baseline `b3b3f1bdd79a5e6c` hashes the raw fact rows (`run_key`,
+      `river_network_version_key`, `valid_time`, `value`, `unit_e`). This test is a sound
+      pushed-vs-unpushed equivalence oracle on its own terms; it does **not** satisfy task 4.4, which
+      stays a probe-side comparison against `b3b3f1bdd79a5e6c`.
 - [x] 3.2 Multi-scenario `:718` case with **≥ 2 distinct `cycle_time`s**, asserting every scenario's rows
       survive. The production measurement pinned one scenario, so the digest alone cannot catch a
       non-envelope window push.
@@ -157,7 +182,9 @@
 - [ ] 4.2 node-27 warm EXPLAIN × 3, `:758` with `run_id` unbound: `shared hit <= 5000` (validated 2 548,
       plus 265 resolve).
 - [ ] 4.3 node-27 warm EXPLAIN × 3, `:718`: `shared hit <= 5000` (validated 3 049, plus 265 resolve).
-- [ ] 4.4 Digest equivalence pre/post on all three paths.
+- [ ] 4.4 Digest equivalence pre/post on all three paths, **probe-side**, against the raw-row
+      serialisation that produced `b3b3f1bdd79a5e6c`. Task 3.1's test uses a different, response-side
+      digest and does not discharge this.
 - [ ] 4.5 `scripts/node27_pgdata_workload.py measure --evidence-kind live` no longer refuses with
       `PLAN_BUFFERS_EXCEEDED`; capture the receipt #1987 task 5.2 needs.
 - [ ] 4.6 Re-time the public API default shape (`issue_time=latest`) against D11's 500 ms API warm P95.

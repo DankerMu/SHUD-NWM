@@ -973,6 +973,14 @@ async def test_forecast_series_include_analysis_multi_source_has_one_analysis_se
     assert all(segment["segment_role"] == "future_7_days" for segment in forecast_segments)
     assert {segment["source_id"] for segment in forecast_segments} == {"GFS", "IFS"}
     assert store.forecast_fetches[-1]["cycle_times_by_scenario"] == store.latest_cycles
+    # #2417: the spliced path must push the SAME converged run set the single
+    # `_resolve_run_identity` statement produced. Without this, dropping
+    # `resolved_runs=` from the include_analysis fetch call leaves the suite green
+    # while the analysis splice silently reads the fact table unpushed.
+    assert len(store.resolve_calls) == 1
+    assert store.resolve_calls[0]["cycle_times"] == sorted(store.latest_cycles.values())
+    assert len(store.forecast_fetches) == 1
+    assert store.forecast_fetches[0]["resolved_runs"] == store.resolved_runs
 
 
 def test_forecast_response_groups_multi_source_rows_with_metadata_and_points() -> None:

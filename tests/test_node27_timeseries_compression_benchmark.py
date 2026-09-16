@@ -260,6 +260,9 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
     ]
     assert len(resolve_statements) == 1
     assert "h.cycle_time = ANY(%(resolve_cycle_times)s)" in resolve_statements[0]
+    # The binding below is compared before/after for equality across the whole
+    # compression window, so the resolve must return a deterministic run order.
+    assert "ORDER BY h.run_key" in resolve_statements[0]
     assert connections[0].closed
     curve_executions = [
         (statement, parameters)
