@@ -1985,6 +1985,30 @@ export interface components {
                 };
             };
         };
+        /** @description Cold MVT generation is saturated; retry after the stated delay. */
+        MvtColdGenerationBusy: {
+            headers: {
+                "Retry-After"?: string;
+                "Cache-Control"?: string;
+                "X-Request-ID"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "MVT_COLD_GENERATION_BUSY";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
         /** @description Error response */
         Error: {
             headers: {
@@ -3520,6 +3544,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3561,6 +3586,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtNationalIdentityUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3600,6 +3626,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3637,6 +3664,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3675,6 +3703,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -3713,6 +3742,7 @@ export interface operations {
                 };
             };
             424: components["responses"]["MvtLivePostgisUnavailable"];
+            503: components["responses"]["MvtColdGenerationBusy"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };

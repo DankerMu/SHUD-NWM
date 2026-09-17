@@ -32,12 +32,13 @@ _DISCHARGE_TILE_COUNT = 13
 # `docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`
 # records 56 entries (`[C, min(river_valid_time_end)]` = 165 h / 3 + 1).
 _VALID_TIME_COUNT = 56
-# What survives the `PREWARM_LEAD_HOURS = 12` cut on that 3 h grid: k = 0...4.
-_WARMED_VALID_TIME_COUNT = 5
-# 13 * 5 discharge tiles + 5 PNGs.
+# Full published cycle: the 56-entry fixture is warmed in discovery order.
+_WARMED_VALID_TIME_COUNT = _VALID_TIME_COUNT
+# 13 * 56 discharge tiles + 56 PNGs.
 _PER_SOURCE_REQUESTS = _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT + _WARMED_VALID_TIME_COUNT
-# 43 + 2 * 70 -- discovery calls are NOT counted.
+# 43 + 2 * 784 -- discovery calls are NOT counted.
 _GOLDEN_REQUESTS_TOTAL = _RIVER_TILE_COUNT + 2 * _PER_SOURCE_REQUESTS
+_FORMER_LEAD_WINDOW_COUNT = 5
 
 _ENCODED_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}%3A\d{2}%3A\d{2}Z")
 
@@ -52,7 +53,7 @@ def _steps(cycle: str, count: int, *, first_step: int = 0) -> list[str]:
 
 
 def _warmed(cycle: str) -> list[str]:
-    """The valid times of `cycle` that survive the `PREWARM_LEAD_HOURS` cut."""
+    """The valid times of `cycle` scheduled for full-cycle prewarm."""
     return _steps(cycle, _WARMED_VALID_TIME_COUNT)
 
 
@@ -228,7 +229,7 @@ def _raising_urlopen(exc: Exception) -> Any:
     return _fake_urlopen
 
 
-_SUMMARY_V3_KEYS = {
+_SUMMARY_V4_KEYS = {
     "schema",
     "base_url",
     "zooms",
@@ -243,7 +244,7 @@ _SUMMARY_V3_KEYS = {
     "elapsed_seconds",
     "deadline_seconds",
     "deadline_skipped",
-    "lead_hours",
+    "prewarm_scope",
     "per_source",
 }
 
@@ -334,7 +335,7 @@ def test_build_warm_urls_encodes_cycle_and_valid_time_in_the_path() -> None:
     ]
 
 
-def test_envelope_is_river_43_plus_70_per_source_and_counts_183_warm_requests() -> None:
+def test_envelope_is_river_43_plus_full_cycle_per_source() -> None:
     gfs_times = _warmed(_GFS_CYCLE)
     ifs_times = _warmed(_IFS_CYCLE)
 
@@ -350,12 +351,13 @@ def test_envelope_is_river_43_plus_70_per_source_and_counts_183_warm_requests() 
     assert set(warmer.urls) == expected
     assert len(warmer.urls) == _GOLDEN_REQUESTS_TOTAL
     assert len(expected) == _RIVER_TILE_COUNT + 2 * _PER_SOURCE_REQUESTS
-    assert _GOLDEN_REQUESTS_TOTAL == 183
+    assert _GOLDEN_REQUESTS_TOTAL == _RIVER_TILE_COUNT + 2 * (13 * 56 + 56)
     assert rc == 0
-    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v4"
     assert summary["requests_total"] == _GOLDEN_REQUESTS_TOTAL
     assert summary["river_tile_count"] == _RIVER_TILE_COUNT
-    assert summary["lead_hours"] == prewarm.PREWARM_LEAD_HOURS == 12
+    assert summary["prewarm_scope"] == prewarm.PREWARM_SCOPE == "full_cycle"
+    assert "lead_hours" not in summary
     assert "valid_time" not in summary
     assert isinstance(summary["elapsed_seconds"], float)
     assert summary["elapsed_seconds"] >= 0.0
@@ -367,10 +369,8 @@ def test_envelope_is_river_43_plus_70_per_source_and_counts_183_warm_requests() 
     assert summary["deadline_seconds"] == prewarm.DEFAULT_DEADLINE_SECONDS
     for source in ("gfs", "ifs"):
         entry = summary["per_source"][source]
-        # Both counts are in the summary so the receipt SEES the descope instead
-        # of having to infer it from the request total.
         assert entry["valid_times_available"] == _VALID_TIME_COUNT == 56
-        assert entry["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT == 5
+        assert entry["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT == 56
         assert entry["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
         assert entry["discharge_ok"] == entry["discharge_requests"]
         assert entry["discharge_failed"] == 0
@@ -535,7 +535,7 @@ def test_unparseable_valid_time_element_is_a_source_error_not_a_process_failure(
     assert summary["per_source"]["gfs"]["discharge_ok"] == 0
     assert summary["per_source"]["gfs"]["discharge_failed"] == 0
     # The full summary, not `main()`'s one-line failure envelope.
-    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v4"
     assert "status" not in summary
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
 
@@ -655,14 +655,13 @@ def test_an_expected_precip_error_code_on_a_tile_url_is_still_a_failure() -> Non
 
 
 def test_out_of_horizon_valid_time_is_reported_and_its_discharge_tiles_still_warmed() -> None:
-    """The off-grid valid time must be INSIDE the lead window to be an oracle.
+    """An off-grid valid time still reaches the PNG request-shape gate.
 
-    The previous `cycle+171h` outlier is now cut by `PREWARM_LEAD_HOURS` before
-    the PNG request-shape gate ever sees it, which would have made every
-    assertion below vacuously true. `cycle+4h` is inside the window and off the
-    3 h grid, so it exercises the gate itself.
+    Full-cycle prewarm no longer drops times beyond twelve hours, so the
+    oracle is an off-grid instant that is still inside the PNG horizon.
+    `cycle+4h` is off the 3 h grid, so it exercises the gate itself.
     """
-    outlier = "2026-09-02T16:00:00Z"  # _GFS_CYCLE + 4h: in-window, off the 3 h grid
+    outlier = "2026-09-02T16:00:00Z"  # _GFS_CYCLE + 4h: off the 3 h grid
     gfs_times = [*_steps(_GFS_CYCLE, _VALID_TIME_COUNT), outlier]
     warmed = [*_warmed(_GFS_CYCLE), outlier]
 
@@ -701,10 +700,9 @@ def test_an_on_grid_valid_time_beyond_the_png_horizon_is_out_of_contract() -> No
     (`2026-09-02T12:00:00Z`) to `2027-01-01T00:00:00Z` is 2892 h; 2892 = 964 x 3,
     so the instant sits exactly on the 3 h grid, and it is 2724 h past the
     horizon's last member. A single published entry is the simplest shape that
-    reaches the gate at all -- as the sole entry it anchors the lead window
-    itself, so `select_lead_window` cannot truncate it away first. It is not the
-    only one: two consecutive far-future instants would reach it too, the first
-    anchoring the window and the second landing inside it.
+    reaches the gate at all -- as the sole published entry it is scheduled
+    even though it sits far outside the PNG horizon. Full-cycle selection
+    does not hide that PNG out-of-contract result.
 
     If the horizon bound is deleted and only the grid test survives, this instant
     becomes "requestable", the PNG goes out, and every assertion below flips.
@@ -743,98 +741,69 @@ def test_half_hour_cycle_puts_every_png_out_of_contract_but_still_warms_tiles() 
     assert _discharge_urls("gfs", half_hour, _warmed(half_hour)) <= set(warmer.urls)
     gfs = summary["per_source"]["gfs"]
     assert gfs["cycle"] == half_hour
-    # Only the WARMED valid times can be out of contract: the ones the lead
-    # window dropped were never candidates for a PNG request.
     assert gfs["png_out_of_contract"] == _WARMED_VALID_TIME_COUNT
     assert gfs["png_ok"] == 0
     assert gfs["error"] is None
     assert rc != 0
 
 
-def test_the_lead_window_is_cut_by_timestamp_not_by_list_position() -> None:
-    """Out-of-order in, window-correct out: `valid_times[:5]` must go red here.
+def test_full_cycle_keeps_ordered_timestamp_strings_and_duplicates_beyond_twelve_hours() -> None:
+    """Every discovered string is scheduled in order, including a duplicate past either old cutoff."""
+    first = "2026-09-02T12:00:00Z"
+    plus_three_offset = "2026-09-02T15:00:00+00:00"
+    plus_eighteen = "2026-09-03T06:00:00Z"
+    # +18h is beyond both the prior earliest-time +12h cutoff and a
+    # first-list-item (+3h) +12h cutoff. Its duplicate proves multiplicity too.
+    published = [plus_three_offset, plus_eighteen, first, plus_eighteen]
 
-    `/valid-times` ordering and step are not properties this script may assume,
-    so the cut compares instants. The input below puts `cycle+9h` first and an
-    out-of-window `cycle+15h` fourth: a fixed-length prefix would warm `+15h`
-    and drop `+12h`.
-    """
-    in_window = _warmed(_GFS_CYCLE)
-    outside = _instant(datetime.fromisoformat(_GFS_CYCLE) + timedelta(hours=15))
-    scrambled = [in_window[3], in_window[0], in_window[1], outside, in_window[2], in_window[4]]
+    rc, summary, warmer, _ = _run(_plan(gfs_valid_times=published), workers=1)
 
-    rc, summary, warmer, _ = _run(_plan(gfs_valid_times=scrambled))
-
-    expected = _discharge_urls("gfs", _GFS_CYCLE, in_window) | _png_urls("gfs", _GFS_CYCLE, in_window)
-    assert {url for url in warmer.urls if "/gfs/" in url} == expected
-    assert _discharge_urls("gfs", _GFS_CYCLE, [outside]).isdisjoint(warmer.urls)
-    assert _png_urls("gfs", _GFS_CYCLE, [outside]).isdisjoint(warmer.urls)
+    gfs_urls = [url for url in warmer.urls if "/gfs/" in url]
+    groups: list[tuple[str, str]] = []
+    for url in gfs_urls:
+        key = _group_key(url)
+        assert key is not None
+        if not groups or groups[-1] != key:
+            groups.append(key)
+    assert groups == [("gfs", quote(valid_time, safe="")) for valid_time in published]
+    assert len(gfs_urls) == len(published) * (_DISCHARGE_TILE_COUNT + 1)
+    assert _discharge_urls("gfs", _GFS_CYCLE, published) <= set(gfs_urls)
+    assert _png_urls("gfs", _GFS_CYCLE, published) <= set(gfs_urls)
     gfs = summary["per_source"]["gfs"]
-    assert gfs["valid_times_available"] == len(scrambled) == 6
-    assert gfs["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT
-    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
-    assert gfs["png_ok"] == _WARMED_VALID_TIME_COUNT
-    # A descope, not an error: the dropped valid time is neither a failure nor
-    # out-of-contract.
+    assert gfs["valid_times_available"] == len(published) == 4
+    assert gfs["valid_times_warmed"] == 4
+    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * 4
+    assert gfs["png_ok"] == 4
     assert gfs["png_out_of_contract"] == 0
     assert gfs["error"] is None
+    assert summary["prewarm_scope"] == "full_cycle"
+    assert "lead_hours" not in summary
     assert summary["failed_count"] == 0
     assert rc == 0
 
 
-def test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle() -> None:
-    """The coverage-clamped case: `/valid-times` starts well after the cycle.
-
-    `services/tiles/mvt.py:2171` sets `window_start = max(cycle, max(coverage
-    starts))`, so a source whose river coverage begins later publishes a list
-    whose FIRST entry is not the cycle instant -- and that first entry is what
-    `map-layer-timeline-controls` calls lead 0 and what the frontend opens on.
-    A cycle-anchored window would have warmed NOTHING here (the first entry is
-    15 h out, past `PREWARM_LEAD_HOURS`), at rc=0, with no counter and no
-    assertion able to see it.
-
-    The cycle is still the cycle: it is a separate dimension of the URL, and the
-    `{cycle}` path segment must stay the published cycle rather than follow the
-    anchor.
-    """
-    head_offset = timedelta(hours=15)
-    first = datetime.fromisoformat(_GFS_CYCLE) + head_offset
-    assert head_offset > timedelta(hours=prewarm.PREWARM_LEAD_HOURS), "the head offset must clear the window"
+def test_a_clamped_published_cycle_keeps_its_cycle_identity_and_png_horizon() -> None:
+    """Full-cycle warming uses every clamped published time, not fabricated cycle times."""
+    first = datetime.fromisoformat(_GFS_CYCLE) + timedelta(hours=15)
     clamped = _steps(_instant(first), _VALID_TIME_COUNT)
-    expected_warmed = clamped[:_WARMED_VALID_TIME_COUNT]
 
     rc, summary, warmer, _ = _run(_plan(gfs_valid_times=clamped))
 
     gfs_urls = {url for url in warmer.urls if "/gfs/" in url}
-    assert gfs_urls == _discharge_urls("gfs", _GFS_CYCLE, expected_warmed) | _png_urls(
-        "gfs", _GFS_CYCLE, expected_warmed
+    requestable_png = clamped[:-4]  # cycle+15 through cycle+168, inclusive
+    assert gfs_urls == _discharge_urls("gfs", _GFS_CYCLE, clamped) | _png_urls(
+        "gfs", _GFS_CYCLE, requestable_png
     )
     assert {_cycle_segment(url) for url in gfs_urls} == {quote(_GFS_CYCLE, safe="")}
     gfs = summary["per_source"]["gfs"]
     assert gfs["cycle"] == _GFS_CYCLE
     assert gfs["valid_times_available"] == _VALID_TIME_COUNT
-    assert gfs["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT
-    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
-    # These clamped entries are on the 3 h grid measured from the CYCLE
-    # (`mvt.py:2178` takes ceiling division on that grid) AND inside the 168 h
-    # PNG horizon -- cycle+15h .. cycle+27h -- so every one of them gets a PNG.
-    # Being on the grid is NOT on its own sufficient: `horizon_valid_times`
-    # stops at cycle+168h (`services/precip/mirror.py:106-115`), so a grid
-    # instant beyond that is out of contract. That branch is ASSERTED by
-    # `test_an_on_grid_valid_time_beyond_the_png_horizon_is_out_of_contract`
-    # above -- and only there. The `single-far-future-entry` parametrization
-    # below feeds the same input but asserts the exit-code RULE
-    # (`rc == (1 if png_out_of_contract else 0)`), never the counter's value, so
-    # it stays green with the horizon bound removed. What is pinned here is this
-    # window, not the general implication. Even the grid claim holds only while
-    # `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
-    # (`services/tiles/mvt.py:122`) equals `PRECIP_STEP_HOURS`
-    # (`services/precip/constants.py:28`) -- two independently declared 3s, with
-    # no assertion coupling them.
-    assert gfs["png_ok"] == _WARMED_VALID_TIME_COUNT
-    assert gfs["png_out_of_contract"] == 0
+    assert gfs["valid_times_warmed"] == _VALID_TIME_COUNT
+    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * _VALID_TIME_COUNT
+    assert gfs["png_ok"] == 52
+    assert gfs["png_out_of_contract"] == 4
     assert gfs["error"] is None
-    assert rc == 0
+    assert rc != 0
 
 
 @pytest.mark.parametrize(
@@ -846,35 +815,26 @@ def test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle
         pytest.param(list(reversed(_steps(_GFS_CYCLE, 9))), id="descending"),
     ],
 )
-def test_a_non_empty_published_list_always_warms_at_least_its_first_entry(published: list[str]) -> None:
-    """`valid_times_available > 0` implies `valid_times_warmed > 0`, unconditionally.
-
-    This is the property that makes the silent-zero state unreachable, which is
-    why there is no `warmed == 0` error branch to test: anchoring the window on
-    the earliest published instant means the window always contains it. An error
-    branch for a state the code cannot reach would be the same premise-as-guard
-    defect wearing a different hat.
-    """
+def test_full_cycle_warms_every_nonempty_published_list(published: list[str]) -> None:
+    """`valid_times_warmed` equals the published count, even for unsorted input."""
     rc, summary, warmer, _ = _run(_plan(gfs_valid_times=published))
 
     gfs = summary["per_source"]["gfs"]
     assert gfs["valid_times_available"] == len(published)
-    assert gfs["valid_times_warmed"] >= 1
-    lead_zero = min(published, key=datetime.fromisoformat)
-    assert _discharge_urls("gfs", _GFS_CYCLE, [lead_zero]) <= set(warmer.urls)
-    # Whatever else the run reports, the source itself discovered cleanly: the
-    # window is a descope, never an error.
+    assert gfs["valid_times_warmed"] == len(published)
+    for valid_time in published:
+        assert _discharge_urls("gfs", _GFS_CYCLE, [valid_time]) <= set(warmer.urls)
     assert gfs["error"] is None
     assert summary["failed_count"] == 0
     assert rc == (1 if gfs["png_out_of_contract"] else 0)
 
 
-def test_job_submission_interleaves_the_two_sources_lead_by_lead() -> None:
+def test_job_submission_interleaves_the_two_sources_by_published_time() -> None:
     """A deadline truncation must degrade both sources symmetrically.
 
     Source-major submission + FIFO means the truncated source is always `ifs`,
-    including its lead-0 default view, which is exactly what the frontend shows
-    first. `workers=1` makes the pool's execution order the submission order.
+    including its earliest published view. `workers=1` makes the pool's
+    execution order the submission order.
     """
     rc, _, warmer, _ = _run(_plan(), workers=1)
 
@@ -900,12 +860,12 @@ def test_job_submission_interleaves_the_two_sources_lead_by_lead() -> None:
     assert rc == 0
 
 
-def test_summary_v3_key_set_and_accounting_identity() -> None:
+def test_summary_v4_key_set_and_accounting_identity() -> None:
     plan, overrides, _ = _precip_override_plan()
 
     _, summary, _, _ = _run(plan, overrides=overrides)
 
-    assert set(summary) == _SUMMARY_V3_KEYS
+    assert set(summary) == _SUMMARY_V4_KEYS
     accounted = summary["river_tile_count"]
     for entry in summary["per_source"].values():
         assert entry["discharge_requests"] == entry["discharge_ok"] + entry["discharge_failed"]
@@ -943,8 +903,9 @@ def test_mixed_source_discharge_outcomes_are_attributed_separately() -> None:
 
     gfs = summary["per_source"]["gfs"]
     ifs = summary["per_source"]["ifs"]
-    assert (gfs["discharge_requests"], gfs["discharge_ok"], gfs["discharge_failed"]) == (65, 62, 3)
-    assert (ifs["discharge_requests"], ifs["discharge_ok"], ifs["discharge_failed"]) == (65, 64, 1)
+    total = _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
+    assert (gfs["discharge_requests"], gfs["discharge_ok"], gfs["discharge_failed"]) == (total, total - 3, 3)
+    assert (ifs["discharge_requests"], ifs["discharge_ok"], ifs["discharge_failed"]) == (total, total - 1, 1)
     assert gfs["discharge_requests"] == gfs["discharge_ok"] + gfs["discharge_failed"]
     assert ifs["discharge_requests"] == ifs["discharge_ok"] + ifs["discharge_failed"]
     assert summary["failed_count"] == 4
@@ -955,7 +916,7 @@ def test_mixed_source_discharge_outcomes_are_attributed_separately() -> None:
     assert ifs["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert gfs["png_failed"] == ifs["png_failed"] == 0
     assert rc != 0
-    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v4"
 
 
 def test_the_summary_reports_the_effective_worker_count_not_the_module_default() -> None:
@@ -966,7 +927,7 @@ def test_the_summary_reports_the_effective_worker_count_not_the_module_default()
     tell the #2017 receipt what concurrency actually ran. A silent fallback to
     the module constant would make the receipt read 8 against a deployed 2 and
     record round-3 B-2 closed on a value production never uses. Membership in
-    `_SUMMARY_V3_KEYS` proves the key exists; only this proves its value.
+    `_SUMMARY_V4_KEYS` proves the key exists; only this proves its value.
 
     The discriminating mechanism is that the two counts differ from EACH OTHER,
     not that either differs from `DEFAULT_WORKERS`: any implementation that
@@ -1146,7 +1107,7 @@ def test_incomplete_read_during_discovery_is_a_source_error_not_a_lost_summary()
     assert summary["per_source"]["gfs"]["discharge_requests"] == 0
     assert summary["per_source"]["gfs"]["discharge_ok"] == 0
     assert summary["per_source"]["gfs"]["discharge_failed"] == 0
-    assert set(summary) == _SUMMARY_V3_KEYS
+    assert set(summary) == _SUMMARY_V4_KEYS
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert summary["per_source"]["ifs"]["error"] is None
 
@@ -1167,7 +1128,7 @@ def test_a_cycle_whose_horizon_arithmetic_overflows_is_a_source_error() -> None:
     assert summary["per_source"]["gfs"]["discharge_requests"] == 0
     assert summary["per_source"]["gfs"]["discharge_ok"] == 0
     assert summary["per_source"]["gfs"]["discharge_failed"] == 0
-    assert set(summary) == _SUMMARY_V3_KEYS
+    assert set(summary) == _SUMMARY_V4_KEYS
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert summary["per_source"]["ifs"]["error"] is None
 
@@ -1184,7 +1145,7 @@ def test_a_raising_warm_call_is_a_failed_request_not_a_lost_summary() -> None:
     assert summary["failures"][0]["url"] == tile
     assert summary["failures"][0]["error"] == "IncompleteRead"
     assert summary["failures"][0]["status"] == 0
-    assert set(summary) == _SUMMARY_V3_KEYS
+    assert set(summary) == _SUMMARY_V4_KEYS
     # rc 1 == "some requests failed"; rc 2 is reserved for process-level failure.
     assert rc == 1
 
@@ -1200,7 +1161,7 @@ def test_main_reserves_exit_2_and_the_one_line_envelope_for_process_failures(
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "nhms.node27-mvt-prewarm.v3"
+    assert payload["schema"] == "nhms.node27-mvt-prewarm.v4"
     assert payload["status"] == "failed"
     assert "per_source" not in payload
 
@@ -1264,8 +1225,8 @@ def test_elapsed_seconds_spans_discovery_and_warming_not_just_one_phase() -> Non
 
     assert len(discovery.urls) == 4  # two hops per source
     assert len(warmer.urls) == _GOLDEN_REQUESTS_TOTAL
-    # 4 discovery hops x 5 s + 183 warm requests x 0.125 s. Both terms are
-    # required: dropping either phase out of the timed span changes the number.
+    # 4 discovery hops x 5 s + every planned warm request x 0.125 s. Both
+    # terms are required: dropping either phase out of the timed span changes the number.
     assert summary["elapsed_seconds"] == 4 * 5.0 + _GOLDEN_REQUESTS_TOTAL * 0.125
     assert summary["deadline_skipped"] == 0
     assert summary["requests_total"] == _GOLDEN_REQUESTS_TOTAL
@@ -1294,29 +1255,29 @@ def test_the_run_stops_issuing_requests_once_the_wall_clock_deadline_passes() ->
         }
     assert summary["failed_count"] == 0
     # The summary is still emitted in full, and the run still fails.
-    assert set(summary) == _SUMMARY_V3_KEYS
+    assert set(summary) == _SUMMARY_V4_KEYS
     assert rc != 0
     json.dumps(summary, ensure_ascii=False, sort_keys=True)
 
 
-def test_a_deadline_truncation_still_warms_both_sources_lead_zero_views() -> None:
+def test_a_deadline_truncation_still_warms_both_sources_first_published_views() -> None:
     """Interleaved submission is what makes a truncated run degrade symmetrically.
 
-    43 river jobs + one lead-0 group per source = 71 requests at 1 s each, so a
-    71 s deadline stops right after both sources' lead-0 groups. Under the
-    source-major order this diff replaces, `gfs`'s 70 jobs would come first and
+    43 river jobs + one first-published group per source = 71 requests at 1 s
+    each, so a 71 s deadline stops right after both first groups. Under the
+    source-major order this diff replaces, `gfs`'s work would come first and
     `ifs` would issue nothing at all -- including its default view.
     """
     clock = _FakeClock(warm_step=1.0)
-    lead_zero_requests = _DISCHARGE_TILE_COUNT + 1
+    first_published_requests = _DISCHARGE_TILE_COUNT + 1
 
     rc, summary, warmer, _ = _run(_plan(), clock=clock, deadline_seconds=71.0, workers=1)
 
-    assert len(warmer.urls) == _RIVER_TILE_COUNT + 2 * lead_zero_requests == 71
+    assert len(warmer.urls) == _RIVER_TILE_COUNT + 2 * first_published_requests == 71
     for source, cycle in (("gfs", _GFS_CYCLE), ("ifs", _IFS_CYCLE)):
-        lead_zero = [_warmed(cycle)[0]]
-        assert _discharge_urls(source, cycle, lead_zero) <= set(warmer.urls)
-        assert _png_urls(source, cycle, lead_zero) <= set(warmer.urls)
+        first_published = [_warmed(cycle)[0]]
+        assert _discharge_urls(source, cycle, first_published) <= set(warmer.urls)
+        assert _png_urls(source, cycle, first_published) <= set(warmer.urls)
         assert summary["per_source"][source]["png_ok"] == 1
         assert summary["per_source"][source]["discharge_requests"] == _DISCHARGE_TILE_COUNT
         assert summary["per_source"][source]["discharge_ok"] == _DISCHARGE_TILE_COUNT
@@ -1376,7 +1337,7 @@ def test_an_empty_zoom_set_is_rejected_before_prewarm_is_ever_called(
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "nhms.node27-mvt-prewarm.v3"
+    assert payload["schema"] == "nhms.node27-mvt-prewarm.v4"
     assert payload["status"] == "failed"
     assert "zoom" in payload["error"]
     assert calls == []
@@ -1432,42 +1393,31 @@ def test_the_default_deadline_plus_one_timeout_fits_inside_the_ingest_tick() -> 
     assert prewarm.DEFAULT_DEADLINE_SECONDS + prewarm.DEFAULT_TIMEOUT_SECONDS <= tick_seconds
 
 
-def test_the_planned_envelope_is_183_requests_derived_end_to_end_from_the_code(
+def test_the_planned_envelope_is_derived_end_to_end_from_the_published_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The size of the envelope prewarm PLANS, computed the way production computes it.
 
-    This replaces the deleted "worst-case cost at half concurrency" inequality,
-    which modelled the envelope with a second source for every input it needed
-    (the precipitation 3 h grid instead of the discharge stride, a hardcoded
-    river zoom list instead of the CLI default) and therefore stayed green when
-    the real envelope changed. Here every factor comes from the production path:
+    Every factor comes from the production path:
 
       - the published grid steps by `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
         (`services/tiles/mvt.py`), which is what `/valid-times` actually emits;
-      - the window is cut by the real `select_lead_window`;
-      - the river zoom set is the one `main()`'s parser yields by default, i.e.
-        the one the cron passes;
+      - every published time is scheduled (full-cycle, no 12h cut);
+      - the river zoom set is the one `main()`'s parser yields by default;
       - the tile counts come from `xyz_tiles`, the URL set from
         `build_warm_url_groups` / `build_warm_urls` including its PNG gate.
 
-    So `183` is the ONLY literal here, and a change to the stride, to
-    `PREWARM_LEAD_HOURS`, to `DISCHARGE_ZOOMS`, to the river zoom default or to
-    `PREWARM_SOURCES` turns it red. What it does NOT claim is that 183 requests
-    fit inside `DEFAULT_DEADLINE_SECONDS`; that has no in-repo oracle and is
-    settled only by the node-27 receipt of task 7.2 (#2017).
+    The only literals are the 56-entry fixture length and the 1611 total that
+    follows from it. A change to the stride, `DISCHARGE_ZOOMS`, the river zoom
+    default or `PREWARM_SOURCES` turns it red. What it does NOT claim is that
+    the envelope fits inside `DEFAULT_DEADLINE_SECONDS`.
     """
     cycle_instant = datetime(2026, 9, 2, 12, tzinfo=UTC)
     cycle = _instant(cycle_instant)
-    # A grid twice the lead window wide: long enough that the WINDOW is what
-    # bounds the envelope whatever the stride is, and deliberately not a model
-    # of how far the catalogue actually publishes (that length is irrelevant
-    # here -- anything strictly beyond the window gives the same answer).
-    span = timedelta(hours=2 * prewarm.PREWARM_LEAD_HOURS)
     stride = timedelta(hours=NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS)
-    published = [_instant(cycle_instant + stride * step) for step in range(int(span / stride) + 1)]
-    warmed = prewarm.select_lead_window(published)
-    assert len(warmed) < len(published), "the synthetic grid must outrun the window, or the golden proves nothing"
+    published = [_instant(cycle_instant + stride * step) for step in range(_VALID_TIME_COUNT)]
+    beyond = _instant(cycle_instant + stride * (_FORMER_LEAD_WINDOW_COUNT + 1))
+    assert beyond in published, "the fixture must include a time the old 12h window would have dropped"
 
     river_zooms = _cli_kwargs(monkeypatch, [])["zooms"]
     planned = len(prewarm.build_river_urls(_BASE_URL, prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, river_zooms)))
@@ -1477,13 +1427,11 @@ def test_the_planned_envelope_is_183_requests_derived_end_to_end_from_the_code(
             prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, prewarm.DISCHARGE_ZOOMS),
             source=source,
             cycle=cycle,
-            valid_times=warmed,
+            valid_times=published,
         )
         planned += sum(len(group) for group in groups)
 
-    # 43 river + 2 x (5 x 13 discharge + 5 PNG). None of 43 / 13 / 5 appears
-    # above: they are consequences of the constants, and this is their total.
-    assert planned == 183
+    assert planned == 1611
 
 
 def _shell_fallback(script_text: str, variable: str) -> str:

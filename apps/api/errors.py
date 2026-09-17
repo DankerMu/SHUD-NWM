@@ -106,12 +106,14 @@ class ApiError(RuntimeError):
         code: str,
         message: str,
         details: Any | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details
+        self.headers = dict(headers) if headers is not None else None
 
 
 def register_error_handlers(app: FastAPI) -> None:
@@ -131,6 +133,7 @@ def register_error_handlers(app: FastAPI) -> None:
             code=exc.code,
             message=exc.message,
             details=exc.details,
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -308,6 +311,7 @@ def error_response(
     code: str,
     message: str,
     details: Any | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     # Through the shared rule, not straight off `request.state`: this is the
     # fourth writer of the id (after the middleware, the pre-body auth path and
@@ -331,8 +335,15 @@ def error_response(
             "details": details,
         },
     }
+    response_headers: dict[str, str] = {}
+    if headers:
+        for name, value in headers.items():
+            if str(name).lower() == "x-request-id":
+                continue
+            response_headers[str(name)] = str(value)
+    response_headers["X-Request-ID"] = request_id
     return JSONResponse(
         status_code=status_code,
         content=jsonable_encoder(body),
-        headers={"X-Request-ID": request_id},
+        headers=response_headers,
     )

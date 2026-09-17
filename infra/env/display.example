@@ -8,8 +8,15 @@ NHMS_CONTAINER_UID=1000
 NHMS_CONTAINER_GID=1000
 NHMS_DISPLAY_API_PORT=8080
 NHMS_DISPLAY_WORKERS=2
-NHMS_DISPLAY_DB_POOL_SIZE=4
-NHMS_DISPLAY_DB_MAX_OVERFLOW=2
+# node-27 production: two workers × (pool 8 + overflow 8) = 32 possible
+# display connections. The per-worker cold cap 8 leaves eight connections for
+# cache hits, catalog, and brief identity/cache work; same-key waiters hold no
+# checkout.
+# The active production path sources `display.env` wholesale; compose currently
+# enumerates its environment keys and does not consume pool tuning.
+NHMS_DISPLAY_DB_POOL_SIZE=8
+NHMS_DISPLAY_DB_MAX_OVERFLOW=8
+NHMS_DISPLAY_MVT_COLD_LIMIT=8
 
 NHMS_SERVICE_ROLE=display_readonly
 NHMS_REQUIRE_SERVICE_ROLE=true
