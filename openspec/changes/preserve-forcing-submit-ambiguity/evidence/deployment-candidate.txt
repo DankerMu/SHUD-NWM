@@ -1,0 +1,7 @@
+Mainline runtime source c34ca08b (after review fix pass1) vs integration base b922b2455.
+Production baseline e7bd816060a25b72112048c9b24e9d8a9980581a remains active; no #2447 rollout yet.
+Local isolated /tmp/nwm-2447-deploy received only services/orchestrator runtime diff via git apply --3way; all nine files applied without conflict.
+Mainline diff and staged production-baseline diff both have stable patch-id 74ea21bfcfd26774780b1956fc1a7f4358734b59.
+Source-only candidate bc5e755db1f99c9aa963bd7784bab0862d441f95, branch deploy/issue-2447-forcing-ambiguity, pushed via GitHub. Nine source files, +1730/-81; no unrelated master/source/config/dependency rollout.
+Verification-only child 7f0e0a5b5481524526db58711ea7b6ef3677dc46 adds current tests/test_forcing_submit_ambiguity.py and tests/test_orchestration_chain.py, no runtime edits. Branch verify/issue-2447-deployment; node27 isolatedcheckout /home/nwm/tmp/wt-2447-deploy. Dependency manifest diff against production environment empty. Full affected deployment-tree suite is running; no pass claimed yet.
+Read-only actual node22 scontrol show job -o output measured90993bytes, below existing256KiB bounded reader; this is response-size evidence only, not an exact-attempt recovery proof. Active .venv/env untouched.

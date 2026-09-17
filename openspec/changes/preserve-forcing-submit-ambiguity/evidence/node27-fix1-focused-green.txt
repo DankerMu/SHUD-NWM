@@ -1,0 +1,10 @@
+...................                                                      [100%]
+19 passed in 3.78s
+
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              feat/issue-2447-forcing-submit-recovery -> FETCH_HEAD
+   8e125401..c34ca08b  feat/issue-2447-forcing-submit-recovery -> origin/feat/issue-2447-forcing-submit-recovery
+Previous HEAD position was 8e125401 fix(orchestrator): resolve forcing attempts from bounded controller identity
+HEAD is now at c34ca08b fix(orchestrator): use typed authority for immediate forcing reconciliation
+
+exit=0

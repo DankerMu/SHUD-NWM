@@ -7,14 +7,14 @@
 
 - [x] 2.1 Preserve sufficient new forcing submit identity before Gateway and retain ambiguity/origin/provenance through normal persisted and scheduler result surfaces; explicit rejection unchanged. Focused9 and affected3438 pass.
 - [x] 2.2 Prevent overlapping unresolved forcing submission across cohort keys and restart with existing atomic reservation mechanisms; unrelated work remains eligible. Focused concurrency/renamed-restart regression passed.
-- [ ] 2.3 Resolve uniquely confirmed original completion through existing trusted query/completion/witness paths and continue normally to forecast without forcing resubmit; genuine unknown remains explicitly unresolved.
+- [x] 2.3 Resolve uniquely confirmed original completion through trusted query and existing normal completion/aggregation paths, then continue to forecast without forcing resubmit; genuine unknown remains unresolved. c34ca08b focused19 pass includes comment-less controller discovery at the failure boundary, same-second attempt token, stale-token refusal and normal original-array accounting.
 - [x] 2.4 Preserve forecast digest/aliases/reconciliation, ordinary forcing, strict witness/#2439 boundary and successful legacy replacement behavior. Node27 eight affected files:3438 passed,1 skipped at edb46cd0.
 
-Task2.3 remains open: fake Comment-bearing accounting resolves in the focused regression, but the production-consistent comment-storage-false query refuses before forcing binding. Parent recorded `evidence/node27-commentless-query-gap.txt`; do not count a permanent unresolved fence as actual node22 recovery. No #2447 deployment performed.
+The initial comment-less query gap is corrected by a bounded controller identity lane and one target-row positive-bind attempt at the response failure boundary. The existing strict package-witness guard is forecast-restart-only; this fix preserves it rather than adding new validation to normal forcing completion. First fix-pass regressions:19 passed; nine affected files:3499 passed,1 skipped in899.18s at c34ca08b. Actual old-baseline deployment tree validation and re-review remain pending; no #2447 production deployment.
 
 ## 3. Verification and delivery
 
-- [x] 3.1 Parent runs local Ruff/OpenSpec and node27 targeted red/green plus affected suites at exact head; no implementer mid-flight validation. edb46cd0:3438 passed,1 skipped in799.07s; query-capability coverage gap tracked separately under2.3/review.
+- [x] 3.1 Parent runs local Ruff/OpenSpec and node27 targeted red/green plus affected suites at exact head; no implementer mid-flight validation. Initial edb46cd0:3438 passed,1 skipped; first fix c34ca08b:3499 passed,1 skipped, plus focused19 passed.
 - [ ] 3.2 Expanded native correctness, test-evidence/spec and invariant-state review; bounded fix gate and exact-head CI.
 - [ ] 3.3 Test actual minimal deployment tree on old production baseline, quiescent rollout without3.12.7/env rebuild, normal progression smoke and node27 exact data evidence.
 - [ ] 3.4 Update narrow runbook/receipt, merge/close/archive. No generic historical recovery tooling.
@@ -22,7 +22,7 @@ Task2.3 remains open: fake Comment-bearing accounting resolves in the focused re
 ## Evidence Floor
 
 - Real HTTP502/client ambiguity → real file-backed orchestration → restarted/renamed cohort: old path duplicates or loses ambiguity; new sbatch count stays one, persisted evidence says unknown not absent. Include transport and invalid response at the owning seam, not padded mock-echo tests.
-- Confirm original execution uniquely complete with valid normal forcing witness → next normal scheduler reaches forecast, no forcing resubmit. A permanent fence alone does not pass.
+- Confirm original execution uniquely bound → consume existing full array task accounting/aggregation and forecast preparation → continue without forcing resubmit. Controller status alone never establishes terminal completion. Preserve the separate forecast-restart strict witness tests; do not claim a new package-integrity check on normal forcing continuation.
 - Concurrent overlapping reservations admit at most one; source/cycle/member-disjoint, explicit rejection and ordinary new submissions preserve behavior.
 - Old successful replacement remains usable despite sparse historical failed row. No migration/reconstruction/adoption of49174, no arbitrary saved receipt authority.
 - Existing forecast identity/reconcile and#2439 suites remain green. Execute backend tests node27 isolatedcheckout withTMPDIR=/home/nwm/tmp and df -h / /home /data/GHDC first. Exact test files selected from actual changed callers/seams in implementer report. Local: uv run --no-sync ruff check changedfiles; openspec validate preserve-forcing-submit-ambiguity --strict --no-interactive.

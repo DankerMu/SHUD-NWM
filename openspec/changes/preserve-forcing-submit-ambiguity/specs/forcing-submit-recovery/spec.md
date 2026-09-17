@@ -25,10 +25,10 @@ The scheduler SHALL atomically check and reserve forcing member authority by sou
 - **THEN** at most one SHALL be admitted to Gateway submission
 
 ### Requirement: Authoritative resolution permits normal stage continuation
-The existing lifecycle SHALL resolve the new forcing attempt using trustworthy unique task identity/status/accounting and normal output validation rather than leaving every ambiguity permanently fenced.
+The existing lifecycle SHALL resolve the new forcing attempt using trustworthy unique task identity/status/accounting and the existing complete array-accounting, aggregation and forecast-preparation path rather than leaving every ambiguity permanently fenced.
 
 #### Scenario: Original execution is confirmed complete
-- **WHEN** the accepted original attempt is uniquely bound and its forcing completion/witness checks pass
+- **WHEN** the accepted original attempt is uniquely bound and its existing normal forcing completion checks pass
 - **THEN** the next normal orchestration SHALL continue to forecast without submitting forcing again
 
 #### Scenario: Acceptance remains unproven
