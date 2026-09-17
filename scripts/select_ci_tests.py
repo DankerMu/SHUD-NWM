@@ -1784,6 +1784,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sub-second fixtures beside the gateway-reconcile lane they join.
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            "tests/test_forcing_submit_ambiguity.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",
@@ -2004,6 +2005,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scale_validation.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_reconcile_sacct_parse.py",
+            "tests/test_forcing_submit_ambiguity.py",
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
             "tests/test_orchestrator_demote_projection_faults.py",

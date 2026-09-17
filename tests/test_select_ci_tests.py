@@ -769,21 +769,17 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
 
 
 def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() -> None:
-    # #1561: the ordinary changed-suite branch now also selects the suite's
-    # direct non-gated module-scope importers, so this suite's whole-file
-    # selection grew by its two derived importers (test_e2e_m3.py,
-    # test_pipeline_logs_artifacts.py) — the meta-guard and the owner stay.
-    # Deriving the expected importers from the index would be
-    # self-referential, so the growth is pinned with the owner anchors and the
-    # redirect test guards the unchanged redirect class.
-    selected = select_tests(["tests/test_orchestration_chain.py"], repo_root=Path("."))
+    """A changed owner suite routes itself and every derived direct importer."""
+
+    selected = set(select_tests(["tests/test_orchestration_chain.py"], repo_root=Path(".")))
 
     assert {
         "tests/test_orchestration_chain.py",
         "tests/test_select_ci_tests.py",
-    } <= set(selected)
-    assert "tests/test_e2e_m3.py" in selected
-    assert "tests/test_pipeline_logs_artifacts.py" in selected
+        "tests/test_e2e_m3.py",
+        "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_pipeline_logs_artifacts.py",
+    } <= selected
 
 
 def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
@@ -842,6 +838,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
+        "tests/test_forcing_submit_ambiguity.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
         # #1581: the parity lock rides the broad orchestrator directory rule —
@@ -5912,9 +5909,6 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
 @pytest.mark.parametrize(
     ("changed_path", "expected_count"),
     [
-        # #1561: the changed suite plus its two derived direct non-gated
-        # module-scope importers plus the accumulated meta-guard.
-        ("tests/test_orchestration_chain.py", "4"),
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
         # owner selecting focused suites — still non-collapsed. #2075 added a
         # second reader (`tests/test_env_templates.py` asserts the pinned
