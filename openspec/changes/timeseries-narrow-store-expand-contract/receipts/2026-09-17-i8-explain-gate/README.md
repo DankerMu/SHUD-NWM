@@ -144,8 +144,8 @@ chunks that has never been analyzed.
 ```
 
 All three carry all three indexes, so it is not a missing index. `ANALYZE` was **not**
-run (production, read-only role), so the causal link is unverified here. Filed as
-**#2451**; the proof belongs on a throwaway database, not on the live primary.
+run on the primary (production, read-only role). Filed as **#2451**, and the causal link
+has since been **established on a throwaway database** — see §8.
 
 Two things #2451 established from the code that this receipt could not:
 
@@ -297,6 +297,53 @@ chunk — **24×**. #2425 argued on structural grounds that fixing compression w
 disk for read performance under the current query shape. On this statement, that trade is
 now measured rather than predicted.
 
+## 8. The causal proof (#2451), on a throwaway database
+
+`tests/test_river_timeseries_stats_index_choice_integration.py`, run on node-27 against a
+per-test throwaway database (`throwaway_database_url` creates and drops it; no live
+database is touched). **`1 passed in 18.53s`**; evidence in `stats-proof-2451.json`.
+
+3000 segments x 24 hourly steps x 2 runs = 144 000 rows on one 1-day narrow chunk with
+autovacuum disabled before the insert; the real `PsycopgForecastStore` drives the
+run-bound shape through a recording cursor; `EXPLAIN` twice, `ANALYZE
+hydro.river_timeseries`, `EXPLAIN` twice again. **Statistics are the only variable that
+changes between the two measurements.**
+
+| | before `ANALYZE` | after `ANALYZE` |
+|---|---|---|
+| index | `…_river_ts_run_discovery_key_idx` | `…_river_timeseries_narrow_pkey` |
+| `river_segment_key` | `Filter` | **`Index Cond`, second column** |
+| `Rows Removed / Actual` | 71 976 / 24 = **2 999** | 0 / 24 = **0** |
+| breaks D11 `filter_ratio_limit = 10` | **yes** | no |
+| node shared hits | 1 581 | **27** |
+| statement root shared hits | 1 734 | **88** |
+| execution time | 22.254 ms | **0.255 ms** |
+| `pg_statistic` rows / `reltuples` / `relpages` | 0 / −1 / 0 | 11 / 144000 / 1485 |
+
+`71 976 + 24 = 72 000 = 3000 x 24` — the same "reads every segment of the run for that
+chunk's slice" shape as production. The bound is read off
+`evaluate_explain_json_plan`'s own signature, so the test reddens if D11 moves it.
+
+**A negative result inside the positive one, recorded rather than buried.** The
+mechanism proposed when #2451 was filed — "the discovery index binds more columns, so its
+estimate is smaller and it wins" — is **not** what the run shows. Before `ANALYZE` the
+node reports `Plan Rows = 1` at `Total Cost = 2.53` (after: `Plan Rows = 24`,
+`Total Cost = 25.14`): the estimate **clamped to the minimum** rather than being merely
+低. What the primary-key path would have cost without statistics is not in this bundle,
+so whether the pre-`ANALYZE` choice was a near-tie broken by index size or OID order
+**remains undetermined**. Two layers, stated separately:
+
+- **Refreshing statistics deterministically fixes the plan** — controlled experiment, solid.
+- **Why the planner prefers the discovery index when statistics are absent** — unproven.
+  It must not be used as a justification for any fix.
+
+One observation for #2451's triage, not a recommendation: the chunk that mis-plans is
+always the one being actively written, whose statistics drift by construction — the
+run-bound shape flipped the never-analyzed `_hyper_9_175`, the `latest` shape flipped
+`_hyper_9_170`, analyzed but 10 802 448 modifications stale. A fix along "analyze new
+chunks once" is therefore weaker than the evidence requires; keeping the write frontier's
+statistics fresh is a stronger requirement than tuning one guard's parameters.
+
 ## Files
 
 | file | what it is |
@@ -312,6 +359,7 @@ now measured rather than predicted.
 | `explain-1987-latest.json` | master `fd3d4869a` bundle for the `latest` shape |
 | `run1987latest.out` | its console output |
 | `latestgate.py` | per-node extract used for the §7 tables |
+| `stats-proof-2451.json` | the throwaway-database causal proof of §8 |
 
 The three `.py` files here are the scripts that produced the bundles, with one
 caveat recorded honestly: after archiving they were lint-formatted to satisfy the
