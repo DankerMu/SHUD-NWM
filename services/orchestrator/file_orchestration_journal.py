@@ -2948,12 +2948,15 @@ class FileOrchestrationJournalRepository:
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
             if forcing_reclaim:
                 # A reclaimed forcing reservation is a distinct execution
-                # attempt. Mint its exact controller comment inside the lock;
-                # resuming the same attempt never reaches this branch.
+                # attempt. Mint its exact controller comment inside the lock
+                # and persist the current request's validated task map so the
+                # Gateway payload and durable recovery mapping agree.
                 row["slurm_comment"] = forcing_attempt_comment_for(
                     idempotency_key,
                     row["submission_attempt"],
                 )
+                if forcing_member_identity_is_complete(request_row):
+                    row["cohort_members"] = list(request_row["cohort_members"])
             if not versioned_master:
                 # INIT_STATE_IDENTITY_FIELD is deliberately absent from this
                 # backfill set (#1188): keeping it out is what makes the reclaim

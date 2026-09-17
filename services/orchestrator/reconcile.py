@@ -703,9 +703,6 @@ def _query_forcing_controller_identity(
     expected_account: str,
     expected_stage: str,
     expected_task_count: int,
-    attempt_anchor: datetime,
-    query_end: datetime,
-    current_attempt_comment: bool,
 ) -> "CommentAccountingResult":
     """Find uniquely controller-retained forcing identity; never prove absence."""
 
@@ -732,8 +729,6 @@ def _query_forcing_controller_identity(
             fields.get("ArrayTaskId"),
             task_count=expected_task_count,
         )
-        # A current forcing token is the durable incarnation proof. Pre-token
-        # rows retain the strict timestamp window rather than being upgraded.
         if (
             fields.get("_identity_unparseable") is not None
             or not SLURM_JOB_ID_RE.fullmatch(master_id)
@@ -745,25 +740,10 @@ def _query_forcing_controller_identity(
             or account != expected_account
             or not _controller_forcing_job_name_matches(job_name, expected_stage)
             or not task_identity_matches
-            or (
-                not current_attempt_comment
-                and (
-                    submitted_at is None
-                    or not _fallback_candidate_in_window(
-                        submitted_at,
-                        anchor=attempt_anchor,
-                        end=query_end,
-                    )
-                )
-            )
         ):
             identity_unproven = True
             continue
-        identity = (
-            (user, account, job_name)
-            if current_attempt_comment
-            else (user, account, job_name, submitted_at)
-        )
+        identity = (user, account, job_name)
         candidate = candidates.setdefault(
             master_id,
             {
@@ -918,9 +898,6 @@ def default_comment_sacct_querier(
                     expected_account=owner_scope[1],
                     expected_stage=str(forcing_stage or ""),
                     expected_task_count=forcing_task_count,
-                    attempt_anchor=controller_anchor,
-                    query_end=pages[0][1],
-                    current_attempt_comment=forcing_current_attempt_comment,
                 )
             # Explicitly comment-less (including (null)): exact-comment search
             # is provably useless, so refuse it — but a current accepted-submit
