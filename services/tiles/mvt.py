@@ -2127,15 +2127,26 @@ def national_discharge_cycles(
     colourless basins that look like "no flow" rather than "no data".
 
     Sets, not cardinalities, because the denominator and the coverage rows come
-    from two statements with their own READ COMMITTED snapshots. Activating a
-    network between them is enough to make equal counts lie: statement 1 sees
-    ``{B, C1, C2}``, ``A`` is activated with a run for cycle K, statement 2
-    returns ``{A, C1, C2}`` for K, and ``3 == 3`` would list a cycle the active
-    network ``B`` cannot render. Without a race the two forms agree (same
-    predicates, one snapshot, so covered is a subset of active). A network
-    activated with ZERO display-ready rows never appears in statement 2 at all
-    and no comparison of statement-2 output can catch it -- that branch needs a
-    single-statement merge or a higher isolation level and is deferred.
+    from two statements with their own READ COMMITTED snapshots. A membership
+    change landing between them is enough to make equal counts lie: the coverage
+    read returns ``{B, C1, C2}``, then ``C1`` is deactivated and ``A`` activated,
+    and the active read returns ``{A, B, C2}`` -- ``3 == 3`` would list a cycle
+    the network ``A`` cannot render. Without a race the two forms agree (same
+    predicates, one snapshot, so covered is a subset of active).
+
+    Which of the two statements runs first is equally load-bearing, and
+    ``_national_discharge_coverage_rows`` owns that choice: it reads the coverage
+    rows first and the active set second (#2087), so a network activated between
+    the reads is in the active set, cannot be in any cycle's covered set, and
+    closes EVERY cycle -- including the cycles the set comparison alone cannot
+    see, which are the cycles the newcomer has NO rows for: all of them when it
+    brings zero display-ready rows, and the uncovered ones when it holds rows for
+    some cycles but not others. Its COVERED cycles the set comparison (#2073)
+    already caught, because there the newcomer's rows made the covered set a
+    strict SUPERSET of the stale active set. Read that helper's docstring for
+    what the order costs (a covered run that stops being display-ready between
+    the reads is the residual fail-open class) before reasoning about either
+    endpoint's behaviour under a race.
 
     ``valid_time_start`` / ``valid_time_end`` are the FIRST and LAST entries of
     that cycle's clamped 3-hour list, produced by the same function
@@ -2216,7 +2227,12 @@ class NationalCycleCoverage:
     @property
     def complete(self) -> bool:
         # SETS, not cardinalities, the `national_discharge_cycles` rule: equal
-        # counts with different members is the fail-open case (matrix 40b).
+        # counts with different members is the fail-open case (matrix 40b). The
+        # set rule is only half the invariant -- it catches a mid-flight
+        # activation only for the cycles the newcomer already has rows for; the
+        # other half is the read ORDER inside
+        # `_national_discharge_coverage_rows` (matrix 40d, #2087), which is what
+        # closes the zero-coverage and partial-coverage newcomers here too.
         return self.covered_networks == self.active_networks
 
 
@@ -2261,9 +2277,81 @@ def _national_discharge_coverage_rows(
     is precisely the case that must fail the intersection closed; deriving the set
     from the rows would make it invisible and turn the intersection into a union
     over whoever happens to have data. Callers compare it to the covered networks
-    as a SET: the two statements take separate READ COMMITTED snapshots, and a
-    network activated between them can keep the cardinalities equal while the
-    membership differs (see ``national_discharge_cycles``).
+    as a SET, never as cardinalities: equal counts with different membership is a
+    fail-open state (see ``national_discharge_cycles``).
+
+    STATEMENT ORDER IS LOAD-BEARING (#2087). The coverage rows are read FIRST
+    (call it T1), the active set SECOND (T2). Each statement takes its own READ
+    COMMITTED snapshot, so a membership change landing between them is visible to
+    exactly one of the two sets, and this order chooses which drift direction the
+    comparison can catch. It is a TRADE, not a one-sided improvement:
+
+    * CLOSED by this order -- numerator GROWTH. The coverage statement carries
+      ``mi.active_flag`` itself, so the covered networks are a subset of the
+      networks active in T1's snapshot. A network activated between T1 and T2 is
+      therefore in the T2 active set and cannot be in the covered set, the
+      comparison is unequal, and EVERY cycle judged by this pair of reads fails
+      closed -- whether the newcomer brought no display-ready row at all or rows
+      for only some cycles. Those are #2087's two branches; with the active set
+      read first, the cycles the newcomer has NO rows for were invisible to any
+      comparison of the coverage rows, because a network with no rows for a cycle
+      simply is not in that cycle's output. The cycles it DID bring rows for were
+      already caught by the set comparison (#2073): the coverage statement
+      applies ``mi.active_flag`` in its own snapshot -- the LATER of the two
+      under that order -- so those rows landed in the covered set while the stale
+      active set still lacked the newcomer, making covered a strict SUPERSET.
+    * NEWLY OPENED by this order -- numerator SHRINK. A row that is in the T1
+      covered set and stops being display-ready before T2 leaves the comparison
+      equal, so the cycle is listed although its run is gone. The other order
+      caught that one. This class has LIVE WRITERS and must not be described as
+      unreachable. Each one below was read in the tree, not inferred:
+
+      - ``mark_run_failed`` (``workers/output_parser/parser.py``) rewrites
+        ``hydro.hydro_run.status`` to ``failed`` under a guard,
+        ``FAILABLE_RUN_STATUSES``, that INCLUDES ``succeeded`` and ``parsed``
+        (only ``published`` is outside it). ``mark_run_parsed``'s own gate admits
+        an already-``parsed`` run, so a re-parse that then fails moves a run
+        holding a POPULATED coverage row straight out of the display-ready set.
+        This is the routine, single-actor writer of the class.
+      - ``scripts/node27_refresh_coverage.py --force`` drives
+        ``rdc.segment_count`` to zero, and the ``rdc.segment_count > 0`` join
+        below then drops the row. #1446 made the upsert refuse to zero a
+        populated row, but that refusal is spelled ``WHERE %(force)s OR ...`` in
+        ``packages/common/display_coverage.py``, which ``force=True`` bypasses
+        outright -- and the script documents ``--run-id <run> --force`` as the
+        INTENDED manual remediation for a legacy run whose fresh scan computes
+        zero, i.e. exactly a run the national tile may be painting right now. The
+        cron loop never passes it: operator-gated, not automatic, but live.
+      - ``mark_failed`` (``workers/shud_runtime/runtime.py``) issues an UPDATE to
+        ``failed`` with no status guard at all, but its only production caller is
+        ``SHUDRuntime.execute``'s failure path, which is reached only after
+        ``create_run`` accepted the ``run_id`` -- and ``create_run`` refuses a
+        display-ready one (``HYDRO_RUN_NOT_RETRIABLE``). Reaching it therefore
+        needs a duplicate concurrent ``execute`` of the same run: rare, not
+        impossible.
+
+      Neither table has a production ``DELETE`` (the only ones in the tree are
+      test teardown and a one-off cutover-rehearsal script removing its own
+      seeded run). The residual is accepted because
+      no TWO-statement design can close both classes -- a numerator shrink is
+      invisible to any re-read of the denominator -- so the choice is which class
+      to close, not whether to close both. Closing both means merging these two
+      statements into one, which changes the returned row shape (zero-coverage
+      networks become all-NULL rows) and rewrites one of the four run-selection
+      sites the module header requires to stay identical.
+    * Deactivation is not symmetric between the orders, and the difference is a
+      race-path behaviour delta rather than a regression: a network deactivated
+      between the reads that HAS coverage rows still fails closed (it is in the T1
+      covered set and not in the T2 active set), while one with NO coverage rows
+      now lets the cycle through -- the correct answer, since a deactivated
+      network does not need rendering.
+
+    Availability cost of failing closed on activation: one ordinary activation can
+    empty the whole intersection, and the display catalog may keep serving that
+    empty answer for up to one fresh TTL or, on the stale-while-revalidate path,
+    up to ``DISPLAY_CATALOG_STALE_MAX_SECONDS`` (``apps/api/display_cache.py``).
+    That is this module's declared fail-closed semantics -- no data beats wrong
+    data -- and the exposure is bounded by the cache, not by the activation.
 
     ``source`` / ``cycle`` / ``since`` are NULL-guarded in the
     ``CAST(:x AS type) IS NULL OR`` form the three tile-side run-selection sites
@@ -2278,22 +2366,6 @@ def _national_discharge_coverage_rows(
     intersection -- bounding it there would silently drop the network and change a
     result the catalog has always published.
     """
-    active_networks = (
-        session.execute(
-            text(
-                """
-                SELECT DISTINCT mi.river_network_version_id
-                FROM core.model_instance mi
-                WHERE mi.active_flag
-                  AND mi.river_network_version_id IS NOT NULL
-                ORDER BY mi.river_network_version_id
-                """
-            )
-        )
-        .mappings()
-        .all()
-    )
-    active_network_ids = frozenset(row["river_network_version_id"] for row in active_networks)
     rows = (
         session.execute(
             text(
@@ -2338,6 +2410,22 @@ def _national_discharge_coverage_rows(
         .mappings()
         .all()
     )
+    active_networks = (
+        session.execute(
+            text(
+                """
+                SELECT DISTINCT mi.river_network_version_id
+                FROM core.model_instance mi
+                WHERE mi.active_flag
+                  AND mi.river_network_version_id IS NOT NULL
+                ORDER BY mi.river_network_version_id
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    active_network_ids = frozenset(row["river_network_version_id"] for row in active_networks)
     return list(rows), active_network_ids
 
 
