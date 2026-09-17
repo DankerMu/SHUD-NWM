@@ -26,7 +26,7 @@ from services.orchestrator.reconcile import (
     CommentAccountingResult,
     reconcile_reserved_unbound_jobs,
 )
-from services.orchestrator.reservation import reserve_candidate, slurm_comment_for
+from services.orchestrator.reservation import reserve_candidate
 from services.orchestrator.scheduler_candidate_execution_evidence import (
     _pipeline_result_slurm_submit_called,
 )
@@ -837,50 +837,77 @@ def test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim(
     assert bound["status"] == "submitted"
 
 
-def test_legacy_forcing_comment_is_not_reconstructed_as_an_attempt_token(
+def test_permitted_reclaim_persists_current_attempt_task_mapping_before_post(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    reservation = _reserve_forcing(
-        repository,
-        suffix="legacy_comment",
-        model_ids=("model_0",),
-        expected_user="scheduler",
-        expected_account="account",
-        submission_attempt_started_at=_CYCLE_TIME + timedelta(microseconds=500_000),
-        legacy_comment=True,
-    )
-    transition = repository.transition_pipeline_job_submit_evidence(
-        reservation.job_id,
-        AcceptedSubmitTransition.timeout(),
-        expected_submission_attempt=reservation.submission_attempt,
-        expected_statuses=("reserved",),
-        require_unbound=True,
-        error_code="SLURM_PARSE_ERROR",
-        error_message="Gateway response was empty after submission.",
-    )
-    assert transition.committed
-    held = repository.query_reserved_unbound_jobs()[0]
-    legacy_comment = slurm_comment_for(reservation.idempotency_key)
-    assert held.slurm_comment == legacy_comment
-    query, _commands = _commentless_forcing_query(
-        monkeypatch,
-        controller_stdout=_controller_forcing_rows(
-            master_id="2001",
-            task_count=1,
-            comment=legacy_comment,
-            submitted_at=held.submission_attempt_started_at.replace(microsecond=0),
+    requests: list[dict[str, Any]] = []
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path
+            requests.append(dict(json or {}))
+            return httpx.Response(
+                502, json={"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}}
+            )
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_visibility_stdout",
+        lambda command: (
+            "AccountingStoreFlags = (null)\n"
+            if list(command)[-2:] == ["show", "config"]
+            else ""
         ),
-        query_end=held.submission_attempt_started_at + timedelta(minutes=1),
     )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    run_id = f"cycle_gfs_{_CYCLE}_forcing_cohort_order"
+    orchestrator = _orchestrator(
+        tmp_path / "orch",
+        repository,
+        HttpSlurmGatewayClient("http://gateway.test"),
+        terminal_stage="forecast",
+    )
+    basins = _forcing_basins(2, orchestration_run_id=run_id)
+    first, _aggregation = orchestrator._submit_and_wait_cycle_stage(
+        M3_STAGES[1],
+        _forcing_context(orchestrator, basins, run_id=run_id),
+    )
+    held = repository.query_reserved_unbound_jobs()[0]
+    anchor = held.submission_attempt_started_at
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=lambda _key, **_kwargs: CommentAccountingResult(
+            (),
+            scope="global",
+            coverage_start=anchor - timedelta(seconds=1),
+            coverage_end=anchor + timedelta(minutes=3),
+            coverage_complete=True,
+        ),
+        now=lambda: anchor + timedelta(minutes=3),
+    )[0]
+    assert outcome.action == "absence_retry_permitted"
 
-    outcome = reconcile_reserved_unbound_jobs(repository, comment_query=query)[0]
-
-    assert outcome.action == "query_unavailable"
-    persisted = repository.get_pipeline_job(reservation.job_id)
-    assert persisted is not None
-    assert persisted["slurm_comment"] == legacy_comment
+    second, _aggregation = orchestrator._submit_and_wait_cycle_stage(
+        M3_STAGES[1],
+        _forcing_context(orchestrator, list(reversed(basins)), run_id=run_id),
+    )
+    current = repository.get_reconcile_pipeline_job(second.pipeline_job_id)
+    assert current is not None
+    sent_task_models = [entry["model_id"] for entry in requests[-1]["tasks"]]
+    durable_task_models = [entry["model_id"] for entry in current.cohort_members]
+    assert first.pipeline_job_id == second.pipeline_job_id
+    assert current.submission_attempt == 2
+    assert len(requests) == 2
+    assert sent_task_models == ["model_1", "model_0"]
+    assert durable_task_models == sent_task_models
 
 
 def _forcing_members(model_ids: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -906,7 +933,6 @@ def _reserve_forcing(
     expected_user: str | None = None,
     expected_account: str | None = None,
     submission_attempt_started_at: Any = _CYCLE_TIME,
-    legacy_comment: bool = False,
 ):
     run_id = f"cycle_gfs_{_CYCLE}_forcing_{suffix}"
     idempotency_key = f"{run_id}:forcing"
@@ -921,11 +947,7 @@ def _reserve_forcing(
         stage="forcing",
         candidate_id=run_id,
         reservation_evidence={
-            "slurm_comment": (
-                slurm_comment_for(idempotency_key)
-                if legacy_comment
-                else _expected_forcing_attempt_comment(idempotency_key, 1)
-            ),
+            "slurm_comment": _expected_forcing_attempt_comment(idempotency_key, 1),
             "cohort_members": _forcing_members(model_ids),
             "restart_stage": "forcing",
             "submission_attempt": 1,
