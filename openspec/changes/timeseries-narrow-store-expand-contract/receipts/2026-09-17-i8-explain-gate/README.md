@@ -328,8 +328,8 @@ chunk's slice" shape as production. The bound is read off
 mechanism proposed when #2451 was filed — "the discovery index binds more columns, so its
 estimate is smaller and it wins" — is **not** what the run shows. Before `ANALYZE` the
 node reports `Plan Rows = 1` at `Total Cost = 2.53` (after: `Plan Rows = 24`,
-`Total Cost = 25.14`): the estimate **clamped to the minimum** rather than being merely
-低. What the primary-key path would have cost without statistics is not in this bundle,
+`Total Cost = 25.14`): the estimate **clamped to the minimum** rather than merely being
+low. What the primary-key path would have cost without statistics is not in this bundle,
 so whether the pre-`ANALYZE` choice was a near-tie broken by index size or OID order
 **remains undetermined**. Two layers, stated separately:
 
