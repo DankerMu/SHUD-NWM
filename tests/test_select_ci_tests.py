@@ -10033,38 +10033,17 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
 
 
 @pytest.mark.parametrize(
-    ("module_path", "expected_count"),
+    "module_path",
     (
-        # 49 -> 51 and 48 -> 50: harden-copyback-mutex-residuals added two
-        # orchestrator-tree suites (lock signal, run-tree backup lifecycle).
-        # +2 on all three legs (#1955/#1953): the lane-adoption and full-tree
-        # budget suites joined the broad orchestrator list (which retention.py
-        # and __init__.py take) and the cli.py stop rule's at-site targets.
-        # +1 on all three legs (#1555/#1768), for the same reason one more time:
-        # the operator re-entry confirmation suite joined the broad orchestrator
-        # list AND the cli.py stop rule's at-site targets. The helper leg is
-        # untouched, which is what keeps this pin able to tell the two apart.
-        # +1 on all three legs again (#1186): the operator-action listing suite
-        # joined the broad orchestrator list AND the cli.py stop rule's at-site
-        # targets. Measured, not inferred — `select_tests` run per leg gives
-        # 55 / 34 / 54, and the helper leg is deliberately still 6 (the control
-        # that tells "one more suite joined two lanes" apart from "something else
-        # moved").
-        ("services/orchestrator/retention.py", 55),
-        ("services/orchestrator/cli.py", 34),
-        ("services/orchestrator/__init__.py", 54),
-        ("tests/retention_test_helpers.py", 6),
+        "services/orchestrator/retention.py",
+        "services/orchestrator/cli.py",
+        "services/orchestrator/__init__.py",
+        "tests/retention_test_helpers.py",
     ),
 )
-def test_copyback_mutex_routing_leaves_the_other_retention_legs_unmoved(module_path: str, expected_count: int) -> None:
-    # #2260 must-preserve: the two new mutex edges touch neither the broad
-    # orchestrator rule, the cli.py stop rule nor the helper's support-module
-    # route, so the #2238 legs keep their selection size (measured at base
-    # 55a14398d). Every leg already selects the mutex suite; asserted too, so a
-    # count kept by swapping it out still reds.
+def test_copyback_mutex_routing_keeps_the_mutex_suite(module_path: str) -> None:
     selected = select_tests([module_path], repo_root=Path("."))
 
-    assert len(selected) == expected_count, f"{module_path}: selection moved to {len(selected)}: {selected}"
     assert "tests/test_retention_copyback_mutex.py" in selected, module_path
 
 

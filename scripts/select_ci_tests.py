@@ -634,6 +634,7 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_e2e_ifs.py",
     "tests/test_e2e_m3.py",
     "tests/test_file_orchestration_journal.py",
+    "tests/test_forcing_submit_ambiguity.py",
     # #1581: chain.py aliases DURABLE_HYDRO_SUCCESS_STATUSES as
     # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
     # shared object; a chain-only edit that rebinds it must run this suite.
@@ -722,6 +723,7 @@ RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
 
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    "tests/test_forcing_submit_ambiguity.py",
     # #1581: the journal's completed-pipeline probes decide on its own
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
     # pins as the one shared object. Stop-rule owned module, so the addition
