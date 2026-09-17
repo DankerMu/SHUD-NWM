@@ -49,6 +49,14 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     ("retry_limit", ("retry_policy", "retry_limit")),
     ("retry_occurrences", ("retry_policy", "occurrences")),
     ("manual_retry_required", ("retry_policy", "manual_retry_required")),
+    # #1186 round 2: the operator re-entry token, the same surface's only
+    # executable output for the breaker arm.  ``confirm-operator-reentry``
+    # refuses that arm without ``--recorded-init-state-id``, its refusal payload
+    # does not echo the live token, and no other operator surface prints it -- so
+    # dropping it here leaves the listed action unexecutable exactly on the passes
+    # that overflow the byte budget.  One bounded scalar out of the same identity
+    # block as ``quarantined_skip_reason`` above.
+    ("recorded_init_state_id", ("journal_predecessor_identity", "recorded_init_state_id")),
     # #1555: the sink refusal's only triage key -- it is what tells an operator
     # WHICH pre-forecast input to repair.  Exactly one pull of the five-field
     # ``operator_reentry_sink_refusal`` block: retaining the block whole is

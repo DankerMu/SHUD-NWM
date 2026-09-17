@@ -4765,3 +4765,34 @@ receipt 初稿把「cron 起的 prewarm 看不到 `NHMS_DISPLAY_CACHE_WARM_TOKEN
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 keep、座位上限不变。
+
+## 2026-09-16 复核四（PR #2440 合并后）—— 方向首次反转
+
+追加 #2440 行后 682 行、669 merged、13 terminal。`loop_log_audit.py` 仍报同一项
+DECIDABLE lens-rotation，但**数字第一次改变了方向**：225 个多轮样本，
+**core=326 / rotated=270** / phase=61 / skipped=15。
+
+上一节是 core=313 / rotated=270。#2440 一个 PR 贡献了 **core +13、rotated +0**。
+自本 ADR 建立以来，rotated 份额从 98.8% 一路降到 **45.3%**，而 core 首次超过 rotated。
+
+**这不是轮换失效的证据，是样本构成变了。** #2440 的三轮座位全部落在 core 三席
+（correctness / invariant-state / test-evidence+spec-compliance），round 1 才额外坐了
+integration+security-perf。当一个 PR 的失败类是**同一条不变量反复复发**时，
+可用的座位本来就收敛到 core——轮换没有被取消，是没有可轮换的面。
+所以本次比值的移动衡量的是「本 PR 是 depth 型」，不是「轮换不再产出」。
+
+真正值得记的一条来自 #2440 的失败结构，它对座位定价有直接含义：
+**该 PR 八次复发里有两次是编排者执行纠正动作时犯的，且两次都由席位/实现者而非机器发现。**
+- round 3 的 C1b：spec 条款与编排者自己的口头 brief 互斥，`openspec validate --strict`
+  是结构校验，看不见「规格与其作者想要的行为相反」。
+- DEV-10：编排者把新段插进旧段中间，导致一句豁免挂错边界；**实现者拒绝把这条假的
+  运维承诺写进 help/runbook 并停下来报告**，这条从未上线。
+
+与前两节 `contract-doc-accuracy` 的两例合看，本队列里已有**四个连续实例**指向同一个缺口：
+**不是座位组合不够，而是「编排者自己产出的规格/receipt 文本没有独立复核者」**。
+座位轮换管的是代码面，管不到 fixture 面；而本 PR 里 fixture 面的缺陷买走了一整轮。
+下一次 profile 维护应把这条落成规则：**fixture 冻结后、实现启动前，规格增量需要一次
+独立只读复核**——成本远低于它本轮消耗的那一轮交叉审查。
+
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 **keep**、座位上限不变。

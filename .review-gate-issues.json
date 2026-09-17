@@ -3564,12 +3564,17 @@
       "ceilingPrs": [
         2398
       ],
-      "gateEntries": 2,
+      "gateEntries": 4,
       "closed": [
         {
           "pr": 2398,
           "outcome": "superseded-by-split",
           "rounds": 5
+        },
+        {
+          "pr": 2440,
+          "outcome": "merged",
+          "rounds": 3
         }
       ]
     },

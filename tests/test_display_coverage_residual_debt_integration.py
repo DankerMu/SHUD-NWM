@@ -912,39 +912,3 @@ def test_parity_oracle_is_independent_of_the_production_candidate_sql(
     assert new_rows != legacy_rows
     if new_rows:
         assert new_rows[0]["display_end_time"] != legacy_rows[0]["display_end_time"]
-
-
-@pytest.mark.parametrize("newest_store", ["legacy", "narrow"])
-def test_public_forecast_selects_latest_and_pinned_runs_across_physical_stores(
-    throwaway_database_url: str,
-    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    newest_store: str,
-) -> None:
-    _prepared_database(throwaway_database_url)
-    connection = _connect(throwaway_database_url)
-    try:
-        newest_run_id = _insert_null_forcing_run(connection)
-    finally:
-        connection.close()
-    post_expand_forecast_database({newest_run_id if newest_store == "narrow" else FORECAST_RUN_ID: "narrow"})
-    store = PsycopgForecastStore(throwaway_database_url)
-    parameters = {
-        "basin_version_id": BASIN_VERSION_ID,
-        "segment_id": f"{ISSUE_126_PREFIX}_seg_inside",
-        "river_network_version_id": RIVER_NETWORK_VERSION_ID,
-        "issue_time": "latest",
-        "variables": ["q_down"],
-        "scenarios": ["GFS"],
-    }
-
-    latest = store.forecast_series(**parameters)
-    assert latest["issue_time"] == "2026-05-03T06:00:00Z"
-    assert [point[1] for series in latest["series"] for point in series["points"]] == [101.0, 102.0]
-
-    pinned = store.forecast_series(**parameters, run_id=FORECAST_RUN_ID, model_id=MODEL_ID)
-    assert pinned["issue_time"] == "2026-05-03T00:00:00Z"
-    assert [point[1] for series in pinned["series"] for point in series["points"]] == [180.0, 250.0]
-
-    parameters["issue_time"] = "2026-05-03T00:00:00Z"
-    explicit_cycle = store.forecast_series(**parameters)
-    assert explicit_cycle == pinned

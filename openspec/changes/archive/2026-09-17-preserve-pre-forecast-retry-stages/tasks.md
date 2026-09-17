@@ -14,7 +14,7 @@
 ## 3. Review and verification
 
 - [x] 3.1 Run local Ruff and OpenSpec, node-27 targeted red/green regression and affected scheduler/consumer suites; record source SHA/import path and commands.
-- [x] 3.2 Create PR and finish expanded cross-review/fix gate; preserve immutable fixture and record reviewed deployment patch identity. PR #2445 source checkpoint clean at `c9589e0f`; live recovery and final evidence review still gate merge.
+- [x] 3.2 Create PR and finish expanded cross-review/fix gate; preserve immutable fixture and record reviewed deployment patch identity. PR #2445 source checkpoint clean at `c9589e0f`; fresh final correctness/invariant-state and evidence/spec reviews clean at `2b9c9f01`, mechanical round 2 clean.
 
 ## 4. Authorized production recovery
 
@@ -23,11 +23,11 @@
 - [x] 4.3 Observe GFS prior completion and IFS global-prior release/progression; record any independent failures honestly. IFS convert 49156 succeeded; forcing 49174 completed 38/38 but its gateway response failed and journal became permanently_failed. Independent recovery gap tracked in #2447; no blind retry or journal mutation.
 - [x] 4.4 On node-27 verify normal ingest/publication of later GFS and IFS cycles and API source/cycle/model/run identity plus readable result data; restore approved timer state and record live receipt. Both sources published `2026-09-15T12Z`, exact-run MVT decoded at 23:06Z; timer active.
 
-GFS first recovery tick PID3339699 published 38/38 with zero failures. IFS initially encountered #2447; the next normal pass retried under a forcing-cohort identity (49309), then completed forecast49347/state-save49385. This was automatic duplicate forcing execution, not operator adoption; #2447 remains authorized follow-on work to prevent recurrence. At 23:06Z both sources selected `2026-09-15T12Z` with readable exact-run discharge tiles (GFS first feature qc_warning, IFS ok; no global QC-clean claim). See `evidence/node27-dual-source-decoded-tiles.txt` and `evidence/node22-recovered-stage-identities.txt`. Final evidence review and merge remain pending.
+GFS first recovery tick PID3339699 published 38/38 with zero failures. IFS initially encountered #2447; the next normal pass retried under a forcing-cohort identity (49309), then completed forecast49347/state-save49385. This was automatic duplicate forcing execution, not operator adoption; #2447 remains authorized follow-on work, narrowed by the user to minimal ambiguity/duplicate prevention without generic historical adoption. At 23:06Z both sources selected `2026-09-15T12Z` with readable exact-run discharge tiles (GFS first feature qc_warning, IFS ok; no global QC-clean claim). See `evidence/node27-dual-source-decoded-tiles.txt` and `evidence/node22-recovered-stage-identities.txt`. Final reviews and CI passed; merged as `acabb229f`.
 
 ## 5. Delivery
 
-- [ ] 5.1 Update narrow runbook guidance and recovery receipt, complete CI/merge/issue evidence, and archive the completed change only when code and requested recovery criteria are satisfied.
+- [x] 5.1 Update narrow runbook guidance and recovery receipt, complete CI/merge/issue evidence, and archive the completed change only when code and requested recovery criteria are satisfied. CI `35165304347` and Governance `35165304338` passed at frozen `2b9c9f01`; PR #2445 merged and #2439 closed. Archive is the merge follow-up.
 
 ## Evidence Floor
 

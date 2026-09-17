@@ -13,7 +13,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import stat
 import sys
 import threading
@@ -39,9 +38,18 @@ from packages.common.evidence_io import (
     reject_secret_material,
     validate_json_complexity,
 )
-from packages.common.forecast_store import (
-    ForecastStoreError,
-    PsycopgForecastStore,
+
+# The curve statement's derivation from its public owner is shared with the
+# OFFLINE verifier (`node27_timeseries_compression_live_evidence.py`), which must
+# re-derive the identical text from a recorded bundle; it lives in
+# `packages/common` so the verifier does not import this capture CLI to get it.
+# `CurveCaptureError` keeps its historical name here: it is the same class
+# object, so every existing `except`/`pytest.raises` is unchanged.
+from packages.common.forecast_curve_capture import (
+    CurveCaptureError as BenchmarkCaptureError,
+)
+from packages.common.forecast_curve_capture import (
+    curve_query_and_binding,
 )
 from packages.common.node27_container_contract import (
     CLIENT_BACKEND_TYPE,
@@ -102,10 +110,6 @@ MAX_PLAN_BYTES = 8 * 1024**2
 CONNECT_TIMEOUT_SECONDS = 10
 
 
-class BenchmarkCaptureError(RuntimeError):
-    """A fail-closed capture or publication error."""
-
-
 class _Deadline:
     """One absolute monotonic wall covering connection through result capture."""
 
@@ -144,36 +148,6 @@ def _bounded_connection_cleanup(deadline: _Deadline, *connections: Any) -> None:
         raise BenchmarkCaptureError("benchmark wall deadline exceeded during connection cleanup")
     if errors:
         raise BenchmarkCaptureError("benchmark connection cleanup failed") from errors[0]
-
-
-class _RecordingCursor:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, Mapping[str, Any]]] = []
-
-    def execute(self, statement: str, parameters: Mapping[str, Any]) -> None:
-        if not isinstance(parameters, Mapping):
-            raise BenchmarkCaptureError("production curve SQL requires named bindings")
-        self.calls.append((statement, dict(parameters)))
-
-    def fetchall(self) -> list[dict[str, Any]]:
-        return []
-
-
-class _CaptureForecastStore(PsycopgForecastStore):
-    """Recording adapter that exercises the public forecast-series owner."""
-
-    def __init__(self, cursor: _RecordingCursor) -> None:
-        super().__init__("recording-only")
-        object.__setattr__(self, "_capture_cursor", cursor)
-
-    @contextmanager
-    def _transaction(self):  # type: ignore[no-untyped-def]
-        yield self._capture_cursor
-
-    def _validate_series_target(self, *args: Any, **kwargs: Any) -> None:
-        # Target existence is a separate production query. The benchmark is
-        # recording the public curve-owner's primary timeseries statement.
-        return None
 
 
 def _utc(value: str) -> datetime:
@@ -225,63 +199,6 @@ def _file_ref(path: Path) -> dict[str, Any]:
     except BoundedEvidenceError as error:
         raise BenchmarkCaptureError(str(error)) from error
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
-
-
-def _curve_query_and_binding(
-    *,
-    basin_version_id: str,
-    river_segment_id: str,
-    river_network_version_id: str,
-    issue_time: datetime,
-    end_time: datetime,
-    scenario: str,
-) -> tuple[str, list[str], tuple[Any, ...]]:
-    if end_time != issue_time + timedelta(days=7):
-        raise BenchmarkCaptureError("public curve owner supports the frozen seven-day window only")
-    cursor = _RecordingCursor()
-    try:
-        _CaptureForecastStore(cursor).forecast_series(
-            basin_version_id=basin_version_id,
-            segment_id=river_segment_id,
-            river_network_version_id=river_network_version_id,
-            issue_time=issue_time.isoformat(),
-            variables=["q_down"],
-            scenarios=[scenario],
-            include_analysis=False,
-            run_types=["forecast"],
-        )
-    except ForecastStoreError as error:
-        # The recording adapter intentionally returns no result rows. The
-        # public owner raises after issuing its production query; only that
-        # expected no-published-run outcome is admissible here.
-        if error.code != "RUN_NOT_PUBLISHED":
-            raise
-    primary = [
-        call
-        for call in cursor.calls
-        if "FROM hydro.river_timeseries rt" in call[0] and "h.run_type = 'forecast'" in call[0]
-    ]
-    if len(primary) != 1:
-        raise BenchmarkCaptureError("production curve path did not yield exactly one primary SQL call")
-    query_text, parameters = primary[0]
-    placeholder_names = set(re.findall(r"(?<!%)%\(([^)]+)\)s", query_text))
-    if (
-        re.search(r"(?<!%)%s", query_text)
-        or placeholder_names != {
-            "basin_version_id",
-            "end_time",
-            "issue_time",
-            "river_network_version_id",
-            "river_segment_id",
-            "scenario_ids",
-            "scenario_tokens",
-        }
-        or any(not isinstance(name, str) or not name for name in parameters)
-        or placeholder_names != set(parameters)
-    ):
-        raise BenchmarkCaptureError("production curve SQL named binding coverage changed")
-    names = sorted(parameters)
-    return query_text, names, tuple(parameters[name] for name in names)
 
 
 def _named_to_pyformat(statement: str) -> str:
@@ -630,6 +547,43 @@ def _capture_with_connections(
     )
 
 
+def _live_resolve_cursor(
+    *,
+    connect: Callable[[str], Any],
+    database_url: str,
+    deadline: _Deadline,
+) -> Callable[[], Any]:
+    """A short-lived read-only cursor for the curve's run-identity resolve.
+
+    Its own connection, acquired and released inside the same wall as the phase:
+    the render site has none, and the measured connections must not carry an
+    extra statement into their plan/warmup accounting.
+
+    The seeded/empty siblings moved to ``packages.common.forecast_curve_capture``
+    because the offline verifier needs them; this one stays because every line of
+    it is capture-local — ``_Deadline``, ``_default_connect`` and the statement
+    bounds have no meaning without a live phase to bound.
+    """
+
+    @contextmanager
+    def acquire():  # type: ignore[no-untyped-def]
+        deadline.remaining("curve run-identity resolve connection")
+        remaining = max(1, math.ceil(deadline.remaining("curve run-identity resolve connect bound")))
+        if connect is _default_connect:
+            connection = connect(database_url, connect_timeout=min(CONNECT_TIMEOUT_SECONDS, remaining))
+        else:
+            connection = connect(database_url)
+        try:
+            connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
+            cursor = connection.cursor()
+            _set_statement_bounds(cursor, deadline=deadline)
+            yield cursor
+        finally:
+            _bounded_connection_cleanup(deadline, connection)
+
+    return acquire
+
+
 def capture_benchmark_phase(
     *,
     database_url: str,
@@ -654,13 +608,14 @@ def capture_benchmark_phase(
     deadline.remaining("capture input validation")
     if phase not in {"before", "after"}:
         raise BenchmarkCaptureError("phase must be before or after")
-    curve_query, parameter_names, curve_parameters = _curve_query_and_binding(
+    curve_query, parameter_names, curve_parameters = curve_query_and_binding(
         basin_version_id=curve_basin_version_id,
         river_segment_id=curve_river_segment_id,
         river_network_version_id=curve_river_network_version_id,
         issue_time=curve_issue_time,
         end_time=curve_end_time,
         scenario=curve_scenario,
+        resolve_cursor=_live_resolve_cursor(connect=connect, database_url=database_url, deadline=deadline),
     )
     mvt_query = postgis_tile_sql("hydro")
     mvt_binding = _postgis_tile_params(
