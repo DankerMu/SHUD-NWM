@@ -1,18 +1,20 @@
 ## 1. Fixture and red proof
 
-- [ ] 1.1 Re-review this reduced expanded fixture after user-approved minimal scope; pass strict OpenSpec validation.
-- [ ] 1.2 Produce deterministic old-source red proof through real HTTP client classification, file journal and subsequent renamed-cohort scheduler path. No production submit reproduction.
+- [x] 1.1 Re-review this reduced expanded fixture after user-approved minimal scope; pass strict OpenSpec validation. Native revise-iteration1 pass at f8e4791a.
+- [x] 1.2 Produce deterministic old-source red proof through real HTTP client classification, file journal and subsequent renamed-cohort scheduler path. No production submit reproduction. Node27 c7d5a90a fails submission_failed vs submit_result_ambiguous; source9cd7ba9b focused9 pass.
 
 ## 2. Minimal behavior
 
-- [ ] 2.1 Preserve sufficient new forcing submit identity before Gateway and retain ambiguity/origin/provenance through normal persisted and scheduler result surfaces; explicit rejection unchanged.
-- [ ] 2.2 Prevent overlapping unresolved forcing submission across cohort keys and restart with existing atomic reservation mechanisms; unrelated work remains eligible.
+- [x] 2.1 Preserve sufficient new forcing submit identity before Gateway and retain ambiguity/origin/provenance through normal persisted and scheduler result surfaces; explicit rejection unchanged. Focused9 and affected3438 pass.
+- [x] 2.2 Prevent overlapping unresolved forcing submission across cohort keys and restart with existing atomic reservation mechanisms; unrelated work remains eligible. Focused concurrency/renamed-restart regression passed.
 - [ ] 2.3 Resolve uniquely confirmed original completion through existing trusted query/completion/witness paths and continue normally to forecast without forcing resubmit; genuine unknown remains explicitly unresolved.
-- [ ] 2.4 Preserve forecast digest/aliases/reconciliation, ordinary forcing, strict witness/#2439 boundary and successful legacy replacement behavior.
+- [x] 2.4 Preserve forecast digest/aliases/reconciliation, ordinary forcing, strict witness/#2439 boundary and successful legacy replacement behavior. Node27 eight affected files:3438 passed,1 skipped at edb46cd0.
+
+Task2.3 remains open: fake Comment-bearing accounting resolves in the focused regression, but the production-consistent comment-storage-false query refuses before forcing binding. Parent recorded `evidence/node27-commentless-query-gap.txt`; do not count a permanent unresolved fence as actual node22 recovery. No #2447 deployment performed.
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Parent runs local Ruff/OpenSpec and node27 targeted red/green plus affected suites at exact head; no implementer mid-flight validation.
+- [x] 3.1 Parent runs local Ruff/OpenSpec and node27 targeted red/green plus affected suites at exact head; no implementer mid-flight validation. edb46cd0:3438 passed,1 skipped in799.07s; query-capability coverage gap tracked separately under2.3/review.
 - [ ] 3.2 Expanded native correctness, test-evidence/spec and invariant-state review; bounded fix gate and exact-head CI.
 - [ ] 3.3 Test actual minimal deployment tree on old production baseline, quiescent rollout without3.12.7/env rebuild, normal progression smoke and node27 exact data evidence.
 - [ ] 3.4 Update narrow runbook/receipt, merge/close/archive. No generic historical recovery tooling.

@@ -1,0 +1,9 @@
+Production-consistent capability: accounting does not store Comment; forcing caller supplies no forecast contract version
+
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+  File "/home/nwm/tmp/wt-2447/services/orchestrator/reconcile.py", line 670, in _query
+    raise ReconcileQueryUnavailable(
+services.orchestrator.reconcile.ReconcileQueryUnavailable: accounting does not store job comments
+
+exit=1
