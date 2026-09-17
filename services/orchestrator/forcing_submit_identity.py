@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from services.orchestrator.accepted_submit_identity import ordered_cohort_members
-from services.orchestrator.chain_types import StageDefinition, TERMINAL_JOB_STATUSES
+from services.orchestrator.chain_types import TERMINAL_JOB_STATUSES, StageDefinition
 from services.orchestrator.reservation import slurm_comment_for
 
 FORCING_STAGE_ALIASES = frozenset(

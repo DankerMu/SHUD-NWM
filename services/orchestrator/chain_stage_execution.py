@@ -13,12 +13,6 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitTransition,
     accepted_submit_pipeline_job_model_id,
 )
-from services.orchestrator.forcing_submit_identity import (
-    is_forcing_array_stage,
-    is_resolved_forcing_attempt,
-    is_unresolved_forcing_attempt,
-    reordered_forcing_resume_basins,
-)
 from services.orchestrator.chain_array_accounting import settled_cohort_master
 from services.orchestrator.chain_config import SubmitDisposition
 from services.orchestrator.chain_types import (
@@ -30,6 +24,12 @@ from services.orchestrator.chain_types import (
     StageDefinition,
     StageRunResult,
     TerminalJobObservation,
+)
+from services.orchestrator.forcing_submit_identity import (
+    is_forcing_array_stage,
+    is_resolved_forcing_attempt,
+    is_unresolved_forcing_attempt,
+    reordered_forcing_resume_basins,
 )
 
 
@@ -1017,7 +1017,9 @@ def resume_cycle_stage(
                 publication_attempt = orchestrator._try_publish_log_for_advertise(str(job["slurm_job_id"]), publication)
                 log_uri = publication_attempt.advertised_uri
             elif not deps.published_artifact_root_configured():
-                legacy_log_uri = orchestrator.object_store.uri_for_key(f"runs/{resume_context.run_id}/logs/{stage.stage}.log")
+                legacy_log_uri = orchestrator.object_store.uri_for_key(
+                    f"runs/{resume_context.run_id}/logs/{stage.stage}.log"
+                )
                 publication_attempt = orchestrator._try_publish_log_for_advertise(
                     str(job["slurm_job_id"]),
                     DisplayLogPublication(

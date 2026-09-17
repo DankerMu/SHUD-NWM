@@ -8,14 +8,16 @@ from typing import Any
 import httpx
 import pytest
 
+from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
 from services.orchestrator.chain import (
+    M3_STAGES,
     CycleOrchestrationContext,
     HttpSlurmGatewayClient,
-    M3_STAGES,
     OrchestratorError,
 )
-from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
-from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from services.orchestrator.file_orchestration_journal import (
+    FileOrchestrationJournalRepository,
+)
 from services.orchestrator.reconcile import (
     CommentAccountingResult,
     SacctRecord,
@@ -23,10 +25,16 @@ from services.orchestrator.reconcile import (
     reconcile_reserved_unbound_jobs,
 )
 from services.orchestrator.reservation import reserve_candidate, slurm_comment_for
-from services.orchestrator.scheduler_candidate_execution_evidence import _pipeline_result_slurm_submit_called
+from services.orchestrator.scheduler_candidate_execution_evidence import (
+    _pipeline_result_slurm_submit_called,
+)
 from services.orchestrator.scheduler_evidence import UNKNOWN_AFTER_ATTEMPT
-from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _dt, _orchestrator
-
+from tests.test_orchestration_chain import (
+    FakeCycleSlurmClient,
+    _basins,
+    _dt,
+    _orchestrator,
+)
 
 _CYCLE = "2026050100"
 _CYCLE_TIME = _dt("2026-05-01T00:00:00Z")
