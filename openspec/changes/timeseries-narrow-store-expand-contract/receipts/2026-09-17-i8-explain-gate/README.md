@@ -105,8 +105,9 @@ so the offending node satisfies it on the strength of its own
 "every node must bind" would still pass this plan; only requiring the segment parameter
 to land in the **`Index Cond`** would catch it.
 
-The whole failure is one plan node — `_hyper_9_175_chunk`, the newest narrow chunk
-(range 2026-09-23 → 2026-09-24):
+In **this** shape the whole failure is one plan node — `_hyper_9_175_chunk`, the newest
+narrow chunk (range 2026-09-23 → 2026-09-24). Do not read that as "chunk 175 is the bad
+one": §7 measures the `latest` shape flipping a *different* chunk with the same ratio.
 
 | | base `b40d0015a` | master `fd3d4869a` |
 |---|---|---|
