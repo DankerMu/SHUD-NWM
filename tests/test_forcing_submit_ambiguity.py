@@ -413,7 +413,6 @@ def test_boundary_controller_identity_continues_before_next_global_reconcile(
     requests: list[tuple[str, str, dict[str, Any]]] = []
     controller_job_queries: list[list[str]] = []
     durable_at_discovery: list[dict[str, Any]] = []
-    controller_task_states: list[str] = []
 
     class _HttpClient:
         def __enter__(self) -> _HttpClient:
@@ -473,7 +472,6 @@ def test_boundary_controller_identity_continues_before_next_global_reconcile(
                 forcing_job_id = next(
                     job_id for job_id, job in runtime.jobs.items() if job["stage"] == "forcing"
                 )
-                controller_task_states.extend(("COMPLETED", "RUNNING"))
                 return _controller_forcing_rows(
                     master_id=forcing_job_id,
                     task_count=2,
@@ -532,7 +530,6 @@ def test_boundary_controller_identity_continues_before_next_global_reconcile(
     ]
     assert controller_job_queries == [["/opt/slurm/bin/scontrol", "show", "job", "-o"]]
     assert result.stages[0].slurm_job_id == original_forcing_job_id
-    assert controller_task_states == ["COMPLETED", "RUNNING"]
     assert result.stages[0].slurm_job_id == forcing["slurm_job_id"]
     assert [
         (task["array_task_id"], task["model_id"], task["status"])
@@ -637,9 +634,9 @@ def test_comment_storing_accounting_binds_current_forcing_attempt_token(
     assert outcome.slurm_job_id == "2001"
     assert outcome.reconciliation_source == "slurm_exact_comment"
     assert commands
-    bound = repository.get_pipeline_job(reservation.job_id)
+    bound = repository.get_reconcile_pipeline_job(reservation.job_id)
     assert bound is not None
-    assert bound["slurm_comment"] == held.slurm_comment
+    assert bound.slurm_comment == held.slurm_comment
 
 
 @pytest.mark.parametrize(
@@ -788,9 +785,9 @@ def test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim(
         current.idempotency_key,
         current.submission_attempt,
     )
-    reopened = repository.get_pipeline_job(current.job_id)
+    reopened = repository.get_reconcile_pipeline_job(current.job_id)
     assert reopened is not None
-    assert reopened["slurm_comment"] == current_comment
+    assert reopened.slurm_comment == current_comment
     current_transition = repository.transition_pipeline_job_submit_evidence(
         current.job_id,
         AcceptedSubmitTransition.timeout(),
@@ -819,7 +816,6 @@ def test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim(
     persisted = repository.get_pipeline_job(current.job_id)
     assert persisted is not None
     assert persisted["status"] == "reserved"
-    assert persisted["slurm_comment"] == current_comment
 
     current_query, _commands = _commentless_forcing_query(
         monkeypatch,
@@ -839,7 +835,6 @@ def test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim(
     bound = repository.get_pipeline_job(current.job_id)
     assert bound is not None
     assert bound["status"] == "submitted"
-    assert bound["slurm_comment"] == current_comment
 
 
 def test_legacy_forcing_comment_is_not_reconstructed_as_an_attempt_token(

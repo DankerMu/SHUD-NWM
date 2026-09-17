@@ -1976,18 +1976,24 @@ class FileOrchestrationJournalRepository:
             return _blocked_query_job(error, job_id=job_id)
         return None
 
+    def get_reconcile_pipeline_job(self, job_id: str) -> SimpleNamespace | None:
+        """Read one pipeline row in the internal reconciliation representation."""
+
+        job = self._pipeline_job_for_id_unlocked(job_id)
+        return _file_reconcile_namespace(job) if job is not None else None
+
     def get_reserved_unbound_job(self, job_id: str) -> SimpleNamespace | None:
         """Read one current reserved row with the normal reconciliation shape."""
 
-        job = self._pipeline_job_for_id_unlocked(job_id)
+        job = self.get_reconcile_pipeline_job(job_id)
         if (
             job is None
-            or str(job.get("status") or "") != "reserved"
-            or job.get("slurm_job_id") not in (None, "")
-            or not str(job.get("idempotency_key") or "")
+            or str(getattr(job, "status", "") or "") != "reserved"
+            or getattr(job, "slurm_job_id", None) not in (None, "")
+            or not str(getattr(job, "idempotency_key", "") or "")
         ):
             return None
-        return _file_reconcile_namespace(job)
+        return job
 
     def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
         expected_job_id = _safe_segment(job_id)

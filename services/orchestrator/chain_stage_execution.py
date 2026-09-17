@@ -197,10 +197,22 @@ def _immediate_forcing_submit_reconcile(
     orchestrator: StageExecutionOrchestrator,
     *,
     pipeline_job_id: str,
-    ambiguity_row: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     """Bind only the just-persisted forcing ambiguity; never retry or scan peers."""
 
+    reader = getattr(orchestrator.repository, "get_reconcile_pipeline_job", None)
+    if not callable(reader):
+        return None
+    try:
+        raw_ambiguity_row = reader(pipeline_job_id)
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    if isinstance(raw_ambiguity_row, Mapping):
+        ambiguity_row = dict(raw_ambiguity_row)
+    elif hasattr(raw_ambiguity_row, "__dict__"):
+        ambiguity_row = dict(vars(raw_ambiguity_row))
+    else:
+        return None
     try:
         expected_submission_attempt = ambiguity_row.get("submission_attempt")
         if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
@@ -255,22 +267,24 @@ def _immediate_forcing_submit_reconcile(
     )
     if bound is None:
         return None
-    reader = getattr(orchestrator.repository, "get_pipeline_job", None)
-    if not callable(reader):
-        return None
     try:
-        row = reader(pipeline_job_id)
+        raw_bound_row = reader(pipeline_job_id)
     except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
         return None
+    if isinstance(raw_bound_row, Mapping):
+        row = dict(raw_bound_row)
+    elif hasattr(raw_bound_row, "__dict__"):
+        row = dict(vars(raw_bound_row))
+    else:
+        return None
     if (
-        not isinstance(row, Mapping)
-        or str(row.get("slurm_job_id") or "") != str(bound.slurm_job_id or "")
+        str(row.get("slurm_job_id") or "") != str(bound.slurm_job_id or "")
         or row.get("submission_attempt") != expected_submission_attempt
         or row.get("submission_attempt_started_at") != expected_submission_attempt_started_at
         or str(row.get("slurm_comment") or "") != expected_slurm_comment
     ):
         return None
-    return dict(row)
+    return row
 
 
 def submit_and_wait_cycle_stage(
@@ -502,21 +516,18 @@ def submit_and_wait_cycle_stage(
                 },
             )
             if is_forcing_array_stage(stage):
-                ambiguity_row = getattr(transition_result, "row", None)
-                if isinstance(ambiguity_row, Mapping):
-                    bound_forcing = _immediate_forcing_submit_reconcile(
+                bound_forcing = _immediate_forcing_submit_reconcile(
+                    orchestrator,
+                    pipeline_job_id=pipeline_job_id,
+                )
+                if bound_forcing is not None:
+                    return _call_orchestrator_helper(
                         orchestrator,
-                        pipeline_job_id=pipeline_job_id,
-                        ambiguity_row=ambiguity_row,
+                        "_resume_cycle_stage",
+                        stage,
+                        context,
+                        bound_forcing,
                     )
-                    if bound_forcing is not None:
-                        return _call_orchestrator_helper(
-                            orchestrator,
-                            "_resume_cycle_stage",
-                            stage,
-                            context,
-                            bound_forcing,
-                        )
             return (
                 StageRunResult(
                     stage=stage.stage,

@@ -1,0 +1,283 @@
+....F.F.....F......                                                      [100%]
+=================================== FAILURES ===================================
+___ test_boundary_controller_identity_continues_before_next_global_reconcile ___
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-215/test_boundary_controller_ident0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f87c69711d0>
+
+    def test_boundary_controller_identity_continues_before_next_global_reconcile(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _BoundaryRepository(FileOrchestrationJournalRepository):
+            def query_reserved_unbound_jobs(self) -> list[Any]:
+                raise AssertionError("failure-boundary reconcile must select only its current row")
+    
+        class _HttpGatewayWithFakeRuntime(HttpSlurmGatewayClient):
+            def __init__(self, runtime: FakeCycleSlurmClient) -> None:
+                super().__init__("http://gateway.test")
+                self.runtime = runtime
+                self.array_task_queries: list[str] = []
+    
+            def get_job_status(self, job_id: str) -> dict[str, Any]:
+                return self.runtime.get_job_status(job_id)
+    
+            def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+                self.array_task_queries.append(job_id)
+                return self.runtime.get_array_task_results(job_id)
+    
+            def fetch_logs(self, job_id: str) -> dict[str, Any]:
+                return self.runtime.fetch_logs(job_id)
+    
+        runtime = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["succeeded", "succeeded"]})
+        client = _HttpGatewayWithFakeRuntime(runtime)
+        requests: list[tuple[str, str, dict[str, Any]]] = []
+        controller_job_queries: list[list[str]] = []
+        durable_at_discovery: list[dict[str, Any]] = []
+        controller_task_states: list[str] = []
+    
+        class _HttpClient:
+            def __enter__(self) -> _HttpClient:
+                return self
+    
+            def __exit__(self, *_args: Any) -> None:
+                return None
+    
+            def request(
+                self,
+                method: str,
+                path: str,
+                *,
+                json: Any = None,
+                headers: Any = None,
+            ) -> httpx.Response:
+                del headers
+                payload = dict(json or {})
+                requests.append((method, path, payload))
+                assert (method, path) == ("POST", "/api/v1/slurm/job-arrays")
+                accepted = runtime.submit_job_array(
+                    str(payload["job_type"]),
+                    cycle_id=str(payload["cycle_id"]),
+                    stage_name=str(payload["stage_name"]),
+                    tasks=[dict(task) for task in payload["tasks"]],
+                    manifest=dict(payload["manifest"]),
+                )
+                if payload["stage_name"] == "forcing":
+                    return httpx.Response(
+                        502,
+                        json={"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}},
+                    )
+                return httpx.Response(200, json=accepted)
+    
+        repository = _BoundaryRepository(tmp_path / "journal")
+    
+        def controller(command: list[str]) -> str:
+            if command[-2:] == ["show", "config"]:
+                return "AccountingStoreFlags = (null)\n"
+            if command[-3:] == ["show", "job", "-o"]:
+                controller_job_queries.append(list(command))
+                if len(controller_job_queries) == 1:
+                    forcing = next(
+                        job
+                        for job in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)
+                        if job["stage"] == "forcing"
+                    )
+                    durable_at_discovery.append(
+                        {
+                            "status": forcing["status"],
+                            "slurm_job_id": forcing["slurm_job_id"],
+                            "submit_outcome": forcing["submit_outcome"],
+                            "error_code": forcing["error_code"],
+                            "slurm_comment": forcing["slurm_comment"],
+                        }
+                    )
+                    forcing_job_id = next(
+                        job_id for job_id, job in runtime.jobs.items() if job["stage"] == "forcing"
+                    )
+                    controller_task_states.extend(("COMPLETED", "RUNNING"))
+                    return _controller_forcing_rows(
+                        master_id=forcing_job_id,
+                        task_count=2,
+                        comment=forcing["slurm_comment"],
+                        submitted_at=_CYCLE_TIME,
+                    ).replace("JobState=RUNNING", "JobState=COMPLETED", 1)
+                return ""
+            return ""
+    
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+        monkeypatch.setenv("SLURM_GATEWAY_SLURM_BIN_PATH", "/opt/slurm/bin")
+        monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", controller)
+        monkeypatch.setattr(
+            reconcile_module,
+            "_bounded_sacct_stdout",
+            lambda _command: pytest.fail("comment-less boundary discovery must not query sacct"),
+        )
+        orchestrator = _orchestrator(tmp_path / "orchestrator", repository, client, terminal_stage="forecast")
+        orchestrator.config = replace(
+            orchestrator.config,
+            reconcile_slurm_user="scheduler",
+            reconcile_slurm_account="account",
+        )
+        run_id = f"cycle_gfs_{_CYCLE}_boundary_reconcile"
+    
+        result = orchestrator.orchestrate_cycle(
+            "gfs",
+            _CYCLE,
+            _forcing_basins(2, orchestration_run_id=run_id),
+        )
+    
+        forcing = next(
+            job for job in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID) if job["stage"] == "forcing"
+        )
+        original_forcing_job_id = next(
+            job_id for job_id, job in runtime.jobs.items() if job["stage"] == "forcing"
+        )
+        forcing_posts = [
+            payload
+            for method, path, payload in requests
+            if (method, path) == ("POST", "/api/v1/slurm/job-arrays")
+            and payload["stage_name"] == "forcing"
+        ]
+>       assert result.status == "succeeded"
+E       AssertionError: assert 'reconciling' == 'succeeded'
+E         
+E         - succeeded
+E         + reconciling
+
+tests/test_forcing_submit_ambiguity.py:520: AssertionError
+_____ test_comment_storing_accounting_binds_current_forcing_attempt_token ______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-215/test_comment_storing_accountin0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f87c6f22450>
+
+    def test_comment_storing_accounting_binds_current_forcing_attempt_token(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+        reservation = _reserve_forcing(
+            repository,
+            suffix="accounting_token",
+            model_ids=("model_0",),
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        transition = repository.transition_pipeline_job_submit_evidence(
+            reservation.job_id,
+            AcceptedSubmitTransition.timeout(),
+            expected_submission_attempt=reservation.submission_attempt,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+            error_code="SLURM_PARSE_ERROR",
+            error_message="Gateway response was empty after submission.",
+        )
+        assert transition.committed
+        held = repository.query_reserved_unbound_jobs()[0]
+        assert held.slurm_comment == _expected_forcing_attempt_comment(
+            reservation.idempotency_key,
+            reservation.submission_attempt,
+        )
+        commands: list[list[str]] = []
+        monkeypatch.setattr(
+            reconcile_module,
+            "_bounded_sacct_stdout",
+            lambda command: commands.append(list(command))
+            or f"2001_0|nhms_forcing|RUNNING|0:0|{held.slurm_comment}|scheduler|account\n",
+        )
+        query = reconcile_module.default_comment_sacct_querier(
+            "/opt/slurm/bin",
+            comment_storage_probe=lambda: True,
+            global_visibility_probe=lambda: True,
+            now=lambda: held.submission_attempt_started_at + timedelta(minutes=1),
+        )
+    
+        outcome = reconcile_reserved_unbound_jobs(repository, comment_query=query)[0]
+    
+        assert outcome.action == "bound"
+        assert outcome.slurm_job_id == "2001"
+        assert outcome.reconciliation_source == "slurm_exact_comment"
+        assert commands
+        bound = repository.get_pipeline_job(reservation.job_id)
+        assert bound is not None
+>       assert bound["slurm_comment"] == held.slurm_comment
+E       AssertionError: assert 'nhms_forcing...en:[redacted]' == 'nhms_forcing...en:forcing:a1'
+E         
+E         Skipping 57 identical leading characters in diff, use -v to show
+E         - ing_token:forcing:a1
+E         + ing_token:[redacted]
+
+tests/test_forcing_submit_ambiguity.py:642: AssertionError
+____ test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim _____
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-215/test_controller_rejects_a_stal0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f87c4479ed0>
+
+    def test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+        first = _reserve_forcing(
+            repository,
+            suffix="stale_token",
+            model_ids=("model_0",),
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        first_comment = _expected_forcing_attempt_comment(
+            first.idempotency_key,
+            first.submission_attempt,
+        )
+        first_transition = repository.transition_pipeline_job_submit_evidence(
+            first.job_id,
+            AcceptedSubmitTransition.timeout(),
+            expected_submission_attempt=first.submission_attempt,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+            error_code="SLURM_PARSE_ERROR",
+            error_message="Gateway response was empty after submission.",
+        )
+        assert first_transition.committed
+        first_held = repository.query_reserved_unbound_jobs()[0]
+        assert repository.permit_forcing_submit_retry(
+            first.job_id,
+            expected_submission_attempt=first.submission_attempt,
+            expected_submission_attempt_started_at=first_held.submission_attempt_started_at,
+        ) is not None
+    
+        current = _reserve_forcing(
+            repository,
+            suffix="stale_token",
+            model_ids=("model_0",),
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        assert current.created
+        assert current.submission_attempt == 2
+        current_comment = _expected_forcing_attempt_comment(
+            current.idempotency_key,
+            current.submission_attempt,
+        )
+        reopened = repository.get_pipeline_job(current.job_id)
+        assert reopened is not None
+>       assert reopened["slurm_comment"] == current_comment
+E       AssertionError: assert 'nhms_forcing...en:[redacted]' == 'nhms_forcing...en:forcing:a2'
+E         
+E         Skipping 52 identical leading characters in diff, use -v to show
+E         - ale_token:forcing:a2
+E         + ale_token:[redacted]
+
+tests/test_forcing_submit_ambiguity.py:793: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_forcing_submit_ambiguity.py::test_boundary_controller_identity_continues_before_next_global_reconcile
+FAILED tests/test_forcing_submit_ambiguity.py::test_comment_storing_accounting_binds_current_forcing_attempt_token
+FAILED tests/test_forcing_submit_ambiguity.py::test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim
+3 failed, 16 passed in 5.87s
+
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              feat/issue-2447-forcing-submit-recovery -> FETCH_HEAD
+   edb46cd0..8e125401  feat/issue-2447-forcing-submit-recovery -> origin/feat/issue-2447-forcing-submit-recovery
+Previous HEAD position was edb46cd0 style: format forcing lifecycle changes and record red-green proof
+HEAD is now at 8e125401 fix(orchestrator): resolve forcing attempts from bounded controller identity
+
+exit=1
