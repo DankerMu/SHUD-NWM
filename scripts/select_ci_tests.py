@@ -2258,6 +2258,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            # #2121-A: real QueuePool admission regression imports the shared
+            # TileInput/TileResponse/cache-key contract at module scope.
+            "tests/test_display_mvt_cold_admission.py",
             # #2032: guard-derived, not hand-curated — both new suites import
             # services.tiles.mvt at file level. The lock suite drives
             # tile_generation_lock / _open_live_lock_file directly; the
@@ -2361,6 +2364,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # _run_source_version plus the route cache keys, so it is a DIRECT
             # non-gated importer (and on the services/tiles/mvt.py rule too).
             "tests/test_mvt_run_and_river_network_geometry_identity.py",
+            "tests/test_display_mvt_cold_admission.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             # #2017: the checked-in 2.4/2.5 coordinate-budget harness imports
@@ -4203,7 +4207,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
 
     PathTestRule(
         "apps/api/errors.py",
-        (API_ERROR_LOGGING_TEST,),
+        (API_ERROR_LOGGING_TEST, "tests/test_display_mvt_cold_admission.py"),
     ),
     PathTestRule(
         # #2098: the route-reachability composition owner. This module imports
@@ -4234,6 +4238,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/main.py",
         (
             API_ERROR_LOGGING_TEST,
+            "tests/test_display_mvt_cold_admission.py",
             # #2098: the runtime-OpenAPI composition owner. `_patch_openapi_schema`
             # calls `_patch_precip_openapi(schema)`, which pops the generated
             # `PrecipIndexResponse` component and rewrites the index operation onto

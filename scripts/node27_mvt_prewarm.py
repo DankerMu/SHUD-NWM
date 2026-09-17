@@ -7,18 +7,16 @@ database and is safe to run after every idempotent autopipeline tick.
 Envelope (per `precipitation-raster-overlay`'s prewarm requirement): the
 national river network at `--zooms` (unchanged), plus -- for each of `gfs` and
 `ifs`, at that source's OWN newest cycle -- the z3-z4 China discharge tiles for
-the valid times inside `PREWARM_LEAD_HOURS` of that cycle's FIRST PUBLISHED
-valid time, and one precipitation PNG per such valid time. A source with no
-cycle contributes zero requests; a source whose discovery FAILS is a different
-terminal state and is reported as an error.
+every published valid time of that cycle, in discovery order and with the
+supplied strings/multiplicity preserved, and one precipitation PNG per valid
+time that also sits inside the PNG horizon. A source with no cycle contributes
+zero requests; a source whose discovery FAILS is a different terminal state and
+is reported as an error.
 
-The lead window is a DESCOPE, not a fix: the published timeline does not fit
-inside one ingest tick at the measured cold tile cost, so the valid times beyond
-the window stay cold reads. The window's width is a judgement call whose only
-oracle is the node-27 receipt of task 7.2 (#2017); the estimate behind it, the
-known limit, and the fact that it is UNVERIFIED are all spelled out in
-`docs/runbooks/display-readonly-live-mvt.md` and in design point 10 of
-`openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`. What IS
+Full-cycle scope does not hide incomplete warming: the global deadline, request
+timeout, source-interleaved ordering and nonzero incomplete/error exit status
+remain enforced, and deadline-skipped work is not counted as issued. The PNG
+horizon/error classification stays separate from discharge warming. What IS
 pinned in this repository is the PLANNED envelope size and inequality A below;
 see `tests/test_node27_mvt_prewarm.py`.
 
@@ -39,7 +37,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -58,7 +56,7 @@ from services.precip.mirror import horizon_valid_times  # noqa: E402 - after the
 
 CHINA_BOUNDS = (73.5, 18.1, 134.8, 53.6)
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
-SUMMARY_SCHEMA = "nhms.node27-mvt-prewarm.v3"
+SUMMARY_SCHEMA = "nhms.node27-mvt-prewarm.v4"
 PREWARM_SOURCES = ("gfs", "ifs")
 # Fixed by the spec, NOT `zooms & {3, 4}`: an operator setting
 # AUTOPIPE_MVT_PREWARM_ZOOMS=5,6,7 must not silently warm zero discharge tiles.
@@ -108,23 +106,10 @@ EXPECTED_NOT_MIRRORED_REASON = "cycle_not_mirrored"
 # or deployment fault -- a missing `grid.json` would otherwise turn every one of
 # a source's PNGs into a silent `rc=0`.
 EXPECTED_WINDOW_INCOMPLETE_REASONS = frozenset({"missing_slice", "no_mirrored_cycle_before_window_end"})
-# The lead window the envelope is cut to, measured from the FIRST PUBLISHED
-# valid time of the source's newest cycle -- which is exactly the instant the
-# frontend opens on: `pickCurrentValidTime` returns element 0 of the sorted list
-# (`apps/frontend/src/lib/m11/overviewDataContracts.ts`), and
-# `map-layer-timeline-controls` defines "lead 0" as the first entry of the
-# advertised `valid_times[]`, equal to the cycle instant only in the
-# fully-covered case (`services/tiles/mvt.py:2171` clamps it to the coverage
-# start otherwise). Anchoring on the published first entry rather than on the
-# cycle is what makes "the default view is warm" a property of the code instead
-# of a claim about the data.
-# 12 h on the published 3 h grid is 5 valid times per source. That width is a
-# judgement call from an UNVERIFIED cost estimate -- see design point 10 of
-# `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md` and
-# `docs/runbooks/display-readonly-live-mvt.md`; its only oracle is the node-27
-# receipt of task 7.2 (#2017). What is pinned in-repo is the PLANNED envelope
-# size that follows from this constant.
-PREWARM_LEAD_HOURS = 12
+# Full published default cycle, not a truncated lead window. Discovery order,
+# timestamp strings and multiplicity are preserved; only the former 12h cut is
+# gone. PNG horizon/error classification remains a separate gate.
+PREWARM_SCOPE = "full_cycle"
 # Nominal pool width. Kept as a constant, not an argparse literal, so the test
 # suite can assert that `scripts/node27_autopipe_cron.sh`'s `--workers` fallback
 # and this default have not drifted apart.
@@ -230,38 +215,6 @@ def discover_source(
     return SourceDiscovery(cycle=cycle, valid_times=tuple(values))
 
 
-def select_lead_window(valid_times: Sequence[str]) -> list[str]:
-    """The valid times inside `[first, first + PREWARM_LEAD_HOURS]`, in input order.
-
-    `first` is the EARLIEST published instant, computed with `min()` -- not
-    `valid_times[0]`, because neither the ordering nor the step of
-    `/valid-times` is a property this script may assume, and not the cycle
-    instant either. `services/tiles/mvt.py:2171` clamps a cycle's list to the
-    intersection coverage start (`max(cycle, max(window starts))`), and
-    `map-layer-timeline-controls` makes the first published entry -- not the
-    cycle -- what the frontend opens on. A cycle-anchored window would warm
-    NOTHING for a source clamped more than `PREWARM_LEAD_HOURS` past its cycle,
-    silently and at rc=0.
-    Consequence, and the point of the change: a non-empty list always yields a
-    non-empty window, so `valid_times_available > 0` implies
-    `valid_times_warmed > 0`. There is deliberately no `warmed == 0` error
-    branch, because with this anchor it is unreachable -- an error branch for an
-    unreachable state is the same premise-as-guard defect in a new place.
-
-    BY TIMESTAMP, never `valid_times[:N]`: a fixed-length prefix would turn "the
-    list happens to be a sorted 3 h grid today" into yet another premise.
-
-    The valid times outside the window are a recorded DESCOPE -- not failures,
-    not `png_out_of_contract`. They stay cold reads; see the module docstring.
-    """
-    if not valid_times:
-        return []
-    instants = {value: _parse_instant(value) for value in valid_times}
-    window_start = min(instants.values())
-    window_end = window_start + timedelta(hours=PREWARM_LEAD_HOURS)
-    return [value for value in valid_times if instants[value] <= window_end]
-
-
 def partition_png_valid_times(cycle: str, valid_times: Sequence[str]) -> tuple[list[str], list[str]]:
     """Split `valid_times` into the PNG-requestable ones and the rest.
 
@@ -329,10 +282,9 @@ def build_warm_url_groups(
     valid_times: Sequence[str],
 ) -> list[list[str]]:
     """One group per valid time, in `valid_times` order.
-
-    Grouping exists so the two sources can be submitted lead by lead: with a
-    source-major job list a deadline hit always truncates the SAME source,
-    including its lead-0 default view.
+    Grouping exists so the two sources can be submitted valid time by valid
+    time: with a source-major job list a deadline hit always truncates the SAME
+    source, including its earliest published view.
     """
     tiles = list(tiles)
     return [
@@ -427,11 +379,10 @@ def prewarm(
             entry["cycle"] = discovery.cycle
             entry["valid_times_available"] = len(discovery.valid_times)
             if discovery.cycle is not None:
-                # The lead cut happens FIRST: everything downstream -- the PNG
-                # request-shape gate, the URL set, every per-source counter --
-                # sees only the warmed window. A valid time the window dropped
-                # is a descope, so it must not surface as `png_out_of_contract`.
-                warmed = select_lead_window(discovery.valid_times)
+                # Full published cycle: preserve supplied strings, order and
+                # multiplicity. PNG out-of-contract classification stays a
+                # separate gate and must not hide issued discharge work.
+                warmed = list(discovery.valid_times)
                 entry["valid_times_warmed"] = len(warmed)
                 out_of_contract = partition_png_valid_times(discovery.cycle, warmed)[1]
                 entry["png_out_of_contract"] = len(out_of_contract)
@@ -458,13 +409,13 @@ def prewarm(
             entry["error"] = f"{type(exc).__name__}: {exc}"
             continue
 
-    # Lead-major, source-interleaved submission: river tiles, then
+    # Valid-time-major, source-interleaved submission: river tiles, then
     # `(k=0 gfs, k=0 ifs, k=1 gfs, k=1 ifs, ...)`, with one valid time's 13
     # discharge tiles and its PNG kept together. `executor.map` is FIFO, so a
-    # source-major list would make every deadline truncation fall on the same
-    # source -- and its lead-0 group is the frontend's default view. This only
-    # reorders an existing list: per-source attribution, the summary identity
-    # and the `zip(jobs, outcomes, strict=True)` pairing are untouched.
+    # source-major job list would make every deadline truncation fall on the same
+    # source, including its earliest published view. This only reorders an
+    # existing list: per-source attribution, the summary identity and the
+    # `zip(jobs, outcomes, strict=True)` pairing are untouched.
     for index in range(max((len(groups) for groups in source_groups.values()), default=0)):
         for source, groups in source_groups.items():
             if index >= len(groups):
@@ -547,7 +498,7 @@ def prewarm(
         "elapsed_seconds": round(clock() - started, 3),
         "deadline_seconds": deadline_seconds,
         "deadline_skipped": deadline_skipped,
-        "lead_hours": PREWARM_LEAD_HOURS,
+        "prewarm_scope": PREWARM_SCOPE,
         "per_source": per_source,
     }
     rc = 1 if (failed or discovery_failed or out_of_contract or deadline_skipped) else 0
@@ -557,9 +508,9 @@ def prewarm(
 def _new_source_entry() -> dict[str, Any]:
     return {
         "cycle": None,
-        # `available` is what `/valid-times` published; `warmed` is what
-        # survived the lead cut. Both are in the summary so the receipt can SEE
-        # how much was descoped instead of inferring it from the request total.
+        # `available` is what `/valid-times` published; `warmed` is the full
+        # published set scheduled for discharge. Both stay in the summary so a
+        # deadline skip cannot be mistaken for a truncated envelope.
         "valid_times_available": 0,
         "valid_times_warmed": 0,
         "discharge_requests": 0,

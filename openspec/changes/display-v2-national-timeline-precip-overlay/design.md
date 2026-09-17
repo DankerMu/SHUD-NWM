@@ -2,6 +2,8 @@
 
 设计 oracle：`docs/plans/2026-09-03-display-v2-header-river-precip-timeline.md`（前提纠正、实机事实、14 条决策清单）。本文件只承载实现取舍与测试 seam，不重复事实清单。
 
+后续决策：I13 的固定 lead-window 预热设计由 `isolate-display-cold-generation`（#2121-A / #2346）接管为全已发布时次；原 I13 设计与测量保留其历史语境，不能作为当前包络或预算证明。本 change 的 `precipitation-raster-overlay` spec 已同步，以免未来归档重新引入旧窗口；新的完整冷启与争用证据归联合 change。
+
 现状要点：
 - 全国流量瓦片 `hydro-national` 的 `latest_runs` CTE 只按 `cycle_time DESC, run_id DESC` 取 run，没有 source/cycle 绑定（`services/tiles/mvt.py:654,692`）；`national_discharge_valid_times` 返回 `common_end` 前 100 个整点，前端默认取末项。
 - 时间轴组件 `M11Timeline`、源/图层控件自 M26 起未挂载（`apps/frontend/src/pages/m11/M11Controls.tsx`），全屏地图壳在 `OverviewPage.tsx` 的 `M11FullscreenMap`。

@@ -13,7 +13,8 @@ from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
 from apps.api import display_cache, main
 from apps.api.errors import ApiError
@@ -753,7 +754,9 @@ def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: 
     responses: list[Any] = []
 
     def request() -> None:
-        responses.append(hydro_display._cached_or_generated_mvt_response(object(), tile, produce))
+        engine = create_engine("sqlite://", future=True)
+        with Session(engine) as session:
+            responses.append(hydro_display._cached_or_generated_mvt_response(session, tile, produce))
 
     threads = [threading.Thread(target=request) for _ in range(2)]
     for thread in threads:
@@ -1187,6 +1190,9 @@ class _NationalRouteSession:
 
     def get_bind(self) -> Any:
         return self.bind
+
+    def rollback(self) -> None:
+        return None
 
 
 class _ExplodingSession:
@@ -1873,6 +1879,7 @@ def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     assert operation["responses"]["424"] == {"$ref": "#/components/responses/MvtNationalIdentityUnavailable"}
+    assert operation["responses"]["503"] == {"$ref": "#/components/responses/MvtColdGenerationBusy"}
     assert parameters["variable"]["schema"]["enum"] == ["q_down"]
     assert parameters["source"]["schema"]["enum"] == ["gfs", "ifs"]
     assert parameters["z"]["schema"]["maximum"] == 14
@@ -3472,6 +3479,9 @@ class _LegacyRunRouteSession:
     def get_bind(self) -> Any:
         return self.bind
 
+    def rollback(self) -> None:
+        return None
+
 
 @pytest.mark.parametrize("found", (True, False), ids=("found", "not-found"))
 def test_hydro_mvt_probe_reads_one_narrow_statement_and_preserves_not_found(found: bool) -> None:
@@ -4183,6 +4193,16 @@ def test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_rout
         }, path
     assert _code_enum("MvtNationalIdentityUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE", _INCOMPLETE_CODE]
     assert _code_enum("MvtLivePostgisUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE"]
+    assert _code_enum("MvtColdGenerationBusy") == ["MVT_COLD_GENERATION_BUSY"]
+    assert schema["components"]["responses"]["MvtColdGenerationBusy"]["headers"] == {
+        "Retry-After": {"schema": {"type": "string"}},
+        "Cache-Control": {"schema": {"type": "string"}},
+        "X-Request-ID": {"schema": {"type": "string"}},
+    }
+    for path in (canonical, *siblings):
+        assert schema["paths"][path]["get"]["responses"]["503"] == {
+            "$ref": "#/components/responses/MvtColdGenerationBusy"
+        }, path
 
 
 # Never recomputed from the module under test: the #2153 refusal must leave a

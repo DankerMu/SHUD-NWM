@@ -1,7 +1,7 @@
 # prewarm-source-outcomes Specification
 
 ## Purpose
-TBD - created by archiving change prewarm-source-discharge-results. Update Purpose after archive.
+Attribute every issued discharge prewarm result to its source without losing failures or counting unissued work.
 ## Requirements
 ### Requirement: Complete per-source discharge result attribution
 The prewarm CLI SHALL emit schema nhms.node27-mvt-prewarm.v3. Every source entry SHALL include integer discharge_ok and discharge_failed in addition to discharge_requests. Each issued discharge request SHALL increment the total and exactly one outcome bucket for its own source, using 2xx as success. Unissued requests SHALL NOT increment any discharge counter. Existing global failures, PNG accounting and exit status semantics SHALL remain unchanged.

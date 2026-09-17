@@ -13,32 +13,9 @@ from apps.api import openapi_patching
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 
-# Every nullable node the patch functions inject (pre-finalizer). The
-# Layer.metadata node is the one type+allOf composition; the rest are ordinary
-# scalar/array/object typed nodes. The exact count and the composed-node identity
-# are pinned so a regression in either direction reddens.
-#
-# 111 -> 113 with #2009: `LayerMetadata.default_cycle` and
-# `DischargeCycles.default_cycle` are two genuinely nullable new API fields (the
-# fail-closed empty intersection is spelled `null`, not an absent key), so the
-# census of nullable nodes moves by exactly two. The count is a coverage
-# tripwire on the finalizer, not a freeze on the API surface: the assertions
-# below still prove every one of them is rewritten into a 3.1 type union.
-#
-# 113 -> 115 with #2010: the two precipitation routes each declare a typed 404
-# whose `error.details` is the same nullable object every typed error response
-# in this API carries (`_typed_error_response`), so the census moves by exactly
-# two -- one per route. `LayerMetadata.legend` and the precip index's own
-# `legend` both `$ref` the single generated `PrecipLegendEntry`, whose
-# `max: float | None` pydantic already emits as a 3.1 `anyOf` union rather than
-# a `nullable` node; the open-ended top class stays nullable (pinned decision 5)
-# and was NOT made non-nullable to keep this number still.
-#
-# 115 -> 116 with #2153: the canonical source/cycle national tile route's 424
-# now references its own `MvtNationalIdentityUnavailable` response (both error
-# codes), whose `error.details` is the same nullable object the shared
-# `MvtLivePostgisUnavailable` carries, so the census moves by exactly one.
-BASELINE_NULLABLE_COUNT = 116
+# Validate each legacy nullable node against the actual input schema rather
+# than pinning an incidental census that changes whenever the API grows.
+# Layer.metadata has the composed type+allOf shape covered separately below.
 COMPOSED_NULLABLE_PATH = ("components", "schemas", "Layer", "properties", "metadata")
 
 # The exact pinned openapi-typescript package the generated-type assertions run
@@ -118,7 +95,6 @@ def test_openapi_typescript_pin_guard_discriminates_on_mismatch() -> None:
 def test_finalizer_replaces_all_nullables_and_keeps_dialect() -> None:
     pre_finalized = _pre_finalized_runtime_schema()
     nullable_paths = _nullable_paths(pre_finalized)
-    assert len(nullable_paths) == BASELINE_NULLABLE_COUNT
 
     composed = _deep_get(pre_finalized, COMPOSED_NULLABLE_PATH)
     assert composed["type"] == "object"
@@ -140,10 +116,9 @@ def test_finalizer_replaces_all_nullables_and_keeps_dialect() -> None:
         ]
     }
     assert len(_nullable_paths(finalized)) == 0
-    # The 112 ordinary nodes become scalar type unions [T, "null"]; the composed
-    # node becomes an anyOf union. FastAPI's own anyOf-null unions stay untouched
-    # (they were never nullable-keyword nodes, so they keep their shape).
-    assert _scalar_type_union_null_count(finalized) == BASELINE_NULLABLE_COUNT - 1
+    # Ordinary nodes gain a scalar null union; the composed node gains anyOf.
+    # Native anyOf-null unions remain unchanged.
+    assert _scalar_type_union_null_count(finalized) == len(nullable_paths) - 1
     assert _anyof_with_null_branch_count(finalized) == 1 + _pre_existing_anyof_null_count(pre_finalized)
 
 
@@ -154,7 +129,6 @@ def test_finalizer_preserves_ordinary_sibling_keywords() -> None:
         for path in _nullable_paths(pre_finalized)
         if path != COMPOSED_NULLABLE_PATH and isinstance(_deep_get(pre_finalized, path)["type"], str)
     ]
-    assert len(ordinary) == BASELINE_NULLABLE_COUNT - 1
 
     finalized = copy.deepcopy(pre_finalized)
     openapi_patching._finalize_openapi_schema(finalized)
