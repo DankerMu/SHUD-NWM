@@ -8,13 +8,19 @@
 
 ## 2. Verification and deployment
 - [x] 2.1 Independent fixture review PASS and openspec validate isolate-display-cold-generation --strict --no-interactive.
-- [ ] 2.2 On node-27, new behavioral regressions fail against pre-change source and pass after; targeted prewarm, MVT scaling, lock, API-error and OpenAPI drift suites pass.
-- [ ] 2.3 Local ruff, strict OpenSpec and relevant OpenAPI/generated API-type checks pass.
-- [ ] 2.4 Verify live retention/disk capacity, then measure standalone full-cycle cold prewarm in a fresh empty namespace: counts/time/cache growth, no discharge failures/deadline skips, fresh files not selected for deletion. A later contention-recovery fill is not cold-budget proof.
-- [ ] 2.5 Node-27 same-worker live cold burst plus hot/catalog probes: positive cold successes, declared bounded 503 excess, hot/catalog 200, zero river/cache-hit/catalog 500s and zero QueuePool timeout; capture per-request cold max/p95 and actual workload.
-- [ ] 2.6 Node-27 complete-axis 4x playback after prewarm: actual browser/proxy-to-candidate or equivalent public HTTP traffic with explicit scope, predominantly cache hits, zero fast-surface 500s; record what was actually exercised.
+- [x] 2.2 On node-27, new behavioral regressions fail against pre-change source and pass after; targeted prewarm, MVT scaling, lock, API-error and OpenAPI drift suites pass.
+- [x] 2.3 Local ruff, strict OpenSpec and relevant OpenAPI/generated API-type checks pass.
+- [x] 2.4 Verify live retention/disk capacity, then measure standalone full-cycle cold prewarm in a fresh empty namespace: counts/time/cache growth, no discharge failures/deadline skips, fresh files not selected for deletion. A later contention-recovery fill is not cold-budget proof.
+- [x] 2.5 Node-27 same-worker live cold burst plus hot/catalog probes: positive cold successes, declared bounded 503 excess, hot/catalog 200, zero river/cache-hit/catalog 500s and zero QueuePool timeout; capture per-request cold max/p95 and actual workload.
+- [x] 2.6 Node-27 complete-axis 4x playback after prewarm: actual browser/proxy-to-candidate or equivalent public HTTP traffic with explicit scope, predominantly cache hits, zero fast-surface 500s; record what was actually exercised.
 - [ ] 2.7 In the same deployment window apply code/cold cap and display-role timeout/parallel ceiling, with before/after capacity, role settings, EXPLAIN and production C1-C4 live receipt; preserve exact rollback state.
 - [ ] 2.8 Publish receipt with A keep/change decisions and pre/post failure/latency comparison, all #2346 body/comment acceptance items mapped; cross-review and CI must be clean before merge.
+
+## Deployment hold (2026-09-17)
+
+The reviewed joint candidate was applied on node-27, then formal public C4 produced `FAIL / JOB_LOG_MISSING / ops`, the existing #2420 blocker. Exact code/env/role/frontend rollback was executed and independently checked healthy. The user explicitly selected **“保持回滚，等待 #2420”**, not a scoped waiver. PR #2450 stays draft/unmerged; #2121-A and #2346 step two remain one held deployment batch. Tasks 2.7 and 2.8 intentionally remain unchecked until #2420 is resolved and joint acceptance is rerun.
+
+Evidence: `docs/runbooks/receipts/2026-09-17-issue2121-2346-joint.md`. Source round1 (three seats) is clean at `c9891c14`; this does not claim C4 acceptance or final-head merge-gate completion. Candidate tests reported 1258 passed; standalone full-cycle cold took 189.693s; same-worker fast probes had zero500/QueuePool timeout; China-framed 4x browser playback hit223/223 and222/222. Preserve the recorded failed attempts and rollback, not just successful samples.
 
 ## Evidence Floor and oracle integrity
 Baseline receipt already committed at af61cccc after B merge d3d09d9be: 183/183 misses, 18.771s, p95 2.494663s, max 3.124972s, no failures/skips. EXPLAIN GFS z4/12/6 at that cycle: 2032.815ms, no parallel nodes (session timeout 30s only; role unchanged). Full-axis costs and same-worker isolation are NOT inferred from that baseline.
