@@ -216,9 +216,14 @@ clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同
 自愈，故保持 rc 不变——**有记录、不告警**（`scripts/node27_autopipe_cron.sh:244` 每 tick
 把整份汇总 JSON 写进 `$LOG`，`:245` 只在失败时另加一行）。发现失败是**另一种**终态，
 按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为
-`nhms.node27-mvt-prewarm.v2`，含 `requests_total`（只计预热请求，不含发现请求）、
+`nhms.node27-mvt-prewarm.v3`，含 `requests_total`（只计预热请求，不含发现请求）、
 `elapsed_seconds`、`lead_hours`、`workers`（**实际生效**的并发数），以及每源的 `valid_times_available`（目录发布了多少个
 时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
+每源另有 `discharge_requests` / `discharge_ok` / `discharge_failed`：只计**实际发出**的流量瓦片，
+2xx 进 `discharge_ok`，HTTP 非 2xx 与 transport 异常进 `discharge_failed`，恒等
+`discharge_requests == discharge_ok + discharge_failed`。未发出的请求（deadline skip、源无周期、发现失败）
+不进三个桶；该源一条流量瓦片都没发出时三个桶才都是 0，已经发出的结果照常计数。`failures[]` 仍截前 20 条作分类样本，
+完整流量瓦片失败数以 `discharge_failed` 为准（不含 PNG），不从截断样本反推。
 job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
 deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
 由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py::tile_generation_lock`；唯一调用点
