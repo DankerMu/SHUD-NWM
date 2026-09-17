@@ -1,60 +1,52 @@
 ## ADDED Requirements
 
-### Requirement: Forcing submission ambiguity preserves durable authority
-The orchestrator SHALL durably record complete forcing submission identity before a Gateway call and SHALL retain ambiguous acceptance without automatic retry, permanent failure or proven-absence claims.
+### Requirement: New forcing attempts preserve unresolved acceptance
+The orchestrator SHALL persist sufficient attempt/member identity before Gateway entry and SHALL distinguish unresolved acceptance from proven rejection, permanent failure and proven absence.
 
-#### Scenario: Accepted request has an unverifiable response
-- **WHEN** a forcing array POST crosses the Gateway boundary and returns HTTP502 SLURM_PARSE_ERROR, transport failure or invalid success identity
-- **THEN** the row/event/result retain submit_result_ambiguous, empty Slurm binding, original error and audited identity, and scheduler evidence reports unknown_after_attempt with slurm_submit_proven_absent false
-- **AND** no later submission is authorized merely by the missing ID or a process restart
+#### Scenario: Gateway crossed but response unverifiable
+- **WHEN** a new forcing POST returns HTTP502 SLURM_PARSE_ERROR, transport failure or invalid success identity after entering the Gateway
+- **THEN** durable state and stage/scheduler evidence SHALL preserve submission ambiguity, empty Slurm binding and origin error with unknown_after_attempt and no proven-absence claim
+- **AND** automatic failure retry SHALL NOT submit the attempt again
 
-#### Scenario: Proven pre-acceptance rejection
-- **WHEN** the Gateway proves policy or validation rejection before acceptance
-- **THEN** the existing rejected semantics apply rather than invented ambiguity
+#### Scenario: Explicit pre-acceptance rejection
+- **WHEN** the Gateway proves a pre-acceptance policy or validation rejection
+- **THEN** existing rejected semantics SHALL remain applicable
 
-### Requirement: Ambiguous forcing fences intersecting cohort identities
-The scheduler SHALL block new forcing execution for unresolved intersecting source/cycle/model members independently of stage-derived cohort run keys.
+### Requirement: Unresolved forcing prevents overlapping submission across cohort keys
+The scheduler SHALL atomically check and reserve forcing member authority by source/cycle/model overlap independently of stage-derived cohort run keys.
 
-#### Scenario: Convert cohort becomes forcing cohort
-- **WHEN** a subsequent pass derives forcing_cohort instead of convert_cohort for the same or overlapping members while prior forcing acceptance is unresolved
-- **THEN** it SHALL defer without sbatch and retain the prior authority reference
-- **AND** unrelated source/cycle/member work remains eligible
+#### Scenario: Restart with renamed or overlapping cohort
+- **WHEN** an unresolved new convert_cohort forcing attempt exists and a later/restarted pass derives forcing_cohort with identical, reordered, subset or overlapping members
+- **THEN** no second forcing submission SHALL occur for intersecting members
+- **AND** unrelated source/cycle/model work SHALL remain eligible
 
-### Requirement: Completed forcing adoption validates identity and real outputs
-An operator-only dry-run-first adoption command SHALL require explicit authorization, exact attempt/revision, uniquely provable Slurm and cohort identity, complete successful task accounting and verified actual forcing objects before any authority transition.
+#### Scenario: Concurrent overlapping submissions
+- **WHEN** two concurrent passes try to reserve intersecting forcing members
+- **THEN** at most one SHALL be admitted to Gateway submission
 
-#### Scenario: Unsuperseded incident fixture has complete proof
-- **WHEN** all expected members and task mappings, source/cycle/stage/job_type/owner/account/comment/attempt, accounting and actual package checks pass for one unsuperseded completed array
-- **THEN** authorized apply SHALL atomically bind and project complete forcing evidence with an audit event preserving the original failure
-- **AND** normal scheduler continuation SHALL enter forecast without submitting a new forcing array
+### Requirement: Authoritative resolution permits normal stage continuation
+The existing lifecycle SHALL resolve the new forcing attempt using trustworthy unique task identity/status/accounting and normal output validation rather than leaving every ambiguity permanently fenced.
 
-#### Scenario: Legacy identity cannot be proven
-- **WHEN** a legacy failed/null-id record lacks independently auditable identity or provenance
-- **THEN** adoption SHALL refuse diagnostically with zero authority writes and zero Slurm mutations
+#### Scenario: Original execution is confirmed complete
+- **WHEN** the accepted original attempt is uniquely bound and its forcing completion/witness checks pass
+- **THEN** the next normal orchestration SHALL continue to forecast without submitting forcing again
 
-### Requirement: Adoption is race-safe and cannot replace newer authority
-Adoption SHALL compare current authority and competing attempts under existing journal locking and SHALL be idempotent for an already committed identical recovery.
+#### Scenario: Acceptance remains unproven
+- **WHEN** existing authority cannot prove a unique execution or nonacceptance
+- **THEN** the scheduler SHALL report unresolved/reconciling state without retry or skipping to forecast
+- **AND** only existing trustworthy rejection/absence proof SHALL allow retry, never empty output alone
 
-#### Scenario: Successful replacement already exists
-- **WHEN** a newer accepted/running/completed or published execution supersedes the target, including49174 after49309
-- **THEN** adoption SHALL refuse without rewriting existing authority or outputs
+### Requirement: Existing production and forecast contracts remain unchanged
+The fix SHALL preserve historical forecast identity/digest/reconciliation, #2439 phase semantics, strict forcing witnesses, successful legacy products and ordinary no-ambiguity forcing.
 
-#### Scenario: Same recovery repeats or races another writer
-- **WHEN** an identical committed adoption repeats
-- **THEN** it SHALL return the existing recovery without duplicate business events or execution
-- **WHEN** a competing writer changes revision, attempt or member authority before commit
-- **THEN** it SHALL refuse without partial authority projection
+#### Scenario: No unresolved new attempt
+- **WHEN** ordinary forcing has no conflicting unresolved authority
+- **THEN** it SHALL submit and continue normally
 
-### Requirement: Invalid evidence is a write-free refusal
-The command SHALL reject missing/conflicting/extra/duplicate task identity, incomplete accounting, invalid or changed objects, unsafe paths and exceeded evidence budgets.
+#### Scenario: Sparse historical failed row has successful replacement
+- **WHEN** a historical permanent/null-id forcing row lacks new identity fields and already has successful later execution, as49174/49309
+- **THEN** the fix SHALL NOT reinterpret it into a new global or cycle-wide blocking authority or modify its history/products
 
-#### Scenario: One member is invalid
-- **WHEN** one member in an otherwise complete cohort fails identity or object integrity validation
-- **THEN** the entire adoption SHALL refuse, preserve all previous journal authority and submit nothing
-
-### Requirement: Forecast and pre-forecast boundary behavior remains unchanged
-The change SHALL preserve historical forecast identity/digest validation, forecast reconciliation, strict warm-start and #2439 ordinary pre-forecast resume semantics.
-
-#### Scenario: Existing forecast and ordinary forcing resume
-- **WHEN** existing forecast reconciliation fixtures or a new ordinary pre-forecast resume with no prior ambiguous execution are evaluated
-- **THEN** their existing valid behavior and strict witness protections SHALL remain unchanged
+#### Scenario: Forecast reconciliation
+- **WHEN** existing forecast accepted-submit and strict warm-start tests run
+- **THEN** their prior outcomes and historical identity bytes SHALL be preserved
