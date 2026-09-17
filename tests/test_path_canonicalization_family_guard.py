@@ -58,7 +58,7 @@ as this function's whole reason for existing.  Delete ``strict=True`` from the
 :215 re-check and this guard stays GREEN, because :206 still satisfies
 ``any()``.  That is a STATED limit, not a silent gap: the alternative pin
 ("this member's strict call count must not decrease") is a member-list-shaped
-assertion, which ADR 0009 "权衡" and design D3 reject for the reasons recorded
+assertion, which ADR 0009 "权衡" / "守卫" rejects for the reasons recorded
 under the violator-set paragraph below.  Losing a second strict call inside an
 already-strict member is a design-review question, like the missing-dereference
 case at the end of this docstring.
@@ -482,7 +482,7 @@ def test_every_realpath_site_resolves_strictly_or_is_a_named_exemption() -> None
       ``services/orchestrator/scheduler_config/db_free.py:215`` leaves this test
       green, because the same function's strict call at :206 satisfies
       ``any()``.  The module docstring records why the member-list-shaped pin
-      that would catch it is rejected (ADR 0009 "权衡", design D3);
+      that would catch it is rejected (ADR 0009 "守卫", 断言二);
     * an exemption that has rotted -- its function was renamed, moved or
       deleted, so the entry exempts nothing and the name misleads the next
       reader -- it shows up as unresolved;
