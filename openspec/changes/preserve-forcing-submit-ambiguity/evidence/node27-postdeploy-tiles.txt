@@ -1,0 +1,47 @@
+OBSERVED 2026-09-17T07:35:57.846166+00:00
+ifs fcst_ifs_2026091612_dg_9ccb261a39d51c24f4de9173fb4461b6 2026-09-16T12:00:00Z HTTP 200 BYTES 244122
+INFO: Open of `/home/nwm/tmp/2447-tiles-q4cx_7v2/tile.pbf'
+      using driver `MVT' successful.
+
+Layer name: hydro
+Geometry: Line String
+Feature Count: 1616
+Extent: (718.000000, 3555.000000) - (1009.000000, 3776.000000)
+Layer SRS WKT:
+(unknown)
+mvt_id: Integer64 (0.0)
+feature_id: String (0.0)
+segment_id: String (0.0)
+river_segment_id: String (0.0)
+river_network_version_id: String (0.0)
+basin_version_id: String (0.0)
+value: Real (0.0)
+unit: String (0.0)
+quality_flag: String (0.0)
+run_id: String (0.0)
+variable: String (0.0)
+valid_time: String (0.0)
+ 
+gfs fcst_gfs_2026091612_dg_0883c7e9c1006c6fd347df500315e9df 2026-09-16T12:00:00Z HTTP 200 BYTES 244130
+INFO: Open of `/home/nwm/tmp/2447-tiles-23vetd6n/tile.pbf'
+      using driver `MVT' successful.
+
+Layer name: hydro
+Geometry: Line String
+Feature Count: 1616
+Extent: (718.000000, 3555.000000) - (1009.000000, 3776.000000)
+Layer SRS WKT:
+(unknown)
+mvt_id: Integer64 (0.0)
+feature_id: String (0.0)
+segment_id: String (0.0)
+river_segment_id: String (0.0)
+river_network_version_id: String (0.0)
+basin_version_id: String (0.0)
+value: Real (0.0)
+unit: String (0.0)
+quality_flag: String (0.0)
+run_id: String (0.0)
+variable: String (0.0)
+valid_time: String (0.0)
+ 

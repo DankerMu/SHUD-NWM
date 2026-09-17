@@ -129,3 +129,37 @@ change when archived). Key files: `deployment-patch.txt`, `node27-green.txt`,
 `node27-gfs-publication-monitor.txt`, `node22-ifs-acceptance-probe.txt`,
 `node22-ifs-forcing-completion.txt`, `node22-recovered-stage-identities.txt`,
 `node27-dual-source-latest.txt`, `node27-dual-source-decoded-tiles.txt`.
+
+## Follow-up #2447 deployment
+
+At 2026-09-17T07:30:39Z, deployed source-only commit
+`6031eb829b1ee801ee9334976f87a4b147829d8e` over `e7bd8160`.
+The old scheduler pass drained naturally; the user's Slurm queue was empty.
+The source patch-id matched mainline `eee47464e9f2e2f868c4380c53950a6c506d9dd8`
+(`f28c301716e0fd3e32814f9b1e2349acc54278a9`). Dependency/pin file hashes
+and the active Python3.12.7 environment remained unchanged.
+The timer was restored active/enabled immediately; no journal/circuit edits,
+historical adoption, environment rebuild or node-22 DB access occurred.
+A redundant GitHub fetch failed because the local proxy listener was unavailable;
+deployment used the exact commit already fetched from GitHub for tree validation.
+
+Mainline node-27 verification:3499 passed,1 skipped; the actual old-baseline
+runtime with issue-only test overlay:3364 passed,1 skipped. Final native
+re-review was CLEAN. The reordered-reclaim regression was red before the fix
+and green after it; allowed retry now persists the task order actually submitted.
+
+Deployed bounded pass `scheduler_2026091707_e6f2d1d1d36e` ran
+07:30:40Z–07:38:50Z and completed normally with `planning_only`/`planned`.
+It did not submit a new forcing array; this is a scheduler deployment smoke,
+not a live lost-response recovery. The actual deployed Python/controller query
+at07:34:06Z held a nonexistent synthetic identity as unresolved, never absence.
+Positive original-array recovery and forecast continuation are covered by
+node-27 real-client/file-journal regressions, not claimed as a production
+fault injection. No completed production cycle was forced to rerun for testing.
+
+At07:33:32Z, both qhh sources remained ready/published for2026-09-16T12Z,
+with71/71stations and1633/1633segments. At07:35:57Z their exact-run q_down
+tiles returned HTTP200 and decoded with GDAL to1616features each. These
+products were generated before this deployment; they prove retained readable
+publication, not a new #2447 forcing execution or global QC success.
+Raw outputs are under `preserve-forcing-submit-ambiguity/evidence/`.

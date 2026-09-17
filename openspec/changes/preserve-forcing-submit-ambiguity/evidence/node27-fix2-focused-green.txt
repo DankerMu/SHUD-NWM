@@ -1,0 +1,10 @@
+...................                                                      [100%]
+19 passed in 3.88s
+
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              feat/issue-2447-forcing-submit-recovery -> FETCH_HEAD
+   c34ca08b..eee47464  feat/issue-2447-forcing-submit-recovery -> origin/feat/issue-2447-forcing-submit-recovery
+Previous HEAD position was c34ca08b fix(orchestrator): use typed authority for immediate forcing reconciliation
+HEAD is now at eee47464 fix(orchestrator): preserve current forcing task map across reclaim
+
+exit=0

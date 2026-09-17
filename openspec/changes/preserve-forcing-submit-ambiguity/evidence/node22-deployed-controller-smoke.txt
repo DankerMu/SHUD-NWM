@@ -1,0 +1,5 @@
+{"python": "3.12.7", "observed_at": "2026-09-17T07:34:06.521022+00:00", "scope": "real controller query only; synthetic non-submitted identity; no repository or Slurm mutation"}
+{"result": "unresolved_without_controller_identity", "reason_class": "comment_accounting_unproven", "message": "controller did not prove forcing identity"}
+accounting does not store job comments: AccountingStoreFlags lacks job_comment
+
+exit=0
