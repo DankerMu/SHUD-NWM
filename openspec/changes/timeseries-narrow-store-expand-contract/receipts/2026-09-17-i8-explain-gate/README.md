@@ -39,8 +39,8 @@ Three trees are in play and the receipt distinguishes them throughout:
 is what production will do **after the next `git pull --ff-only` in the live tree**,
 not what it does now.
 
-Pinned shape (the run-bound `:758` shape, deliberately **not** `issue_time=latest` —
-see §6):
+Pinned shape (the run-bound shape, `packages/common/forecast_store.py:927` → `:950`,
+deliberately **not** `issue_time=latest` — see §6):
 
 ```
 forecast_series(basin_version_id=…, segment_id=…, river_network_version_id=…,
@@ -85,12 +85,25 @@ The spec bound is three-part (`specs/timeseries-narrow-store/spec.md`):
 `river_segment_key` in an `Index Cond`, `Rows Removed by Filter / rows returned ≤ 10`,
 `shared hit ≤ 5000`, plus SQL warm P95 ≤ 300 ms.
 
-| tree | shared hit ≤ 5000 | ratio ≤ 10 | `river_segment_key` in Index Cond |
+| tree | shared hit ≤ 5000 | filter ratio ≤ 10 | `river_segment_key` in Index Cond |
 |---|---|---|---|
-| master `fd3d4869a` | 2 749 ✓ | **1143.69 ✗** | **✗** (one chunk) |
+| master `fd3d4869a` | 2 749 ✓ | **16 008 ✗** | **✗** (one chunk) |
 | base `b40d0015a` | **14 875 ✗** | 0.524 ✓ | ✓ |
 
 **No tree passes all three.** `2749 < 5000` on master must not be read as a pass.
+
+The ratio is **per plan node**, which is how the D11 gate computes it
+(`packages/common/node27_pgdata_workload_plan.py:508-515`, `filter_ratio_limit = 10`,
+refuse code `PLAN_FILTER_RATIO`): on the offending node, `192 096 / 12 = 16 008`.
+The whole-statement figure is a much milder `192 140 / 168 = 1143.69`; quoting the
+statement number understates the breach by 14×.
+
+Which gate does **not** catch it: `_segment_identity_bound` reads a node's `Filter` and
+`Index Cond` concatenated (`node27_pgdata_workload_plan.py:242` `_node_predicate_raw`),
+so the offending node satisfies it on the strength of its own
+`Filter: (river_segment_key = $5)`. Tightening that check from first-match-wins to
+"every node must bind" would still pass this plan; only requiring the segment parameter
+to land in the **`Index Cond`** would catch it.
 
 The whole failure is one plan node — `_hyper_9_175_chunk`, the newest narrow chunk
 (range 2026-09-23 → 2026-09-24):
@@ -103,15 +116,21 @@ The whole failure is one plan node — `_hyper_9_175_chunk`, the newest narrow c
 | `actual_rows` | 24 | 12 |
 | `Shared Hit Blocks` | 27 | **2 204** (81×) |
 
-`192 096 = 32 018 segments × 6 hourly steps` — the node now reads every segment of
-the run for that chunk's slice. Every **other** narrow chunk in the same plan
+`192 096 removed + 12 returned = 192 108 = 32 018 segments × 6 hourly steps` — the node
+now reads every segment of the run for that chunk's slice. Every **other** narrow chunk in the same plan
 (`_hyper_9_132/133/134/135/136/142/170`) correctly uses
 `NNN_river_timeseries_narrow_pkey` with `(run_key, river_segment_key, variable_e,
 valid_time)` in the `Index Cond` and `Rows Removed by Filter: 0`.
 
-Mechanism: #2417 pushed `run_key` into the fact scan, which made
-`…_river_ts_run_discovery_key_idx` **newly matchable** for this shape. On a chunk with
-no statistics the planner mis-costs it and takes it.
+Mechanism: #2417 added the `{run_pushdown}` slot to `_SEGMENT_ROWS_SOURCE_SQL`
+(`packages/common/forecast_store.py:29-56`; the string `run_pushdown` does not occur
+anywhere in `b40d0015a`). What it pushes is not `h.run_key` but
+`rt.run_key = (<scalar subquery on hydro_run.run_id>)` (`:73-77`), which the planner
+materialises as the InitPlan parameter `$7`. `river_ts_run_discovery_key_idx` leads on
+`run_key` and does **not** contain `river_segment_key`
+(`db/migrations/000059_river_timeseries_narrow_expand.sql:23-35`), so binding `run_key`
+makes that index newly matchable and, when chosen, structurally evicts the segment key
+from the `Index Cond`. On a chunk with no statistics the planner mis-costs it and takes it.
 
 Correlation, **not proven**: `_hyper_9_175_chunk` is the only one of the three newest
 chunks that has never been analyzed.
@@ -124,8 +143,23 @@ chunks that has never been analyzed.
 ```
 
 All three carry all three indexes, so it is not a missing index. `ANALYZE` was **not**
-run (production, read-only role), so the causal link is unverified here. It is filed
-separately; the proof belongs on a throwaway database, not on the live primary.
+run (production, read-only role), so the causal link is unverified here. Filed as
+**#2451**; the proof belongs on a throwaway database, not on the live primary.
+
+Two things #2451 established from the code that this receipt could not:
+
+- The repo already has the mechanism that should have analyzed this chunk —
+  `scripts/node27_autopipeline.py:1629` `_analyze_frontier_chunks`, whose candidate SQL
+  (`:1455-1466`) covers `hydro.river_timeseries` under `STATS_GUARD_MIN_MODS = 10_000`
+  and `STATS_GUARD_MAX_CHUNKS = 3` (`:108-109`). With 5.4M modifications
+  `_hyper_9_175_chunk` is a legitimate candidate that was never analyzed, so either the
+  three-chunk budget is outrun by churn or the guard failed silently — `:1638-1645`
+  states both failure levels leave the tick's return code unchanged.
+- The `issue_time=latest` path binds `run_key` too, as
+  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`forecast_store.py:516-524`, `:859-866`,
+  `:82-85`). A `ScalarArrayOpExpr` can match a btree leading column, so the discovery
+  index is an option there as well. **Not measured** — the predicate shape differs and
+  this receipt does not cover the `latest` path.
 
 ### The narrow-**compressed** leg, by contrast, passes cleanly
 
@@ -200,7 +234,8 @@ reproducible on demand** — it was taken in the window it existed.
 2. **The `forecast-series` warm P95 ≤ 500 ms bound names no request shape.** The spec
    says only "the node-27 local single-source `forecast-series` warm P95 ≤ 500 ms".
    The production default is `issue_time=latest` (`apps/api/routes/forecast.py:47`),
-   which costs 650 589 shared blocks end to end because of #2424 and would fail. This
+   which costs 650 589 shared blocks end to end because of #2424 and would fail (that
+   figure was measured on `basins_wj_vbasins` for #2417, not on SHJ-NJ). This
    receipt measures the **run-bound** shape, which is what the D11 gate measures, and
    records the ambiguity rather than resolving it. The API-level P95 is **not** in this
    receipt; it cannot be measured against master until the live tree is updated (§1).
