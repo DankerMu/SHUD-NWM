@@ -591,6 +591,8 @@ def _require_output_outside_root(output: str, verified_root: Path) -> Path:
             OUTPUT_UNEXPANDABLE_MESSAGE,
             {"error_type": "UnexpandableOutputHome", "output": str(output)},
         ) from error
+    # ADR 0009 clause 2, on the premise stated in the docstring above (single operator
+    # CLI, no concurrent writer); clause 2 quantifies over inputs only.
     resolved = Path(os.path.realpath(target))
     root_real = Path(os.path.realpath(verified_root))
     if resolved == root_real or root_real in resolved.parents:

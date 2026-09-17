@@ -112,8 +112,16 @@ kernel dereference — the preflight `lstat` — before any verdict derived from
 is committed. The product does differ between CPython 3.12 and 3.13+ where the
 loop sits behind a symlinked parent, but that difference is neutral at the
 dereference: the condition that makes the two spellings differ is precisely a
-loop surviving in the parent chain, so `lstat` reports `ELOOP` for both. That
-neutrality is measured on 3.11.14 and 3.13.3, not argued. A cross-interpreter
+loop surviving in the parent chain, so `lstat` reports `ELOOP` for both. The
+neutrality is backed by `tests/test_preserve_final_component_loop_spelling.py`,
+which builds both spellings and asserts `ELOOP` for each on the pinned
+interpreter; the 3.13 spelling it builds is synthesized from the folding rule
+rather than produced by a 3.13 runtime, so the 3.13 half of this claim rests on
+that construction and is tracked with the rest of the cross-interpreter question
+by issue #2453. The neutrality claim SHALL NOT be widened beyond a parent-chain
+loop: for a `<missing>/../<loop>` input the two spellings do not agree at the
+dereference — the raw spelling faults `ENOENT` and the folded one `ELOOP` — and
+the same test pins that boundary so the wording cannot drift outward. A cross-interpreter
 difference in the refusal's blocker code and in the emitted evidence payload
 does exist on this preflight leg; a counterfactual probe attributes it to that
 leg's own `Path.resolve(strict=False)` rather than to this arm, and it is

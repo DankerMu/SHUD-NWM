@@ -33,19 +33,19 @@
 issue 的前提是「三套相反教条并存，从未在家族层裁定过一次」。**这个前提是错的。**
 裁定早就做过，论证也写得很清楚，只是写进了某个具体 change 的归档 design 里：
 
-> `openspec/changes/archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:42`（#1401）
+> `openspec/changes/archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:41-43`（#1401）
 > 「artifact-guard lane 的残留后果面是 verdict 路由口味；本 lane 是 manifest fail-open
 > ——**后果面不同，裁决不同**。」
 
 另一半在更早的归档里：
 
-> `openspec/changes/archive/2026-08-10-symlink-loop-errno-detection/design.md:216-217`（#1332）
+> `openspec/changes/archive/2026-08-10-symlink-loop-errno-detection/design.md:216-218`（#1332）
 > 「…and nothing unsafe is admitted (dangling entries fail `is_dir()`/existence checks downstream)」
 
 即：**立场 B 的正当性从来不是「环路无所谓」，而是「下游会挡」**；#1401 不是推翻它，
 是发现自己那条腿**没有下游**，于是同一条原则给出相反结论。三个立场是一条原则的三个实例。
 
-### 裁定（唯一口径）
+### 裁定（唯一口径）——家族层第一次作出
 
 > **被裁决的那条路径，只要在任何据其归一化产物作出的判断被提交之前，
 > 会被对内核解引用一次，ENOENT 非严格兜底就可以容忍；否则必须 loop-filtered 复查。**
@@ -62,9 +62,9 @@ fail-open 形状**有且只有一个**：*判据建立在归一化字符串上�
 1. **下游解引用。** 被裁决的路径在任何据其归一化产物作出的判断被提交之前，
    被探测（`exists()` / `lstat` / `open`），且那里的失败会改变裁决。
    探测点可以是原值而非归一化产物——内核解析使二者在探测能成功的输入上等价
-   （`scheduler_preflight.py:627` 探 `path`、`:628` 用 `resolved`；
+   （`scheduler_preflight.py:634` 探 `path`、`:635` 用 `resolved`；
    `scheduler_state_failure.py:1401` 探 `path`、包含判定用 `_realpath_or_none` 产物）。
-   探测确实改变裁决：`scheduler_preflight.py:645-655` 在 `visible=False` 时返回
+   探测确实改变裁决：`scheduler_preflight.py` 的 `SLURM_PREFLIGHT_<FIELD>_NOT_VISIBLE` 分支在 `visible=False` 时返回
    `SLURM_PREFLIGHT_<FIELD>_NOT_VISIBLE` blocker。
 2. **可证重合。** 归一化产物与后续动作实际作用的路径，在**任何该动作能够成功的输入**上重合。
    **该从句只对静态输入量化，不覆盖 check-then-act 竞态**（见 D5.2），援引它必须写明前提。
@@ -111,9 +111,9 @@ handler 内非 strict 兜底），它：
 
 **但权威是按「生产者」取键的，而判据问的是「消费者」**（fixture 评审 F5）。
 经 helper 归一化的消费者永远进不了这个集合，今天已有三个：
-`db_free.py:285 _db_free_path_check`（经 `_db_free_loop_filtered_realpath`）、
-`scheduler_state_failure.py:1561 _local_artifact_path_is_allowed` 与
-`:1612 _local_artifact_allowed_roots`（经 `_realpath_or_none`）。
+`db_free.py::_db_free_path_check`（经 `_db_free_loop_filtered_realpath`）、
+`scheduler_state_failure.py::_local_artifact_path_is_allowed` 与
+`::_local_artifact_allowed_roots`（经 `_realpath_or_none`）。
 故本 design 明确：**权威集合是守卫的嗅探边界，不是裁定的覆盖边界**；
 ADR 必须把 wrapper 的消费者显式列出。
 
@@ -126,16 +126,16 @@ ADR 必须把 wrapper 的消费者显式列出。
 | `retry.py::_local_runtime_root_safety` | A 已复查 | — | #1401：manifest 腿无下游 |
 | `scheduler_config/db_free.py::_db_free_loop_filtered_realpath` | A 已复查 | — | #1626 |
 | `scheduler_config/db_free.py::_db_free_allowed_roots_and_blockers` | B | 1 | 下游 blocker 阶梯 |
-| `scheduler_config/db_free.py::_db_free_path_identity` | B | 1 | **守卫白名单第 3 项**（无 strict 臂）。两个操作数各自以 `canonical_root_blocker is None` / `raw_root_blocker is None` 为前提（`scheduler_config/config.py:792`/`:806`/`:818`），而那些 blocker 来自 `_db_free_path_check` 的真探针（`db_free.py:306` `parent.lstat()`、`:321` `exists()`、`:319`/`:326` `is_symlink()/is_dir()`） |
+| `scheduler_config/db_free.py::_db_free_path_identity` | B | 1 | **守卫白名单第 3 项**（无 strict 臂）。**config 提供的那一侧**操作数以 `canonical_root_blocker is None` / `raw_root_blocker is None` 为前提（`scheduler_config/config.py:792`/`:806`/`:818`），blocker 来自 `_db_free_path_check` 的真探针（`_db_free_path_check` 内的 `parent.lstat()`、`path.exists()`、`is_symlink()/is_dir()` 四处真探针）。另一侧是模块常量（`config.py:788-790` 无门调用），**从未被探测**——交叉审查证伪了初稿「两操作数均以真探针为前提」的写法 |
 | `scheduler_config/path_modes.py::_resolve_config_path_for_mode` | B | 1 | 8 个 root 字段在使用点被 `open()`/`lstat()` 解引用（D6） |
-| `scheduler_preflight.py::_preflight_allowed_roots` | B | **3** | 仅作包含基底；被判定路径在 `:627` 被 `exists()/is_dir()` 探 |
-| `scheduler_preflight.py::_storage_root_check` | B | 1 | `:627` `.exists() and .is_dir()`，`:645-655` 据此出 blocker |
+| `scheduler_preflight.py::_preflight_allowed_roots` | B | **3** | 仅作包含基底；被判定路径在 `:634` 被 `exists()/is_dir()` 探 |
+| `scheduler_preflight.py::_storage_root_check` | B | 1 | `:634` `.exists() and .is_dir()`，`:651-661` 据此出 blocker |
 | `scheduler_runtime_roots.py::_scheduler_allowed_roots_and_blockers` | B | **3** | 同 `_preflight_allowed_roots` |
 | `scheduler_runtime_roots.py::_canonical_parent` | B（裸 `except OSError`） | 1 | 产物进 preflight 路径，`:304` `lstat` |
 | `scheduler_runtime_roots.py::_canonical_path` | B（裸 `except OSError`） | 1 | 同上 |
-| `scheduler_runtime_roots.py::_optional_config_path` | B（裸 `except OSError`） | 1 | 同上 |
+| `scheduler_runtime_roots.py::_optional_config_path` | B（裸 `except OSError`） | **3** | 产物经 `scheduler_config/config.py::_optional_config_path_for_mode` 变成 `allowed_storage_roots`，**只作包含基底**、自身从不被探；被判定的那条路径才被解引用。初稿写从句 1、理由「同上」，指的是 `_canonical_parent` 产物那次 `lstat`——而 `_scheduler_root_check` lstat 的是 `path`，**不是 `allowed_roots`**，是另一个值。实现任务实测后拒绝写这条已被自己证伪的理由，编排者采纳其定性 |
 | `scheduler_runtime_roots.py::_require_safe_directory_final_component` | B | 1 | 构造期硬守卫，产物随即被 open |
-| `scheduler_state_failure.py::_realpath_or_none` | C 自述残留 | 1 | **实核为 B**：`:1401` `path.exists()`；`job-retry-mechanism/spec.md:1585-1589` 已写成 SHALL |
+| `scheduler_state_failure.py::_realpath_or_none` | C（**该 lane 被他处描述为残留，非本函数自述**） | 1 | **实核为 B**：`:1401` `path.exists()`；`job-retry-mechanism/spec.md:1585-1589` 已写成 SHALL |
 | `basins_discovery.py::_safe_resolve_under_root` | B | 1 | 下游 containment / `relative_to` |
 | `basins_package_source_io.py::_resolve_package_path` | B | 1 | 其余 errno 抛 `BASINS_PACKAGE_PATH_UNRESOLVABLE` |
 | `journal_scope_census.py::_require_output_outside_root` | B | **2** | **守卫白名单第 1 项**（无 strict 臂）。D5.2；非 ENOENT-兜底形状，issue 表未收 |
@@ -161,7 +161,7 @@ ADR 必须把 wrapper 的消费者显式列出。
 |---|---|---|
 | `journal_scope_census::_require_output_outside_root` | 2 | D5.2 |
 | `shud_preflight::check_shud_executable` | 1 | 判 stub 后该可执行文件真的被执行 |
-| `scheduler_config/db_free.py::_db_free_path_identity` | 1 | 只比较自身产物，两操作数均以真探针出的 blocker 为前提；`:164-167` 自述无拒绝通道 |
+| `scheduler_config/db_free.py::_db_free_path_identity` | 1 | 只比较自身产物；config 侧操作数以真探针出的 blocker 为前提，另一侧是 `config.py:788-790` 无门传入的模块常量（从未被探测，风险低但断言须准）；`:174-177` 自述无拒绝通道 |
 
 白名单三项以外的任何增长都要过评审。守卫抓得住「有人加了第 20 个站点、只写非严格形」，
 **抓不住**「作者忘了下游裁决」——后者是设计评审的事，D1 三条从句就是那份评审清单。
@@ -170,7 +170,7 @@ ADR 必须把 wrapper 的消费者显式列出。
 ## D4 —— errno 分流是正交问题，不在本裁定内
 
 issue 把「裸 `except OSError` vs errno 分流」和「兜底要不要复查」混在一处。它们正交。
-`scheduler_runtime_roots.py:653-661` 的 D2 反论（「errno 分流一无所获」）只回答前者。
+`scheduler_runtime_roots.py:681-688` 的 D2 反论（「errno 分流一无所获」）只回答前者。
 
 **初稿把裸写法三行的「定性」指向本节，而本节自认与对齐问题正交，等于没回答**
 （fixture 评审 F3）。定性已移入 D2 表（三行均依从句 1，证据为 `:304` 的 `lstat`）。
@@ -185,13 +185,14 @@ issue 把「裸 `except OSError` vs errno 分流」和「兜底要不要复查�
    不下判断，立单路由。（初稿称 `production_closure` 占 94，评审复算为 59 对 / 98 调用点；
    该数字不承重，已删除而非改写。）
 2. `journal_scope_census::_require_output_outside_root` 的**判据/动作分离**
-   （`:578` 判 `realpath(target)`、`:617` 写 `target`）：静态输入上无逃逸，
+   （在 `_require_output_outside_root` 内判 `os.path.realpath(target)`，
+   而写入发生在 `census_job_id_scope` 返回之后对同一 `target` 的落盘处）：静态输入上无逃逸，
    fixture 评审逐类试破未果（悬空 symlink、中间组件缺失 + `..`、中间组件 ELOOP、
    父目录含 symlink + 末组件缺失，四类全部方向正确或响亮失败）。
-   **但从句 2 只对输入量化，对 TOCTOU 无声**：`:611` 判定与 `:617` 写入之间隔着
+   **但从句 2 只对输入量化，对 TOCTOU 无声**：判定与写入之间隔着
    `census_job_id_scope`，而该文件自述该 census 在 node-22 上「takes minutes」。
    援引从句 2 必须写明前提「单次操作者 CLI、无并发写者」。ADR 已写明。
-3. 同一函数 `:576` 的 `os.path.realpath(target)` 无保护：`--output` 为相对路径且 cwd 已删除
+3. 同一函数内那次 `os.path.realpath(target)` 无保护：`--output` 为相对路径且 cwd 已删除
    → `FileNotFoundError`；含内嵌 NUL → `ValueError`。两者都会在一个自述
    「1 on a typed failure」的命令上留 traceback。既存问题，本 change 零运行时改动，立单。
 
@@ -208,7 +209,7 @@ issue 把「裸 `except OSError` vs errno 分流」和「兜底要不要复查�
   充要条件就是父段仍有环存活，故 `lstat` 两边都得 `ELOOP`、同映射为 `UNSAFE_PATH`。
   **该臂无残留。** 该被证伪的句子一度被我写进 live spec，已撤回。
 - **8 个核心 root 字段经 `_resolve_config_path_for_mode`**：全部有内核级探针
-  （`scheduler_preflight.py:627` 的 `.exists()/.is_dir()`，或 `scheduler_runtime_roots.py:304`
+  （`scheduler_preflight.py:634` 的 `.exists()/.is_dir()`，或 `scheduler_runtime_roots.py:304`
   的 `lstat`），但每一条都挂在默认关闭的开关上（`slurm_execution_enabled` /
   `require_runtime_roots`）。这**不**构成错位：`lock_path` 与 `evidence_dir` 在使用点真的落到内核
   （`scheduler_lease.py:252` `os.open`、`:271` `os.stat(follow_symlinks=False)`；
@@ -224,6 +225,12 @@ issue 把「裸 `except OSError` vs errno 分流」和「兜底要不要复查�
 | 权威 19 成员、形状无关、取键法闭合 | 实现任务交付的 AST 扫描 + 守卫测试；fixture 评审独立复算逐行一致 |
 | 零错位站点 | D2 表逐行从句归属 + file:line；D6 的两处内核解引用 |
 | 立场 C 实为 B | `scheduler_state_failure.py:1401` + `job-retry-mechanism/spec.md:1585-1589` |
-| 原则早已成文 | `archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:42`、`archive/2026-08-10-symlink-loop-errno-detection/design.md:216-217` |
+| 原则早已成文 | `archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:41-43`、`archive/2026-08-10-symlink-loop-errno-detection/design.md:216-218` |
 | 守卫今天为绿且能变红 | 实现任务须给出红证据：新增一个只写非严格 realpath 的桩函数 → 守卫失败；删桩 → 恢复绿 |
 | tracker 指针双边闭合 | A-2 的全仓 `#1627` grep 结果随 PR body 交付 |
+
+> **本节的行锚已全部改为符号锚。** 初稿写死的 `:576`/`:578`/`:611`/`:617` 四处，
+> 被本 commit 自己在 `journal_scope_census.py` 插入的 18 行 docstring 整体下移到
+> `:594`/`:596`/`:629`/`:635`——由交叉审查实测发现。这是 ADR 已知限制 1 教训 (b)
+> 「同文件内的行锚会被本次写入自己作废」的第五次复发，也是它第一次发生在
+> **专门警告这件事的那份文档自己的 fixture 里**。

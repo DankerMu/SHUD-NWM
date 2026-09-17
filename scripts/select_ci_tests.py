@@ -290,6 +290,37 @@ RIVER_SEGMENT_WRITE_SURFACE_ROOTS: tuple[str, ...] = (
     "scripts/**",
 )
 
+# #1627 / ADR 0009 (docs/adr/0009-path-canonicalization-dereference-doctrine.md):
+# the path-canonicalisation family guard. It AST-scans every Python file under
+# the four published trees for `(module, qualified function)` pairs that call
+# `os.path.realpath` and pins that each such member resolves strictly at least
+# once, unless it is a named exemption. A NEW canonicalisation site added
+# anywhere under those roots with only the non-strict call must red the MERGE
+# GATE, not the post-merge master run, so every path the scan reads must route
+# to it. Routed SUPPLEMENTALLY (set union only) in the shape #1656 established
+# and #2185 repeated: it does not set `matched`, does not participate in stop
+# rules, and cannot shadow the unknown-backend fallback or any other rule's
+# targets.
+PATH_CANONICALIZATION_FAMILY_GUARD_TEST = "tests/test_path_canonicalization_family_guard.py"
+
+# #1627: the four roots the family guard scans, mirroring its own module-level
+# `_SCAN_ROOTS` binding (tests/test_path_canonicalization_family_guard.py:95)
+# mapped to `<root>/**` globs. A selector meta-guard parses that binding out of
+# the guard's source and asserts it equals this set, so adding a fifth root to
+# the scan without wiring it here reddens that meta-guard by name.
+# `apps/**` and `packages/**` are deliberately at full width — the guard's
+# `_iter_python_sources` walks both directories whole, exactly as
+# RIVER_SEGMENT_WRITE_SURFACE_ROOTS above does.
+# TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS is not a precedent for narrowing them:
+# only ITS packages root is `packages/common/**`, because that is the width of
+# the scan it routes.
+PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
+    "services/**",
+    "workers/**",
+    "packages/**",
+    "apps/**",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -3928,6 +3959,19 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS):
             selected.add(RIVER_SEGMENT_WRITE_SURFACE_TEST)
+
+    # #1627 / ADR 0009: supplemental path-canonicalisation family routing, same
+    # shape as the two loops above. Every Python path under the four roots the
+    # family guard scans selects that guard IN ADDITION to its ordinary
+    # selection. Purely additive: no `matched`, no stop-rule participation, no
+    # effect on whether a path counts as known for the unknown-backend
+    # fallback. The root match is the only gate — the guard parses `*.py` under
+    # these roots regardless of the backend-prefix classification, so `apps/`
+    # outside `apps/api/` (not a backend prefix) is covered exactly as the
+    # guard reads it.
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS):
+            selected.add(PATH_CANONICALIZATION_FAMILY_GUARD_TEST)
 
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish

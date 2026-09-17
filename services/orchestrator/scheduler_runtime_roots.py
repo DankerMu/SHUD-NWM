@@ -494,6 +494,9 @@ def _scheduler_allowed_roots_and_blockers(config: Any) -> tuple[tuple[Path, ...]
     ``SCHEDULER_ROOT_ALLOWED_ROOTS_<REASON>`` blocker explaining why.
     """
 
+    # ADR 0009 clause 3: same posture as _preflight_allowed_roots -- these products are
+    # containment bases only and assert nothing about existence, while the path judged
+    # against them is dereferenced by _scheduler_root_check's lstat below.
     db_free_required = bool(getattr(config, "db_free_required", False))
     evidence_safe_paths = bool(db_free_required or getattr(config, "repair_missing_forcing", False))
     roots: list[Path] = []
@@ -567,6 +570,10 @@ def _canonical_parent(path: Path) -> Path:
     (design D1/D2 of #1423).
     """
 
+    # ADR 0009 clause 1: the product goes into the preflight path fields, which
+    # _scheduler_root_check dereferences with path.lstat() before any verdict, and
+    # _require_safe_directory_final_component lstats the same value it canonicalises
+    # here one line later.
     parent = path.parent
     try:
         return Path(os.path.realpath(parent, strict=True))
@@ -588,6 +595,14 @@ def _canonical_path(path: Path) -> Path:
     ENOENT inputs are unchanged (#1546).
     """
 
+    # ADR 0009 clause 1: same posture as _canonical_parent above, with a reachability
+    # note that is measured rather than assumed -- this helper is entered only through
+    # _resolve_optional_config_path / _optional_config_path_relative_to below, and
+    # those two have no caller today outside scheduler_candidate_runtime.py's
+    # compatibility forwarders (the production config lane goes through
+    # path_modes._resolve_config_path_for_mode instead). The clause therefore rests on
+    # the preflight dereference any such consumer reaches -- _scheduler_root_check's
+    # path.lstat() -- not on a traced production call site.
     try:
         return Path(os.path.realpath(path, strict=True))
     except OSError:
@@ -635,6 +650,19 @@ def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None
 
 
 def _optional_config_path(value: Path | str | None) -> Path | None:
+    # ADR 0009 clause 3: the only production consumer is scheduler_config/config.py:430,
+    # which turns this product into allowed_storage_roots -- a containment base that
+    # asserts nothing about existence and is never itself probed, while the path judged
+    # against it IS dereferenced first (_scheduler_root_check's path.lstat(),
+    # _storage_root_check's exists()/is_dir()).
+    #
+    # This diverges from the ADR 0009 census row for this function, which records
+    # clause 1 with the reason "同上" -- pointing at the lstat of _canonical_parent's
+    # product. That lstat is of a DIFFERENT value: _scheduler_root_check dereferences
+    # `path`, not `allowed_roots`. The traced downstream here is the same one
+    # _preflight_allowed_roots and _scheduler_allowed_roots_and_blockers carry, and both
+    # of those are censused as clause 3. Recorded as clause 3 because the marker has to
+    # state something true; reconciling the census row is a separate edit.
     if value in (None, ""):
         return None
     # A tilde whose home cannot be determined is kept verbatim rather than
@@ -795,6 +823,9 @@ def _symlink_loop_refusal(field_name: str, path: Path, attribution: str) -> Valu
 
 
 def _require_safe_directory_final_component(path: Path, workspace_root: Path, field_name: str) -> None:
+    # ADR 0009 clause 1: a construction-time hard guard whose non-strict product is
+    # handed straight to _require_under_workspace and _classify_resolved_directory_target,
+    # and the value it judges is opened/stat'ed right after, so a phantom faults there.
     # Parent-segment arm, same paradigm as _confined_path: a loop ABOVE the
     # final component must reach the lstat() verdict below on every CPython
     # instead of aborting here on <=3.12 (#1520).

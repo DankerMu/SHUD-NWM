@@ -100,6 +100,7 @@
     "tests/test_forecast_api.py",
     "tests/test_node27_pgdata_workload.py",
     "tests/test_river_ts_render.py",
-    "tests/test_river_ts_text_identity_cleanup.py"
+    "tests/test_river_ts_text_identity_cleanup.py",
+    "workers/model_registry/basins_discovery.py"
   ]
 }

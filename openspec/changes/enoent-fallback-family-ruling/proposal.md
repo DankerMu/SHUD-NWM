@@ -6,20 +6,23 @@ issue #1627 要求对「`strict realpath` → `ENOENT` → 非严格兜底」这
 理由是仓内并存三套都写了理由的相反立场（A 复查 / B 有意容忍 / C 记录在案残留），
 新站点作者无法从仓里读出该照哪套写，而该家族链已复发 9 次以上。
 
-勘察推翻了 issue 的前提。三个立场**不是**三套教条，而是同一条从未成文的原则
-在不同下游事实上的三个结论：
+勘察的结论是：issue 说「从未在家族层裁定过一次」**是对的**，但三个立场**不是**三套教条，
+而是同一条**已经成文过两次、每次都只裁本 lane 并把与邻接 lane 的分歧记录走而非解决**的
+原则，在不同下游事实上的三个结论：
 
 - 立场 B 的起源 #1332 给出的理由本身就是「下游有护栏」
-  （`openspec/changes/archive/2026-08-10-symlink-loop-errno-detection/design.md:216-217`：
+  （`openspec/changes/archive/2026-08-10-symlink-loop-errno-detection/design.md:216-218`：
   dangling entries fail `is_dir()`/existence checks downstream）。
 - 立场 A（#1401）不是推翻这条原则，是同一条原则在**没有下游护栏**的那条腿上的结论
-  （`openspec/changes/archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:42`）。
+  （`openspec/changes/archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:41-43`）。
 - 立场 C（#1402）经本轮实核**同样有下游护栏**：`services/orchestrator/scheduler_state_failure.py:1401`
   的 `path.exists()` 就在 admitted 之后两行，且 `openspec/specs/job-retry-mechanism/spec.md:1585-1589`
   已把它写成硬约束——null-reason absent verdict **SHALL** 只在实际探过存在性之后产生。
 
-所以家族的**行为已经一致**，不一致的只有**说法**。本 change 的交付物是把那条原则写下来、
-给出可判定的判据，并留下一条**机械的、不会漂移的**防复发锚。
+所以家族的**行为已经一致**，不一致的只有**说法**，而家族层的裁定确实一次都没作出过
+——第一处出处的小标题就是「与 #1402/preflight 家族先例**显式分歧**」，段末把分歧推给了偏离记录。
+本 change 的交付物是把那条原则写下来、第一次在家族层裁定它、给出可判定的判据，
+并留下两条**机械的、不会漂移的**防复发锚：违规者集合守卫，以及 15 个 admit 站点的具名从句标记。
 
 ## What Changes
 

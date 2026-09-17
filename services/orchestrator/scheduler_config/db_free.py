@@ -123,6 +123,9 @@ def _db_free_allowed_roots_and_blockers(
     why, so an unresolvable root can never become a phantom containment base.
     """
 
+    # ADR 0009 clause 1: the product feeds the downstream blocker ladder, whose
+    # verdicts are committed only after the adjudicated path has been touched by a
+    # real kernel probe, so an ENOENT-admitted phantom faults there rather than here.
     db_free_required = bool(config.scheduler_db_free_required)
     roots: list[Path] = []
     blockers: list[dict[str, Any]] = []
@@ -155,6 +158,13 @@ def _db_free_allowed_roots_and_blockers(
 
 
 def _db_free_path_identity(value: str | Path | None) -> Path | None:
+    # ADR 0009 clause 1: this helper only compares products it made itself, and the
+    # config-side operand is gated on blockers that _db_free_path_check raises from
+    # real kernel probes (scheduler_config/config.py:792, :806, :818). The other
+    # operand is a module constant (config.py:788-790, passed through no gate) and is
+    # never probed; the note below records that this function has no rejection
+    # channel of its own.
+    #
     # Non-strict os.path.realpath, not Path.resolve(strict=False): the latter
     # returns the unresolved path on <=3.12 (it raises an errno-less
     # RuntimeError on a loop, which the old except arm swallowed) and the folded
@@ -189,6 +199,9 @@ def _db_free_loop_filtered_realpath(path: Path) -> tuple[Path | None, OSError | 
     lexically and then mis-attributed as "not created".
     """
 
+    # ADR 0009 loop-filtered: the function name is its disposition -- the ENOENT
+    # fallback is re-resolved strictly below (#1626) instead of being admitted, so no
+    # admission clause is invoked here.
     try:
         return Path(os.path.realpath(path, strict=True)), None
     except (OSError, ValueError) as error:

@@ -96,6 +96,8 @@ def _safe_preserve_final_component(path: Path) -> Path:
 
 
 def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path:
+    # ADR 0009 clause 1 -- both arms; the reasoning is spelled out at the db-free arm
+    # below (the eight root fields this feeds are dereferenced at their use sites).
     if not db_free_required:
         try:
             return Path(os.path.realpath(path, strict=True))

@@ -9,11 +9,47 @@ input class -- it folds the loop lexically into a partially resolved product --
 so the strict form is the only call in the supported interpreter range that
 makes the loop visible to a handler as an ``OSError`` carrying an errno.
 
-This module pins the one MECHANICAL invariant of that ruling:
+This module pins the two MECHANICAL invariants of that ruling:
 
     every member of the authority set passes ``strict=True`` on at least one
     of its ``os.path.realpath`` calls, unless it is named in the exemption
-    list below with the ADR clause it relies on.
+    list below with the ADR clause it relies on;
+
+    and every member of the authority set records its disposition IN ITS OWN
+    BODY as a comment naming either the admission clause it rests on (``ADR
+    0009 clause 1``/``2``/``3``) or the fact that it re-resolves strictly
+    instead of admitting (``ADR 0009 loop-filtered``).
+
+The second invariant is required of EVERY member, not only of the members that
+admit the ``ENOENT`` arm, because deciding which members admit is a judgement
+about handler shape -- and this family's whole lesson is that shape inference
+encodes the author's guess (see the authority-set paragraph below).  The guard
+decides that a disposition is NAMED, never that the named one is CORRECT; the
+latter is the design review the ADR's four questions drive.  Two further limits
+are stated rather than papered over: a bare ``ADR 0009`` mention deliberately
+does NOT satisfy the check, because it names no clause and therefore says
+nothing; and the marker is searched only within the member's own
+``lineno``/``end_lineno`` span, so a comment at module scope cannot vouch for
+every member of its file.  A marker sitting inside a NESTED function does count
+for the enclosing one, since the enclosing span contains it -- no member in the
+tree is nested today, and closing that would need a member-shaped exclusion.
+
+Read that quantifier literally, because its scope is the guard's main limit.
+The member key is ``(module, qualified function)`` and the test is ``any()``
+over that member's calls, so a member that normalises EXCLUSIVELY non-strictly
+is a violator, while a non-strict call added INSIDE a member that already
+resolves strictly somewhere is not detected.  Worked example, verified by
+deletion: ``services/orchestrator/scheduler_config/db_free.py``'s
+``_db_free_loop_filtered_realpath`` resolves strictly at :206 and re-checks the
+loop-filtered fallback strictly at :215 -- the re-check ADR 0009's census lists
+as this function's whole reason for existing.  Delete ``strict=True`` from the
+:215 re-check and this guard stays GREEN, because :206 still satisfies
+``any()``.  That is a STATED limit, not a silent gap: the alternative pin
+("this member's strict call count must not decrease") is a member-list-shaped
+assertion, which ADR 0009 "权衡" and design D3 reject for the reasons recorded
+under the violator-set paragraph below.  Losing a second strict call inside an
+already-strict member is a design-review question, like the missing-dereference
+case at the end of this docstring.
 
 The authority set is ``(module, qualified function)`` pairs that call
 ``realpath``, collected by AST over ``services/``, ``workers/``, ``packages/``
@@ -33,10 +69,16 @@ is exactly these N functions" fails on every unrelated addition and cannot
 notice its own name being deleted; the cardinality therefore appears in the
 failure message for diagnosis and never as an assertion.
 
-The exemption list is checked in BOTH directions: an entry naming a function
-that no longer exists -- renamed, moved, deleted -- fails this test instead of
-passing silently, so the list cannot rot into a set of dead names that quietly
-exempt nothing.
+The exemption list is checked in BOTH directions, and both are mechanical:
+
+* an entry naming a function that no longer exists -- renamed, moved, deleted
+  -- fails this test instead of passing silently, so the list cannot rot into a
+  set of dead names that quietly exempt nothing;
+* an entry naming a member that DOES now resolve strictly fails too.  An
+  exemption that is no longer needed is not harmless: while it stands, that
+  member may lose its strict arm again without going red, so a site that had
+  been repaired can silently regress behind the entry that once excused it.
+  The entry has to be deleted the day the repair lands.
 
 Scan surface (ADR 0009 "普查"): ``services/``, ``workers/``, ``packages/``,
 ``apps/``, every ``*.py`` outside build and dependency directories.
@@ -63,6 +105,7 @@ checklist.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +128,22 @@ Member = tuple[str, str]
 # (line number, whether this call passes strict=True)
 RealpathCall = tuple[int, bool]
 
+# The disposition every authority member owes its own body, per the requirement
+# "Path canonicalization SHALL resolve strictly unless named ...".  Only a
+# COMMENT counts (`#` before the token): the spec says "as a comment", and a
+# prose mention in a docstring is not a marker a reader can grep per site.  The
+# clause number is `[123]` rather than `\d+`, so an invented "clause 4" is not
+# accepted, and a BARE `ADR 0009` matches nothing at all -- an unqualified
+# pointer names no disposition and would let the check be satisfied by noise.
+_DISPOSITION_MARKER = re.compile(
+    r"#.*\bADR\s+0009\s+(?:clause\s+[123]\b|loop[-\s]?filtered\b)",
+    re.IGNORECASE,
+)
+
+# (first line, last line) of the member's own function body, or None when the
+# realpath call has no enclosing function to carry a marker.
+MemberBody = tuple[int, int] | None
+
 # Sites admitted WITHOUT a strict call. Each entry names the ADR 0009 clause it
 # rests on; anything beyond these three has to go through review.
 _EXEMPT_MEMBERS: frozenset[Member] = frozenset(
@@ -103,7 +162,7 @@ _EXEMPT_MEMBERS: frozenset[Member] = frozenset(
         # ADR 0009 clause 1 (downstream dereference): it only compares products
         # it produced itself, and both operands are gated on blockers that
         # _db_free_path_check raises from real kernel probes (parent.lstat(),
-        # exists(), is_symlink()/is_dir()); db_free.py:164-167 records that this
+        # exists(), is_symlink()/is_dir()); db_free.py:174-177 records that this
         # function has no rejection channel of its own.
         ("services/orchestrator/scheduler_config/db_free.py", "_db_free_path_identity"),
     }
@@ -152,18 +211,85 @@ def _collect_realpath_calls(node: ast.AST, scope: tuple[str, ...], found: dict[s
         _collect_realpath_calls(child, scope, found)
 
 
-def _parsed_sources() -> list[tuple[str, ast.Module]]:
-    """Every scanned module as ``(path relative to the repo root, parsed tree)``.
+def _collect_member_bodies(
+    node: ast.AST,
+    scope: tuple[str, ...],
+    enclosing: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    found: dict[str, MemberBody],
+) -> None:
+    """Record, per authority member, the line span of its own function body.
+
+    Walks the same way as :func:`_collect_realpath_calls` and keys members
+    identically, but carries the INNERMOST enclosing function alongside the
+    dotted scope, because the scope's last element may be a class (whose body is
+    not where a per-site marker belongs) or may be empty at module scope.  A
+    ``realpath`` call with no enclosing function records ``None``: there is no
+    body to carry a disposition, which the caller reports as a violation rather
+    than silently skipping.
+    """
+
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _collect_member_bodies(child, scope + (child.name,), child, found)
+            continue
+        if isinstance(child, ast.ClassDef):
+            _collect_member_bodies(child, scope + (child.name,), None, found)
+            continue
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "realpath":
+            qualname = ".".join(scope) if scope else _MODULE_SCOPE
+            if enclosing is None:
+                found[qualname] = None
+            else:
+                found[qualname] = (enclosing.lineno, enclosing.end_lineno or enclosing.lineno)
+        _collect_member_bodies(child, scope, enclosing, found)
+
+
+def _members_missing_disposition(module: str, source: str) -> list[tuple[Member, str]]:
+    """Authority members of ``source`` whose own body carries no ADR 0009 marker.
+
+    Takes the module TEXT rather than a path so the negative cases below --
+    a bare ``ADR 0009`` mention, and a marker parked at module scope -- are
+    exercised against synthetic sources instead of against the live tree, which
+    would otherwise have to be temporarily broken to prove the check bites.
+    """
+
+    lines = source.splitlines()
+    bodies: dict[str, MemberBody] = {}
+    _collect_member_bodies(ast.parse(source, filename=module), (), None, bodies)
+
+    missing: list[tuple[Member, str]] = []
+    for qualname, body in sorted(bodies.items()):
+        if body is None:
+            missing.append((
+                (module, qualname),
+                "the realpath call has no enclosing function, so there is no body that could carry a marker",
+            ))
+            continue
+        start, end = body
+        if not _DISPOSITION_MARKER.search("\n".join(lines[start - 1 : end])):
+            missing.append(((module, qualname), f"no disposition comment anywhere in lines {start}-{end}"))
+    return missing
+
+
+def _read_sources() -> list[tuple[str, str, ast.Module]]:
+    """Every scanned module as ``(relative path, source text, parsed tree)``.
 
     A ``SyntaxError`` is left to surface: a module the family guard cannot parse
     is a module whose canonicalisation sites it cannot see, and swallowing that
     would turn the guard green on a file it never read.
     """
 
-    return [
-        (path.relative_to(REPO_ROOT).as_posix(), ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
-        for path in _iter_python_sources()
-    ]
+    sources: list[tuple[str, str, ast.Module]] = []
+    for path in _iter_python_sources():
+        text = path.read_text(encoding="utf-8")
+        sources.append((path.relative_to(REPO_ROOT).as_posix(), text, ast.parse(text, filename=str(path))))
+    return sources
+
+
+def _parsed_sources() -> list[tuple[str, ast.Module]]:
+    """Every scanned module as ``(path relative to the repo root, parsed tree)``."""
+
+    return [(module, tree) for module, _, tree in _read_sources()]
 
 
 def _authority_set() -> dict[Member, list[RealpathCall]]:
@@ -267,15 +393,29 @@ def _render(members: list[Member]) -> str:
 
 
 def test_every_realpath_site_resolves_strictly_or_is_a_named_exemption() -> None:
-    """The violator set is empty, and no exemption names a vanished function.
+    """The violator set is empty, and the exemption list holds no dead weight.
 
-    Two failure modes, both real:
+    Three failure modes, all real:
 
-    * a new canonicalisation site that only ever calls the non-strict form,
-      with no entry admitting it -- it shows up as a violator;
+    * a canonicalisation site that normalises EXCLUSIVELY non-strictly -- every
+      one of that ``(module, qualified function)`` member's ``realpath`` calls
+      omits ``strict=True`` -- with no entry admitting it: it shows up as a
+      violator.  The grouping is the limit, and it is stated rather than
+      papered over: the check is ``any()`` over the member's calls, so a
+      non-strict call added inside a member that already resolves strictly
+      SOMEWHERE is NOT detected.  Concretely, deleting ``strict=True`` from the
+      loop-filtered re-check at
+      ``services/orchestrator/scheduler_config/db_free.py:215`` leaves this test
+      green, because the same function's strict call at :206 satisfies
+      ``any()``.  The module docstring records why the member-list-shaped pin
+      that would catch it is rejected (ADR 0009 "权衡", design D3);
     * an exemption that has rotted -- its function was renamed, moved or
       deleted, so the entry exempts nothing and the name misleads the next
-      reader -- it shows up as unresolved.
+      reader -- it shows up as unresolved;
+    * an exemption that is no longer NEEDED -- the member it names now passes
+      ``strict=True`` somewhere, so the entry is dead weight that would let that
+      member drop its strict arm again without going red -- it shows up as
+      unnecessary.
     """
 
     authority = _authority_set()
@@ -286,6 +426,23 @@ def test_every_realpath_site_resolves_strictly_or_is_a_named_exemption() -> None
         f"({len(authority)} members today). Each was renamed, moved or deleted; an entry that "
         "resolves to nothing exempts nothing and misleads the next reader. Re-point or drop it:\n"
         f"{_render(unresolved)}"
+    )
+
+    unnecessary = sorted(
+        member for member in _EXEMPT_MEMBERS if any(strict for _, strict in authority.get(member, []))
+    )
+    unnecessary_detail = "\n".join(
+        f"  - {module}::{qualname} -> strict realpath call(s) at "
+        f"{', '.join(f'line {lineno}' for lineno, strict in authority[(module, qualname)] if strict)}"
+        for module, qualname in unnecessary
+    )
+    assert unnecessary == [], (
+        "ADR 0009 exemption entries whose member now resolves strictly. The entry is no longer "
+        "needed, and while it stands the member may silently lose that strict call again without "
+        "reddening this test -- a repaired site quietly regressing behind the entry that once "
+        "excused it. Delete the entry (and the ADR clause note it carries, which no longer "
+        "describes the code):\n"
+        f"{unnecessary_detail}"
     )
 
     violators = sorted(
@@ -336,3 +493,102 @@ def test_no_call_shape_defeats_the_attribute_name_key() -> None:
         "assertion (ADR 0009, docs/adr/0009-path-canonicalization-dereference-doctrine.md):\n"
         f"{detail}"
     )
+
+
+def _render_missing(missing: list[tuple[Member, str]]) -> str:
+    return "\n".join(f"  - {module}::{qualname} -- {reason}" for (module, qualname), reason in missing)
+
+
+def test_every_authority_member_records_its_adr_0009_disposition() -> None:
+    """The set of authority members carrying no disposition marker is empty.
+
+    Same violator-set shape as the strictness assertion above, and for the same
+    reason: a member LIST would fail on every unrelated addition and could not
+    notice its own name being deleted, so the cardinality appears only in the
+    message.  The obligation is on EVERY member -- the requirement puts it that
+    way because "which members admit the ENOENT arm" is a judgement about
+    handler shape, and the commit that introduced this rule got that judgement
+    wrong on 13 of 15 sites while writing the rule.
+    """
+
+    missing = [entry for module, source, _ in _read_sources() for entry in _members_missing_disposition(module, source)]
+    authority_size = len(_authority_set())
+    assert missing == [], (
+        f"Path canonicalisation sites recording no ADR 0009 disposition ({authority_size} members in the authority "
+        "set today). Every member owes a comment IN ITS OWN BODY naming either the admission clause it rests on "
+        "(`ADR 0009 clause 1`, `2` or `3`) or the fact that it re-resolves strictly instead of admitting "
+        "(`ADR 0009 loop-filtered`), plus the sentence saying why that disposition holds here -- a token with no "
+        "reason feeds the guard and is the behaviour the ADR exists to stop. A bare `ADR 0009` mention names no "
+        "disposition and does not count, and the marker must sit inside the member's own body, not at module "
+        "scope (docs/adr/0009-path-canonicalization-dereference-doctrine.md):\n"
+        f"{_render_missing(missing)}"
+    )
+
+
+def test_a_marker_inside_the_body_satisfies_the_disposition_check() -> None:
+    """Positive control, so the two negative cases below cannot pass vacuously."""
+
+    source = (
+        "import os\n"
+        "\n"
+        "\n"
+        "def site(path):\n"
+        "    # ADR 0009 clause 1: the caller opens what it accepted.\n"
+        "    return os.path.realpath(path)\n"
+    )
+    assert _members_missing_disposition("synthetic.py", source) == []
+
+
+def test_a_bare_adr_0009_mention_is_not_a_disposition() -> None:
+    """``ADR 0009`` on its own names nothing, so it must not satisfy the check.
+
+    Accepting it would make the marker a ritual: the point of the token is to
+    say WHICH of the three clauses the site rests on, or that it rests on none
+    of them because it loop-filters.  A pointer to the document says neither.
+    """
+
+    source = (
+        "import os\n"
+        "\n"
+        "\n"
+        "def site(path):\n"
+        "    # See ADR 0009 for the canonicalisation doctrine.\n"
+        "    return os.path.realpath(path)\n"
+    )
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", "site")]
+
+
+def test_a_module_scope_marker_does_not_vouch_for_a_member() -> None:
+    """The search window is the member's own span, not the whole file.
+
+    A file-level comment would otherwise exempt every member in its module at
+    once, which is the file-granularity the ADR rejects: a marker has to move
+    and die with the function it annotates.
+    """
+
+    source = (
+        "import os\n"
+        "\n"
+        "# ADR 0009 clause 1: parked at module scope, which vouches for nothing.\n"
+        "\n"
+        "\n"
+        "def site(path):\n"
+        "    return os.path.realpath(path)\n"
+    )
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", "site")]
+
+
+def test_a_realpath_call_outside_any_function_has_nowhere_to_carry_a_marker() -> None:
+    """A module-scope call site is reported rather than skipped.
+
+    ``_collect_member_bodies`` records ``None`` for it, and the rule chosen is
+    to treat that as a violation: a site with no body cannot satisfy an
+    in-body marker requirement, and silently passing it would be a hole of
+    exactly the shape this guard exists to close.
+    """
+
+    source = "import os\n\nBASE = os.path.realpath('/tmp')\n"
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", _MODULE_SCOPE)]

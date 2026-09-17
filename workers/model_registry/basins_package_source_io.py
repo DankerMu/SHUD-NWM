@@ -805,6 +805,7 @@ def _ensure_under_root(
 
 
 def _resolve_package_path(path: Path, *, model_id: str | None = None, version: str | None = None) -> Path:
+    # ADR 0009 clause 1: callers dereference the admitted ENOENT product before committing any verdict.
     # Strict resolution + errno split: non-strict resolution stopped raising
     # on symlink loops in CPython 3.13+, so the loop verdict must come from
     # the kernel errno. ENOENT keeps pre-change parity (missing paths resolve

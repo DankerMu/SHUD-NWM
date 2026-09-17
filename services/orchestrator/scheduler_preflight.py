@@ -526,6 +526,10 @@ def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[s
     never serve as a phantom containment base, and a blocker explains why.
     """
 
+    # ADR 0009 clause 3: these products serve only as containment bases and carry no
+    # claim that they exist; the path actually judged against them is dereferenced by
+    # _storage_root_check's `path.exists() and path.is_dir()` below, before any
+    # containment verdict is committed.
     roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
     db_free = bool(getattr(config, "db_free_required", False))
     resolved: list[Path] = []
@@ -624,6 +628,9 @@ def _storage_root_check(
         # the `..`-collapsed tail meets a symlink loop behind the missing
         # component (e.g. `gone/../loopdir`).
         resolved = Path(os.path.realpath(path))
+    # ADR 0009 clause 1: the next line dereferences the adjudicated path against the
+    # kernel, and the NOT_VISIBLE blocker below turns a fault into a changed verdict,
+    # so an ENOENT-admitted product is never committed unprobed.
     visible = path.exists() and path.is_dir()
     contained = _path_is_under_any(resolved, allowed_roots)
     check = {
