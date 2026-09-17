@@ -563,6 +563,24 @@ def _require_output_outside_root(output: str, verified_root: Path) -> Path:
     ``FileOrchestrationJournalError`` -- so before #1955 the shape left a
     traceback on a command that documents "1 on a typed failure".  It becomes
     its own code because the failure happens BEFORE the census runs (design D5).
+
+    The two ``os.path.realpath`` calls below are non-strict, which admits a
+    symlink loop behind a missing component as a lexically folded product
+    instead of raising.  That admission rests on clause 2 (provable
+    coincidence) of
+    ``docs/adr/0009-path-canonicalization-dereference-doctrine.md``: the
+    normalized product and the path the receipt write actually acts upon
+    coincide on every input for which that write can succeed.  **Clause 2
+    quantifies over inputs only and does NOT cover a check-then-act race.**
+    The containment verdict here (``resolved == root_real or root_real in
+    resolved.parents``) and the write to that same target in
+    :func:`_census_command_result` are separated by ``census_job_id_scope``,
+    which on node-22 takes minutes; the endorsement therefore carries the
+    premise "single operator CLI, no concurrent writer" (ADR 0009 已知限制 3).
+    A concurrent writer entering this path invalidates clause 2 here, and the
+    site would have to move to clause 1 or re-check -- which is why no re-check
+    is added today: it would buy nothing against a race and would imply a
+    guarantee this function cannot make.
     """
 
     try:

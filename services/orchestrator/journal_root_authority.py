@@ -76,7 +76,9 @@ def verify_journal_root_authority(journal_root: str | Path, *, setting: str) -> 
     it used to hand its rejected value straight to the factory anyway), but
     because a preflight-blocked db-free pass now passes
     ``scheduler_core._DB_FREE_REPOSITORY_BLOCKED`` and builds no repository.
-    The redacted blocker of #1627 stays the operator's answer for those shapes
+    The redacted blocker of that lane -- the one adjudicated by ADR 0009,
+    ``docs/adr/0009-path-canonicalization-dereference-doctrine.md`` -- stays
+    the operator's answer for those shapes
     (blank and relative among them); this refusal is the answer for the roots
     the preflight passes, above all a symlinked ancestor -- and for the demotion
     and census CLIs, which have no preflight in front of them at all.

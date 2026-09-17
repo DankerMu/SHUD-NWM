@@ -116,7 +116,12 @@ def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path
             return Path(os.path.realpath(path))
     # The db-free arm is aligned with the arm above rather than given an errno
     # split of its own: this function has no rejection channel (it returns a
-    # Path), so classification stays with the storage preflight. What the
+    # Path), so classification stays with the storage preflight. That is the
+    # family ruling, not a local shortcut -- clause 1 of
+    # `docs/adr/0009-path-canonicalization-dereference-doctrine.md` hangs the
+    # non-strict fallback's legitimacy on the CONSUMER's kernel dereference,
+    # and so does not require a function without a rejection channel to
+    # manufacture a verdict it has nowhere to report. What the
     # alignment buys is one canonical form on both interpreter arms -- the old
     # `Path.resolve(strict=False)` returned a loop-bearing value unresolved on
     # <=3.12 (the errno-less RuntimeError landed in the except arm) and folded
