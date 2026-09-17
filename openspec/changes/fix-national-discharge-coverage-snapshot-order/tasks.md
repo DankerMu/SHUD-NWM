@@ -201,10 +201,10 @@ change introduces — those never downgrade to a note. Verdict tables: `.workpla
 - [x] 23. Correct the false claim in the helper docstring that `segment_count -> 0` is not a live writer:
       #1446's guard is bypassed by `force=True`, exposed as `--force` by `scripts/node27_refresh_coverage.py`
       as the intended operator remediation. Same correction applied to `design.md` D2.
-- [x] 24. Cross-cutting claim audit (this PR's review history produced FIVE instances of one class: a
+- [x] 24. Cross-cutting claim audit (at the time of the audit the ledger below stood at rows 1-5 of one class: a
       confidently-worded factual claim, committed to an artifact, that the code contradicts). Every factual
       claim about other code in the docstrings/comments this PR added or rewrote was opened and checked; the
-      audit itself found the fifth instance — the docstring had overstated `mark_failed`'s reachability, which
+      audit itself found ledger row 5 — the docstring had overstated `mark_failed`'s reachability, which
       is gated behind `create_run`'s `HYDRO_RUN_NOT_RETRIABLE` refusal. (The tick covers the audit; publishing
       its verdicts is task 27, which belongs to Phase 8 — this task was briefly ticked while claiming the
       publication too, which round 2 caught as finding D.)
@@ -259,16 +259,7 @@ artifacts that outlive this PR:
       when the row was written and were invalidated 21 lines later by this PR's own second commit, which
       left the cited offset pointing inside the coverage SQL literal.
 
-**Failure-class note for the retro trail:** one class dominated this PR's entire review history — a
-confidently-worded factual claim, committed to an artifact, that the code contradicts. Seven instances:
-two in fixture review, two in cross-review round 1, one found by the round-1 fix pass's own cross-cutting
-audit, two in round 2. An eighth was averted when the round-2 repair's implementer noticed that the
-orchestrator's own suggested replacement wording ("`>=` is also False for an incomparable pair") would
-itself have been false, since the file's EQUAL pairs have `>=` True and survive the mutation because
-`>=` and `==` agree there. Every instance was written by someone reasoning from a plausible mental model
-instead of opening the cited file; every one was caught by someone who opened it.
-
-## Phase 7 gap sweep (final review) — two local-repair findings, both closed
+## Phase 7 gap sweep (final review)
 
 - [x] 31. Propagate the row-40e correction to the two production docstrings that had not received it.
       `national_discharge_cycles` and `_national_discharge_coverage_rows` still flattened "the set
@@ -280,7 +271,7 @@ instead of opening the cited file; every one was caught by someone who opened it
       cases to "the cycles the newcomer has NO rows for". Left unchanged after review: the
       `NationalCycleCoverage.complete` comment (its preceding sentence already scopes it correctly) and
       the "same predicates, one snapshot" shorthand (terse, not false).
-- [ ] 32. See task 27 — the PR-body publication is the other Phase 7 finding and is the same item.
+- [ ] 32. See task 27 — the PR-body publication is a Phase 7 finding and is the same item as 27.
 
 **Failure-class ledger.** One class dominated this PR's entire review history: a confidently-worded
 factual claim, committed to an artifact, that the code contradicts. The count is enumerated rather than
@@ -302,13 +293,15 @@ asserted — an earlier draft of this very paragraph said "Ten" while listing ni
 | 12 | Phase 7 pass 1 | two production docstrings never received instance 6's correction |
 | 13 | Phase 7 pass 2 | this ledger asserted a total of ten while enumerating nine |
 | 14 | Phase 7 pass 2 | the PR body reported the #2087 upstream correction in the done tense while it was unposted |
+| 15 | Phase 7 pass 3 | a superseded "Seven instances" paragraph survived directly above this ledger — pass 2 replaced one of the file's two competing totals with the ledger and left the other, in a file it had open |
+| 16 | pre-merge self-audit | the PR body's `Key findings addressed` wrote "round 2 四条 P2" while `verify-round2-artifact-claims.md:10-15` records five CONFIRMED; the count was taken from 偏离记录 bullets, not from the verdict table, and 偏离记录 12 omitted finding D entirely |
 
-Two more were averted before they were written: the round-2 repair's implementer rejected the
+Averted before they were written, and therefore absent from the ledger: the round-2 repair's implementer rejected the
 orchestrator's suggested replacement wording as itself false (the file's EQUAL pairs have `>=` True and
 survive the mutation because `>=` and `==` agree, not because both are False), and the Phase 7 repair's
 implementer re-derived the K/J behaviour from the pre-swap tree instead of copying the matrix row.
 
 Every instance was authored by someone reasoning from a plausible mental model without opening the cited
-file; every one was caught by someone who opened it. Instances 10, 11 and 13 are the sharpest: each was
+file; every one was caught by someone who opened it. Instances 10, 11, 13 and 15 are the sharpest: each was
 written *while fixing the previous one*. That is the transferable lesson from this issue, and it is why
 the docstrings here carry their citations — so the next reader can check them the cheap way.
