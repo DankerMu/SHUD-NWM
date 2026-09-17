@@ -304,7 +304,7 @@ RIVER_SEGMENT_WRITE_SURFACE_ROOTS: tuple[str, ...] = (
 PATH_CANONICALIZATION_FAMILY_GUARD_TEST = "tests/test_path_canonicalization_family_guard.py"
 
 # #1627: the four roots the family guard scans, mirroring its own module-level
-# `_SCAN_ROOTS` binding (tests/test_path_canonicalization_family_guard.py:95)
+# `_SCAN_ROOTS` binding in tests/test_path_canonicalization_family_guard.py
 # mapped to `<root>/**` globs. A selector meta-guard parses that binding out of
 # the guard's source and asserts it equals this set, so adding a fifth root to
 # the scan without wiring it here reddens that meta-guard by name.
@@ -2963,6 +2963,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
         ("tests/test_node22_refresh_timer_health.py",),
+    ),
+    # #1627 / ADR 0009: the loop-spelling measurement is the backing the
+    # array-runner spec names for admitting path_modes.py's db-free
+    # `_safe_preserve_final_component` arm — it measures, with real symlinks and
+    # a real `os.lstat`, that the <=3.12 and 3.13+ spellings of a parent-chain
+    # loop are NEUTRAL at the dereference. That claim is a property of THIS
+    # module's function, so an edit to it must re-measure rather than wait for
+    # the post-merge master run. A per-file row, not a widening of the broad
+    # `services/orchestrator/**` list: the suite's subject is one function in
+    # this one module, so routing it from the directory list would make every
+    # orchestrator PR pay for a measurement of an unrelated PR class.
+    # DB-free, 2 tests in 0.25s.
+    PathTestRule(
+        "services/orchestrator/scheduler_config/path_modes.py",
+        ("tests/test_preserve_final_component_loop_spelling.py",),
     ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;

@@ -215,8 +215,8 @@ not-yet-existing roots; the resulting phantom-root geometry on this preflight
 leg is adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md`,
 which admits it under clause 3 — the admitted root serves only as a containment
 base, carries no assertion that it exists, and the path judged against it is
-dereferenced before the verdict is committed, so a phantom base admits no real
-object; that geometry is documented, not changed, here)
+dereferenced before the verdict is committed, which is what makes the admission
+safe; that geometry is documented, not changed, here)
 
 #### Scenario: unexpandable tilde in a storage root field yields the existing check verdict
 

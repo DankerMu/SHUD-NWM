@@ -3,36 +3,34 @@
 ``openspec/specs/slurm-array-runner-integration/spec.md`` (scenario
 "parent-segment loop no longer aborts construction on 3.11/3.12") admits the
 db-free ``_safe_preserve_final_component`` arm under ADR 0009 clause 1, and
-rests that admission on a measurement:
+names this module as the backing for one step of that admission: the product of
+that arm differs between CPython <=3.12 and 3.13+ when the loop sits behind a
+symlinked parent, and the admission needs that difference to be NEUTRAL at the
+dereference -- the same errno either way, so no verdict downstream can turn on
+which spelling it got.  Before this module the claim was a transcribed
+conclusion standing in for evidence, the shape of debt ADR 0009 exists to
+remove.
 
-    "The product does differ between CPython 3.12 and 3.13+ where the loop sits
-    behind a symlinked parent, but that difference is neutral at the
-    dereference: the condition that makes the two spellings differ is precisely
-    a loop surviving in the parent chain, so ``lstat`` reports ``ELOOP`` for
-    both. That neutrality is measured on 3.11.14 and 3.13.3, not argued."
+The spec's own wording is deliberately not quoted here.  A quotation is a second
+copy that rots on the next edit of the original -- the drift ADR 0009 is about
+-- so this docstring states what the module MEASURES and leaves the wording to
+the one file that owns it.
 
-Nothing in the repository backed that sentence, which is the same shape of debt
-ADR 0009 exists to remove -- a transcribed conclusion standing in for evidence.
-This module supplies the half that CAN be measured here, on the pinned
-interpreter, with real symlinks and a real ``os.lstat``.
+Measured here, on the pinned interpreter, with real symlinks and a real
+``os.lstat``: the two spellings genuinely differ; the <=3.12 spelling is the
+real function's product rather than a reconstruction; ``os.lstat`` reports
+``ELOOP`` for both; and the neutrality does NOT extend to ``<missing>/../<loop>``,
+where the two spellings fault differently.
 
-STATED LIMIT -- the 3.13 half is still unbacked.  Two pieces of it are assumed
-rather than measured by this module:
-
-* the 3.13+ SPELLING is synthesised as ``os.path.realpath(parent) / name``,
-  which is the right value only because CPython 3.13 reimplemented
-  ``Path.resolve()`` on top of ``os.path.realpath``.  On a 3.13 interpreter
-  :func:`test_both_spellings_of_a_parent_chain_loop_lstat_to_eloop` measures the
-  real product instead, because the ``sys.version_info`` branch below then
-  takes the other arm;
-* the spec's "3.13.3" figure itself.  Running this module on 3.13 would back it;
-  the project pin is 3.11 and no 3.13 oracle is wired up, so the claim about
-  that specific interpreter remains transcribed.
-
-What IS measured here on 3.11: the two spellings genuinely differ, the
-<=3.12 product is the raw path (the real function's product, not a
-reconstruction), and ``os.lstat`` reports ``ELOOP`` for both -- which is the
-substance of the neutrality the spec leans on.
+STATED LIMIT -- the 3.13 half is assumed, not measured.  The 3.13+ spelling is
+synthesised as ``os.path.realpath(parent) / name``, which is the right value
+only because CPython 3.13 reimplemented ``Path.resolve()`` on top of
+``os.path.realpath``.  On a 3.13 interpreter
+:func:`test_both_spellings_of_a_parent_chain_loop_lstat_to_eloop` measures the
+real product instead, because the ``sys.version_info`` branch below then takes
+the other arm; the project pin is 3.11 and no 3.13 oracle is wired up, so that
+half stays constructed rather than run.  It is tracked with the rest of the
+cross-interpreter question by issue #2453.
 """
 
 from __future__ import annotations

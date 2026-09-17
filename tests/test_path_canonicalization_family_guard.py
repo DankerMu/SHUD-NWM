@@ -25,14 +25,26 @@ admit the ``ENOENT`` arm, because deciding which members admit is a judgement
 about handler shape -- and this family's whole lesson is that shape inference
 encodes the author's guess (see the authority-set paragraph below).  The guard
 decides that a disposition is NAMED, never that the named one is CORRECT; the
-latter is the design review the ADR's four questions drive.  Two further limits
-are stated rather than papered over: a bare ``ADR 0009`` mention deliberately
-does NOT satisfy the check, because it names no clause and therefore says
-nothing; and the marker is searched only within the member's own
+latter is the design review the ADR's four questions drive.  Three further
+limits are stated rather than papered over: a bare ``ADR 0009`` mention
+deliberately does NOT satisfy the check, because it names no clause and
+therefore says nothing; the marker is searched only within the member's own
 ``lineno``/``end_lineno`` span, so a comment at module scope cannot vouch for
-every member of its file.  A marker sitting inside a NESTED function does count
-for the enclosing one, since the enclosing span contains it -- no member in the
-tree is nested today, and closing that would need a member-shaped exclusion.
+every member of its file; and "as a comment" is taken literally, matched against
+``tokenize.COMMENT`` tokens rather than against the raw text, so a docstring
+sentence quoting the token or a string literal whose value spells it marks
+nothing.  A marker sitting inside a NESTED function does count for the enclosing
+one, since the enclosing span contains it -- no member in the tree is nested
+today, and closing that would need a member-shaped exclusion.
+
+One shape is refused outright instead of being marked: a qualified name bound by
+more than one ``def`` in its scope.  The member key IS that name, so the two
+bodies collapse into one member -- the strictness check's ``any()`` then lets a
+strict call in either body cover a non-strict call in the other, and a marker in
+either body vouches for both.  ``ruff --select F811`` does not report the
+``if sys.platform == "win32": ... else: ...`` spelling of it.  The guard has no
+way to split the member, so it reports the name and asks for two distinct names
+or one shared helper.  There is no such member in the tree today.
 
 Read that quantifier literally, because its scope is the guard's main limit.
 The member key is ``(module, qualified function)`` and the test is ``any()``
@@ -105,7 +117,9 @@ checklist.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -129,20 +143,26 @@ Member = tuple[str, str]
 RealpathCall = tuple[int, bool]
 
 # The disposition every authority member owes its own body, per the requirement
-# "Path canonicalization SHALL resolve strictly unless named ...".  Only a
-# COMMENT counts (`#` before the token): the spec says "as a comment", and a
-# prose mention in a docstring is not a marker a reader can grep per site.  The
-# clause number is `[123]` rather than `\d+`, so an invented "clause 4" is not
-# accepted, and a BARE `ADR 0009` matches nothing at all -- an unqualified
-# pointer names no disposition and would let the check be satisfied by noise.
+# "Path canonicalization SHALL resolve strictly unless named ...".  The pattern
+# is matched against the text of a `tokenize.COMMENT` token, never against the
+# raw source: the spec says "as a comment", and a plain-text search cannot tell
+# a comment from a docstring sentence or a string literal whose VALUE spells the
+# token, which would let a member be marked by describing the scheme instead of
+# applying it.  The pattern no longer spells a leading `#` -- the token type
+# already carries that -- and it never did the work of rejecting a bare mention:
+# that comes from the alternation.  The clause number is `[123]` rather than
+# `\d+`, so an invented "clause 4" is not accepted, and a BARE `ADR 0009` matches
+# neither branch, naming no disposition and therefore satisfying nothing.
 _DISPOSITION_MARKER = re.compile(
-    r"#.*\bADR\s+0009\s+(?:clause\s+[123]\b|loop[-\s]?filtered\b)",
+    r"\bADR\s+0009\s+(?:clause\s+[123]\b|loop[-\s]?filtered\b)",
     re.IGNORECASE,
 )
 
-# (first line, last line) of the member's own function body, or None when the
-# realpath call has no enclosing function to carry a marker.
-MemberBody = tuple[int, int] | None
+# Every (first line, last line) span that defines the member, or None when the
+# realpath call has no enclosing function to carry a marker.  A list rather than
+# one span because a qualified name CAN be bound more than once in a scope; the
+# caller reports that instead of picking a definition.
+MemberBody = list[tuple[int, int]] | None
 
 # Sites admitted WITHOUT a strict call. Each entry names the ADR 0009 clause it
 # rests on; anything beyond these three has to go through review.
@@ -160,10 +180,12 @@ _EXEMPT_MEMBERS: frozenset[Member] = frozenset(
         # product faults at the kernel rather than being admitted here.
         ("packages/common/shud_preflight.py", "check_shud_executable"),
         # ADR 0009 clause 1 (downstream dereference): it only compares products
-        # it produced itself, and both operands are gated on blockers that
-        # _db_free_path_check raises from real kernel probes (parent.lstat(),
-        # exists(), is_symlink()/is_dir()); db_free.py:174-177 records that this
-        # function has no rejection channel of its own.
+        # it produced itself, and the config-side operand is gated on blockers
+        # that _db_free_path_check raises from real kernel probes (parent.lstat(),
+        # exists(), is_symlink()/is_dir()). The other operand is a module constant
+        # passed through no gate and never probed. The function's own marker in
+        # db_free.py carries both halves, plus the note that it has no rejection
+        # channel of its own.
         ("services/orchestrator/scheduler_config/db_free.py", "_db_free_path_identity"),
     }
 )
@@ -226,6 +248,12 @@ def _collect_member_bodies(
     ``realpath`` call with no enclosing function records ``None``: there is no
     body to carry a disposition, which the caller reports as a violation rather
     than silently skipping.
+
+    Spans ACCUMULATE.  One qualified name can be bound by more than one ``def``
+    in a scope -- the ``if sys.platform == "win32": ... else: ...`` split -- and
+    recording only the last one hid every earlier definition's body from the
+    marker search.  Collecting them all lets the caller report the ambiguity
+    instead of silently adjudicating one definition on another's evidence.
     """
 
     for child in ast.iter_child_nodes(node):
@@ -240,20 +268,56 @@ def _collect_member_bodies(
             if enclosing is None:
                 found[qualname] = None
             else:
-                found[qualname] = (enclosing.lineno, enclosing.end_lineno or enclosing.lineno)
+                span = (enclosing.lineno, enclosing.end_lineno or enclosing.lineno)
+                spans = found.get(qualname)
+                if not isinstance(spans, list):
+                    # Absent, or the `None` sentinel a class-body call recorded
+                    # under this same name. Either way there is nothing to
+                    # extend; both states end in a reported violation.
+                    found[qualname] = [span]
+                elif span not in spans:
+                    spans.append(span)
         _collect_member_bodies(child, scope, enclosing, found)
+
+
+def _marker_comment_lines(source: str) -> frozenset[int]:
+    """Line numbers of ``source`` carrying a disposition marker IN A COMMENT.
+
+    Tokenising is the whole point: a regex over the raw text cannot distinguish
+    a comment from a docstring sentence quoting the token, or from a string
+    literal whose value spells it, and both read as a marker to a plain-text
+    search while marking nothing.  ``tokenize.COMMENT`` is the only token type
+    the spec's "as a comment" admits.
+
+    A ``TokenError`` is left to surface for the same reason ``_read_sources``
+    lets a ``SyntaxError`` through: a module this cannot tokenise is a module
+    whose markers it cannot see, and swallowing that would pass it silently.
+    """
+
+    return frozenset(
+        token.start[0]
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT and _DISPOSITION_MARKER.search(token.string)
+    )
 
 
 def _members_missing_disposition(module: str, source: str) -> list[tuple[Member, str]]:
     """Authority members of ``source`` whose own body carries no ADR 0009 marker.
 
-    Takes the module TEXT rather than a path so the negative cases below --
-    a bare ``ADR 0009`` mention, and a marker parked at module scope -- are
+    Takes the module TEXT rather than a path so the negative cases below -- a
+    bare ``ADR 0009`` mention, a marker parked at module scope, a marker quoted
+    in a docstring or a string literal, and a qualified name bound twice -- are
     exercised against synthetic sources instead of against the live tree, which
     would otherwise have to be temporarily broken to prove the check bites.
+
+    A member whose qualified name is bound MORE THAN ONCE is reported without
+    looking at its markers at all.  ``(module, qualified function)`` is the
+    member key, so two definitions of one name are one member and the guard
+    cannot say which body owes the marker; adjudicating either on the other's
+    evidence is exactly the silent merge this reports.
     """
 
-    lines = source.splitlines()
+    marker_lines = _marker_comment_lines(source)
     bodies: dict[str, MemberBody] = {}
     _collect_member_bodies(ast.parse(source, filename=module), (), None, bodies)
 
@@ -265,8 +329,18 @@ def _members_missing_disposition(module: str, source: str) -> list[tuple[Member,
                 "the realpath call has no enclosing function, so there is no body that could carry a marker",
             ))
             continue
-        start, end = body
-        if not _DISPOSITION_MARKER.search("\n".join(lines[start - 1 : end])):
+        if len(body) > 1:
+            where = ", ".join(f"line {start}" for start, _ in sorted(body))
+            missing.append((
+                (module, qualname),
+                f"this qualified name is bound {len(body)} times ({where}), so the (module, qualified function) "
+                "key cannot tell the definitions apart: their realpath calls merge into one member and a marker "
+                "in either body would vouch for both. Give them distinct names, or hoist the realpath call into "
+                "a single helper",
+            ))
+            continue
+        start, end = body[0]
+        if not any(start <= line <= end for line in marker_lines):
             missing.append(((module, qualname), f"no disposition comment anywhere in lines {start}-{end}"))
     return missing
 
@@ -557,6 +631,86 @@ def test_a_bare_adr_0009_mention_is_not_a_disposition() -> None:
     )
     missing = _members_missing_disposition("synthetic.py", source)
     assert [member for member, _ in missing] == [("synthetic.py", "site")]
+
+
+def test_a_marker_quoted_in_a_docstring_is_not_a_disposition() -> None:
+    """Prose ABOUT the marker is not the marker.
+
+    A docstring that quotes the token -- documentation, a cross-reference, a
+    sentence explaining the convention -- reads to a plain-text search exactly
+    like a comment carrying it, and the requirement says "as a comment" for a
+    reason: a marker has to be the site's own statement of its disposition, not
+    a mention of the rule that governs it.  Accepting the mention would let any
+    member be marked by describing the scheme instead of applying it.
+    """
+
+    source = (
+        "import os\n"
+        "\n"
+        "\n"
+        "def site(path):\n"
+        '    """Sites record `# ADR 0009 clause 1` in their body."""\n'
+        "    return os.path.realpath(path)\n"
+    )
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", "site")]
+
+
+def test_a_marker_inside_a_string_literal_is_not_a_disposition() -> None:
+    """A string whose VALUE is the marker text does not mark the site either.
+
+    Same hole as the docstring case and reported separately because it needs no
+    prose at all: a constant, a log template or an error message whose text
+    happens to contain the token is data the member carries, not a disposition
+    it records.  Only a real comment token counts.
+    """
+
+    source = (
+        "import os\n"
+        "\n"
+        "\n"
+        "def site(path):\n"
+        '    note = "# ADR 0009 clause 1"\n'
+        "    return os.path.realpath(note and path)\n"
+    )
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", "site")]
+
+
+def test_two_definitions_of_one_qualified_name_are_reported_rather_than_merged() -> None:
+    """A qualified name bound twice breaks the member key, so it is a violation.
+
+    ``(module, qualified function)`` identifies a member only while the name is
+    bound once.  Two ``def``s of one name in a scope -- the ordinary
+    ``if sys.platform == "win32": ... else: ...`` split -- collapse into a
+    single key, and the collapse hides the FIRST definition from both
+    assertions: the strictness check is ``any()`` over the merged call list, so
+    a strict call in either body covers a non-strict one in the other, and the
+    body span used to be overwritten, so only the last definition's comments
+    were searched.  ``ruff --select F811`` does not report this shape.
+
+    The guard therefore refuses to guess which definition a marker belongs to
+    and reports the name.  Splitting the member is not available -- the key IS
+    the name -- so the rule is fail-closed: give the two definitions distinct
+    names, or hoist the ``realpath`` call into one helper they both call.
+    """
+
+    source = (
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "\n"
+        "if sys.platform == 'win32':\n"
+        "    def _canon(path):\n"
+        "        return os.path.realpath(path, strict=True)\n"
+        "else:\n"
+        "    def _canon(path):\n"
+        "        # ADR 0009 clause 1: the caller opens what it accepted.\n"
+        "        return os.path.realpath(path)\n"
+    )
+    missing = _members_missing_disposition("synthetic.py", source)
+    assert [member for member, _ in missing] == [("synthetic.py", "_canon")]
+    assert "bound 2 times" in missing[0][1]
 
 
 def test_a_module_scope_marker_does_not_vouch_for_a_member() -> None:

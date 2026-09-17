@@ -31,7 +31,7 @@ issue #1627 要求对「`strict realpath` → `ENOENT` → 非严格兜底」这
   把裁定的可判定部分固化为规范文本。
 - 全仓 tracker 指向从 #1627 改指 ADR 0009（两条 live spec + 一条 requirement + 5 处源码/测试引用，见 tasks A-2）
   （`slurm-array-runner-integration/spec.md:106-112`、
-  `runtime-evidence-and-operations/spec.md:206-217`）。**终态必须指向 ADR 而非任何 issue**：
+  `runtime-evidence-and-operations/spec.md:212-222`）。**终态必须指向 ADR 而非任何 issue**：
   本 PR 关闭 #1627，指向 issue 即再次制造死指针——这正是 PR #1626 复盘里已记录的
   那条审查命中 `closing-issue-while-live-spec-names-it-as-the-tracker`。
 - 新增一条守卫测试：断言「违规者集合为空」，不是断言成员清单（见 design D3）。

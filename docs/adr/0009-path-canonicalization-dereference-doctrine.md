@@ -72,7 +72,7 @@ fail-open 有**两种**形状：
    被探测（`exists()` / `lstat` / `open`），且那里的失败会改变裁决。
    探测点可以是**原值**而非归一化产物——内核解析使二者在探测能成功的输入上等价。
    实例：`scheduler_preflight.py:634` 探 `path`、`:635` 的包含判定用 `resolved`，
-   而 `visible=False` 确实改变裁决（`:651-661` 出 `SLURM_PREFLIGHT_<FIELD>_NOT_VISIBLE`）。
+   而 `visible=False` 确实改变裁决（`:652-661` 出 `SLURM_PREFLIGHT_<FIELD>_NOT_VISIBLE`）。
 2. **可证重合。** 归一化产物与后续动作实际作用的路径，在**任何该动作能够成功的输入**上重合。
    **本从句只对输入量化，不覆盖 check-then-act 竞态**——援引它必须写明
    「单次操作者 CLI、无并发写者」这个前提（见「已知限制」3）。
@@ -131,7 +131,7 @@ errno 分流被增删、兜底被挪进 helper，集合都不动，只有**新�
 | `scheduler_config/db_free.py::_db_free_path_identity` | B | 1 | **守卫白名单第 3 项**（无 strict 臂）。**config 提供的那一侧**操作数以 `canonical_root_blocker is None` / `raw_root_blocker is None` 为前提（`scheduler_config/config.py:792`/`:806`/`:818`），blocker 来自 `_db_free_path_check` 的真探针（`_db_free_path_check` 内的 `parent.lstat()`、`path.exists()`、`is_symlink()/is_dir()` 四处真探针）。另一侧是模块常量（`config.py:788-790` 无门调用），**从未被探测** |
 | `scheduler_config/path_modes.py::_resolve_config_path_for_mode` | B | 1 | 8 个 root 字段在使用点被 `open()`/`lstat()` 解引用（D6） |
 | `scheduler_preflight.py::_preflight_allowed_roots` | B | **3** | 仅作包含基底；被判定路径在 `:634` 被 `exists()/is_dir()` 探 |
-| `scheduler_preflight.py::_storage_root_check` | B | 1 | `:634` `.exists() and .is_dir()`，`:651-661` 据此出 blocker |
+| `scheduler_preflight.py::_storage_root_check` | B | 1 | `:634` `.exists() and .is_dir()`，`:652-661` 据此出 blocker |
 | `scheduler_runtime_roots.py::_scheduler_allowed_roots_and_blockers` | B | **3** | 同 `_preflight_allowed_roots` |
 | `scheduler_runtime_roots.py::_canonical_parent` | B（裸 `except OSError`） | 1 | 产物进 preflight 路径，`:304` `lstat` |
 | `scheduler_runtime_roots.py::_canonical_path` | B（裸 `except OSError`） | 1 | 同上 |
@@ -141,11 +141,15 @@ errno 分流被增删、兜底被挪进 helper，集合都不动，只有**新�
 | `basins_discovery.py::_safe_resolve_under_root` | B | 1 | 下游 containment / `relative_to` |
 | `basins_package_source_io.py::_resolve_package_path` | B | 1 | 其余 errno 抛 `BASINS_PACKAGE_PATH_UNRESOLVABLE` |
 | `journal_scope_census.py::_require_output_outside_root` | B | **2** | **守卫白名单第 1 项**（无 strict 臂）。D5.2；非 ENOENT-兜底形状，issue 表未收 |
-| `shud_preflight.py::check_shud_executable` | B | 1 | **守卫白名单第 2 项**（无 strict 臂）。`_is_stub_basename(real)`（`:160`）判 stub 后，该可执行文件随即真的被执行 |
+| `shud_preflight.py::check_shud_executable` | B | 1 | **守卫白名单第 2 项**（无 strict 臂）。`_is_stub_basename(real)`（`shud_preflight.py:164`）判 stub 后，该可执行文件随即真的被执行 |
 
-四条从句之外的立场 A 四个成员（表中 `A 已复查`）本就做 loop-filtered 复查，
-不走非严格 admit，因而不受「站点记录从句」义务约束。其余 **15** 个走 admit 的成员，
-每一个都在自己的函数体内写有 `ADR 0009 clause N` 标记（见「守卫」）。
+**全部 19 个成员**都在自己的函数体内写有处置标记：15 个走 admit 的写
+`ADR 0009 clause N`，4 个立场 A（表中 `A 已复查`，本就做 loop-filtered 复查、不走非严格 admit）
+写 `ADR 0009 loop-filtered`。**立场 A 成员同样要写标记**——义务是「记录处置」而不是
+「记录从句」，因为「谁在 admit」是对 handler 形状的判断，而本家族的全部教训就是
+形状推断编码的是作者猜的形状，守卫不该去猜。（初稿在此写「立场 A 不受约束、其余 15 个写标记」，
+与规范正文和守卫断言都不符——一个照此写了 loop-filtered 站点却不写标记的新作者，
+会在合并门上莫名其妙地变红。由交叉审查第 2 轮抓到。）
 四棵树外 `scripts/`/`db/`/`infra/` 的真调用点为 0、`tests/` 不发布。
 **取键法的闭合性由守卫自己强制，不靠散文断言**：按 attribute 名取键只在
 `realpath` 无法经裸名到达时闭合，故守卫第二条断言「击穿取键法的构造集合为空」，
@@ -188,8 +192,8 @@ attr 为 `realpath` 的 `ast.Attribute`，扩面而不藏事。
 
 > **断言一**：权威集合中每个成员的 `os.path.realpath` 调用里，至少有一处带 `strict=True`
 > （或进具名白名单）；违规者集合为空。
-> **断言二**：每个**走非严格兜底 admit** 的成员，函数体内写有 `ADR 0009 clause N` 形式的
-> 具名从句标记；无标记者集合为空。
+> **断言二**：**权威集合中的每个成员**，函数体内写有处置标记——admit 者
+> `ADR 0009 clause N`，复查者 `ADR 0009 loop-filtered`；无标记者集合为空。
 
 ### 断言二：为什么标记不是 D3 拒绝的那种「分离注册表」
 
@@ -205,6 +209,12 @@ attr 为 `realpath` 的 `ast.Attribute`，扩面而不藏事。
 
 **标记断言的是「具名了从句」，不是「从句选对了」。** 后者仍然是上面四个问题那份设计评审，
 守卫对它无话可说——这一点写进了规范正文，不留含混。
+
+断言二有两条由交叉审查第 2 轮逼出来的收紧：标记必须是**真正的注释**
+（按 `tokenize.COMMENT` 判定，docstring 或字符串字面量里提到这个 token 不算——
+初稿用纯文本正则，实测可被一句 docstring 散文绕过）；以及**同一限定名被绑定多次时直接判红**，
+因为 `(模块, 限定函数)` 这个键分不开它们，合并会让第一个 def 同时逃过两条断言
+（`ruff --select F811` 对该形状不报，没有第二道拦）。两条今天在活树上都是零实例。
 
 **具名白名单恰好三项**，每项带所依从句与理由：
 
@@ -241,7 +251,7 @@ attr 为 `realpath` 的 `ast.Attribute`，扩面而不藏事。
 - **`_safe_preserve_final_component`（`services/orchestrator/scheduler_config/path_modes.py::_safe_preserve_final_component`，
   幸存的 `Path.resolve` 子族）**：实现为 `path.parent.resolve(strict=False) / path.name`，
   `except (OSError, RuntimeError): return path`。`≤3.12` 环路抛 errno-less `RuntimeError`
-  被吞、返回 raw path；3.13+ 不抛、返回折叠值。四个调用点
+  被吞、返回 raw path；3.13+ 不抛、返回折叠值。三个调用点
   （同文件的 `_config_path_preserve_final_component_for_mode`、
   `_config_path_relative_to_preserve_final_for_mode`、以及 `_confined_path_for_mode`
   的兜底臂——本 PR 触及该文件，故按本 ADR 已知限制 1(b) 用符号锚而非行号）的产物进 preflight 路径，
@@ -305,10 +315,13 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
 
 ## 已知限制
 
-1. **本 ADR 的三条自定硬约束，作者在本 PR 内全部违反；未现证的陈述共二十二处。**
+1. **本 ADR 的三条自定硬约束，作者在本 PR 内全部违反；未现证的陈述逐条列于下。**
    继承自 PR #1626 复盘的三条是：只写有界断言、引用必须现证、孤儿指针审计必须双边。
    初稿写了无豁免从句的全称 SHALL；只审两条 spec 指针而漏掉全仓另外 5 处 tracker 活引用；
-   以及二十二处未经现证就落笔的陈述。前十三处在开 PR 之前被抓到：
+   以及以下这些未经现证就落笔的陈述。**这里不给总数**——初稿写「十三处」、
+   第一次修订写「二十二处」，两个数都被交叉审查机械数出来是错的，
+   而**一份规定「只写有界断言」的文档在审计自己现证纪律的那一段写了个数不出来的数**，
+   本身就是第三次犯同一个错。下面这组在开 PR 之前被抓到：
 
    - 承重引用 `scheduler_state_failure.py:1401` 写成 `:1399`，**且在同一节自称
      「每条引用均已逐行打开核对」——那句自述本身是假的**；
@@ -320,7 +333,10 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
    - 四处行号在本 PR **自己的 diff** 内被顶走而失效；
    - 把「全仓无 `import posixpath`」当前提写进 design，而 `workers/forcing_producer/file_store.py:6`
      今天就有一个——**那句话是从本 PR 自己的评审席报告里誊来的，我没有自己测**；
-   - `_safe_preserve_final_component` 写成「三个包装器」，实为四个调用点；
+   - `_safe_preserve_final_component` 写成「三个包装器」，改成「四个调用点」——
+     **这条「修正」本身是错的**：实测是 `path_modes.py:59`/`:73`/`:183` 三个调用点，
+     「四」多半来自 `grep -c` 把 `def` 行数了进去。由交叉审查第 2 轮抓到，
+     是本 PR 里「修正一条错误时引入新错误」的第四个实例；
    - 「`Path.resolve()` 非严格形在 3.13+ 不再抛」漏了后半句——**≤3.12 上它同样抛**；
    - 把另一处站点的 `resolve(strict=False)` 记在它上面那行的 `try:` 上；
    - 以及最重的一条：断言该臂留有「跨解释器 blocker 码分歧」残留，
@@ -330,7 +346,7 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
      `..._UNSAFE_PATH` vs `..._SYMLINK`。两份报告并不矛盾（分歧源是另一处站点），
      **是我把其中一份放大了**。最终由我自己动手实测才定案。
 
-   交叉审查第 1 轮（2 席）又抓出九处，**其中三处是我为修正前十三处而写下的新错误**：
+   交叉审查第 1 轮（2 席）又抓出下面这组，**其中几处是我为修正上面那组而写下的新错误**：
 
    - **主论点站反**：初稿称「勘察推翻了 issue 的前提」。所引归档节的小标题就是
      「与 #1402/preflight 家族先例**显式分歧**」，段末把分歧推给偏离记录——
@@ -355,12 +371,28 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
      实测证伪——该 spec 写的是「父链中存活的环」，而 `<missing>/../<loop>` 的两种拼法
      在 `lstat` 处**恰恰不一致**（raw 报 ENOENT、折叠报 ELOOP）。
 
-   **二十二处没有一处是 `openspec validate --strict` 抓到的**——它只做结构校验，
-   看不见一份规格与它自己想要的行为相反，更数不清行号。抓到它们的是四种机制：
-   fixture 评审席（人）三处；实现者三处，其中一处是它**拒绝执行我的指令**；
-   一个当场写的机械 file:line 校验器两处（其一覆盖四个站点），
-   且第一处只在实现者改完同批文件后才暴露——**校验器自己也是在第十一次错误之后才被写出来的**；
-   以及三处来自被派去立单的 agent——**其中一个没有立单，它把我要它跟踪的那条残留测掉了**。
+   交叉审查第 2 轮（2 席）抓到的**不是新一批细节，而是同一个病灶的结构形态**：
+   上面那两组的修正，我只改了 ADR 与 proposal，**没有改 design.md 里那份重复抄本**
+   ——主论点、「有且只有一个」、从句 3 的可检查性质、「该臂无残留」四段在 fixture 里原样留着，
+   而我在偏离记录里写的是「三处已改」。同轮还抓到：上面那个总数数不出来；
+   「四个调用点」这条修正本身是错的；以及至少四条行锚被本 PR 自己的源码编辑顶走，
+   其中一条就在刚内联进 ADR 的那张普查表里，且 ADR 在两个位置对同一行给出了不同的值。
+   修 P1 的过程里又自己捞到一条：那条被证伪的「可检查性质」**还活在一份 live spec 里**
+   （`runtime-evidence-and-operations/spec.md` 本 PR 写入的正文，「a phantom base admits no
+   real object」），是顺着 `cite_check` 的未解析项翻出来的，两席都没看到。
+   **这是本 PR 第三次把一条未现证的断言写进 live spec**（前两次见上面两组的末尾两条）。
+
+   **处置不是再抄一遍**：design.md 里那四段重复论证已全部换成指向 ADR 的指针，
+   重复抄本被消掉；总数被删除；EF-6 的勾改为指向一份仓内的 `cite_check` 回执文件，
+   而不是我的一句断言。
+
+   **以上没有一处是 `openspec validate --strict` 抓到的**——它只做结构校验，
+   看不见一份规格与它自己想要的行为相反，更数不清行号。抓到它们的是四种机制，
+   这里只说机制、不再给分项计数（上一版的分项加起来是 11，却声称覆盖全部）：
+   fixture 评审席（人）；实现者，**其中一次是它拒绝执行我的指令**；
+   一个当场写的机械 file:line 校验器——**它自己是在第十一次错误之后才被写出来的**，
+   且它的第一次命中只在实现者改完同批文件后才暴露；
+   以及被派去立单的 agent——**其中一个没有立单，它把我要它跟踪的那条残留测掉了**。
    最后这一条是本 ADR 最该被记住的方法论实例：**被要求为某个断言建档时，
    正确的第一步是去测它是否成立，而不是替它写一份档案。**
 

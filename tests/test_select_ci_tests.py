@@ -8828,6 +8828,25 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/file_orchestration_journal.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/scheduler.py", "tests/test_production_scheduler.py"): "redirect",
     ("workers/forcing_producer/direct_grid_contract.py", "tests/test_forcing_producer.py"): "redirect",
+    # -- edge-consumer: the loop-spelling measurement's import-order fixture --
+    # (#1627) ---------------------------------------------------------------
+    # tests/test_preserve_final_component_loop_spelling.py has exactly one
+    # subject: `_safe_preserve_final_component` in
+    # services/orchestrator/scheduler_config/path_modes.py, which owns the suite
+    # through its own per-file rule in the selector. The other two edges are an
+    # import-order fixture, not consumption: the scheduler package and its
+    # config package import each other, so the module imports
+    # `services.orchestrator.scheduler` (and thereby the package `__init__`)
+    # FIRST — under its own `noqa: F401  (import-order fixture)` — purely so
+    # reaching path_modes does not hit a partially initialised package. Copying
+    # the suite into either module's rule would couple unrelated PR classes,
+    # which is exactly what this token refuses: the scheduler stop rule's own
+    # convention (SCHEDULER_IMPORTER_TESTS in the selector) admits a suite when
+    # "the suite's subject IS this module", and this one's subject is one
+    # function two packages down; the broad `services/orchestrator/**` list
+    # would make every orchestrator PR pay for it as well.
+    ("services/orchestrator/__init__.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
+    ("services/orchestrator/scheduler.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
     # -- edge-consumer: slurm array-job entry points ------------------------
     # tests/test_slurm_array_contract.py contracts the sbatch array entry
     # points, so it top-level-imports the `cli` module (and package) of five

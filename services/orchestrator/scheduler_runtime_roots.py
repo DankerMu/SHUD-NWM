@@ -650,19 +650,14 @@ def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None
 
 
 def _optional_config_path(value: Path | str | None) -> Path | None:
-    # ADR 0009 clause 3: the only production consumer is scheduler_config/config.py:430,
-    # which turns this product into allowed_storage_roots -- a containment base that
-    # asserts nothing about existence and is never itself probed, while the path judged
-    # against it IS dereferenced first (_scheduler_root_check's path.lstat(),
-    # _storage_root_check's exists()/is_dir()).
-    #
-    # This diverges from the ADR 0009 census row for this function, which records
-    # clause 1 with the reason "同上" -- pointing at the lstat of _canonical_parent's
-    # product. That lstat is of a DIFFERENT value: _scheduler_root_check dereferences
-    # `path`, not `allowed_roots`. The traced downstream here is the same one
-    # _preflight_allowed_roots and _scheduler_allowed_roots_and_blockers carry, and both
-    # of those are censused as clause 3. Recorded as clause 3 because the marker has to
-    # state something true; reconciling the census row is a separate edit.
+    # ADR 0009 clause 3: the production consumer is the db-backed arm of
+    # scheduler_config/path_modes.py::_optional_config_path_for_mode, whose only caller
+    # turns this product into allowed_storage_roots -- a containment base that asserts
+    # nothing about existence and is never itself probed, while the path judged against
+    # it IS dereferenced first (_scheduler_root_check's path.lstat(),
+    # _storage_root_check's exists()/is_dir()). That lstat is of `path`, not of
+    # `allowed_roots`, which is why the containment-base clause is the one that holds
+    # here and not the downstream-dereference one.
     if value in (None, ""):
         return None
     # A tilde whose home cannot be determined is kept verbatim rather than

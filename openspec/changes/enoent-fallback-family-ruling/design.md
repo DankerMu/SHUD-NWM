@@ -30,8 +30,10 @@
 
 ## D1 —— 裁定：家族从来只有一条原则，它只是写在没人会去找的地方
 
-issue 的前提是「三套相反教条并存，从未在家族层裁定过一次」。**这个前提是错的。**
-裁定早就做过，论证也写得很清楚，只是写进了某个具体 change 的归档 design 里：
+issue 的前提是「三套相反教条并存，从未在家族层裁定过一次」。**后半句是对的**——
+原则写过两次，但每次都只裁本 lane 并把与邻接 lane 的分歧**记录走而非解决**。
+完整论证见 **ADR 0009「背景」**，本节不复述（本 change 初稿在此复述了一份，
+两份随后各自漂移：ADR 改了、这里没改，被交叉审查第 2 轮以 P1 抓到）。出处：
 
 > `openspec/changes/archive/2026-08-16-runtime-root-safety-symlink-loop/design.md:41-43`（#1401）
 > 「artifact-guard lane 的残留后果面是 verdict 路由口味；本 lane 是 manifest fail-open
@@ -50,8 +52,9 @@ issue 的前提是「三套相反教条并存，从未在家族层裁定过一�
 > **被裁决的那条路径，只要在任何据其归一化产物作出的判断被提交之前，
 > 会被对内核解引用一次，ENOENT 非严格兜底就可以容忍；否则必须 loop-filtered 复查。**
 
-fail-open 形状**有且只有一个**：*判据建立在归一化字符串上，而它代表的对象从未被解引用。*
-这正是 #1401 的 manifest 腿——把归一化路径写进提交 manifest、据此宣告「产物在此」，全程不 stat。
+fail-open 的形状**见 ADR 0009「决策」**（那里写了两种：从未解引用，以及解引用后在动作前失效）。
+本节初稿写「有且只有一个」，被 ADR 自己的已知限制 3 反驳——不在此复述，以 ADR 为准。
+第一种正是 #1401 的 manifest 腿：把归一化路径写进提交 manifest、据此宣告「产物在此」，全程不 stat。
 
 ### 三条从句（析取，任一成立即可容忍）
 
@@ -69,9 +72,9 @@ fail-open 形状**有且只有一个**：*判据建立在归一化字符串上�
 2. **可证重合。** 归一化产物与后续动作实际作用的路径，在**任何该动作能够成功的输入**上重合。
    **该从句只对静态输入量化，不覆盖 check-then-act 竞态**（见 D5.2），援引它必须写明前提。
 3. **仅作包含基底 / 比较操作数。** 归一化产物只被用作包含判定的基底或身份比对的操作数，
-   自身从不承载「该路径存在或可用」的断言；而被判定的那一方在裁决提交前已被解引用。
-   安全性由一条可检查的性质兜底：**真实对象的严格解析产物不可能以一个含缺失分量或
-   环路的字符串为前缀**，故 phantom 基底放不进任何真实对象。这正是 #1332 那句话的机制。
+   自身从不承载「该路径存在或可用」的断言；而**被判定的那一方在裁决提交前已被解引用**
+   ——安全性到此为止。初稿在此加了一条「可检查性质」兜底，**它对一半输入为假**，
+   已由 ADR 0009 从句 3 一节收窄并留档，本节不复述。这正是 #1332 那句话的机制。
 
 ## D2 —— 普查：19 个权威成员，逐行归到具名从句，零错位
 
@@ -139,7 +142,7 @@ ADR 必须把 wrapper 的消费者显式列出。
 | `basins_discovery.py::_safe_resolve_under_root` | B | 1 | 下游 containment / `relative_to` |
 | `basins_package_source_io.py::_resolve_package_path` | B | 1 | 其余 errno 抛 `BASINS_PACKAGE_PATH_UNRESOLVABLE` |
 | `journal_scope_census.py::_require_output_outside_root` | B | **2** | **守卫白名单第 1 项**（无 strict 臂）。D5.2；非 ENOENT-兜底形状，issue 表未收 |
-| `shud_preflight.py::check_shud_executable` | B | 1 | **守卫白名单第 2 项**（无 strict 臂）。`_is_stub_basename(real)`（`:160`）判 stub 后，该可执行文件随即真的被执行 |
+| `shud_preflight.py::check_shud_executable` | B | 1 | **守卫白名单第 2 项**（无 strict 臂）。`_is_stub_basename(real)`（`shud_preflight.py:164`）判 stub 后，该可执行文件随即真的被执行 |
 
 **结论：零错位站点。** 没有要对齐的对象，故本 change 不含运行时行为改动。
 立场 C 的措辞按验收项**保留**，ADR 记明它已被实核为立场 B 的实例。
@@ -151,9 +154,18 @@ ADR 必须把 wrapper 的消费者显式列出。
 一个只检查「每个函数都有一行」的钉，验的是行的**存在**，不是所引裁决**存在、可达、独立**。
 行文照样烂，而钉照样绿——正是 C1 抓到的假闭合形状。**绿在漂移上的钉比没有钉更坏。**
 
-守卫改为断言家族唯一的**机械**不变量（#1626 教训 6：断言违规者集合，不要断言成员元组）：
+守卫改为断言家族的**机械**不变量（#1626 教训 6：断言违规者集合，不要断言成员元组）。
+**共两条**，第二条是交叉审查第 1 轮的 P0 逼出来的：
 
-> 权威集合中的每个成员，其 `os.path.realpath` 调用里**至少有一处带 `strict=True`**。
+> **断言一**：权威集合中的每个成员，其 `os.path.realpath` 调用里**至少有一处带 `strict=True`**
+> （或进具名白名单）。
+> **断言二**：权威集合中的每个成员，函数体内写有处置标记——admit 者 `ADR 0009 clause N`，
+> 复查者 `ADR 0009 loop-filtered`。无标记者集合为空。
+
+断言二**不是**上面拒绝的那张注册表：注册表与代码分离，站点改名挪走它都不动；
+而标记写在函数体内、随函数移动删除，无法与它所标注的站点漂移。
+「recorded at the site」本来就是存在性要求，用存在性检查强制它是同义的。
+它断言「具名了从句」，不断言「从句选对了」——后者仍是四问设计评审。详见 ADR 0009「守卫」。
 
 **具名白名单恰好三项**（初稿写两项，fixture 评审 F1 实测第三项今天就会让守卫变红）：
 
@@ -203,11 +215,16 @@ issue 把「裸 `except OSError` vs errno 分流」和「兜底要不要复查�
   fixture 评审 F4 判验收项 4 未满足）。实现为
   `path.parent.resolve(strict=False) / path.name`，`except (OSError, RuntimeError): return path`。
   `≤3.12` 环路抛 errno-less `RuntimeError` 被吞、返回 raw path；3.13+ 不抛、返回折叠值。
-  三个包装器（`:53-59`、`:62-73`、`:76-88`）的产物进 preflight 路径，在 `:304` 被 `lstat`。
+  三个调用点（`path_modes.py::_config_path_preserve_final_component_for_mode`、
+  `::_config_path_relative_to_preserve_final_for_mode`、以及 `::_confined_path_for_mode` 的兜底臂）
+  的产物进 preflight 路径，在 `scheduler_runtime_roots.py:304` 被 `lstat`。
   **按从句 1 正当，不是 fail-open。** 初稿在此多写了一条「跨解释器 blocker 码分歧」的残留，
   **实测证伪**（4 形状 × 3 字段 × 3.11.14/3.13.3，blocker code 全同）：让两条产物分叉的
   充要条件就是父段仍有环存活，故 `lstat` 两边都得 `ELOOP`、同映射为 `UNSAFE_PATH`。
-  **该臂无残留。** 该被证伪的句子一度被我写进 live spec，已撤回。
+  **该臂在解引用点判据中性，到此为止**——不等于「无残留」：该 preflight 腿确有跨解释器的
+  blocker 码与证据载荷差异，归因于它自己的 `Path.resolve(strict=False)`，由 **#2453** 跟踪。
+  初稿在此写「该臂无残留」，是把一份 agent 报告放大成了结论；口径以
+  `openspec/specs/slurm-array-runner-integration/spec.md` 与 ADR 0009 为准，本节不复述。
 - **8 个核心 root 字段经 `_resolve_config_path_for_mode`**：全部有内核级探针
   （`scheduler_preflight.py:634` 的 `.exists()/.is_dir()`，或 `scheduler_runtime_roots.py:304`
   的 `lstat`），但每一条都挂在默认关闭的开关上（`slurm_execution_enabled` /

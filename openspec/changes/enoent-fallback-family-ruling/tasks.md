@@ -63,6 +63,19 @@
       （无标记者集合为空，函数区间内检索，裸 `ADR 0009` 不算过）。
 - [x] C-3 live spec 的跨解释器 `lstat` 实测断言补仓内凭据（本 PR 已两次栽在转抄未实测结论上）。
 
+## D —— 交叉审查第 2 轮长出来的任务
+
+- [x] D-1 design.md 里与 ADR 重复的四段论证换成指针（主论点、fail-open 形状、
+      从句 3 的可检查性质、「该臂无残留」）。**根因是两份手抄件必然各自漂移**，
+      第 1 轮只改了 ADR 与 proposal，design.md 原样留着并与自身小标题矛盾。
+- [x] D-2 删掉 ADR 里数不出来的两个总数，归因段去掉加不起来的算术。
+- [x] D-3 守卫断言二收紧两处（`tokenize.COMMENT` 判定；同限定名多次绑定判红），
+      delta spec 正文与 Scenario 同步补齐。
+- [x] D-4 **合并前拦下的回归**：新增测试文件的三条 importer 边未在 selector 立处置，
+      使 `tests/test_select_ci_tests.py` 5 红。PR 定向 CI 抓不到，合并后 master 全量才会红。
+      处置：subject 边加 per-file 规则，两条 import-order 夹具边立 `edge-consumer`。
+- [x] D-5 那条被证伪的「可检查性质」从 live spec `runtime-evidence-and-operations/spec.md` 撤回。
+
 ## Evidence Floor
 
 - [x] EF-1 `uv run ruff check .` 干净。
@@ -71,11 +84,16 @@
 - [x] EF-4 `openspec validate enoent-fallback-family-ruling --strict --no-interactive` valid。
 - [x] EF-5 权威集合基数实测值随 PR body 交付；若与 design D2 的 19 不符，
       **以实测为准并改 design**，不得反向修饰。
-- [x] EF-6 ADR 与 design 内每一条 `#N`、归档路径、file:line 引用均已逐条打开现证，
-      核对清单随 PR body 交付（#1626 教训 2）。**本 change 在此复发了六次、跨三轮**：
-      初稿一次、交叉审查第 1 轮两次、实现任务插入 19 条处置标记时又顶走一批。
-      第三轮不再追着补行号——指向源码符号的锚已全部改为 `模块::函数` 符号锚。
-      C-3 收窄 live spec 措辞的依据同属此项。
+- [x] EF-6 ADR / design / proposal 内每一条 `#N`、归档路径、file:line 引用逐条现证。
+      **回执：`openspec/changes/enoent-fallback-family-ruling/cite-check-receipt.txt`**
+      （机械校验器输出，随 PR 入库并随 change 归档；不放 `.workplans/`——那是 gitignored，
+      指向它等于指向仓外，正是本项要避免的失败形态）。
+      该文件里 9 条唯一的未解析项全部是校验器无法展开的缩写路径
+      （`config.py:788` 这类，正文另有全路径写法可解析），已逐条手工打开现证。
+      **这个勾指向一份仓内文件，不是我的一句断言**——第 2 轮 P1-2 抓到的正是
+      「EF-6 已勾但终态仍有腐烂行锚」。
+      本 change 在此复发多次、跨三轮：初稿、第 1 轮、以及实现任务插入 19 条处置标记时
+      又顶走一批。**第三轮起不再追着补行号**：指向源码符号的锚已全部改为 `模块::函数`。
 - [x] EF-7 A-2f 的全仓 `#1627` grep 结果为空或仅剩 A-2e 的沿革引用。
 - [x] EF-8 C-1 的 selector before/after 实测表（接线前后各路径选中数 + 守卫是否被选中）。
 - [x] EF-9 C-2 的红证据三向实跑：删标记 → 红；标记退化为裸 `ADR 0009` → 红；
