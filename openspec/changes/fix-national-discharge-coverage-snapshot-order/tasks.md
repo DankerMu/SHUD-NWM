@@ -205,7 +205,9 @@ change introduces — those never downgrade to a note. Verdict tables: `.workpla
       confidently-worded factual claim, committed to an artifact, that the code contradicts). Every factual
       claim about other code in the docstrings/comments this PR added or rewrote was opened and checked; the
       audit itself found the fifth instance — the docstring had overstated `mark_failed`'s reachability, which
-      is gated behind `create_run`'s `HYDRO_RUN_NOT_RETRIABLE` refusal. Verdicts recorded in the PR body.
+      is gated behind `create_run`'s `HYDRO_RUN_NOT_RETRIABLE` refusal. (The tick covers the audit; publishing
+      its verdicts is task 27, which belongs to Phase 8 — this task was briefly ticked while claiming the
+      publication too, which round 2 caught as finding D.)
 - [x] 25. Widen the spec delta's antecedent: "without a concurrent activation or deactivation ... MUST NOT
       change any result" was falsified by the shrink class, which involves no membership change at all. Now
       conditioned on no concurrent write to `core.model_instance` / `hydro.hydro_run` /
@@ -222,3 +224,41 @@ change introduces — those never downgrade to a note. Verdict tables: `.workpla
   Pre-existing, untouched by the swap; found independently by two seats.
 - `NationalCycleCoverage.complete` has no `covered ⊋ active` oracle, so the superset mutation survives at
   that second comparison site. Predates #2087 (row 40b's site, from #2073); recorded in row 40e.
+
+## Round-2 cross-review (clean) — the four P2 notes and what closed them
+
+Round 2 ran two pinned-core seats (`invariant-state` full-scope, `test-evidence+spec-compliance`) on
+`9344e37e` and was recorded **clean**: no P0/P1 and no coverage gap. Its four verified findings were all
+minor and all in orchestrator-owned artifacts, so under the P2-note rule they are notes, not deferrals —
+they owe no issue and no reason line. Records: `.workplans/pr-2455/review/round2-summary.md` and
+`verify-round2-artifact-claims.md`. Corrected anyway, because three of them were false or stale claims in
+artifacts that outlive this PR:
+
+- [x] 27. Publish the claim-audit verdicts and the corrected evidence numbers in the PR body, close
+      round-1 findings C3 (the red-proof arithmetic) and C4 (issue #2087 AC2's literal
+      「无一处期望值修改」), drop the round-1 claim the audit retracted (`mark_failed` presented as an
+      unqualified live writer), and fill the `Agent Review` block. Phase 8.
+- [x] 28. Correct matrix row 40e's reachability parenthetical. It said the pre-#2087 order made
+      `covered ⊋ active` unreachable. False: the coverage statement carries `mi.active_flag` in its own
+      snapshot, so under the old order a network activated between the reads holding display-ready rows
+      landed in `covered` and not in `active@T1` — which is exactly how #2073's set comparison caught
+      cycle K. The swap changes which race routinely produces the state, not whether it exists. The same
+      cell's other half — that the untested superset mutation at `NationalCycleCoverage.complete`
+      predates #2087 and is therefore routed rather than fixed — was verified CORRECT and stands.
+- [x] 29. Correct two enumeration overclaims (row 40e and two test docstrings): the deactivation test is
+      the only case asserting the swap relaxes a MEMBERSHIP-change outcome, not the only more-permissive
+      assertion in the file (the shrink characterization is the other); and the other set-comparison
+      cases are subset, equal **or incomparable**, on all of which `>=` and `==` agree — the strict
+      superset is the one shape where they differ.
+- [x] 30. Replace row 40d's line-number mutation instruction with identifiers. The numbers were accurate
+      when the row was written and were invalidated 21 lines later by this PR's own second commit, which
+      left the cited offset pointing inside the coverage SQL literal.
+
+**Failure-class note for the retro trail:** one class dominated this PR's entire review history — a
+confidently-worded factual claim, committed to an artifact, that the code contradicts. Seven instances:
+two in fixture review, two in cross-review round 1, one found by the round-1 fix pass's own cross-cutting
+audit, two in round 2. An eighth was averted when the round-2 repair's implementer noticed that the
+orchestrator's own suggested replacement wording ("`>=` is also False for an incomparable pair") would
+itself have been false, since the file's EQUAL pairs have `>=` True and survive the mutation because
+`>=` and `==` agree there. Every instance was written by someone reasoning from a plausible mental model
+instead of opening the cited file; every one was caught by someone who opened it.

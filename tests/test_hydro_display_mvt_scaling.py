@@ -4453,10 +4453,15 @@ def test_national_cycles_list_a_cycle_when_a_zero_coverage_network_is_deactivate
 
     Mutation killed: restoring the pre-#2087 statement order in
     `_national_discharge_coverage_rows` (invariant matrix row 40d). This is the
-    ONLY case asserting the swap makes something MORE permissive -- the four
+    only case asserting the swap relaxes a MEMBERSHIP-change outcome -- the four
     activation cases all assert a newly CLOSED outcome, so a partial revert that
     kept the growth closures while restoring the old deactivation strictness
-    would pass every one of them and fail only here.
+    would pass every one of them and fail only here. It is NOT the file's only
+    more-permissive assertion:
+    `test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_display_ready`
+    is listed under the swap where "the old order caught this one" too, but its
+    active set is identical at both reads -- only a row's display-readiness moves
+    -- so no membership-based revert can reach it.
     """
     session = _zero_coverage_deactivation_session()
 
@@ -4486,8 +4491,10 @@ def test_national_cycles_close_when_a_covered_network_is_deactivated() -> None:
     Mutation killed: relaxing the comparison in `national_discharge_cycles` from
     equality to "covers at least the active set"
     (`if not covered_networks >= active_networks: continue`). Every other case in
-    this file has `covered` a subset of `active`, so that mutation is green
-    everywhere except here.
+    this file has `covered` a subset of `active` (equality included) or
+    incomparable with it, and on all three shapes `>=` and `==` return the same
+    verdict; this is the only case where `covered` is a strict SUPERSET, the one
+    shape where they differ, so that mutation is green everywhere except here.
     """
     session = _covered_deactivation_session()
 
