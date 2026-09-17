@@ -104,6 +104,7 @@ class ReservationResult:
     status: str
     created: bool  # True => this pass wrote the reservation; False => reused.
     submission_attempt: int = 1
+    blocking_job_id: str | None = None
 
     @property
     def already_inflight(self) -> bool:
@@ -238,6 +239,19 @@ def reserve_candidate(
             created=True,
             submission_attempt=_submission_attempt(record),
         )
+
+    overlap_reader = getattr(repository, "query_overlapping_forcing_reservation", None)
+    if callable(overlap_reader):
+        blocker = overlap_reader(reservation_record)
+        if blocker is not None:
+            return ReservationResult(
+                idempotency_key=idempotency_key,
+                job_id=str(blocker["job_id"]),
+                status=str(blocker["status"]),
+                created=False,
+                submission_attempt=_submission_attempt(blocker),
+                blocking_job_id=str(blocker["job_id"]),
+            )
 
     # The INSERT lost. Before treating this as already-inflight, try to ATOMICALLY
     # take over a DEAD reservation (reserved-but-never-bound: slurm_job_id IS NULL

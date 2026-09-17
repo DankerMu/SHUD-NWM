@@ -147,6 +147,9 @@ def _skip_duplicate_submission(
         "pipeline_job_id": pipeline_job_id,
         "reservation_status": active_status,
         "reason": "candidate_already_inflight",
+        "blocking_pipeline_job_id": (
+            reservation.blocking_job_id if reservation is not None else None
+        ),
     }
     self.duplicate_submission_skips.append(skip)
     try:
