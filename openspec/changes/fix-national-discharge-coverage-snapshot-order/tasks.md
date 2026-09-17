@@ -225,13 +225,13 @@ change introduces — those never downgrade to a note. Verdict tables: `.workpla
 - `NationalCycleCoverage.complete` has no `covered ⊋ active` oracle, so the superset mutation survives at
   that second comparison site. Predates #2087 (row 40b's site, from #2073); recorded in row 40e.
 
-## Round-2 cross-review (clean) — the four P2 notes and what closed them
+## Round-2 cross-review (clean) — the P2 notes and what closed them
 
 Round 2 ran two pinned-core seats (`invariant-state` full-scope, `test-evidence+spec-compliance`) on
-`9344e37e` and was recorded **clean**: no P0/P1 and no coverage gap. Its four verified findings were all
+`9344e37e` and was recorded **clean**: no P0/P1 and no coverage gap. Its verified findings (ledger rows 6-10) were all
 minor and all in orchestrator-owned artifacts, so under the P2-note rule they are notes, not deferrals —
 they owe no issue and no reason line. Records: `.workplans/pr-2455/review/round2-summary.md` and
-`verify-round2-artifact-claims.md`. Corrected anyway, because three of them were false or stale claims in
+`verify-round2-artifact-claims.md`. Corrected anyway, because rows 6-9 were false or stale claims in
 artifacts that outlive this PR:
 
 - [ ] 27. Publish the claim-audit verdicts and the corrected evidence numbers in the PR body, close
