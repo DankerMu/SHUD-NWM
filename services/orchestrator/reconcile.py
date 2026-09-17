@@ -40,6 +40,7 @@ from services.orchestrator.accepted_submit_identity import (
     ordered_cohort_members,
 )
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+from services.orchestrator.forcing_submit_identity import forcing_submit_identity_is_complete
 from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
@@ -1358,7 +1359,11 @@ def reconcile_inflight_jobs(
             continue
         expected_token = _expected_job_name_token(job.stage, job.job_type)
         normalized = _normalize_slurm_state(record.raw_state) if record is not None else None
-        slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED) if normalized is not None else None
+        slurm_status = (
+            SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED)
+            if normalized is not None
+            else None
+        )
         cohort_members = getattr(job, "cohort_members", None)
         file_cohort = bool(
             getattr(store, "supports_accepted_submit_reconcile", False)
@@ -1368,14 +1373,28 @@ def reconcile_inflight_jobs(
             and not isinstance(cohort_members, str | bytes)
             and cohort_members
         )
-        requires_durable_identity = slurm_status in TERMINAL_STATUSES and not file_cohort
-
-        if record is None or not _identity_matches(
-            record,
-            expected_token,
-            job,
-            require_durable_identity=requires_durable_identity,
-        ):
+        forcing_bound = _bound_forcing_submit_reconcile_job(job)
+        requires_durable_identity = (
+            slurm_status in TERMINAL_STATUSES and not file_cohort and not forcing_bound
+        )
+        identity_matches = (
+            _forcing_accounting_identity_matches(
+                record,
+                job,
+                idempotency_key=str(getattr(job, "idempotency_key", None) or ""),
+                require_exact_comment=False,
+                require_bound_master=True,
+            )
+            if record is not None and forcing_bound
+            else record is not None
+            and _identity_matches(
+                record,
+                expected_token,
+                job,
+                require_durable_identity=requires_durable_identity,
+            )
+        )
+        if not identity_matches:
             # Cannot prove this is our candidate: mark typed, do NOT resubmit.
             if file_cohort:
                 write_count = _transition_file_runtime_status(
@@ -1514,6 +1533,71 @@ def _is_forecast_cohort_job(job: Any) -> bool:
     if stage:
         return stage in FORECAST_COHORT_STAGE_ALIASES
     return str(getattr(job, "job_type", None) or "") in FORECAST_COHORT_STAGE_ALIASES
+
+
+def _forcing_submit_reconcile_job(job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else {}
+    return forcing_submit_identity_is_complete(identity)
+
+
+def _bound_forcing_submit_reconcile_job(job: Any) -> bool:
+    if not _forcing_submit_reconcile_job(job):
+        return False
+    slurm_job_id = str(getattr(job, "slurm_job_id", None) or "")
+    return bool(
+        slurm_job_id.isdigit()
+        and getattr(job, "submit_outcome", None) == "accepted"
+        and getattr(job, "reconciliation_source", None) == "slurm_exact_comment"
+        and getattr(job, "reconciliation_decision", None) == "matched_bound"
+        and getattr(job, "matched_slurm_job_id", None) == slurm_job_id
+    )
+
+
+def _forcing_accounting_identity_matches(
+    record: SacctRecord,
+    job: Any,
+    *,
+    idempotency_key: str,
+    require_exact_comment: bool,
+    require_bound_master: bool,
+) -> bool:
+    if not _forcing_submit_reconcile_job(job):
+        return False
+    if not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
+        return False
+    if require_exact_comment and idempotency_key_from_comment(record.comment) != idempotency_key:
+        return False
+    if not require_exact_comment and record.comment not in (None, ""):
+        if idempotency_key_from_comment(record.comment) != idempotency_key:
+            return False
+    expected_master = str(getattr(job, "slurm_job_id", None) or "")
+    if require_bound_master and (not expected_master or record.slurm_job_id != expected_master):
+        return False
+    expected_token = _expected_job_name_token(
+        getattr(job, "stage", None), getattr(job, "job_type", None)
+    )
+    if not _identity_matches(record, expected_token, job, require_durable_identity=False):
+        return False
+    for record_value, job_field in (
+        (record.run_id, "run_id"),
+        (record.stage, "stage"),
+        (record.pipeline_job_id, "job_id"),
+    ):
+        expected = getattr(job, job_field, None)
+        if record_value not in (None, "") and expected not in (None, ""):
+            if str(record_value) != str(expected):
+                return False
+    expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+    expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
+    if expected_user and record.user != expected_user:
+        return False
+    if expected_account and record.account != expected_account:
+        return False
+    return True
 
 
 def _file_cohort_runtime_identity_matches(store: Any, identity: Mapping[str, Any]) -> bool:
@@ -1814,6 +1898,7 @@ def reconcile_reserved_unbound_jobs(
                 job,
                 comment_capability_provider=_pass_comment_capability,
             )
+            forcing_submit_reconcile = _forcing_submit_reconcile_job(job)
             file_forecast_cohort = bool(
                 getattr(store, "supports_accepted_submit_reconcile", False)
                 and _accepted_submit_versioned_job(job)
@@ -1860,20 +1945,27 @@ def reconcile_reserved_unbound_jobs(
                     job,
                     AcceptedSubmitTransition.timeout(status=str(job.status)),
                 )
+            elif forcing_submit_reconcile and getattr(job, "submit_outcome", None) is None:
+                _transition_forcing_submit_ambiguity(store, job)
 
-            attempt_anchor = _job_attempt_anchor(job, accepted_submit_reconcile=accepted_submit_reconcile)
+            trusted_submit_reconcile = accepted_submit_reconcile or forcing_submit_reconcile
+            attempt_anchor = _job_attempt_anchor(
+                job, accepted_submit_reconcile=trusted_submit_reconcile
+            )
             try:
                 expected_user = str(getattr(job, "expected_slurm_user", None) or "")
                 expected_account = str(getattr(job, "expected_slurm_account", None) or "")
                 proof = _query_comment_accounting_proof(
                     comment_query,
                     str(idempotency_key),
-                    expected_user=expected_user if accepted_submit_reconcile else "",
-                    expected_account=expected_account if accepted_submit_reconcile else "",
+                    expected_user=expected_user if trusted_submit_reconcile else "",
+                    expected_account=expected_account if trusted_submit_reconcile else "",
                     accepted_submit_contract_version=(
                         ACCEPTED_SUBMIT_CONTRACT_VERSION if accepted_submit_reconcile else None
                     ),
-                    submission_attempt_started_at=(attempt_anchor if accepted_submit_reconcile else None),
+                    submission_attempt_started_at=(
+                        attempt_anchor if trusted_submit_reconcile else None
+                    ),
                 )
             except ReconcileQueryUnavailable as error:
                 # Transient failure: we did NOT confirm absence. Keep the row
@@ -1940,6 +2032,52 @@ def reconcile_reserved_unbound_jobs(
                         reconciliation_reason_class="coverage_incomplete",
                         durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                         durable_write_count=write_count,
+                    )
+                )
+                continue
+            if (
+                forcing_submit_reconcile
+                and proof.kind == "global_absence"
+                and not _effective_versioned_absence_coverage(
+                    proof, attempt_anchor=attempt_anchor
+                )
+            ):
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=ABSENCE_UNCONFIRMED_ACTION,
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_reason_class="coverage_incomplete",
+                    )
+                )
+                continue
+            if forcing_submit_reconcile and proof.kind not in {"owned_match", "global_absence"}:
+                action = (
+                    "multiple_matches_blocked"
+                    if proof.kind == "ambiguous"
+                    else "identity_mismatch_blocked"
+                    if proof.kind == "foreign_collision"
+                    else "query_unavailable"
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=action,
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        match_count=(
+                            min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1)
+                            if proof.records
+                            else 0
+                        ),
+                        reconciliation_reason_class=(
+                            "comment_accounting_unproven"
+                            if action == "query_unavailable"
+                            else None
+                        ),
                     )
                 )
                 continue
@@ -2052,7 +2190,11 @@ def reconcile_reserved_unbound_jobs(
             record = (
                 proof.records[0]
                 if proof.records
-                and (proof.kind in {"owned_match", "fallback_unique"} or not accepted_submit_reconcile)
+                and (
+                    proof.kind in {"owned_match", "fallback_unique"}
+                    or (forcing_submit_reconcile and proof.kind == "owned_match")
+                    or (not accepted_submit_reconcile and not forcing_submit_reconcile)
+                )
                 else None
             )
             fallback_unique = accepted_submit_reconcile and proof.kind == "fallback_unique"
@@ -2106,6 +2248,28 @@ def reconcile_reserved_unbound_jobs(
                     )
                 )
                 continue
+            if (
+                forcing_submit_reconcile
+                and record is not None
+                and not _forcing_accounting_identity_matches(
+                    record,
+                    job,
+                    idempotency_key=str(idempotency_key),
+                    require_exact_comment=True,
+                    require_bound_master=False,
+                )
+            ):
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="identity_mismatch_blocked",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        match_count=1,
+                    )
+                )
+                continue
             # Confirm the accounting row truly carries our idempotency comment AND
             # that its slurm_job_id has a valid Slurm shape (``\d+`` or ``\d+_\d+``)
             # before binding — symmetric with the identity guard in
@@ -2114,6 +2278,56 @@ def reconcile_reserved_unbound_jobs(
             # fallback an empty comment is expected (the cluster does not store
             # it) and the comment gate was already applied by the reserved
             # identity check; only a present-but-different comment is fatal.
+            if forcing_submit_reconcile and record is None:
+                credible_absence = (
+                    proof.kind == "global_absence"
+                    and _effective_versioned_absence_coverage(
+                        proof, attempt_anchor=attempt_anchor
+                    )
+                )
+                retry_permission = None
+                if credible_absence:
+                    permit_forcing_retry = getattr(
+                        store, "permit_forcing_submit_retry", None
+                    )
+                    if callable(permit_forcing_retry):
+                        retry_permission = permit_forcing_retry(
+                            job.job_id,
+                            expected_submission_attempt=_job_submission_attempt(job),
+                            expected_submission_attempt_started_at=attempt_anchor,
+                        )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=(
+                            "absence_retry_permitted"
+                            if retry_permission is not None
+                            else ABSENCE_UNCONFIRMED_ACTION
+                        ),
+                        status=(
+                            RESERVATION_LOST_STATUS
+                            if retry_permission is not None
+                            else str(job.status)
+                        ),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision=(
+                            "absence_retry_permitted"
+                            if retry_permission is not None
+                            else None
+                        ),
+                        reconciliation_reason_class=(
+                            None if credible_absence else "coverage_incomplete"
+                        ),
+                        durable_write_kind=(
+                            "forcing_retry_permission"
+                            if retry_permission is not None
+                            else None
+                        ),
+                        durable_write_count=1 if retry_permission is not None else 0,
+                    )
+                )
+                continue
             if record is None or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
                 if fallback_unique:
                     write_count = _record_file_reconciliation(
@@ -2382,6 +2596,17 @@ def reconcile_reserved_unbound_jobs(
                     continue
                 bound = commit_result.row
                 write_count = int(commit_result.wrote)
+            elif forcing_submit_reconcile:
+                forcing_binder = getattr(store, "bind_forcing_submit_attempt", None)
+                if not callable(forcing_binder):
+                    raise ReconcileQueryUnavailable("forcing submit bind API unavailable")
+                bound = forcing_binder(
+                    str(idempotency_key),
+                    expected_submission_attempt=_job_submission_attempt(job),
+                    expected_submission_attempt_started_at=attempt_anchor,
+                    slurm_job_id=record.slurm_job_id,
+                )
+                write_count = 1 if bound is not None else 0
             else:
                 bound = store.bind_reservation(
                     str(idempotency_key),
@@ -2394,18 +2619,32 @@ def reconcile_reserved_unbound_jobs(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
-                    action="bound",
+                    action="bound" if bound is not None else "stale_attempt_blocked",
                     status=bound_status,
                     slurm_job_id=record.slurm_job_id,
                     reconciliation_source=(
                         "slurm_name_window_unique" if fallback_unique else "slurm_exact_comment"
                     )
-                    if accepted_submit_reconcile
+                    if accepted_submit_reconcile or forcing_submit_reconcile
                     else None,
-                    reconciliation_decision="matched_bound" if accepted_submit_reconcile else None,
-                    matched_slurm_job_id=record.slurm_job_id if accepted_submit_reconcile else None,
-                    match_count=1 if accepted_submit_reconcile else None,
-                    durable_write_kind="reservation_bind" if write_count else None,
+                    reconciliation_decision=(
+                        "matched_bound"
+                        if accepted_submit_reconcile or forcing_submit_reconcile
+                        else None
+                    ),
+                    matched_slurm_job_id=(
+                        record.slurm_job_id
+                        if accepted_submit_reconcile or forcing_submit_reconcile
+                        else None
+                    ),
+                    match_count=1 if accepted_submit_reconcile or forcing_submit_reconcile else None,
+                    durable_write_kind=(
+                        "forcing_submit_bind"
+                        if forcing_submit_reconcile and write_count
+                        else "reservation_bind"
+                        if write_count
+                        else None
+                    ),
                     durable_write_count=write_count,
                 )
             )
@@ -2861,6 +3100,22 @@ def _release_identity_blocked_reservation(store: Any, job: Any, *, identity_bloc
             identity_blocked_streak=identity_blocked_streak,
         )
     )
+
+
+def _transition_forcing_submit_ambiguity(store: Any, job: Any) -> int:
+    """Persist a pre-outcome forcing reservation as unknown before querying it."""
+
+    transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
+    if not callable(transitioner):
+        return 0
+    result = transitioner(
+        job.job_id,
+        AcceptedSubmitTransition.timeout(status=str(job.status)),
+        expected_submission_attempt=_job_submission_attempt(job),
+        expected_statuses=(str(job.status),),
+        require_unbound=getattr(job, "slurm_job_id", None) in (None, ""),
+    )
+    return int(getattr(result, "wrote", False))
 
 
 def _transition_file_reconciliation(

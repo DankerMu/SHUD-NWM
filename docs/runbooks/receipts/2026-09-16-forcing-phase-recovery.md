@@ -71,9 +71,16 @@ identity: forcing **49309**, forecast **49347**, state-save/QC **49385** all
 succeeded. Thus IFS recovered through automatic repeated forcing execution,
 **not** by adopting 49174. No operator retry/adoption was invoked. The earlier
 claim that this row permanently blocked IFS publication was superseded by these
-observations. The ambiguity/cross-cohort duplicate-submission defect remains
-tracked in #2447, which the user authorized as separate follow-on implementation.
-An adoption tool must refuse the now-superseded old attempt.
+observations.
+
+For future self-sufficient forcing attempts, #2447 retains an unverifiable
+post-Gateway response as an unbound ambiguity rather than a permanent failure
+or absence. It fences intersecting source/cycle/model members while the attempt
+is unresolved. Only an exact trusted accounting bind followed by the ordinary
+forcing completion/witness path permits forecast continuation; only existing
+credible rejection or coverage-proven absence permits another forcing attempt.
+Historical **49174** remains superseded by **49309**: no adoption, migration,
+reconstruction, or broad sparse-failure fence is authorized.
 
 Pass `scheduler_2026091619_936c2814d474` completed at 21:28:31Z with 76 selected
 models, 76 submitted, zero failed/partial/blocked. Its terminal stage evidence:

@@ -20,6 +20,11 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.forcing_submit_identity import (
+    canonical_forcing_cohort_members,
+    forcing_member_identity_is_complete,
+    is_forcing_array_stage,
+)
 from services.orchestrator.accepted_submit_identity import (
     OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
 )
@@ -619,6 +624,8 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext,
         pipeline_job_id: str,
         idempotency_key: str,
+        *,
+        forcing_member_tasks: _chain.Sequence[_chain.Mapping[str, _chain.Any]] | None = None,
     ) -> _chain.ReservationResult | None:
         """Phase 1 durable reservation; best-effort for legacy repositories.
 
@@ -690,6 +697,56 @@ class ForecastOrchestratorCycleMixin:
                 "expected_slurm_account": expected_account,
                 "native_shud_resubmitted": _chain.chain_stage_execution.is_forecast_cohort_stage(stage),
             }
+        elif (
+            getattr(self.repository, "supports_accepted_submit_reconcile", False)
+            and is_forcing_array_stage(stage)
+        ):
+            submission_attempt = max(int(context.retry_attempt or 1), 1)
+            retry_marker = "_retry_"
+            if retry_marker in pipeline_job_id:
+                try:
+                    submission_attempt = max(
+                        submission_attempt,
+                        int(pipeline_job_id.rsplit(retry_marker, maxsplit=1)[1]) + 1,
+                    )
+                except ValueError:
+                    pass
+            expected_user = self.config.reconcile_slurm_user
+            expected_account = self.config.reconcile_slurm_account
+            if forcing_member_tasks is None:
+                raise _chain.OrchestratorError(
+                    "FORCING_SUBMIT_IDENTITY_UNAVAILABLE",
+                    "forcing reservation requires the exact pre-Gateway task mapping",
+                    {"stage": stage.stage, "pipeline_job_id": pipeline_job_id},
+                )
+            forcing_members = canonical_forcing_cohort_members(tasks=forcing_member_tasks)
+            reservation_evidence = {
+                "slurm_comment": _chain.slurm_comment_for(idempotency_key),
+                "cohort_members": list(forcing_members),
+                "restart_stage": "forcing",
+                "submission_attempt": submission_attempt,
+                "submission_attempt_started_at": datetime.now(UTC),
+                "slurm_ownership_required": bool(expected_user and expected_account),
+                "expected_slurm_user": expected_user,
+                "expected_slurm_account": expected_account,
+            }
+            if not forcing_member_identity_is_complete(
+                {
+                    "job_id": pipeline_job_id,
+                    "run_id": context.run_id,
+                    "source_id": context.source_id,
+                    "cycle_id": context.cycle_id,
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "idempotency_key": idempotency_key,
+                    **reservation_evidence,
+                }
+            ):
+                raise _chain.OrchestratorError(
+                    "FORCING_SUBMIT_IDENTITY_UNAVAILABLE",
+                    "forcing reservation requires complete pre-Gateway member identity",
+                    {"stage": stage.stage, "pipeline_job_id": pipeline_job_id},
+                )
         reserve_kwargs = {
             "idempotency_key": idempotency_key,
             "job_id": pipeline_job_id,
@@ -708,9 +765,10 @@ class ForecastOrchestratorCycleMixin:
             "candidate_id": context.run_id,
         }
         if reservation_evidence is not None:
-            reservation_evidence["cohort_digest"] = forecast_cohort_digest(
-                {"source_id": context.source_id, **reserve_kwargs, **reservation_evidence}
-            )
+            if _chain.chain_stage_execution.is_forecast_cohort_stage(stage):
+                reservation_evidence["cohort_digest"] = forecast_cohort_digest(
+                    {"source_id": context.source_id, **reserve_kwargs, **reservation_evidence}
+                )
             reserve_kwargs["reservation_evidence"] = reservation_evidence
         return _chain.reserve_candidate(self.repository, **reserve_kwargs)
 
