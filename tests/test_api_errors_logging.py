@@ -1497,3 +1497,27 @@ def test_an_unmatched_path_404_leaves_no_api_error_line(
 
     assert response.status_code == 404
     assert api_error_logs.records == []
+
+
+
+def test_extra_error_headers_cannot_override_canonical_request_id() -> None:
+    response = error_response(
+        _request(),
+        status_code=503,
+        code="MVT_COLD_GENERATION_BUSY",
+        message="Cold MVT generation is saturated; retry after the stated delay.",
+        headers={
+            "Retry-After": "1",
+            "Cache-Control": "no-store",
+            "x-request-id": "spoofed-id",
+            "X-Request-Id": "also-spoofed",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Request-ID"] == REQUEST_ID
+    assert response.body
+    names = [name.lower() for name in response.headers]
+    assert names.count("x-request-id") == 1

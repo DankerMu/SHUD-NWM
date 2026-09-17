@@ -1,3 +1,5 @@
+> 预热后续范围：I13 原固定 lead-window 的已执行任务与 receipt 保留历史原貌；当前全时次包络、v4 汇总和冷生成隔离由 `isolate-display-cold-generation`（#2121-A / #2346）验收。本 change 的 prewarm spec 已同步新契约，归档时不得恢复旧窗口。其它未完成任务不受此说明影响。
+
 ## 1. Header brand (national-overview-page)
 
 - [x] 1.1 `apps/frontend/src/components/layout/SiteHeader.tsx`：标题改为 `全国水文模拟系统（V2.0）`，`text-[28px] font-extrabold tracking-wide`，header `h-[84px]`，赞助商 `h-14`；检查 `AppShell.tsx` 对 header 高度的布局假设（地图区高度/偏移）。

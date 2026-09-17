@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -103,6 +104,11 @@ MVT_RESPONSE_HEADERS = {
     "X-Tile-Cache-Key": {"schema": {"type": "string"}},
     "X-MVT-Schema-Version": {"schema": {"type": "string"}},
 }
+MVT_COLD_BUSY_RESPONSE_HEADERS = {
+    "Retry-After": {"schema": {"type": "string"}},
+    "Cache-Control": {"schema": {"type": "string"}},
+    "X-Request-ID": {"schema": {"type": "string"}},
+}
 MVT_ROUTE_RESPONSES = {
     200: {
         "description": "Raw Mapbox vector tile",
@@ -111,6 +117,11 @@ MVT_ROUTE_RESPONSES = {
     },
     424: {
         "description": "Live PostGIS MVT is unavailable for this canonical tile route.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    },
+    503: {
+        "description": "Cold MVT generation is saturated; retry after the stated delay.",
+        "headers": MVT_COLD_BUSY_RESPONSE_HEADERS,
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
     },
     "4XX": {"description": "MVT request validation error."},
@@ -204,16 +215,26 @@ class DischargeCycles(BaseModel):
 class DischargeCyclesResponse(ApiSuccessEnvelope):
     data: DischargeCycles
 
+_POOL_CONFIGURATION_LOCK = threading.Lock()
+_DISPLAY_POOL_CONFIGURATION: tuple[int, int] | None = None
+_COLD_GATE_LOCK = threading.Lock()
+_COLD_GATE: threading.BoundedSemaphore | None = None
+_COLD_GATE_LIMIT: int | None = None
+MVT_COLD_BUSY_CODE = "MVT_COLD_GENERATION_BUSY"
+MVT_COLD_BUSY_MESSAGE = "Cold MVT generation is saturated; retry after the stated delay."
+MVT_COLD_BUSY_HEADERS = {"Retry-After": "1", "Cache-Control": "no-store"}
+
 
 @lru_cache
 def _engine(database_url: str) -> Engine:
+    pool_size, max_overflow = _display_pool_configuration()
     return create_engine(
         database_url,
         future=True,
         connect_args={"fallback_application_name": _APPLICATION_NAME},
         pool_pre_ping=True,
-        pool_size=_bounded_env_int("NHMS_DISPLAY_DB_POOL_SIZE", default=4, minimum=1, maximum=16),
-        max_overflow=_bounded_env_int("NHMS_DISPLAY_DB_MAX_OVERFLOW", default=2, minimum=0, maximum=16),
+        pool_size=pool_size,
+        max_overflow=max_overflow,
         pool_timeout=10,
         pool_recycle=1800,
     )
@@ -226,6 +247,75 @@ def _bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> 
     except ValueError:
         return default
     return value if minimum <= value <= maximum else default
+
+
+def _display_pool_size() -> int:
+    return _bounded_env_int("NHMS_DISPLAY_DB_POOL_SIZE", default=4, minimum=1, maximum=16)
+
+
+def _display_max_overflow() -> int:
+    return _bounded_env_int("NHMS_DISPLAY_DB_MAX_OVERFLOW", default=2, minimum=0, maximum=16)
+
+
+def _display_pool_configuration() -> tuple[int, int]:
+    """The effective bounded pool settings captured once for this process."""
+    global _DISPLAY_POOL_CONFIGURATION
+    with _POOL_CONFIGURATION_LOCK:
+        if _DISPLAY_POOL_CONFIGURATION is None:
+            _DISPLAY_POOL_CONFIGURATION = (_display_pool_size(), _display_max_overflow())
+        return _DISPLAY_POOL_CONFIGURATION
+
+
+def _display_pool_capacity() -> int:
+    pool_size, max_overflow = _display_pool_configuration()
+    return pool_size + max_overflow
+
+
+def _effective_cold_limit(capacity: int | None = None) -> int:
+    """Cold admission strictly below the same bounded pool the engine uses."""
+    pool_capacity = _display_pool_capacity() if capacity is None else capacity
+    if pool_capacity <= 1:
+        return 0
+    default = pool_capacity // 2
+    raw = os.getenv("NHMS_DISPLAY_MVT_COLD_LIMIT", "").strip()
+    try:
+        requested = int(raw) if raw else default
+    except ValueError:
+        requested = default
+    if requested < 0:
+        requested = default
+    return min(requested, pool_capacity - 1)
+
+
+def _cold_generation_gate() -> tuple[threading.BoundedSemaphore, int]:
+    global _COLD_GATE, _COLD_GATE_LIMIT
+    with _COLD_GATE_LOCK:
+        if _COLD_GATE is None or _COLD_GATE_LIMIT is None:
+            limit = _effective_cold_limit()
+            _COLD_GATE = threading.BoundedSemaphore(limit)
+            _COLD_GATE_LIMIT = limit
+        return _COLD_GATE, _COLD_GATE_LIMIT
+
+
+def _release_session_checkout(session: Session) -> None:
+    """Return a session checkout before an admission or single-flight wait."""
+    try:
+        session.rollback()
+    except BaseException as rollback_error:
+        try:
+            session.invalidate()
+        except BaseException as invalidate_error:
+            raise invalidate_error from rollback_error
+        raise
+
+
+def _mvt_cold_generation_busy() -> ApiError:
+    return ApiError(
+        status_code=503,
+        code=MVT_COLD_BUSY_CODE,
+        message=MVT_COLD_BUSY_MESSAGE,
+        headers=MVT_COLD_BUSY_HEADERS,
+    )
 
 
 def get_hydro_display_session() -> Generator[Session, None, None]:
@@ -754,14 +844,29 @@ def _cached_or_generated_mvt_response(
     tile_input: TileInput,
     producer: Callable[[], bytes],
 ) -> Response:
-    cached = read_cached_tile_response(session, tile_input)
+    try:
+        cached = read_cached_tile_response(session, tile_input)
+    except BaseException:
+        _release_session_checkout(session)
+        raise
     if cached is not None:
         return _mvt_response(cached)
-    with tile_generation_lock(tile_input):
-        cached = read_cached_tile_response(session, tile_input)
-        if cached is not None:
-            return _mvt_response(cached)
-        return _mvt_response(build_raw_tile_response(session, tile_input, producer()))
+
+    _release_session_checkout(session)
+    gate, limit = _cold_generation_gate()
+    if limit <= 0 or not gate.acquire(blocking=False):
+        raise _mvt_cold_generation_busy()
+    try:
+        with tile_generation_lock(tile_input):
+            cached = read_cached_tile_response(session, tile_input)
+            if cached is not None:
+                return _mvt_response(cached)
+            return _mvt_response(build_raw_tile_response(session, tile_input, producer()))
+    finally:
+        try:
+            _release_session_checkout(session)
+        finally:
+            gate.release()
 
 
 def _mvt_live_postgis_enabled(session: Session) -> bool:
