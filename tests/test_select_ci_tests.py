@@ -1699,6 +1699,7 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         "tests/test_api.py",
         "tests/test_api_contract.py",
         "tests/test_api_errors_logging.py",
+        "tests/test_display_mvt_cold_admission.py",
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
