@@ -1,0 +1,15 @@
+Wed Sep 16 01:55:49 PM UTC 2026
+?? .nhms-work/
+7b38bcb8bebd65ce051dae0771c896e1ca96c0fc
+master
+Python 3.12.7
+NextElapseUSecRealtime=
+ActiveState=active
+UnitFileState=enabled
+MainPID=2513758
+ExecStart={ path=/scratch/frd_muziyao/NWM/.venv/bin/python ; argv[]=/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli plan-production --submit --continuous --max-passes 1 ; ignore_errors=no ; start_time=[Wed 2026-09-16 21:54:43 CST] ; stop_time=[n/a] ; pid=2513758 ; code=(null) ; status=0/0 }
+WorkingDirectory=/scratch/frd_muziyao/NWM
+ActiveState=activating
+SubState=start
+FragmentPath=/users/frd_muziyao/.config/systemd/user/nhms-compute-scheduler.service
+DropInPaths=/users/frd_muziyao/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf /users/frd_muziyao/.config/systemd/user/nhms-compute-scheduler.service.d/20-runtime-path.conf

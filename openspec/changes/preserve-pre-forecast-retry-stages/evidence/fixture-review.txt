@@ -1,0 +1,3 @@
+RepairFixtureReview: pass; no required additions. Read-only; no tests run by reviewer.
+Parent OpenSpec strict validate: PASS.
+Explicit user authorization: fix #2439 and restore upstream chain; original issue production exclusion superseded only for guarded normal recovery.

@@ -1,0 +1,53 @@
+NOW 2026-09-16T23:02:49.951786+00:00
+49807 nhms_state_save_qc PENDING
+49834 nhms_state_save_qc PENDING
+49856 nhms_state_save_qc RUNNING
+49855 nhms_state_save_qc RUNNING
+49854 nhms_state_save_qc RUNNING
+49853 nhms_state_save_qc RUNNING
+49852 nhms_state_save_qc RUNNING
+49851 nhms_state_save_qc RUNNING
+49837 nhms_state_save_qc RUNNING
+49838 nhms_state_save_qc RUNNING
+49839 nhms_state_save_qc RUNNING
+49840 nhms_state_save_qc RUNNING
+49841 nhms_state_save_qc RUNNING
+49842 nhms_state_save_qc RUNNING
+49843 nhms_state_save_qc RUNNING
+49844 nhms_state_save_qc RUNNING
+49845 nhms_state_save_qc RUNNING
+49846 nhms_state_save_qc RUNNING
+49847 nhms_state_save_qc RUNNING
+49848 nhms_state_save_qc RUNNING
+49849 nhms_state_save_qc RUNNING
+49850 nhms_state_save_qc RUNNING
+49835 nhms_state_save_qc RUNNING
+49836 nhms_state_save_qc RUNNING
+49833 nhms_state_save_qc RUNNING
+49832 nhms_state_save_qc RUNNING
+49831 nhms_state_save_qc RUNNING
+49830 nhms_state_save_qc RUNNING
+49829 nhms_state_save_qc RUNNING
+49828 nhms_state_save_qc RUNNING
+49827 nhms_state_save_qc RUNNING
+49826 nhms_state_save_qc RUNNING
+49825 nhms_state_save_qc RUNNING
+49824 nhms_state_save_qc RUNNING
+
+MainPID=239393
+ExecMainStartTimestamp=Thu 2026-09-17 05:28:52 CST
+
+PASS scheduler_2026091619_936c2814d474.pre_execution.json KEYS ['artifact_path', 'candidate_count', 'final_evidence_artifact', 'pass_id', 'proof', 'reserved_at', 'schema_version', 'started_at', 'status']
+{"status": "reserved", "started_at": "2026-09-16T19:05:06.864329Z", "finished_at": null, "counts": null, "summary": null}
+PASS scheduler_2026091619_936c2814d474.json KEYS ['artifact_path', 'backfill', 'blocked_candidates', 'candidates', 'counts', 'cycle_window', 'dry_run', 'duplicate_exclusions', 'evidence_compaction', 'evidence_pre_execution', 'execution_boundary', 'execution_mode', 'execution_write_proof', 'filters', 'finished_at', 'journal_read_attribution', 'lock', 'model_discovery', 'model_run_evidence', 'no_mutation_proof', 'operator_filters', 'pass_id', 'production_contract', 'progress_guard', 'readiness', 'readiness_interpretation', 'resolved_runtime_roots', 'restart_reconcile', 'restart_reconcile_proof', 'retention', 'review_contract', 'root_preflight', 'runtime_config', 'schema_version', 'skipped_candidates', 'slurm_cancellation_evidence', 'slurm_cancellation_proof', 'slurm_preflight', 'slurm_status_sync_proof', 'source_cycles', 'sources', 'started_at', 'status', 'submit_overlap_receipt', 'timing']
+{"status": "submitted", "started_at": "2026-09-16T19:05:06.864329Z", "finished_at": "2026-09-16T21:28:31.198630Z", "counts": {"blocked_candidate_count": 0, "candidate_count": 76, "failed_count": 0, "partial_count": 0, "selected_model_count": 76, "skipped_candidate_count": 0, "slurm_cancellation_blocked_count": 0, "slurm_cancellation_unknown_count": 0, "slurm_cancelled_count": 0, "slurm_status_sync_count": 0, "slurm_status_sync_unknown_count": 0, "source_cycle_count": 2, "submitted_count": 76}, "summary": null}
+PASS scheduler_2026091621_8df950532cc2.pre_execution.json KEYS ['artifact_path', 'candidate_count', 'final_evidence_artifact', 'pass_id', 'proof', 'reserved_at', 'schema_version', 'started_at', 'status']
+{"status": "reserved", "started_at": "2026-09-16T21:28:53.239422Z", "finished_at": null, "counts": null, "summary": null}
+MANIFEST forcing_index_20260916T155859540849.json list 38
+[{'_provided_identity_fields': ['candidate_id', 'cycle_id', 'cycle_time', 'forcing_version_id', 'output_uri', 'run_id', 'scenario_id', 'source_id'], 'basin_id': 'basins_lh_lxyh', 'basin_version_id': 'basins_lh_lxyh_vbasins', 'candidate_id': 'IFS:2026-09-15T00:00:00Z:dg_0e611766f8d1edb6e99a2ba1892e48e1:forecast_ifs_deterministic', 'canonical_product_id': 'canon_ifs_2026091500', 'cycle_id': 'ifs_2026091500', 'cycle_time': '2026091500', 'display_capabilities': {'q_down': True, 'tiles': True}, 'forcing_file_uris': {}, 'forcing_manifest_checksum': None, 'forcing_package_manifest_uri': None, 'forcing_package_uri': None, 'forcing_uri': None, 'forcing_version_id': 'forc_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'forecast_horizon_hours': 168, 'hydro_run_id': 'fcst_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'init_state_checksum': 'd1d9ba9331f045f7c948f64df3ae44c03a63c2b86331ab39783f86c327e7f426', 'init_state_id': 'state_IFS_dg_0e611766f8d1edb6e99a2ba1892e48e1_2026091500_ifs_2026091412_f012', 'init_state_lineage': {'cycle_id': 'ifs_2026091412', 'lead_hours': 12, 'model_package_checksum': '32da92ae907a25fcfdb5e6cca0d3f4564f72d1313d8df82724d46794b12682c2', 'model_package_version': 's3://nhms/models/direct_grid_variants/basins_lh_lxyh_shud/dg-ifs-8b155599d07aa5ff0506/package/', 'source_id': 'IFS'}, 'init_state_quality': 'fresh', 'init_state_uri': 's3://nhms/states/IFS/dg_0e611766f8d1edb6e99a2ba1892e48e1/2026091500/ifs_2026091412/f012/state.cfg.ic', 'init_state_valid_ti
+MANIFEST forcing_index_20260916T175254002584.json list 38
+[{'_provided_identity_fields': ['candidate_id', 'cycle_id', 'cycle_time', 'forcing_version_id', 'output_uri', 'run_id', 'scenario_id', 'source_id'], 'basin_id': 'basins_lh_lxyh', 'basin_version_id': 'basins_lh_lxyh_vbasins', 'candidate_id': 'IFS:2026-09-15T00:00:00Z:dg_0e611766f8d1edb6e99a2ba1892e48e1:forecast_ifs_deterministic', 'canonical_product_id': 'canon_ifs_2026091500', 'cycle_id': 'ifs_2026091500', 'cycle_time': '2026091500', 'display_capabilities': {'q_down': True, 'tiles': True}, 'forcing_file_uris': {}, 'forcing_manifest_checksum': None, 'forcing_package_manifest_uri': None, 'forcing_package_uri': None, 'forcing_uri': None, 'forcing_version_id': 'forc_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'forecast_horizon_hours': 168, 'hydro_run_id': 'fcst_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'init_state_checksum': 'd1d9ba9331f045f7c948f64df3ae44c03a63c2b86331ab39783f86c327e7f426', 'init_state_id': 'state_IFS_dg_0e611766f8d1edb6e99a2ba1892e48e1_2026091500_ifs_2026091412_f012', 'init_state_lineage': {'cycle_id': 'ifs_2026091412', 'lead_hours': 12, 'model_package_checksum': '32da92ae907a25fcfdb5e6cca0d3f4564f72d1313d8df82724d46794b12682c2', 'model_package_version': 's3://nhms/models/direct_grid_variants/basins_lh_lxyh_shud/dg-ifs-8b155599d07aa5ff0506/package/', 'source_id': 'IFS'}, 'init_state_quality': 'fresh', 'init_state_uri': 's3://nhms/states/IFS/dg_0e611766f8d1edb6e99a2ba1892e48e1/2026091500/ifs_2026091412/f012/state.cfg.ic', 'init_state_valid_ti
+MANIFEST forecast_index_20260916T180552900822.json list 38
+[{'_provided_identity_fields': ['candidate_id', 'cycle_id', 'cycle_time', 'forcing_version_id', 'output_uri', 'run_id', 'scenario_id', 'source_id'], 'basin_id': 'basins_lh_lxyh', 'basin_version_id': 'basins_lh_lxyh_vbasins', 'candidate_id': 'IFS:2026-09-15T00:00:00Z:dg_0e611766f8d1edb6e99a2ba1892e48e1:forecast_ifs_deterministic', 'canonical_product_id': 'canon_ifs_2026091500', 'cycle_id': 'ifs_2026091500', 'cycle_time': '2026091500', 'display_capabilities': {'q_down': True, 'tiles': True}, 'forcing_file_uris': {}, 'forcing_manifest_checksum': None, 'forcing_package_manifest_uri': None, 'forcing_package_uri': None, 'forcing_uri': None, 'forcing_version_id': 'forc_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'forecast_horizon_hours': 168, 'hydro_run_id': 'fcst_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'init_state_checksum': 'd1d9ba9331f045f7c948f64df3ae44c03a63c2b86331ab39783f86c327e7f426', 'init_state_id': 'state_IFS_dg_0e611766f8d1edb6e99a2ba1892e48e1_2026091500_ifs_2026091412_f012', 'init_state_lineage': {'cycle_id': 'ifs_2026091412', 'lead_hours': 12, 'model_package_checksum': '32da92ae907a25fcfdb5e6cca0d3f4564f72d1313d8df82724d46794b12682c2', 'model_package_version': 's3://nhms/models/direct_grid_variants/basins_lh_lxyh_shud/dg-ifs-8b155599d07aa5ff0506/package/', 'source_id': 'IFS'}, 'init_state_quality': 'fresh', 'init_state_uri': 's3://nhms/states/IFS/dg_0e611766f8d1edb6e99a2ba1892e48e1/2026091500/ifs_2026091412/f012/state.cfg.ic', 'init_state_valid_ti
+MANIFEST state_save_qc_index_20260916T182926089483.json list 38
+[{'_provided_identity_fields': ['candidate_id', 'cycle_id', 'cycle_time', 'forcing_version_id', 'output_uri', 'run_id', 'scenario_id', 'source_id'], 'basin_id': 'basins_lh_lxyh', 'basin_version_id': 'basins_lh_lxyh_vbasins', 'candidate_id': 'IFS:2026-09-15T00:00:00Z:dg_0e611766f8d1edb6e99a2ba1892e48e1:forecast_ifs_deterministic', 'canonical_product_id': 'canon_ifs_2026091500', 'cycle_id': 'ifs_2026091500', 'cycle_time': '2026091500', 'display_capabilities': {'q_down': True, 'tiles': True}, 'forcing_file_uris': {}, 'forcing_manifest_checksum': None, 'forcing_package_manifest_uri': None, 'forcing_package_uri': None, 'forcing_uri': None, 'forcing_version_id': 'forc_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'forecast_horizon_hours': 168, 'hydro_run_id': 'fcst_ifs_2026091500_dg_0e611766f8d1edb6e99a2ba1892e48e1', 'init_state_checksum': 'd1d9ba9331f045f7c948f64df3ae44c03a63c2b86331ab39783f86c327e7f426', 'init_state_id': 'state_IFS_dg_0e611766f8d1edb6e99a2ba1892e48e1_2026091500_ifs_2026091412_f012', 'init_state_lineage': {'cycle_id': 'ifs_2026091412', 'lead_hours': 12, 'model_package_checksum': '32da92ae907a25fcfdb5e6cca0d3f4564f72d1313d8df82724d46794b12682c2', 'model_package_version': 's3://nhms/models/direct_grid_variants/basins_lh_lxyh_shud/dg-ifs-8b155599d07aa5ff0506/package/', 'source_id': 'IFS'}, 'init_state_quality': 'fresh', 'init_state_uri': 's3://nhms/states/IFS/dg_0e611766f8d1edb6e99a2ba1892e48e1/2026091500/ifs_2026091412/f012/state.cfg.ic', 'init_state_valid_ti

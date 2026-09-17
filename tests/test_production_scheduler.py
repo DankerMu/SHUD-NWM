@@ -169,13 +169,14 @@ def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> 
         reason="resume_after_completed_stage",
         evidence={
             "decision": "retry_after_completed_stage",
-            "restart_stage": "forcing",
+            "restart_stage": "parse",
             "run_manifest_initial_state": {
                 "state_id": None,
                 "quality": "cold_start_no_state",
             },
         },
     )
+
     strict = {
         "ready": True,
         "candidate_state": {
@@ -198,6 +199,261 @@ def test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun() -> 
     assert upgraded.evidence["native_shud_resubmitted"] is True
     assert upgraded.evidence["durable_shud_output_reused"] is False
     assert upgraded.evidence["candidate_state"]["init_state_id"] == "state_gfs_model_a_2026052112"
+
+
+def _strict_ready_without_forecast_manifest() -> dict[str, Any]:
+    return {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052112",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052112/state.cfg.ic",
+            "init_state_quality": "fresh",
+            "init_state_valid_time": "2026-05-21T12:00:00Z",
+        },
+    }
+
+
+def _convert_only_completed_stage_state(candidate: Any) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run": {
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "stage": "convert",
+        "completed_stage_evidence": {
+            "stage": "convert",
+            "status": "succeeded",
+            "restart_stage": "forcing",
+        },
+    }
+
+
+def test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2439: convert-only resume must keep forcing, not become a forecast missing-forcing block."""
+
+    object_store_root = tmp_path / "empty-object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _convert_only_completed_stage_state(candidate)
+    strict = _strict_ready_without_forecast_manifest()
+
+    state_decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert state_decision is not None
+    assert state_decision.action == "retry"
+    assert state_decision.reason == "resume_after_completed_stage"
+    assert state_decision.evidence["restart_stage"] == "forcing"
+    assert state_decision.evidence.get("artifact_guard") is None
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        state_decision,
+        strict,
+    )
+    guarded = scheduler_candidates_module._strict_warm_start_forcing_witness_decision(
+        candidate,
+        state,
+        upgraded,
+    )
+
+    assert upgraded.action == "retry"
+    assert upgraded.reason == "resume_after_completed_stage"
+    assert upgraded.evidence["decision"] == "retry_after_completed_stage"
+    assert upgraded.evidence["restart_stage"] == "forcing"
+
+    assert guarded is not None
+    assert guarded.action == "retry"
+    assert guarded.reason == "resume_after_completed_stage"
+    assert guarded.evidence["decision"] == "retry_after_completed_stage"
+    assert guarded.evidence["restart_stage"] == "forcing"
+    assert guarded.evidence.get("artifact_guard") is None
+    assert guarded.reason != "strict_warm_start_retry_run_manifest_mismatch"
+    assert guarded.reason != "forcing_version_row_absent"
+    from services.orchestrator import chain_runtime_utils
+    from services.orchestrator.chain_forced_resubmit import (
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    basin = {
+        "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
+        "candidate_id": candidate.candidate_id,
+        "state_evidence": dict(guarded.evidence),
+    }
+    # Completed-stage resumes with a recognized restart_stage are cohort
+    # replacement-eligible; that is not forced terminal forecast replay.
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin]) is True
+
+    assert (
+        _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(active_basins=[basin], restart_stage="forcing"),
+            {
+                "job_id": "job_cycle_gfs_2026052106_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+                "job_type": "run_shud_forecast_array",
+            },
+        )
+        is False
+    )
+
+
+
+def test_strict_upgrade_preserves_recognized_pre_forecast_aliases_and_precedence() -> None:
+    """#2439: only recognized convert/forcing stages keep original retry evidence."""
+
+    strict = _strict_ready_without_forecast_manifest()
+
+    def retry_decision(**evidence: Any) -> CandidateStateDecision:
+        return CandidateStateDecision(
+            action="retry",
+            reason="resume_after_completed_stage",
+            evidence={
+                "decision": "retry_after_completed_stage",
+                "reason": "resume_after_completed_stage",
+                **evidence,
+            },
+        )
+
+    convert_alias = retry_decision(restart_stage="convert_canonical")
+    forcing_alias = retry_decision(restart_stage="produce_forcing")
+    fallback_forcing = retry_decision(restart_from_stage="forcing")
+    nonempty_primary_beats_fallback = retry_decision(
+        restart_stage="forcing",
+        restart_from_stage="forecast",
+    )
+    unknown_primary_does_not_fall_back = retry_decision(
+        restart_stage="download",
+        restart_from_stage="forcing",
+    )
+    missing_stage = retry_decision(
+        run_manifest_initial_state={"state_id": None, "quality": "cold_start_no_state"},
+    )
+
+    convert_upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        convert_alias,
+        strict,
+    )
+    forcing_upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        forcing_alias,
+        strict,
+    )
+    fallback_upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        fallback_forcing,
+        strict,
+    )
+    preserved = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        nonempty_primary_beats_fallback,
+        strict,
+    )
+    assert convert_upgraded is not None
+    assert forcing_upgraded is not None
+    assert fallback_upgraded is not None
+    assert preserved is not None
+    assert convert_upgraded.action == "retry"
+    assert convert_upgraded.reason == "resume_after_completed_stage"
+    assert convert_upgraded.evidence["restart_stage"] == "convert_canonical"
+    assert forcing_upgraded.action == "retry"
+    assert forcing_upgraded.reason == "resume_after_completed_stage"
+    assert forcing_upgraded.evidence["restart_stage"] == "produce_forcing"
+    assert fallback_upgraded.action == "retry"
+    assert fallback_upgraded.reason == "resume_after_completed_stage"
+    assert fallback_upgraded.evidence["restart_from_stage"] == "forcing"
+    assert preserved.action == "retry"
+    assert preserved.reason == "resume_after_completed_stage"
+    assert preserved.evidence["restart_stage"] == "forcing"
+
+
+    unknown_upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        unknown_primary_does_not_fall_back,
+        strict,
+    )
+    missing_upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        missing_stage,
+        strict,
+    )
+    assert unknown_upgraded is not None
+    assert missing_upgraded is not None
+    assert unknown_upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert missing_upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert unknown_upgraded.evidence["restart_stage"] == "forecast"
+    assert missing_upgraded.evidence["restart_stage"] == "forecast"
+
+
+def test_forecast_later_mismatch_without_forcing_stays_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2439: forecast/later mismatch still fail-closes on absent per-model forcing."""
+
+    object_store_root = tmp_path / "empty-object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run": {
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "stage": "forecast",
+        "completed_stage_evidence": {
+            "stage": "forecast",
+            "status": "succeeded",
+            "restart_stage": "parse",
+        },
+    }
+    strict = _strict_ready_without_forecast_manifest()
+
+    state_decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert state_decision is not None
+    assert state_decision.action == "retry"
+    assert state_decision.reason == "resume_after_completed_stage"
+    assert state_decision.evidence["restart_stage"] == "parse"
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        state_decision,
+        strict,
+    )
+    guarded = scheduler_candidates_module._strict_warm_start_forcing_witness_decision(
+        candidate,
+        state,
+        upgraded,
+    )
+
+    assert upgraded is not None
+    assert upgraded.reason == "strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["restart_stage"] == "forecast"
+    assert guarded is not None
+    assert guarded.action == "blocked"
+    assert guarded.reason == "forcing_version_row_absent"
+    assert guarded.evidence["restart_stage"] == "forecast"
+    assert guarded.evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert guarded.evidence["artifact_guard"]["artifact_exists"] is False
+    from services.orchestrator import chain_runtime_utils
+
+    assert chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+        [
+            {
+                "model_id": candidate.model_id,
+                "basin_id": candidate.basin_id,
+                "candidate_id": candidate.candidate_id,
+                "state_evidence": dict(upgraded.evidence),
+            }
+        ]
+    ) is True
+
 
 
 def test_terminal_warm_state_same_id_with_repaired_checksum_requires_forecast_rerun() -> None:
@@ -10974,11 +11230,13 @@ def test_manual_retry_claim_superseded_by_strict_warm_start_upgrade_degrades_to_
 ) -> None:
     """#1201 E11 — a FRESH manual-retry decision rewritten in flight loses its pin, by design.
 
-    ``_upgrade_retry_for_strict_warm_start_manifest`` applies to any surviving
-    ``action == "retry"`` decision, including the manual-retry lane, and
-    ``_strict_warm_start_retry_run_manifest_evidence`` spreads ``**dict(retry_evidence)``
-    while overwriting BOTH ``decision`` and ``reason`` — so a live operator claim can
-    reach the minting point under a decision face that is no longer manual retry.
+    ``_upgrade_retry_for_strict_warm_start_manifest`` rewrites surviving
+    ``action == "retry"`` decisions at forecast and later, including the
+    manual-retry lane; recognized pre-forecast convert/forcing resumes keep
+    their original decision.  ``_strict_warm_start_retry_run_manifest_evidence``
+    spreads ``**dict(retry_evidence)`` while overwriting BOTH ``decision`` and
+    ``reason`` — so a live operator claim at forecast can reach the minting
+    point under a decision face that is no longer manual retry.
 
     The intended answer, pinned here, is that the claim is then treated as one with no
     active decision: nothing is minted and the stage targets the superseding lane's own
@@ -14893,31 +15151,40 @@ def test_missing_forcing_repair_rechecks_blocker_created_by_warm_manifest_upgrad
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    candidate = _scheduler_candidate_fixture()
     raw_root = tmp_path / "nfs-raw-post-upgrade"
     readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    object_store_root = tmp_path / "empty-object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
     state = {
         **_production_identity_fixture(),
         "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run": {
+            "run_id": candidate.run_id,
+            "status": "created",
+        },
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "stage": "forecast",
+        "completed_stage_evidence": {
+            "stage": "forecast",
+            "status": "succeeded",
+            "restart_stage": "parse",
+        },
         "nfs_raw_manifest": readiness,
+        "run_manifest_initial_state": {
+            "state_id": None,
+            "quality": "cold_start_no_state",
+        },
     }
-    monkeypatch.setattr(
-        scheduler_module,
-        "_candidate_state_decision",
-        lambda *_args: CandidateStateDecision(
-            "retry",
-            "resume_after_completed_stage",
-            {
-                "decision": "retry_after_completed_stage",
-                "reason": "resume_after_completed_stage",
-                "restart_stage": "forcing",
-                "run_manifest_initial_state": {
-                    "state_id": None,
-                    "quality": "cold_start_no_state",
-                },
-            },
-        ),
-    )
+    state_decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert state_decision is not None
+    assert state_decision.action == "retry"
+    assert state_decision.reason == "resume_after_completed_stage"
+    assert state_decision.evidence["restart_stage"] == "parse"
     scheduler = ProductionScheduler(
         _missing_forcing_repair_config(
             tmp_path,
@@ -14946,6 +15213,11 @@ def test_missing_forcing_repair_rechecks_blocker_created_by_warm_manifest_upgrad
     assert state_evidence["missing_forcing_repair"]["status"] == "authorized"
     assert state_evidence["restart_stage"] == "forcing"
     assert state_evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert state_evidence["artifact_guard"]["planned_retry_reason"] == (
+        "strict_warm_start_retry_run_manifest_mismatch"
+    )
+
+
 
 
 def test_file_journal_missing_forcing_repair_uses_trusted_raw_root_and_public_redaction(

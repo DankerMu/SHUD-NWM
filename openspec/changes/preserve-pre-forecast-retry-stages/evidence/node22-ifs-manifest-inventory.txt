@@ -1,0 +1,7 @@
+DIRECTORY /scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500
+/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests 6
+DIRECTORY /scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests
+/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests/forcing_index_20260916T155859540849.json 5290031
+/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests/forcing_index_20260916T175254002584.json 4880894
+/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests/forecast_index_20260916T180552900822.json 4891496
+/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/manifests/state_save_qc_index_20260916T182926089483.json 4891496

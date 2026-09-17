@@ -1,0 +1,2 @@
+Independent IFS blocker tracked: https://github.com/DankerMu/SHUD-NWM/issues/2447
+Issue successfully filed before issue-scribe transport failure; parent verified body via GitHub. #2439 source fix and GFS live publication verified; IFS adoption requires new guarded authority, not an existing operational command. No journal mutation, circuit reset, duplicate submission or source rollout performed for this independent blocker.

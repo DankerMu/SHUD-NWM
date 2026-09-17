@@ -1,0 +1,274 @@
+COMMAND ['sacct', '-j', '49174', '--format=JobID,JobName%80,State,ExitCode,Submit,Start,End,Comment%200', '-P'] 
+ JobID|JobName|State|ExitCode|Submit|Start|End|Comment
+49174_0|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:03|
+49174_0.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:03|
+49174_1|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:03|
+49174_1.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:03|
+49174_2|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:08|
+49174_2.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:08|
+49174_3|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:05|
+49174_3.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:05|
+49174_4|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:09|
+49174_4.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:09|
+49174_5|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:02|
+49174_5.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:02|
+49174_6|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_6.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_7|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_7.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_8|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:14|
+49174_8.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:14|
+49174_9|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:10|
+49174_9.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:10|
+49174_10|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:09|
+49174_10.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:09|
+49174_11|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:10|
+49174_11.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:10|
+49174_12|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:08|
+49174_12.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:08|
+49174_13|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:05|
+49174_13.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:05|
+49174_14|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:06|
+49174_14.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:06|
+49174_15|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_15.batch|batch|COMPLETED|0:0|2026-09-16T23:59:06|2026-09-16T23:59:06|2026-09-17T00:05:04|
+49174_16|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:02|2026-09-17T00:11:06|
+49174_16.batch|batch|COMPLETED|0:0|2026-09-17T00:05:02|2026-09-17T00:05:02|2026-09-17T00:11:06|
+49174_17|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:00|
+49174_17.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:00|
+49174_18|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:01|
+49174_18.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:01|
+49174_19|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:10|
+49174_19.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:10|
+49174_20|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:05|
+49174_20.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:05|
+49174_21|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:08|
+49174_21.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:08|
+49174_22|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:07|
+49174_22.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:07|
+49174_23|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:06|2026-09-17T00:11:05|
+49174_23.batch|batch|COMPLETED|0:0|2026-09-17T00:05:06|2026-09-17T00:05:06|2026-09-17T00:11:05|
+49174_24|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:09|2026-09-17T00:11:12|
+49174_24.batch|batch|COMPLETED|0:0|2026-09-17T00:05:09|2026-09-17T00:05:09|2026-09-17T00:11:12|
+49174_25|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:09|2026-09-17T00:11:12|
+49174_25.batch|batch|COMPLETED|0:0|2026-09-17T00:05:09|2026-09-17T00:05:09|2026-09-17T00:11:12|
+49174_26|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:09|2026-09-17T00:11:07|
+49174_26.batch|batch|COMPLETED|0:0|2026-09-17T00:05:09|2026-09-17T00:05:09|2026-09-17T00:11:07|
+49174_27|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:12|2026-09-17T00:11:12|
+49174_27.batch|batch|COMPLETED|0:0|2026-09-17T00:05:12|2026-09-17T00:05:12|2026-09-17T00:11:12|
+49174_28|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:12|2026-09-17T00:11:09|
+49174_28.batch|batch|COMPLETED|0:0|2026-09-17T00:05:12|2026-09-17T00:05:12|2026-09-17T00:11:09|
+49174_29|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:12|2026-09-17T00:11:11|
+49174_29.batch|batch|COMPLETED|0:0|2026-09-17T00:05:12|2026-09-17T00:05:12|2026-09-17T00:11:11|
+49174_30|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:12|2026-09-17T00:11:18|
+49174_30.batch|batch|COMPLETED|0:0|2026-09-17T00:05:12|2026-09-17T00:05:12|2026-09-17T00:11:18|
+49174_31|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:05:15|2026-09-17T00:11:15|
+49174_31.batch|batch|COMPLETED|0:0|2026-09-17T00:05:15|2026-09-17T00:05:15|2026-09-17T00:11:15|
+49174_32|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:00|2026-09-17T00:17:00|
+49174_32.batch|batch|COMPLETED|0:0|2026-09-17T00:11:00|2026-09-17T00:11:00|2026-09-17T00:17:00|
+49174_33|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:03|2026-09-17T00:17:00|
+49174_33.batch|batch|COMPLETED|0:0|2026-09-17T00:11:03|2026-09-17T00:11:03|2026-09-17T00:17:00|
+49174_34|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:06|2026-09-17T00:16:32|
+49174_34.batch|batch|COMPLETED|0:0|2026-09-17T00:11:06|2026-09-17T00:11:06|2026-09-17T00:16:32|
+49174_35|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:06|2026-09-17T00:17:07|
+49174_35.batch|batch|COMPLETED|0:0|2026-09-17T00:11:06|2026-09-17T00:11:06|2026-09-17T00:17:07|
+49174_36|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:09|2026-09-17T00:16:49|
+49174_36.batch|batch|COMPLETED|0:0|2026-09-17T00:11:09|2026-09-17T00:11:09|2026-09-17T00:16:49|
+49174_37|nhms_forcing|COMPLETED|0:0|2026-09-16T23:59:04|2026-09-17T00:11:09|2026-09-17T00:16:47|
+49174_37.batch|batch|COMPLETED|0:0|2026-09-17T00:11:09|2026-09-17T00:11:09|2026-09-17T00:16:47|
+ 
+COMMAND ['scontrol', 'show', 'job', '49174'] 
+ JobId=49174 ArrayJobId=49174 ArrayTaskId=37 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:05:38 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:09
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:09 EndTime=2026-09-17T00:16:47 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:09 Scheduler=Main
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn07
+   BatchHost=cn07
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_37.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_37.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+JobId=49227 ArrayJobId=49174 ArrayTaskId=36 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:05:40 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:09
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:09 EndTime=2026-09-17T00:16:49 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:09 Scheduler=Main
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn07
+   BatchHost=cn07
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_36.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_36.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+JobId=49226 ArrayJobId=49174 ArrayTaskId=35 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:06:01 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:06
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:06 EndTime=2026-09-17T00:17:07 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:06 Scheduler=Main
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn07
+   BatchHost=cn07
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_35.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_35.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+JobId=49225 ArrayJobId=49174 ArrayTaskId=34 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:05:26 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:06
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:06 EndTime=2026-09-17T00:16:32 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:06 Scheduler=Main
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn08
+   BatchHost=cn08
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_34.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_34.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+JobId=49224 ArrayJobId=49174 ArrayTaskId=33 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:05:57 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:03
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:03 EndTime=2026-09-17T00:17:00 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:03 Scheduler=Main
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn07
+   BatchHost=cn07
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_33.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_33.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+JobId=49223 ArrayJobId=49174 ArrayTaskId=32 ArrayTaskThrottle=16 JobName=nhms_forcing
+   UserId=frd_muziyao(1103) GroupId=huser(1078) MCS_label=N/A
+   Priority=8000 Nice=0 Account=friends QOS=level2
+   JobState=COMPLETED Reason=None Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   RunTime=00:06:00 TimeLimit=14:00:00 TimeMin=N/A
+   SubmitTime=2026-09-16T23:59:04 EligibleTime=2026-09-17T00:11:00
+   AccrueTime=2026-09-16T23:59:06
+   StartTime=2026-09-17T00:11:00 EndTime=2026-09-17T00:17:00 Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-17T00:11:00 Scheduler=Backfill
+   Partition=CPU AllocNode:Sid=stor:2409535
+   ReqNodeList=(null) ExcNodeList=cn[11,24]
+   NodeList=cn07
+   BatchHost=cn07
+   NumNodes=1 NumCPUs=4 NumTasks=1 CPUs/Task=4 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=4,mem=8G,node=1,billing=4
+   AllocTRES=cpu=4,node=1,billing=4
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=4 MinMemoryNode=8G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) Network=(null)
+   Command=/tmp/nhms_bq9a0984.sbatch
+   WorkDir=/scratch/frd_muziyao/NWM
+   Comment=nhms_idem:cycle_ifs_2026091500_convert_cohort_3da2eb48a78b:forcing 
+   StdErr=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_32.err
+   StdIn=/dev/null
+   StdOut=/scratch/frd_muziyao/nhms-prod/workspace/ifs_2026091500/array_logs/forcing_index_20260916T155859540849/49174_32.out
+   Power=
+   TresPerTask=cpu:4
+   
+
+ 
+COMMAND ['systemctl', '--user', 'show', 'nhms-compute-scheduler.service', '-p', 'MainPID', '-p', 'ActiveState', '-p', 'ExecMainStartTimestamp'] 
+ MainPID=3033690
+ExecMainStartTimestamp=Wed 2026-09-16 23:47:08 CST
+ActiveState=activating
+ 
+  nhms-slurm-gateway.service                                                                                                               loaded    active     running         NHMS standalone Slurm gateway (node 22 user)
+  yd-slurm-gateway.service                                                                                                                 loaded    active     running         yd-NWM standalone Slurm gateway (node 22 user)

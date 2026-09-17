@@ -1,0 +1,8 @@
+PASS scheduler_2026091617_33080980c3c3.json
+TOP TYPES {'candidates': 'list', 'model_run_evidence': 'list'}
+CANDIDATE_KEYS ['basin_id', 'basin_version_id', 'candidate_id', 'canonical_product_id', 'cycle_id', 'cycle_time', 'cycle_time_utc', 'display_capabilities', 'forcing_version_id', 'horizon', 'hydro_run_id', 'model_id', 'model_package_uri', 'output_segment_count', 'production_identity_contract', 'published_manifest_id', 'reason', 'resource_profile', 'river_network_version_id', 'run_id', 'scenario_id', 'segment_count', 'source', 'source_id', 'state_evidence', 'status']
+DECISION {"status": "selected"}
+PASS scheduler_2026091619_936c2814d474.json
+TOP TYPES {'candidates': 'list', 'model_run_evidence': 'list'}
+CANDIDATE_KEYS ['basin_id', 'basin_version_id', 'candidate_id', 'canonical_product_id', 'cycle_id', 'cycle_time', 'cycle_time_utc', 'display_capabilities', 'forcing_version_id', 'horizon', 'hydro_run_id', 'model_id', 'model_package_uri', 'output_segment_count', 'production_identity_contract', 'published_manifest_id', 'reason', 'resource_profile', 'river_network_version_id', 'run_id', 'scenario_id', 'segment_count', 'source', 'source_id', 'state_evidence', 'status']
+DECISION {"status": "selected"}

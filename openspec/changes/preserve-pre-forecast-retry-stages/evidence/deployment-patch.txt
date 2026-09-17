@@ -1,0 +1,11 @@
+Implementation source commit: 8e5938e491ba74f2e56153e52407d27bc5cec645
+Pinned deployment parent: 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc
+Pinned deployment commit: e7bd816060a25b72112048c9b24e9d8a9980581a
+GitHub branch: deploy/issue-2439-forcing-phase
+Construction: git format-patch -1 8e5938e491ba74f2e56153e52407d27bc5cec645 -- services/orchestrator/scheduler_candidates.py; git am on isolated pinned-parent checkout.
+Changed runtime files: services/orchestrator/scheduler_candidates.py only (16 insertions, 6 deletions).
+Ancestry proof: git merge-base --is-ancestor 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc HEAD => exit 0.
+Unrelated-file proof: git diff --exit-code 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc HEAD -- . ':(exclude)services/orchestrator/scheduler_candidates.py' => no output, exit 0.
+Mainline source-only stable patch-id: 299d90a4fe444bc7cc39cc7521a423222d1e54ab
+Pinned deployment stable patch-id: 299d90a4fe444bc7cc39cc7521a423222d1e54ab
+Equality proves the same reviewed source patch, not whole-tree SHA equality. Branch has been pushed; production checkout has NOT yet changed. Tests, quiescence, review and deployment smoke remain prerequisites.

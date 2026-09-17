@@ -1,0 +1,7 @@
+PinnedDeploymentRecon source-only investigation (no runtime validation):
+node22 baseline7b38bcb8; localmaster94dc12e3. Upgrade helper/callsite/canonical-stage normalization and vocabulary are text-identical in relevant regions. Existing scheduler_state reexports canonical stage helper and domain, available at baseline. Source-only scheduler_candidates.py patch needs no other runtime file; do not replace entire master file.
+Per-pass scheduler imports patched module; workers import same checkout via editable install at job start. Quiesce scheduler and in-flight queue before swap. No gateway/API restart needed from inspected import graph (source inspection, not runtime proof).
+Active interpreter3.12.7; repo pin3.11 must not trigger uv environment rebuild. Exact active interpreter only on22, no DB. Production terminalforecast_state_save_qc and warm-startrequired remain.
+Second yd tree uses same Slurm user but separatecode; observe queue and avoid unrelated services. No-progress tracker is observe-only per scheduler_no_progress docstring; never reset it for recovery.
+node27 production7ecc46be/Python3.11.15. Reuse its environment only after dependency manifests compare equal; use isolated Git checkout and PYTHONPATH/TMPDIR, never pull production for tests.
+Full source-cited report: agent://PinnedDeploymentRecon (session artifact). Live before-action admission is still required; these are baseline facts, not permission to skip quiescence.

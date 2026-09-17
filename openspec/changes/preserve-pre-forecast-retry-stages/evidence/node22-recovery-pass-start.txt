@@ -1,0 +1,8 @@
+MainPID=2558997
+ExecMainStartTimestamp=Wed 2026-09-16 22:05:01 CST
+ActiveState=activating
+SubState=start
+ActiveState=inactive
+UnitFileState=enabled
+
+exit=0

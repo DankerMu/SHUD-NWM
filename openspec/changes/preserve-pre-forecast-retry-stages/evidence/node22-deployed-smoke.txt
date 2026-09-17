@@ -1,0 +1,8 @@
+deployment_sha=e7bd816060a25b72112048c9b24e9d8a9980581a
+Same captured provider-state replay as pre-fix RED, exact active interpreter; no scheduler/journal mutation.
+state_decision {"action": "retry", "reason": "resume_after_completed_stage", "restart_stage": "forcing", "artifact_guard": null}
+strict_upgrade {"action": "retry", "reason": "resume_after_completed_stage", "restart_stage": "forcing", "artifact_guard": null}
+forcing_guard {"action": "retry", "reason": "resume_after_completed_stage", "restart_stage": "forcing", "artifact_guard": null}
+DEPLOYED_DECISION_CHAIN_PASS: forcing preserved through upgrade and guard
+
+exit=0
