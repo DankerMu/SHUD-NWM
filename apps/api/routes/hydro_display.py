@@ -1308,8 +1308,10 @@ def _default_layer_catalog(
             # list: the second call then reads a consistent smaller state (the gone
             # network is in neither its covered nor its active set) and confirms
             # `default_cycle` -- correctly, since a deactivated network does not need
-            # rendering. It only fails closed when it lands INSIDE one call, between
-            # that call's two reads. The contract spells the empty intersection
+            # rendering. It fails closed only when it lands INSIDE one call, between
+            # that call's two reads, AND the departing network still has coverage
+            # rows in the coverage read -- with zero rows that call is equally
+            # consistent and confirms the cycle. The contract spells the empty intersection
             # `default_cycle = null` AND `valid_times = []` together; `(C, [])`
             # advertises a cycle whose timeline is empty and is forbidden.
             if not valid_time_sample.valid_times:

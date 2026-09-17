@@ -181,3 +181,44 @@ Evidence floor:
 DB migration, no display deployment receipt, no read-only boundary change, and no Slurm/SHUD surface.
 Issue #2087 records the same conclusion (the node-27 need existed only for the rejected
 REPEATABLE READ alternative).
+
+## Round-1 cross-review fix pass (added after the verification gate)
+
+Round 1 ran three seats (`correctness`, `invariant-state`, `test-evidence+spec-compliance`), produced no
+P0/P1, and was recorded **not clean** because one verified finding was a coverage gap on behaviour this
+change introduces — those never downgrade to a note. Verdict tables: `.workplans/pr-2455/review/verify-*.md`.
+
+- [x] 20. Pin the deactivation-with-zero-coverage delta (`design.md` D2's recorded race-path delta):
+      `test_national_cycles_list_a_cycle_when_a_zero_coverage_network_is_deactivated`, red under a partial
+      revert that keeps growth closed but restores the old deactivation strictness.
+- [x] 21. Pin its companion that must stay fail-closed in BOTH orders (a deactivated network that HAS
+      coverage rows): `test_national_cycles_close_when_a_covered_network_is_deactivated`, red under the
+      superset-containment mutation (`not covered_networks >= active_networks`). Recorded as matrix row 40e.
+- [x] 22. Characterize the numerator-SHRINK residual the swap newly opens:
+      `test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_display_ready`, on a new
+      `_CoverageRowVanishesBetweenStatementsSession`. It documents the ACCEPTED residual, not desired
+      behaviour; the fix stays out of scope (task 19's follow-up).
+- [x] 23. Correct the false claim in the helper docstring that `segment_count -> 0` is not a live writer:
+      #1446's guard is bypassed by `force=True`, exposed as `--force` by `scripts/node27_refresh_coverage.py`
+      as the intended operator remediation. Same correction applied to `design.md` D2.
+- [x] 24. Cross-cutting claim audit (this PR's review history produced FIVE instances of one class: a
+      confidently-worded factual claim, committed to an artifact, that the code contradicts). Every factual
+      claim about other code in the docstrings/comments this PR added or rewrote was opened and checked; the
+      audit itself found the fifth instance — the docstring had overstated `mark_failed`'s reachability, which
+      is gated behind `create_run`'s `HYDRO_RUN_NOT_RETRIABLE` refusal. Verdicts recorded in the PR body.
+- [x] 25. Widen the spec delta's antecedent: "without a concurrent activation or deactivation ... MUST NOT
+      change any result" was falsified by the shrink class, which involves no membership change at all. Now
+      conditioned on no concurrent write to `core.model_instance` / `hydro.hydro_run` /
+      `hydro.run_display_coverage`, matching the wording the commit message, proposal and docstring already used.
+- [x] 26. Correct matrix row 40d's Measured cell (it claimed `200 passed / 1 failed` "as delivered" with the
+      `:170` site unrepaired, while that repair is in the delivered commit; and it undercounted the kill list
+      as "5 assertions" when 9 node ids need six test names). Now `204 passed / 0 failed`, eight names, eleven
+      node ids, with row 40e added for the superset mutation.
+
+### Routed out of scope (report, don't fix)
+
+- `national_discharge_valid_times`' no-argument branch discards the active set and derives its intersection
+  from the rows — the "union over whoever happens to have data" the helper's own docstring forbids.
+  Pre-existing, untouched by the swap; found independently by two seats.
+- `NationalCycleCoverage.complete` has no `covered ⊋ active` oracle, so the superset mutation survives at
+  that second comparison site. Predates #2087 (row 40b's site, from #2073); recorded in row 40e.

@@ -2297,14 +2297,35 @@ def _national_discharge_coverage_rows(
       covered set and stops being display-ready before T2 leaves the comparison
       equal, so the cycle is listed although its run is gone. The other order
       caught that one. This class has LIVE WRITERS and must not be described as
-      unreachable: ``mark_failed`` in ``workers/shud_runtime/runtime.py`` rewrites
-      ``hydro.hydro_run.status`` to ``failed`` with no status guard at all, so any
-      display-ready run can go backwards through it, and ``mark_run_failed`` in
-      ``workers/output_parser/parser.py`` does the same for the ``succeeded`` and
-      ``parsed`` members of its ``FAILABLE_RUN_STATUSES`` guard. Driving
-      ``rdc.segment_count`` to zero is NOT a live writer (the
-      ``run_display_coverage`` upsert refuses to zero a populated row, #1446) and
-      neither table has a production ``DELETE``. The residual is accepted because
+      unreachable. Each one below was read in the tree, not inferred:
+
+      - ``mark_run_failed`` (``workers/output_parser/parser.py``) rewrites
+        ``hydro.hydro_run.status`` to ``failed`` under a guard,
+        ``FAILABLE_RUN_STATUSES``, that INCLUDES ``succeeded`` and ``parsed``
+        (only ``published`` is outside it). ``mark_run_parsed``'s own gate admits
+        an already-``parsed`` run, so a re-parse that then fails moves a run
+        holding a POPULATED coverage row straight out of the display-ready set.
+        This is the routine, single-actor writer of the class.
+      - ``scripts/node27_refresh_coverage.py --force`` drives
+        ``rdc.segment_count`` to zero, and the ``rdc.segment_count > 0`` join
+        below then drops the row. #1446 made the upsert refuse to zero a
+        populated row, but that refusal is spelled ``WHERE %(force)s OR ...`` in
+        ``packages/common/display_coverage.py``, which ``force=True`` bypasses
+        outright -- and the script documents ``--run-id <run> --force`` as the
+        INTENDED manual remediation for a legacy run whose fresh scan computes
+        zero, i.e. exactly a run the national tile may be painting right now. The
+        cron loop never passes it: operator-gated, not automatic, but live.
+      - ``mark_failed`` (``workers/shud_runtime/runtime.py``) issues an UPDATE to
+        ``failed`` with no status guard at all, but its only production caller is
+        ``SHUDRuntime.execute``'s failure path, which is reached only after
+        ``create_run`` accepted the ``run_id`` -- and ``create_run`` refuses a
+        display-ready one (``HYDRO_RUN_NOT_RETRIABLE``). Reaching it therefore
+        needs a duplicate concurrent ``execute`` of the same run: rare, not
+        impossible.
+
+      Neither table has a production ``DELETE`` (the only ones in the tree are
+      test teardown and a one-off cutover-rehearsal script removing its own
+      seeded run). The residual is accepted because
       no TWO-statement design can close both classes -- a numerator shrink is
       invisible to any re-read of the denominator -- so the choice is which class
       to close, not whether to close both. Closing both means merging these two

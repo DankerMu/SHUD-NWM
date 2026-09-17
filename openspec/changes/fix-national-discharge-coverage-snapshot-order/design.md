@@ -89,9 +89,22 @@ inherits a false oracle.
     become `failed`. (`_TERMINAL_HYDRO_STATUSES` in `apps/api/routes/pipeline.py` is NOT a global
     state-machine guard — it only stops the cancel endpoint from overwriting a terminal row — so it
     must not be cited as one.)
-  - `rdc.segment_count` can be driven to 0 only through the `packages/common/display_coverage.py`
-    upsert, which #1446 already made refuse to zero a populated row (capability
-    `display-coverage-freshness`).
+  - `rdc.segment_count` CAN be driven to 0 in production, contrary to the first draft of this section:
+    #1446's refuse-to-zero guard in the `packages/common/display_coverage.py` upsert
+    (`WHERE %(force)s OR EXCLUDED.segment_count > 0 OR ... = 0`) is bypassed unconditionally by
+    `force=True`, which `scripts/node27_refresh_coverage.py` exposes as `--force` and documents as the
+    INTENDED operator remediation for exactly the legacy runs whose fresh scan computes
+    `segment_count = 0` while they are still populated on the national tile. It is operator-gated, not
+    unreachable.
+  - Reachability of the three writers is NOT uniform, and the docstring must not flatten them:
+    `mark_run_failed` is routine (a re-parse of an already-`parsed` run), `--force` is operator-triggered,
+    and `mark_failed` in `workers/shud_runtime/runtime.py` — though its SQL genuinely has no status guard —
+    is reached only from `SHUDRuntime.execute`'s failure branch, which sits behind `create_run`'s
+    `HYDRO_RUN_NOT_RETRIABLE` refusal, so hitting it on an already-display-ready run needs concurrent
+    execution rather than an ordinary pipeline pass.
+  - NOT a writer, checked and excluded: `create_run`'s `ON CONFLICT (run_id) DO UPDATE SET
+    status = 'created'` is guarded by `WHERE hydro.hydro_run.status IN ('failed','cancelled','pending')`,
+    disjoint from the display-ready set.
 
   Why the trade is nonetheless the right call, argued on its real merits:
   - **Any two-statement design leaves exactly one class open.** A numerator shrink is invisible to any
@@ -118,7 +131,11 @@ inherits a false oracle.
 
   The implementer MUST re-verify these writer facts before writing the docstring rather than copying
   this list, and MUST state the newly opened class in the docstring in these terms — including that it
-  has live writers, not that it is unreachable.
+  has live writers, not that it is unreachable. This instruction earned its keep: the first draft of
+  this very list asserted that `segment_count -> 0` was not a live writer and that `mark_failed` could
+  be reached on any display-ready run, and both were corrected only because a reviewer and then the
+  implementer went and read the code. Treat every factual claim here as a claim to check, not a fact to
+  copy.
 - **Deactivation-with-zero-coverage delta**: under the new order, a network that had no coverage rows
   and is deactivated between T1 and T2 lets the cycle list (`covered@T1 = {B,C}` equals
   `active@T2 = {B,C}`), where the old order refused it (`active@T1 = {B,C,D}`). This is the correct

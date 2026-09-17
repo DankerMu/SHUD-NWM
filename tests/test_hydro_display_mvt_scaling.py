@@ -4271,6 +4271,13 @@ def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monke
 class _ActivationBetweenStatementsSession(_NationalDiscoverySession):
     """A network is activated BETWEEN the helper's two reads.
 
+    The name says "activation" because that is the case #2087 set out to close,
+    but nothing here constrains the DIRECTION: `active_after` may be any set, so
+    the same fake models a deactivation (`active_after` smaller) and a version
+    switch (equal size, different members). The deactivation cases below use it
+    as-is. Kept under this name rather than renamed because the invariant matrix's
+    row 40d cites it by name as the mutation oracle.
+
     Deliberately order-INDEPENDENT, so the same case is red under the old
     statement order and green under the #2087 one: the activation lands after the
     FIRST `execute()`, whichever statement that turns out to be. A fake keyed on
@@ -4404,3 +4411,186 @@ def test_national_per_cycle_valid_times_close_the_older_cycle_the_newcomer_does_
     )
     assert result.valid_times == []
     assert result.observed_count == 0
+
+
+# ---------------------------------------------------------------------------
+# #2087 round 2: the DEACTIVATION half of the read-order trade, and a
+# CHARACTERIZATION of the fail-open class the swap newly opens. The four cases
+# above cover activation (numerator growth) only; design D2 distinguishes two
+# deactivation outcomes and accepts one residual, and none of the three had an
+# oracle.
+# ---------------------------------------------------------------------------
+
+
+def _zero_coverage_deactivation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-d` is DEACTIVATED between the reads holding NO display-ready run at all."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c", "rn-d"],
+        active_after=["rn-b", "rn-c"],
+    )
+
+
+def _covered_deactivation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-d` is DEACTIVATED between the reads while HOLDING a display-ready run."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c", "rn-d")),
+        active_before=["rn-b", "rn-c", "rn-d"],
+        active_after=["rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_list_a_cycle_when_a_zero_coverage_network_is_deactivated() -> None:
+    """The permissive half of #2087's deactivation delta (design D2), pinned.
+
+    `rn-d` is active with no display-ready row at T1 and gone by T2. Reading the
+    coverage rows FIRST makes it invisible to the comparison: `covered == {rn-b,
+    rn-c}` equals the T2 active set, so the cycle is LISTED. That is the right
+    answer -- a deactivated network does not need rendering -- but it is a
+    behaviour DELTA the swap introduced, not a pre-existing property: with the
+    active set read first, `active@T1 == {rn-b, rn-c, rn-d}` was compared against
+    the same `covered`, and every cycle failed closed.
+
+    Mutation killed: restoring the pre-#2087 statement order in
+    `_national_discharge_coverage_rows` (invariant matrix row 40d). This is the
+    ONLY case asserting the swap makes something MORE permissive -- the four
+    activation cases all assert a newly CLOSED outcome, so a partial revert that
+    kept the growth closures while restoring the old deactivation strictness
+    would pass every one of them and fail only here.
+    """
+    session = _zero_coverage_deactivation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: three networks were really active at T1, one really left, and
+    # the departing one really brought no coverage row (otherwise this is the
+    # fail-closed case below wearing the wrong name).
+    assert len(session.active_before) == 3
+    assert "rn-d" not in session.active_after
+    assert all(row["river_network_version_id"] != "rn-d" for row in session.rows)
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert [entry["cycle_time"] for entry in result["cycles"]] == ["2026-09-02T12:00:00Z"]
+    assert result["default_cycle"] == "2026-09-02T12:00:00Z"
+
+
+def test_national_cycles_close_when_a_covered_network_is_deactivated() -> None:
+    """The fail-closed half of the same delta -- and it holds in BOTH statement orders.
+
+    `rn-d` is in the T1 covered set (it has a display-ready run) and out of the T2
+    active set, so `covered` is a strict SUPERSET of `active` and the cycle is
+    refused. Under the old order the deactivation instead shrank the coverage read
+    and `covered` was a strict SUBSET, refused as well. D2 distinguishes this case
+    from the zero-coverage one precisely because only one of the two moved; this
+    test is what keeps the unmoved one unmoved.
+
+    Mutation killed: relaxing the comparison in `national_discharge_cycles` from
+    equality to "covers at least the active set"
+    (`if not covered_networks >= active_networks: continue`). Every other case in
+    this file has `covered` a subset of `active`, so that mutation is green
+    everywhere except here.
+    """
+    session = _covered_deactivation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: the departing network really did hold a display-ready row --
+    # the one thing that separates this case from the test above.
+    assert len(session.active_before) == 3
+    assert "rn-d" not in session.active_after
+    assert any(row["river_network_version_id"] == "rn-d" for row in session.rows)
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+class _CoverageRowVanishesBetweenStatementsSession(_NationalDiscoverySession):
+    """A covered run stops being display-ready BETWEEN the helper's two reads.
+
+    The numerator-SHRINK race: the active-network SET never moves, only a row's
+    eligibility for the coverage statement does -- `h.status` leaving
+    `('succeeded', 'parsed', 'published')`, or `rdc.segment_count` going to zero.
+    `_ActivationBetweenStatementsSession` cannot express it: its only lever is the
+    active set, and `_NationalDiscoverySession.rows` is fixed at construction.
+
+    Order-INDEPENDENT on the same terms as its sibling: the write lands after the
+    FIRST `execute()`, whichever statement that turns out to be, so the case is
+    green under the #2087 order and red under the old one rather than encoding
+    either. A subclass, never an edit to the base.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        vanishing_network: str,
+        active_networks: list[str],
+    ) -> None:
+        super().__init__(rows, active_networks=active_networks)
+        self.vanishing_network = vanishing_network
+        self.served_coverage_rows: list[list[dict[str, Any]]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        # Evaluated BEFORE `super().execute`, which is what appends to
+        # `executions`: read 1 still sees the run as display-ready, every later
+        # read does not.
+        still_display_ready = not self.executions
+        result = super().execute(statement, params)
+        if "hydro.run_display_coverage" not in str(statement):
+            return result
+        served = [
+            row
+            for row in result.all()
+            if still_display_ready or row["river_network_version_id"] != self.vanishing_network
+        ]
+        self.served_coverage_rows.append(served)
+        return _Rows(served)
+
+
+def _coverage_shrink_session() -> _CoverageRowVanishesBetweenStatementsSession:
+    return _CoverageRowVanishesBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        vanishing_network="rn-c",
+        active_networks=["rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_display_ready() -> None:
+    """CHARACTERIZATION of the residual #2087 newly opens. NOT the desired answer.
+
+    `rn-c` is display-ready at T1 and not at T2 while the active set stays
+    `{rn-b, rn-c}`, so `covered == active` and the cycle is listed although the
+    run painting `rn-c` is gone. The old order caught this one; no TWO-statement
+    design can close it and the growth class at once, so it is accepted here and
+    the fix (merging the two statements) is tracked separately. This test exists
+    so the residual is VISIBLE to the suite -- if a later change closes it, this
+    case goes red and must be rewritten deliberately rather than silently.
+
+    Reachable in production, each writer read in the tree:
+      * `mark_run_failed` (`workers/output_parser/parser.py`) -- its
+        `FAILABLE_RUN_STATUSES` guard includes `succeeded` and `parsed`, and
+        `mark_run_parsed` admits an already-`parsed` run, so a failed re-parse
+        drops a run that HAS a populated coverage row. The routine writer.
+      * `scripts/node27_refresh_coverage.py --force` -- zeroes `segment_count`
+        past the #1446 refusal (`WHERE %(force)s OR ...`), which the coverage
+        statement's `rdc.segment_count > 0` join then drops. Operator-gated.
+      * `mark_failed` (`workers/shud_runtime/runtime.py`) -- unguarded UPDATE, but
+        behind `create_run`'s retriability refusal, so it needs a duplicate
+        concurrent `execute`.
+
+    Mutation killed: restoring the pre-#2087 statement order (matrix row 40d) --
+    which is also the empirical proof that the old order really did catch this
+    class, the claim the helper's docstring makes.
+    """
+    session = _coverage_shrink_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == ["2026-09-02T12:00:00Z"]
+    assert result["default_cycle"] == "2026-09-02T12:00:00Z"
+    # Non-vacuity, and the whole point: the shrink is real and the DENOMINATOR
+    # never moved. A second pass over the same session -- now past the write --
+    # sees `rn-c` gone from the covered set while the active set still holds it.
+    after = mvt_module.national_discharge_cycle_coverage(session, source="gfs", cycle=_CYCLE)
+    assert after.covered_networks == frozenset({"rn-b"})
+    assert after.active_networks == frozenset({"rn-b", "rn-c"})
+    assert after.complete is False
