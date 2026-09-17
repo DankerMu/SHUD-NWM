@@ -161,12 +161,12 @@ Evidence floor:
       point it at this change / issue #2087.
 - [x] 17. `openspec validate fix-national-discharge-coverage-snapshot-order --strict --no-interactive`
       passes.
-- [ ] 18. Report the falsified upstream premise (orchestrator-owned, Phase 8): issue #2087's
+- [x] 18. Report the falsified upstream premise (orchestrator-owned, Phase 8) — posted as a comment on #2087: issue #2087's
       "残留…那不是激活竞态，且现有代码同样不覆盖" is wrong — the CURRENT order does catch the
       numerator-shrink class, so the swap opens it rather than inheriting it, and the class is broader
       than DELETE (status rewrite, coverage zeroing). Post this correction on #2087 and carry it in
       the PR's `偏离记录` and the Chinese work summary.
-- [ ] 19. Route the residual (orchestrator-owned, Phase 8): the newly opened numerator-shrink fail-open
+- [x] 19. Route the residual (orchestrator-owned, Phase 8) — filed as #2457, with #2458 and #2459 for the two out-of-scope findings: the newly opened numerator-shrink fail-open
       class is a known limit of this change and needs a tracked follow-up issue (single-statement merge
       with its node-27 lane), or a recorded one-line reason why none is filed.
 
@@ -282,12 +282,33 @@ instead of opening the cited file; every one was caught by someone who opened it
       the "same predicates, one snapshot" shorthand (terse, not false).
 - [ ] 32. See task 27 — the PR-body publication is the other Phase 7 finding and is the same item.
 
-**Failure-class tally, final.** Ten instances of one class across this PR: a confidently-worded factual
-claim, committed to an artifact, that the code contradicts. Two in fixture review, two in cross-review
-round 1, one found by the round-1 fix pass's own audit, two in round 2, two in the Phase 7 gap sweep.
-Two further instances were averted before they were written — once when the round-2 repair's implementer
-rejected the orchestrator's suggested wording as itself false, once when this task's implementer
-re-derived the K/J behaviour from the pre-swap tree instead of from the matrix row. Every instance was
-authored by someone reasoning from a plausible mental model without opening the cited file; every one was
-caught by someone who opened it. That is the transferable lesson from this issue, and it is why the
-docstrings here carry their citations: so the next reader can check them the cheap way.
+**Failure-class ledger.** One class dominated this PR's entire review history: a confidently-worded
+factual claim, committed to an artifact, that the code contradicts. The count is enumerated rather than
+asserted — an earlier draft of this very paragraph said "Ten" while listing nine, which is instance 13.
+
+| # | Caught by | The claim, and what the code said |
+|---|---|---|
+| 1 | fixture review r1 | `design.md` D2 stated the shrink residual's direction backwards ("现有代码同样不覆盖") — the OLD order caught that class |
+| 2 | fixture review r2 | `_TERMINAL_HYDRO_STATUSES` cited as a global state-machine guard; it only stops the cancel endpoint overwriting a terminal row |
+| 3 | cross-review r1 | the spec delta's antecedent excluded only membership writes, so the shrink class falsified its MUST-NOT-change clause |
+| 4 | cross-review r1 | the docstring called `segment_count -> 0` "NOT a live writer"; `--force` bypasses #1446 and is the documented operator remediation |
+| 5 | the r1 fix pass's own audit | the docstring overstated `mark_failed`'s reachability, which sits behind `create_run`'s `HYDRO_RUN_NOT_RETRIABLE` |
+| 6 | cross-review r2 | matrix row 40e: "the pre-#2087 order made this unreachable" — the superset state was reachable by activation, which is how #2073 caught cycle K |
+| 7 | cross-review r2 | "the ONLY case asserting the swap makes something MORE permissive" — the shrink characterization is another |
+| 8 | cross-review r2 | "every other set-comparison case is `covered ⊆ active`" — several are incomparable |
+| 9 | cross-review r2 | row 40d's mutation instruction cited line numbers its own PR's second commit shifted into the SQL literal |
+| 10 | cross-review r2 | task 24 ticked while its stated deliverable did not exist |
+| 11 | Phase 7 pass 1 | task 27 ticked while unmet — in the commit whose purpose was to fix instance 10 |
+| 12 | Phase 7 pass 1 | two production docstrings never received instance 6's correction |
+| 13 | Phase 7 pass 2 | this ledger asserted a total of ten while enumerating nine |
+| 14 | Phase 7 pass 2 | the PR body reported the #2087 upstream correction in the done tense while it was unposted |
+
+Two more were averted before they were written: the round-2 repair's implementer rejected the
+orchestrator's suggested replacement wording as itself false (the file's EQUAL pairs have `>=` True and
+survive the mutation because `>=` and `==` agree, not because both are False), and the Phase 7 repair's
+implementer re-derived the K/J behaviour from the pre-swap tree instead of copying the matrix row.
+
+Every instance was authored by someone reasoning from a plausible mental model without opening the cited
+file; every one was caught by someone who opened it. Instances 10, 11 and 13 are the sharpest: each was
+written *while fixing the previous one*. That is the transferable lesson from this issue, and it is why
+the docstrings here carry their citations — so the next reader can check them the cheap way.
