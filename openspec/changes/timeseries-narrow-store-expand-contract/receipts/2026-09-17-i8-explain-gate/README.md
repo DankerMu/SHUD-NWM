@@ -233,12 +233,68 @@ reproducible on demand** — it was taken in the window it existed.
    re-measured.
 2. **The `forecast-series` warm P95 ≤ 500 ms bound names no request shape.** The spec
    says only "the node-27 local single-source `forecast-series` warm P95 ≤ 500 ms".
-   The production default is `issue_time=latest` (`apps/api/routes/forecast.py:47`),
-   which costs 650 589 shared blocks end to end because of #2424 and would fail (that
-   figure was measured on `basins_wj_vbasins` for #2417, not on SHJ-NJ). This
-   receipt measures the **run-bound** shape, which is what the D11 gate measures, and
-   records the ambiguity rather than resolving it. The API-level P95 is **not** in this
-   receipt; it cannot be measured against master until the live tree is updated (§1).
+   The production default is `issue_time=latest` (`apps/api/routes/forecast.py:47`).
+   **Decision (user, 2026-09-17): the gate is measured on the run-bound shape — which is
+   what D11 measures — and the `latest` shape is recorded alongside, red, with #2424
+   named as its root cause. Neither is hidden.** §7 is that record. The API-level P95 is
+   still **not** in this receipt: it cannot be measured against master until the live
+   tree is updated (§1).
+
+## 7. The `latest` shape, measured on the same two networks (red)
+
+`explain-1987-latest.json`, master `fd3d4869a`, same probe, five warm rounds, same
+read-only role. The production default shape: `issue_time="latest"`, no `run_id` and no
+`model_id` bound. The probe accounts for **every** mapping-bound statement here, not only
+the fact-table ones, because this shape's cost is mostly outside them.
+
+| statement | SHJ-NJ | tailanhe (small) |
+|---|---|---|
+| `_per_source_latest_cycles` (1 row) | 631 496 hits · 2735.3 ms | 631 709 hits · 2569.5 ms |
+| run resolve on `hydro.hydro_run` (38 rows) | 318 hits · 1.08 ms | 318 hits · 1.05 ms |
+| segment rows (168 rows) | **7 365 hits** · 79.5 ms | 2 828 hits · 4.13 ms |
+| **total** | **639 179** | **634 855** |
+
+Two things this settles that the #2417 receipt could only assert:
+
+- **#2424 is network-independent and dominates.** The `_per_source_latest_cycles`
+  statement is byte-identical across both networks (digest `9c906f72b21d9bd1`, 1 row) and
+  costs ~631 500 blocks either way — 98.8 % of the SHJ-NJ total. #2417 measured 647 275
+  for it on `basins_wj_vbasins`; the same order on a network 4× larger confirms the cost
+  does not scale with the network, because the statement answers a run-metadata question
+  by scanning facts.
+- **The segment statement alone breaches D11 on SHJ-NJ in this shape**: 7 365 > 5000,
+  against 2 749 for the same rows in the run-bound shape. Same digest
+  (`3e5b320d680975fc`) — identical rows, 2.7× the buffers.
+
+### The `latest` path confirms #2451, and moves the mis-plan to a different chunk
+
+`forecast_store.py:516-524` / `:859-866` bind `rt.run_key = ANY(%(pushdown_run_keys)s)`
+here. #2451 recorded, from code and explicitly unmeasured, that a `ScalarArrayOpExpr` can
+match a btree leading column and therefore makes the discovery index an option on this
+path too. **It does.** In the segment statement:
+
+| shape | offending node | index | `Rows Removed / Actual` | node hits |
+|---|---|---|---|---|
+| run-bound | `_hyper_9_175_chunk` | `…_run_discovery_key_idx` | 192 096 / 12 = **16 008** | 2 204 |
+| `latest` | `_hyper_9_170_chunk` | `…_run_discovery_key_idx` | 384 192 / 24 = **16 008** | 4 480 |
+
+and on the small network the same node flips with ratio `1 488 / 24 = 62`, which is
+124 ≈ its 126 segments — the node reads **every segment of the run** for that chunk's
+slice, so the ratio is the network's segment count and the breach scales with it.
+
+This changes the #2451 statement of the defect: it is **not** "chunk 175 is bad". The two
+shapes flip *different* chunks, and both are the chunk with the worst statistics for that
+shape — 175 has never been analyzed, 170 was analyzed at 2026-09-17T00:16Z and has
+accumulated 10 802 448 modifications since (of 27 006 197 live rows). Every chunk with
+current statistics uses an index carrying `river_segment_key` in its `Index Cond`.
+
+### A measured data point for #2425's coupling warning
+
+In `_per_source_latest_cycles`, the one compressed narrow chunk costs **16 197 hits**
+(`_hyper_9_126_chunk` + `compress_hyper_10_174_chunk`) against ~676 for each uncompressed
+chunk — **24×**. #2425 argued on structural grounds that fixing compression would trade
+disk for read performance under the current query shape. On this statement, that trade is
+now measured rather than predicted.
 
 ## Files
 
@@ -251,3 +307,7 @@ reproducible on demand** — it was taken in the window it existed.
 | `run1987.out` / `run1987base.out` | the probes' console output |
 | `compression-receipt-0917.json` | the 04:25Z compression tick |
 | `retention-20260917T051532Z.json` | the 05:15Z retention tick |
+| `probe1987latest.py` | the `issue_time=latest` variant of the probe (§7) |
+| `explain-1987-latest.json` | master `fd3d4869a` bundle for the `latest` shape |
+| `run1987latest.out` | its console output |
+| `latestgate.py` | per-node extract used for the §7 tables |
