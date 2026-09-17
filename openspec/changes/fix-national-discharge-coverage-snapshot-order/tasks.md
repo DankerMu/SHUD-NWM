@@ -234,10 +234,15 @@ they owe no issue and no reason line. Records: `.workplans/pr-2455/review/round2
 `verify-round2-artifact-claims.md`. Corrected anyway, because three of them were false or stale claims in
 artifacts that outlive this PR:
 
-- [x] 27. Publish the claim-audit verdicts and the corrected evidence numbers in the PR body, close
+- [ ] 27. Publish the claim-audit verdicts and the corrected evidence numbers in the PR body, close
       round-1 findings C3 (the red-proof arithmetic) and C4 (issue #2087 AC2's literal
       「无一处期望值修改」), drop the round-1 claim the audit retracted (`mark_failed` presented as an
       unqualified live writer), and fill the `Agent Review` block. Phase 8.
+      **Deliberately unticked here.** The Phase 7 gap sweep caught this task ticked while unmet — in the
+      very commit whose purpose was to fix task 24 being ticked while unmet, which is the same error one
+      layer up. The PR body is not part of any commit, so it cannot land atomically with the tick; the
+      honest state at commit time is unticked. The receipt is the `Agent Review` block in the PR body
+      itself, against the frozen head.
 - [x] 28. Correct matrix row 40e's reachability parenthetical. It said the pre-#2087 order made
       `covered ⊋ active` unreachable. False: the coverage statement carries `mi.active_flag` in its own
       snapshot, so under the old order a network activated between the reads holding display-ready rows
@@ -262,3 +267,27 @@ orchestrator's own suggested replacement wording ("`>=` is also False for an inc
 itself have been false, since the file's EQUAL pairs have `>=` True and survive the mutation because
 `>=` and `==` agree there. Every instance was written by someone reasoning from a plausible mental model
 instead of opening the cited file; every one was caught by someone who opened it.
+
+## Phase 7 gap sweep (final review) — two local-repair findings, both closed
+
+- [x] 31. Propagate the row-40e correction to the two production docstrings that had not received it.
+      `national_discharge_cycles` and `_national_discharge_coverage_rows` still flattened "the set
+      comparison could not see branch (b)" with no per-cycle scoping. The truth, re-derived against the
+      PRE-swap tree rather than from any artifact: under the old order the coverage statement applied
+      `mi.active_flag` in its own (later) snapshot, so a partial-coverage newcomer's rows for cycle K
+      landed in the covered set while the stale active set still lacked it — `covered ⊋ active`, unequal,
+      so #2073 DID catch K. Only the uncovered cycle J escaped. Both docstrings now scope the invisible
+      cases to "the cycles the newcomer has NO rows for". Left unchanged after review: the
+      `NationalCycleCoverage.complete` comment (its preceding sentence already scopes it correctly) and
+      the "same predicates, one snapshot" shorthand (terse, not false).
+- [ ] 32. See task 27 — the PR-body publication is the other Phase 7 finding and is the same item.
+
+**Failure-class tally, final.** Ten instances of one class across this PR: a confidently-worded factual
+claim, committed to an artifact, that the code contradicts. Two in fixture review, two in cross-review
+round 1, one found by the round-1 fix pass's own audit, two in round 2, two in the Phase 7 gap sweep.
+Two further instances were averted before they were written — once when the round-2 repair's implementer
+rejected the orchestrator's suggested wording as itself false, once when this task's implementer
+re-derived the K/J behaviour from the pre-swap tree instead of from the matrix row. Every instance was
+authored by someone reasoning from a plausible mental model without opening the cited file; every one was
+caught by someone who opened it. That is the transferable lesson from this issue, and it is why the
+docstrings here carry their citations: so the next reader can check them the cheap way.

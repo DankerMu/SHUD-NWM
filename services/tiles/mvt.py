@@ -2138,12 +2138,15 @@ def national_discharge_cycles(
     ``_national_discharge_coverage_rows`` owns that choice: it reads the coverage
     rows first and the active set second (#2087), so a network activated between
     the reads is in the active set, cannot be in any cycle's covered set, and
-    closes EVERY cycle -- including the two cases the set comparison alone cannot
-    see, a newcomer with zero display-ready rows and a newcomer holding rows for
-    some cycles but not others. Read that helper's docstring for what the order
-    costs (a covered run that stops being display-ready between the reads is the
-    residual fail-open class) before reasoning about either endpoint's behaviour
-    under a race.
+    closes EVERY cycle -- including the cycles the set comparison alone cannot
+    see, which are the cycles the newcomer has NO rows for: all of them when it
+    brings zero display-ready rows, and the uncovered ones when it holds rows for
+    some cycles but not others. Its COVERED cycles the set comparison (#2073)
+    already caught, because there the newcomer's rows made the covered set a
+    strict SUPERSET of the stale active set. Read that helper's docstring for
+    what the order costs (a covered run that stops being display-ready between
+    the reads is the residual fail-open class) before reasoning about either
+    endpoint's behaviour under a race.
 
     ``valid_time_start`` / ``valid_time_end`` are the FIRST and LAST entries of
     that cycle's clamped 3-hour list, produced by the same function
@@ -2290,9 +2293,13 @@ def _national_discharge_coverage_rows(
       comparison is unequal, and EVERY cycle judged by this pair of reads fails
       closed -- whether the newcomer brought no display-ready row at all or rows
       for only some cycles. Those are #2087's two branches; with the active set
-      read first they were invisible to any comparison of the coverage rows,
-      because a network with no rows for a cycle simply is not in that cycle's
-      output.
+      read first, the cycles the newcomer has NO rows for were invisible to any
+      comparison of the coverage rows, because a network with no rows for a cycle
+      simply is not in that cycle's output. The cycles it DID bring rows for were
+      already caught by the set comparison (#2073): the coverage statement
+      applies ``mi.active_flag`` in its own snapshot -- the LATER of the two
+      under that order -- so those rows landed in the covered set while the stale
+      active set still lacked the newcomer, making covered a strict SUPERSET.
     * NEWLY OPENED by this order -- numerator SHRINK. A row that is in the T1
       covered set and stops being display-ready before T2 leaves the comparison
       equal, so the cycle is listed although its run is gone. The other order
