@@ -312,3 +312,9 @@ now measured rather than predicted.
 | `explain-1987-latest.json` | master `fd3d4869a` bundle for the `latest` shape |
 | `run1987latest.out` | its console output |
 | `latestgate.py` | per-node extract used for the §7 tables |
+
+The three `.py` files here are the scripts that produced the bundles, with one
+caveat recorded honestly: after archiving they were lint-formatted to satisfy the
+repo's `ruff` gate (an unused `import statistics` removed from both probes, import
+style and one line wrap in `latestgate.py`). No behavioural line changed; the bundles
+were produced by the pre-format text.

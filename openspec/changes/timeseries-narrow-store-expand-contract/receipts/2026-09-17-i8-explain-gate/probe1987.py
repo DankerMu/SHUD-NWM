@@ -18,7 +18,6 @@ Usage:  DATABASE_URL=... python probe1987.py <checkout> <outfile>
 import hashlib
 import json
 import os
-import statistics
 import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
