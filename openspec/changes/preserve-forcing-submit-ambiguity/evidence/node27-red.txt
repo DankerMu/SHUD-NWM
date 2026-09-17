@@ -1,0 +1,73 @@
+c7d5a90a98740eb8ce1f21e5ba7e052ff2280a74
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_real_http_forcing_ambiguity_persists_identity_and_blocks_renamed_restart[http-502] _
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-213/test_real_http_forcing_ambigui0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7efde5abc290>
+failure = 'http_502', expected_error_code = 'SLURM_PARSE_ERROR'
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_error_code"),
+        [
+            pytest.param("http_502", "SLURM_PARSE_ERROR", id="http-502"),
+            pytest.param("transport", "SLURM_GATEWAY_UNAVAILABLE", id="transport"),
+            pytest.param("invalid_success", "SLURM_GATEWAY_INVALID_RESPONSE", id="invalid-success"),
+        ],
+    )
+    def test_real_http_forcing_ambiguity_persists_identity_and_blocks_renamed_restart(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        expected_error_code: str,
+    ) -> None:
+        requests: list[tuple[str, str]] = []
+    
+        class _HttpClient:
+            def __enter__(self) -> _HttpClient:
+                return self
+    
+            def __exit__(self, *_args: Any) -> None:
+                return None
+    
+            def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+                del json
+                requests.append((method, path))
+                if failure == "transport":
+                    raise httpx.ConnectError("gateway connection reset")
+                if failure == "http_502":
+                    return httpx.Response(502, json={"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}})
+                return httpx.Response(200, json={"status": "submitted"})
+    
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+        root = tmp_path / "journal"
+        initial_run_id = f"cycle_gfs_{_CYCLE}_convert_cohort_a"
+        repository = FileOrchestrationJournalRepository(root)
+        initial = _orchestrator(
+            tmp_path / "initial",
+            repository,
+            HttpSlurmGatewayClient("http://gateway.test"),
+            terminal_stage="forecast",
+        )
+        context = _forcing_context(
+            initial,
+            _forcing_basins(2, orchestration_run_id=initial_run_id),
+            run_id=initial_run_id,
+        )
+    
+        result, aggregation = initial._submit_and_wait_cycle_stage(M3_STAGES[1], context)
+    
+        assert aggregation is None
+>       assert result.status == "submit_result_ambiguous"
+E       AssertionError: assert 'submission_failed' == 'submit_result_ambiguous'
+E         
+E         - submit_result_ambiguous
+E         + submission_failed
+
+tests/test_forcing_submit_ambiguity.py:124: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_forcing_submit_ambiguity.py::test_real_http_forcing_ambiguity_persists_identity_and_blocks_renamed_restart[http-502]
+1 failed in 4.46s
+
+
+exit=1

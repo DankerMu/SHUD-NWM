@@ -1,0 +1,8 @@
+HEAD is now at 7f0e0a5b test: attach forcing regressions to exact deployment source tree
+
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              verify/issue-2447-deployment -> FETCH_HEAD
+ * branch              deploy/issue-2447-forcing-ambiguity -> FETCH_HEAD
+ * [new branch]        verify/issue-2447-deployment -> origin/verify/issue-2447-deployment
+ * [new branch]        deploy/issue-2447-forcing-ambiguity -> origin/deploy/issue-2447-forcing-ambiguity
+Preparing worktree (detached HEAD 7f0e0a5b)

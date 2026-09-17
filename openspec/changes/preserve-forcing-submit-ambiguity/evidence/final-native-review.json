@@ -1,0 +1,61 @@
+{
+  "reviewer": "correctness+test-evidence",
+  "round": "final re-review (post fix-pass 2)",
+  "head": "eee47464e9f2e2f868c4380c53950a6c506d9dd8",
+  "verdict": "CLEAN",
+  "prior_findings": [
+    {
+      "id": "R2-A",
+      "title": "reclaim reorders POST tasks but durable cohort_members stays stale",
+      "status": "closed",
+      "evidence": "file_orchestration_journal.py:3149-3159 — inside reclaim_pipeline_job_reservation's _locked_cycle_write, the forcing branch now mints the per-attempt comment AND persists row['cohort_members'] = list(request_row['cohort_members']) gated on forcing_member_identity_is_complete(request_row); request_row passed through the same _bounded_cohort_members normalization as the original reserve, and completeness is checked on that exact normalized row, so durable bytes == validated request bytes. Backfill loop at :3188-3198 explicitly skips cohort_members for forcing_reclaim, making :3159 the single writer. Red/green proof pair: node27-reclaim-order-probe.txt exit=1 (sent [model_1,model_0] vs durable [model_0,model_1], committed in the fix commit) vs node27-reclaim-order-green.txt exit=0 (durable now [model_1,model_0]). Regression test test_permitted_reclaim_persists_current_attempt_task_mapping_before_post (tests/test_forcing_submit_ambiguity.py:840) drives the real seam end-to-end: real FileOrchestrationJournalRepository, real HttpSlurmGatewayClient returning 502, real reconcile_reserved_unbound_jobs permit path with coverage-complete absence at anchor+3min (>120s grace), second _submit_and_wait_cycle_stage with reversed basins; asserts same pipeline_job_id, submission_attempt==2, exactly 2 POSTs, sent task order == durable cohort_members order. Reachability of the conditional's false branch checked: the only production forcing caller (_reserve_cycle_stage, chain_forecast_orchestrator_cycle.py:705-751) validates forcing_member_identity_is_complete on the same evidence and raises FORCING_SUBMIT_IDENTITY_UNAVAILABLE before reserve_candidate; reserve_candidate is the sole reclaim entry; FileOrchestrationJournalRepository is the only repo with supports_accepted_submit_reconcile=True (chain_repository.py's SQL reclaim lacks the entire forcing identity surface, so R2-A never existed there)."
+    },
+    {
+      "id": "R2-B",
+      "title": "unshipped pre-token compatibility shim + legacy test removal",
+      "status": "closed",
+      "evidence": "forcing_submit_identity.py: legacy slurm_comment_for acceptance deleted (import gone; is_current_forcing_attempt_comment is now the sole comment gate). reconcile.py: _query_forcing_controller_identity's attempt_anchor/query_end/current_attempt_comment params and the SubmitTime-window branch deleted; identity tuple fixed at (user,account,job_name). No dangling references: no test/source references to removed kwargs, legacy_comment, or the deleted test; _parse_fallback_submit_instant/_fallback_candidate_in_window remain only for the pre-existing #1565 forecast name-window fallback (:535-539) and candidate submitted_at reporting (:727). Fail-closed preserved by construction: pre-token rows now fail forcing_member_identity_is_complete → _forcing_submit_reconcile_job False (reconcile.py:1782-1784) → generic pre-#2447 path, which on a comment-less cluster raises ReconcileQueryUnavailable (held, never absence, never retry); typed bind/permit CASes both gate on forcing_submit_identity_is_complete (journal:3279/3283, 3362/3366) so legacy rows can neither bind nor be released through the new machinery. Legacy test was replaced (not dropped) by the reclaim regression test; spec scenario 'sparse historical failed row' remains covered by test_sparse_historical_forcing_failure_does_not_block_a_new_successful_attempt."
+    }
+  ],
+  "prior_closure_stability": [
+    {
+      "item": "R1-A comment-less controller query",
+      "status": "remains closed",
+      "note": "controller lane entry still gated on comment_storage_proven is False + _forcing_controller_identity_request (strict anchor, owner/account, forcing stage, int task_count>=1); target comment = durable slurm_comment which is guaranteed the current attempt token because forcing_submit_identity_is_complete requires is_current_forcing_attempt_comment; parser allowlist/duplicate-poison/array-task-compat unchanged; >1 owned master or any unproven field raises ReconcileQueryUnavailable (never absence); bind via bind_forcing_submit_attempt CAS unchanged (attempt+anchor+comment+reserved pins re-verified at journal:3263-3351)."
+    },
+    {
+      "item": "R1-B 120s grace + credible absence",
+      "status": "remains closed",
+      "note": "reconcile.py:93 RESERVATION_ABSENCE_GRACE=120s; :2127 default; grace gate now()-anchor < grace → absence_unconfirmed placed before permit_forcing_submit_retry; credible_absence requires global_absence + _effective_versioned_absence_coverage (strict non-None anchor within coverage); permit CAS pins attempt+anchor+reserved+unbound (journal:3353-3417)."
+    },
+    {
+      "item": "immediate bind-only recovery",
+      "status": "remains closed",
+      "note": "chain_stage_execution.py:196-282 untouched by the last commit; _immediate_forcing_submit_reconcile re-derives and re-pins attempt/anchor/comment/status=reserved/submit_result_ambiguous, bind_only=True path can never permit retry (reconcile.py:2667-2679), all exceptions fail closed to preserved ambiguity."
+    },
+    {
+      "item": "current-attempt Comment minting",
+      "status": "remains closed",
+      "note": "minted before Gateway in _reserve_cycle_stage evidence and re-minted per reclaim inside the journal lock; stale-token refusal test (test_controller_rejects_a_stale_forcing_attempt_comment_after_reclaim) retained and green."
+    }
+  ],
+  "new_findings": [],
+  "evidence_assessment": {
+    "node27-final-mainline-suite.txt": "header commit eee47464e9f2e2f868c4380c53950a6c506d9dd8 == review HEAD; 3499 passed, 1 skipped, 913.44s, exit=0",
+    "node27-final-deployment-suite.txt": "header commit e5c60ffafba337c2b6e78ddc9178aa3aab8bc53d (verification checkout on old deployment baseline); 3364 passed, 1 skipped, 788.14s, exit=0; supersedes the bad-overlay 22-failure run (node27-exact-deployment-tree-suite.txt)",
+    "deployment_equivalence": "deploy backport commit 6031eb829 source hunks are byte-identical to mainline eee47464e source hunks (modulo line offset 2948 vs 3148 from the older baseline); overlay tests/test_forcing_submit_ambiguity.py is byte-identical to mainline HEAD; test_orchestration_chain.py differs only by absent unrelated mainline features, with the #2447 oracle re-pin (ambiguous-and-unbound instead of submission_failed) present",
+    "node27-reclaim-order-green.txt": "probe exit=0 with durable order now equal to sent order",
+    "focused": "node27-fix2-focused-green.txt 19 passed 3.88s at eee47464e; node27-final-deployment-focused.txt 21 passed 14.48s on deployment tree",
+    "coverage_of_new_contract": "12 forcing-ambiguity test functions (19 parametrized cases) map onto every fixture scenario: real-HTTP ambiguity persistence, renamed-cohort block, comment-less controller resume through normal aggregation, boundary bind-only, pending-range bind, comment-storing bind, fail-closed without unique owned master, stale-token refusal, coverage+grace retry gate, cross-key member atomicity, sparse-historical non-blocking, rejection semantics, and the new reclaim task-map regression"
+  },
+  "non_blocking_notes": [
+    "The reclaim persist is conditional on request-row completeness; the false branch silently keeps the prior map. Unreachable in production (sole forcing caller pre-validates and raises; sole reclaim entry is reserve_candidate; sole forcing-capable repo is the file journal) — defense-in-depth only, not a defect in the change's real input domain.",
+    "forcing_current_attempt_comment is now a pure adapter-capability handshake kwarg in default_comment_sacct_querier._query (accepted, forwarded, not otherwise consumed) — harmless, keeps fake-adapter fail-closed gating intact.",
+    "Carried from re-review1: controller lane not yet exercised against a live node22 scontrol blob (size-measured only); parser fidelity rests on the field-allowlist design and shaped fixtures."
+  ],
+  "verification_gaps": [
+    "Leaf reviewer ran no tests/builds/lint per contract; verdict is source- and evidence-based. Suite/focused/probe outputs are parent-supplied evidence files whose headers and exit codes match the claimed commits.",
+    "Deployment/live smoke and production rollout remain parent-owned and pending (tasks.md 3.2/3.3/3.4 open); not a source finding."
+  ],
+  "verdict_for_parent": "CLEAN on exact source HEAD eee47464e. R2-A and R2-B are closed with real-seam regression coverage; all fix-pass-1 closures (comment-less controller lane, 120s grace, immediate bind-only, current-attempt Comment) verified intact at source after the last commit; no new P0/P1 findings and no new-contract coverage gap. Remaining gates are parent-owned: deployment-tree suite is now green on the corrected overlay, but live smoke/rollout proof is still pending."
+}

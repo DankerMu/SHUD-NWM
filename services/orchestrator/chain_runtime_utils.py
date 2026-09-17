@@ -108,10 +108,26 @@ def _active_orchestration_conflicts(
         if replacement_retry:
             return False
         if model_ids and callable(active_pipeline_provider):
-            return any(
+            active = any(
                 bool(active_pipeline_provider(source_id=source_id, cycle_time=cycle_time, model_id=model_id))
                 for model_id in model_ids
             )
+            if not active:
+                return False
+            forcing_overlap = getattr(
+                repository, "has_unresolved_forcing_submission_overlap", None
+            )
+            if (
+                _restart_stage_from_basins(basins) == "forcing"
+                and callable(forcing_overlap)
+                and forcing_overlap(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_ids=model_ids,
+                )
+            ):
+                return False
+            return True
         return False
     if model_ids and callable(active_pipeline_provider):
         return any(

@@ -25,6 +25,13 @@ from services.orchestrator.chain_types import (
     StageRunResult,
     TerminalJobObservation,
 )
+from services.orchestrator.forcing_submit_identity import (
+    forcing_attempt_comment_for,
+    is_forcing_array_stage,
+    is_resolved_forcing_attempt,
+    is_unresolved_forcing_attempt,
+    reordered_forcing_resume_basins,
+)
 
 
 class StageExecutionOrchestrator(Protocol):
@@ -186,6 +193,100 @@ def _call_orchestrator_helper(orchestrator: StageExecutionOrchestrator, name: st
     )
 
 
+def _immediate_forcing_submit_reconcile(
+    orchestrator: StageExecutionOrchestrator,
+    *,
+    pipeline_job_id: str,
+) -> dict[str, Any] | None:
+    """Bind only the just-persisted forcing ambiguity; never retry or scan peers."""
+
+    reader = getattr(orchestrator.repository, "get_reconcile_pipeline_job", None)
+    if not callable(reader):
+        return None
+    try:
+        raw_ambiguity_row = reader(pipeline_job_id)
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    if isinstance(raw_ambiguity_row, Mapping):
+        ambiguity_row = dict(raw_ambiguity_row)
+    elif hasattr(raw_ambiguity_row, "__dict__"):
+        ambiguity_row = dict(vars(raw_ambiguity_row))
+    else:
+        return None
+    try:
+        expected_submission_attempt = ambiguity_row.get("submission_attempt")
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            return None
+        expected_submission_attempt_started_at = ambiguity_row.get("submission_attempt_started_at")
+        if expected_submission_attempt_started_at in (None, ""):
+            return None
+        expected_idempotency_key = str(ambiguity_row.get("idempotency_key") or "")
+        expected_slurm_comment = forcing_attempt_comment_for(
+            expected_idempotency_key,
+            expected_submission_attempt,
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        str(ambiguity_row.get("job_id") or "") != pipeline_job_id
+        or str(ambiguity_row.get("status") or "") != "reserved"
+        or str(ambiguity_row.get("submit_outcome") or "") != "submit_result_ambiguous"
+        or str(ambiguity_row.get("slurm_comment") or "") != expected_slurm_comment
+    ):
+        return None
+
+    from services.orchestrator.reconcile import (
+        default_comment_sacct_querier,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        slurm_bin_path = str(SlurmGatewaySettings().slurm_bin_path or "").strip()
+    except Exception:  # noqa: BLE001 - configuration failure leaves ambiguity unresolved.
+        return None
+    try:
+        outcomes = reconcile_reserved_unbound_jobs(
+            orchestrator.repository,
+            comment_query=default_comment_sacct_querier(slurm_bin_path),
+            target_job_id=pipeline_job_id,
+            target_submission_attempt=expected_submission_attempt,
+            target_submission_attempt_started_at=expected_submission_attempt_started_at,
+            target_slurm_comment=expected_slurm_comment,
+            bind_only=True,
+        )
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    bound = next(
+        (
+            outcome
+            for outcome in outcomes
+            if outcome.job_id == pipeline_job_id and outcome.action == "bound"
+        ),
+        None,
+    )
+    if bound is None:
+        return None
+    try:
+        raw_bound_row = reader(pipeline_job_id)
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    if isinstance(raw_bound_row, Mapping):
+        row = dict(raw_bound_row)
+    elif hasattr(raw_bound_row, "__dict__"):
+        row = dict(vars(raw_bound_row))
+    else:
+        return None
+    if (
+        str(row.get("slurm_job_id") or "") != str(bound.slurm_job_id or "")
+        or row.get("submission_attempt") != expected_submission_attempt
+        or row.get("submission_attempt_started_at") != expected_submission_attempt_started_at
+        or str(row.get("slurm_comment") or "") != expected_slurm_comment
+    ):
+        return None
+    return row
+
+
 def submit_and_wait_cycle_stage(
     orchestrator: StageExecutionOrchestrator,
     stage: StageDefinition,
@@ -235,8 +336,26 @@ def submit_and_wait_cycle_stage(
     # overlapping passes and the submit-crash window. Best-effort against
     # repositories that predate the reservation methods.
     idempotency_key = deps.cycle_stage_idempotency_key(context, stage, pipeline_job_id=pipeline_job_id)
-    reservation = orchestrator._reserve_cycle_stage(stage, context, pipeline_job_id, idempotency_key)
-
+    forcing_member_tasks = (
+        orchestrator._reindexed_manifest_entries(context.active_basins)
+        if stage.is_array and is_forcing_array_stage(stage)
+        else None
+    )
+    if forcing_member_tasks is None:
+        reservation = orchestrator._reserve_cycle_stage(
+            stage,
+            context,
+            pipeline_job_id,
+            idempotency_key,
+        )
+    else:
+        reservation = orchestrator._reserve_cycle_stage(
+            stage,
+            context,
+            pipeline_job_id,
+            idempotency_key,
+            forcing_member_tasks=forcing_member_tasks,
+        )
     # M24 §3A reserve gate: when a concurrent pass already holds an active
     # reservation for this candidate+stage, skip sbatch entirely (no double
     # submission). Only a pass that truly won the reservation (created) - or
@@ -248,6 +367,15 @@ def submit_and_wait_cycle_stage(
         # Runtime manifests/placeholders must carry that exact attempt so a
         # later accepted-submit ambiguity releases the current, not stale, rows.
         context.retry_attempt = reservation.submission_attempt
+    durable_submit_ambiguity = bool(
+        getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
+        and (is_forecast_cohort_stage(stage) or is_forcing_array_stage(stage))
+    )
+    submission_comment = (
+        forcing_attempt_comment_for(idempotency_key, reservation.submission_attempt)
+        if durable_submit_ambiguity and is_forcing_array_stage(stage) and reservation is not None
+        else deps.slurm_comment_for(idempotency_key)
+    )
 
     submitted: dict[str, Any]
     manifest_index_path: Path | None = None
@@ -261,9 +389,9 @@ def submit_and_wait_cycle_stage(
             tasks = orchestrator._reindexed_manifest_entries(context.active_basins)
             manifest_index_path = orchestrator._write_cycle_manifest_index(context, stage, tasks)
             stage_manifest["manifest_index_path"] = str(manifest_index_path)
-            # Array path must carry the same idempotency --comment as the
-            # single-job path so crash-recovery can reconcile array masters.
-            stage_manifest["comment"] = deps.slurm_comment_for(idempotency_key)
+            # Array submission must carry the durable execution comment so
+            # crash recovery can reconcile the current master exactly.
+            stage_manifest["comment"] = submission_comment
             gateway_boundary_entered = True
             submitted = _call_orchestrator_helper(
                 orchestrator,
@@ -283,24 +411,20 @@ def submit_and_wait_cycle_stage(
                     "_slurm_submission_manifest",
                     stage_manifest,
                 ),
-                "comment": deps.slurm_comment_for(idempotency_key),
+                "comment": submission_comment,
             }
             gateway_boundary_entered = True
             submitted = deps.coerce_mapping(
                 orchestrator.slurm_client.submit_job(submit_payload)
             )
         submitted_job_id = submitted.get("job_id")
-        accepted_submit_repository = bool(
-            getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
-            and is_forecast_cohort_stage(stage)
-        )
         valid_legacy_mock_id = (
             isinstance(submitted_job_id, str)
             and submitted_job_id.startswith("mock_")
             and submitted_job_id.removeprefix("mock_").isdigit()
         )
         if not isinstance(submitted_job_id, str) or not (
-            submitted_job_id.isdigit() or (valid_legacy_mock_id and not accepted_submit_repository)
+            submitted_job_id.isdigit() or (valid_legacy_mock_id and not durable_submit_ambiguity)
         ):
             error = OrchestratorError(
                 "SLURM_GATEWAY_INVALID_RESPONSE",
@@ -311,7 +435,7 @@ def submit_and_wait_cycle_stage(
         raw_submitted_status = submitted.get("status")
         raw_status_value = getattr(raw_submitted_status, "value", raw_submitted_status)
         if (
-            accepted_submit_repository
+            durable_submit_ambiguity
             and (
                 type(raw_status_value) is not str
                 or not raw_status_value
@@ -326,8 +450,7 @@ def submit_and_wait_cycle_stage(
             raise error
     except Exception as error:
         if (
-            getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
-            and is_forecast_cohort_stage(stage)
+            durable_submit_ambiguity
             and _submit_error_is_ambiguous(error, gateway_boundary_entered=gateway_boundary_entered)
         ):
             transition = getattr(
@@ -349,8 +472,16 @@ def submit_and_wait_cycle_stage(
                     "expected_statuses": ("reserved",),
                     "require_unbound": True,
                 }
-                if _accepts_keyword(transition, "accepted_submit_contract_version"):
+                if (
+                    is_forecast_cohort_stage(stage)
+                    and _accepts_keyword(transition, "accepted_submit_contract_version")
+                ):
                     transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+                if is_forcing_array_stage(stage):
+                    transition_kwargs["error_code"] = (
+                        getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+                    )
+                    transition_kwargs["error_message"] = str(deps.redact_payload(str(error)))
                 transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.timeout(),
@@ -381,8 +512,22 @@ def submit_and_wait_cycle_stage(
                     "matched_slurm_job_id": None,
                     "restart_stage": context.restart_stage or stage.stage,
                     "native_shud_resubmitted": is_forecast_cohort_stage(stage),
+                    "forcing_submit_identity": is_forcing_array_stage(stage),
                 },
             )
+            if is_forcing_array_stage(stage):
+                bound_forcing = _immediate_forcing_submit_reconcile(
+                    orchestrator,
+                    pipeline_job_id=pipeline_job_id,
+                )
+                if bound_forcing is not None:
+                    return _call_orchestrator_helper(
+                        orchestrator,
+                        "_resume_cycle_stage",
+                        stage,
+                        context,
+                        bound_forcing,
+                    )
             return (
                 StageRunResult(
                     stage=stage.stage,
@@ -391,7 +536,11 @@ def submit_and_wait_cycle_stage(
                     slurm_job_id="",
                     status="submit_result_ambiguous",
                     error_code=getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS",
-                    error_message="Submit result is ambiguous; exact-comment reconciliation pending.",
+                    error_message=(
+                        str(deps.redact_payload(str(error)))
+                        if is_forcing_array_stage(stage)
+                        else "Submit result is ambiguous; exact-comment reconciliation pending."
+                    ),
                     task_results=(),
                 ),
                 None,
@@ -842,6 +991,56 @@ def resume_cycle_stage(
     deps: StageExecutionDependencies | None = None,
 ) -> tuple[StageRunResult, ArrayAggregation | None]:
     deps = _dependencies(orchestrator, deps)
+    resume_context = context
+    if is_forcing_array_stage(stage) and (
+        is_resolved_forcing_attempt(job)
+        or (
+            is_unresolved_forcing_attempt(job)
+            and job.get("slurm_job_id") not in (None, "")
+        )
+    ):
+        restored_basins = reordered_forcing_resume_basins(context.active_basins, job)
+        if restored_basins is None:
+            return (
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=str(job["job_id"]),
+                    slurm_job_id=str(job.get("slurm_job_id") or ""),
+                    status="reconcile_unverified",
+                    error_code="FORCING_RESUME_IDENTITY_MISMATCH",
+                    error_message=(
+                        "The current forcing cohort cannot be matched to the "
+                        "trusted original task mapping."
+                    ),
+                    task_results=(),
+                ),
+                None,
+            )
+        context.active_basins = restored_basins
+    if (
+        is_forcing_array_stage(stage)
+        and is_unresolved_forcing_attempt(job)
+        and job.get("slurm_job_id") in (None, "")
+    ):
+        return (
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=str(job["job_id"]),
+                slurm_job_id="",
+                status="submit_result_ambiguous",
+                error_code=str(
+                    job.get("error_code") or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+                ),
+                error_message=str(
+                    job.get("error_message")
+                    or "Forcing submit acceptance remains unresolved; exact-comment reconciliation pending."
+                ),
+                task_results=(),
+            ),
+            None,
+        )
     status = str(job.get("status"))
     terminal = dict(job)
     deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
@@ -854,7 +1053,7 @@ def resume_cycle_stage(
             orchestrator,
             "_poll_cycle_stage_until_terminal",
             stage=stage,
-            context=context,
+            context=resume_context,
             pipeline_job_id=str(job["job_id"]),
             initial_job={"job_id": job["slurm_job_id"], "status": status},
             initial_status=status,
@@ -885,7 +1084,7 @@ def resume_cycle_stage(
     ):
         aggregation = orchestrator._aggregate_array_stage(
             stage,
-            context,
+            resume_context,
             str(job["slurm_job_id"]),
             terminal,
             str(job["job_id"]),
@@ -921,6 +1120,7 @@ def resume_cycle_stage(
                     )
         elif (
             accepted_submit_projection
+            or is_resolved_forcing_attempt(job)
             or str(job.get("status")) not in deps.terminal_job_statuses
             or status != str(job.get("status"))
         ):
@@ -930,7 +1130,9 @@ def resume_cycle_stage(
                 publication_attempt = orchestrator._try_publish_log_for_advertise(str(job["slurm_job_id"]), publication)
                 log_uri = publication_attempt.advertised_uri
             elif not deps.published_artifact_root_configured():
-                legacy_log_uri = orchestrator.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+                legacy_log_uri = orchestrator.object_store.uri_for_key(
+                    f"runs/{resume_context.run_id}/logs/{stage.stage}.log"
+                )
                 publication_attempt = orchestrator._try_publish_log_for_advertise(
                     str(job["slurm_job_id"]),
                     DisplayLogPublication(
@@ -948,7 +1150,7 @@ def resume_cycle_stage(
                 )
             durable_outcome = orchestrator._record_cycle_stage_status_override(
                 stage,
-                context,
+                resume_context,
                 str(job["job_id"]),
                 terminal,
                 aggregation,
@@ -985,7 +1187,7 @@ def resume_cycle_stage(
             error_message=effective_job.get("error_message"),
             log_uri=result_log_uri,
             accounting=deps.slurm_accounting_from_payload(terminal),
-            task_results=deps.stage_task_result_evidence(aggregation, context=context),
+            task_results=deps.stage_task_result_evidence(aggregation, context=resume_context),
             finished_at=deps.parse_gateway_time(
                 (effective_job or {}).get("finished_at")
                 or terminal.get("finished_at")

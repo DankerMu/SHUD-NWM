@@ -1,0 +1,3 @@
+{"schema_version": "nhms.scheduler_pass_timing.v1", "ts": "2026-09-17T07:30:40.371132Z", "pass_id": "scheduler_2026091707_e6f2d1d1d36e", "level": "stage", "phase": "pass:started"}
+{"schema_version": "nhms.scheduler_pass_timing.v1", "ts": "2026-09-17T07:38:50.982250Z", "pass_id": "scheduler_2026091707_e6f2d1d1d36e", "level": "stage", "phase": "pass:finished"}
+{"passes": [{"artifact_path": "[local-path]", "dry_run": false, "execution_boundary": "planning_only", "finished_at": "2026-09-17T07:38:42.567125Z", "pass_id": "scheduler_2026091707_e6f2d1d1d36e", "readiness_interpretation": "non_final_scheduler_evidence", "sources": ["gfs", "IFS"], "started_at": "2026-09-17T07:30:40.371066Z", "status": "planned"}], "status": "planned"}

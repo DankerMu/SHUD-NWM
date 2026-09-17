@@ -11760,9 +11760,11 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     assert client.cancelled_jobs == []
 
 
-def test_file_journal_forcing_gateway_failure_keeps_legacy_failure_without_forecast_projection(
+def test_file_journal_forcing_gateway_failure_stays_ambiguous_and_unbound(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from services.orchestrator import reconcile as reconcile_module
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import reconcile_inflight_jobs
 
@@ -11788,21 +11790,33 @@ def test_file_journal_forcing_gateway_failure_keeps_legacy_failure_without_forec
         )
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     orchestrator = _orchestrator(tmp_path, repository, _AcceptedForcingTimeoutClient())
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_visibility_stdout",
+        lambda command: (
+            "AccountingStoreFlags = (null)\n"
+            if list(command)[-2:] == ["show", "config"]
+            else ""
+        ),
+    )
 
     result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
 
-    assert result.status == "failed"
+    assert result.status == "reconciling"
     jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
     forcing = next(job for job in jobs if job["stage"] == "forcing")
-    assert forcing["status"] == "submission_failed"
-    assert forcing["submit_outcome"] is None
-    assert forcing["cohort_members"] == []
+    assert forcing["status"] == "reserved"
+    assert forcing["submit_outcome"] == "submit_result_ambiguous"
+    assert forcing["slurm_job_id"] is None
+    assert forcing["error_code"] == "SLURM_GATEWAY_UNAVAILABLE"
+    assert [member["array_task_id"] for member in forcing["cohort_members"]] == [0, 1]
+    assert all(member["restart_stage"] == "forcing" for member in forcing["cohort_members"])
     assert forcing["candidate_projections"] == []
     assert all(job["job_type"] != "run_shud_forecast_array" for job in jobs)
-    assert repository.query_reserved_unbound_jobs() == []
+    assert len(repository.query_reserved_unbound_jobs()) == 1
     assert reconcile_inflight_jobs(
         repository,
-        sacct_query=lambda _job_id: pytest.fail("terminal forcing rejection is not reconcile-inflight"),
+        sacct_query=lambda _job_id: pytest.fail("unbound forcing ambiguity is not reconcile-inflight"),
     ) == []
     assert all(job.get("restart_stage") != "state_save_qc" for job in jobs)
 
