@@ -1297,14 +1297,21 @@ def _default_layer_catalog(
                     cycle=default_cycle_instant,
                 )
             )
-            # The two calls above take separate `read committed` snapshots, so the
-            # intersection can empty out between them -- newly ACTIVATING a network
+            # The two calls above are two full helper invocations, so they hold an
+            # OUTER snapshot seam on top of the inner two-statement one each of them
+            # owns (#2087 orders that inner pair and stays out of this one). The
+            # intersection can empty out between the calls -- a network ACTIVATED
             # with no display-ready run for `default_cycle`, or a covered run's
-            # status / coverage row being rewritten. Deactivation empties it too (fail-closed),
-            # intra-call: statement 1's active set still holds it, statement 2 drops its rows. The
-            # contract spells the empty intersection
-            # `default_cycle = null` AND `valid_times = []` together;
-            # `(C, [])` advertises a cycle whose timeline is empty and is forbidden.
+            # status / coverage row being rewritten so it stops being display-ready.
+            # Both are caught by the SECOND call's own pair of reads, which is why
+            # the guard below is here. DEACTIVATION between the calls is not in that
+            # list: the second call then reads a consistent smaller state (the gone
+            # network is in neither its covered nor its active set) and confirms
+            # `default_cycle` -- correctly, since a deactivated network does not need
+            # rendering. It only fails closed when it lands INSIDE one call, between
+            # that call's two reads. The contract spells the empty intersection
+            # `default_cycle = null` AND `valid_times = []` together; `(C, [])`
+            # advertises a cycle whose timeline is empty and is forbidden.
             if not valid_time_sample.valid_times:
                 default_cycle = None
                 default_cycle_instant = None

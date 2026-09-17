@@ -167,10 +167,16 @@ def test_national_valid_times_use_active_basin_identity_not_transient_model_id()
         "2026-07-11T11:00:00Z",
     ]
     assert discovery.observed_count == 3
-    assert "mi.basin_version_id = h.basin_version_id" in session.sql
-    assert "hydro.run_display_coverage" in session.sql
-    assert "mi.model_id = h.model_id" not in session.sql
-    assert "hydro.river_timeseries" not in session.sql
+    # Selected BY CONTENT, not via `session.sql`: that attribute holds only the
+    # LAST statement executed, and since #2087 the last one is the active-network
+    # read, which mentions neither `h.model_id` nor `hydro.river_timeseries`. The
+    # two negatives below would pass against it for the trivial reason and stop
+    # testing anything, so the claims are pinned to the coverage statement itself.
+    coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
+    assert "mi.basin_version_id = h.basin_version_id" in coverage_sql
+    assert "hydro.run_display_coverage" in coverage_sql
+    assert "mi.model_id = h.model_id" not in coverage_sql
+    assert "hydro.river_timeseries" not in coverage_sql
 
 
 def test_national_valid_times_fail_closed_for_non_rectangular_coverage() -> None:
@@ -1090,9 +1096,10 @@ class _TileResult:
 class _NationalRouteSession:
     """Answers every statement the national routes issue, and records their SQL and binds.
 
-    #2153 added the per-cycle coverage pair (active set, then coverage rows) to
-    the canonical route's miss path, so statements are classified by the feature
-    that distinguishes each one, in this order: the tile (`ST_AsMVT`), the digest
+    #2153 added the per-cycle coverage pair to the canonical route's miss path,
+    EXECUTED since #2087 as coverage rows then active set (`_statement_kinds`
+    pins that). Classification is a separate, stricter-check-first dispatch order
+    and is NOT the execution order: the tile (`ST_AsMVT`), the digest
     (`geometry_generation` -- `national_river_network_source_version` also
     mentions `core.model_instance mi`, so this check must precede the active-set
     one), the coverage rows (their `PARTITION BY`), the active set
@@ -2136,12 +2143,12 @@ def test_national_cycles_fail_closed_when_a_network_activates_between_the_two_st
     """Equal cardinality, different membership -- the minimal fail-OPEN race.
 
     The denominator query and the coverage query are two statements with their own
-    READ COMMITTED snapshots. Statement 1 sees the active set `{rn-b, rn-c1, rn-c2}`;
-    `rn-a` is then activated and already holds a display-ready run for the cycle,
-    so statement 2 (which re-evaluates `active_flag`) returns `{rn-a, rn-c1, rn-c2}`
-    while `rn-b` never had that cycle at all. `3 == 3`, so a cardinality comparison
-    lists a cycle the active network `rn-b` cannot render. The set comparison
-    refuses it.
+    READ COMMITTED snapshots. The coverage read returns `{rn-a, rn-c1, rn-c2}` for
+    the cycle; a version switch then deactivates `rn-a` and activates `rn-b`, which
+    never had that cycle at all, so the active read returns `{rn-b, rn-c1, rn-c2}`.
+    `3 == 3`, so a cardinality comparison lists a cycle the active network `rn-b`
+    cannot render. The set comparison refuses it in EITHER statement order, which
+    is why #2087's swap leaves this case alone.
     """
     session = _NationalDiscoverySession(
         _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
@@ -2938,11 +2945,12 @@ def test_national_per_cycle_valid_times_fail_closed_when_a_network_activates_bet
     Row 40's oracle only ever touched the `national_discharge_cycles` site; this
     one drives the SECOND set comparison, the one inside
     `national_discharge_valid_times`' per-cycle branch. Same race, same shape:
-    equal cardinality, different membership. Statement 1 sees the active set
-    `{rn-b, rn-c1, rn-c2}`; `rn-a` is activated with a display-ready run for the
-    requested cycle, so statement 2 returns `{rn-a, rn-c1, rn-c2}` while `rn-b`
-    never had that cycle at all. `3 == 3`, so a cardinality comparison would
-    serve `rn-b`'s basins a timeline they cannot render.
+    equal cardinality, different membership. The coverage read returns
+    `{rn-a, rn-c1, rn-c2}` for the requested cycle; a version switch then swaps
+    `rn-a` out for `rn-b`, which never had that cycle at all, so the active read
+    returns `{rn-b, rn-c1, rn-c2}`. `3 == 3`, so a cardinality comparison would
+    serve `rn-b`'s basins a timeline they cannot render. Order-independent, like
+    its `national_discharge_cycles` twin.
     """
     session = _NationalDiscoverySession(
         _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
@@ -4169,10 +4177,13 @@ def test_national_cycle_coverage_helper_compares_sets_like_the_per_cycle_valid_t
     assert coverage.active_networks == frozenset(active), case
     assert coverage.complete is complete, case
     assert [row["river_network_version_id"] for row in coverage.rows] == list(covering), case
-    # The same two statements, with the same binds, the valid-times branch always issued.
+    # The same two statements, with the same binds, the valid-times branch always
+    # issued -- and in the #2087 order: the identity-bound coverage read first, the
+    # unbound active-set read second, so an activation between them cannot hide in
+    # the coverage rows.
     assert [params for _sql, params in helper_session.executions] == [
-        None,
         {"source": "gfs", "cycle": _CYCLE, "since": None},
+        None,
     ], case
 
     discovery = national_discharge_valid_times(
@@ -4244,8 +4255,152 @@ def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monke
 
     assert response.status_code == 200, response.text
     assert response.content == b"pbf-bytes"
-    assert _statement_kinds(session) == ["digest", "active", "coverage", "tile"]
+    assert _statement_kinds(session) == ["digest", "coverage", "active", "tile"]
     assert len(session.active_params) == 1
     assert session.coverage_params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE, "since": None}]
     assert response.headers["X-Tile-Cache-Key"] == _PRE_2153_FULL_COVERAGE_CACHE_KEY
     assert session.tile_params == [_PRE_2153_FULL_COVERAGE_TILE_BINDS]
+
+
+# ---------------------------------------------------------------------------
+# #2087: the ORDER of `_national_discharge_coverage_rows`' two statements. Also
+# appended at the END, for the reason stated above the #2009 round-4 block.
+# ---------------------------------------------------------------------------
+
+
+class _ActivationBetweenStatementsSession(_NationalDiscoverySession):
+    """A network is activated BETWEEN the helper's two reads.
+
+    Deliberately order-INDEPENDENT, so the same case is red under the old
+    statement order and green under the #2087 one: the activation lands after the
+    FIRST `execute()`, whichever statement that turns out to be. A fake keyed on
+    "the active-set statement" instead would encode the very order under test and
+    could not distinguish the two.
+
+    The coverage branch filters its rows by the active set current AT THAT
+    EXECUTION, because `mi.active_flag` sits inside the real coverage statement:
+    a snapshot taken before the activation cannot see the newcomer's rows. Without
+    that filter the partial-coverage case would hand back the newcomer's rows from
+    a pre-activation snapshot and prove less than the SQL does.
+
+    A subclass, never an edit to `_NationalDiscoverySession`: the base
+    deliberately answers the coverage query without consulting `active_networks`,
+    and the fail-closed fixtures above pass an explicit `active_networks=` WIDER
+    than their rows precisely to exercise that.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        active_before: list[str],
+        active_after: list[str],
+    ) -> None:
+        super().__init__(rows, active_networks=active_before)
+        self.active_before = list(active_before)
+        self.active_after = list(active_after)
+        # What the coverage statement actually handed back, per execution: the
+        # non-vacuity oracle, so a case cannot pass on an empty fixture.
+        self.served_coverage_rows: list[list[dict[str, Any]]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        # Evaluated BEFORE `super().execute`, which is what appends to
+        # `executions`: read 1 sees the pre-activation state, every later read the
+        # post-activation one.
+        self.active_networks = self.active_before if not self.executions else self.active_after
+        result = super().execute(statement, params)
+        if "hydro.run_display_coverage" not in str(statement):
+            return result
+        visible = frozenset(self.active_networks)
+        served = [row for row in result.all() if row["river_network_version_id"] in visible]
+        self.served_coverage_rows.append(served)
+        return _Rows(served)
+
+
+def _zero_coverage_activation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-a` is activated between the reads holding NO display-ready run at all."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c"],
+        active_after=["rn-a", "rn-b", "rn-c"],
+    )
+
+
+def _partial_coverage_activation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-a` is activated between the reads with a run for `_CYCLE` (K) but not `_PREVIOUS_CYCLE` (J)."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b", "rn-c"))
+        + _full_coverage_rows(_PREVIOUS_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c"],
+        active_after=["rn-a", "rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_close_when_a_network_is_activated_with_zero_coverage_rows() -> None:
+    """Branch (a) of #2087, at the `cycles` site.
+
+    A newcomer with no display-ready row contributes to NO cycle's covered set, so
+    no comparison of coverage-statement output can see it. Reading the coverage
+    rows FIRST makes the denominator the younger set instead: `covered` lacks
+    `rn-a`, the active read has it, every cycle fails closed. Under the old order
+    the covered set equalled the stale active set and the cycle was listed.
+    """
+    session = _zero_coverage_activation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: three active networks after the activation, and the coverage
+    # statement really did serve rows -- an empty fixture would pass regardless.
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_per_cycle_valid_times_close_when_a_network_is_activated_with_zero_coverage_rows() -> None:
+    """Branch (a) of #2087, at the per-cycle valid-times site (through `NationalCycleCoverage`)."""
+    session = _zero_coverage_activation_session()
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result.valid_times == []
+    assert result.observed_count == 0
+
+
+def test_national_cycles_close_both_cycles_when_the_newcomer_covers_only_the_newer_one() -> None:
+    """Branch (b) of #2087: rows for K but not J must close J as well as K.
+
+    The set comparison alone (#2073) only ever caught K -- for J the newcomer is
+    absent from the covered set, which then equals the stale active set. With the
+    coverage read first, `rn-a`'s K rows are filtered out by the pre-activation
+    snapshot's `active_flag` too, so both cycles land unequal.
+    """
+    session = _partial_coverage_activation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    # Not a disguised branch (a): the newcomer really does hold a run for K.
+    assert any(
+        row["river_network_version_id"] == "rn-a" and row["cycle_time"] == _CYCLE for row in session.rows
+    )
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_per_cycle_valid_times_close_the_older_cycle_the_newcomer_does_not_cover() -> None:
+    """Branch (b) of #2087 at the per-cycle site, asked for J -- the cycle the newcomer misses."""
+    session = _partial_coverage_activation_session()
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_PREVIOUS_CYCLE)
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert any(
+        row["river_network_version_id"] == "rn-a" and row["cycle_time"] == _CYCLE for row in session.rows
+    )
+    assert result.valid_times == []
+    assert result.observed_count == 0
