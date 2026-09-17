@@ -87,6 +87,8 @@ from services.orchestrator.chain_types import (
     OrchestratorError,
 )
 from services.orchestrator.forcing_submit_identity import (
+    FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES,
+    forcing_attempt_comment_for,
     forcing_member_identity_is_complete,
     forcing_member_model_ids,
     forcing_submit_identity_is_complete,
@@ -1974,6 +1976,19 @@ class FileOrchestrationJournalRepository:
             return _blocked_query_job(error, job_id=job_id)
         return None
 
+    def get_reserved_unbound_job(self, job_id: str) -> SimpleNamespace | None:
+        """Read one current reserved row with the normal reconciliation shape."""
+
+        job = self._pipeline_job_for_id_unlocked(job_id)
+        if (
+            job is None
+            or str(job.get("status") or "") != "reserved"
+            or job.get("slurm_job_id") not in (None, "")
+            or not str(job.get("idempotency_key") or "")
+        ):
+            return None
+        return _file_reconcile_namespace(job)
+
     def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
         expected_job_id = _safe_segment(job_id)
         direct_job = self._direct_pipeline_job_record(expected_job_id)
@@ -3125,6 +3140,14 @@ class FileOrchestrationJournalRepository:
             # authority anchor is captured here, never copied from a stale
             # lock-external reclaim request.
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
+            if forcing_reclaim:
+                # A reclaimed forcing reservation is a distinct execution
+                # attempt. Mint its exact controller comment inside the lock;
+                # resuming the same attempt never reaches this branch.
+                row["slurm_comment"] = forcing_attempt_comment_for(
+                    idempotency_key,
+                    row["submission_attempt"],
+                )
             if not versioned_master:
                 # INIT_STATE_IDENTITY_FIELD is deliberately absent from this
                 # backfill set (#1188): keeping it out is what makes the reclaim
@@ -3235,6 +3258,8 @@ class FileOrchestrationJournalRepository:
         expected_submission_attempt: int,
         expected_submission_attempt_started_at: datetime | str,
         slurm_job_id: str,
+        reconciliation_source: str = "slurm_exact_comment",
+        expected_slurm_comment: str | None = None,
     ) -> dict[str, Any] | None:
         """Atomically bind one trusted, current forcing ambiguity attempt."""
 
@@ -3244,7 +3269,14 @@ class FileOrchestrationJournalRepository:
         source_id = _source_id_from_job(initial)
         cycle_time = _cycle_time_from_job(initial)
         requested_id = str(slurm_job_id)
-        if not requested_id.isdigit():
+        requested_source = str(reconciliation_source or "")
+        requested_comment = (
+            str(expected_slurm_comment) if expected_slurm_comment is not None else None
+        )
+        if (
+            not requested_id.isdigit()
+            or requested_source not in FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES
+        ):
             return None
         try:
             expected_anchor = _optional_format_datetime(
@@ -3270,6 +3302,10 @@ class FileOrchestrationJournalRepository:
                 current_anchor != expected_anchor
                 or max(int(existing.get("submission_attempt") or 1), 1)
                 != max(int(expected_submission_attempt), 1)
+                or (
+                    requested_comment is not None
+                    and str(existing.get("slurm_comment") or "") != requested_comment
+                )
             ):
                 return None
             current_id = str(existing.get("slurm_job_id") or "")
@@ -3277,7 +3313,7 @@ class FileOrchestrationJournalRepository:
                 if (
                     current_id == requested_id
                     and existing.get("submit_outcome") == "accepted"
-                    and existing.get("reconciliation_source") == "slurm_exact_comment"
+                    and existing.get("reconciliation_source") == requested_source
                     and existing.get("reconciliation_decision") == "matched_bound"
                     and existing.get("matched_slurm_job_id") == requested_id
                 ):
@@ -3293,7 +3329,7 @@ class FileOrchestrationJournalRepository:
                     "slurm_job_id": requested_id,
                     "submitted_at": existing.get("submitted_at") or _format_utc(_utcnow()),
                     "submit_outcome": "accepted",
-                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_source": requested_source,
                     "reconciliation_decision": "matched_bound",
                     "matched_slurm_job_id": requested_id,
                     "reconciliation_reason_class": None,

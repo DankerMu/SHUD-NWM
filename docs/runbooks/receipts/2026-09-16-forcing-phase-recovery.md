@@ -76,9 +76,16 @@ observations.
 For future self-sufficient forcing attempts, #2447 retains an unverifiable
 post-Gateway response as an unbound ambiguity rather than a permanent failure
 or absence. It fences intersecting source/cycle/model members while the attempt
-is unresolved. Only an exact trusted accounting bind followed by the ordinary
-forcing completion/witness path permits forecast continuation; only existing
-credible rejection or coverage-proven absence permits another forcing attempt.
+is unresolved. Immediately after the ambiguity is persisted, one bounded
+current-row exact-comment lookup may bind the original master; it never retries
+or treats an empty lookup as absence. Each new forcing attempt persists and
+stamps its own attempt-specific Slurm Comment, separate from the stable business
+idempotency key. Only an exact trusted accounting bind, or a still-retained
+controller bind to that current comment with configured owner/account, followed
+by ordinary forcing completion, permits forecast continuation. Missing, expired,
+or nonmatching controller proof never proves absence; only existing credible
+rejection or coverage-proven absence permits another forcing attempt. Existing
+pre-token attempts are not reconstructed or upgraded in place.
 Historical **49174** remains superseded by **49309**: no adoption, migration,
 reconstruction, or broad sparse-failure fence is authorized.
 

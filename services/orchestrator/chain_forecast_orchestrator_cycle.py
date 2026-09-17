@@ -78,6 +78,7 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.forcing_submit_identity import (
     canonical_forcing_cohort_members,
+    forcing_attempt_comment_for,
     forcing_member_identity_is_complete,
     is_forcing_array_stage,
 )
@@ -724,7 +725,7 @@ class ForecastOrchestratorCycleMixin:
                 )
             forcing_members = canonical_forcing_cohort_members(tasks=forcing_member_tasks)
             reservation_evidence = {
-                "slurm_comment": _chain.slurm_comment_for(idempotency_key),
+                "slurm_comment": forcing_attempt_comment_for(idempotency_key, submission_attempt),
                 "cohort_members": list(forcing_members),
                 "restart_stage": "forcing",
                 "submission_attempt": submission_attempt,

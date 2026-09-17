@@ -26,6 +26,7 @@ from services.orchestrator.chain_types import (
     TerminalJobObservation,
 )
 from services.orchestrator.forcing_submit_identity import (
+    forcing_attempt_comment_for,
     is_forcing_array_stage,
     is_resolved_forcing_attempt,
     is_unresolved_forcing_attempt,
@@ -192,6 +193,86 @@ def _call_orchestrator_helper(orchestrator: StageExecutionOrchestrator, name: st
     )
 
 
+def _immediate_forcing_submit_reconcile(
+    orchestrator: StageExecutionOrchestrator,
+    *,
+    pipeline_job_id: str,
+    ambiguity_row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Bind only the just-persisted forcing ambiguity; never retry or scan peers."""
+
+    try:
+        expected_submission_attempt = ambiguity_row.get("submission_attempt")
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            return None
+        expected_submission_attempt_started_at = ambiguity_row.get("submission_attempt_started_at")
+        if expected_submission_attempt_started_at in (None, ""):
+            return None
+        expected_idempotency_key = str(ambiguity_row.get("idempotency_key") or "")
+        expected_slurm_comment = forcing_attempt_comment_for(
+            expected_idempotency_key,
+            expected_submission_attempt,
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        str(ambiguity_row.get("job_id") or "") != pipeline_job_id
+        or str(ambiguity_row.get("status") or "") != "reserved"
+        or str(ambiguity_row.get("submit_outcome") or "") != "submit_result_ambiguous"
+        or str(ambiguity_row.get("slurm_comment") or "") != expected_slurm_comment
+    ):
+        return None
+
+    from services.orchestrator.reconcile import (
+        default_comment_sacct_querier,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        slurm_bin_path = str(SlurmGatewaySettings().slurm_bin_path or "").strip()
+    except Exception:  # noqa: BLE001 - configuration failure leaves ambiguity unresolved.
+        return None
+    try:
+        outcomes = reconcile_reserved_unbound_jobs(
+            orchestrator.repository,
+            comment_query=default_comment_sacct_querier(slurm_bin_path),
+            target_job_id=pipeline_job_id,
+            target_submission_attempt=expected_submission_attempt,
+            target_submission_attempt_started_at=expected_submission_attempt_started_at,
+            target_slurm_comment=expected_slurm_comment,
+            bind_only=True,
+        )
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    bound = next(
+        (
+            outcome
+            for outcome in outcomes
+            if outcome.job_id == pipeline_job_id and outcome.action == "bound"
+        ),
+        None,
+    )
+    if bound is None:
+        return None
+    reader = getattr(orchestrator.repository, "get_pipeline_job", None)
+    if not callable(reader):
+        return None
+    try:
+        row = reader(pipeline_job_id)
+    except Exception:  # noqa: BLE001 - preserve the original ambiguous result.
+        return None
+    if (
+        not isinstance(row, Mapping)
+        or str(row.get("slurm_job_id") or "") != str(bound.slurm_job_id or "")
+        or row.get("submission_attempt") != expected_submission_attempt
+        or row.get("submission_attempt_started_at") != expected_submission_attempt_started_at
+        or str(row.get("slurm_comment") or "") != expected_slurm_comment
+    ):
+        return None
+    return dict(row)
+
+
 def submit_and_wait_cycle_stage(
     orchestrator: StageExecutionOrchestrator,
     stage: StageDefinition,
@@ -276,6 +357,11 @@ def submit_and_wait_cycle_stage(
         getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
         and (is_forecast_cohort_stage(stage) or is_forcing_array_stage(stage))
     )
+    submission_comment = (
+        forcing_attempt_comment_for(idempotency_key, reservation.submission_attempt)
+        if durable_submit_ambiguity and is_forcing_array_stage(stage) and reservation is not None
+        else deps.slurm_comment_for(idempotency_key)
+    )
 
     submitted: dict[str, Any]
     manifest_index_path: Path | None = None
@@ -289,9 +375,9 @@ def submit_and_wait_cycle_stage(
             tasks = orchestrator._reindexed_manifest_entries(context.active_basins)
             manifest_index_path = orchestrator._write_cycle_manifest_index(context, stage, tasks)
             stage_manifest["manifest_index_path"] = str(manifest_index_path)
-            # Array path must carry the same idempotency --comment as the
-            # single-job path so crash-recovery can reconcile array masters.
-            stage_manifest["comment"] = deps.slurm_comment_for(idempotency_key)
+            # Array submission must carry the durable execution comment so
+            # crash recovery can reconcile the current master exactly.
+            stage_manifest["comment"] = submission_comment
             gateway_boundary_entered = True
             submitted = _call_orchestrator_helper(
                 orchestrator,
@@ -311,7 +397,7 @@ def submit_and_wait_cycle_stage(
                     "_slurm_submission_manifest",
                     stage_manifest,
                 ),
-                "comment": deps.slurm_comment_for(idempotency_key),
+                "comment": submission_comment,
             }
             gateway_boundary_entered = True
             submitted = deps.coerce_mapping(
@@ -415,6 +501,22 @@ def submit_and_wait_cycle_stage(
                     "forcing_submit_identity": is_forcing_array_stage(stage),
                 },
             )
+            if is_forcing_array_stage(stage):
+                ambiguity_row = getattr(transition_result, "row", None)
+                if isinstance(ambiguity_row, Mapping):
+                    bound_forcing = _immediate_forcing_submit_reconcile(
+                        orchestrator,
+                        pipeline_job_id=pipeline_job_id,
+                        ambiguity_row=ambiguity_row,
+                    )
+                    if bound_forcing is not None:
+                        return _call_orchestrator_helper(
+                            orchestrator,
+                            "_resume_cycle_stage",
+                            stage,
+                            context,
+                            bound_forcing,
+                        )
             return (
                 StageRunResult(
                     stage=stage.stage,

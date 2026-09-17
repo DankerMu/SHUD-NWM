@@ -13,11 +13,43 @@ from typing import Any
 
 from services.orchestrator.accepted_submit_identity import ordered_cohort_members
 from services.orchestrator.chain_types import TERMINAL_JOB_STATUSES, StageDefinition
-from services.orchestrator.reservation import slurm_comment_for
+from services.orchestrator.reservation import slurm_comment_for, validate_idempotency_key
 
 FORCING_STAGE_ALIASES = frozenset(
     {"forcing", "produce_forcing", "produce_forcing_array", "forcing_package"}
 )
+
+FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES = frozenset(
+    {"slurm_exact_comment", "slurm_controller_exact_comment"}
+)
+
+FORCING_ATTEMPT_COMMENT_PREFIX = "nhms_forcing_attempt:"
+
+
+def forcing_attempt_comment_for(idempotency_key: str, submission_attempt: int) -> str:
+    """Return the forcing-only Slurm comment for one durable attempt."""
+
+    if type(submission_attempt) is not int or submission_attempt < 1:
+        raise ValueError("submission_attempt must be a positive integer")
+    return (
+        f"{FORCING_ATTEMPT_COMMENT_PREFIX}{validate_idempotency_key(idempotency_key)}"
+        f":a{submission_attempt}"
+    )
+
+
+def is_current_forcing_attempt_comment(row: Mapping[str, Any] | None) -> bool:
+    """Whether ``row`` carries its current forcing attempt's exact comment."""
+
+    if not isinstance(row, Mapping):
+        return False
+    try:
+        expected_comment = forcing_attempt_comment_for(
+            str(row.get("idempotency_key") or ""),
+            row.get("submission_attempt"),
+        )
+    except ValueError:
+        return False
+    return str(row.get("slurm_comment") or "") == expected_comment
 
 
 def is_forcing_stage_name(stage: Any, job_type: Any = None) -> bool:
@@ -62,12 +94,17 @@ def forcing_member_identity_is_complete(row: Mapping[str, Any] | None) -> bool:
     attempt = row.get("submission_attempt")
     if type(attempt) is not int or attempt < 1:
         return False
+    # Keep pre-token rows readable without synthesizing a token for them. New
+    # forcing reservations always write ``forcing_attempt_comment_for``.
     key = str(row.get("idempotency_key") or "")
     try:
-        expected_comment = slurm_comment_for(key)
+        legacy_comment = slurm_comment_for(key)
     except ValueError:
         return False
-    if not key or str(row.get("slurm_comment") or "") != expected_comment:
+    if not key or not (
+        is_current_forcing_attempt_comment(row)
+        or str(row.get("slurm_comment") or "") == legacy_comment
+    ):
         return False
     if row.get("submission_attempt_started_at") in (None, ""):
         return False
