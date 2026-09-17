@@ -5,8 +5,12 @@
 
 ## 2. Evidence Floor
 - [x] 2.1 Fixture reviewer pass and openspec validate prewarm-source-discharge-results --strict --no-interactive.
-- [ ] 2.2 On node-27, demonstrate the new mixed-source regression fails against base source and passes against changed source; uv run pytest tests/test_node27_mvt_prewarm.py -q passes.
-- [ ] 2.3 Local uv run ruff check scripts/node27_mvt_prewarm.py tests/test_node27_mvt_prewarm.py passes; cross-review and CI pass at frozen SHA.
+- [x] 2.2 On node-27, demonstrate the new mixed-source regression fails against base source and passes against changed source; uv run pytest tests/test_node27_mvt_prewarm.py -q passes.
+- [x] 2.3 Local uv run ruff check scripts/node27_mvt_prewarm.py tests/test_node27_mvt_prewarm.py passes.
+
+Verification evidence: node-27 base `b922b2455` fails the mixed-source regression with `KeyError: 'discharge_ok'`; implementation `40ce5510` passes all 56 tests in 0.67 s. Local isolated `uv run --no-project --with ruff ruff check ...` and strict OpenSpec validation pass. Test output is retained in `.workplans/2121/base-red.txt` and `head-green.txt` and posted in the PR.
+
+Pre-merge gates remain mandatory: cross-review and CI must pass at the frozen final SHA; their completion evidence is recorded in the PR and review gate ledger rather than a post-CI documentation commit.
 
 ## Risk packs
 - Selected Public API / CLI / script entry: v3 normal/error JSON, tasks 1.2/2.2.
