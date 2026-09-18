@@ -5352,7 +5352,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分四支（仓库代码缺陷、缺第三方依赖、已装的第三方包与代码对不上、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:` 三种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测；`AttributeError` 前缀与两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分四支（仓库代码缺陷、缺第三方依赖、已装的第三方包与代码对不上、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:`、`AttributeError:` 四种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测（`AttributeError` 那一例是 `AttributeError: module 'sqlalchemy' has no attribute 'no_such_attr_2472'`），单测另钉住 `AttributeError` 前缀；两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
 | `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
 
 **退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
@@ -5376,7 +5376,8 @@ SQLAlchemy 类**分不开**原因——`OperationalError` 既是连不上也是 
 `connect_timeout=10`，容器挂死或网络不通时读 `timeout expired`；连接数打满读
 `sorry, too many clients already`；容器正在起读 `the database system is starting up`。三种之外的
 **任何**原文都走同一条兜底：库在、但没在接受或服务连接 → 先 §11.3「库侧观测失败」第 1 步（容器
-状态），再第 3 步（`pg_stat_activity`）/ §9.2 看是谁占着。兜底这条是推导，未在 node-27 实测。
+状态），按那里的读法走到第 2 步的探针；探针也以这类原文失败，再第 3 步（`pg_stat_activity`）/ §9.2 看是谁
+占着，探针正常则是已经过去的瞬时故障。兜底这条是推导，未在 node-27 实测。
 一封真实的（已脱敏）`reason`：
 
 ```text
@@ -5449,7 +5450,10 @@ grep -n 'coverage_refresh\|coverage backstop' /home/nwm/autopipe-logs/*.log | ta
 ```
 
 看到 `refresh_failed_rc<N>` 或 backstop 非零 rc，就是刷新腿在失败（`rc=3` 是 #1446 的
-拒绝守卫）。修完刷新后手工补跑 `scripts/node27_refresh_coverage.py`，下一 tick 自动闭环。
+拒绝守卫）。修完刷新后手工补跑 `scripts/node27_refresh_coverage.py`，下一 tick 自动闭环。补跑的命令、
+必须带的写角色 env 与 `rc=3` 时 `--force` 的纪律，都在下面分支 C 末尾的刷新块里；其它非零 rc 在本
+runbook 没有专门的处置段，把该行前后的日志留证开 issue（推导）。想立刻确认，就在补跑之后用 §11.4
+那条 `systemctl --user start` 手跑一次（读法见 §11.4 末尾）。日志里没有失败行 → 走分支 B。
 注意：刷新**故意保持 non-fatal**（设计 D7，ingest 成功不该因刷新失败变成失败），所以
 rc 只在日志里，本车道才是那个持久信号。
 
@@ -5479,7 +5483,10 @@ ORDER BY 1;
 ```
 
 差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
-`active_flag` 置 false（退出业务化的口径见 §7）。
+`active_flag` 置 false（退出业务化的口径见 §7）。处置之后，要等覆盖刷新把该 cycle 收进目录
+gap 才会回落——下一次 autopipe 刷新自然会做，要立刻做就用分支 C 末尾的刷新块对该 cycle 的 run 补刷新；
+之后用 §11.4 那条 `systemctl --user start` 手跑一次（读法见 §11.4 末尾）。刷新过了仍退 1 → 回来重跑上面
+两条语句，差集已空就走分支 C（推导）。差集为空 → 直接走分支 C。
 
 **分支 C —— A 和 B 都查空：目录仍然不收这个 cycle**
 
@@ -5609,6 +5616,9 @@ docker ps -a --filter name=^nhms-db$ --format '{{.Names}} {{.Status}} {{.Ports}}
 `127.0.0.1:55432->5432/tcp` → 是库本身的事故，不是本车道的，按 §5.1（容器事实与重建指针）
 处理。`Up` 的时长很短而告警是 `AdminShutdown` → 观测中途容器重启过。本车道无状态，库恢复后
 下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码。
+健康（`Up`、映射是 `127.0.0.1:55432->5432/tcp`）而告警不是 `AdminShutdown` → 库本身在听，问题在车道
+这一侧：做第 2 步。若你是从第 2 步探针读法跳回来的，就回到那一条接着做它的下一个动作，别再从第 2 步开头来
+（推导）。
 
 **第 2 步 —— 先看 unit 读哪份 env 文件，再跑探针**
 
@@ -5641,7 +5651,8 @@ systemctl --user show -p DropInPaths nhms-node27-coverage-freshness-alert.servic
 再 show 一次 `DropInPaths` 与 `EnvironmentFiles`，确认回到上面那一行，然后用 §11.4 那条
 `systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码。`DropInPaths` 里没有本 unit 的 drop-in、`EnvironmentFiles`
 却仍不是上面那一行 → 装进去的 unit 文件被改过，重跑 §11.5 安装块里的两条 `install` 与
-`daemon-reload`。（`EnvironmentFiles` 与 `DropInPaths` 的健康值是实测；异常读数这两支是推导。）
+`daemon-reload`，再用 §11.4 那条 `systemctl --user start` 手跑一次确认。（`EnvironmentFiles` 与
+`DropInPaths` 的健康值是实测；异常读数这两支是推导。）
 
 读数正确之后跑**探针**：走本车道**自己的** venv、env 文件与只读角色，用与车道同一个 SQLAlchemy
 URL 解析，并报出连到了哪个库、本车道的表在不在：
@@ -5657,15 +5668,34 @@ with engine.connect() as conn:
 '; echo "rc=$?"
 ```
 
-健康读 `('nhms', 'nhms_display_ro', True)` 加 `rc=0`（2026-09-18 node-27 实测）。其余读法：
+健康读 `('nhms', 'nhms_display_ro', True)` 加 `rc=0`（2026-09-18 node-27 实测）。其余读法——凡是
+「改 env 文件」的，改的都是 §11.4 那份 env 文件里的 `DATABASE_URL`，改完用 §11.4 那条
+`systemctl --user start` 手跑一次，按 §11.4 末尾的读法确认 `systemctl` 返回 0：
 
 - 库名不是 `nhms`、或第三列是 `False` → DSN 指错了库。unit 读的就是这份文件（上面第一个动作已确认），
-  改 env 文件里的 `DATABASE_URL`。
-- 探针自己也以基类 `psycopg2.OperationalError` 失败 → 按 §11.2 的原文分：拒连回第 1 步，口令错 /
-  库不存在改 env 文件；常见三种之外的原文（`timeout expired`、`too many clients` 一类）→ 第 1 步看
-  容器、再第 3 步看 `pg_stat_activity`（推导）。
-- 探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次 unit，
-  `systemctl` 返回 0（即车道退 0，读法见 §11.4 末尾）即闭环。
+  改 env 文件。
+- 探针自己也以基类 `psycopg2.OperationalError` 失败 → 按 §11.2 的原文分：
+  - `Connection refused` → 先看第 1 步的容器读数。容器不是 `Up`、或没有 `127.0.0.1:55432->5432/tcp`
+    → 第 1 步的 §5.1 那一条。容器 `Up`、映射也对，探针却照样被拒 → DSN 的 host:port 与映射对不上：
+    原文里 `connection to server at "<host>", port <N>` 的 `N` 不是 `55432`（或 host 不是 `127.0.0.1`
+    / `localhost`）→ 改 env 文件。形状实测：2026-09-18 在 node-27 上，容器健康、DSN 端口写成 `1` 时车道读
+    `OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1", port 1 failed: Connection refused`；
+    这条路由是推导。
+  - `password authentication failed` / `database "…" does not exist` → 改 env 文件（两种原文实测）。
+  - 常见三种之外的原文（`timeout expired`、`too many clients` 一类）→ 第 1 步看容器、再第 3 步看
+    `pg_stat_activity`（推导）。
+- 探针以 `ValueError` / `ArgumentError` / `NoSuchModuleError` 失败、且与告警是同一行 → DSN 解析不了，
+  改 env 文件（`notaport` 那一例实测，见 §11.2「不带驱动类」第二条）。
+- 探针一切正常，按告警分：
+  - 告警是 `Undefined*`（`UndefinedTable` / `UndefinedColumn` / `UndefinedFunction`…）→ 下一条。
+  - 告警是 `ValueError` / `ArgumentError` / `NoSuchModuleError` → 异常来自观测期，走下面
+    「非驱动观测失败」（§11.2「不带驱动类」第二条）。
+  - 从下面「什么都观测不到」第 1 步过来的 → 库连对了，回那一条做第 2 步。
+  - 从第 4 步末尾那段过来的（告警是 `InsufficientPrivilege`）→ 回那一段，按探针的 `current_user` 分。
+  - 告警是别的驱动错误（拒连、口令、`AdminShutdown`、`timeout expired`…）→ 是已经过去的瞬时故障：
+    手跑一次 unit，`systemctl` 返回 0（即车道退 0，读法见 §11.4 末尾）即闭环。仍失败、原文不变 →
+    unit 与探针用的不是同一套连接参数，而 `EnvironmentFiles` 已确认一致：把两边原文与 `DropInPaths` 读数
+    一并开 issue（推导）。
 - 探针一切正常、而告警是 `Undefined*`（`UndefinedTable` / `UndefinedColumn` / `UndefinedFunction`…）
   → 库连对了，是**部署的代码与库的 schema 对不上**（schema 漂移）。探针只查 `hydro.hydro_run`
   在不在，而车道还要读 `hydro.run_display_coverage` 与 `core.model_instance` 的若干列、以及
@@ -5744,7 +5774,14 @@ from unnest(array['hydro.hydro_run', 'hydro.run_display_coverage', 'core.model_i
 
 补 grant 是一次权限变更。先想清楚它是怎么丢的：display API 也以
 `nhms_display_ro` 读这三张表（`national_discharge_cycles` 就是它发布的目录），它若同时在报错，
-这是一次波及展示面的权限回退，不只是本车道的事。
+这是一次波及展示面的权限回退，不只是本车道的事。补完用 §11.4 那条 `systemctl --user start` 手跑一次，
+按 §11.4 末尾的读法确认 `systemctl` 返回 0。
+
+五行全 `t`、告警却是 `InsufficientPrivilege` → 被拒的不是这五样，或连库的不是 `nhms_display_ro`
+（推导）。读驱动原文里 `permission denied for <对象>` 点名的是什么：先做第 2 步，看 unit 读的 env 文件与探针的
+`current_user`——不是 `nhms_display_ro` → DSN 用错了角色，改 §11.4 那份 env 文件；是 → 被拒的对象是车道
+或 `services/tiles/mvt.py` 新引用、而只读角色没被授权的，按上面 schema 漂移那一支同样的材料开 issue
+（附完整 `reason`），别在生产库上临时补授。
 
 **退出 3 —— 非驱动观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 不带 `(psycopg2.`）**
 
@@ -5761,8 +5798,10 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import psycopg2; import packages.c
 §11.5 那条 `import services.tiles.mvt`——它不碰驱动，缺驱动时照样通过），`packages.…` 出错是「仓库代码缺陷」那支；
 驱动装着却导不进（例如 `ImportError: libpq.so.5: cannot open shared object file …`，2026-09-18 node-27
 模拟实测：车道退 3、`reason` 读 `ImportError: <error text withheld: redaction unavailable (ImportError)>`）
-是「已装的第三方包与代码对不上」那支，拿 `psycopg2-binary` 对版本。两者都
-导得进、`reason` 却仍被扣 → 脱敏函数自己在这个异常上出了错，按下面第 3 条当代码缺陷开 issue（推导）。
+是「已装的第三方包与代码对不上」那支，拿 `psycopg2-binary` 对版本。两者都导得进（`rc=0`）→ 先用
+§11.4 那条 `systemctl --user start` 手跑一次：`systemctl` 返回 0（读法见 §11.4 末尾）→ 是已经过去的瞬时
+故障（例如 tick 撞上了一次正在进行的 sync），闭环；仍失败、`reason` 仍被扣 → 脱敏函数自己在这个异常上
+出了错，按下面第 3 条当代码缺陷开 issue（推导）。
 
 `ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」做上一条第 2 步（先查
 unit 读哪份 env 文件，再跑探针）排除 DSN；探针成功的、别的异常类的、以及引导词是
@@ -5771,7 +5810,9 @@ unit 读哪份 env 文件，再跑探针）排除 DSN；探针成功的、别的
 
 1. 用 §11.5 那段手工调用复现。它源的是仓库里那份 env 文件，unit 读的也是它时就会回来同一行。
    复现不出 → 回到上面「库侧观测失败」第 2 步的第一个动作查 `EnvironmentFiles`：unit 读的可能
-   根本不是这份文件（推导）。
+   根本不是这份文件（推导）。`EnvironmentFiles` 也健康 → 用 §11.4 那条 `systemctl --user start` 手跑一次：
+   `systemctl` 返回 0（读法见 §11.4 末尾）→ 瞬时，闭环；仍失败 → 带上 unit 这次的 `reason` 与手工调用的输出，
+   直接做第 3 条（推导）。
 2. 看展示模块最近动过什么：`cd /home/nwm/NWM && git log -5 --oneline -- services/tiles/mvt.py`。
 3. 按代码缺陷开 issue，附上 stderr 那行结构化 JSON 里完整的 `reason`（`VERDICT:` 行是拍平、
    截断过的）。本车道无状态、无 dedup，修好之前每天 06:00 一封。
@@ -5788,10 +5829,23 @@ ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 
 "进展"因而继续沉默，同时 `national_discharge_cycles` 已经在返回 `default_cycle = null`，
 图层已经黑了。这正是本 issue 要消除的构造性沉默。收到这封：
 
-1. 先查 `core.model_instance` 的 `active_flag` / `river_network_version_id`。
-2. 确认车道读的是哪个库：做上面「库侧观测失败」第 2 步——先查 `EnvironmentFiles`（§11.5 验投递时
+1. 先确认车道读的是哪个库：做上面「库侧观测失败」第 2 步——先查 `EnvironmentFiles`（§11.5 验投递时
    留下的 scratch drop-in 会把 unit 指到一个有表、没数据的库，在那里查就是零行），再跑探针看
-   `current_database()`。
+   `current_database()`。库不对 → 那一步的读法已经给出处置（改 env 文件或删 drop-in，再手跑确认）。
+2. 库对了，再查 `core.model_instance` 里还剩多少能进 ready 前沿的活跃实例：
+
+   ```bash
+   docker exec nhms-db psql -X -U nhms -d nhms -Atc "select count(*) filter (where active_flag), count(*) filter (where active_flag and river_network_version_id is not null) from core.model_instance;"
+   ```
+
+   输出是 `<活跃实例数>|<其中带 river network 的数>`，健康时读 `38|38`、`rc=0`（2026-09-18 node-27 实测；列与
+   谓词取自车道 ready 前沿语句的 `mi.active_flag` 与 `mi.river_network_version_id IS NOT NULL`）。读法（推导）：
+   - 第二个数是 `0` → 就是上面说的批量 `active_flag` 翻转或 `river_network_version_id` 漂移。恢复
+     哪些实例是业务裁定（口径见 §7），不是本车道能定的；恢复之后用 §11.4 那条 `systemctl --user start`
+     手跑一次，按 §11.4 末尾的读法确认。
+   - 第二个数大于 `0` → 实例在，但它们的 `basin_version_id` 上没有任何 `succeeded` / `parsed` /
+     `published` 且带 `cycle_time` 的 run：实例指向了一个还没产出过的 basin version，或 ingest 从没为它
+     产出。这是 ingest 侧的事——看 §10 前沿车道与 §3.1 的 ingest 口径；把这两个计数与探针读数一并开 issue。
 
 缺 grant **不会**走到这里：权限不足抛 `InsufficientPrivilege`，是
 `COVERAGE_FRESHNESS_OBSERVATION_FAILED`，不会静默返回零行（`db/` 下没有行级安全策略）。
@@ -5807,6 +5861,8 @@ ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 
   阈值取到窗口或以上，只能在图层**已经黑了**之后才触发，那就不是探测器了。
 - 不设该变量时用 `回看窗 / 3`。**不要在这里写死天数**：窗口常量改小时，默认阈值自动跟着小。
 - 改完直接 `systemctl --user start nhms-node27-coverage-freshness-alert.service` 验证一次退出码。
+  改过文件、手跑仍退 2 且 `reason` 一字不变 → unit 读的可能不是这份文件：做 §11.3「库侧观测失败」
+  第 2 步的第一个动作（`EnvironmentFiles` / `DropInPaths`）（推导）。
 
 **手跑 unit 的退出码怎么读**（§11 各处说"手跑一次 unit 看退出码 / 退 0 / 仍退 N"都按这一条）：
 service 是 `Type=oneshot`，`systemctl --user start` 要等车道跑完才返回。`systemctl` 自己返回 0，
@@ -5930,7 +5986,7 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
   锁文件之外的包会被卸掉——所以只在这一支（以及下一支里版本对不上的情形）才 sync。sync 完**再验两遍**：
   重跑上面的导入检查（`rc=0`），再用 §11.4 那条 `systemctl --user start nhms-node27-coverage-freshness-alert.service`
   手跑 unit，`systemctl` 返回 0（读法见 §11.4 末尾）才算闭环。sync 之后导入检查仍失败 → 不是缺包，
-  按「仓库代码缺陷」那支处理（推导）。
+  按「仓库代码缺陷」那支处理；导入检查过了、unit 仍失败 → 按下面「通过」那支对照（推导）。
 - **已装的第三方包与代码对不上**（兜底：失败、而最后一行不属于上面两支的，都走这里）——典型形状：
   - `ImportError: cannot import name '…' from '<第三方模块>' (…/site-packages/…)`；
   - `AttributeError: module '<第三方模块>' has no attribute '…'`；
@@ -5939,8 +5995,9 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
   实测样本（2026-09-18 node-27 scratch worktree，生产解释器）：
   `ImportError: cannot import name 'NoSuchThing2472' from 'sqlalchemy.exc' (/home/nwm/NWM/.venv/lib/python3.11/site-packages/sqlalchemy/exc.py)`
   与 `AttributeError: module 'sqlalchemy' has no attribute 'no_such_attr_2472'`，车道都退 2、`reason` 同文。
-  共享库那一形状是模拟的（让 `psycopg2._psycopg` 的导入抛 `ImportError`），驱动检查的最后一行读
-  `ImportError: libpq.so.5: cannot open shared object file: No such file or directory`，而车道落在退 3、
+  共享库那一形状是模拟的（让 `psycopg2._psycopg` 的导入抛 `ImportError`），驱动检查的最后一行原样读
+  `ImportError: libpq.so.5: cannot open shared object file: No such file or directory (simulated)`——末尾的
+  `(simulated)` 是模拟时加的标记，真实的库缺失没有它；车道落在退 3、
   `reason` 读 `ImportError: <error text withheld: redaction unavailable (ImportError)>`——即 §11.3
   「非驱动观测失败」开头那条路径。先拿装着的版本对锁文件（`<包>` 是发行包名，可能与模块名不同：
   `sqlalchemy.exc` → `sqlalchemy`，`psycopg2` → `psycopg2-binary`）：
@@ -5974,6 +6031,9 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
     `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`（本地复现，
     推导）。重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再用 §11.4 那条 `systemctl --user start`
     确认 `systemctl` 返回 0（读法见 §11.4 末尾）；venv 为什么丢了本项目，单独查（推导）。
+  - 以上都干净（drop-in 没有、`.pth` 在，或 `Environment=PYTHONPATH=` 在），unit 却仍 `status=2`、两边仍
+    对不上 → 重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再手跑一次（读法见 §11.4 末尾）。
+    仍失败 → 开 issue，附上 unit journal 里那行结构化 JSON 的 `reason` 与手工导入检查的输出（`rc=0`）（推导）。
 
 要验证真实投递链路，用 systemd drop-in 把这一次调用指到 scratch 库（**必须先用空的
 `EnvironmentFile=` 清空已有列表**，`Environment=` 赢不了后读的 `EnvironmentFile=`）：
