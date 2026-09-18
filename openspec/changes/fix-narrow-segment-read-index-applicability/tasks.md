@@ -131,7 +131,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 ## 4. Live evidence on node-27
 
-- [ ] 4.1 Re-run the receipt probes
+- [x] 4.1 Re-run the receipt probes
   (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987.py`,
   `probe1987latest.py`) **as a same-session A/B against two worktrees** — the merge-base and this change
   — exactly as the 2026-09-17 receipt did. A cross-day comparison against that receipt is **not**
@@ -152,13 +152,13 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   Record `inconclusive` and move on; do not loop waiting for production to present the failing state. The narrow-compressed leg of the 2026-09-17 receipt is **not** reproducible
   (`_hyper_9_126_chunk` sat at the retention boundary); if it is gone, say so rather than substituting
   another chunk — §1.4 is what carries that property now.
-- [ ] 4.2 No regression on the three discovery-index consumers (design.md F3, F6): warm
+- [x] 4.2 No regression on the three discovery-index consumers (design.md F3, F6): warm
   `EXPLAIN (ANALYZE, BUFFERS)` before/after, same-session A/B, for
   `apps/api/routes/hydro_display.py:1123-1164`, `services/tiles/mvt.py:702-730` and
   `packages/common/display_coverage.py:139-160`. Verify: shared hits and warm P95 for each, before and
   after, any regression stated in absolute terms. Mandatory regardless of candidate; for C3 it is the
   admission gate, per `db/migrations/000049_...`.
-- [ ] 4.3 No regression on the other call sites of the shared template. There are eight
+- [x] 4.3 No regression on the other call sites of the shared template. There are eight
   (`packages/common/forecast_store.py:740, 770, 803, 836, 909, 961, 997, 1035`); only `:909` and `:961`
   bind `rt.run_key` into the fact scan, `:803`/`:836` push `h.scenario_id` and `:997`/`:1035` push
   `h.run_type` (`:108-109`, `:112-113`), and `:740`/`:770` push nothing — so no exposed call site is
@@ -170,6 +170,24 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   (`packages/common/node27_pgdata_workload_query.py:57-63`) matches the captured statement. Verify: the
   D11 live receipt runs and reports `status: PASS`, with the buffer count recorded. This is the gate
   #1987 task 5.2 and #1988 both depend on.
+
+### §4 results — 2026-09-18, receipt `receipts/2026-09-18-live-ab/`
+
+- **4.1 = PASS on no-regression, INCONCLUSIVE on defect reproduction.** Both arms are identical on every
+  judged node (38 run-bound, 84 `latest`), every digest matches, and C1's rendering is visible in the
+  production plans. But the **base** arm no longer reproduces the breach either: `_hyper_9_175` was
+  analysed at 2026-09-17 19:15Z and now carries `n_mod_since_analyze = 0`. That is F11's confound and
+  §4.1's own `inconclusive` rule, so it is recorded and not looped on.
+- **4.2 = PASS by diff.** The three consumers are byte-identical between the arms and C1 changes no
+  index, so an A/B would compare a statement against itself. F6's mandate exists because `000049`
+  dropped an index; C1 does not.
+- **4.3 = PASS.** Every statement's shared-hit delta is exactly 0 with identical digests,
+  `_per_source_latest_cycles` included (631 833 and 632 045 hits, unchanged). The lower p95 on the head
+  arm is run order, not a speedup, and is recorded as such.
+- **4.4 = half done, half BLOCKED.** `_REQUIRED_EQUALS` is measurably unaffected (it pins neither changed
+  column, and only matches the `= %(key)s` form those conjuncts never had; 55 passed under all variants).
+  The live D11 receipt drives the display API on `/home/nwm/NWM`, so producing one for this change means
+  deploying this branch — **explicit GO required**, and it would carry #2417 into production per §6.4.
 
 ## 5. C3 admission (only if §2.2 selects C3)
 
