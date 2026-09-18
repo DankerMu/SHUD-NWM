@@ -7,7 +7,7 @@
 ## What Changes
 
 - 标题改为「全国水文模拟系统（V2.0）」（全角括号），加粗放大；header 抬高；赞助商图放大。
-- 全国静态河网 `stream_type` 阈值每级下移一档（缓存查询版本递增），前端 z<6 不再因流量叠加打折且加粗；以 node-27 实测为合并 go/no-go：z3/z4/z5/z6/z7 全部 516 张覆盖中国的瓦片，四条并列硬门（`feature_coordinate_count < 50000`、`overflow == 0`、`coordinate_count <=` 该层集合上限、两遍绑定读数相等即未被预算窗口截断）。该层集合上限由 50000 提到 120000，并新增公平集合预算窗口。
+- 全国静态河网 `stream_type` 阈值每级下移一档（缓存查询版本递增），前端 z≤5 不再因流量叠加打折（折扣在 z5→z6 之间线性 ramp 进来，z6 起满额）且加粗；以 node-27 实测为合并 go/no-go：z3/z4/z5/z6/z7 全部 516 张覆盖中国的瓦片，四条并列硬门（`feature_coordinate_count < 50000`、`overflow == 0`、`coordinate_count <=` 该层集合上限、两遍绑定读数相等即未被预算窗口截断）。该层集合上限由 50000 提到 120000，并新增公平集合预算窗口。
 - **BREAKING（目录契约）**：`/api/v1/layers` 的 `discharge` 条目 `tile_url_template` 改为带 `{source}/{cycle}` 的新全国路由 `/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf`，`required_placeholders` 统一为 `["source","cycle","valid_time","z","x","y"]`（沿用后端现有含 z/x/y 的形状），`metadata.valid_times` 改为 `(default_source, default_cycle)` 的列表；旧无源路由保留为别名、行为不变。
 - 新增 `GET /api/v1/layers/discharge/cycles?source=`（各活动河网交集，fail-closed）；`valid-times` 支持 `source`+`cycle` 查询，返回从起报时刻起 3h 步长的全范围列表。全部 API 时间实例统一 `YYYY-MM-DDTHH:MM:SSZ`（秒精度、无小数秒），路径段、列表与缓存文件名同一拼写。
 - 新增「过去 24h 累积降水」栅格图层：node-22 的 DB-free forecast 终态 stage 把 canonical 降水 `.nc` + `grid.json` 镜像到 NFS；node-27 display API 跨周期取 8 个 3h 切片求和，渲染 Web-Mercator 六级调色板 PNG（numpy+zlib，无新依赖），文件缓存下发；`/api/v1/layers` 新增 `precip` 条目；一次性回填现存周期；镜像纳入 retention 剪枝。

@@ -213,11 +213,15 @@ them.
   is never conforming
 
 ### Requirement: Frontend national river paint is not dimmed at low zoom
-`m11NationalRiverPaint` SHALL apply the `dimmed` opacity discount only at zoom ≥ 6 via a zoom-interpolated expression, SHALL use wider z3–z5 line-width stops for trunk classes, and SHALL give the newly visible classes a non-zero opacity where the denser SQL now returns them: the v3 table returns `Type ≥ 2` at z6 and `Type ≥ 1` at z7, while today's `line-opacity` stops list only `Type 5..2` at z7 (`Type 1` falls to the `match` default `0`) and have no z6 stop at all (so `Type 2` interpolates to ≈0.25 and `Type 1` to 0 at z6). Those features would be fetched and drawn invisibly. The paint MUST therefore render `Type 2` at z6 with opacity ≥ 0.4 and `Type 1` with a non-zero opacity at z6 and ≥ 0.3 at z7.
+`m11NationalRiverPaint` SHALL carry no `dimmed` opacity discount at the z3 and z5 stops and the full 0.42 discount from the z6 stop upward, via a zoom-interpolated expression (top-level linear `interpolate` on `['zoom']`), SHALL use wider z3–z5 line-width stops for trunk classes, and SHALL give the newly visible classes a non-zero opacity where the denser SQL now returns them: the v3 table returns `Type ≥ 2` at z6 and `Type ≥ 1` at z7, while today's `line-opacity` stops list only `Type 5..2` at z7 (`Type 1` falls to the `match` default `0`) and have no z6 stop at all (so `Type 2` interpolates to ≈0.25 and `Type 1` to 0 at z6). Those features would be fetched and drawn invisibly. The paint MUST therefore render `Type 2` at z6 with opacity ≥ 0.4 and `Type 1` with a non-zero opacity at z6 and ≥ 0.3 at z7.
+
+Between the z5 and z6 stops the discount ramps in; it does not cut at z6. `line-opacity` here is a composite property (driven by both `['zoom']` and `['get', 'Type']`), which MapLibre evaluates at integer zooms and blends linearly at the fractional map zoom, so under a top-level linear `interpolate` the dimmed value on (5, 6) is the linear blend of the undimmed z5 stop value and the 0.42-scaled z6 stop value. This ramp is an accepted trade-off, not a renderer limitation: a top-level `step` on `['zoom']` could hard-cut at z6, but it would jump at every stop (3/5/6/7/9), drop the cross-zoom smoothing this paint relies on, and not be the zoom-interpolated expression this requirement names. The paint SHALL NOT be switched to `step` to obtain a z6 hard cut.
 
 #### Scenario: Low zoom ignores dimming
-- **WHEN** `m11NationalRiverPaint({ dimmed: true, satellite: false })` is evaluated
-- **THEN** the `line-opacity` expression yields the undimmed value at zoom 3–5.99 and the 0.42-scaled value at zoom ≥ 6
+- **WHEN** the `line-opacity` expressions of `m11NationalRiverPaint({ dimmed: true, satellite: false })` and `m11NationalRiverPaint({ dimmed: false, satellite: false })` are evaluated
+- **THEN** at every zoom ≤ 5 the dimmed value equals the undimmed value for every `Type` (the z3 and z5 stops carry no discount), and at every zoom ≥ 6 it equals 0.42 × the undimmed value
+- **AND** on the open interval (5, 6) the dimmed value is the linear blend of the undimmed z5 stop value and the 0.42-scaled z6 stop value: for `Type` 5/4/3, whose undimmed z5 opacity is non-zero, the dimmed/undimmed ratio falls monotonically from 1 at z5 to 0.42 at z6 (for `Type = 5`: ≈0.7068 at z5.5 and ≈0.4257 at z5.99)
+- **AND** for `Type` 2/1, whose undimmed z5 opacity is 0, the blend reduces to 0.42 × the undimmed value, so the ratio is 0.42 throughout (5, 6)
 
 #### Scenario: Newly visible classes are actually visible
 - **WHEN** the `line-opacity` expression of `m11NationalRiverPaint({ dimmed: false, satellite: false })` is evaluated at zoom 6 and zoom 7
