@@ -4959,3 +4959,21 @@ rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.
 
 处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2489 本身，不含审核策略调整；keep/cut
 仍由维护者人工决定，且应在 #2477 落地、用修复后的审计重算之后再做。
+
+## Revisit 2026-09-18 (post PR #2482 / issues #2472, #2473)
+
+审计第六次在同一天给出 DECIDABLE：**231 个多轮已合并 PR，later-round catches core=388 /
+rotated=275 / phase=74**（15 条不可归属已排除）。rotated 份额 **41.5%**（275/663），比上一条的 42.2%
+略降，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。本 PR 增量：
+core +11 / rotated +0 / phase +4——三轮都是同一组三席（correctness、test-evidence+spec-compliance、
+integration），没有发生轮换，所以本 PR 对 rotated 这一侧不提供任何证据。
+
+- later-round 的 11 条 core catch 几乎全是**路由文档的叶子缺口与虚假陈述**（运维 runbook 里一种原因
+  落不到可收口的一步、一个「实测」标签没有 receipt 支撑）；Phase 7 的 4 条同类。代码缺陷只有一条
+  模板端口（既存）。
+- 收敛靠的不是换席位，而是**给 reviewer 一张实测形状表让它逐叶 trace**，以及在 brief 里写死阻断定义；
+  前几次 final review 的阻断项都在上一轮修复新写的文字里，面越修越大——与 lens 组合无关。
+- 本条同样受 #2477 的保留意见约束：归因算法未经校准，这组数字不是已校准的判据输入。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2482 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定，且应在 #2477 落地、重算比例之后再做。
