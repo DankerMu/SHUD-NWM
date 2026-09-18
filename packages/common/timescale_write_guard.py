@@ -31,22 +31,22 @@ Semantics:
   ``CompressedChunkGuardError`` before any SQL runs) so a wire-site typo
   cannot silently permit writes.
 
-The guard is a shared helper (design D5); the four production write paths
+The guard is a shared helper (design D5); the three production write paths
 (``workers/output_parser/parser.py::upsert_river_timeseries``,
 ``workers/forcing_producer/store.py::replace_forcing_timeseries``,
 ``packages/common/forcing_domain_handoff_apply.py::
-_replace_forcing_station_timeseries``,
-``scripts/node27_river_identity_backfill.py``) all import from this module.
+_replace_forcing_station_timeseries``) all import from this module.
 Display API and frontend code paths never import this module (ADR 0001).
 
-The first three are batch writers that know a ``valid_time`` window and use
-:func:`check_batch_targets_uncompressed`. The fourth (issue #1339) walks named
-chunks directly rather than time windows, so it uses
-:func:`assert_chunk_uncompressed`, which answers the same question
-("would this write land in compressed storage?") for a chunk identity instead
-of a time range. Both share the registry check, the statement-timeout
-discipline, and the fail-closed catalog-error contract; neither is a
-per-caller reimplementation, which is exactly what design D5 forbids.
+All three are batch writers that know a ``valid_time`` window and use
+:func:`check_batch_targets_uncompressed`. :func:`assert_chunk_uncompressed`
+answers the same question ("would this write land in compressed storage?") for a
+chunk identity instead of a time range; #1339's identity-backfill runner was its
+production caller and went with #1342's contract (task 6.3), so it is currently
+a library entry point with unit coverage only. Both share the registry check,
+the statement-timeout discipline, and the fail-closed catalog-error contract;
+neither is a per-caller reimplementation, which is exactly what design D5
+forbids.
 """
 
 from __future__ import annotations

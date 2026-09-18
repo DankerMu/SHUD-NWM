@@ -351,11 +351,15 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
 
     assert "FROM hydro.hydro_run h" in sql
     assert "EXISTS (" in sql
-    # Correlation stays key-only. Only the legacy branch retains the text
-    # ORDERBY batch filter; the canonical narrow branch needs only the enum.
+    # Correlation stays key-only. The text `rt.variable = 'q_down'` half of this
+    # pin belonged to the legacy branch, which #1342's contract (task 6.3)
+    # deleted along with the routing column that chose it.
     assert "rt.run_key = h.run_key" in sql
     assert "rt.run_id = h.run_id" not in sql
-    assert "rt.variable = 'q_down'" in sql
+    assert "rt.variable = 'q_down'" not in sql
+    assert "hydro.river_timeseries_legacy" not in sql
+    assert "timeseries_store" not in sql
+    assert "UNION ALL" not in sql
     # No explicit enum cast: this statement is also parsed by the sqlite harness
     # above, and PostgreSQL coerces the unknown-typed literal to the enum anyway.
     assert "rt.variable_e = 'q_down'" in sql
@@ -369,9 +373,7 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
     [
         ("river_timeseries", "run_key"),
         ("river_timeseries", "variable_e"),
-        ("river_timeseries_legacy", "variable"),
         ("hydro_run", "run_key"),
-        ("hydro_run", "timeseries_store"),
     ],
 )
 def test_backfill_schema_guard_names_the_missing_identity_column(
@@ -407,15 +409,17 @@ def test_backfill_schema_guard_names_the_missing_identity_column(
     assert excinfo.value.details == {"missing_columns": {f"hydro.{table_name}": [column]}}
 
 
-@pytest.mark.parametrize("missing", [None, "legacy_variable", "canonical"])
+@pytest.mark.parametrize("missing", [None, "canonical"])
 def test_backfill_expanded_catalog_guard(tmp_path: Path, missing: str | None) -> None:
+    """The guard's table set. The `legacy_variable` case went with #1342's
+    contract (task 6.3): the discovery no longer reads
+    `hydro.river_timeseries_legacy`, so dropping a column of it is not a hazard
+    the guard is allowed to notice."""
     from sqlalchemy.orm import Session
 
     engine, db_path = _init_db(tmp_path)
     with engine.begin() as connection:
-        if missing == "legacy_variable":
-            connection.execute(text("ALTER TABLE river_timeseries_legacy DROP COLUMN variable"))
-        elif missing == "canonical":
+        if missing == "canonical":
             connection.execute(text("DROP TABLE river_timeseries"))
     with Session(engine) as session:
         session.execute(text("ATTACH DATABASE :path AS hydro"), {"path": str(db_path)})
@@ -426,12 +430,7 @@ def test_backfill_expanded_catalog_guard(tmp_path: Path, missing: str | None) ->
             with pytest.raises(backfill_module.BackfillError) as excinfo:
                 backfill_module._require_backfill_schema(session)
             assert excinfo.value.error_code == "BACKFILL_SCHEMA_MISSING"
-            if missing == "legacy_variable":
-                assert excinfo.value.details == {
-                    "missing_columns": {"hydro.river_timeseries_legacy": ["variable"]}
-                }
-            else:
-                assert excinfo.value.details == {"missing_tables": ["hydro.river_timeseries"]}
+            assert excinfo.value.details == {"missing_tables": ["hydro.river_timeseries"]}
 
 
 def test_cli_dry_run_emits_json_and_writes_nothing(tmp_path: Path) -> None:

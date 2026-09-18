@@ -750,12 +750,10 @@ def _insert_null_forcing_run(connection: Any) -> str:
     return _NULL_FORCING_RUN_ID
 
 
-@pytest.mark.parametrize("store_kind", ["legacy", "narrow"])
 def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store_kind: str,
 ) -> None:
     """The spec's "Result parity" scenario, against its literal baseline.
 
@@ -773,7 +771,11 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
     new_rows, legacy_rows = _parity_pair(
         PsycopgForecastStore(throwaway_database_url),
         post_expand_forecast_database,
-        store_overrides={FORECAST_RUN_ID: "narrow"} if store_kind == "narrow" else {},
+        # One store since #1342's contract (task 6.3). The override is kept
+        # rather than dropped: the fixture poisons every run whose column still
+        # says `legacy`, so naming the run narrow is what puts the decoys on the
+        # retired table where a reader must not find them.
+        store_overrides={FORECAST_RUN_ID: "narrow"},
     )
 
     # Non-vacuity first: "equal" must not mean "both empty" or "both all-NULL".

@@ -71,7 +71,6 @@ from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload, redact_text
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
-from workers.output_parser.parser import LEGACY_STORE_REFUSED_EXIT_CODE
 
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
@@ -963,38 +962,30 @@ def _record_recompute_decline(
 
     Deliberately raises on any failure: the caller keeps ``outcome="failed"``
     when this does not commit, so a run is never treated as accounted for on a
-    row that does not exist. Legacy permanence lasts only while the authority
-    is legacy; narrow reentry must replace an inert legacy record at the same key.
+    row that does not exist.
     """
     conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id=%s FOR SHARE",
-                    (run_id,),
-                )
-                authority = cur.fetchone()
-                if authority is None:
+                # Existence check AND row lock, in one statement. #1342's
+                # contract (task 6.3) removed the routing column this used to
+                # read and the legacy-permanence `CASE` that depended on it; the
+                # `FOR SHARE` lock and the missing-row refusal are what stays.
+                cur.execute("SELECT 1 FROM hydro.hydro_run WHERE run_id=%s FOR SHARE", (run_id,))
+                if cur.fetchone() is None:
                     raise RuntimeError(f"Cannot record decline without run authority: {run_id}")
-                store = authority[0]
-                if reason_code == "legacy_store_refused" and store != "legacy":
-                    raise RuntimeError(f"Legacy refusal is stale for narrow run: {run_id}")
                 cur.execute(
                     """
                     INSERT INTO ops.ingest_recompute_decline
                         (run_id, init_state_id, product_mtime, reason_code, detail)
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (run_id, init_state_id, product_mtime) DO UPDATE
-                    SET reason_code = CASE
-                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
-                          THEN ops.ingest_recompute_decline.reason_code ELSE EXCLUDED.reason_code END,
-                        detail = CASE
-                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
-                          THEN ops.ingest_recompute_decline.detail ELSE EXCLUDED.detail END
+                    SET reason_code = EXCLUDED.reason_code,
+                        detail = EXCLUDED.detail
                     RETURNING reason_code
                     """,
-                    (run_id, init_state_id, product_mtime, reason_code, detail, store, store),
+                    (run_id, init_state_id, product_mtime, reason_code, detail),
                 )
                 if cur.fetchone() is None:
                     raise RuntimeError(f"Decline record was not written: {run_id}")
@@ -1033,7 +1024,15 @@ def _declined_runs(
     run_ids: list[str],
     object_store_root: Path | None,
 ) -> set[str]:
-    """Suppress legacy refusals until narrow; other declines match current evidence."""
+    """Suppress a run whose decline record still matches its current evidence.
+
+    Every decline is governed by the same rule since #1342's contract (task 6.3):
+    the record suppresses the run only while its ``(init_state_id, product_mtime)``
+    key is unchanged. The river-routing refusal used to bypass that comparison and
+    suppress unconditionally; its reason code is a dead vocabulary word now, so
+    its historical rows are governed like any other — key unchanged suppresses,
+    key changed re-queues.
+    """
     if not run_ids:
         return set()
     # Savepoint, not a bare try/except (#1781): this cursor shares the caller's
@@ -1056,12 +1055,9 @@ def _declined_runs(
         established = True
         cur.execute(
             """
-            SELECT d.run_id, d.init_state_id, d.product_mtime, d.reason_code
+            SELECT d.run_id, d.init_state_id, d.product_mtime
             FROM ops.ingest_recompute_decline d
-            LEFT JOIN hydro.hydro_run h ON h.run_id = d.run_id
             WHERE d.run_id = ANY(%s)
-              AND (d.reason_code <> 'legacy_store_refused'
-                   OR h.timeseries_store IS DISTINCT FROM 'narrow')
             """,
             (run_ids,),
         )
@@ -1076,10 +1072,7 @@ def _declined_runs(
     recorded: dict[str, set[tuple[str, float]]] = {}
     declined: set[str] = set()
     for row in rows:
-        if row[3] == "legacy_store_refused":
-            declined.add(str(row[0]))
-        else:
-            recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
+        recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
 
     if object_store_root is None:
         return declined
@@ -2165,23 +2158,6 @@ def _process_run(
 
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
     rc, out, err = _run(parse, env)
-    if rc == LEGACY_STORE_REFUSED_EXIT_CODE:
-        error = redact_text((err or out)[-500:])
-        return {
-            "run_id": run_id,
-            "outcome": _decline_blocked_recompute(
-                run_id,
-                object_store_root=object_store_root,
-                database_url=database_url,
-                detail=error,
-                reason_code="legacy_store_refused",
-            ),
-            "stage": "parse",
-            "rc": rc,
-            "error": error,
-            "reason_code": "legacy_store_refused",
-            "forcing_stage": forcing_stage,
-        }
     if rc != 0:
         return {
             "run_id": run_id,

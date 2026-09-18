@@ -3473,9 +3473,18 @@ class _LegacyRunRouteSession:
         return self.bind
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 @pytest.mark.parametrize("found", (True, False), ids=("found", "not-found"))
-def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, found: bool) -> None:
+def test_hydro_mvt_probe_reads_one_narrow_statement_and_preserves_not_found(found: bool) -> None:
+    """The probe's whole contract, with the store argument gone.
+
+    It used to be parametrised over ``timeseries_store`` and asserted the
+    rendered statement named one of two physical tables and carried three
+    transitional aids on the legacy one. #1342's contract (task 6.3) left one
+    table, so what is pinned is that the probe issues exactly ONE statement,
+    that the statement is the registered template rendered for ``narrow``, that
+    it names the canonical table and no other, and that the 404 payload is
+    byte-identical to the routed era's.
+    """
     session = _Session([{"exists": 1}] if found else [])
     arguments = {
         "run_id": _LEGACY_RUN_ID,
@@ -3485,10 +3494,10 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
         "river_network_version_id": "rnv_a",
     }
     if found:
-        hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+        hydro_display._require_hydro_mvt_source_identity(session, **arguments)
     else:
         with pytest.raises(ApiError) as raised:
-            hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+            hydro_display._require_hydro_mvt_source_identity(session, **arguments)
         assert raised.value.status_code == 404
         assert raised.value.code == "MVT_SOURCE_IDENTITY_NOT_FOUND"
         assert raised.value.details == {
@@ -3499,12 +3508,11 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
 
     assert len(session.executions) == 1
     sql, params = session.executions[0]
-    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
-    assert sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
-    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", sql) == [
-        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
-    ]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source("narrow")
+    assert sql == render_river_ts_sql(raw, "narrow", entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", sql) == ["river_timeseries"]
     assert "UNION" not in sql.upper()
+    assert "timeseries_store" not in sql
     assert len(re.findall(r"\bLIMIT\s+1\b", sql, re.IGNORECASE)) == 1
     assert params == arguments
     assert set(re.findall(r"(?<!:):([a-z_]+)", sql)) == set(arguments)
@@ -3513,61 +3521,39 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
         assert re.search(rf"\b{column}\s*=\s*\(", sql)
     assert "unnest(enum_range(NULL::hydro.river_variable))" in sql
     assert "AND valid_time = :valid_time" in sql
+    # The three transitional aids are gone with the column they pushed into.
     for column in ("run_id", "river_network_version_id", "variable"):
-        assert bool(re.search(rf"\bAND {column} = :{column}\b", sql)) is (store == "legacy")
-    assert sql.count("transitional compressed-chunk pushdown aid") == (3 if store == "legacy" else 0)
-
-
-@pytest.mark.parametrize(
-    "metadata",
-    ({"timeseries_store": None}, {"timeseries_store": "unknown"}, {"timeseries_store": ["legacy"]}),
-    ids=("missing-or-null", "unknown", "non-string"),
-)
-def test_hydro_mvt_probe_rejects_invalid_store_before_sql(metadata: dict[str, Any]) -> None:
-    session = _Session([])
-    with pytest.raises(ApiError) as raised:
-        hydro_display._require_hydro_mvt_source_identity(
-            session,
-            run_id=_LEGACY_RUN_ID,
-            variable="q_down",
-            valid_time=datetime(2026, 9, 3, tzinfo=UTC),
-            basin_version_id="bv_a",
-            river_network_version_id="rnv_a",
-            timeseries_store=metadata.get("timeseries_store"),
-        )
-    assert raised.value.status_code == 500
-    assert raised.value.code == "TIMESERIES_STORE_INVALID"
-    assert raised.value.details == {"run_id": _LEGACY_RUN_ID}
-    assert session.executions == []
+        assert re.search(rf"\bAND {column} = :{column}\b", sql) is None
+    assert sql.count("transitional compressed-chunk pushdown aid") == 0
 
 
 @pytest.mark.parametrize(
     "metadata, status, code",
     (
-        pytest.param({"status": "running"}, 409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-missing"),
+        pytest.param({"status": "running"}, 409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready"),
         pytest.param(
-            {"status": "running", "timeseries_store": "unknown"},
-            409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-invalid",
+            {"basin_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-basin",
         ),
         pytest.param(
-            {"basin_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-basin-missing",
+            {"river_network_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-network",
         ),
-        pytest.param(
-            {"river_network_version_id": None, "timeseries_store": "unknown"},
-            404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-network-invalid",
-        ),
-        pytest.param({}, 500, "TIMESERIES_STORE_INVALID", id="ready-missing"),
-        pytest.param({"timeseries_store": None}, 500, "TIMESERIES_STORE_INVALID", id="ready-null"),
-        pytest.param({"timeseries_store": "unknown"}, 500, "TIMESERIES_STORE_INVALID", id="ready-invalid"),
-        pytest.param({"timeseries_store": "legacy"}, 200, None, id="ready-legacy"),
-        pytest.param({"timeseries_store": "narrow"}, 200, None, id="ready-narrow"),
+        pytest.param({}, 200, None, id="ready"),
     ),
 )
-def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
+def test_hydro_mvt_route_preserves_error_precedence_and_sql_order(
     metadata: dict[str, Any], status: int, code: str | None, monkeypatch: Any, tmp_path: Path,
 ) -> None:
+    """Precedence and statement COUNT, with the store-invalid arm retired.
+
+    The route used to answer 500 ``TIMESERIES_STORE_INVALID`` when the run's
+    routing column was absent, null or unknown, and that 500 had to be reached
+    in ONE statement rather than the three the happy path pays. #1342's contract
+    (task 6.3) dropped the column, so the arm and its error code are gone; the
+    readiness and identity arms that outranked it are unchanged and are pinned
+    here with the same statement-count discipline.
+    """
     session = _LegacyRunRouteSession()
-    session._RUN_ROW = {key: value for key, value in session._RUN_ROW.items() if key != "timeseries_store"}
+    session._RUN_ROW = dict(session._RUN_ROW)
     session._RUN_ROW.update(metadata)
     response, captured = _request_national_identity_tile(_legacy_run_url(), session, monkeypatch, tmp_path)
 
@@ -3576,22 +3562,18 @@ def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
     assert len(session.executions) == session.execute_count
     metadata_sql, metadata_params = session.executions[0]
     assert "FROM hydro.hydro_run h" in metadata_sql
+    assert "timeseries_store" not in metadata_sql
     assert metadata_params == {"run_id": _LEGACY_RUN_ID}
     if status != 200:
         assert response.json()["error"]["code"] == code
-        if status == 500:
-            assert response.json()["error"]["details"] == {"run_id": _LEGACY_RUN_ID}
         assert captured == []
         assert session.tile_params == []
         return
 
-    store = metadata["timeseries_store"]
     probe_sql, probe_params = session.executions[1]
-    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
-    assert probe_sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
-    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", probe_sql) == [
-        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
-    ]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source("narrow")
+    assert probe_sql == render_river_ts_sql(raw, "narrow", entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", probe_sql) == ["river_timeseries"]
     assert probe_params == {
         "run_id": _LEGACY_RUN_ID,
         "variable": "q_down",
@@ -3911,76 +3893,6 @@ def test_seconds_precision_validator_still_returns_a_utc_normalized_instant() ->
     assert naive.utcoffset() == timedelta(0)
 
 
-def test_per_basin_store_union_preserves_the_frozen_public_sql_contract() -> None:
-    frozen = (Path(__file__).parent / "fixtures/hydro_mvt_pre_store_f33441a2.sql").read_text()
-    current = postgis_tile_sql("hydro")
-    opener = "source_rows AS NOT MATERIALIZED ("
-    closer = "\n        ),\n        source_identity_stats AS ("
-    before, rest = frozen.split(opener, 1)
-    original_source, after = rest.split(closer, 1)
-    actual_before, rest = current.split(opener, 1)
-    routed_source, actual_after = rest.split(closer, 1)
-    assert actual_before == before
-    assert actual_after == after
-    branches = routed_source.split("\nUNION ALL\n")
-    assert len(branches) == 2
-    for store, branch in zip(("legacy", "narrow"), branches, strict=True):
-        assert f"AND timeseries_store = '{store}'" in branch
-        restored = branch.replace(f"                        AND timeseries_store = '{store}'\n", "")
-        if store == "legacy":
-            restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
-            expected = original_source
-        else:
-            assert "hydro.river_timeseries_legacy" not in branch
-            expected = re.sub(
-                r"              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
-                r"              AND ts\.(?:run_id|river_network_version_id|variable) = :\w+\n",
-                "", original_source,
-            )
-        assert restored.strip() == expected.strip()
-    assert current.count("ST_AsMVT(tile_rows,") == 1
-    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
-
-
-def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
-    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_text()
-    current = postgis_tile_sql("hydro-national")
-    # Only the three already located LATERAL bodies and two candidate columns
-    # may change. Compare every byte outside them, not merely selected landmarks.
-    pattern = r"(?<=CROSS JOIN LATERAL \()(.*?)(?=\) (?:v|hit)\b)"
-    originals = re.findall(pattern, frozen, re.S)
-    routed = re.findall(pattern, current, re.S)
-    assert len(originals) == len(routed) == 3
-    for original, combined in zip(originals, routed, strict=True):
-        assert combined.count("UNION ALL") == 1
-        assert combined.count("LIMIT 1") == 1
-        assert combined.rstrip().endswith("LIMIT 1")
-        original_body = original.rsplit("LIMIT 1", 1)[0]
-        branches = combined.rsplit("LIMIT 1", 1)[0].split("\nUNION ALL\n")
-        for store, branch in zip(("legacy", "narrow"), branches, strict=True):
-            assert branch.count(f"AND lr.timeseries_store = '{store}'") == 1
-            restored = branch.replace(f"                      AND lr.timeseries_store = '{store}'\n", "")
-            if store == "legacy":
-                restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
-                expected = original_body
-            else:
-                assert "hydro.river_timeseries_legacy" not in branch
-                expected = re.sub(
-                    r"                      -- transitional compressed-chunk pushdown aid, remove with #1342\n"
-                    r"                      AND ts\."
-                    r"(?:run_id|river_network_version_id|river_segment_id|variable) = [^\n]+\n",
-                    "", original_body,
-                )
-            assert restored.strip() == expected.strip()
-    restored_sql = current
-    for combined, original in zip(routed, originals, strict=True):
-        restored_sql = restored_sql.replace(combined, original, 1)
-    assert restored_sql.count(", h.timeseries_store") == 2
-    assert restored_sql.replace(", h.timeseries_store", "") == frozen
-    assert current.count("ST_AsMVT(tile_rows,") == 1
-    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
-
-
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
@@ -3991,9 +3903,16 @@ def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
         ({"feature_count": 10001}, (413, "MVT_TILE_BUDGET_EXCEEDED")),
     ],
 )
-def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
+def test_per_basin_consumer_keeps_one_statement_and_first_row_outcomes(
     monkeypatch: Any, overrides: dict[str, Any], expected: Any,
 ) -> None:
+    """One statement, five first-row outcomes, one physical fact table.
+
+    The routing wiring made the per-basin source CTE a two-branch ``UNION ALL``
+    told apart by ``timeseries_store``; #1342's contract (task 6.3) left one
+    branch. The outcomes below never depended on the routing and are unchanged,
+    so the single-statement discipline is asserted with the single-table one.
+    """
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     session = _Session([{**_budget_row(6), **overrides}])
     params = {
@@ -4008,10 +3927,10 @@ def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
         assert (raised.value.status_code, raised.value.code) == expected
     assert len(session.executions) == 1
     sql, bound = session.executions[0]
-    assert "FROM hydro.river_timeseries_legacy ts" in sql
-    assert "FROM hydro.river_timeseries ts" in sql
-    assert "AND timeseries_store = 'legacy'" in sql
-    assert "AND timeseries_store = 'narrow'" in sql
+    assert sql.count("FROM hydro.river_timeseries ts") == 1
+    assert "hydro.river_timeseries_legacy" not in sql
+    assert "timeseries_store" not in sql
+    assert "UNION ALL" not in sql
     assert set(text(sql)._bindparams) <= bound.keys()
     assert all(bound[key] == value for key, value in params.items())
 

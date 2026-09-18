@@ -496,7 +496,7 @@ class InMemoryForecastSeriesStore(PsycopgForecastStore):
         self.forecast_fetches: list[dict[str, Any]] = []
         # #2417: forecast_series converges run identity before reading facts.
         self.resolve_calls: list[dict[str, Any]] = []
-        self.resolved_runs = _ResolvedRuns((101, 202), ("run_gfs", "run_ifs"))
+        self.resolved_runs = _ResolvedRuns((101, 202))
         self.analysis_rows = [
             {
                 "scenario_id": "analysis_true_field",
@@ -1107,6 +1107,18 @@ async def test_forecast_series_requires_river_network_version_id(fake_store: Fak
     assert fake_store.forecast_calls == []
 
 
+#: How a fact read binds the caller's river network after #1342's contract
+#: (task 6.3): through the authority table the surrogate key resolves against,
+#: not through a text column on the fact table. Spelled with the guard because
+#: the guard is what keeps the pair filtering exactly as `=` did (#2451 C1).
+_NETWORK_IDENTITY_RESOLUTION = (
+    "rt.river_network_version_key IS NOT NULL\n"
+    "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"
+    "      SELECT river_network_version_key FROM core.river_network_version\n"
+    "      WHERE river_network_version_id = %(river_network_version_id)s\n"
+)
+
+
 def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_by_selected_network() -> None:
     issue_time = _dt("2026-05-07T00:00:00Z")
     selected_rows = [
@@ -1161,10 +1173,21 @@ def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_
     ]
     statements = [statement for statement, _parameters in store.cursor.executions]
     assert statements[1].count("rs.river_network_version_id = %s") == 1
-    facts = [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+    # These were selected by `"UNION ALL" in sql` and pinned a text
+    # `rt.river_network_version_id` conjunct. #1342's contract (task 6.3) left
+    # one physical branch, so the union is gone and the network identity binds
+    # through the authority sub-select the surrogate key resolves against. The
+    # property under test — EVERY fact read is filtered by the SELECTED network,
+    # not by the duplicate segment's other one — is unchanged.
+    facts = [
+        (sql, params) for sql, params in store.cursor.executions
+        if "FROM hydro.river_timeseries rt" in sql
+    ]
     assert len(facts) == 3
     for sql, params in facts:
-        assert "rt.river_network_version_id = %(river_network_version_id)s" in sql
+        assert "UNION ALL" not in sql
+        assert "rt.river_network_version_id" not in sql
+        assert _NETWORK_IDENTITY_RESOLUTION in sql
         assert params["river_network_version_id"] == "rnv_selected"
 
 
@@ -1208,7 +1231,7 @@ def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> N
     assert resolve_parameters["resolve_cycle_times"] == [issue_time]
     statement, parameters = store.cursor.executions[3]
     assert parameters["pushdown_run_keys"] == [101]
-    assert parameters["pushdown_run_ids"] == ["run_gfs"]
+    assert "pushdown_run_ids" not in parameters
     assert response["series"][0]["scenario_id"] == "forecast_gfs_deterministic"
     assert "{scenario_filter.sql}" not in statement
     assert "LOWER(h.source_id) = ANY(%(scenario_tokens)s)" in statement
@@ -1253,10 +1276,16 @@ def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_s
     )
 
     assert response["series"][0]["scenario_id"] == "hindcast_replay"
-    facts = [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+    # Same re-pin as the forecast case above (task 6.3).
+    facts = [
+        (sql, params) for sql, params in store.cursor.executions
+        if "FROM hydro.river_timeseries rt" in sql
+    ]
     assert len(facts) == 2
     for sql, params in facts:
-        assert "rt.river_network_version_id = %(river_network_version_id)s" in sql
+        assert "UNION ALL" not in sql
+        assert "rt.river_network_version_id" not in sql
+        assert _NETWORK_IDENTITY_RESOLUTION in sql
         assert params["river_network_version_id"] == "rnv_selected"
 
 

@@ -79,8 +79,7 @@ _SEGMENT_ROWS_SOURCE_SQL = """
 SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e
 FROM hydro.river_timeseries rt
 JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-WHERE {store_predicate}
-  AND rt.basin_version_key IS NOT NULL
+WHERE rt.basin_version_key IS NOT NULL
   AND rt.basin_version_key IS NOT DISTINCT FROM (
       SELECT basin_version_key FROM core.basin_version
       WHERE basin_version_id = %(basin_version_id)s
@@ -90,17 +89,11 @@ WHERE {store_predicate}
       WHERE river_segment_id = %(river_segment_id)s
         AND river_network_version_id = %(river_network_version_id)s
   )
-  -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.river_segment_id = %(river_segment_id)s
-  -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.river_network_version_id = %(river_network_version_id)s
   AND rt.river_network_version_key IS NOT NULL
   AND rt.river_network_version_key IS NOT DISTINCT FROM (
       SELECT river_network_version_key FROM core.river_network_version
       WHERE river_network_version_id = %(river_network_version_id)s
   )
-  -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.variable = 'q_down'
   AND rt.variable_e = 'q_down'::hydro.river_variable{run_pushdown}
 """
 
@@ -122,17 +115,14 @@ WHERE {store_predicate}
 #: with which to resolve a `run_key`. `hydro.hydro_run.run_id` is TEXT PRIMARY KEY
 #: (db/migrations/000006_hydro.sql), so the scalar returns at most one row.
 _BOUND_RUN_PUSHDOWN_SQL = """
-  -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.run_id = %(run_id)s
   AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)"""
 
 #: Reads whose run set was resolved against `hydro.hydro_run` one layer up. The
-#: `rt.run_id` aid is legacy-only: `hydro.river_timeseries_legacy` segments its
-#: compressed chunks by `(run_id, river_network_version_id, river_segment_id)` and
-#: cannot prune on `run_key`, while the narrow table's pkey opens with `run_key`.
+#: narrow table's pkey opens with `run_key`, so the key array prunes on its own;
+#: the `rt.run_id` companion this fragment used to carry was legacy-only (that
+#: table segmented its compressed chunks by `(run_id, river_network_version_id,
+#: river_segment_id)` and could not prune on `run_key`) and went with #1342.
 _RESOLVED_RUN_PUSHDOWN_SQL = """
-  -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.run_id = ANY(%(pushdown_run_ids)s)
   AND rt.run_key = ANY(%(pushdown_run_keys)s)"""
 
 #: The cycle-per-scenario read's `valid_time` window, as two constants. It is the
@@ -160,29 +150,29 @@ class _ResolvedRuns:
     Seeded-empty is NOT the same as unseeded: an empty key set is pushed as an
     empty ``ANY`` array, which returns no rows — exactly what the unpushed query
     returns when no run matches — while ``None`` means no push at all.
+
+    ``run_keys`` is the whole resolved identity. The companion ``run_ids`` tuple
+    this class used to carry existed solely to bind the text segmentby aid on the
+    retired routing target; #1342's contract (task 6.3) deleted the aid, and a
+    binding with no predicate to feed is dead weight that
+    ``packages/common/forecast_curve_capture.py``'s three-way placeholder
+    equality would (correctly) reject.
     """
 
     run_keys: tuple[int, ...]
-    run_ids: tuple[str, ...]
 
     def pushdown_params(self) -> dict[str, Any]:
-        return {"pushdown_run_keys": list(self.run_keys), "pushdown_run_ids": list(self.run_ids)}
+        return {"pushdown_run_keys": list(self.run_keys)}
 
 
 def _segment_rows_source_template(store: str, run_pushdown: str = "") -> str:
-    if store == "legacy":
-        store_predicate = "h.timeseries_store = 'legacy'"
-    elif store == "narrow":
-        store_predicate = "h.timeseries_store = 'narrow'"
-    else:
+    if store != "narrow":
         raise ValueError(f"Invalid river timeseries store: {store!r}")
-    return _SEGMENT_ROWS_SOURCE_SQL.format(store_predicate=store_predicate, run_pushdown=run_pushdown)
+    return _SEGMENT_ROWS_SOURCE_SQL.format(run_pushdown=run_pushdown)
 
 
 def _segment_rows_source_sql(run_pushdown: str = "") -> str:
-    legacy = render_river_ts_sql(_segment_rows_source_template("legacy", run_pushdown), "legacy").sql
-    narrow = render_river_ts_sql(_segment_rows_source_template("narrow", run_pushdown), "narrow").sql
-    return f"({legacy}\nUNION ALL\n{narrow})"
+    return f"({render_river_ts_sql(_segment_rows_source_template('narrow', run_pushdown), 'narrow').sql})"
 
 
 def _segment_identity_params(
@@ -211,16 +201,11 @@ _LATEST_PRODUCT_RIVER_SOURCE_SQL = """
                   ON cr.run_key = rt.run_key
                  AND cr.basin_version_key = rt.basin_version_key
                  AND cr.river_network_version_key = rt.river_network_version_key
-                WHERE {store_predicate}
-                  AND rt.variable_e = 'q_down'::hydro.river_variable
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND rt.variable = 'q_down'
+                WHERE rt.variable_e = 'q_down'::hydro.river_variable
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
                   AND (%(scan_run_id)s IS NULL
                        OR (
-                           -- transitional compressed-chunk pushdown aid, remove with #1342
-                           rt.run_id = %(scan_run_id)s AND
                            rt.run_key = (SELECT run_key FROM hydro.hydro_run
                                          WHERE run_id = %(scan_run_id)s)))
                   AND (%(scan_basin_version_id)s IS NULL
@@ -228,8 +213,6 @@ _LATEST_PRODUCT_RIVER_SOURCE_SQL = """
                                                   WHERE basin_version_id = %(scan_basin_version_id)s))
                   AND (%(scan_river_network_version_id)s IS NULL
                        OR (
-                           -- transitional compressed-chunk pushdown aid, remove with #1342
-                           rt.river_network_version_id = %(scan_river_network_version_id)s AND
                            rt.river_network_version_key = (SELECT river_network_version_key
                                                            FROM core.river_network_version
                                                            WHERE river_network_version_id
@@ -242,11 +225,9 @@ _LATEST_PRODUCT_RIVER_SOURCE_SQL = """
 
 
 def _latest_product_river_source_template(store: str) -> str:
-    if store == "legacy":
-        return _LATEST_PRODUCT_RIVER_SOURCE_SQL.format(store_predicate="cr.timeseries_store = 'legacy'")
-    if store == "narrow":
-        return _LATEST_PRODUCT_RIVER_SOURCE_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
-    raise ValueError(f"Invalid river timeseries store: {store!r}")
+    if store != "narrow":
+        raise ValueError(f"Invalid river timeseries store: {store!r}")
+    return _LATEST_PRODUCT_RIVER_SOURCE_SQL
 
 
 # ---------------------------------------------------------------------------
@@ -265,12 +246,12 @@ def _latest_product_river_source_template(store: str) -> str:
 # be tidied into a variable: `met.forcing_version.timeseries_store` does not
 # exist until task 7.3, so there is nothing to look up, and a narrow render
 # reaching an executed statement would name `forcing_version_key` /
-# `variable_e` against a table that has neither (must-preserve M6). In
-# particular, `_fetch_latest_qhh_display_candidates` has a `store` local IN
-# SCOPE at the forcing call site — it is the RIVER route read off
-# `hydro.hydro_run.timeseries_store`, and passing it here would render narrow
-# forcing SQL for any narrow-routed run. `tests/test_forcing_read_path_store_
-# routing.py` asserts the literal by AST over every wired reader.
+# `variable_e` against a table that has neither (must-preserve M6). River no
+# longer has a routing column of its own to be confused with this one — #1342's
+# contract (task 6.3) dropped it — so the only store literal left in this
+# module's river calls is `"narrow"`.
+# `tests/test_forcing_read_path_store_routing.py` asserts the forcing literal by
+# AST over every wired reader.
 #
 # While the two D1 constants agree the legacy render is byte-identical to the
 # text it replaced, which is what makes this wiring a provable no-op; the
@@ -591,18 +572,6 @@ _FORCING_READINESS_VARIABLE_ROWS_TEMPLATES = ForcingTemplatePair(
 )
 
 
-def _qhh_latest_timeseries_store(header: Mapping[str, Any]) -> str:
-    store = header.get("timeseries_store")
-    if store not in ("legacy", "narrow"):
-        raise ForecastStoreError(
-            status_code=500,
-            code="TIMESERIES_STORE_INVALID",
-            message="The candidate run has an invalid river timeseries store route.",
-            details={"run_id": header.get("run_id")},
-        )
-    return store
-
-
 class ForecastStoreError(RuntimeError):
     def __init__(
         self,
@@ -703,7 +672,6 @@ def _station_variable_filter_tokens(values: Sequence[str] | str | None) -> list[
 _QHH_LATEST_CANDIDATE_RUNS_SQL = """
                 SELECT
                     h.run_id,
-                    h.timeseries_store,
                     h.run_type,
                     h.scenario_id,
                     h.model_id,
@@ -1056,12 +1024,12 @@ class PsycopgForecastStore:
         outer predicates, so the result is a SUPERSET of the runs that read keeps:
         the pairwise ``(scenario_id, cycle_time)`` join of the cycle-per-scenario
         read is relaxed to independent ``ANY`` sets, and nothing the outer layer
-        does not apply — ``basin_version_id``, ``status``, ``timeseries_store`` —
-        is added. It deliberately does not reduce to one run: a single
+        does not apply — ``basin_version_id``, ``status`` — is added. It
+        deliberately does not reduce to one run: a single
         ``(scenario_id, cycle_time)`` can match several runs and all of them are
         reported.
 
-        ``ORDER BY h.run_key`` is not cosmetic. The resolved pair lands in the
+        ``ORDER BY h.run_key`` is not cosmetic. The resolved key set lands in the
         read's bindings, and the benchmark compares the before/after bindings for
         EQUALITY across the whole compression window (``static_keys`` in
         ``scripts/node27_timeseries_compression_benchmark.py``). Heap order would
@@ -1075,7 +1043,7 @@ class PsycopgForecastStore:
         rows = self._fetch_all(
             cursor,
             f"""
-            SELECT h.run_key, h.run_id
+            SELECT h.run_key
             FROM hydro.hydro_run h
             WHERE h.run_type = 'forecast'
               AND h.cycle_time = ANY(%(resolve_cycle_times)s)
@@ -1092,15 +1060,12 @@ class PsycopgForecastStore:
             },
         )
         run_keys: list[int] = []
-        run_ids: list[str] = []
         for row in rows:
             run_key = row.get("run_key")
-            run_id = row.get("run_id")
-            if run_key is None or not run_id:
+            if run_key is None:
                 continue
             run_keys.append(int(run_key))
-            run_ids.append(str(run_id))
-        return _ResolvedRuns(tuple(run_keys), tuple(run_ids))
+        return _ResolvedRuns(tuple(run_keys))
 
     def _latest_issue_time(
         self,
@@ -2067,7 +2032,6 @@ class PsycopgForecastStore:
             WITH candidate_runs AS ({header_candidate_runs_sql}            )
             SELECT
                 run_id,
-                timeseries_store,
                 forcing_version_id,
                 basin_version_id,
                 river_network_version_id,
@@ -2081,7 +2045,6 @@ class PsycopgForecastStore:
         if not headers:
             return []
         header = headers[0]
-        store = _qhh_latest_timeseries_store(header)
         parameters.update(
             scan_run_id=header["run_id"],
             scan_forcing_version_id=header["forcing_version_id"],
@@ -2095,12 +2058,11 @@ class PsycopgForecastStore:
             identity_sql=identity_sql_named,
             pin_scan_run_id=True,
         )
-        river_source_sql = render_river_ts_sql(_latest_product_river_source_template(store), store).sql
-        # `store` above is the RIVER route (`hydro.hydro_run.timeseries_store`).
-        # The forcing leg takes the literal `"legacy"` — forcing has no routing
-        # column until task 7.3, and rendering it narrow because the RUN happens
-        # to be narrow-routed would emit `forcing_version_key` / `variable_e`
-        # against a table that has neither (must-preserve M6).
+        river_source_sql = render_river_ts_sql(_latest_product_river_source_template("narrow"), "narrow").sql
+        # River is narrow-only since #1342's contract (task 6.3); the forcing leg
+        # takes the literal `"legacy"` because forcing has no routing column until
+        # task 7.3, and rendering it narrow would emit `forcing_version_key` /
+        # `variable_e` against a table that has neither (must-preserve M6).
         station_source_sql = render_forcing_ts_sql(
             _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
             "legacy",

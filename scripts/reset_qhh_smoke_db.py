@@ -23,11 +23,11 @@ from packages.common.forcing_ts_render import (  # noqa: E402
     render_forcing_ts_sql,
 )
 
-# Reader #9 (#1990 task 7.2). ONE `_delete`, not river's two-group split at
-# `_river_run_groups`: that split reads `hydro.hydro_run.timeseries_store` to
-# decide which runs live in which table, and forcing has no such column until
-# task 7.3 creates `met.forcing_version.timeseries_store`. The split lands with
-# the column; here store is the constant `legacy`.
+# Reader #9 (#1990 task 7.2). ONE `_delete`, and river now has one too: river's
+# two-group split read its routing column to decide which physical table a run's
+# rows lived in, and #1342's contract (task 6.3) dropped both. Forcing's own
+# routing column `met.forcing_version.timeseries_store` arrives with task 7.3 and
+# the split lands with it; here store is the constant `legacy`.
 _FORCING_TIMESERIES_DELETE_TEMPLATES = ForcingTemplatePair(
     legacy=f"DELETE FROM {FORCING_TABLE_TOKEN} WHERE forcing_version_id = ANY(%s)",
     # `AS fst` is not decoration: it makes the fact-table reference carry the same
@@ -62,10 +62,6 @@ def main() -> int:
             (MODEL_ID, "qhh_%_smoke"),
             "run_id",
         )
-        river_runs = _river_run_groups(cur, run_ids)
-        if river_runs is None:
-            print(json.dumps({"status": "error", "error_code": "INVALID_TIMESERIES_STORE"}))
-            return 1
         forcing_ids = _list_values(
             cur,
             """
@@ -85,16 +81,8 @@ def main() -> int:
             deleted,
             "hydro.river_timeseries",
             "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
-            (river_runs["canonical"],),
+            (run_ids,),
         )
-        if river_runs["legacy"]:
-            _delete(
-                cur,
-                deleted,
-                "hydro.river_timeseries_legacy",
-                "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
-                (river_runs["legacy"],),
-            )
         _delete(cur, deleted, "hydro.state_snapshot", "model_id = %s OR run_id = ANY(%s)", (MODEL_ID, run_ids))
         _delete(cur, deleted, "ops.qc_result", _qc_where(), (MODEL_ID, run_ids, forcing_ids, "qhh_%_smoke"))
         _delete(cur, deleted, "ops.pipeline_job", "run_id = ANY(%s)", (run_ids,))
@@ -180,32 +168,6 @@ def main() -> int:
     )
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0
-
-
-def _river_run_groups(cur: Any, run_ids: list[str]) -> dict[str, list[str]] | None:
-    cur.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'hydro' AND table_name = 'hydro_run'
-              AND column_name = 'timeseries_store'
-        ) AS has_store
-        """
-    )
-    if not cur.fetchone()["has_store"]:
-        return {"canonical": run_ids, "legacy": []}
-    cur.execute(
-        "SELECT run_id, timeseries_store FROM hydro.hydro_run WHERE run_id = ANY(%s)",
-        (run_ids,),
-    )
-    stores = {row["run_id"]: row["timeseries_store"] for row in cur.fetchall()}
-    groups: dict[str, list[str]] = {"canonical": [], "legacy": []}
-    for run_id in run_ids:
-        store = stores.get(run_id)
-        if store not in ("legacy", "narrow"):
-            return None
-        groups["legacy" if store == "legacy" else "canonical"].append(run_id)
-    return groups
 
 
 def _load_ids(cur: Any) -> dict[str, str]:

@@ -15,6 +15,15 @@ Scope: the questions a text-substring pin cannot answer.
   as the oracle — over rows that carry BOTH the text columns and the surrogate
   keys. Every projected field, including the ``feature_id`` concatenation and
   the geometry, must match.
+* **One store.** #1342's contract (task 6.3) deleted
+  ``hydro.hydro_run.timeseries_store`` and the routing readers, so nothing here
+  is parametrized over a store any more; the cases that existed only to
+  discriminate between the two physical tables are gone with it, and the
+  planner assertion that replaced them requires the legacy hypertable to be
+  absent from every live caller's plan. The three frozen pre-transition SQL
+  snapshots two of these tests diffed against were part of the deleted marker
+  corpus; their properties are asserted against the seed instead, which is the
+  stronger oracle anyway.
 * **The NULL-key exclusion.** Rows written before #1340 carry NULL keys and
   are invisible to key-filtered reads. That is a designed consequence with a
   retention deadline, not an accident, so it is asserted as an explicit
@@ -44,7 +53,6 @@ Scope: the questions a text-substring pin cannot answer.
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -201,16 +209,6 @@ def _source_cte_body(layer: str) -> str:
     end = sql.index("source_identity_stats AS (", start)
     body = sql[start:end].rstrip()
     assert body.endswith("),"), body[-80:]
-    return body[:-2]
-
-
-def _frozen_national_source_body() -> str:
-    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_bytes()
-    assert hashlib.sha256(frozen).hexdigest() == "d18c89af633838df8be0d84e3bff02df3e01d35ef21935f9bb59de0dc1f8e8b4"
-    sql = frozen.decode()
-    opener = "source_rows AS NOT MATERIALIZED ("
-    body = sql.split(opener, 1)[1].split("source_identity_stats AS (", 1)[0].rstrip()
-    assert body.endswith("),")
     return body[:-2]
 
 
@@ -465,43 +463,31 @@ def _identity_params(run_id: str, valid_time: datetime = _T0, variable: str = _V
 # ---------------------------------------------------------------------------
 
 
-def _prepare_hydro_stores(
-    session: Session,
-    prepare: Callable[[Mapping[str, str]], None],
-    store: str,
-    run_id: str = _KEYED_RUN_ID,
-) -> None:
+# Every seeded run, mapped to the one store the read path still has. #1342's
+# contract (task 6.3) deleted the routing, so there is nothing left to
+# parametrize; naming all three runs keeps the helper's decoy poison off the
+# rows these tests read, which is what the old store mapping used to arrange.
+_NARROW_STORE_MAP: Mapping[str, str] = {
+    _KEYED_RUN_ID: "narrow",
+    _LEGACY_RUN_ID: "narrow",
+    _ALL_LEGACY_RUN_ID: "narrow",
+}
+
+
+def _expand(session: Session, prepare: Callable[[Mapping[str, str]], None]) -> None:
     # Release all baseline reads before the separate connection renames tables.
     session.rollback()
-    opposite_run = _LEGACY_RUN_ID if run_id == _KEYED_RUN_ID else _KEYED_RUN_ID
-    prepare({
-        run_id: store,
-        opposite_run: "narrow" if store == "legacy" else "legacy",
-        _ALL_LEGACY_RUN_ID: "legacy",
-    })
-    # Only this exact-time MVT oracle restores decoy times. Forecast's shared
-    # poison remains unchanged, and NULL-key historical rows are never updated.
-    for table, authoritative_store in (
-        ("river_timeseries", "legacy"),
-        ("river_timeseries_legacy", "narrow"),
-    ):
-        session.execute(text(
-            f"UPDATE hydro.{table} ts SET valid_time = ts.valid_time - INTERVAL '30 minutes' "
-            "FROM hydro.hydro_run h WHERE h.run_key = ts.run_key "
-            "AND h.timeseries_store = :store"
-        ), {"store": authoritative_store})
-    session.commit()
+    prepare(_NARROW_STORE_MAP)
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _url, session = seeded
     params = _identity_params(_KEYED_RUN_ID)
 
     oracle = _rows(session, _hydro_source_query(_TEXT_ERA_HYDRO_SOURCE_CTE), params)
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    _expand(session, post_expand_forecast_database)
     switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
 
     assert len(oracle) == len(_SEGMENTS), "seed must produce rows for the oracle to be meaningful"
@@ -518,35 +504,30 @@ def test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query(
     assert {row["basin_version_id"] for row in switched} == {_BASIN_VERSION_ID}
 
 
-# Frozen at f33441a2dafd910375aab087f61257327055611c, never regenerated.
-_FROZEN_HYDRO_SQL = Path(__file__).parent / "fixtures/hydro_mvt_pre_store_f33441a2.sql"
-_FROZEN_HYDRO_SHA256 = "bf284b1f7d6532d5f45a26b490b8f23093b303c962a1adf524292557b169fd68"
-
-
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_hydro_store_union_preserves_one_mvt_result_and_decoded_payload(
+def test_hydro_tile_produces_one_mvt_result_and_the_seeded_decoded_payload(
     seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store: str, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One row, three features, every property compared against the seed.
+
+    Its pre-transition oracle was the frozen ``hydro_mvt_pre_store_f33441a2.sql``
+    snapshot, deleted with #1342's marker corpus (task 6.3). Nothing is lost:
+    the expectations below are the seed constants, not a recorded rendering, so
+    they are a stronger oracle than a byte-frozen copy of the old statement —
+    and ``test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query``
+    still runs the inline text-era CTE side by side over the same rows.
+    """
     _url, session = seeded
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     assert _tile_xy(100.0, 38.0, 9) == (398, 197)
     params = _identity_params(_KEYED_RUN_ID, _T0)
     bind = hydro_display._postgis_tile_params(params, z=9, x=398, y=197, layer="hydro")
-    frozen = _FROZEN_HYDRO_SQL.read_bytes()
-    assert hashlib.sha256(frozen).hexdigest() == _FROZEN_HYDRO_SHA256
-    baseline = _rows(session, frozen.decode(), bind)
-    assert len(baseline) == 1
-    decoded = mapbox_vector_tile.decode(bytes(baseline[0]["tile"]))
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
-    for physical_store, table in (("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries")):
-        facts = _rows(session,
-            f"SELECT ts.value FROM hydro.{table} ts "
-            "WHERE ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id) "
-            "AND ts.valid_time = :valid_time ORDER BY ts.value", params)
-        assert [row["value"] for row in facts] == (
-            [10, 20, 30] if physical_store == store else [10010, 10020, 10030]
-        )
+    _expand(session, post_expand_forecast_database)
+    facts = _rows(session,
+        "SELECT ts.value FROM hydro.river_timeseries ts "
+        "WHERE ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id) "
+        "AND ts.valid_time = :valid_time ORDER BY ts.value", params)
+    assert [row["value"] for row in facts] == [10, 20, 30]
     columns = _rows(session,
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_schema = 'hydro' AND table_name = 'river_timeseries'", {})
@@ -555,11 +536,10 @@ def test_hydro_store_union_preserves_one_mvt_result_and_decoded_payload(
     }
     result = _rows(session, postgis_tile_sql("hydro"), bind)
     assert len(result) == 1
-    assert {key: value for key, value in result[0].items() if key != "tile"} == {
-        key: value for key, value in baseline[0].items() if key != "tile"
-    }
+    assert result[0]["source_identity_count"] == 1
+    assert result[0]["feature_count"] == len(_SEGMENTS)
+    assert result[0]["invalid_property_count"] == 0
     actual = mapbox_vector_tile.decode(bytes(result[0]["tile"]))
-    assert actual == decoded
     features = actual["hydro"]["features"]
     assert [feature["properties"]["segment_id"] for feature in features] == ["seg-a", "seg-b", "seg-c"]
     assert [feature["properties"]["value"] for feature in features] == [30, 20, 10]
@@ -574,18 +554,17 @@ def test_hydro_store_union_preserves_one_mvt_result_and_decoded_payload(
         assert feature["geometry"]["type"] == "LineString"
     consumed = hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=398, y=197)
     assert consumed == bytes(result[0]["tile"])
-    assert mapbox_vector_tile.decode(consumed) == decoded
+    assert mapbox_vector_tile.decode(consumed) == actual
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 @pytest.mark.parametrize("case", ("unknown", "oov", "off-tile", "non-finite", "budget"))
-def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
+def test_hydro_real_consumer_preserves_failure_and_empty_outcomes(
     seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store: str, case: str, monkeypatch: pytest.MonkeyPatch,
+    case: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _url, session = seeded
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    _expand(session, post_expand_forecast_database)
     params = _identity_params(_KEYED_RUN_ID)
     x, y = (0, 0) if case == "off-tile" else (398, 197)
     if case == "unknown":
@@ -593,9 +572,8 @@ def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
     elif case == "oov":
         params["variable"] = "not_a_river_variable"
     elif case == "non-finite":
-        table = "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
         session.execute(text(
-            f"UPDATE hydro.{table} ts SET value = 'NaN'::double precision "
+            "UPDATE hydro.river_timeseries ts SET value = 'NaN'::double precision "
             "FROM core.river_segment rs WHERE rs.river_segment_key = ts.river_segment_key "
             "AND rs.river_segment_id = 'seg-a' AND ts.valid_time = :valid_time "
             "AND ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)"
@@ -631,9 +609,8 @@ def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
     assert (raised.value.status_code, raised.value.code) == expected
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_query(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _url, session = seeded
     params = {
@@ -645,12 +622,7 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
     }
 
     oracle = [row["valid_time"] for row in _rows(session, _TEXT_ERA_VALID_TIMES_SQL, params)]
-    session.rollback()
-    post_expand_forecast_database({
-        _KEYED_RUN_ID: store,
-        _LEGACY_RUN_ID: "narrow" if store == "legacy" else "legacy",
-        _ALL_LEGACY_RUN_ID: "legacy",
-    })
+    _expand(session, post_expand_forecast_database)
     switched = valid_times_for_layer(
         session,
         "discharge",
@@ -667,14 +639,13 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
         value.astimezone(UTC).isoformat().replace("+00:00", "Z") for value in oracle
     )
     assert switched.valid_times == ["2026-06-01T00:00:00Z", "2026-06-01T01:00:00Z"]
-    active_raw = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
+    active_raw = render_river_ts_sql(_valid_times_named_source_template("narrow"), "narrow").sql
     assert {row["valid_time"] for row in _rows(session, active_raw, params)} == {_T0, _T1}
     assert _rows(session, active_raw, params | {"variable": "not_a_river_variable"}) == []
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+def test_any_identity_valid_times_are_distinct_and_limited_across_runs(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     url, session = seeded
     t3 = _T0 + timedelta(hours=3)
@@ -698,36 +669,25 @@ def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
                     (_LEGACY_RUN_ID, t4, 4),
                 )
             ])
-    session.rollback()
-    opposite = "narrow" if store == "legacy" else "legacy"
-    post_expand_forecast_database({
-        _KEYED_RUN_ID: store,
-        _LEGACY_RUN_ID: opposite,
-        _ALL_LEGACY_RUN_ID: "legacy",
-    })
+    _expand(session, post_expand_forecast_database)
 
-    # Read both physical sides independently: wrong-store copies must exist
-    # and stay half an hour away, so DISTINCT cannot hide missing authority.
-    for run_id, authoritative_store, expected in (
-        (_KEYED_RUN_ID, store, {_T0, _T1, t4}),
-        (_LEGACY_RUN_ID, opposite, {_T0, t3, t4}),
+    # The two runs contribute overlapping but unequal instant sets, so a
+    # DISTINCT that dropped one run's rows, or a limit applied per run rather
+    # than to the combined set, would show up in the discovery below.
+    for run_id, expected in (
+        (_KEYED_RUN_ID, {_T0, _T1, t4}),
+        (_LEGACY_RUN_ID, {_T0, t3, t4}),
     ):
-        for physical_store, table in (
-            ("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries"),
-        ):
-            actual = {
-                row["valid_time"] for row in _rows(
-                    session,
-                    f"SELECT ts.valid_time FROM hydro.{table} ts "
-                    "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
-                    "WHERE h.run_id = :run_id",
-                    {"run_id": run_id},
-                )
-            }
-            assert actual == (
-                expected if physical_store == authoritative_store
-                else {value + timedelta(minutes=30) for value in expected}
+        actual = {
+            row["valid_time"] for row in _rows(
+                session,
+                "SELECT ts.valid_time FROM hydro.river_timeseries ts "
+                "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
+                "WHERE h.run_id = :run_id",
+                {"run_id": run_id},
             )
+        }
+        assert actual == expected
 
     discovery = valid_times_for_layer(session, "discharge", limit=3)
     assert discovery.valid_times == [
@@ -736,46 +696,30 @@ def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
     assert discovery.limit == 3
     assert discovery.observed_count == 4
     assert discovery.truncated is True
-    for active_store, expected in ((store, {_T0, _T1, t4}), (opposite, {_T0, t3, t4})):
-        active_raw = render_river_ts_sql(_valid_times_any_source_template(active_store), active_store).sql
-        assert {row["valid_time"] for row in _rows(session, active_raw, {"variable": _VARIABLE})} == expected
-        assert _rows(session, active_raw, {"variable": "not_a_river_variable"}) == []
+    active_raw = render_river_ts_sql(_valid_times_any_source_template("narrow"), "narrow").sql
+    assert {row["valid_time"] for row in _rows(session, active_raw, {"variable": _VARIABLE})} == {
+        _T0, _T1, t3, t4,
+    }
+    assert _rows(session, active_raw, {"variable": "not_a_river_variable"}) == []
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _url, session = seeded
-    session.rollback()
-    opposite = "narrow" if store == "legacy" else "legacy"
-    post_expand_forecast_database({
-        _KEYED_RUN_ID: store,
-        _LEGACY_RUN_ID: opposite,
-        _ALL_LEGACY_RUN_ID: "legacy",
-    })
-    metadata = hydro_display._run_row(session, _KEYED_RUN_ID)
-    assert metadata.get("timeseries_store") == store
-    mapped_store = metadata["timeseries_store"]
+    _expand(session, post_expand_forecast_database)
 
-    # Keep the helper's +30 minute wrong-store facts: an opposite-store probe
-    # must miss the requested instant rather than accidentally accepting it.
-    for physical_store, table in (
-        ("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries"),
-    ):
-        times = {
-            row["valid_time"] for row in _rows(
-                session,
-                f"SELECT ts.valid_time FROM hydro.{table} ts "
-                "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
-                "WHERE h.run_id = :run_id",
-                {"run_id": _KEYED_RUN_ID},
-            )
-        }
-        assert times == (
-            {_T0, _T1} if physical_store == store
-            else {_T0 + timedelta(minutes=30), _T1 + timedelta(minutes=30)}
+    # Non-vacuity: the probe really does have the requested instants to find.
+    times = {
+        row["valid_time"] for row in _rows(
+            session,
+            "SELECT ts.valid_time FROM hydro.river_timeseries ts "
+            "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
+            "WHERE h.run_id = :run_id",
+            {"run_id": _KEYED_RUN_ID},
         )
+    }
+    assert times == {_T0, _T1}
 
     _require_hydro_mvt_source_identity(
         session,
@@ -784,7 +728,6 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(
         valid_time=_T0,
         basin_version_id=_BASIN_VERSION_ID,
         river_network_version_id=_NETWORK_ID,
-        timeseries_store=mapped_store,
     )
 
     for unknown in (
@@ -799,7 +742,6 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(
             "valid_time": _T0,
             "basin_version_id": _BASIN_VERSION_ID,
             "river_network_version_id": _NETWORK_ID,
-            "timeseries_store": mapped_store,
             **unknown,
         }
         with pytest.raises(ApiError) as raised:
@@ -821,13 +763,12 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _url, session = seeded
 
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    _expand(session, post_expand_forecast_database)
     assert (
         valid_times_for_layer(
             session,
@@ -873,9 +814,8 @@ def test_the_rejected_enum_cast_really_would_have_raised_on_that_literal(seeded:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Excluded by design, with the text oracle proving the rows are really there."""
     _url, session = seeded
@@ -901,7 +841,7 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
         )
     ]
     assert text_era_times == [_LEGACY_ONLY_TIME, _T0]
-    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    _expand(session, post_expand_forecast_database)
     discovery = valid_times_for_layer(
         session,
         "discharge",
@@ -917,9 +857,8 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
     assert switched_segments == [segment_id for segment_id, _type, _value in _SEGMENTS]
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """One national identity, two zoom branches, one visibility answer.
 
@@ -927,24 +866,17 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
     legacy segment carries the largest value and no stream class, so at z=5 its
     PERCENT_RANK is 1.0 and it clears the cutoff: had the untyped leg kept the
     text predicates, it would appear at z=5 and vanish at z=9.
+
+    The pre-transition national snapshot this used to diff against went with
+    #1342's marker corpus (task 6.3). The property under test never needed it:
+    it is an agreement between the two live legs and the seed, both asserted
+    directly below.
     """
     _url, session = seeded
-    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
     overview_x, overview_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 5)
-    detail = _rows(
-        session,
-        query,
-        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
-    )
-    overview = _rows(
-        session,
-        query,
-        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y},
-    )
-    baseline_detail, baseline_overview = detail, overview
-    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    _expand(session, post_expand_forecast_database)
     query = _national_source_query(_source_cte_body("hydro-national"))
     detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
         "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
@@ -952,8 +884,6 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
     overview = _rows(session, query, _NATIONAL_TILE_PARAMS | {
         "valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y,
     })
-    assert detail == baseline_detail
-    assert overview == baseline_overview
 
     detail_segments = {row["river_segment_id"] for row in detail}
     overview_segments = {row["river_segment_id"] for row in overview}
@@ -977,9 +907,8 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
         assert row["feature_id"] == f"{_NETWORK_ID}::{row['river_segment_id']}"
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Per-segment payload, not just the run/network constants both legs share.
 
@@ -996,15 +925,8 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
     simplifies, so only its value/identity payload is compared.
     """
     _url, session = seeded
-    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
-    detail = _rows(
-        session,
-        query,
-        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
-    )
-
     expected_values = {segment_id: value for segment_id, _type, value in _SEGMENTS}
     assert len(set(expected_values.values())) == len(expected_values), "values must be distinct to be diagnostic"
     authority_geometry = {
@@ -1020,17 +942,11 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
         )
     }
     assert len(set(authority_geometry.values())) == len(_SEGMENTS) + 1, "geometries must be distinct too"
-    baseline_detail = detail
-    baseline_later = _rows(session, query, _NATIONAL_TILE_PARAMS | {
-        "valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y,
-    })
-    assert baseline_later == []
-    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    _expand(session, post_expand_forecast_database)
     query = _national_source_query(_source_cte_body("hydro-national"))
     detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
         "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
     })
-    assert detail == baseline_detail
 
     assert len(detail) == len(_SEGMENTS)
     for row in detail:
@@ -1057,12 +973,10 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 @pytest.mark.parametrize("all_runs", (False, True), ids=("named", "all-runs"))
 def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows(
     seeded: Any,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store: str,
     all_runs: bool,
 ) -> None:
     url, session = seeded
@@ -1076,11 +990,7 @@ def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows
                 (_T0, _LEGACY_RUN_ID),
             )
             assert cursor.rowcount == 1
-    post_expand_forecast_database({
-        _KEYED_RUN_ID: store,
-        _LEGACY_RUN_ID: "narrow" if store == "legacy" else "legacy",
-        _ALL_LEGACY_RUN_ID: "legacy",
-    })
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         protected = _assert_all_legacy_preconditions(connection)
@@ -1180,7 +1090,7 @@ def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(
     """
     url, _session = seeded
     _session.rollback()
-    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         before = _assert_all_legacy_preconditions(connection)
@@ -1204,7 +1114,7 @@ def test_forced_refresh_of_an_all_null_key_run_performs_the_zeroing(
     """The escape hatch still works — and is the ONLY way to zero the row."""
     url, _session = seeded
     _session.rollback()
-    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         before = _assert_all_legacy_preconditions(connection)
@@ -1229,7 +1139,7 @@ def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(
     """
     url, _session = seeded
     _session.rollback()
-    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID, force=True) is True
@@ -1257,7 +1167,7 @@ def test_first_refresh_with_no_existing_row_writes_zero(
     """
     url, _session = seeded
     _session.rollback()
-    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         with connection.cursor() as cursor:
@@ -1287,7 +1197,7 @@ def test_keyed_run_refresh_is_never_refused(
     """
     url, _session = seeded
     _session.rollback()
-    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
+    post_expand_forecast_database(_NARROW_STORE_MAP)
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True
@@ -1346,9 +1256,8 @@ def _coverage_oracle_statement() -> tuple[str, dict[str, Any]]:
     return display_coverage._REFRESH_SQL, parameters
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_complete_registry_prepares_against_expanded_catalog(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """PREPARE every live registry source in its actual caller's SQL context."""
     import re
@@ -1357,14 +1266,14 @@ def test_complete_registry_prepares_against_expanded_catalog(
     from tests.test_river_ts_text_identity_cleanup import _latest_product_fallback_execution
 
     url, session = seeded
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    _expand(session, post_expand_forecast_database)
     national_params = hydro_display._postgis_tile_params(
         _identity_params(_KEYED_RUN_ID) | _NATIONAL_TILE_PARAMS,
         z=9, x=398, y=197, layer="hydro-national",
     )
     contexts = {
         "display_coverage:refresh": _coverage_oracle_statement(),
-        "forecast_store:latest_product_river_source": _latest_product_fallback_execution(store),
+        "forecast_store:latest_product_river_source": _latest_product_fallback_execution(),
         "mvt:hydro_national_identity_source": (postgis_tile_sql("hydro-national"), national_params),
         "mvt:hydro_national_data_source": (postgis_tile_sql("hydro-national"), national_params),
     }
@@ -1389,7 +1298,7 @@ def test_complete_registry_prepares_against_expanded_catalog(
     with psycopg2.connect(url) as connection:
         with connection.cursor() as cursor:
             for index, entry in enumerate(REGISTRY):
-                rendered = render_river_ts_sql(entry.source(store), store, entry=entry.key).sql
+                rendered = render_river_ts_sql(entry.source("narrow"), "narrow", entry=entry.key).sql
                 if entry.key in contexts:
                     sql, parameters = contexts[entry.key]
                     assert " ".join(rendered.split()) in " ".join(sql.split()), entry.key
@@ -1415,13 +1324,20 @@ def test_complete_registry_prepares_against_expanded_catalog(
                 cursor.execute(f"DEALLOCATE {prepared}")
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_mixed_store_caller_plans_include_both_physical_stores(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+def test_live_caller_plans_scan_the_narrow_store_and_never_the_legacy_one(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
-    """EXPLAIN actual national, refresh, named and any-identity statements."""
+    """EXPLAIN actual national, refresh, named and any-identity statements.
+
+    The planner is the only oracle that can tell "the legacy table is no longer
+    named in the SQL" (a text pin, already held by the unit suite) from "the
+    legacy table is no longer read" -- a view, a rule or a stale prepared plan
+    could still route there. #1342's contract (task 6.3) makes that the whole
+    point, so this replaces the mixed-store variant that used to require BOTH
+    physical stores in every plan.
+    """
     url, session = seeded
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    _expand(session, post_expand_forecast_database)
     national_params = hydro_display._postgis_tile_params(
         _identity_params(_KEYED_RUN_ID) | _NATIONAL_TILE_PARAMS,
         z=9, x=398, y=197, layer="hydro-national",
@@ -1448,121 +1364,20 @@ def test_mixed_store_caller_plans_include_both_physical_stores(
                     "WHERE hypertable_schema='hydro' AND hypertable_name=%s", (table,),
                 )
                 chunks = {row[0] for row in cursor.fetchall()}
+                # Non-vacuity: both hypertables still hold chunks a plan could
+                # reach for, so the exclusion below is a routing fact and not
+                # an artefact of an empty legacy table.
                 assert chunks, table
                 physical[table] = chunks | {table}
             for label, (sql, parameters) in statements.items():
                 cursor.execute("EXPLAIN (VERBOSE, FORMAT JSON) " + _bound_oracle_sql(cursor, sql, parameters))
                 plan = cursor.fetchone()[0][0]["Plan"]
                 scanned = relations(plan)
-                for table, names in physical.items():
-                    assert scanned & names, (label, table, plan)
+                assert scanned & physical["river_timeseries"], (label, plan)
+                assert not scanned & physical["river_timeseries_legacy"], (label, plan)
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_named_nonmatching_store_branch_explains_and_returns_zero(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
-) -> None:
-    url, session = seeded
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
-    opposite = "narrow" if store == "legacy" else "legacy"
-    params = _identity_params(_KEYED_RUN_ID)
-    with psycopg2.connect(url) as connection:
-        with connection.cursor() as cursor:
-            # The named identity has real decoy facts in the opposite table;
-            # only the run's store authority makes this branch empty.
-            table = "river_timeseries_legacy" if opposite == "legacy" else "river_timeseries"
-            cursor.execute(
-                f"SELECT count(*) FROM hydro.{table} WHERE run_key = "
-                "(SELECT run_key FROM hydro.hydro_run WHERE run_id=%s)", (_KEYED_RUN_ID,),
-            )
-            assert cursor.fetchone()[0] == len(_SEGMENTS) * 2
-            sql = render_river_ts_sql(_valid_times_named_source_template(opposite), opposite).sql
-            bound = _bound_oracle_sql(cursor, sql, params)
-            cursor.execute("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + bound)
-            assert cursor.fetchone()[0][0]["Plan"]["Actual Rows"] == 0
-            cursor.execute(bound)
-            assert cursor.fetchall() == []
-
-
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-@pytest.mark.parametrize("branch", ["national_identity", "national_data", "coverage", "named", "any"])
-def test_each_discovery_fact_branch_explains_only_its_store_and_rejects_decoys(
-    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store: str, branch: str,
-) -> None:
-    from packages.common import display_coverage
-    from services.tiles import mvt
-
-    url, session = seeded
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
-    params = _identity_params(_KEYED_RUN_ID)
-    if branch == "coverage":
-        raw = display_coverage._river_sample_rows_template(store)
-        source = render_river_ts_sql(raw, store).sql
-        assert source in display_coverage._REFRESH_SQL
-        sql = "WITH candidate_runs AS (" + display_coverage._CANDIDATE_RUNS_SQL + ") " + source
-        _, params = _coverage_oracle_statement()
-        params = params | {"run_id": _KEYED_RUN_ID}
-    elif branch.startswith("national"):
-        factory = (mvt._hydro_national_identity_source_template if branch == "national_identity"
-                   else mvt._hydro_national_data_source_template)
-        source = render_river_ts_sql(factory(store), store).sql
-        assert source in postgis_tile_sql("hydro-national")
-        sql = """
-            SELECT facts.* FROM (
-                SELECT h.run_id, h.run_key, h.timeseries_store,
-                       rnv.river_network_version_key, rnv.river_network_version_id
-                FROM hydro.hydro_run h JOIN core.model_instance mi USING (model_id)
-                JOIN core.river_network_version rnv USING (river_network_version_id)
-                WHERE h.run_id=:run_id
-            ) lr JOIN core.river_segment seg USING (river_network_version_id)
-            CROSS JOIN LATERAL (
-        """ + source + ") facts"
-    else:
-        factory = _valid_times_named_source_template if branch == "named" else _valid_times_any_source_template
-        sql = render_river_ts_sql(factory(store), store).sql
-        caller, _ = _capture_valid_times_statement(session, named=branch == "named")
-        assert sql in caller
-
-    def relations(node: dict[str, Any]) -> set[str]:
-        names = {node["Relation Name"]} if "Relation Name" in node else set()
-        for child in node.get("Plans", []):
-            names |= relations(child)
-        return names
-
-    session.rollback()
-    with psycopg2.connect(url) as connection:
-        with connection.cursor() as cursor:
-            physical = {}
-            for target in ("legacy", "narrow"):
-                table = "river_timeseries_legacy" if target == "legacy" else "river_timeseries"
-                cursor.execute("SELECT chunk_name FROM timescaledb_information.chunks "
-                               "WHERE hypertable_schema='hydro' AND hypertable_name=%s", (table,))
-                physical[target] = {table, *(row[0] for row in cursor.fetchall())}
-                cursor.execute(f"SELECT count(*) FROM hydro.{table} WHERE run_key="
-                               "(SELECT run_key FROM hydro.hydro_run WHERE run_id=%s)", (_KEYED_RUN_ID,))
-                assert cursor.fetchone()[0] > 0
-            bound = _bound_oracle_sql(cursor, sql, params)
-            opposite = "narrow" if store == "legacy" else "legacy"
-            for authority in (store, opposite):
-                # No fact deletion: both physical stores retain the real decoys.
-                cursor.execute("UPDATE hydro.hydro_run SET timeseries_store=%s", (authority,))
-                cursor.execute("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + bound)
-                plan = cursor.fetchone()[0][0]["Plan"]
-                scanned = relations(plan)
-                assert not scanned & physical[opposite], (branch, plan)
-                if authority == store:
-                    assert scanned & physical[store], (branch, plan)
-                    assert plan["Actual Rows"] > 0
-                else:
-                    assert plan["Actual Rows"] == 0
-                cursor.execute(bound)
-                rows = cursor.fetchall()
-                assert bool(rows) == (authority == store)
-        connection.rollback()
-
-
-def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
+def test_actual_publisher_and_copyback_discover_the_narrow_facts(
     seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], tmp_path: Path,
 ) -> None:
     from services.tile_publisher.forcing_copyback_backfill import discover_backfill_runs
@@ -1570,7 +1385,7 @@ def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
     from workers.data_adapters.base import cycle_id_for
 
     url, session = seeded
-    _prepare_hydro_stores(session, post_expand_forecast_database, "legacy")
+    _expand(session, post_expand_forecast_database)
     session.execute(text("""
         INSERT INTO met.data_source (source_id, source_name, source_type, status, adapter_name)
         VALUES ('gfs', 'GFS integration source', 'forecast', 'enabled', 'gfs')
@@ -1594,9 +1409,8 @@ def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
     session.rollback()
     with psycopg2.connect(url) as connection:
         with connection.cursor() as cursor:
-            # Delete authoritative facts only. Opposite-store poison stays.
-            for table, store in (("river_timeseries_legacy", "legacy"), ("river_timeseries", "narrow")):
-                cursor.execute(f"DELETE FROM hydro.{table} r USING hydro.hydro_run h "
-                               "WHERE h.run_key=r.run_key AND h.timeseries_store=%s", (store,))
+            # Non-vacuity: both discoveries answer from the narrow fact table
+            # and nothing else, so emptying it must empty them.
+            cursor.execute("DELETE FROM hydro.river_timeseries")
     assert discover_publisher() == []
     assert discover_backfill_runs(session) == []

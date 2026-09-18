@@ -1069,13 +1069,6 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        "tests/river_identity_backfill_fakes.py",
-        (
-            "tests/test_node27_river_identity_backfill.py",
-            "tests/test_node27_river_identity_backfill_receipt.py",
-        ),
-    ),
-    PathTestRule(
         # The recalibration carry-over package fixtures, fakes AND the
         # independent fingerprint oracle (#1697). The oracle is why this rule
         # matters more than a fixture-builder rule usually does: it re-implements
@@ -2675,23 +2668,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # a re-capture at a new base routes the same way.
         "tests/fixtures/forcing_read_path_pre_wiring_*.json",
         FORCING_SQL_SHAPE_ORACLE_TESTS,
-    ),
-    PathTestRule(
-        # #2208: these are the non-gated frozen-coverage owners. The national
-        # integration consumer runs through this fixture's database edge in ci.yml.
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        (
-            "tests/test_display_coverage_refresh.py",
-            "tests/test_river_ts_template_golden.py",
-        ),
-    ),
-    PathTestRule(
-        "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
-        ("tests/test_hydro_display_mvt_scaling.py",),
-    ),
-    PathTestRule(
-        "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql",
-        ("tests/test_hydro_display_mvt_scaling.py",),
     ),
     PathTestRule(
         # #2183: the #1913 registry-partition additions ledger is a hand-edited

@@ -42,7 +42,6 @@ _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
 
 _HEADER_ROW = {
     "run_id": "qhh_gfs_2026050700",
-    "timeseries_store": "legacy",
     "forcing_version_id": "forc_qhh_gfs_2026050700",
     "basin_version_id": "basins_qhh_vbasins",
     "river_network_version_id": "basins_qhh_rivnet_vbasins",
@@ -170,9 +169,11 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # The river leg filters on the surrogate keys since #1442. Each scan_* guard
     # keeps its text binding — resolved to a key by an authority sub-select — so
     # a NULL binding still folds the guard away and an unknown text value still
-    # yields the empty scan. run_id / river_network_version_id additionally keep
-    # their text conjunct as the transitional compressed-chunk pushdown aid;
-    # basin_version_id does not (it is not a segmentby column).
+    # yields the empty scan. The text conjuncts that run_id and
+    # river_network_version_id used to carry beside their key — the transitional
+    # compressed-chunk pushdown aids — are gone with #1342's contract (task
+    # 6.3): `hydro.river_timeseries` has no such column, so all three guards now
+    # have the single-predicate shape basin_version_id always had.
     #
     # Pinned WHOLE-GUARD rather than as separate "the escape is somewhere" /
     # "the predicate is somewhere" assertions: split that way, an escape in one
@@ -189,18 +190,18 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # see a guard whose escape branch has drifted. Do not simplify these
     # substrings on the grounds that the adjacency check covers them.
     river_outer = outer_predicates(river_cte)
-    # #1980 note on the space in ``OR ( rt.``: the removal marker now sits on
-    # its own line INSIDE the disjunct, immediately above the aid, so once
-    # ``strip_comments`` has replaced it the bracket is followed by whitespace.
-    # The pin is re-spelled rather than loosened — the shape it protects (the
-    # aid AND-ed to its key resolution inside the guard, the guard folding away
-    # on a NULL binding) is unchanged, and the fold is exactly what makes the
-    # aid line deletable by #1342.
-    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in river_outer
+    # #1980 introduced a space in ``OR ( rt.`` because the removal marker sat on
+    # its own line inside the disjunct; the contract (task 6.3) deleted the
+    # marker and the aid beneath it, leaving the disjunct's inner bracket around
+    # a single key resolution. The bracket is kept verbatim rather than tidied:
+    # it is still the escape branch's own group, and re-spelling production SQL
+    # for cosmetics is how a fold-away guard loses a branch unnoticed. The pin
+    # is re-spelled rather than loosened — the shape it protects (the key
+    # resolution inside the guard, the guard folding away on a NULL binding) is
+    # exactly what survived the deletion.
+    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_key = ))" in river_outer
     assert (
-        "AND (%(scan_river_network_version_id)s IS NULL "
-        "OR ( rt.river_network_version_id = %(scan_river_network_version_id)s "
-        "AND rt.river_network_version_key = ))"
+        "AND (%(scan_river_network_version_id)s IS NULL OR ( rt.river_network_version_key = ))"
     ) in river_outer
     assert "AND (%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = )" in river_outer
     assert "AND (%(scan_display_start)s IS NULL OR rt.valid_time >= %(scan_display_start)s)" in river_outer

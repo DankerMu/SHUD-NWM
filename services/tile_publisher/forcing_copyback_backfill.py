@@ -58,25 +58,18 @@ _COUNT_FIELDS = (
     "failure_count",
 )
 def _backfill_discovery_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
         SELECT rt.run_key
         FROM hydro.river_timeseries rt
         JOIN hydro.hydro_run authority ON authority.run_key = rt.run_key
-        WHERE authority.timeseries_store = '{store}'
-          -- 000047's ORDERBY batch filter, not a segmentby index pushdown.
-          -- transitional compressed-chunk pushdown aid, remove with #1342
-          AND rt.variable = 'q_down'
-          AND rt.variable_e = 'q_down'
+        WHERE rt.variable_e = 'q_down'
           AND rt.value IS NOT NULL
     """
 
 
-_BACKFILL_FACT_SOURCE = "\nUNION ALL\n".join(
-    render_river_ts_sql(_backfill_discovery_source_template(store), store).sql
-    for store in ("legacy", "narrow")
-)
+_BACKFILL_FACT_SOURCE = render_river_ts_sql(_backfill_discovery_source_template("narrow"), "narrow").sql
 
 _DISCOVER_BACKFILL_RUNS_SQL = f"""
     SELECT
@@ -288,7 +281,6 @@ def _require_backfill_schema(session: Session) -> None:
     required_tables = (
         ("hydro", "hydro_run"),
         ("hydro", "river_timeseries"),
-        ("hydro", "river_timeseries_legacy"),
         ("met", "forcing_version"),
     )
     missing_tables = [
@@ -303,13 +295,12 @@ def _require_backfill_schema(session: Session) -> None:
             details={"missing_tables": missing_tables},
         )
 
-    # Expand is the activation boundary: each physical branch has its own
-    # column contract, and hydro_run owns routing.
+    # #1342's contract (task 6.3) left one physical river branch: the narrow
+    # table under the canonical name, with no routing column on hydro_run.
     required_columns = {
         ("hydro", "hydro_run"): {
             "run_id",
             "run_key",
-            "timeseries_store",
             "status",
             "model_id",
             "basin_version_id",
@@ -318,7 +309,6 @@ def _require_backfill_schema(session: Session) -> None:
             "cycle_time",
         },
         ("hydro", "river_timeseries"): {"run_key", "variable_e", "value"},
-        ("hydro", "river_timeseries_legacy"): {"run_key", "variable", "variable_e", "value"},
         ("met", "forcing_version"): {
             "forcing_version_id",
             "forcing_package_uri",

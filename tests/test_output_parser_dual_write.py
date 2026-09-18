@@ -135,8 +135,12 @@ class _FakeConnection:
         for needle, columns, rows in self.responses:
             if needle.lower() in normalized:
                 return columns, rows
-        if normalized.startswith("select timeseries_store"):
-            return ["timeseries_store"], [("narrow",)]
+        # #1342's contract (task 6.3) took the routing column off the replace
+        # chain's opening statement, so it no longer projects anything: it is a
+        # bare `SELECT 1 ... FOR UPDATE` whose only questions are "does the run
+        # row exist" and "is it locked". The default answer is "it exists".
+        if normalized.startswith("select 1 from hydro.hydro_run"):
+            return ["?column?"], [(1,)]
         return None, []
 
     def cursor(self) -> _FakeCursor:
@@ -259,17 +263,31 @@ def test_every_value_row_has_narrow_keys_and_enum_values(
     assert observed_quality_flags == set(QUALITY_FLAGS), "both enum members must be exercised in one batch"
 
 
-def test_legacy_run_is_refused_before_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
-    from workers.output_parser.parser import LegacyStoreWriteRefused
+def test_a_missing_run_row_is_refused_before_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The surviving half of the chain's opening statement.
+
+    It used to be three questions in one — lock the run, prove it exists, and
+    read its store so a legacy run could be refused. #1342's contract (task 6.3)
+    deleted the store and the refusal; the existence check is what still has to
+    fail closed BEFORE `execute_values` or the DELETE, because a batch written
+    against a run row that is not there is exactly the orphan the surrogate-key
+    design exists to prevent.
+    """
+    from workers.output_parser.parser import OutputParsingError
 
     calls = _patch_execute_values(monkeypatch)
     connection = _FakeConnection([
-        ("select timeseries_store", ["timeseries_store"], [("legacy",)]),
+        ("select 1 from hydro.hydro_run", ["?column?"], []),
     ])
-    with pytest.raises(LegacyStoreWriteRefused):
+    with pytest.raises(OutputParsingError) as excinfo:
         _upsert(connection, _rows())
+    assert excinfo.value.error_code == "DATABASE_ROW_MISSING"
     assert calls == []
     assert not any("DELETE" in sql for sql, _ in connection.executions)
+    # And the statement that asked really was the locking probe.
+    assert [sql for sql, _ in connection.executions] == [
+        "SELECT 1 FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE"
+    ]
 
 
 def test_on_conflict_set_mirrors_every_refreshable_and_identity_surrogate_column(
@@ -572,11 +590,11 @@ def test_mark_run_parsed_stamps_parsed_at_unconditionally_before_the_status_gate
 
     stamp, stamp_params = connection.executions[0]
     normalized_stamp = " ".join(stamp.split())
-    assert normalized_stamp == (
-        "UPDATE hydro.hydro_run SET parsed_at = now(), timeseries_store = 'narrow' "
-        "WHERE run_id = %s AND timeseries_store = 'narrow'"
-    )
+    # It also set and re-asserted `timeseries_store = 'narrow'` until #1342's
+    # contract (task 6.3) dropped the column; the stamp itself is unchanged.
+    assert normalized_stamp == "UPDATE hydro.hydro_run SET parsed_at = now() WHERE run_id = %s"
     assert stamp_params == ("run_a",)
+    assert "timeseries_store" not in normalized_stamp
     # The whole point (design D2): no status predicate. PARSE_READY_RUN_STATUSES
     # excludes 'published', and re-parsing a published run is exactly the
     # population recompute detection exists for. A status-gated stamp matches
@@ -643,17 +661,26 @@ def test_unbound_mark_run_parsed_puts_both_writes_in_one_transaction(
 
 @pytest.mark.parametrize("entrypoint", ["_click_main", "_argparse_main"])
 @pytest.mark.parametrize("command", ["parse", "shud-output"])
-def test_legacy_refusal_has_a_dedicated_cli_exit(
+def test_a_parse_failure_exits_one_and_names_its_code_on_both_entrypoints(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     entrypoint: str, command: str,
 ) -> None:
+    """Four CLI surfaces, one refusal contract.
+
+    This was ``test_legacy_refusal_has_a_dedicated_cli_exit`` and injected
+    ``LegacyStoreWriteRefused`` for exit code 3. #1342's contract (task 6.3)
+    deleted the exception, the exit code and the wire string with the routing
+    column, so the case is re-pointed at the refusal that survives — the two
+    commands times the two entrypoints are the coverage worth keeping, and
+    nothing else in the suite exercises ``_argparse_main``.
+    """
     from workers.output_parser import cli
-    from workers.output_parser.parser import LegacyStoreWriteRefused
+    from workers.output_parser.parser import OutputParsingError
 
     # Object-store/DB failures are covered separately; inject the typed outcome
     # at the command boundary to exercise both CLI implementations.
     def refused(_run_id: str) -> Any:
-        raise LegacyStoreWriteRefused("legacy run")
+        raise OutputParsingError("DATABASE_ROW_MISSING", "Narrow run identity is missing")
 
     monkeypatch.setattr(cli, "_parse", refused)
     if entrypoint == "_click_main":
@@ -662,5 +689,5 @@ def test_legacy_refusal_has_a_dedicated_cli_exit(
         code = exc.value.code
     else:
         code = getattr(cli, entrypoint)([command, "--run-id", "run_a"])
-    assert code == 3
-    assert "OUTPUT_PARSE_LEGACY_STORE_REFUSED" in capsys.readouterr().err
+    assert code == 1
+    assert "DATABASE_ROW_MISSING: Narrow run identity is missing" in capsys.readouterr().err

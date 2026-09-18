@@ -140,7 +140,10 @@ def _answers(shape: str) -> list[tuple[str, list[dict[str, Any]]]]:
     return [
         ("pushdown_run_keys", _fact_rows(scenario_ids)),
         ("MAX(h.cycle_time) AS cycle_time", [{"scenario_id": name, "cycle_time": _CYCLE} for name in scenario_ids]),
-        ("SELECT h.run_key, h.run_id", [{"run_key": 11, "run_id": "it2451_s0_target"}]),
+        # #2417's run-identity resolution. It projected `h.run_key, h.run_id`
+        # while the reader still bound a `pushdown_run_ids` text twin; #1342's
+        # contract (task 6.3) deleted the twin, so only the key is selected.
+        ("SELECT h.run_key FROM hydro.hydro_run h", [{"run_key": 11}]),
         ("rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id =", _fact_rows(scenario_ids)),
         ("FROM met.forcing_version", [{"forcing_version_id": "it126_forcing_v1", "lineage_json": None}]),
         ("SELECT basin_version_id FROM core.basin_version", [{"basin_version_id": "it126_basin_v1"}]),
@@ -623,12 +626,15 @@ def test_the_shipped_sql_carries_the_selected_c1_spelling(monkeypatch: pytest.Mo
     assert "rt.river_network_version_key = (" not in sql
     # The NULL guard is part of the measured statement, not a separate concern:
     # without it the two conjuncts diverge from `=` when both sides are NULL, and
-    # `hydro.river_timeseries_legacy` — one of the two branches this statement
-    # scans — declares all three key columns nullable. The bench must measure the
-    # spelling that ships, guard included.
-    assert "  AND rt.basin_version_key IS NOT NULL\n  AND rt.basin_version_key IS NOT DISTINCT FROM (\n" in sql
+    # the columns were declared nullable on the table this statement used to also
+    # scan. The bench must measure the spelling that ships, guard included.
+    #
+    # ADJACENCY is the property; which keyword introduces the chain is not.
+    # #1342's contract (task 6.3) deleted the store predicate that used to open
+    # the WHERE clause, which promoted the guard from `AND` to `WHERE`.
+    assert "rt.basin_version_key IS NOT NULL\n  AND rt.basin_version_key IS NOT DISTINCT FROM (\n" in sql
     assert (
-        "  AND rt.river_network_version_key IS NOT NULL\n"
+        "rt.river_network_version_key IS NOT NULL\n"
         "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"
     ) in sql
     # The conjunct #2451 exists to protect keeps its sargable `=`.

@@ -1245,15 +1245,8 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        "tests/river_ts_template_registry.py",
-    ],
-)
-def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target: str) -> None:
-    selected = set(select_tests([target], repo_root=Path(".")))
+def test_select_tests_routes_the_template_registry_to_its_unit_owners() -> None:
+    selected = set(select_tests(["tests/river_ts_template_registry.py"], repo_root=Path(".")))
     assert {
         "tests/test_display_coverage_refresh.py",
         "tests/test_river_ts_template_golden.py",
@@ -1261,14 +1254,8 @@ def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target:
     assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        "tests/river_ts_template_registry.py",
-    ],
-)
-def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> None:
+def test_template_registry_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/river_ts_template_registry.py"
     patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
     assert target in patterns, f"{target}: an isolated change must open the database lane"
     remaining = patterns.copy()
@@ -1278,46 +1265,10 @@ def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> Non
     )
 
 
-def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
-    selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
-
-    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
-
-
-def test_frozen_hydro_sql_database_edge_deletion_is_unrescued() -> None:
-    target = "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"
-    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
-
-    assert target in patterns, "a frozen-SQL-only diff must open the database lane through its exact literal"
-    # Delete the dedicated literal from the parsed database filter, not other lanes.
-    # Every surviving pattern must be checked: a broad fixture glob could rescue it.
-    remaining = patterns.copy()
-    remaining.remove(target)
-    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
-        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
-    )
-
-
-def test_select_tests_routes_the_frozen_national_sql_fixture_to_its_shape_owner() -> None:
-    selected = select_tests(["tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"], repo_root=Path("."))
-    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
-
-
 def test_select_tests_routes_the_registry_partition_additions_ledger_to_the_meta_suite() -> None:
     # #2183: the ledger is data read only by the #1913 guards in this suite.
     selected = select_tests(["tests/fixtures/basins_registry_partition_additions.json"], repo_root=Path("."))
     assert selected == ["tests/test_select_ci_tests.py"]
-
-
-def test_frozen_national_sql_database_edge_deletion_is_unrescued() -> None:
-    target = "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"
-    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
-    assert target in patterns
-    remaining = patterns.copy()
-    remaining.remove(target)
-    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
-        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
-    )
 
 
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
@@ -10393,15 +10344,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
     # I1 #1980: the river read-template register. The golden equivalence
-    # oracle anchors the raw corpus; #2208 also imports its frozen coverage
-    # loader in the capture owner and national historical fixture preparation.
+    # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
     # I11 #1990: the forcing read-template register. Its derived closure is a
     # single suite — the discovery-set census — so that suite is both the anchor
     # and the whole routed set; an anchor that stops deriving here means the
     # census stopped importing the register, which is itself the alarm.
     ("tests/forcing_ts_template_registry.py", "tests/test_forcing_ts_template_census.py"),
-    ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     (
         "tests/state_clone_recalibration_fixtures.py",
         "tests/test_state_clone_recalibration.py",

@@ -18,27 +18,25 @@ What these tests are for, and what they deliberately are not:
   :run_id`` against the AUTHORITY table by design, so a raw-source pin goes
   green on code that never switched a thing.
 
-The hybrid pushdown rule these pins encode (user-adjudicated, #1341): every
-in-boundary fact read keeps a redundant TEXT predicate on exactly ``run_id`` /
-``river_network_version_id`` / ``variable``, each AND-ed with its key or enum
-counterpart, for as long as compression segments compressed chunks by the text
-columns. So the pins are two-sided:
+The hybrid pushdown rule these pins used to encode (user-adjudicated, #1341)
+is RETIRED. Every in-boundary fact read used to keep a redundant TEXT predicate
+on ``run_id`` / ``river_network_version_id`` / ``variable``, AND-ed with its key
+or enum counterpart, for as long as compression segmented compressed chunks by
+the text columns. #1342's contract (task 6.3) dropped
+``hydro.river_timeseries_legacy`` and the routing column with it, so there is no
+text-segmented chunk left to push into and no text identity column on the
+surviving table to push with. The pins are therefore one-sided now:
 
-* positive — each sanctioned text predicate sits in the SAME conjunction as
-  its counterpart (asserted as one adjacency substring, not two independent
-  ``in`` checks, which would pass with the pair split across the query);
-* negative — the referenced text column set EQUALS the sanctioned subset that
-  surface may carry, so both a forbidden column appearing and a pushdown aid
-  quietly vanishing are red.
+* the key / enum predicates are pinned literally — they are the row-selection
+  authority and the contract with 000051's discovery index;
+* the referenced fact-table text column set is pinned EQUAL TO THE EMPTY SET on
+  every switched surface, so a reintroduced text predicate is red here before it
+  reaches a table that has no such column.
 
-Surfaces whose identity arrives by join rather than as a bound constant can
-carry only ``variable``: a join equality is not pushdown material, and a text
-fact join is forbidden outright. The three ``hydro-national`` ``CROSS JOIN
-LATERAL`` probe bodies are the adjudicated exception — inside them the
-correlated values are per-loop constants, so they additionally carry
-``run_id`` / ``river_network_version_id`` (all three probes) and
-``river_segment_id`` (the two per-segment data legs only; #1341 round 3 and
-#1596).
+The ``hydro-national`` ``CROSS JOIN LATERAL`` probe shape is kept for its own
+reason, which never was the aids: inside the lateral the discovery row is a
+per-loop constant, so the key equalities are index conditions instead of a
+set-based join the planner cannot estimate (#1341 round 3, #1596).
 """
 
 from __future__ import annotations
@@ -60,12 +58,16 @@ from services.tiles.mvt import (
     postgis_tile_sql,
     valid_times_for_layer,
 )
-from tests.river_ts_template_registry import NON_TEMPLATE_MENTIONS, REGISTRY, assert_marker_census
+from tests.river_ts_template_registry import (
+    AID_MARKER_TAG,
+    NON_TEMPLATE_MENTIONS,
+    REGISTRY,
+    assert_marker_census,
+)
 from tests.test_river_ts_text_identity_cleanup import _river_table_mentions
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
-    SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     outer_predicates,
     sql_from_python,
 )
@@ -97,21 +99,16 @@ NETWORK_KEY_RESOLUTION = "SELECT river_network_version_key FROM core.river_netwo
 # a 500; enum_range simply matches nothing.
 ENUM_VARIABLE_RESOLUTION = "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e"
 
-# The sanctioned pushdown pairs, spelled the way each surface binds them.
-# Written as ONE substring per pair so the assertion is about adjacency in a
-# single conjunction, not about two literals existing somewhere in the query.
-BOUND_PARAM_PUSHDOWN_PAIRS = (
-    # #1980: `run_id` is the aid whose WHERE-line position moved, so its pair is
-    # spelled key-then-aid; the other two were already aid-then-key and are
-    # unchanged. Either order is the same conjunction (see
-    # `assert_aid_is_conjoined_with_its_counterpart`), and the pin stays ONE
-    # substring so it is still about adjacency and not about co-existence.
-    ("run_id", "ts.run_key = AND ts.run_id = :run_id"),
-    (
-        "river_network_version_id",
-        "ts.river_network_version_id = :river_network_version_id AND ts.river_network_version_key =",
-    ),
-    ("variable", "ts.variable = :variable AND ts.variable_e ="),
+# The row-selection authority of the tile point lookup, spelled the way the
+# surface binds it. ONE substring per chain so the assertion is about ADJACENCY
+# in a single conjunction, not about literals existing somewhere in the query.
+# Each of these used to be half of a key/aid pair; the contract (task 6.3)
+# deleted the text halves, and what is pinned is that the key halves survived
+# the deletion in the same chain and the same order.
+BOUND_PARAM_KEY_PREDICATES = (
+    ("run_id", "ts.run_key = AND ts.basin_version_key ="),
+    ("river_network_version_id", "ts.river_network_version_key = AND ts.variable_e ="),
+    ("variable", "ts.variable_e = AND ts.valid_time = :valid_time"),
 )
 
 
@@ -174,27 +171,25 @@ def test_hydro_tile_resolves_text_identity_to_keys_and_restores_text_output() ->
     ):
         assert restored in source_cte, restored
 
-    _assert_text_fact_columns(source_cte, "ts", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "hydro tile")
+    _assert_text_fact_columns(source_cte, "ts", set(), "hydro tile")
 
 
-def test_hydro_tile_carries_all_three_pushdown_aids_paired_with_their_keys() -> None:
-    """The tile point lookup binds every sanctioned column as a constant.
+def test_hydro_tile_carries_its_key_predicates_and_no_text_aid() -> None:
+    """The tile point lookup binds every identity as a resolved key constant.
 
-    It is the one in-boundary surface that can carry all three, so it is where
-    the pairing rule is pinned hardest: each text conjunct must be immediately
-    followed by its key/enum counterpart in the same ``AND`` chain. A pair
-    split apart still reads the same rows but stops being self-evidently a
-    no-op, which is the whole argument for allowing the text predicate at all.
+    It was the one in-boundary surface that carried all three transitional
+    pushdown aids, so it is where their removal is pinned hardest: the key /
+    enum chain is unbroken and adjacent, and not one text identity column is
+    predicated on. A surviving aid here is a read of a column
+    ``hydro.river_timeseries`` does not have (#1342 contract, task 6.3).
     """
     outer = outer_predicates(_source_cte("hydro"))
 
-    for column, pair in BOUND_PARAM_PUSHDOWN_PAIRS:
-        assert pair in outer, column
-    # Non-vacuity: the key predicates are the row-selection authority and the
-    # basin key — the one identity with no sanctioned text partner — is there
-    # on its own.
-    assert "AND ts.basin_version_key = AND" in outer
+    for column, chain in BOUND_PARAM_KEY_PREDICATES:
+        assert chain in outer, column
+    assert "WHERE ts.run_key = AND" in outer
     assert "AND ts.valid_time = :valid_time" in outer
+    assert AID_MARKER_TAG not in _source_cte("hydro")
 
 
 def test_hydro_tile_feature_id_concatenation_is_unchanged() -> None:
@@ -237,12 +232,11 @@ def test_variable_predicates_are_enum_range_matches_not_casts_on_every_switched_
         "national tile": _source_cte("hydro-national"),
         "national identity probe": _identity_stats_cte("hydro-national"),
         **{
-            f"valid_times {form} {store}": render_river_ts_sql(factory(store), store).sql
+            f"valid_times {form}": render_river_ts_sql(factory("narrow"), "narrow").sql
             for form, factory in (
                 ("named", _valid_times_named_source_template),
                 ("any", _valid_times_any_source_template),
             )
-            for store in ("legacy", "narrow")
         },
         "existence probe": _slice(
             HYDRO_DISPLAY_SOURCE,
@@ -278,92 +272,72 @@ def _lateral_probe(leg: str) -> str:
     return _slice(leg, "CROSS JOIN LATERAL (", ") v")
 
 
-def _store_probe_branches(probe: str) -> tuple[str, str]:
-    assert probe.count("UNION ALL") == 1
+def _probe_body(probe: str) -> str:
+    """The probe's single fact read.
+
+    The routing wiring made this a two-branch ``UNION ALL`` told apart by
+    ``lr.timeseries_store``; #1342's contract (task 6.3) deleted the column and
+    the second physical table, so there is one branch and the absence of the
+    other is asserted rather than assumed.
+    """
+    assert "UNION ALL" not in probe
+    assert "timeseries_store" not in probe
+    assert "hydro.river_timeseries_legacy" not in probe
     assert probe.count("LIMIT 1") == 1
     assert probe.rstrip().endswith("LIMIT 1")
-    legacy, narrow = probe.rsplit("LIMIT 1", 1)[0].split("UNION ALL")
-    for store, branch in (("legacy", legacy), ("narrow", narrow)):
-        opposite = "narrow" if store == "legacy" else "legacy"
-        assert f"lr.timeseries_store = '{store}'" in branch
-        assert f"lr.timeseries_store = '{opposite}'" not in branch
-        table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
-        assert f"FROM {table} ts" in branch
-        assert branch.count("FROM hydro.river_timeseries") == 1
-        assert ("hydro.river_timeseries_legacy" in branch) == (store == "legacy")
-    return legacy, narrow
+    assert probe.count("FROM hydro.river_timeseries") == 1
+    assert "FROM hydro.river_timeseries ts" in probe
+    return probe
 
 
-def _assert_store_probe_predicates(probe: str, expected: str, aids: set[str]) -> None:
-    legacy, narrow = _store_probe_branches(probe)
-    for store, branch in (("legacy", legacy), ("narrow", narrow)):
-        predicates = expected.removesuffix("LIMIT 1")
-        if store == "legacy":
-            predicates = predicates.replace("hydro.river_timeseries ts", "hydro.river_timeseries_legacy ts")
-        else:
-            for column in aids:
-                rhs = "seg.river_segment_id" if column == "river_segment_id" else f"lr.{column}"
-                if column == "variable":
-                    rhs = ":variable"
-                predicates = predicates.replace(f"AND ts.{column} = {rhs} ", "")
-        predicates += f"AND lr.timeseries_store = '{store}'"
-        assert predicates in outer_predicates(branch)
-        _assert_text_fact_columns(
-            branch, "ts", aids if store == "legacy" else set(), store,
-            allowed=LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
-        )
-        assert ENUM_VARIABLE_RESOLUTION in branch
+def _assert_probe_predicates(probe: str, expected: str) -> None:
+    body = _probe_body(probe)
+    assert expected in outer_predicates(body)
+    _assert_text_fact_columns(
+        body, "ts", set(), "lateral probe", allowed=LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
+    )
+    assert ENUM_VARIABLE_RESOLUTION in body
 
 
 # The probe's whole conjunction, canonicalised (comments gone, whitespace
-# collapsed, the enum sub-select stripped). ONE substring, not eleven `in`
-# checks: what has to hold is that every key predicate and its transitional
-# text aid live in the SAME `AND` chain of the SAME correlated probe, and that
-# the `LIMIT 1` fence terminates it. Split any pair across the query and the
-# text aid stops being a self-evident no-op; drop the fence and the planner is
-# free to pull the subquery up into the join this replaced.
+# collapsed, the enum sub-select stripped). ONE substring, not seven `in`
+# checks: what has to hold is that every key predicate lives in the SAME `AND`
+# chain of the SAME correlated probe, and that the `LIMIT 1` fence terminates
+# it. Drop the fence and the planner is free to pull the subquery up into the
+# set-based join this replaced. The three transitional text aids that used to
+# sit between the keys and the enum are gone with #1342's contract (task 6.3),
+# so their ABSENCE is part of this one substring too — an aid re-inserted
+# anywhere in the chain breaks the match.
 NATIONAL_LATERAL_PROBE_PREDICATES = (
     "FROM hydro.river_timeseries ts "
     "WHERE ts.run_key = lr.run_key "
     "AND ts.river_network_version_key = lr.river_network_version_key "
     "AND ts.river_segment_key = seg.river_segment_key "
-    "AND ts.run_id = lr.run_id "
-    "AND ts.river_network_version_id = lr.river_network_version_id "
-    "AND ts.river_segment_id = seg.river_segment_id "
-    "AND ts.variable = :variable "
     "AND ts.variable_e = "
     "AND ts.valid_time = :valid_time "
     "LIMIT 1"
 )
-# The keys the probe binds are exactly the fact PRIMARY KEY's columns in their
-# surrogate spelling, which is why `LIMIT 1` cannot change the result set.
-NATIONAL_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "river_segment_id", "variable"}
 
 # The identity-existence probe's conjunction, same one-substring discipline
 # (#1596). It is the data legs' probe minus everything per-segment: no
-# `river_segment_key` predicate, and therefore no `river_segment_id` aid to
-# pair with one. `lr` here is the probe's OWN inline discovery sub-select, not
-# the `latest_runs` CTE — that CTE lives inside the `source_rows` sub-query's
-# WITH and is not in scope for this sibling CTE.
+# `river_segment_key` predicate. `lr` here is the probe's OWN inline discovery
+# sub-select, not the `latest_runs` CTE — that CTE lives inside the
+# `source_rows` sub-query's WITH and is not in scope for this sibling CTE.
 NATIONAL_IDENTITY_PROBE_PREDICATES = (
     "FROM hydro.river_timeseries ts "
     "WHERE ts.run_key = lr.run_key "
     "AND ts.river_network_version_key = lr.river_network_version_key "
-    "AND ts.run_id = lr.run_id "
-    "AND ts.river_network_version_id = lr.river_network_version_id "
-    "AND ts.variable = :variable "
     "AND ts.variable_e = "
     "AND ts.valid_time = :valid_time "
     "LIMIT 1"
 )
-NATIONAL_IDENTITY_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "variable"}
-# The five columns the inline discovery hands the probe: two keys, the two
-# text identities the legacy aids bind, and the candidate's authoritative
-# store. Discovery remains shared rather than choosing a run per store.
+# The four columns the inline discovery hands the probe: two keys and the two
+# text identities the projection echoes back out. The fifth — the candidate's
+# authoritative store — went with the routing column (#1342 contract, task 6.3).
 NATIONAL_IDENTITY_DISCOVERY_COLUMNS = (
     "SELECT DISTINCT ON (mi.river_network_version_id) "
     "h.run_key, rnv.river_network_version_key, "
-    "h.run_id, mi.river_network_version_id, h.timeseries_store "
+    "h.run_id, mi.river_network_version_id "
     "FROM hydro.hydro_run h"
 )
 
@@ -388,9 +362,7 @@ def test_national_tile_probes_the_fact_table_once_per_segment_through_a_lateral(
             "ON lr.river_network_version_id = seg.river_network_version_id "
             "CROSS JOIN LATERAL (" in collapsed
         ), name
-        _assert_store_probe_predicates(
-            _lateral_probe(leg), NATIONAL_LATERAL_PROBE_PREDICATES, NATIONAL_PROBE_TEXT_AIDS,
-        )
+        _assert_probe_predicates(_lateral_probe(leg), NATIONAL_LATERAL_PROBE_PREDICATES)
         # The old set-based fact join is gone, not merely supplemented.
         assert "JOIN hydro.river_timeseries" not in leg, name
         # And nothing reads the fact table outside the probe: a second, uncorrelated
@@ -427,32 +399,34 @@ def test_national_leg_projections_and_percent_rank_read_the_probe_result() -> No
     )
 
 
-def test_per_basin_hydro_layer_keeps_point_lookups_in_both_stores() -> None:
-    """Routing adds two scalar-key branches, never national per-segment probes."""
+def test_per_basin_hydro_layer_keeps_one_point_lookup() -> None:
+    """One scalar-key read, never a national per-segment probe.
+
+    The routing wiring made this two scalar-key branches under a ``UNION ALL``;
+    #1342's contract (task 6.3) left one, and the per-basin layer must not have
+    picked up the national layer's LATERAL shape on the way back down.
+    """
     hydro_cte = _source_cte("hydro")
 
     assert "LATERAL" not in hydro_cte
     assert "LIMIT 1" not in hydro_cte
+    assert "UNION ALL" not in hydro_cte
+    assert "timeseries_store" not in hydro_cte
+    assert "hydro.river_timeseries_legacy" not in hydro_cte
     assert "FROM hydro.river_timeseries ts" in hydro_cte
-    assert hydro_cte.count("FROM hydro.river_timeseries") == 2
-    legacy, narrow = hydro_cte.split("UNION ALL")
-    assert "FROM hydro.river_timeseries_legacy ts" in legacy
-    assert "timeseries_store = 'legacy'" in legacy
-    assert "timeseries_store = 'narrow'" in narrow
-    _assert_text_fact_columns(legacy, "ts", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "legacy hydro tile")
-    _assert_text_fact_columns(narrow, "ts", set(), "narrow hydro tile")
+    assert hydro_cte.count("FROM hydro.river_timeseries") == 1
+    _assert_text_fact_columns(hydro_cte, "ts", set(), "hydro tile")
 
 
-def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
+def test_national_tile_switches_both_zoom_legs_to_keys() -> None:
     for name, leg in _national_legs():
         probe = _lateral_probe(leg)
 
-        _assert_store_probe_predicates(probe, NATIONAL_LATERAL_PROBE_PREDICATES, NATIONAL_PROBE_TEXT_AIDS)
-        for branch in _store_probe_branches(probe):
-            assert (
-                "SELECT ts.basin_version_key, ts.value, ts.unit_e::text AS unit, "
-                "ts.quality_flag_e::text AS quality_flag, ts.variable_e::text AS variable, ts.valid_time"
-            ) in outer_predicates(branch)
+        _assert_probe_predicates(probe, NATIONAL_LATERAL_PROBE_PREDICATES)
+        assert (
+            "SELECT ts.basin_version_key, ts.value, ts.unit_e::text AS unit, "
+            "ts.quality_flag_e::text AS quality_flag, ts.variable_e::text AS variable, ts.valid_time"
+        ) in outer_predicates(probe)
 
     # latest_runs hands both legs the keys AND the text it will echo back out,
     # from the authority join it was already doing.
@@ -460,7 +434,7 @@ def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
     latest_runs = _slice(national_cte, "WITH latest_runs AS MATERIALIZED (", "network_stream_max AS")
     assert "h.run_id, mi.river_network_version_id," in latest_runs
     assert "h.run_key, rnv.river_network_version_key" in latest_runs
-    assert "h.timeseries_store" in latest_runs
+    assert "timeseries_store" not in latest_runs
     assert "JOIN core.river_network_version rnv" in latest_runs
 
 
@@ -468,11 +442,13 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
     """z<9 and z>=9 must see exactly the same fact rows for one national identity.
 
     ``typed_values`` (z>=9 branch) and ``untyped_ranked`` (z<9 branch) are the
-    same read under two zoom guards. If one leg kept the text predicates, a
-    legacy NULL-key row would render at one zoom and vanish at the other for
-    the same tile — the split this change exists to prevent. Comparing the two
-    legs' complete set of fact-table column references, rather than a list of
-    literals, is what makes a one-sided edit red.
+    same read under two zoom guards. If one leg kept the text predicates a
+    NULL-key row would render at one zoom and vanish at the other for the same
+    tile — the split this change exists to prevent. Comparing the two legs'
+    complete set of fact-table column references, rather than a list of
+    literals, is what makes a one-sided edit red — and after #1342's contract
+    (task 6.3) the set is the keys, the enums and the value, with no text
+    identity column on either side.
     """
     (_typed_name, typed), (_untyped_name, untyped) = _national_legs()
 
@@ -481,16 +457,9 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
         "ts.basin_version_key", "ts.variable_e", "ts.valid_time", "ts.value",
         "ts.unit_e", "ts.quality_flag_e",
     }
-    for store, typed_branch, untyped_branch in zip(
-        ("legacy", "narrow"), _store_probe_branches(_lateral_probe(typed)),
-        _store_probe_branches(_lateral_probe(untyped)), strict=True,
-    ):
-        typed_columns = set(re.findall(r"\bts\.[a-z_]+", typed_branch))
-        untyped_columns = set(re.findall(r"\bts\.[a-z_]+", untyped_branch))
-        expected = expected_columns | (
-            {f"ts.{column}" for column in NATIONAL_PROBE_TEXT_AIDS} if store == "legacy" else set()
-        )
-        assert typed_columns == untyped_columns == expected, store
+    typed_columns = set(re.findall(r"\bts\.[a-z_]+", _probe_body(_lateral_probe(typed))))
+    untyped_columns = set(re.findall(r"\bts\.[a-z_]+", _probe_body(_lateral_probe(untyped))))
+    assert typed_columns == untyped_columns == expected_columns
 
     # The two probes are literally the same text, so no predicate can drift
     # between them at all.
@@ -515,9 +484,14 @@ def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> N
 
     What must NOT drift: the probe still reads the fact table (the coverage
     window is a MIN/MAX over complete instants, so answering existence from it
-    alone flips an interior gap's 424 into an empty-tile 200), and it carries
-    no `river_segment_id` aid — it has no per-segment correlation to pair one
-    with, which is why its sanctioned set is narrower than the data legs'.
+    alone flips an interior gap's 424 into an empty-tile 200), and it carries no
+    per-segment predicate — it has no per-segment correlation — which is why its
+    chain is a strict prefix of the data legs'.
+
+    The two text aids this docstring's measurement paragraph was written for are
+    gone with #1342's contract (task 6.3); the LATERAL shape is kept because the
+    key equalities are index conditions only when the discovery row is a
+    per-loop constant.
     """
     probe = _identity_stats_cte("hydro-national")
     lateral = _slice(probe, "CROSS JOIN LATERAL (", ") hit")
@@ -536,14 +510,16 @@ def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> N
     # The whole conjunction, one substring: every key predicate and its
     # transitional text aid in the SAME `AND` chain, terminated by the `LIMIT 1`
     # fence that keeps the planner from pulling the probe back up into a join.
-    _assert_store_probe_predicates(
-        lateral, NATIONAL_IDENTITY_PROBE_PREDICATES, NATIONAL_IDENTITY_PROBE_TEXT_AIDS,
-    )
+    _assert_probe_predicates(lateral, NATIONAL_IDENTITY_PROBE_PREDICATES)
     assert probe.count("LIMIT 1") == 2
     assert ") hit LIMIT 1 ) THEN 1 ELSE 0 END AS source_identity_count" in outer_predicates(probe)
-    for branch in _store_probe_branches(lateral):
-        assert "SELECT 1 FROM" in outer_predicates(branch)
-    assert NATIONAL_IDENTITY_PROBE_TEXT_AIDS < set(NATIONAL_PROBE_TEXT_AIDS)
+    assert "SELECT 1 FROM" in outer_predicates(lateral)
+    # The identity probe's chain is a strict prefix of the data legs' — same
+    # keys minus the per-segment one — which is what makes "same shape" a
+    # measurement rather than a claim.
+    assert NATIONAL_IDENTITY_PROBE_PREDICATES.removesuffix(
+        "AND ts.variable_e = AND ts.valid_time = :valid_time LIMIT 1"
+    ) in NATIONAL_LATERAL_PROBE_PREDICATES
     assert "river_segment_id" not in probe
 
 
@@ -575,49 +551,48 @@ def test_national_output_and_ordering_stay_on_restored_text_expressions() -> Non
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key(store: str) -> None:
-    """The four-column discovery-index prefix survives each physical store."""
-    named = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
+def test_valid_times_named_identity_branch_keeps_the_four_column_index_prefix() -> None:
+    """The four-column discovery-index prefix, with no text aid left beside it.
+
+    The branch used to be rendered per store and the legacy variant carried a
+    text conjunct next to three of these four keys. #1342's contract (task 6.3)
+    deleted the legacy variant and the aids; the prefix that makes 000051's
+    integer discovery index usable is what had to survive, in this order.
+    """
+    named = render_river_ts_sql(_valid_times_named_source_template("narrow"), "narrow").sql
     outer = outer_predicates(named)
     assert "SELECT h.run_key FROM hydro.hydro_run h" in named
-    assert f"WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'" in named
-    assert "WHERE run_key =" in outer
-    assert "AND basin_version_key =" in outer
-    assert "AND river_network_version_key =" in outer
-    assert "AND variable_e =" in outer
-    if store == "legacy":
-        assert "WHERE run_key = AND run_id = :run_id" in outer
-        assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
-        assert "AND variable = :variable AND variable_e =" in outer
-    assert fact_table_text_identity_columns(named) == (
-        frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if store == "legacy" else frozenset()
-    )
+    assert "WHERE h.run_id = :run_id" in named
+    assert "timeseries_store" not in named
+    assert (
+        "WHERE run_key = AND basin_version_key = AND river_network_version_key = AND variable_e ="
+    ) in outer
+    assert fact_table_text_identity_columns(named) == frozenset()
     for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
         assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_valid_times_no_named_identity_branch_also_filters_the_enum_column(store: str) -> None:
-    """Any identity has run-key/store authority, never user identity filters."""
-    no_named = render_river_ts_sql(_valid_times_any_source_template(store), store).sql
+def test_valid_times_no_named_identity_branch_also_filters_the_enum_column() -> None:
+    """Any identity has run-key authority, never user identity filters.
+
+    Pinned as the WHOLE collapsed statement: the branch is small enough that an
+    equality says everything a list of substrings would, and it is the assertion
+    that goes red if a store predicate, a text aid or an extra identity filter
+    is reintroduced anywhere in it.
+    """
+    no_named = render_river_ts_sql(_valid_times_any_source_template("narrow"), "narrow").sql
     assert "WHERE ts.variable_e = (" in no_named
     assert ENUM_VARIABLE_RESOLUTION in no_named
     assert "WHERE e::text = :variable" in no_named
     outer = outer_predicates(no_named)
-    table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
-    aid = "AND ts.variable = :variable " if store == "legacy" else ""
     assert outer == (
-        f"SELECT ts.valid_time FROM {table} ts WHERE ts.variable_e = "
-        f"{aid}AND EXISTS ( SELECT 1 FROM hydro.hydro_run h "
-        f"WHERE h.run_key = ts.run_key AND h.timeseries_store = '{store}' )"
+        "SELECT ts.valid_time FROM hydro.river_timeseries ts WHERE ts.variable_e = "
+        "AND EXISTS ( SELECT 1 FROM hydro.hydro_run h WHERE h.run_key = ts.run_key )"
     )
-    assert fact_table_text_identity_columns(no_named) == (
-        frozenset({"variable"}) if store == "legacy" else frozenset()
-    )
+    assert fact_table_text_identity_columns(no_named) == frozenset()
     for column in (
         "run_id", "basin_version_key", "river_network_version_key",
-        "river_network_version_id", "status", "active", "run_display_coverage",
+        "river_network_version_id", "timeseries_store", "status", "active", "run_display_coverage",
         *FORBIDDEN_TEXT_FACT_COLUMNS,
     ):
         assert re.search(rf"\b{column}\b", outer) is None, column
@@ -657,19 +632,18 @@ def test_valid_times_for_layer_capture_session_preserves_outer_limit_semantics_f
         suffix = " ) source_rows ORDER BY valid_time DESC LIMIT :limit"
         assert normalized.startswith(prefix)
         assert normalized.endswith(suffix)
-        arms = normalized[len(prefix):-len(suffix)].split(" UNION ALL ")
-        assert len(arms) == 2
-        for arm, store in zip(arms, ("legacy", "narrow"), strict=True):
-            raw = factory(store)
-            assert re.search(r"\b(?:DISTINCT|ORDER|LIMIT|UNION)\b", raw) is None
-            rendered = render_river_ts_sql(raw, store).sql
-            assert arm == " ".join(rendered.split())
-            assert f"h.timeseries_store = '{store}'" in arm
-            assert fact_table_text_identity_columns(rendered) == (
-                (frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if run_id is not None else frozenset({"variable"}))
-                if store == "legacy" else frozenset()
-            )
-        for operator in ("SELECT DISTINCT", "ORDER BY", "LIMIT", "UNION ALL"):
+        # One arm, not two: the store union went with the routing column
+        # (#1342 contract, task 6.3). The outer DISTINCT / ORDER BY / LIMIT are
+        # what make the discovery contract, and they must stay OUTSIDE the arm.
+        arm = normalized[len(prefix):-len(suffix)]
+        assert "UNION ALL" not in normalized
+        raw = factory("narrow")
+        assert re.search(r"\b(?:DISTINCT|ORDER|LIMIT|UNION)\b", raw) is None
+        rendered = render_river_ts_sql(raw, "narrow").sql
+        assert arm == " ".join(rendered.split())
+        assert "timeseries_store" not in arm
+        assert fact_table_text_identity_columns(rendered) == frozenset()
+        for operator in ("SELECT DISTINCT", "ORDER BY", "LIMIT"):
             assert normalized.count(operator) == 1
         assert params == {
             "run_id": run_id, "basin_version_id": "selected-basin",
@@ -689,9 +663,9 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     )
 
     assert "FROM hydro.river_timeseries" in probe
-    # #1980: the key predicate is now the WHERE-line conjunct and the aid follows
-    # it on its own marked line, so this reads `WHERE run_key = (` rather than
-    # `AND run_key = (`.
+    # #1980 moved the key predicate onto the WHERE line with the aid beneath it;
+    # #1342's contract (task 6.3) deleted the aid, so the key predicate is the
+    # WHERE-line conjunct on its own.
     assert "WHERE run_key = (" in probe
     assert RUN_KEY_RESOLUTION in probe
     assert "AND basin_version_key = (" in probe
@@ -702,13 +676,16 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     assert "AND valid_time = :valid_time" in probe
 
     outer = outer_predicates(sql_from_python(probe))
+    # Pinned as the WHOLE collapsed statement: four key/enum resolutions and the
+    # instant, in this order, with no text conjunct between any of them. An
+    # equality rather than five `in` checks, because the failure this guards
+    # against is an EXTRA predicate, which no `in` check can see.
     assert outer == (
         "SELECT 1 FROM hydro.river_timeseries "
-        # #1980: key predicate first, marked aid second (same conjunction).
-        "WHERE run_key = AND run_id = :run_id "
+        "WHERE run_key = "
         "AND basin_version_key = "
-        "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
-        "AND variable = :variable AND variable_e = "
+        "AND river_network_version_key = "
+        "AND variable_e = "
         "AND valid_time = :valid_time LIMIT 1"
     )
 
@@ -742,11 +719,12 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "ON cr.run_key = rt.run_key" in sql
     assert "AND cr.basin_version_key = rt.basin_version_key" in sql
     assert "AND cr.river_network_version_key = rt.river_network_version_key" in sql
-    assert (
-        "AND rt.variable_e = 'q_down'::hydro.river_variable\n"
-        "              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
-        "              AND rt.variable = 'q_down'"
-    ) in sql
+    # The enum predicate stands alone: the text aid that used to sit under a
+    # marker line beneath it went with the column it pushed into (#1342
+    # contract, task 6.3), and the marker line went with it.
+    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable\n" in sql
+    assert "rt.variable = 'q_down'" not in sql
+    assert AID_MARKER_TAG not in sql
 
     # Segment counting moves to the key. Within a network the mapping is 1:1,
     # so the count is unchanged; the key is additionally unique table-wide.
@@ -765,27 +743,27 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "hc.basin_version_id = cr.basin_version_id" in sql
     assert "hc.river_network_version_id = cr.river_network_version_id" in sql
 
-    _assert_text_fact_columns(sql, "rt", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "coverage river scan")
+    _assert_text_fact_columns(sql, "rt", set(), "coverage river scan")
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only(store: str) -> None:
-    """The coverage scan's aids are constants; its join to candidate_runs is not.
+def test_coverage_river_scan_guards_are_key_only_and_it_joins_on_keys_only() -> None:
+    """Every scan guard is key-only now, and the join always was.
 
-    A ``cr.run_id = rt.run_id`` join equality looks like the same thing but is
-    not: it cannot be pushed into a compressed chunk, and it is exactly the
-    text fact join the delta forbids. The pushdown value here comes from the
-    ``scan_*`` constants, so the aids live inside those guards.
+    A ``cr.run_id = rt.run_id`` join equality looks like a pushdown but is not:
+    it cannot be pushed into a compressed chunk, and it is exactly the text fact
+    join the delta forbids. The text conjuncts that used to sit inside the
+    ``scan_*`` guards beside their keys were the transitional compressed-chunk
+    pushdown aids; #1342's contract (task 6.3) deleted them with the text-
+    segmented table, so all three guards now have the key-only shape
+    ``basin_version_id`` always had.
     """
-    outer = outer_predicates(display_coverage._river_sample_rows_template(store))
+    outer = outer_predicates(display_coverage._river_sample_rows_template("narrow"))
 
-    assert f"WHERE cr.timeseries_store = '{store}'" in outer
-    assert "AND rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
-    assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
-    assert (
-        "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
-    ) in outer
-    # basin_version_id is not sanctioned, so its guard is key-only.
+    assert "timeseries_store" not in outer
+    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable" in outer
+    assert "rt.variable = 'q_down'" not in outer
+    assert "( rt.run_key = )" in outer
+    assert "( rt.river_network_version_key = )" in outer
     assert "OR rt.basin_version_key = )" in outer
     # Key-only join into the fact table.
     assert (
@@ -793,6 +771,9 @@ def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only(stor
         "AND cr.basin_version_key = rt.basin_version_key "
         "AND cr.river_network_version_key = rt.river_network_version_key WHERE"
     ) in outer
+
+    with pytest.raises(ValueError, match="Invalid river timeseries store"):
+        display_coverage._river_sample_rows_template("legacy")
 
 
 def test_coverage_sql_binds_only_parameters_the_refresh_actually_supplies() -> None:
@@ -889,7 +870,7 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 
 
 # ---------------------------------------------------------------------------
-# Marker / aid census and registry closure for the display three (#1980)
+# Transitional-aid census and registry closure for the display three (#1980)
 #
 # Ownership is exclusive by design (fixture decision 7): this file owns mvt,
 # hydro_display and display_coverage; tests/test_river_ts_text_identity_cleanup.py
@@ -898,37 +879,40 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 # other's files.
 # ---------------------------------------------------------------------------
 
-# Counted on the SOURCE — the number `grep -rn "remove with #1342"` gives and the
-# number #1342 deletes:
+# Counted on the SOURCE. The count is now ZERO in all three files: #1342's
+# contract (task 6.3) deleted every transitional compressed-chunk pushdown aid
+# and its marker line. The register is KEPT at zero rather than deleted with the
+# aids, because a zero that is asserted per file is what makes a reintroduced
+# aid red in the file that grew it — a deleted register makes it invisible.
 #
-# * mvt.py 14 = the hydro layer's three + national identity's three and shared
-#   data source's four + the valid_times branches' three and one. The data
-#   source is authored once and reused by both zoom legs.
-# * hydro_display.py 3 / display_coverage.py 3 = run_id, river_network_version_id
-#   and variable on the existence probe and on the coverage river scan. The three
-#   in display_coverage are new marker lines over pre-existing aids that a prose
-#   paragraph used to identify collectively.
+# What the numbers were, and what the contract removed: mvt.py 14 (the hydro
+# layer's three + national identity's three and the shared data source's four +
+# the valid_times branches' three and one), hydro_display.py 3 and
+# display_coverage.py 3 (run_id, river_network_version_id and variable on the
+# existence probe and on the coverage river scan).
 DISPLAY_MARKER_AID_CENSUS: dict[str, int] = {
-    "apps/api/routes/hydro_display.py": 3,
-    "packages/common/display_coverage.py": 3,
-    "services/tiles/mvt.py": 14,
+    "apps/api/routes/hydro_display.py": 0,
+    "packages/common/display_coverage.py": 0,
+    "services/tiles/mvt.py": 0,
 }
 
 
 def test_the_display_readers_declare_their_marker_and_aid_count() -> None:
-    """Per file, 1:1, verbatim, marker alone on the line above its aid."""
+    """Per file: no marker line, and no aid conjunct under one."""
     for path, expected in DISPLAY_MARKER_AID_CENSUS.items():
         assert_marker_census(path, expected)
 
 
-def test_the_display_readers_carry_the_measured_marker_total() -> None:
-    """20 of the registered 30; the other ten are the cleanup oracle's.
+def test_the_display_readers_carry_no_transitional_aid_at_all() -> None:
+    """0 of the once-registered 20; the other ten are the cleanup oracle's.
 
-    Registered, not tree-wide: the 30 spans this census plus the cleanup
+    Registered, not tree-wide: the 30 spanned this census plus the cleanup
     oracle's ``REGISTERED_SOURCES`` and nothing sweeps for an unregistered
-    reader — that is the I11 discovery-set census (tasks 7.2a).
+    reader — that is the I11 discovery-set census (tasks 7.2a). Both registers
+    are now zero, which is the contract's whole verification criterion 1
+    restated per file.
     """
-    assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 20
+    assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 0
 
 
 def test_every_display_read_site_is_registered_in_the_template_registry() -> None:
@@ -983,8 +967,11 @@ def test_every_display_template_renders_free_of_text_identity_for_the_narrow_sto
     # and would have to be weakened until it said nothing.
     assert fact_table_text_identity_columns(narrow.sql) == set()
     # Non-vacuity: what is LEFT is the key/enum authority resolution, so the
-    # statement still selects the same rows through the same predicates, and the
-    # narrow variant really is the legacy one minus its aid blocks.
-    legacy = render_river_ts_sql(entry.source("legacy"), "legacy", entry=entry.key)
+    # statement still selects the same rows through the same predicates. The
+    # line-count comparison against the legacy variant that used to stand beside
+    # this went with the legacy variant itself (#1342 contract, task 6.3); the
+    # renderer now returns its input, so identity is the arithmetic.
     assert "_key = " in narrow.sql or "variable_e = " in narrow.sql
-    assert len(narrow.sql.split("\n")) == len(legacy.sql.split("\n")) - 2 * entry.expected_aids
+    assert narrow.sql == entry.source("narrow")
+    with pytest.raises(Exception, match="unknown timeseries store"):
+        render_river_ts_sql(entry.source("narrow"), "legacy", entry=entry.key)

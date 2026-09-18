@@ -45,19 +45,26 @@ from tests.test_display_coverage_residual_debt_integration import (
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.parametrize("newest_store", ["legacy", "narrow"])
-def test_public_forecast_selects_latest_and_pinned_runs_across_physical_stores(
+def test_public_forecast_selects_latest_and_pinned_runs(
     throwaway_database_url: str,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    newest_store: str,
 ) -> None:
+    """Latest, pinned and explicit-cycle, against one physical fact table.
+
+    This was parametrised over which of the two runs stayed on the retired
+    store. #1342's contract (task 6.3) left one store, so both runs are marked
+    narrow and the fixture's poisoning lands entirely on the retired table —
+    which is what makes it still a decoy setup rather than a no-op: a reader
+    that reached for ``hydro.river_timeseries_legacy`` would come back with
+    values 10000 too high and half an hour late.
+    """
     _prepared_database(throwaway_database_url)
     connection = _connect(throwaway_database_url)
     try:
         newest_run_id = _insert_null_forcing_run(connection)
     finally:
         connection.close()
-    post_expand_forecast_database({newest_run_id if newest_store == "narrow" else FORECAST_RUN_ID: "narrow"})
+    post_expand_forecast_database({newest_run_id: "narrow", FORECAST_RUN_ID: "narrow"})
     store = PsycopgForecastStore(throwaway_database_url)
     parameters = {
         "basin_version_id": BASIN_VERSION_ID,
@@ -103,12 +110,10 @@ def _series_row_digest(response: Mapping[str, Any]) -> tuple[str, int]:
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()[:16], len(rows)
 
 
-@pytest.mark.parametrize("newest_store", ["legacy", "narrow"])
 def test_run_identity_pushdown_returns_byte_identical_rows_on_every_forecast_shape(
     throwaway_database_url: str,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
     monkeypatch: pytest.MonkeyPatch,
-    newest_store: str,
 ) -> None:
     """#2417 task 3.1: row equivalence pre/post, by digest, on all three shapes.
 
@@ -126,7 +131,7 @@ def test_run_identity_pushdown_returns_byte_identical_rows_on_every_forecast_sha
         newest_run_id = _insert_null_forcing_run(connection)
     finally:
         connection.close()
-    post_expand_forecast_database({newest_run_id if newest_store == "narrow" else FORECAST_RUN_ID: "narrow"})
+    post_expand_forecast_database({newest_run_id: "narrow", FORECAST_RUN_ID: "narrow"})
     store = PsycopgForecastStore(throwaway_database_url)
     base = {
         "basin_version_id": BASIN_VERSION_ID,

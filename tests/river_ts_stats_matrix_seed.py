@@ -420,7 +420,6 @@ def seed_matrix(write_connection: Any, autocommit_connection: Any) -> dict[str, 
     of the stale scenarios, and the post-``ANALYZE`` target write. Every call
     site of ``compress_chunk`` in this repository is in autocommit
     (``scripts/node27_timeseries_compression.py:596-620``,
-    ``tests/test_node27_river_narrow_reparse_backfill_integration.py:332``,
     ``tests/test_river_identity_normalization_integration.py:600``), and a
     fixture must not be the first place that assumes it is transaction-safe.
     Phase 2 is safe from autovacuum because phase 1's per-chunk opt-out is
