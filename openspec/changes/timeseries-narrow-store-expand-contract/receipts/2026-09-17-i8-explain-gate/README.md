@@ -5,10 +5,13 @@ bounds on the largest network. This receipt records why, with the numbers.**
 
 > **Superseded for the verdict only, 2026-09-18.** The cause this receipt isolated was
 > fixed (#2451) and deployed; `../2026-09-18-i8-task52/` re-ran the same probe against the
-> live process (`258b06ec`) and the gate is **GREEN on all six cells**, including the node
+> live process (`258b06ec`) and the gate is **GREEN on all six cells on the SQL bounds**,
+> including the node
 > §3 blames: `_hyper_9_175_chunk` went from ratio 16 008 / 2 204 buffers to ratio 0 /
 > 27 buffers. Nothing below is rewritten — this is the record of the defect, and §4–§8
 > remain the authority for the compression ratio, the tick pair and the causal proof.
+> The gate's **local API bound** is a separate item that §6.2 below explicitly excluded;
+> it is **RED** in the 2026-09-18 receipt (§2 there) and nothing here supersedes it.
 
 Covers these task 5.2 items and no others:
 

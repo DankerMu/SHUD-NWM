@@ -22,13 +22,13 @@ authority for the compression ratio, the tick pair and the causal proof.
 | task 5.2 item | verdict | where |
 |---|---|---|
 | curve EXPLAIN gate, SQL bounds, 2 networks × 3 storage states | **GREEN** | §1 |
-| the same gate's local API bound (P95 ≤ 500 ms) | **RED — and red on legacy too** | §2 |
+| the same gate's local API bound (P95 ≤ 500 ms) | **RED — and red on legacy too; #2486** | §2 |
 | identity-existence probe miss branch before/after + coverage loss | **GREEN, no loss** | §3 |
 | registry counts (active/runnable/selected/excluded) | **38 / 38 / 38 / 0** | §4 |
 | governance receipt with the working-set fields | **captured, not critical** | §5 |
 | one compression tick and one retention tick covering both tables | **the 0917 pair; today's pair failed** | §6 |
 | first narrow chunk size after one full cycle | **21 GB uncompressed / 3677 MB compressed** | §7 |
-| display deny-write receipt (C1–C4) | **deny-write 23/23 PASS; overall BLOCKED on C3 identity echo** | §8 |
+| display deny-write receipt (checklist C1–C4) | **C2 deny-write 23/23 PASS — the item this task asks for; C1/C4 partial, C3 out of scope and blocked; validator overall BLOCKED on C3** | §8 |
 | `/` clicks on three networks with screenshots | **3/3, GFS+IFS both 200** | §9 |
 | `/ops` reachable | **200** | §9 |
 | the regression criterion recorded | **recorded, not tripped** | §10 |
@@ -157,9 +157,26 @@ Three facts that say what the red is and is not:
    Flat, no tail at all.
 
 Every distribution is bimodal — a tight body at 100–220 ms and a separate upper cluster
-at 350–1250 ms — on a node carrying `load average: 5.25` with an autopipeline tick every
-ten minutes. Localizing the tail between those two measured endpoints is beyond this
-receipt's scope and is reported rather than guessed at.
+at 350–1250 ms. Not a uniform slowdown: a fraction of requests falls into a second mode.
+
+**The machine state during the measurement, which must be ruled out first.**
+`api-0918.json` was written at **14:40:46**, and `nhms-node27-autopipe.service` had been
+`activating` continuously since **14:30:32** — still unfinished at 14:55, **24 minutes**.
+A normal tick is **11 seconds** (`13:58:40 Starting` → `13:58:51 Finished`). This one was
+catching up a `fcst_ifs_2026091712` backlog: `node27_autopipeline.py --workers 6`, five
+`output_parser.cli parse` children at 50–100 % CPU each with five `nhms_ingest_rw … INSERT`
+backends, load average climbing 4.44 → 6.92. **The whole 30-sample run sat inside a
+saturated catch-up window.** The flat `/health` does not rule this out: `/health` touches
+no database, no connection pool and no serialization, so it stays flat under exactly this
+kind of contention with `--workers 2`. Control 3 above bounds general server slowness, not
+pool or event-loop contention.
+
+So the honest statement is: **the bound is unmet as measured**, and the measurement was
+taken under ingest contention that has not yet been excluded. The verdict does not change
+either way — the spec states 500 ms with no quiet-window caveat, and production carries
+these ticks. Localizing the tail between the two measured endpoints (SQL 1.3–3.2 ms ↔ API
+100–1250 ms), and a re-measure in a quiescent window, are tracked as **#2486** rather than
+guessed at here.
 
 The `issue_time=latest` shape is **not** folded into this verdict and is not hidden: it
 is still red at ~3.9 s warm, its cause is `_per_source_latest_cycles` scanning the fact
@@ -397,6 +414,19 @@ plane. That is **#2420**, already open; note that #2420's stated cause is partly
 too, since `jobs` returns rows here and still yields `{}`.
 
 All of these are C3 cross-plane items, not the deny-write boundary this task asks for.
+
+**What this section does and does not evidence, per checklist item.** The verdict row is
+labelled C1–C4; read literally that would claim four passes, and it is not four passes:
+
+| item | state here | evidence |
+|---|---|---|
+| **C1** service reachable under the read-only role | **partial** | the route smoke's read lane: `/health`, `/api/v1/runtime/config`, `/api/v1/models`, `/api/v1/met/stations` all 200 under `nhms_display_ro`. The full C1 checklist (unit state, worker count, restart survival) is not re-run here — it is the 2026-09-17 deploy receipt's. |
+| **C2** deny-write boundary | **PASS** | 23/23 mutating probes denied, SQLSTATE `42501`, `failed_mutating_count 0`, twice. This is the item task 5.2 actually asks for. |
+| **C3** cross-plane identity echo | **out of scope here, and blocked** | needs node-22's control plane, which this task must not touch. Blocked on #2484 (`cycle_time` spelling + the four-field diagnosability defect) and #2420 (`job_logs` has no `job_id` on node-27). |
+| **C4** `/ops` control surface | **partial** | `/ops` 200 (§9) and both control-plane mutations returned 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` with `write_executed: false`. The **browser-level** check that retry/cancel controls are hidden for the read-only role was **not** run. |
+
+So: one PASS (C2, the asked-for one), two partials, one out of scope. The `BLOCKED`
+overall verdict comes from C3, not from any write getting through.
 
 Evidence bundles: `artifacts/issue1987-52-c2/issue1987-52-c2-20260918/` and
 `…-c2b-20260918/` on node-27 (gitignored; the summary above is the archived form).
