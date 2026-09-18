@@ -53,7 +53,9 @@ Design pins (``openspec/changes/node27-coverage-freshness-alert/design.md``):
   ``MAX_REPORT_LINES`` lines, prints the per-source table first (breaching
   sources sorted first, truncated with an explicit omission line) and the
   ``VERDICT:`` block LAST, so the operator-critical lines are the ones that
-  survive the tail window after systemd's own ~4 framing lines.
+  survive the tail window after systemd's own five framing lines on the exit-1
+  path (measured; this lane adds no structured stderr line there — see
+  ``MAX_REPORT_LINES``).
 - **D6 fail-closed** — every internal failure raises alerting tendency:
   exit 2 config invalid (before any observation), exit 3 observation failure or
   **zero source keys**, exit 1 gap breach / no covered cycle, exit 0 healthy.
@@ -104,10 +106,15 @@ NULL_SOURCE_KEY = "__null_source__"
 #: so a future window shrink carries the threshold with it.
 GAP_THRESHOLD_DIVISOR = 3
 
-#: D3 journal budget. ``journalctl -n 30`` keeps the TAIL and systemd itself
-#: contributes roughly four framing lines (`Starting…`, `Main process exited…`,
-#: `Failed with result…`, `nhms-…: Failed…`), plus this lane's single structured
-#: stderr line on the failure paths. 24 stdout lines therefore still fit.
+#: D3 journal budget, counted BY CATEGORY because the two categories do not
+#: co-occur. ``journalctl -n 30`` keeps the TAIL, and on the EXIT 1 (alert) path
+#: — the one whose mail has to carry the table — systemd contributes FIVE
+#: framing lines (`Starting…`, `Main process exited…`, `Failed with result…`,
+#: `Failed to start…`, `Triggering OnFailure= dependencies.`) and this lane adds
+#: NO structured stderr line, because the alert path calls ``_emit`` without
+#: ``structured=``. 24 + 5 = 29 ≤ 30, one line of margin. The structured stderr
+#: line exists only on exits 2/3, whose reports are the two-line
+#: ``_failure_block``, so the tail is never the binding constraint there.
 MAX_REPORT_LINES = 24
 
 #: Bounds, matching the sibling frontier lane. An unbounded connect would let

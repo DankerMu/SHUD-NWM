@@ -5348,19 +5348,36 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 | 退出码 | 含义 | 第一步做什么 |
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
-| `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 两个分支 |
-| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法），**观测前**就退出 | 修 env 文件，见 §11.4 |
-| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / 展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+| `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
+| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、或 venv 里没有展示栈），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason`：`ImportError:` / `ModuleNotFoundError:` 开头就是导入期，按 §11.5 的 `Environment=PYTHONPATH=` 与安装块修，**不是** §11.4 的阈值旋钮；其余（缺 DSN、阈值非法）才去 §11.4 改 env 文件 |
+| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / **观测期**展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+
+展示模块报错分**导入期**与**观测期**两种，落在哪个退出码取决于它发生在哪一期：`config_from_env` 先读
+`DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
+的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
+`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 修解释器路径，退 3 查库。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
-且总行数 ≤ 24 —— systemd 自己要占约 4 行框架，verdict 必须活在尾窗里。source 太多时
-表会被截断并打一行 `… N more sources omitted`，**排序保证超阈的 source 先打印、不会被截掉**。
+且总行数 ≤ 24 —— verdict 必须活在尾窗里。尾窗预算要**分两类算，不能合成一个数**：
+退 1（告警）那条路径上 **systemd 自己占 5 行框架**（`Starting…`、`Main process
+exited…`、`Failed with result…`、`Failed to start…`、`Triggering OnFailure=
+dependencies.`），而**本车道在该路径一行结构化 stderr 都不打**——告警路径调 `_emit`
+时不带 `structured=`。`24 + 5 = 29 ≤ 30`，只剩 1 行余量。结构化 stderr 行只出现在
+退 2 / 退 3，而那两条路径的报告只有两行 `VERDICT:`，尾窗绰绰有余。
+
+source 太多时表会被截断并打一行 `… N more sources omitted`，**排序保证超阈的 source
+先打印**——但这条保证是**有界的、不是绝对的**：失败时 `VERDICT:` 块占 3 行，留给表的
+额度是 `24 − 1 − 3 = 20` 行，一旦 source 数超过 20 就压成 19 行表 + 1 行省略说明——
+截断一发生表就只剩 19 行，所以超阈 source 多于 19 个时**超阈的行也会被截掉**。
+截掉不等于隐瞒：表头的
+`breaching=<n>` 是真数、省略行带精确的丢弃条数、`VERDICT: breaching=` 仍点名前 8 个
+source 并补 `+N more`。把表撑大反而会把 verdict 顶出尾窗，那是更坏的失败（设计 D3）。
 DSN 口令在任何面（stdout、stderr、异常文本）都被脱敏。
 
 本车道**无状态**：没有 state 文件、没有 lock、没有 receipt、没有自己的日志文件。因此
 也**没有 dedup**——故障不消除就每天一封。沉默来自消除故障，不是压制告警。
 
-### 11.3 处置：两个真分支 + 一个"看不见"分支
+### 11.3 处置：三个真分支 + 一个"看不见"分支
 
 收到 `VERDICT: FAIL ... behind ingest ...` 时，先用 `VERDICT: breaching=` 那行拿到
 出问题的 source，再分支：
@@ -5405,6 +5422,117 @@ ORDER BY 1;
 差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
 `active_flag` 置 false（退出业务化的口径见 §7）。
 
+**分支 C —— A 和 B 都查空：目录仍然不收这个 cycle**
+
+刷新腿日志干净（分支 A 没线索）、活跃网络集合与分子集合相等（分支 B 差集为空），
+gap 却还在涨。**分支 B 差集为空并不证明覆盖行在**：它的分子语句根本不 JOIN
+`hydro.run_display_coverage`，所以一个"有可展示 run、却没有覆盖行"的网络在 B 里照样
+是空差集——那正是 §11.1 点名的 `no_coverage_row` rc=0 静默路径
+（`scripts/node27_autopipeline.py:2207-2209`）。因此走到这里有两种落点：要么覆盖行缺失
+或为零，要么覆盖行确实在、而 `services/tiles/mvt.py` 的**覆盖窗矩形校验**
+（`_national_coverage_window`）或 **3h 相位校验**（`_national_cycle_valid_times`）把该
+cycle 丢掉了。后两处都是 fail-closed 的：任一网络的行不过关，整条 cycle 就不进列表。
+逐条对这个 source 最新几个 cycle 查四项判据（下面用 LEFT JOIN，就是为了让第一种落点现身）：
+
+```sql
+-- 与 `_national_discharge_coverage_rows` 同构：每个 (network, cycle) 只判最新的那个
+-- run（`rn = 1`），否则重导 cycle 上的陈旧 run 会把你指向目录根本不看的那一行。
+WITH ranked AS (
+  SELECT h.run_id, h.cycle_time, mi.river_network_version_id,
+         ROW_NUMBER() OVER (
+           PARTITION BY mi.river_network_version_id, h.cycle_time
+           ORDER BY h.run_id DESC
+         ) AS rn
+  FROM hydro.hydro_run h
+  JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+  WHERE lower(h.source_id) = 'gfs'
+    AND h.status IN ('succeeded','parsed','published')
+    AND mi.active_flag AND mi.river_network_version_id IS NOT NULL
+)
+SELECT r.run_id, r.cycle_time, r.river_network_version_id,
+       rdc.segment_count, rdc.river_sample_count,
+       rdc.min_lead_time_hours, rdc.max_lead_time_hours,
+       rdc.river_valid_time_start, rdc.river_valid_time_end,
+       -- 矩形校验：窗口列齐 + 样本数等于 段数 × lead 数 + 跨度等于 (lead 数 - 1) h
+       (rdc.river_valid_time_start IS NOT NULL
+        AND rdc.river_valid_time_end IS NOT NULL
+        AND rdc.min_lead_time_hours IS NOT NULL
+        AND rdc.max_lead_time_hours IS NOT NULL) AS window_cols_ok,
+       (rdc.river_sample_count
+        = rdc.segment_count * (rdc.max_lead_time_hours - rdc.min_lead_time_hours + 1)) AS sample_count_ok,
+       (EXTRACT(EPOCH FROM (rdc.river_valid_time_end - rdc.river_valid_time_start))::bigint
+        = (rdc.max_lead_time_hours - rdc.min_lead_time_hours) * 3600) AS span_ok,
+       -- 相位校验：窗口起点必须落在该 cycle 的整点网格上
+       (EXTRACT(EPOCH FROM (rdc.river_valid_time_start - r.cycle_time))::bigint % 3600 = 0) AS phase_ok
+FROM ranked r
+-- LEFT JOIN，不是 INNER：缺覆盖行的 run 必须以 segment_count 等 rdc.* 全 NULL 现身，而不是从结果里消失。
+LEFT JOIN hydro.run_display_coverage rdc ON rdc.run_id = r.run_id
+WHERE r.rn = 1
+ORDER BY r.cycle_time DESC, r.run_id DESC
+LIMIT 20;
+```
+
+四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。两种读法靠
+`rdc.segment_count` 分：**它为 NULL** 就是这个 run 压根没有覆盖行，即上面那条
+`no_coverage_row`，处置是直接补刷新，不必查几何；`segment_count` 有值而布尔列挂，才是
+几何问题。缺行的那一行**不会"整行 NULL"**：`window_cols_ok` 是一串 `IS NOT NULL` 的合取，
+按三值逻辑永不为 NULL，缺行时它读 `false`（psql 显示 `f`），而 `sample_count_ok`、
+`span_ok`、`phase_ok` 连同所有 `rdc.*` 值列才是 NULL（psql 里留空）——认这个形状即可。
+还要留一手：目录侧的 JOIN 多带
+`rdc.segment_count > 0`，最新 run 缺行或被归零时它会**回退到该 cycle 上次新的 run**，
+所以最新行为 NULL/零时要回头看同 cycle 更早的 `run_id` 是不是正扛着覆盖。**这一类不是假想
+的**：覆盖行由 `packages/common/display_coverage.py` 一次扫描算出，`river_sample_count`
+是**所有**样本之和，而 `min/max_lead_time_hours` 取的是各河段 lead 区间的**交集**
+（`MAX(min)` / `MIN(max)`），河段之间 lead 覆盖参差时这两个数就对不上；
+`river_valid_time_start/end` 只统计"该时刻河段数 = 期望河段数"的完整时刻，写入残缺时
+整段是 NULL；输出时间网格不落在 cycle 的整点上则相位校验挂。三种几何都保持
+`segment_count > 0`，所以分支 A、B 必然查得干干净净——这正是这一类会把人卡住的原因。
+
+**四个布尔列不是完整的拒绝集合**：它们只覆盖单行的矩形与相位，而
+`_national_cycle_valid_times` 还做**跨行**判定——各网络窗口取交集后为空
+（`window_end < window_start`），或交集被 cycle 截断后**一个 3h 步长时刻都装不下**
+（`last_index < first_index`）。后者尤其反直觉：`min_lead = max_lead = 1` 时四个布尔全
+`true`（跨度 0 = `(lead 数 - 1) × 3600`，相位整除），该 cycle 照样被丢。所以四列全 `true`
+还查不出原因时，别再看单行：对该 cycle 取活跃网络上的 `max(river_valid_time_start)` 与
+`min(river_valid_time_end)`，看 `cycle_time + 3k h` 有没有落进这个区间——装不下就是
+lead 跨度太短或窗口交集为空，同样归上游产出。
+
+处置：对这些 run 重跑覆盖刷新，让窗口列按当前数据重算。**这是一次写操作**
+（`packages/common/display_coverage.py` 的 `_REFRESH_SQL` 是 `INSERT … ON CONFLICT DO UPDATE`），
+所以必须带写角色的 DSN：源 `infra/env/node27-ingest.env`（`nhms_ingest_rw`），**不要**源
+§10/§11.4 那份告警 env —— 它带的是只读的 `nhms_display_ro`（见上面的角色表），
+会在 `InsufficientPrivilege` 上抛栈退 1，既不是刷新成功的 rc=0，也不是 #1446 拒绝守卫的 rc=3。
+生产刷新腿走的就是这份 ingest env（`scripts/node27_autopipe_cron.sh` 源它之后调同一个脚本）。
+
+```bash
+cd /home/nwm/NWM
+set -a; . infra/env/node27-ingest.env; set +a
+PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_refresh_coverage.py --run-id <run_id>
+echo "rc=$?"
+```
+
+新扫描算出非空时会直接覆盖旧的窗口列，**不需要** `--force`。只有新扫描算成空时
+（#1446 拒绝守卫退 **3** 并打一行 `DISPLAY_COVERAGE_REFRESH_REFUSED`，见 §2）才谈得上
+`--force`，而且必须运维逐条确认后再加：`--force` 的动作是把行**归零**，对一个正被全国
+图层使用的 run 用它就是直接熄灯，别拿它当默认手段。
+
+刷新完把上面那条四判据 SQL 再跑一遍（四列全 `true` 的还要按前面「四个布尔列不是完整的
+拒绝集合」那段的 `max(river_valid_time_start)` / `min(river_valid_time_end)` 跨行判定再看
+一眼），全绿之后**再验一次车道本身**，别等下一 tick：用 §11.4 那条
+`systemctl --user start nhms-node27-coverage-freshness-alert.service` 看退出码。
+**要走 unit**——它自带 `EnvironmentFile=`，跑出来的是本车道真正用的只读
+`nhms_display_ro` DSN；若只从 shell 历史里重跑 §11.5 那段手工调用的 python 那一行、没有
+重新源 `infra/env/node27-frontier-alert.env`，环境里还留着刚才刷新用的
+`infra/env/node27-ingest.env`，那是以写角色 `nhms_ingest_rw` 在跑，压根没检验只读角色的
+grant，可能给你一个假绿（要跑就把那两行整段一起跑）。退 0 即闭环：本车道无状态、无
+dedup、也不发"恢复"邮件（口径见 §11.2 末尾那两行），此后下一个预定信号就是下一个 06:00
+那一 tick。
+
+重算后判据仍不过关的，问题在上游产出（河段样本残缺 / 输出网格相位），刷新脚本修不了：
+本 runbook 没有对应的处置段，把 `run_id`、四个布尔列与跨行判定的实测值、以及
+`/home/nwm/autopipe-logs/*.log`（分支 A 用的同一批日志）里该 `run_id` 的 ingest / parse
+行留成证据，对 parse/output 侧开 issue。
+
 **退出 3 —— "什么都观测不到"（fail-closed，不是健康）**
 
 ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 0。那条语句 JOIN 了
@@ -5442,6 +5570,19 @@ journalctl --user -u nhms-node27-coverage-freshness-alert.service -n 30 --no-pag
 systemctl --user enable --now nhms-node27-coverage-freshness-alert.timer
 systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-pager
 ```
+
+service 与 timer 都已注册进 `scripts/node27_resource_governance.py`
+`DEFAULT_SERVICES`（#2466）：治理审计 receipt 因此带上它们的 `ActiveState` / `SubState`，
+以及 `systemctl --user list-timers --all` 那张表里对应的行——**装了但被 disable** 的
+timer 在表里仍然出现、只是没有 NEXT，**从没装过**的 unit 整行缺席，两者靠这张表才分得开
+（只看 per-service 那块分不开）。**但这不是自动告警**：治理审计不对 receipt 的 `systemd`
+段产任何建议、不因此非零、也不发邮件，timer 被人 disable 掉不会自己冒出来。定期看治理
+receipt 里的 unit 状态就是为了这个——与 §10.8 的 frontier 车道同一口径，同样是靠人按周期
+读。本车道无状态、无自有 receipt、无自有日志：它自己的痕迹只在 journal 里
+（`journalctl --user -u nhms-node27-coverage-freshness-alert.service`），而 journal 只能告诉你
+**跑过的那些 tick** 怎么样了——timer 被 disable 之后它就不再有新行，而「没有新行」与「一切
+正常、只是没告警」在那里长得一模一样。治理 receipt 是这两个 unit 出现在**清单**上的唯一地方，
+这才是它在这里值一句话的原因。
 
 单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
 `Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import

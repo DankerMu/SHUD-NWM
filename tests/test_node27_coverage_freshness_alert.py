@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -287,6 +288,42 @@ def test_evidence_13_missing_database_url_is_a_config_error(
     payload = json.loads(captured.err.strip().splitlines()[-1])
     assert payload["code"] == alerter.CODE_CONFIG_INVALID
     assert "DATABASE_URL" in payload["reason"]
+
+
+def test_import_time_display_failure_is_a_config_error(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2465: a display module that will not import is a CONFIG failure (exit 2),
+    not an observation one — `lookback_days()` is called inside `config_from_env`,
+    before any database work.
+
+    The pinned seam is the REAL `from services.tiles.mvt import …` statement inside
+    `lookback_days`, not the handler around it: poisoning `sys.modules` makes CPython
+    raise at that statement on every call (the import is function-local, so it re-runs
+    per invocation). Monkeypatching `lookback_days` wholesale would pin only `main`'s
+    error handling and would stay green if that import ever grew a
+    `try/except ImportError` fallback constant — a regression that trades exit 2 for
+    exit 0/1 under a silently wrong threshold, and one the static source scan in
+    `test_lazy_display_import_keeps_the_module_import_light` cannot see either.
+
+    `DATABASE_URL` is deliberately present: `_required_env` reads it first, so without
+    it the run would refuse on the missing-DSN path and never reach the import at all.
+    """
+
+    monkeypatch.setitem(sys.modules, "services.tiles.mvt", None)
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=_env())
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"].startswith(("ImportError:", "ModuleNotFoundError:"))
+    assert DSN_PASSWORD not in captured.out
+    assert DSN_PASSWORD not in captured.err
 
 
 def test_evidence_17_default_threshold_is_derived_from_the_display_constant() -> None:

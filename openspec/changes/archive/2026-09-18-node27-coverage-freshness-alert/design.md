@@ -304,3 +304,20 @@ and `core.model_instance`.
   per source, and production currently has no `source_id IS NULL` display-ready runs.
 - Dedup/resend/escalation state for this lane (D3).
 - Any change to the frontier stall alerter's criterion or state schema.
+
+## 修正 2026-09-18（#2465）
+
+Appended, not rewritten: the D6 table above is the record of what was decided, and the row
+below is left in place so the drift stays visible.
+
+D6's row `DB unreachable / statement timeout / permission denied / display-module error →
+exit 3` files **every** display-module error under exit 3. That is true only of the
+*observation* stage. A display-module **import** failure happens in
+`config_from_env` — `lookback_days()` imports `services.tiles.mvt` there, after
+`_required_env(env, "DATABASE_URL")` and before any database work — so it is caught by the
+config stage's generic handler and exits **2** with `COVERAGE_FRESHNESS_CONFIG_INVALID`,
+not 3. The shipped code is the deliberate one (`config_from_env`'s docstring says so); the
+table row is what was wrong, and it routed an operator with a broken `PYTHONPATH` at the
+threshold knob. The live operator surface (`docs/runbooks/current-production-ops.md` §11.2)
+is corrected in place and the behaviour is now pinned by
+`tests/test_node27_coverage_freshness_alert.py::test_import_time_display_failure_is_a_config_error`.
