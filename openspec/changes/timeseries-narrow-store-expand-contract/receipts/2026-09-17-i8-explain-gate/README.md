@@ -10,8 +10,10 @@ bounds on the largest network. This receipt records why, with the numbers.**
 > §3 blames: `_hyper_9_175_chunk` went from ratio 16 008 / 2 204 buffers to ratio 0 /
 > 27 buffers. Nothing below is rewritten — this is the record of the defect, and §4–§8
 > remain the authority for the compression ratio, the tick pair and the causal proof.
-> The gate's **local API bound** is a separate item that §6.2 below explicitly excluded;
-> it is **RED** in the 2026-09-18 receipt (§2 there) and nothing here supersedes it.
+> The gate's **local API bound** is a separate item that §6.2 below explicitly excluded.
+> In the 2026-09-18 receipt (§2 there) it is **state-dependent**: green on all six cells
+> on a quiescent box (worst 202.7 ms), red on four while a full-cycle ingest saturates the
+> node (worst 955.7 ms, legacy too). Nothing here supersedes that item either way.
 
 Covers these task 5.2 items and no others:
 
