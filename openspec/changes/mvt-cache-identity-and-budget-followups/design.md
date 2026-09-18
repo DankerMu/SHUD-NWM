@@ -67,7 +67,7 @@ OpenSpec change: mvt-cache-identity-and-budget-followups (generated)
 
 1. **fail-closed**：新增一个共享断言 helper，两个 upsert 入口（`seed_qhh_output_segments`、bootstrap 主路径的
    `_assert_complete_qhh_output_segment_geometry` 同一处）都在尾随 backfill 之后、同一 cursor 上调用。谓词**复用 backfill 的
-   候选/源谓词**，逐字如下（`t` = output 行，`s` = 源 reach）：
+   候选/源谓词**（backfill 的源 `Type` 判定在 Python 侧 `is not None`，此处以 SQL `->> IS NOT NULL` 等价表达），如下（`t` = output 行，`s` = 源 reach）：
    `t.river_network_version_id = :rnv AND COALESCE(t.properties_json->>'shud_output_river','false') = 'true'
    AND (t.properties_json->>'shud_riv_index') ~ '^[0-9]+$' AND NOT t.properties_json ? 'Type'
    AND EXISTS (SELECT 1 FROM core.river_segment s WHERE s.river_network_version_id = t.river_network_version_id

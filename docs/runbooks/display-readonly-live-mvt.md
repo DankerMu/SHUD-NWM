@@ -440,7 +440,8 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
   坐标维数超过上限（`*_overflow_count` 为超限要素数，`feature_coordinate_count` / `coordinate_dimension_count`
   为瓦片内单要素最大值，两个 `max_*` 为本次查询实际绑定的上限），共享的 `budget_gate` 因此清空，整张瓦片以
   **HTTP 200、零要素**返回并照常缓存。不限全国层，任何 live MVT 层都可能触发。与 `MVT_TILE_BUDGET_TRUNCATED`
-  **对同一瓦片互斥**（后者要求两个 overflow 计数均为 0）。
+  **对同一瓦片互斥**（后者要求两个 overflow 计数均为 0）。注意：上一条「`layer_id=discharge` 恒指 `hydro-national`」只对
+  TRUNCATED 成立；本记录的 `layer_id=discharge` 既可能来自全国层也可能来自按 run 的 `hydro` 层，以 z/x/y 与请求路径区分。
 - **grep**：`grep -E 'MVT_TILE_BUDGET_TRUNCATED|MVT_TILE_FEATURE_OVERFLOW_BLANKED' /tmp/display-api.log`
   （单查截断：`grep MVT_TILE_BUDGET_TRUNCATED`，单查清空：`grep MVT_TILE_FEATURE_OVERFLOW_BLANKED`）。
 

@@ -11,7 +11,7 @@ THEN `/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf`, `/api/v1/
 WHEN the source/cycle national tile SQL is generated
 THEN the `latest_runs` CTE filters `lower(h.source_id) = :source` and `h.cycle_time = :cycle` in addition to the display-ready and coverage predicates
 AND the tile cache key and `source_version` include `source` and `cycle`
-AND `NATIONAL_DISCHARGE_QUERY_VERSION` equals `fair-network-budget-v5`
+AND `NATIONAL_DISCHARGE_QUERY_VERSION` is bumped whenever the tile bytes change (the current value is pinned by the `postgis-tile-clipping-cache` spec, not here)
 
 #### Scenario: The identity probe binds the same source and cycle as the data CTE
 WHEN the source/cycle national tile SQL is generated
