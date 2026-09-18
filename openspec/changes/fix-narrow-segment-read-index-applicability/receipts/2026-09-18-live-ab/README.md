@@ -58,6 +58,27 @@ it leaves the sub-mechanism behind production's `latest` breach still unproven.
 **The narrow-compressed leg is reproducible after all.** `tasks.md` §4.1 expected `_hyper_9_126_chunk` to
 have aged out; it is still present and still measured, alongside `_hyper_9_150`…`_156`.
 
+## The `IS NOT NULL` guard was measured, not reasoned about — it changes no plan
+
+Added after cross-review (see `design.md`). The open question was whether the guard could perturb the
+planner back toward the defect: `IS NOT NULL` *is* btree-indexable, and on PG 15.2 — node-27's version,
+so no PG17 redundant-`IS NOT NULL` elimination — `nulltestsel` returns `DEFAULT_NOT_UNK_SEL = 0.995`
+with absent statistics, a ×0.995 on the discovery index's estimated tuples. A near-tie flip is not
+settleable by reading the planner source, so the bench settled it.
+
+Same 24 cells, re-run against the guarded template and compared cell by cell with the pre-guard run:
+
+```
+guarded    {"measured": 24, "passed": 23, "failed": 1, "digest_mismatch": 0, "expected_open_excused": 1}
+pre-guard  {"measured": 24, "passed": 23, "failed": 1, "digest_mismatch": 0, "expected_open_excused": 1}
+cells compared: 24 | differences: 0
+```
+
+**Zero differences** — identical index choice, shared hits, filter ratio, row digest and verdict in every
+cell. The structural reason holds in practice: a `NullTest` with `IS_NOT_NULL` never sets `eqQualHere` in
+`btcostestimate`, so it cannot carry the bound-qual prefix past `basin_version_key`, which is what the
+defect needed. Evidence: `matrix-guarded-20260918.json` against `matrix-shipped-20260918.json`.
+
 ## §4.2 — no regression on the three discovery-index consumers
 
 The whole non-test diff between the arms is two files:
@@ -122,6 +143,7 @@ carry #2417 into production (`tasks.md` §6.4's deploy hold). Recorded as blocke
 | `narrow-chunk-stats.sql`, `legacy-chunk-stats.sql` | the `READ ONLY` statistics snapshots |
 | `chunk-stats-output.txt` | their result sets, plus the `pg_attribute.attnotnull` reading — the tables quoted above |
 | `bench-shipped-run.out` | the `1 passed in 33.29s` pytest output for §3's run |
+| `matrix-guarded-20260918.json`, `bench-guarded-run.out` | the same 24 cells re-run with the `IS NOT NULL` guard — 0 differences |
 | `compare-arms-output.txt` | `compare-arms.py`'s console output |
 
 The probes themselves are **not copied here**: they are

@@ -202,8 +202,23 @@ leg is gated by `rt.river_segment_key = (…)`, which deliberately keeps `=` and
 `NOT NULL REFERENCES core.river_network_version` (`db/migrations/000004_core.sql:35`) — so a missing
 network version makes the segment subselect NULL first and the retained `=` hard-gates the row.
 
-An explicit `IS NOT NULL` is nevertheless added beside each rewritten conjunct. Not because the hole is
-live — it is not — but because the argument above makes the branch predicate depend on an upstream
+An explicit `IS NOT NULL` is nevertheless added beside each rewritten conjunct, and **it was measured
+before being believed**: the same 24 cells re-run against the guarded template differ from the unguarded
+run in **nothing** — same index, same shared hits, same ratio, same digest, same verdict in every cell
+(`receipts/2026-09-18-live-ab/matrix-guarded-20260918.json`). That mattered because the guard is not
+obviously free: `IS NOT NULL` is btree-indexable, and on node-27's PG 15.2 there is no PG17
+redundant-`IS NOT NULL` elimination, so `nulltestsel`'s `DEFAULT_NOT_UNK_SEL = 0.995` perturbs the
+discovery index's estimate by ×0.995 under absent statistics. The structural reason it cannot reinstate
+the defect — a `NullTest` with `IS_NOT_NULL` never sets `eqQualHere` in `btcostestimate`, so it cannot
+carry the bound-qual prefix past `basin_version_key` — is confirmed rather than assumed.
+
+The precise claim is **WHERE-equivalence, not truth-table identity**: with either side NULL, `=` yields
+UNKNOWN while the guarded pair yields FALSE, and those are indistinguishable only because the conjunct
+is always a top-level `AND` term of the branch's `WHERE`. That is pinned by a test that executes all
+five NULL/non-NULL cells rather than arguing them.
+
+The guard is there not because the hole is
+live — it is not — but because without it the branch predicate depends on an upstream
 validator that two subclasses override to a no-op (`packages/common/forecast_curve_capture.py:82`,
 `packages/common/node27_pgdata_workload_query.py:119`). §2.2 rejected C2 for moving identity
 verification out of the branch scan; accepting an equivalent dependency inside C1 would be the same
