@@ -118,23 +118,135 @@ class _ResolvedRuns:
         return {"pushdown_run_keys": list(self.run_keys), "pushdown_run_ids": list(self.run_ids)}
 
 
+# ---------------------------------------------------------------------------
+# #2451 tasks.md §2.1 — the C1 / C2 measurement spike
+#
+# THROWAWAY. Two candidate mechanisms have to be measured across design.md's
+# condition cross product before either is committed to, and a measurement that
+# needs two checkouts is not a measurement the bench can run in one process
+# against one seeded database. So both live behind ONE selection point, read
+# from the environment at render time.
+#
+# The default is not "roughly the same": with the variable unset — and with it
+# set to "" — `_segment_rows_source_sql` renders BYTE-IDENTICAL SQL to the
+# pre-spike tree, pinned by sha256 in
+# `tests/test_river_ts_segment_spike.py`. Nothing in the product reads this
+# variable in production; when §2.2 selects a candidate, the switch is deleted
+# and the selected form becomes the only form.
+#
+# An unrecognised value RAISES. Falling back to the base rendering would let a
+# bench run measure base under a candidate's label, which is the one failure
+# mode that would silently corrupt the selection §2.2 makes.
+# ---------------------------------------------------------------------------
+
+SEGMENT_SPIKE_ENV_VAR = "NWM_RIVER_TS_SEGMENT_SPIKE"
+SEGMENT_SPIKE_BASE = ""
+SEGMENT_SPIKE_C1 = "c1"
+SEGMENT_SPIKE_C2 = "c2"
+SEGMENT_SPIKE_VARIANTS: tuple[str, ...] = (SEGMENT_SPIKE_BASE, SEGMENT_SPIKE_C1, SEGMENT_SPIKE_C2)
+
+#: The two conjuncts design.md F4 pins as permanent, spelled exactly as
+#: `_SEGMENT_ROWS_SOURCE_SQL` spells them. Both candidates rewrite these and
+#: nothing else, so both are expressed as exact-substring surgery: a template
+#: edit that renames or reflows either one raises here instead of quietly
+#: rendering the base form under a candidate's label.
+_C1_REWRITES: tuple[tuple[str, str], ...] = (
+    ("  AND rt.basin_version_key = (\n", "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n"),
+    ("  AND rt.river_network_version_key = (\n", "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"),
+)
+
+_C2_BASIN_CONJUNCT = """  AND rt.basin_version_key = (
+      SELECT basin_version_key FROM core.basin_version
+      WHERE basin_version_id = %(basin_version_id)s
+  )
+"""
+_C2_NETWORK_CONJUNCT = """  AND rt.river_network_version_key = (
+      SELECT river_network_version_key FROM core.river_network_version
+      WHERE river_network_version_id = %(river_network_version_id)s
+  )
+"""
+_C2_SELECT_LIST = "SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\n"
+#: C2 has to project `basin_version_key` out of the branch for the outer layer to
+#: verify it; the branch does not select it today.
+_C2_SELECT_LIST_WITH_BASIN = (
+    "SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e\n"
+)
+
+#: C2's outer layer. design.md describes the verification landing in the CALLER's
+#: outer layer; the callers cannot host it as written — 5 of the 8 do not join
+#: `core.river_network_version` and none of them project `basin_version_key` — so
+#: the spike puts it in a layer BETWEEN the `UNION ALL` and the caller, which is
+#: still outside every branch scan. It is spelled as a JOIN to the two authority
+#: tables rather than as a `WHERE` predicate on purpose: a `WHERE` predicate on a
+#: pulled-up `UNION ALL` is distributed back onto every child by
+#: `set_append_rel_size`, which would put the conjunct straight back into the
+#: branch scan and make C2 a no-op. Both joins are 1:1 (`basin_version_key` and
+#: `river_network_version_key` are the authority tables' surrogate primary keys),
+#: so row identity is unchanged.
+_C2_OUTER_LAYER_SQL = """(SELECT
+    rt_src.run_key, rt_src.river_network_version_key, rt_src.valid_time, rt_src.value, rt_src.unit_e
+FROM (
+{branches}
+) rt_src
+JOIN core.basin_version spike_bv
+  ON spike_bv.basin_version_key = rt_src.basin_version_key
+ AND spike_bv.basin_version_id = %(basin_version_id)s
+JOIN core.river_network_version spike_rnv
+  ON spike_rnv.river_network_version_key = rt_src.river_network_version_key
+ AND spike_rnv.river_network_version_id = %(river_network_version_id)s)"""
+
+
+def _segment_spike_variant() -> str:
+    """Which candidate the environment selects; ``""`` is base and is the default."""
+    variant = os.getenv(SEGMENT_SPIKE_ENV_VAR, SEGMENT_SPIKE_BASE).strip()
+    if variant not in SEGMENT_SPIKE_VARIANTS:
+        raise ValueError(
+            f"{SEGMENT_SPIKE_ENV_VAR}={variant!r} is not a #2451 spike variant "
+            f"(expected one of {list(SEGMENT_SPIKE_VARIANTS)})"
+        )
+    return variant
+
+
+def _apply_exact(text: str, replacements: tuple[tuple[str, str], ...], variant: str) -> str:
+    for needle, replacement in replacements:
+        if needle not in text:
+            raise ValueError(
+                f"#2451 spike {variant!r}: the segment-rows template no longer contains {needle!r}; "
+                "the spike would render the base form under a candidate's label"
+            )
+        text = text.replace(needle, replacement)
+    return text
+
+
 def _segment_rows_source_template(store: str, run_pushdown: str = "") -> str:
     if store == "legacy":
-        return _SEGMENT_ROWS_SOURCE_SQL.format(
-            store_predicate="h.timeseries_store = 'legacy'",
-            run_pushdown=run_pushdown,
+        store_predicate = "h.timeseries_store = 'legacy'"
+    elif store == "narrow":
+        store_predicate = "h.timeseries_store = 'narrow'"
+    else:
+        raise ValueError(f"Invalid river timeseries store: {store!r}")
+    template = _SEGMENT_ROWS_SOURCE_SQL
+    variant = _segment_spike_variant()
+    if variant == SEGMENT_SPIKE_C1:
+        template = _apply_exact(template, _C1_REWRITES, variant)
+    elif variant == SEGMENT_SPIKE_C2:
+        template = _apply_exact(
+            template,
+            (
+                (_C2_SELECT_LIST, _C2_SELECT_LIST_WITH_BASIN),
+                (_C2_BASIN_CONJUNCT, ""),
+                (_C2_NETWORK_CONJUNCT, ""),
+            ),
+            variant,
         )
-    if store == "narrow":
-        return _SEGMENT_ROWS_SOURCE_SQL.format(
-            store_predicate="h.timeseries_store = 'narrow'",
-            run_pushdown=run_pushdown,
-        )
-    raise ValueError(f"Invalid river timeseries store: {store!r}")
+    return template.format(store_predicate=store_predicate, run_pushdown=run_pushdown)
 
 
 def _segment_rows_source_sql(run_pushdown: str = "") -> str:
     legacy = render_river_ts_sql(_segment_rows_source_template("legacy", run_pushdown), "legacy").sql
     narrow = render_river_ts_sql(_segment_rows_source_template("narrow", run_pushdown), "narrow").sql
+    if _segment_spike_variant() == SEGMENT_SPIKE_C2:
+        return _C2_OUTER_LAYER_SQL.format(branches=f"{legacy}\nUNION ALL\n{narrow}")
     return f"({legacy}\nUNION ALL\n{narrow})"
 
 

@@ -72,11 +72,30 @@ Ways this harness could be green for the wrong reason — named, not hidden
    chunk holding several basin versions would not, and a candidate selected here
    would not have been tested against that. Residual, carried deliberately.
 
+The candidate variants (tasks.md §2.1)
+--------------------------------------
+
+Every cell is measured THREE times in one process against ONE seeded database:
+``base`` (today's SQL), ``c1`` and ``c2``, selected through
+``NWM_RIVER_TS_SEGMENT_SPIKE`` (``packages/common/forecast_store.py``). Two
+properties of the loop are load-bearing and neither is incidental:
+
+* all three variants measure their NATURAL statistics state BEFORE the single
+  ``ANALYZE``, and all three measure ``fresh`` after it. Per-variant
+  seed/analyse/measure would destroy the absent-and-stale state the first
+  variant is measured in, and every later variant would be a ``fresh`` cell
+  wearing an ``absent`` label. ``EXPLAIN`` does not change statistics and
+  autovacuum is off per chunk, so re-measuring is free of that hazard;
+* every cell's row digest is compared against the BASE variant's digest for the
+  same cell. A candidate that returns different rows is disqualified regardless
+  of plan quality (must-preserve #1), and that disqualification is recorded on
+  the cell — the cell row shows ``F`` — not only as a top-level finding.
+
 Run on node-27 against a throwaway database:
 
     mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
     NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=... \\
-        NHMS_STATS_PROOF_OUTPUT=/home/nwm/tmp/2451-stats-proof.json \\
+        NHMS_STATS_PROOF_OUTPUT=/home/nwm/tmp/2451/matrix.json \\
         uv run pytest -q tests/test_river_timeseries_stats_index_choice_integration.py
 """
 
@@ -86,14 +105,20 @@ import hashlib
 import inspect
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common.forecast_store import PsycopgForecastStore
+from packages.common.forecast_store import (
+    SEGMENT_SPIKE_BASE,
+    SEGMENT_SPIKE_C1,
+    SEGMENT_SPIKE_C2,
+    SEGMENT_SPIKE_ENV_VAR,
+    PsycopgForecastStore,
+)
 from packages.common.node27_pgdata_workload_plan import evaluate_explain_json_plan
 from tests.integration_helpers import (
     BASIN_VERSION_ID,
@@ -102,7 +127,13 @@ from tests.integration_helpers import (
     apply_migrations_from_zero,
     seed_issue_126_data,
 )
-from tests.river_ts_plan_criteria import DEFAULT_SHARED_HIT_MULTIPLE, cell_row, evaluate_cell, walk_plan
+from tests.river_ts_plan_criteria import (
+    DEFAULT_SHARED_HIT_MULTIPLE,
+    SHARED_HIT_ABSOLUTE_FLOOR,
+    cell_row,
+    evaluate_cell,
+    walk_plan,
+)
 from tests.river_ts_stats_matrix_seed import (
     EXPECTED_SERIES_BY_SHAPE,
     EXPECTED_UNCONSTRUCTIBLE,
@@ -135,6 +166,34 @@ _FILTER_RATIO_LIMIT: int = inspect.signature(evaluate_explain_json_plan).paramet
 
 _EXPLAIN_ROUNDS = 2
 _MCV_COLUMNS = ("run_key", "river_segment_key", "run_id", "river_segment_id")
+
+#: tasks.md §2.1's candidate set, as (label, env value). ``base`` MUST come
+#: first: it supplies the row digest every other variant is compared against.
+BASE_VARIANT = "base"
+SPIKE_VARIANTS: tuple[tuple[str, str], ...] = (
+    (BASE_VARIANT, SEGMENT_SPIKE_BASE),
+    ("c1", SEGMENT_SPIKE_C1),
+    ("c2", SEGMENT_SPIKE_C2),
+)
+
+
+@contextmanager
+def _spike_variant(value: str) -> Iterator[None]:
+    """Select one candidate for the duration of a block, and put it back.
+
+    ``try``/``finally`` rather than a bare assignment: a leaked ``c2`` would make
+    every later module in the same pytest process render a candidate's SQL under
+    no label at all, which is a silent way to measure the wrong thing.
+    """
+    previous = os.environ.get(SEGMENT_SPIKE_ENV_VAR)
+    os.environ[SEGMENT_SPIKE_ENV_VAR] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
+        else:
+            os.environ[SEGMENT_SPIKE_ENV_VAR] = previous
 
 
 # ---------------------------------------------------------------------------
@@ -426,23 +485,54 @@ def test_segment_read_binds_the_segment_key_across_the_condition_cross_product(
         "issue": 2451,
         "filter_ratio_limit": _FILTER_RATIO_LIMIT,
         "shared_hit_multiple": DEFAULT_SHARED_HIT_MULTIPLE,
+        "shared_hit_absolute_floor": SHARED_HIT_ABSOLUTE_FLOOR,
         "explain_rounds": _EXPLAIN_ROUNDS,
         "expected_unconstructible": sorted("/".join(triple) for triple in EXPECTED_UNCONSTRUCTIBLE),
+        "spike_env_var": SEGMENT_SPIKE_ENV_VAR,
+        "variants": [label for label, _value in SPIKE_VARIANTS],
+        "base_variant": BASE_VARIANT,
     }
     with _evidence_dump(evidence):
         cells, findings = _measure_matrix(throwaway_database_url, evidence)
 
+    # Read back out of the evidence rather than recomputed here: the dump is
+    # written in `_evidence_dump`'s `finally`, so anything computed AFTER that
+    # block would be in this message and never in matrix.json — and the parent
+    # reads the JSON, while this message only exists when the gate is red.
+    summary: dict[str, dict[str, int]] = evidence["variant_summary"]
     table = "\n".join("  " + cell_row(cell) for cell in cells)
+    summary_table = "\n".join(
+        f"  {label}: {counts['passed']} passed / {counts['failed']} failed of {counts['measured']} measured"
+        f" (digest mismatches vs base: {counts['digest_mismatch']})"
+        for label, counts in summary.items()
+    )
     failing = [cell for cell in cells if not cell["passed"]]
     reported = findings + [
-        f"{cell['cell_key']}: " + "; ".join(cell["failures"]) for cell in failing
+        f"{cell['variant']}/{cell['cell_key']}: " + "; ".join(cell["failures"]) for cell in failing
     ]
     assert not reported, (
         f"#2451 gate: {len(failing)} of {len(cells)} measured cells failed, {len(findings)} finding(s).\n"
         + "\n".join(f"  - {line}" for line in reported)
+        + f"\n\nper-variant summary:\n{summary_table}"
         + f"\n\nper-cell table (criteria = 1,2,3; P pass / F fail / - not evaluated):\n{table}"
         + f"\n\nevidence: {evidence.get('dump_path')}"
     )
+
+
+def _variant_summary(cells: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """The per-variant pass/fail table tasks.md §2.1 reads to choose a candidate."""
+    summary: dict[str, dict[str, int]] = {
+        label: {"measured": 0, "passed": 0, "failed": 0, "digest_mismatch": 0} for label, _value in SPIKE_VARIANTS
+    }
+    for cell in cells:
+        counts = summary.setdefault(
+            str(cell["variant"]), {"measured": 0, "passed": 0, "failed": 0, "digest_mismatch": 0}
+        )
+        counts["measured"] += 1
+        counts["passed" if cell["passed"] else "failed"] += 1
+        if cell.get("digest_matches_base") is False:
+            counts["digest_mismatch"] += 1
+    return summary
 
 
 def _measure_matrix(
@@ -468,7 +558,7 @@ def _measure_matrix(
         post_connection.close()
 
     findings: list[str] = []
-    measurements: dict[tuple[str, str, str], dict[str, Any]] = {}
+    measurements: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     usable: list[Scenario] = []
 
     connection = _connect(database_url)
@@ -486,9 +576,19 @@ def _measure_matrix(
             usable.append(scenario)
             findings.extend(_precondition_findings(scenario, state))
 
-        for scenario in usable:
-            for shape in SHAPES:
-                _record(measurements, findings, connection, scenario, shape, scenario.statistics, evidence)
+        # EVERY variant measures the natural (absent / stale) statistics state
+        # BEFORE the single ANALYZE below. Do not "simplify" this into a
+        # per-variant seed/analyse/measure loop: the first variant's ANALYZE
+        # would leave every later variant measuring fresh statistics under an
+        # `absent` label, and the cross product's whole point is that a candidate
+        # holding only after ANALYZE has fixed nothing.
+        for label, value in SPIKE_VARIANTS:
+            with _spike_variant(value):
+                for scenario in usable:
+                    for shape in SHAPES:
+                        _record(
+                            measurements, findings, connection, scenario, shape, scenario.statistics, evidence, label
+                        )
 
         evidence["analyze"] = _analyze_everything(connection, usable, evidence["scenarios"])
         for scenario in usable:
@@ -507,9 +607,11 @@ def _measure_matrix(
                     f"{scenario.hypertable} (000059 sets the owner to nhms_ingest_rw)"
                 )
 
-        for scenario in usable:
-            for shape in SHAPES:
-                _record(measurements, findings, connection, scenario, shape, "fresh", evidence)
+        for label, value in SPIKE_VARIANTS:
+            with _spike_variant(value):
+                for scenario in usable:
+                    for shape in SHAPES:
+                        _record(measurements, findings, connection, scenario, shape, "fresh", evidence, label)
     finally:
         connection.close()
 
@@ -517,13 +619,14 @@ def _measure_matrix(
 
 
 def _record(
-    measurements: dict[tuple[str, str, str], dict[str, Any]],
+    measurements: dict[tuple[str, str, str, str], dict[str, Any]],
     findings: list[str],
     connection: Any,
     scenario: Scenario,
     shape: str,
     statistics: str,
     evidence: Mapping[str, Any],
+    variant: str,
 ) -> None:
     """Measure one cell, recording a failure as a finding instead of aborting.
 
@@ -532,9 +635,13 @@ def _record(
     """
     chunk_relation = str(evidence["scenarios"][scenario.key]["chunk"]["chunk_name"])
     try:
-        measurements[(scenario.key, shape, statistics)] = _measure(connection, scenario, shape, chunk_relation)
+        measurements[(variant, scenario.key, shape, statistics)] = _measure(
+            connection, scenario, shape, chunk_relation
+        )
     except Exception as error:  # noqa: BLE001 - a cell that cannot be measured is a finding
-        findings.append(f"CELL NOT MEASURED {shape}/{statistics}/{scenario.key}: {type(error).__name__}: {error}")
+        findings.append(
+            f"CELL NOT MEASURED {variant}/{shape}/{statistics}/{scenario.key}: {type(error).__name__}: {error}"
+        )
 
 
 def _scenario_state(connection: Any, scenario: Scenario, construction: Mapping[str, Any]) -> dict[str, Any]:
@@ -692,87 +799,147 @@ def _analyze_everything(
 
 
 def _judge(
-    measurements: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    measurements: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
     evidence: dict[str, Any],
     findings: list[str],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Turn the raw measurements into the per-cell table tasks.md §2.1 consumes.
+    """Turn the raw measurements into the per-variant table tasks.md §2.1 consumes.
 
     The ``fresh`` cells are judged on criteria 1 and 2 only and then supply
-    criterion 3's baseline to their own scenario+shape — but only if they passed
-    those two, so a broken ``fresh`` plan cannot inflate the bound into silence.
+    criterion 3's baseline to their own variant+scenario+shape — but only if they
+    passed those two, so a broken ``fresh`` plan cannot inflate the bound into
+    silence. The baseline is PER VARIANT: a candidate is judged against the plan
+    the same candidate produces with statistics, which is the comparison
+    design.md asks for. The base variant's own fresh measurement is recorded
+    beside it (``base_fresh_shared_hits``) so a cross-variant read is available
+    from the JSON without re-running anything.
     """
     cells: list[dict[str, Any]] = []
-    baselines: dict[tuple[str, str], int | None] = {}
-    for scenario in SCENARIOS:
-        for shape in SHAPES:
-            measurement = measurements.get((scenario.key, shape, "fresh"))
-            if measurement is None:
-                continue
-            # `fresh@absent` / `fresh@stale`: both scenarios of a branch x chunk
-            # pair become `fresh` after ANALYZE, but they are DIFFERENT chunks
-            # holding different rows, and each supplies criterion 3's baseline to
-            # its own scenario. Collapsing them to one label would overwrite one
-            # baseline with the other's.
-            cell = _cell(scenario, shape, f"fresh@{scenario.statistics}", measurement, baseline=None)
-            cells.append(cell)
-            usable = cell["criterion_1_segment_identity_bound"] and cell["criterion_2_filter_ratio"]
-            baselines[(scenario.key, shape)] = cell["max_shared_hit_blocks"] if usable else None
-            if not usable:
-                findings.append(
-                    f"BASELINE LOST {cell['cell_key']}: the post-ANALYZE plan itself failed criterion "
-                    f"{'1' if not cell['criterion_1_segment_identity_bound'] else '2'}, so criterion 3 has no "
-                    "trustworthy bound for this scenario and is recorded as not evaluated"
+    baselines: dict[tuple[str, str, str], int | None] = {}
+    for variant, _value in SPIKE_VARIANTS:
+        for scenario in SCENARIOS:
+            for shape in SHAPES:
+                measurement = measurements.get((variant, scenario.key, shape, "fresh"))
+                if measurement is None:
+                    continue
+                # `fresh@absent` / `fresh@stale`: both scenarios of a branch x
+                # chunk pair become `fresh` after ANALYZE, but they are DIFFERENT
+                # chunks holding different rows, and each supplies criterion 3's
+                # baseline to its own scenario. Collapsing them to one label
+                # would overwrite one baseline with the other's.
+                cell = _cell(
+                    scenario, shape, f"fresh@{scenario.statistics}", measurement, baseline=None, variant=variant
+                )
+                cells.append(cell)
+                usable = cell["criterion_1_segment_identity_bound"] and cell["criterion_2_filter_ratio"]
+                baselines[(variant, scenario.key, shape)] = cell["max_shared_hit_blocks"] if usable else None
+                if not usable:
+                    findings.append(
+                        f"BASELINE LOST {variant}/{cell['cell_key']}: the post-ANALYZE plan itself failed criterion "
+                        f"{'1' if not cell['criterion_1_segment_identity_bound'] else '2'}, so criterion 3 has no "
+                        "trustworthy bound for this scenario and is recorded as not evaluated"
+                    )
+
+    for variant, _value in SPIKE_VARIANTS:
+        for scenario in SCENARIOS:
+            for shape in SHAPES:
+                measurement = measurements.get((variant, scenario.key, shape, scenario.statistics))
+                if measurement is None:
+                    continue
+                cells.append(
+                    _cell(
+                        scenario,
+                        shape,
+                        scenario.statistics,
+                        measurement,
+                        baseline=baselines.get((variant, scenario.key, shape)),
+                        variant=variant,
+                    )
                 )
 
-    for scenario in SCENARIOS:
-        for shape in SHAPES:
-            measurement = measurements.get((scenario.key, shape, scenario.statistics))
-            if measurement is None:
-                continue
-            cells.append(
-                _cell(
-                    scenario,
-                    shape,
-                    scenario.statistics,
-                    measurement,
-                    baseline=baselines.get((scenario.key, shape)),
-                )
-            )
+    for cell in cells:
+        cell["base_fresh_shared_hits"] = baselines.get((BASE_VARIANT, cell["scenario"], cell["shape"]))
 
     # Coverage, asserted rather than assumed: a harness that measured NOTHING
     # would satisfy every criterion above vacuously, which is the module-level
-    # version of the empty-extract trap.
-    present = {cell["cell_key"] for cell in cells}
-    for scenario in SCENARIOS:
-        if scenario.triple in EXPECTED_UNCONSTRUCTIBLE:
-            continue
-        for shape in SHAPES:
-            for statistics in (scenario.statistics, f"fresh@{scenario.statistics}"):
-                key = f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}"
-                if key not in present:
-                    findings.append(
-                        f"CELL MISSING {key}: a required cell of design.md's condition cross product was not "
-                        "measured, so the gate would be green for a condition it never tested"
-                    )
+    # version of the empty-extract trap. Scoped per VARIANT, so a candidate that
+    # failed to render (and therefore measured nothing) is a finding rather than
+    # an empty pass.
+    present = {(cell["variant"], cell["cell_key"]) for cell in cells}
+    for variant, _value in SPIKE_VARIANTS:
+        for scenario in SCENARIOS:
+            if scenario.triple in EXPECTED_UNCONSTRUCTIBLE:
+                continue
+            for shape in SHAPES:
+                for statistics in (scenario.statistics, f"fresh@{scenario.statistics}"):
+                    key = f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}"
+                    if (variant, key) not in present:
+                        findings.append(
+                            f"CELL MISSING {variant}/{key}: a required cell of design.md's condition cross product "
+                            "was not measured, so the gate would be green for a condition it never tested"
+                        )
 
-    # Must-preserve #1, within a scenario: the rows one shape returns may not
-    # depend on the statistics state. If they do, the plan comparison between the
-    # two states is a comparison of two different questions. Grouped per SCENARIO
-    # because each scenario owns its own segments and runs, so digests are
-    # expected to differ ACROSS scenarios.
+    # Must-preserve #1, within a variant+scenario: the rows one shape returns may
+    # not depend on the statistics state. If they do, the plan comparison between
+    # the two states is a comparison of two different questions. Grouped per
+    # SCENARIO because each scenario owns its own segments and runs, so digests
+    # are expected to differ ACROSS scenarios.
     digests: dict[str, set[str]] = {}
     for cell in cells:
-        digests.setdefault(f"{cell['scenario']}/{cell['shape']}", set()).add(cell["digest"])
+        digests.setdefault(f"{cell['variant']}/{cell['scenario']}/{cell['shape']}", set()).add(cell["digest"])
     for group, values in sorted(digests.items()):
         if len(values) > 1:
             findings.append(f"ROW IDENTITY {group}: statistics states returned different digests {sorted(values)}")
 
-    cells.sort(key=lambda cell: cell["cell_key"])
+    findings.extend(_compare_digests_against_base(cells))
+
+    cells.sort(key=lambda cell: (cell["variant"], cell["cell_key"]))
     evidence["cells"] = cells
     evidence["cell_table"] = [cell_row(cell) for cell in cells]
+    # Computed HERE, inside the dump context, so the per-variant table §2.2 reads
+    # reaches matrix.json on a red run as well as a green one.
+    evidence["variant_summary"] = _variant_summary(cells)
     evidence["findings"] = findings
     return cells, findings
+
+
+def _compare_digests_against_base(cells: list[dict[str, Any]]) -> list[str]:
+    """Must-preserve #1 ACROSS variants: a candidate may not change the rows.
+
+    Disqualifying regardless of plan quality, so it lands on the CELL — the cell
+    row shows ``F`` and the per-variant summary counts it — not only in the
+    findings list, where a reader comparing two candidates' tables would miss it.
+    """
+    base = {cell["cell_key"]: cell["digest"] for cell in cells if cell["variant"] == BASE_VARIANT}
+    reported: list[str] = []
+    for cell in cells:
+        if cell["variant"] == BASE_VARIANT:
+            cell["digest_matches_base"] = True
+            continue
+        expected = base.get(cell["cell_key"])
+        if expected is None:
+            # No base measurement for this cell: say so rather than pass by
+            # default. A candidate whose only "evidence" is an unmeasured base is
+            # not evidence of row identity.
+            cell["digest_matches_base"] = None
+            cell["failures"].append(
+                f"ROW IDENTITY: the base variant has no measurement of {cell['cell_key']}, so this candidate's "
+                "row identity is unverified"
+            )
+            cell["passed"] = False
+            reported.append(f"ROW IDENTITY BASE MISSING {cell['variant']}/{cell['cell_key']}")
+            continue
+        cell["digest_matches_base"] = cell["digest"] == expected
+        if not cell["digest_matches_base"]:
+            cell["failures"].append(
+                f"ROW IDENTITY: digest {cell['digest']} differs from the base variant's {expected}; "
+                "a candidate that changes the returned rows is disqualified regardless of plan quality"
+            )
+            cell["passed"] = False
+            reported.append(
+                f"ROW IDENTITY {cell['variant']}/{cell['cell_key']}: {cell['digest']} != base {expected}"
+            )
+    return reported
 
 
 def _cell(
@@ -782,6 +949,7 @@ def _cell(
     measurement: Mapping[str, Any],
     *,
     baseline: int | None,
+    variant: str = BASE_VARIANT,
 ) -> dict[str, Any]:
     chunk_relation = str(measurement.get("chunk_relation") or "")
     cell = evaluate_cell(
@@ -794,6 +962,7 @@ def _cell(
     cell.update(
         {
             "cell_key": f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}",
+            "variant": variant,
             "shape": shape,
             "statistics": statistics,
             "chunk_state": scenario.chunk_state,

@@ -44,13 +44,19 @@ BRANCH_IDENTITY_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "legacy": ("river_segment_id", "river_segment_key"),
 }
 
-#: Criterion 3's bound: a node may read at most this multiple of the SAME
-#: cell's post-``ANALYZE`` baseline. The throwaway fixture measured 27 shared
-#: hits for the good (primary-key) plan against 1581 for the bad (discovery
-#: index) one — a factor of 58 — so 8 leaves a 7x margin for plan noise while
-#: still rejecting the "segment key late in the Index Cond" shape criterion 3
-#: exists to catch.
+#: Criterion 3's RELATIVE bound: a node may read at most this multiple of the
+#: SAME cell's post-``ANALYZE`` baseline. The throwaway fixture measured 27
+#: shared hits for the good (primary-key) plan against 1581 for the bad
+#: (discovery index) one — a factor of 58 — so 8 leaves a 7x margin while still
+#: rejecting the "segment key late in the Index Cond" shape criterion 3 exists to
+#: catch. The multiple ALONE is not the verdict: see
+#: :data:`SHARED_HIT_ABSOLUTE_FLOOR`.
 DEFAULT_SHARED_HIT_MULTIPLE = 8
+
+#: Criterion 3's ABSOLUTE floor, in 8 kB buffers. A node reading fewer than 256
+#: buffers (2 MB) cannot represent a full-network segment scan at any geometry
+#: this bench seeds, so below that the count is dominated by index descent.
+SHARED_HIT_ABSOLUTE_FLOOR = 256
 
 
 def walk_plan(node: Mapping[str, Any], depth: int = 0) -> Iterator[tuple[int, Mapping[str, Any]]]:
@@ -212,6 +218,7 @@ def evaluate_cell(
     filter_ratio_limit: int,
     shared_hit_baseline: int | None = None,
     shared_hit_multiple: int = DEFAULT_SHARED_HIT_MULTIPLE,
+    shared_hit_absolute_floor: int = SHARED_HIT_ABSOLUTE_FLOOR,
 ) -> dict[str, Any]:
     """Judge one cell's fact-reading nodes against design.md's three criteria.
 
@@ -220,6 +227,22 @@ def evaluate_cell(
     is recorded as ``None`` (not evaluated) rather than silently passing — a
     baseline taken from a plan that itself failed criteria 1 or 2 would be
     inflated and would make criterion 3 unfalsifiable.
+
+    Criterion 3 fails a node only when BOTH bounds are exceeded: the multiple of
+    the baseline AND ``shared_hit_absolute_floor``. The 2026-09-18 run measured
+    why (matrix.json, base variant): ``latest/absent/legacy/uncompressed`` read
+    51 shared hits against a baseline of 8 (limit 64) and PASSED, while
+    ``latest/absent/narrow/uncompressed`` read 50 against a baseline of 6
+    (limit 48) and FAILED — the same healthy plan shape, the segment key bound in
+    the ``Index Cond``, ratio 0.0 in both, and the verdict flipping only on which
+    post-``ANALYZE`` integer the baseline happened to land on. The genuine defect
+    cells in the same run sat at 5977 and 12841 shared hits against baselines of
+    3 and 4. The multiple alone therefore could not tell "the planner picked a
+    different but healthy index" from "the node reads the whole network"; the
+    floor is what separates them. BOTH verdicts are recorded per node and per
+    cell — ``criterion_3_multiple_exceeded`` and ``shared_hit_multiple_observed``
+    beside the floored ``criterion_3_pass`` — so an archived run stays re-readable
+    under either rule without being re-measured.
     """
     nodes = extract_cell_nodes(
         plan,
@@ -236,10 +259,26 @@ def evaluate_cell(
 
     criterion_1: bool | None = all(node["criterion_1_pass"] for node in nodes) if nodes else False
     criterion_2: bool | None = all(not node["breaks_filter_ratio"] for node in nodes) if nodes else False
+    for node in nodes:
+        if shared_hit_limit is None:
+            node["shared_hit_multiple_observed"] = None
+            node["criterion_3_multiple_exceeded"] = None
+            node["criterion_3_pass"] = None
+            continue
+        hits = node["shared_hit_blocks"]
+        # `max(baseline, 1)`: a post-ANALYZE plan may legitimately measure 0
+        # shared hits (an all-read cold cell, or a compressed child that pruned
+        # to nothing), and the OBSERVED multiple must stay a readable number
+        # rather than a ZeroDivisionError inside the criterion it describes.
+        node["shared_hit_multiple_observed"] = hits / max(int(shared_hit_baseline or 0), 1)
+        node["criterion_3_multiple_exceeded"] = hits > shared_hit_limit
+        node["criterion_3_pass"] = not (hits > shared_hit_limit and hits > shared_hit_absolute_floor)
     if shared_hit_limit is None:
         criterion_3: bool | None = None
+        criterion_3_multiple_exceeded: bool | None = None
     else:
-        criterion_3 = all(node["shared_hit_blocks"] <= shared_hit_limit for node in nodes) if nodes else False
+        criterion_3 = all(node["criterion_3_pass"] for node in nodes) if nodes else False
+        criterion_3_multiple_exceeded = any(node["criterion_3_multiple_exceeded"] for node in nodes) if nodes else True
 
     for node in nodes:
         label = f"{node['node_type']}({node['relation']}) index={node['index_names'] or None}"
@@ -253,10 +292,11 @@ def evaluate_cell(
                 f"criterion 2 [{label}]: removed {node['removed_total']} / returned {node['returned_total']} "
                 f"= {node['filter_ratio']:.1f} exceeds filter_ratio_limit {filter_ratio_limit}"
             )
-        if shared_hit_limit is not None and node["shared_hit_blocks"] > shared_hit_limit:
+        if node.get("criterion_3_pass") is False:
             failures.append(
-                f"criterion 3 [{label}]: {node['shared_hit_blocks']} shared hits exceed "
-                f"{shared_hit_multiple} x the post-ANALYZE baseline {shared_hit_baseline} = {shared_hit_limit}"
+                f"criterion 3 [{label}]: {node['shared_hit_blocks']} shared hits exceed BOTH "
+                f"{shared_hit_multiple} x the post-ANALYZE baseline {shared_hit_baseline} = {shared_hit_limit} "
+                f"AND the absolute floor {shared_hit_absolute_floor}"
             )
 
     return {
@@ -266,6 +306,7 @@ def evaluate_cell(
         "shared_hit_baseline": shared_hit_baseline,
         "shared_hit_multiple": shared_hit_multiple,
         "shared_hit_limit": shared_hit_limit,
+        "shared_hit_absolute_floor": shared_hit_absolute_floor,
         "node_count": len(nodes),
         "nodes": nodes,
         "node_types": [node["node_type"] for node in nodes],
@@ -274,7 +315,19 @@ def evaluate_cell(
         "max_shared_hit_blocks": max((node["shared_hit_blocks"] for node in nodes), default=0),
         "criterion_1_segment_identity_bound": criterion_1,
         "criterion_2_filter_ratio": criterion_2,
+        # The FLOORED verdict, and beside it the raw multiple comparison the
+        # 2026-09-18 run was judged by, so that run stays re-readable under the
+        # new rule without being re-measured.
         "criterion_3_shared_hits": criterion_3,
+        "criterion_3_multiple_exceeded": criterion_3_multiple_exceeded,
+        "shared_hit_multiple_observed": max(
+            (
+                node["shared_hit_multiple_observed"]
+                for node in nodes
+                if node["shared_hit_multiple_observed"] is not None
+            ),
+            default=None,
+        ),
         # DATA, never an assertion: which cells reproduce #2451 is what the
         # per-cell table reports to tasks.md 2.1, and it must stay readable after
         # a candidate makes them all green.
@@ -285,7 +338,13 @@ def evaluate_cell(
 
 
 def cell_row(cell: Mapping[str, Any]) -> str:
-    """One line of the per-cell result table tasks.md 2.1 consumes."""
+    """One line of the per-cell result table tasks.md 2.1 consumes.
+
+    ``multiple_exceeded`` is printed beside the floored verdict rather than
+    replaced by it: a cell that trips the multiple but not the floor is the
+    adjacency the 2026-09-18 run mis-judged, and it must stay VISIBLE in the
+    table rather than becoming an invisible pass.
+    """
     criteria = "".join(
         {True: "P", False: "F", None: "-"}[cell[key]]
         for key in (
@@ -294,10 +353,18 @@ def cell_row(cell: Mapping[str, Any]) -> str:
             "criterion_3_shared_hits",
         )
     )
+    label = cell.get("cell_key", cell["chunk_relation"])
+    variant = cell.get("variant")
+    if variant:
+        label = f"{variant}/{label}"
+    observed = cell.get("shared_hit_multiple_observed")
     return (
-        f"{cell.get('cell_key', cell['chunk_relation'])}: criteria={criteria} "
+        f"{label}: criteria={criteria} "
         f"nodes={cell['node_count']} types={cell['node_types']} index={cell['index_names']} "
         f"ratio={cell['worst_filter_ratio']:.1f} hits={cell['max_shared_hit_blocks']} "
-        f"(baseline={cell['shared_hit_baseline']} limit={cell['shared_hit_limit']}) "
+        f"(baseline={cell['shared_hit_baseline']} limit={cell['shared_hit_limit']} "
+        f"floor={cell.get('shared_hit_absolute_floor')} "
+        f"observed_multiple={'n/a' if observed is None else format(observed, '.1f')} "
+        f"multiple_exceeded={cell.get('criterion_3_multiple_exceeded')}) "
         f"defect_reproduced={cell['defect_reproduced']}"
     )

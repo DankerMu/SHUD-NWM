@@ -35,21 +35,27 @@ run-bound shape, and list-shaped response points.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from packages.common.forecast_store import PsycopgForecastStore
+from packages.common.forecast_store import SEGMENT_SPIKE_ENV_VAR, PsycopgForecastStore
 from tests.river_ts_plan_criteria import cell_row
 from tests.river_ts_stats_matrix_seed import SCENARIOS, STEP_COUNT, _parse_array_literal
 from tests.test_river_timeseries_stats_index_choice_integration import (
+    SPIKE_VARIANTS,
     _capture_fact_statement,
     _cell,
+    _compare_digests_against_base,
+    _judge,
     _measure,
     _RecordingForecastStore,
     _relation_census,
+    _spike_variant,
+    _variant_summary,
     response_point_count,
     statement_digest,
 )
@@ -381,8 +387,12 @@ def test_measure_and_cell_agree_on_every_key_they_exchange(shape: str) -> None:
     assert cell["defect_reproduced"] is True
     assert cell["passed"] is False
     assert cell["cell_key"] == f"{shape}/absent/narrow/uncompressed"
+    assert cell["variant"] == "base"
     assert len(cell["companions"]) == (1 if shape == "latest" else 0)
-    assert cell_row(cell).startswith(f"{shape}/absent/narrow/uncompressed: criteria=FFF")
+    # The variant leads the row: the table tasks.md §2.1 reads is grouped by
+    # candidate, and a row that did not say which candidate produced it would be
+    # unreadable once three variants share the file.
+    assert cell_row(cell).startswith(f"base/{shape}/absent/narrow/uncompressed: criteria=FFF")
 
 
 def test_a_measurement_whose_statement_never_fetched_is_reported_not_crashed() -> None:
@@ -399,6 +409,128 @@ def test_a_measurement_whose_statement_never_fetched_is_reported_not_crashed() -
     cell = _cell(_NARROW_UNCOMPRESSED_ABSENT, "run_bound", "absent", measurement, baseline=27)
     assert cell["passed"] is False
     assert any("NON-VACUITY" in failure for failure in cell["failures"])
+
+
+# ---------------------------------------------------------------------------
+# The variant machinery (tasks.md 2.1) — offline, because none of it needs a
+# database and all of it can silently corrupt the selection §2.2 makes.
+# ---------------------------------------------------------------------------
+
+
+def _variant_cell(variant: str, cell_key: str, digest: str | None, *, passed: bool = True) -> dict[str, Any]:
+    return {
+        "variant": variant,
+        "cell_key": cell_key,
+        "digest": digest,
+        "passed": passed,
+        "failures": [],
+    }
+
+
+def test_a_candidate_that_changes_the_returned_rows_is_disqualified_on_the_cell() -> None:
+    """Must-preserve #1 across variants: the cell row must show F, not a footnote.
+
+    A reader comparing two candidates' tables reads the rows, not the findings
+    list, so a digest mismatch that only produced a top-level finding would leave
+    a disqualified candidate looking green in the table it is chosen from.
+    """
+    cells = [
+        _variant_cell("base", "latest/absent/narrow/uncompressed", "aaaaaaaaaaaaaaaa"),
+        _variant_cell("c1", "latest/absent/narrow/uncompressed", "aaaaaaaaaaaaaaaa"),
+        _variant_cell("c2", "latest/absent/narrow/uncompressed", "bbbbbbbbbbbbbbbb"),
+    ]
+    reported = _compare_digests_against_base(cells)
+
+    assert cells[0]["digest_matches_base"] is True
+    assert cells[1]["digest_matches_base"] is True and cells[1]["passed"] is True
+    assert cells[2]["digest_matches_base"] is False
+    assert cells[2]["passed"] is False
+    assert any("disqualified regardless of plan quality" in failure for failure in cells[2]["failures"])
+    assert reported == ["ROW IDENTITY c2/latest/absent/narrow/uncompressed: bbbbbbbbbbbbbbbb != base aaaaaaaaaaaaaaaa"]
+
+
+def test_a_candidate_cell_with_no_base_measurement_is_unverified_not_passed() -> None:
+    """Silence from an unmeasured base is not evidence of row identity."""
+    cells = [_variant_cell("c1", "run_bound/stale/legacy/compressed", "aaaaaaaaaaaaaaaa")]
+    reported = _compare_digests_against_base(cells)
+    assert cells[0]["digest_matches_base"] is None
+    assert cells[0]["passed"] is False
+    assert reported == ["ROW IDENTITY BASE MISSING c1/run_bound/stale/legacy/compressed"]
+
+
+def test_the_variant_summary_counts_every_variant_even_one_that_measured_nothing() -> None:
+    """A candidate that rendered nothing must read as 0 measured, not be absent."""
+    cells = [
+        _variant_cell("base", "a", "d1"),
+        _variant_cell("base", "b", "d2", passed=False),
+        _variant_cell("c1", "a", "d1"),
+    ]
+    _compare_digests_against_base(cells)
+    summary = _variant_summary(cells)
+    assert set(summary) == {"base", "c1", "c2"}
+    assert summary["base"] == {"measured": 2, "passed": 1, "failed": 1, "digest_mismatch": 0}
+    assert summary["c1"] == {"measured": 1, "passed": 1, "failed": 0, "digest_mismatch": 0}
+    assert summary["c2"] == {"measured": 0, "passed": 0, "failed": 0, "digest_mismatch": 0}
+
+
+def test_the_per_variant_summary_is_written_into_the_evidence_not_only_the_message() -> None:
+    """``matrix.json`` is what the parent reads; the assertion message is not.
+
+    ``_evidence_dump`` writes the file in a ``finally``, so anything computed
+    after that block would exist only in a red run's message. This asserts the
+    summary is produced by ``_judge`` — which runs inside the dump context.
+    """
+    evidence: dict[str, Any] = {}
+    cells, findings = _judge({}, evidence, [])
+    assert cells == []
+    assert findings, "an empty measurement set must report missing cells, not pass"
+    assert set(evidence) == {"cells", "cell_table", "variant_summary", "findings"}
+    assert set(evidence["variant_summary"]) == {"base", "c1", "c2"}
+    # Every required cell of every variant is reported missing, not silently absent.
+    assert all(any(f"CELL MISSING {variant}/" in finding for finding in findings) for variant in ("base", "c1", "c2"))
+
+
+def test_base_is_first_so_every_other_variant_has_a_digest_to_compare_against() -> None:
+    assert SPIKE_VARIANTS[0] == ("base", "")
+    assert [label for label, _value in SPIKE_VARIANTS] == ["base", "c1", "c2"]
+    assert [value for _label, value in SPIKE_VARIANTS] == ["", "c1", "c2"]
+
+
+def test_the_spike_selection_is_restored_even_when_the_block_raises() -> None:
+    """A leaked ``c2`` would make every later module render a candidate silently."""
+    os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
+    with pytest.raises(RuntimeError), _spike_variant("c2"):
+        assert os.environ[SEGMENT_SPIKE_ENV_VAR] == "c2"
+        raise RuntimeError("boom")
+    assert SEGMENT_SPIKE_ENV_VAR not in os.environ
+
+    os.environ[SEGMENT_SPIKE_ENV_VAR] = "c1"
+    try:
+        with _spike_variant(""):
+            assert os.environ[SEGMENT_SPIKE_ENV_VAR] == ""
+        assert os.environ[SEGMENT_SPIKE_ENV_VAR] == "c1"
+    finally:
+        os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
+
+
+def test_the_selected_variant_reaches_the_sql_the_harness_captures() -> None:
+    """The switch is only a measurement if the CAPTURED statement changes.
+
+    Driven through the same ``_capture_fact_statement`` the harness uses, over
+    the real store, so a variant that never reached the rendered SQL would be
+    measured as three copies of base.
+    """
+    os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
+    base_sql = _capture("run_bound")[0]["sql"]
+    with _spike_variant("c1"):
+        c1_sql = _capture("run_bound")[0]["sql"]
+    with _spike_variant("c2"):
+        c2_sql = _capture("run_bound")[0]["sql"]
+
+    assert "rt.basin_version_key = (" in base_sql
+    assert "rt.basin_version_key IS NOT DISTINCT FROM (" in c1_sql
+    assert "JOIN core.basin_version spike_bv" in c2_sql
+    assert len({base_sql, c1_sql, c2_sql}) == 3
 
 
 def test_the_recording_store_is_the_real_store() -> None:
