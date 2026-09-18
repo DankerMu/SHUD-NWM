@@ -14,9 +14,11 @@ it. That is deliberate:
   * The four legal outcome values below are hardcoded copies of `OUTCOMES` in
     `.claude/skills/subagent-workflow/scripts/review_gate.py`. That module is
     the source of truth for the vocabulary, but it CANNOT be imported here: it
-    is untracked (`git ls-files | grep -ci subagent` returns 0 — `002ba4b59`
-    deliberately untracked the installed skill copies), install-managed, and
-    therefore absent from a plain checkout and from CI.
+    is untracked (`git ls-files | grep -ci subagent` returns 0), install-managed,
+    and therefore absent from a plain checkout and from CI. `.claude/` has been
+    gitignored throughout and that path was never tracked; `002ba4b59` untracked
+    the sibling `.agents/skills/` copies of the same scripts, for the stated
+    reason that every reinstall left permanent working-tree drift.
   * `tests/test_loop_log_audit_attribution.py:26` is the cautionary example: it
     points `SCRIPTS_DIR` at a skill scripts directory that has held no scripts
     since `002ba4b59`, so that whole suite module-level-skips in every checkout

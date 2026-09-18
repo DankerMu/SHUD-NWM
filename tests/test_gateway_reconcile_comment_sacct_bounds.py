@@ -336,8 +336,22 @@ esac
     assert len(started_processes) == 1
     child = started_processes[0]
     assert child.args[0] == str(executable)
-    # A settled returncode proves the production path waited on the child it owns.
-    assert child.returncode is not None
+    if boundary == "wall_time":
+        # This fake ``exec``s ``sleep``, which discards the shell's TERM trap, so it can
+        # leave no ``terminated_path`` marker: the signalled returncode is the only
+        # available proof that production *terminated* the runaway child instead of
+        # merely blocking until it finished on its own.  Both reap paths signal
+        # (SIGTERM -> -15, the ``kill()`` fallback -> -9); any non-negative code means
+        # the child ran to natural completion and was never terminated.
+        assert child.returncode is not None and child.returncode < 0, (
+            "production must terminate and reap the runaway sacct child, but its "
+            f"returncode is {child.returncode!r}; a non-negative code means the child "
+            "exited on its own while production only waited for it"
+        )
+    else:
+        # These fakes keep their TERM trap and ``exit 0``, so termination is proven by
+        # the marker asserted above and a settled returncode proves the reap.
+        assert child.returncode is not None
     with pytest.raises(ChildProcessError):
         os.waitpid(child.pid, os.WNOHANG)
 

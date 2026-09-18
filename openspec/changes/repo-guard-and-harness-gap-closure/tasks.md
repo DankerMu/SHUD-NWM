@@ -6,14 +6,15 @@
 
 - [x] A-1 加 `test_lineage_state_index_fixtures_rule_selects_its_exact_suites`，断言
       `select_tests(["tests/lineage_state_index_fixtures.py"])` 全等于四个消费者 ∪ `SELECTOR_META_GUARD_TEST`
-- [x] A-2 red leg：临时从 `scripts/select_ci_tests.py:1059` 的规则里删掉 `tests/test_scheduler_generation.py`，
+- [x] A-2 red leg：临时从 `scripts/select_ci_tests.py` 里 `tests/lineage_state_index_fixtures.py` 那条规则删掉
+      `tests/test_scheduler_generation.py`，
       记录新测试红、`test_routed_support_module_selects_its_importer_suites_and_the_meta_guard` 仍绿；随后还原
 - [x] A-3 量化 `apps/api/openapi_patching.py` 的 13 个 `_patch_*_openapi`：每个 → 它改的路由/component →
       候选 oracle suite → 是否已在规则 targets 内 → **no-op mutant 下是否真的变红**。结果落 PR body。
       最后一列是判据本身：本模块唯一可观察输出是运行时 OpenAPI document，读静态 yaml 或不读 schema 的
       suite 无论路由多公开都不是它的 oracle
 - [x] A-4 按量化结果逐条补显式字面量 target（不放宽规则），并**更新既有** exact-set 锚
-      `test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers`（`tests/test_select_ci_tests.py:449`）——
+      `tests/test_select_ci_tests.py::test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers`——
       不新增第二条同路径锚；期望集必须保留 `WRITE_SURFACE_SCAN_PATH` 与 `FAMILY_GUARD_PATH`
 - [x] A-5 no-op mutant 实测（不止 precip 一组）：记录每组变红的 suite 集合。
       `_patch_precip_openapi` 组是 issue 的立论依据，必须单独留档——实测它**不支持** issue 的结论
@@ -35,8 +36,8 @@
 - [x] C-1 用记录型 delegating monkeypatch 包 `reconcile_module.subprocess.Popen`，捕获真实 `Popen` 对象
 - [x] C-2 回收断言改用捕获句柄的已完成 returncode；删除对 `FAKE_SACCT_PID_PATH` / `wall_time.pid` 的依赖
 - [x] C-3 保留 `query_unavailable`、`durable_write_count == 0`、pipeline job 未变、无 candidate projection 断言，
-      **以及** `tests/test_gateway_reconcile_comment_sacct_bounds.py:319` 的 `len(repr(...)) < 1_000` 体量边界
-      与 `:322-323` 的 `terminated_path` marker 断言（#2107 验收第 3 条，逐条点名以免被「简化」掉）
+      **以及** `len(repr(outcomes[0])) < 1_000` 的体量边界与 `terminated_path` marker 断言
+      （#2107 验收第 3 条，按符号点名以免被「简化」掉；行号在本 PR 自己的 diff 下会漂，故不写行号）
 - [x] C-4 不改 `services/orchestrator/reconcile.py`；不 skip/xfail/延长 timeout/加重试
 
 ### E. #1829
@@ -70,11 +71,14 @@
 - [x] G-3b 词表违规的失败信息必须指出成因与修法：`close` 未带 `--outcome` 时未跟踪工具的兜底值不在词表内，
       重跑 `close --outcome merged` 即可。这条通道本 PR 修不了（design.md D1），守卫只能抓红并告知修法
 - [x] G-4 `.github/workflows/ci.yml` 的 `backend` filter 加 `.review-gate-issues.json` 字面量，并按仓内既有先例
-      （`tests/test_select_ci_tests.py:2115-2142`、`:2636-2663`、`:10779-10803` 的 #1571/#1860/#1688 pin）
+      （`tests/test_select_ci_tests.py` 的 `test_calibration_declaration_backend_filter_entry_is_block_scoped`
+      与 `test_calibration_declaration_backend_filter_entry_reds_when_removed_or_moved` 等 #1571/#1860/#1688 pin）
       配一条字面量 pin 测试，带「删掉该 filter 条目即红」的变异腿
 - [x] G-5 `scripts/select_ci_tests.py` 加规则把 `.review-gate-issues.json` 路由到 G-2 的测试 + meta-guard，
       并在 `tests/test_select_ci_tests.py` 加 exact-set 锚
-- [x] G-6 在 #2261 上留言说明 5/6 条验收因文件未被跟踪而无法在本仓落地；PR **不写** `Closes #2261`
+- [x] G-6 在 #2261 上留言，逐条列出六条验收的处置：**4 条**（1/3/4/5）因文件未被跟踪而不可在本仓落地、
+      **1 条**（2，JSON 一次性修复）已交付、**1 条**（6，测试通过 + ruff 干净）以新增的仓库侧守卫
+      而非未跟踪 CLI 的单测满足；PR **不写** `Closes #2261`
 
 ## Evidence Floor
 
@@ -116,15 +120,15 @@
 - [x] EF-16 `openspec validate repo-guard-and-harness-gap-closure --strict --no-interactive` → `is valid`
 - [x] EF-17 `uv run python scripts/cite_check.py openspec/changes/repo-guard-and-harness-gap-closure/*.md`
       → `hard failures: 0`
-- [ ] EF-18 #2105 **绿**证：临时分支（自本分支终态切出）commit 1 只在 `apps/frontend/e2e/m11-routes.mocked.spec.ts`
+- [x] EF-18 #2105 **绿**证：临时分支（自本分支终态切出）commit 1 只在 `apps/frontend/e2e/m11-routes.mocked.spec.ts`
       加一行注释——必须触碰 `apps/frontend/**`，否则 `frontend` filter 不命中、job 直接 skip。
       `gh run view <id> --log` 含 `33 passed`——**实测值**：`playwright test --config playwright.config.ts --list`
       给出 `Total: 33 tests in 3 files`，本地实跑 `33 passed (16.4s)`。issue #2105 正文里的「16」是 PR #2101
       时点的旧数，用它 grep 会把绿 run 误判为红
-- [ ] EF-19 #2105 **红**证：等 EF-18 的 run 跑完（PR 上 `cancel-in-progress: true`）再推 commit 2，
+- [x] EF-19 #2105 **红**证：等 EF-18 的 run 跑完（PR 上 `cancel-in-progress: true`）再推 commit 2，
       把 `m11-routes.mocked.spec.ts` 一条断言写反 → 同 job `conclusion: failure`。两个 run URL 进 PR body；
       临时 PR 关闭不合并
 - [x] EF-20 #366 结论未被回滚：`grep -c workflow_dispatch .github/workflows/m15-visual-evidence.yml` ≥ 1，
       且 `grep -rn '&& false' .github/workflows/` 退出码非 0（无命中）
-- [ ] EF-21 本 PR 的 `Unit Tests` 与 `SQL Migration Dry Run` 绿；`Frontend Build` 在本 PR 上 `skipping`
+- [x] EF-21 本 PR 的 `Unit Tests` 与 `SQL Migration Dry Run` 绿；`Frontend Build` 在本 PR 上 `skipping`
       ——`ci.yml` 不在 `frontend` filter 内，属结构性预期，非缺口（#2105 验收第 4 条由既有 `if:` 结构性满足）
