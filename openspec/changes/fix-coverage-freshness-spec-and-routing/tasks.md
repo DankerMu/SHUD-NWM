@@ -16,6 +16,7 @@ boundary with its reason, never a parked defect: after this change no sentence i
 - `scripts/select_ci_tests.py` — the `docs/runbooks/current-production-ops.md` `PathTestRule` (around `:2788` on `origin/master`) gains `tests/test_node27_coverage_freshness_alert.py`, because T4 makes that test a reader of the runbook — and, from review round 1, the three pre-existing content readers it was missing (`tests/test_node22_entrypoint_invariant.py`, `tests/test_python_environment_truth.py`, `tests/test_role_boundary_static.py`)
 - `tests/test_select_ci_tests.py` — the exact expected lists for that path (around `:2691` and `:5532`) and its count (around `:5988`, `"3"` → `"7"`)
 - `openspec/changes/archive/2026-09-18-node27-coverage-freshness-alert/design.md` (appended dated note)
+- `infra/env/node27-resource-governance.example` (DSN port) and `tests/test_node27_write_roles.py` (template port pin) — from review round 2
 
 ## Must preserve
 
@@ -76,7 +77,7 @@ boundary with its reason, never a parked defect: after this change no sentence i
 
 Every item is a predicate over the tree, not a count that the change itself can perturb.
 
-- [x] E1 `uv run pytest -q tests/test_node27_resource_governance.py tests/test_node27_coverage_freshness_alert.py tests/test_select_ci_tests.py` — all pass, every pre-existing test included.
+- [x] E1 `uv run pytest -q tests/test_node22_entrypoint_invariant.py tests/test_python_environment_truth.py tests/test_role_boundary_static.py tests/test_node27_resource_governance.py tests/test_node27_coverage_freshness_alert.py tests/test_select_ci_tests.py tests/test_env_templates.py tests/test_node22_refresh_timer_health.py tests/test_slurm_gateway_deployment_contract.py tests/test_node27_write_roles.py` — all pass, every pre-existing test included. The set is every content reader of the runbook (the CI selector's rule for it) plus the lane's own suites and the env-template guard: the first E1 (three files) was green on a head where `tests/test_node22_entrypoint_invariant.py` was red (review round 1).
 - [x] E2 `uv run ruff check .` — zero findings.
 - [x] E3 `openspec validate fix-coverage-freshness-spec-and-routing --strict --no-interactive` — valid.
 - [x] E4 Red proofs, labelled honestly: T3 and T4 are **genuinely red on master's tree** (master's collector lacks both properties; master's §11 names none of the three codes) — run each against `origin/master`'s version of the file under test and paste the failure. T3(b) is also a characterization pin (the audit already ignores the `systemd` section) — its red proof is a scratch mutation making `_recommendations` read the timer's state. T5 is a **characterization pin** (the code already behaves so): its red proof is a mutation of the reason format in a scratch copy (e.g. drop the class-name prefix) showing the pin goes red; do not present it as new behaviour.
@@ -106,6 +107,13 @@ Every item is a predicate over the tree, not a count that the change itself can 
   - The exit-2 row discriminates by the reason's `<ExceptionClass>: ` prefix (import time, any class) versus none (`CoverageAlertConfigError`: DSN / threshold), with a characterization pin, because `main`'s generic handler prefixes every non-config exception.
   - DB-side step 2 reads the unit's `EnvironmentFiles` before the probe (a leftover scratch drop-in makes the probe test a different DSN); gains leaves for a healthy probe with an `Undefined*` reason (schema drift: migration ledger + `\d`, measured baseline) and for base-class texts beyond the three measured ones; step 4 also checks schema `USAGE`.
   - §11.5's `uv sync` lines carry `cd /home/nwm/NWM` on the same line: the new text tripped `tests/test_node22_entrypoint_invariant.py`, which the CI selector did not run for this runbook — hence the three readers added to the rule above.
+- **Found in review round 2 and in its node-27 measurements, fixed per the directive** (round 2 verified P2-only; the directive overrides the P2-notes default):
+  - §11.5's import-failure leaf split by what the reason names — repository code defect (no sync) vs a missing third-party module (sync, then recheck) — measured on node-27 in a scratch worktree (receipt E14c/E14d); 「通过」 gains a closing step.
+  - A missing PYTHONPATH is not an exit-2 cause on node-27 as installed: the venv carries an editable install of the project mapping `services`/`packages` to `/home/nwm/NWM`, and the lane ran to rc=0 with PYTHONPATH unset (E14e). The runbook states this; the spec's failure-stage scenario keeps "for example the unit's PYTHONPATH is missing" verbatim, because it is conditioned on the module failing to import and remains a valid cause wherever the editable install is absent (E5 forbids other edits there).
+  - A venv that cannot import the driver reads `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>` at exit 3 (measured, E14e) — routed to the import/driver check, not the env file.
+  - Drop-in discovery uses `systemctl --user show -p DropInPaths` (runtime drop-ins included); `UndefinedSchema` removed (no such psycopg2 class); the `b97c16e28` baseline says 6 deleted + 000031 renamed.
+  - `infra/env/node27-resource-governance.example` used port 5432 (pre-existing; node-27 PG is 55432, every sibling template uses 55432), pinned by a test in `tests/test_node27_write_roles.py`.
+  - E1 widened (above).
 
 ## Non-goals (design boundaries, each with its reason — none is a parked defect)
 

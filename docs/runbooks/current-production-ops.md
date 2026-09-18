@@ -5352,7 +5352,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、venv 里没有展示栈、或展示模块的依赖漂移），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。按 §11.5 的「导入期失败」那段先做导入检查（venv 缺展示栈、unit 缺 `PYTHONPATH=` 各有一步），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。推导（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` + 单测钉住两半：`AttributeError` 前缀、两种配置错误无前缀）；未在 node-27 实测 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分三支（仓库代码缺陷、缺第三方依赖、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:` 三种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测；`AttributeError` 前缀与两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
 | `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
 
 **退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
@@ -5366,9 +5366,9 @@ SQLAlchemy 类**分不开**原因——`OperationalError` 既是连不上也是 
 |---|---|---|---|
 | `OperationalError: (psycopg2.errors.QueryCanceled)` | statement 超时（车道自设 `statement_timeout` 30 s） | §11.3「库侧观测失败」第 3 步（`pg_stat_activity`） | 推导：`QueryCanceled` 是 `psycopg2.OperationalError` 的子类 |
 | `ProgrammingError: (psycopg2.errors.InsufficientPrivilege)` | 只读角色缺 grant | §11.3「库侧观测失败」第 4 步（grant） | 推导：`InsufficientPrivilege` 是 `psycopg2.ProgrammingError` 的子类 |
-| `ProgrammingError: (psycopg2.errors.Undefined`…（`UndefinedTable`、`UndefinedColumn`、`UndefinedFunction`、`UndefinedSchema`…） | 连上的库里没有本车道的表（DSN 指错了库），或 schema 漂移（部署的代码期待的表 / 列 / 函数库里没有） | §11.3「库侧观测失败」第 2 步：先查 unit 读哪份 env 文件，再用探针分——探针报出库连错了 → 改 DSN；探针健康 → 那一步里 schema 漂移那一支 | `UndefinedTable`（连错库）实测；schema 漂移那一支推导 |
+| `ProgrammingError: (psycopg2.errors.Undefined`…（`UndefinedTable`、`UndefinedColumn`、`UndefinedFunction`…） | 连上的库里没有本车道的表（DSN 指错了库），或 schema 漂移（部署的代码期待的表 / 列 / 函数库里没有） | §11.3「库侧观测失败」第 2 步：先查 unit 读哪份 env 文件，再用探针分——探针报出库连错了 → 改 DSN；探针健康 → 那一步里 schema 漂移那一支 | `UndefinedTable`（连错库）实测；schema 漂移那一支推导 |
 | 其余任何带 `(psycopg2.` 的 | 基类 `psycopg2.OperationalError`（常见三种原文与兜底见下）、`psycopg2.errors.AdminShutdown`（观测中途容器重启）、`InterfaceError`、死锁 / 锁等待类错误… | §11.3「库侧观测失败」，从第 1 步（容器状态）做起 | 基类常见三种原文实测；其余推导 |
-| 不带 `(psycopg2.` | 根本没走到驱动，或不是数据库错误 | 按下面「不带驱动类」三条分 | 见各条 |
+| 不带 `(psycopg2.` | 根本没走到驱动，或不是数据库错误 | 按下面「不带驱动类」四条分 | 见各条 |
 
 基类 `(psycopg2.OperationalError)` 后面的原文**常见三种**，2026-09-18 在 node-27 上逐一实测：
 `Connection refused`（库没在听：容器停了 / 端口不对）、`password authentication failed`（口令错）、
@@ -5386,8 +5386,17 @@ OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1
 角色名是 `***`：车道会把与 DSN 用户名相同的角色名脱敏，别指望从邮件里看出是哪个角色——看
 §11.4 那份 env 文件里 `DATABASE_URL` 的用户段。
 
-不带驱动类时，看 `VERDICT: FAIL` 之后的引导词：
+不带驱动类时，看 `VERDICT: FAIL` 之后的引导词（自上而下、第一条命中即停）：
 
+- 类名冒号后是 `<error text withheld: redaction unavailable (<异常类>)>`，**不论什么类** → 原文被扣下，
+  是因为车道导不进自己的脱敏模块 `packages.common.redaction`，它在模块层 import `psycopg2.extensions`。
+  最常见的原因是 venv 里的驱动 `psycopg2` 坏了或没了：展示模块不依赖驱动，配置期那次导入照常通过，
+  所以缺驱动落在**退 3**、不在 §11.5 的退 2；`create_engine` 去 import `psycopg2` 失败，同一个缺包
+  又让脱敏失败。**不是** DSN 的事：别去改 env 文件，也别拿下面那条的探针分——探针同样会以缺驱动
+  失败，被误读成"`DATABASE_URL` 解析不了"。→ §11.3「非驱动观测失败」开头的驱动检查。2026-09-18
+  node-27 实测（生产 venv、生产 env 文件，用一个 scratch `sitecustomize` 挡掉 `psycopg2`）：车道读
+  `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`、退 3，
+  单测钉住同一形状。
 - `observation failed:` 且类是 `ValueError` / `ArgumentError`（URL scheme 不认识时是其子类
   `NoSuchModuleError`）→ **先做 §11.3「库侧观测失败」第 2 步**（先查 unit 读哪份 env 文件，再跑
   探针），别凭异常类直接去改 env 文件：观测期的展示模块同样可能抛 `ValueError`。探针以**同一个**异常失败 → env 文件里的
@@ -5403,8 +5412,8 @@ OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1
 展示模块报错分**导入期**与**观测期**两种，落在哪个退出码取决于它发生在哪一期：`config_from_env` 先读
 `DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
 的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
-`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 → §11.5「导入期失败」（修解释器路径 /
-展示栈）；退 3 → 照上面的「退 3 路由」读 `reason`，与别的退 3 没有区别——观测期展示模块自己发的
+`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 → §11.5「导入期失败」（导入检查的最后一行分出
+仓库代码缺陷 / 缺第三方依赖 / 检查通过则手跑 unit 复核）；退 3 → 照上面的「退 3 路由」读 `reason`，与别的退 3 没有区别——观测期展示模块自己发的
 SQL 失败了，`reason` 就带 `(psycopg2.`，照样去 §11.3「库侧观测失败」；不带的才去「非驱动观测失败」。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
@@ -5617,14 +5626,21 @@ systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.s
 EnvironmentFiles=/home/nwm/NWM/infra/env/node27-frontier-alert.env (ignore_errors=no)
 ```
 
-读到别的（别的路径、多出一行、或空）→ 原因就在这里，不在库：
-`ls ~/.config/systemd/user/nhms-node27-coverage-freshness-alert.service.d/` 找到那个 scratch
-drop-in，按 §11.5 末尾那段 `rm` 掉、`systemctl --user daemon-reload`，再 show 一次确认回到上面
-那一行，然后用 §11.4 那条 `systemctl --user start` 手跑一次看退出码。健康状态下这个 `.service.d/`
-目录**根本不存在**：`ls` 报 `No such file or directory`、退 2（2026-09-18 node-27 实测）。所以
-「目录不存在」与「目录在、里面没有 drop-in」是同一种读数：读数却仍不是上面那一行 → 装进去的 unit
-文件被改过，重跑 §11.5 安装块里的两条 `install` 与 `daemon-reload`。（健康值与健康时目录不存在是
-实测；异常读数这两支是推导。）
+读到别的（别的路径、多出一行、或空）→ 原因就在这里，不在库。问 systemd 是哪些 drop-in 在起作用：
+
+```bash
+systemctl --user show -p DropInPaths nhms-node27-coverage-freshness-alert.service
+```
+
+它列出**所有** drop-in：持久的（`~/.config/systemd/user/nhms-node27-coverage-freshness-alert.service.d/`）
+与运行时的（`systemctl --user edit --runtime` 写进 `/run/user/<uid>/systemd/user/…service.d/` 的）都在内。
+只 `ls` 持久目录会漏掉后者，而重装 unit 文件也清不掉它们。健康时读空的 `DropInPaths=`、`rc=0`
+（2026-09-18 node-27 实测）。把列出的、
+路径里带 `nhms-node27-coverage-freshness-alert.service.d/` 的文件逐个 `rm`，`systemctl --user daemon-reload`，
+再 show 一次 `DropInPaths` 与 `EnvironmentFiles`，确认回到上面那一行，然后用 §11.4 那条
+`systemctl --user start` 手跑一次看退出码。`DropInPaths` 里没有本 unit 的 drop-in、`EnvironmentFiles`
+却仍不是上面那一行 → 装进去的 unit 文件被改过，重跑 §11.5 安装块里的两条 `install` 与
+`daemon-reload`。（`EnvironmentFiles` 与 `DropInPaths` 的健康值是实测；异常读数这两支是推导。）
 
 读数正确之后跑**探针**：走本车道**自己的** venv、env 文件与只读角色，用与车道同一个 SQLAlchemy
 URL 解析，并报出连到了哪个库、本车道的表在不在：
@@ -5669,9 +5685,11 @@ docker exec nhms-db psql -X -U nhms -d nhms -P pager=off -c '\d <schema.table>'
 
 `comm -3` 顶格的行是这棵树里有、账本 `public.schema_migrations` 里没有的迁移（代码期待、库没施加）；
 缩进一列的是账本里有、这棵树里没有的。**健康的 node-27 并不是空输出**（2026-09-18 实测）：顶格 0 行、
-缩进 7 行（`000007_flood.sql`、`000015_…`、`000017_…`、`000020_…`、`000031_…`、`000034_…`、
-`000036_…`），都是账本记过、后来被 `b97c16e28`「Remove retired frequency display pipeline」从树里
-删掉的已退役频率展示管线迁移。所以缩进行本身不是信号；这一支的信号是**顶格行**（代码期待、账本
+缩进 7 行（`000007_flood.sql`、`000015_…`、`000017_…`、`000020_…`、
+`000031_search_discovery_return_period_performance.sql`、`000034_…`、`000036_…`），都出自
+`b97c16e28`「Remove retired frequency display pipeline」：其中 6 个是被从树里删掉的已退役频率展示管线
+迁移，`000031` 则是被**改名**成了 `000031_search_discovery_performance.sql`——账本仍记着旧名，所以
+旧名缩进；新名在树里、也在账本里，所以不顶格。缩进行因此本身不是信号；这一支的信号是**顶格行**（代码期待、账本
 没有），即便有顶格行也仍以下面的 `\d` 为准。账本记的是 `packages/common/migrate.py` 施加过的
 迁移文件名，而 `psql -f` 直接跑的迁移**不写**账本（`tier-node27-timeseries-storage.md` 里「施加
 000052 的运维口径」那段；拿账本对照 `db/migrations` 的既有口径见同一份 runbook §9.6），所以
@@ -5728,6 +5746,19 @@ from unnest(array['hydro.hydro_run', 'hydro.run_display_coverage', 'core.model_i
 这是一次波及展示面的权限回退，不只是本车道的事。
 
 **退出 3 —— 非驱动观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 不带 `(psycopg2.`）**
+
+`reason` 里是 `<error text withheld: redaction unavailable (…)>` 的，先查驱动与脱敏模块导不导得进，
+别往下走：
+
+```bash
+cd /home/nwm/NWM
+PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import psycopg2; import packages.common.redaction; print(psycopg2.__version__)'; echo "rc=$?"
+```
+
+健康读 `2.9.12 (dt dec pq3 ext lo64)` 加 `rc=0`（整条命令 2026-09-18 node-27 实测）。失败时按它打印的最后一行走 §11.5「导入期失败」的三支：`No module named 'psycopg2'`
+这类是缺第三方依赖那支（发行包名是 `psycopg2-binary`；sync 之后重跑的是**这条**驱动检查，不是
+§11.5 那条 `import services.tiles.mvt`——它不碰驱动，缺驱动时照样通过），`packages.…` 出错是仓库代码缺陷那支。两者都
+导得进、`reason` 却仍被扣 → 脱敏函数自己在这个异常上出了错，按下面第 3 条当代码缺陷开 issue（推导）。
 
 `ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」做上一条第 2 步（先查
 unit 读哪份 env 文件，再跑探针）排除 DSN；探针成功的、别的异常类的、以及引导词是
@@ -5813,8 +5844,11 @@ timer 和从没装过的一样，表里一行都没有（同日实测），所�
 这才是它在这里值一句话的原因。
 
 单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
-`Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import
-`services.tiles.mvt` 的原因——手工在 shell 里跑要自己导：
+`Environment=PYTHONPATH=/home/nwm/NWM` 是**双保险**，不是今天 node-27 上 import 得了
+`services.tiles.mvt` 的原因：生产 venv 以 editable 方式装了本项目 `nhms`（`site-packages` 里的
+`__editable__.nhms-0.1.0.pth` 把 `apps` / `packages` / `services` / `workers` 映射到 `/home/nwm/NWM/…`），
+不设 `PYTHONPATH`、在 `/tmp` 下跑车道照样 `rc=0`（2026-09-18 node-27 实测）。只有 venv 被重建却没装回
+本项目时，这一行才起作用（推导）。手工在 shell 里跑与 unit 同口径，也带上它：
 
 ```bash
 cd /home/nwm/NWM
@@ -5823,29 +5857,79 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_coverage_freshness_aler
 ```
 
 **导入期失败（退 2，`reason` 以 `<异常类>: …` 开头，最常见 `ImportError:` / `ModuleNotFoundError:`，
-依赖漂移时也可能是 `AttributeError:` 之类，判据见 §11.2 退 2 那行）**：先做导入检查，它用的就是 unit
-的那个解释器：
+仓库代码坏了时是 `SyntaxError:` 之类，依赖漂移时也可能是 `AttributeError:`，判据见 §11.2 退 2 那行）**：
+先做导入检查，它用的就是 unit 的那个解释器：
 
 ```bash
 cd /home/nwm/NWM
 PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "rc=$?"
 ```
 
-- **失败**（报出与告警同一个异常）→ venv 里的展示栈缺失，或版本与锁文件漂移，同步依赖：
+失败时它打印完整的 traceback；告警的 `reason` 被扣成 `<error text withheld: …>` 时，这里照样是原文。
+**只看最后一行**就能分支：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器逐一做坏实测，
+最后一行的异常类与消息与车道 `reason` 相同（`SyntaxError` 的文件名与行号在 `reason` 的括号里，在检查
+的 traceback 里则是上面几行）。**不要**不看这一行就 `uv sync`：仓库自己的代码坏了，sync 修不了。
+
+- **仓库代码缺陷**——最后一行是下面任一种：
+  - `SyntaxError:` / `IndentationError:` / `NameError:`；
+  - `ImportError: cannot import name '…' from 'services.…'`（或 `'packages.…'`），括号里的路径在
+    `/home/nwm/NWM/` 下；
+  - `ModuleNotFoundError: No module named 'services.…'`（或 `'packages.…'`、`'scripts.…'`）。
+
+  实测样本（node-27 scratch worktree，生产解释器）：
+  `ImportError: cannot import name 'NO_SUCH_NAME_2472' from 'services.precip.constants' (…/services/precip/constants.py)`
+  与 `SyntaxError: invalid syntax`（车道 `reason` 读 `SyntaxError: invalid syntax (mvt.py, line 25)`）两种车道都退 2；
+  `ModuleNotFoundError: No module named 'services.precip.no_such_module_2472'` 只做了导入检查。
+  `IndentationError` / `NameError` 是推导。展示模块在模块层导入的几乎全是 `services.*` / `packages.*`，
+  第三方只有 `sqlalchemy`；timer 跑的就是运维 `git pull` 进来的这份共享 checkout——坏掉的是代码
+  本身，同一个错每次都会复现，**不要 sync**，那只会白白改动生产共享的 venv。先看工作树与最近的提交：
 
   ```bash
-  cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv sync --all-extras --dev --dry-run   # 先看它要装 / 卸什么
+  cd /home/nwm/NWM && git status --porcelain
+  cd /home/nwm/NWM && git log -5 --oneline -- services/ packages/
+  ```
+
+  `git status --porcelain` 有输出 → 这份 checkout 上有未提交的改动或停在一半的 pull，一并记下，
+  别在生产 checkout 上 reset / stash。按代码缺陷开 issue，附上导入检查的最后一行、stderr 那行
+  结构化 JSON 里完整的 `reason`，以及这两条命令的输出。本车道无状态、无 dedup，修好之前每天
+  06:00 一封。
+- **缺第三方依赖**——最后一行是 `ModuleNotFoundError: No module named '<名字>'`，名字不以
+  `services.` / `packages.` / `scripts.` 开头（实测样本：`No module named 'no_such_thirdparty_2472'`，
+  车道退 2、`reason` 同文）。先 dry-run，再 sync：
+
+  ```bash
+  cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv sync --all-extras --dev --dry-run   # 看它要装的包里有没有缺的那个
   cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv sync --all-extras --dev
   ```
 
-  这**不是**默认动作：node-27 的 `.venv` 是生产共享的（display API、autopipe、本车道都跑在它
-  上面），在 node-27 上 `uv sync` 会就地改它，而且默认是精确同步、锁文件之外的包会被卸掉。2026-09-18 实测
-  `--dry-run` 报 `Would install 3 packages`（`mapbox-vector-tile`、`pyclipper`、`shapely`），
-  本车道却照样 import 得了——所以只在导入检查失败时才 sync。
-- **通过** → 这条检查自己带了 `PYTHONPATH`，看不见 unit 缺它。查 unit：
-  `systemctl --user show -p Environment nhms-node27-coverage-freshness-alert.service`，应读
-  `Environment=PYTHONPATH=/home/nwm/NWM`。没有 `PYTHONPATH=` → 装进去的 unit 文件是旧的或被
-  改过，重跑本节开头安装块里的两条 `install` 与 `daemon-reload`。
+  node-27 上这个 dry-run **从来不是空的**：2026-09-18 两次实测都报 `Would install 3 packages`
+  （`mapbox-vector-tile`、`pyclipper`、`shapely`），而本车道照样 import 得了。所以判据不是"有没有
+  输出"，而是列表里**有没有缺的那个包**（发行包名可能与模块名不同，例如 `psycopg2` 对应
+  `psycopg2-binary`）。列表里没有 → sync 不会去动它（锁文件里没有它，或 uv 认为它已经装好），
+sync 修不了：别 sync，按上一支开 issue，把 dry-run 的输出一并附上（推导）。
+  sync 会就地改生产共享的 `.venv`（display API、autopipe、本车道都跑在它上面），默认是精确同步、
+  锁文件之外的包会被卸掉——所以只在这一支才 sync。sync 完**再验两遍**：重跑上面的导入检查，再用
+  §11.4 那条 `systemctl --user start nhms-node27-coverage-freshness-alert.service` 手跑 unit，
+  两者都退 0 才算闭环。sync 之后导入检查仍失败 → 不是缺包，按上一支代码缺陷处理（推导）。
+- **通过**（`rc=0`）→ 手工已复现不出。用 §11.4 那条 `systemctl --user start` 手跑一次 unit：退 0 →
+  是已经过去的瞬时故障（例如 tick 撞上了一次做到一半、之后已补完的 pull），闭环。仍退 2 → 用本节
+  开头安装块里那条 `journalctl` 取这次的 `reason`，与导入检查对照；两边不一致说明 unit 跑的不是手工
+  这套环境（推导）：
+  - 先回 §11.3「库侧观测失败」第 2 步查 `EnvironmentFiles` 与 `DropInPaths`——`EnvironmentFile=`
+    也能改 `PYTHONPATH`。
+  - 那里干净，再看 editable install 还在不在（上面那段双保险失效的前提）：
+
+    ```bash
+    ls /home/nwm/NWM/.venv/lib/python*/site-packages/__editable__.nhms-*.pth
+    ```
+
+    健康时列出 `…/python3.11/site-packages/__editable__.nhms-0.1.0.pth`、`rc=0`（2026-09-18 node-27 实测）。
+    文件没了，**并且** `systemctl --user show -p Environment nhms-node27-coverage-freshness-alert.service`
+    也不读 `Environment=PYTHONPATH=/home/nwm/NWM`（健康值 2026-09-18 node-27 实测）→ 两道保险都没了，
+    unit 导不进 `services`。这时连 `packages.common.redaction` 也导不进，`reason` 读
+    `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`（本地复现，
+    推导）。重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再用 §11.4 那条 `systemctl --user start`
+    确认退 0；venv 为什么丢了本项目，单独查（推导）。
 
 要验证真实投递链路，用 systemd drop-in 把这一次调用指到 scratch 库（**必须先用空的
 `EnvironmentFile=` 清空已有列表**，`Environment=` 赢不了后读的 `EnvironmentFile=`）：

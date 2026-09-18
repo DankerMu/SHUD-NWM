@@ -531,6 +531,50 @@ def test_unparsable_dsn_never_reaches_the_driver(capsys: pytest.CaptureFixture[s
     assert DSN_PASSWORD not in captured.out + captured.err
 
 
+class _MissingDriverFinder:
+    """Meta-path finder that makes `psycopg2` (and every submodule) look uninstalled."""
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname == "psycopg2" or fullname.startswith("psycopg2."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+def test_missing_driver_withholds_the_reason_at_observation_time(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization pin (#2472/#2473 round 2) for the runbook's
+    `redaction unavailable` routing leg.
+
+    With the driver gone the display module still imports (config stage passes),
+    so the failure lands at `create_engine` — exit 3, not exit 2 — and the same
+    missing package makes `packages.common.redaction` (module-scope
+    `psycopg2.extensions`) unimportable, so the chokepoint withholds the text.
+    The class is the raw `ModuleNotFoundError` SQLAlchemy re-raises from the
+    dialect's DBAPI import, not `NoSuchModuleError` (that one is an unknown URL
+    scheme). The runbook routes on the `redaction unavailable` substring; if this
+    shape drifts, §11.2 sends the operator to the DSN probe instead.
+    """
+
+    for name in [n for n in sys.modules if n == "psycopg2" or n.startswith("psycopg2.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.delitem(sys.modules, "packages.common.redaction", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_MissingDriverFinder(), *sys.meta_path])
+    env = {"DATABASE_URL": f"postgresql://nhms_display_ro:{DSN_PASSWORD}@127.0.0.1:55432/nhms"}
+
+    rc = alerter.main([], now=T0, env=env)
+    captured = capsys.readouterr()
+
+    withheld = "ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>"
+    assert rc == alerter.EXIT_OBSERVATION == 3
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"] == withheld
+    assert _verdict_lines(captured.out)[0] == f"VERDICT: FAIL observation failed: {withheld}"
+    assert DSN_PASSWORD not in captured.out + captured.err
+
+
 # ---------------------------------------------------------------------------
 # Evidence 15 — journal budget (design D3).
 # ---------------------------------------------------------------------------
