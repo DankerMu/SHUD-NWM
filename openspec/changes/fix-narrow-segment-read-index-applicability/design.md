@@ -31,7 +31,12 @@ column, expressed in text identities. The later DROPs targeted **different** ind
 `river_timeseries_valid_time_discovery_idx`. This matters for the candidate set: **C1 and C2 move
 `basin_version_key` and `river_network_version_key`, which are not columns of the text twin.** Neither
 candidate can make the text twin non-matchable, and the bench measured the planner taking it
-(§1.3 cell `run_bound/stale/legacy/uncompressed`). `tests/test_migrations.py:385` still lists it as
+(§1.3 cell `run_bound/stale/legacy/uncompressed`).
+
+Two details worth pinning, since a grep for the legacy table name finds neither index: both are created
+`ON hydro.river_timeseries` and reach the legacy table by inheritance through `000059:9`'s `RENAME`. And
+they carry **separate** oracles — `tests/test_migrations.py:385` pins the surrogate twin's columns, `:400`
+the text twin's — so a change touching only one of them does not go silently green on the other. `tests/test_migrations.py:385` still lists it as
 retained and `tests/test_river_identity_normalization_integration.py:270` comments that the legacy text
 indexes remain on the renamed table. **It has the same column order as F1's discovery index and the same
 missing column.** The narrow index is therefore the key-column *analogue* of 000051's, not its
@@ -309,10 +314,20 @@ proves needs three conditions that are all false in production today and cannot 
 1. *a run routed to legacy* — #1988 gate 6.1 measured **0** legacy-routed runs in the retention window;
 2. *a legacy chunk with absent or stale statistics* — all five chunks carry a `last_analyze`
    (2026-08-28 … 2026-09-14) and `n_mod_since_analyze = 0`;
-3. *continuing writes to make those statistics drift* — no modification on any chunk since the latest
-   analyze (2026-09-15 03:21Z), and outside `tests/` and `openspec/` **no source file references
-   `hydro.river_timeseries_legacy` at all**; the render layer reaches it only through the `store`
-   parameter.
+3. *rows for the pinned run inside such a chunk* — with #1988's 0 legacy-routed runs, the run a
+   segment read pins has no legacy rows to be mis-scanned, and no modification has landed on any chunk
+   since the latest analyze (2026-09-15 03:21Z).
+
+**Correction, same day — a fourth condition was claimed and is false.** An earlier revision of this
+section asserted that outside `tests/` and `openspec/` no source file references
+`hydro.river_timeseries_legacy`. That came from a `grep` truncated at 30 lines and is wrong. The legacy
+branch is rendered **unconditionally into every forecast-series read** —
+`packages/common/forecast_store.py:246-250` builds `f"({legacy}\nUNION ALL\n{narrow})"` with no
+condition, and `services/tiles/mvt.py:910,1014,1017,2003` does the same — and the table name is a source
+constant in two places: `packages/common/river_ts_render.py:101` (`RIVER_TABLE_LEGACY`) and
+`packages/common/node27_pgdata_workload_plan.py:34` (`LEGACY_HYPERTABLE`). **Legacy plan nodes are
+present on every read.** The closure therefore rests on conditions 1–3 above, which name what the defect
+additionally needs, and not on an absence of references that does not exist.
 
 This is a reason to record the legacy exposure, not to ignore it, and not a licence to widen the
 candidate set: extending C1's non-sargable rule to the legacy text aids would touch the conjuncts the

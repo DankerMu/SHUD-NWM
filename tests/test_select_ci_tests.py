@@ -10135,6 +10135,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #1948: the QHH bootstrap corpus's shared helper. All three partitions import it at
     # module scope; the retained historical path is a valid anchor for the same reason.
     ("tests/qhh_production_bootstrap_helpers.py", "tests/test_qhh_production_bootstrap.py"),
+    # #2451: the segment-index bench's pass criteria. Anchored on the synthetic-plan
+    # proof, which is both the same-name owner and a module-scope importer; the
+    # gated integration bench is not an anchor for the #2208 reason.
+    ("tests/river_ts_plan_criteria.py", "tests/test_river_ts_plan_criteria.py"),
+    # #2451: the bench's condition seed. Its one non-gated module-scope importer is
+    # the offline capture/digest suite, so that suite is the only valid anchor.
+    ("tests/river_ts_stats_matrix_seed.py", "tests/test_river_ts_stats_harness_offline.py"),
     # #1913: the registry-import helper. Its eight direct collectible importers all
     # import it at module scope; the retained historical path is a valid derivation
     # anchor for the same reason #1912 pinned the publication core. The three QHH
