@@ -482,7 +482,9 @@ def test_the_recorded_digests_cover_every_constructible_scenario_and_shape() -> 
         for shape in SHAPES
     }
     assert set(RECORDED_ROW_DIGESTS) == expected
-    assert len(RECORDED_ROW_DIGESTS) == 12
+    # 6 since task 6.3 collapsed the branch axis to `narrow` (was 12: the same
+    # three constructible scenarios on each of two branches).
+    assert len(RECORDED_ROW_DIGESTS) == 6
     for key, digest in RECORDED_ROW_DIGESTS.items():
         assert len(digest) == 16, key
         assert set(digest) <= set("0123456789abcdef"), key
@@ -501,8 +503,10 @@ def test_the_summary_is_written_into_the_evidence_not_only_the_message() -> None
     assert findings, "an empty measurement set must report missing cells, not pass"
     assert set(evidence) == {"cells", "cell_table", "summary", "findings"}
     assert evidence["summary"]["measured"] == 0
-    # Every required cell is reported missing, not silently absent.
-    assert sum(1 for finding in findings if finding.startswith("CELL MISSING ")) == 24
+    # Every required cell is reported missing, not silently absent. 12 since
+    # task 6.3 collapsed the branch axis to `narrow`: 3 constructible scenarios
+    # x 2 shapes x (its own statistics label + the `fresh@` one).
+    assert sum(1 for finding in findings if finding.startswith("CELL MISSING ")) == 12
 
 
 def test_the_summary_counts_the_cells_the_gate_reports() -> None:
@@ -520,6 +524,7 @@ def test_the_summary_counts_the_cells_the_gate_reports() -> None:
     }
 
 
+@pytest.mark.usefixtures("allowlisted")
 def test_an_allowlisted_cell_failing_on_row_identity_is_not_counted_as_excused() -> None:
     """The summary must not say "excused" about a cell the gate reported."""
     excused = _open_cell(passed=False, failures=["criterion 2: ratio 999.0"])
@@ -530,34 +535,67 @@ def test_an_allowlisted_cell_failing_on_row_identity_is_not_counted_as_excused()
 
 
 # ---------------------------------------------------------------------------
-# EXPECTED_OPEN_CELLS — the one allowlisted cell, and the three ways it must not
-# become a way to be green about something the gate never judged.
+# EXPECTED_OPEN_CELLS — empty since task 6.3, and the three ways an entry must
+# not become a way to be green about something the gate never judged.
+#
+# The live table holds nothing (its one cell, `run_bound/stale/legacy/uncompressed`
+# / #2471, left the cross product with the legacy branch). The MECHANISM still
+# has to work for the next entry, so the cases below INJECT a synthetic entry
+# with `monkeypatch` instead of leaning on a live one — which is what a live
+# entry was doing before, and is why emptying the table would otherwise have
+# deleted the coverage of the guard rather than of the excuse.
 # ---------------------------------------------------------------------------
 
-_OPEN_CELL = "run_bound/stale/legacy/uncompressed"
+_OPEN_CELL = "run_bound/stale/narrow/uncompressed"
+_OPEN_REASON = "synthetic entry owned by this test; the live allowlist is empty"
+
+
+@pytest.fixture()
+def allowlisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put ONE synthetic entry on the gate's live allowlist, and take it back.
+
+    ``setitem`` on the imported object rather than ``setattr`` on the gate
+    module: the name imported here IS the module global ``_reported_cell_failures``
+    reads, so mutating it is what the functions under test observe — and it
+    avoids importing the gate module itself, which would make this suite an
+    importer of ``tests/__init__.py`` and put it outside the selector's
+    support-module routing closure.
+    """
+    monkeypatch.setitem(EXPECTED_OPEN_CELLS, _OPEN_CELL, _OPEN_REASON)
 
 
 def _open_cell(*, passed: bool, failures: list[str]) -> dict[str, Any]:
     return {"cell_key": _OPEN_CELL, "passed": passed, "failures": failures}
 
 
-def test_the_expected_open_entry_names_the_cell_design_md_leaves_open() -> None:
-    """Exactly one cell, and it is the one §2.2 and §6.3 both name.
+def test_the_allowlist_is_empty_and_every_entry_must_name_a_measured_cell() -> None:
+    """Nothing is excused today, and a future entry cannot name a dead cell.
 
-    Pinned as an equality: a second entry added later would otherwise excuse a
-    cell nobody argued for, which is the failure mode an allowlist has.
+    The old pin was an equality against ONE entry — the #2471 cell design.md §2.2
+    left open. Task 6.3 removed the branch that cell lived on, so the entry is
+    gone rather than stale. The equality is kept (a second entry added later must
+    still be argued for, which is the failure mode an allowlist has) and is now
+    joined by the check the old pin could not make: a key that no scenario/shape
+    can produce would excuse a cell the gate never measures, and the CELL MISSING
+    finding for it would be reported anyway.
     """
-    assert set(EXPECTED_OPEN_CELLS) == {_OPEN_CELL}
-    reason = EXPECTED_OPEN_CELLS[_OPEN_CELL]
-    assert "TEXT twin" in reason
-    assert "§6.3" in reason
-    # The tracking issue, by number: a reader must be able to reach #2471 from
-    # the gate's own output without grepping the OpenSpec fixture for it.
-    assert "#2471" in reason
+    assert EXPECTED_OPEN_CELLS == {}
+    constructible = {
+        f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}"
+        for scenario in SCENARIOS
+        if scenario.triple not in EXPECTED_UNCONSTRUCTIBLE
+        for shape in SHAPES
+        for statistics in (scenario.statistics, f"fresh@{scenario.statistics}")
+    }
+    assert set(EXPECTED_OPEN_CELLS) <= constructible
+    # The fixture's synthetic key is one of them, so the cases below are not
+    # excusing something the real cross product could never contain either.
+    assert _OPEN_CELL in constructible
 
 
+@pytest.mark.usefixtures("allowlisted")
 def test_an_expected_open_cell_is_excused_for_its_plan_criteria() -> None:
-    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_id is not in the Index Cond"])
+    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_key is not in the Index Cond"])
     assert _reported_cell_failures([cell]) == []
 
 
@@ -578,6 +616,7 @@ def test_an_expected_open_cell_is_excused_for_its_plan_criteria() -> None:
         "EMPTY EXTRACT: no plan node read _hyper_3_62_chunk; every criterion below would pass for nothing",
     ],
 )
+@pytest.mark.usefixtures("allowlisted")
 def test_an_expected_open_cell_is_not_excused_for_what_the_allowlist_cannot_speak_to(failure: str) -> None:
     """The allowlist's reason covers the INDEX CHOICE and nothing else.
 
@@ -585,15 +624,16 @@ def test_an_expected_open_cell_is_not_excused_for_what_the_allowlist_cannot_spea
     an empty extract, which reports that no index was taken here to have an
     opinion about.
     """
-    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_id is not in the Index Cond", failure])
+    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_key is not in the Index Cond", failure])
     reported = _reported_cell_failures([cell])
     assert len(reported) == 1
     assert failure in reported[0]
     assert "criterion 1" not in reported[0]
 
 
+@pytest.mark.usefixtures("allowlisted")
 def test_an_expected_open_cell_that_starts_passing_is_itself_reported() -> None:
-    """The allowlist must not outlive its reason (#1988's DROP removes it)."""
+    """An allowlist must not outlive its reason — 6.3's entry is the precedent."""
     reported = _reported_cell_failures([_open_cell(passed=True, failures=[])])
     assert len(reported) == 1
     assert reported[0].startswith(f"EXPECTED-OPEN CELL NOW PASSES {_OPEN_CELL}")

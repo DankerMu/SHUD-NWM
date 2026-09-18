@@ -19,6 +19,11 @@ Covers the shared helper's requirement scenarios per the fixture in
 * ``HYPERTABLES_GUARDED`` matches the two production hypertables only, and
   the guard refuses any unregistered pair before running SQL.
 * Query text asserts ``is_compressed = true`` predicate (drift guard).
+* ``assert_chunk_uncompressed`` — the chunk-identity guard — end of file: pass,
+  compressed refusal under both cursor factories, absent-chunk refusal,
+  unregistered-hypertable refusal, and the catalog-error path. It has no
+  production caller since #1342's contract (task 6.3) and these are its only
+  coverage.
 """
 
 from __future__ import annotations
@@ -29,11 +34,13 @@ from typing import Any
 import pytest
 
 from packages.common.timescale_write_guard import (
+    _CHUNK_IDENTITY_QUERY,
     _COMPRESSED_CHUNK_QUERY,
     HYPERTABLES_GUARDED,
     RUNBOOK_ANCHOR,
     CompressedChunkGuardError,
     CompressedChunkWriteError,
+    assert_chunk_uncompressed,
     check_batch_targets_uncompressed,
 )
 
@@ -618,3 +625,108 @@ def test_partial_none_range_refuses() -> None:
         assert "partial batch range" in str(exc_info.value)
         # Cursor never touched — partial-none check fires before any SQL.
         assert cursor.executed == []
+
+
+# ---------------------------------------------------------------------------
+# `assert_chunk_uncompressed` — the chunk-IDENTITY guard.
+#
+# Its production caller (#1339's identity-backfill runner) went with #1342's
+# contract (task 6.3), and the runner's test module went with it. What was left
+# behind was an exported fail-closed guard with NO coverage at all: every
+# behaviour below was asserted only through that runner. These cases own it
+# directly, so the entry point is pinned by what it must do rather than by who
+# used to call it.
+# ---------------------------------------------------------------------------
+
+_CHUNK = {
+    "hypertable_schema": "hydro",
+    "hypertable_name": "river_timeseries",
+    "chunk_schema": "_timescaledb_internal",
+    "chunk_name": "_hyper_6_2_chunk",
+}
+
+
+def test_chunk_guard_passes_an_uncompressed_chunk_and_binds_its_identity() -> None:
+    """A pass returns ``None`` and asks the catalog about THAT chunk.
+
+    The binding is asserted because the guard is fail-closed on absence: a
+    query bound to the wrong chunk would answer about a chunk nobody is
+    writing to, and a wrong-but-present answer is the one failure mode
+    absence-refusal cannot catch.
+    """
+    cursor = _FakeCursor(row=(False,))
+    assert assert_chunk_uncompressed(cursor, **_CHUNK) is None
+
+    catalog = [call for call in cursor.executed if "timescaledb_information.chunks" in call[0]]
+    assert len(catalog) == 1
+    assert catalog[0][0] == _CHUNK_IDENTITY_QUERY
+    assert catalog[0][1] == ("hydro", "river_timeseries", "_timescaledb_internal", "_hyper_6_2_chunk")
+    local_statements = [stmt for stmt, _ in cursor.executed if stmt.startswith("SET LOCAL")]
+    assert len(local_statements) == 2
+    assert "'5s'" in local_statements[0]
+    assert "DEFAULT" in local_statements[1]
+
+
+@pytest.mark.parametrize("row", [(True,), {"is_compressed": True}])
+def test_chunk_guard_refuses_a_compressed_chunk_whatever_the_cursor_factory(row: Any) -> None:
+    """Compressed -> ``CompressedChunkWriteError``, naming chunk and runbook.
+
+    Both row shapes, because the guard is documented to work under either
+    cursor factory and the dict branch of ``_extract_is_compressed`` is
+    otherwise unreached.
+    """
+    cursor = _FakeCursor(row=row)
+    with pytest.raises(CompressedChunkWriteError) as exc_info:
+        assert_chunk_uncompressed(cursor, **_CHUNK)
+    error = exc_info.value
+    assert (error.chunk_schema, error.chunk_name) == ("_timescaledb_internal", "_hyper_6_2_chunk")
+    assert (error.hypertable_schema, error.hypertable_name) == ("hydro", "river_timeseries")
+    assert RUNBOOK_ANCHOR in str(error)
+
+
+def test_chunk_guard_refuses_a_chunk_absent_from_the_catalog() -> None:
+    """An unknown chunk is refused, never certified.
+
+    It usually means the chunk was dropped or renamed between discovery and
+    write; ``CompressedChunkWriteError`` would be the wrong claim, so this is
+    the base ``CompressedChunkGuardError`` and NOT its subclass.
+    """
+    cursor = _FakeCursor(row=None)
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        assert_chunk_uncompressed(cursor, **_CHUNK)
+    assert not isinstance(exc_info.value, CompressedChunkWriteError)
+    assert "refusing to certify an unknown chunk" in str(exc_info.value)
+
+
+def test_chunk_guard_refuses_an_unregistered_hypertable_before_any_sql() -> None:
+    """Same registry discipline as the batch guard: a wire-site typo fails closed."""
+    cursor = _FakeCursor(row=(False,))
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        assert_chunk_uncompressed(
+            cursor,
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries_legacy",
+            chunk_schema="_timescaledb_internal",
+            chunk_name="_hyper_6_2_chunk",
+        )
+    assert "unregistered hypertable" in str(exc_info.value)
+    assert cursor.executed == []
+
+
+def test_chunk_guard_fails_closed_on_a_catalog_error_masks_the_dsn_and_resets() -> None:
+    """A catalog failure refuses, never leaks a DSN, and still resets the timeout."""
+
+    class _DsnBearingError(Exception):
+        def __init__(self) -> None:
+            super().__init__("psql://user:password@host:5432/db failed")
+
+    cursor = _FakeCursor(raise_on_query=_DsnBearingError())
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        assert_chunk_uncompressed(cursor, **_CHUNK)
+    message = str(exc_info.value)
+    assert "chunk lookup failed on _timescaledb_internal._hyper_6_2_chunk" in message
+    assert "password" not in message
+    default_reset = [
+        stmt for stmt, _ in cursor.executed if "DEFAULT" in stmt and stmt.startswith("SET LOCAL")
+    ]
+    assert len(default_reset) == 1, "SET LOCAL statement_timeout = DEFAULT MUST fire in finally"

@@ -282,11 +282,12 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
 #
 # `_COVERAGE_CTES` and `_REFRESH_SQL` are module-level constants built at IMPORT
 # time, in every process that imports this module — including the display API on
-# node-27. A narrow branch would have to reference `met.forcing_version.
-# timeseries_store` and the narrow key/enum columns, none of which exist until
-# task 7.3, so an import-time union would put unrunnable SQL on master. Store is
-# the constant `legacy` for every forcing reader in this task anyway (there is no
-# routing column to read), so the union would also be pure dead text.
+# node-27. A narrow branch would have to reference
+# `met.forcing_version.timeseries_store` and the narrow key/enum columns, none of
+# which exist until task 7.3, so an import-time union would put unrunnable SQL on
+# master. Store is the constant `legacy` for every forcing reader in this task
+# anyway (there is no routing column to read), so the union would also be pure
+# dead text.
 #
 # THE UNION LANDS IN 7.3, with the routing column. River's own two-store union is
 # gone — #1342's contract (task 6.3) dropped river's routing column and the legacy

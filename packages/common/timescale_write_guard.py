@@ -42,11 +42,12 @@ All three are batch writers that know a ``valid_time`` window and use
 :func:`check_batch_targets_uncompressed`. :func:`assert_chunk_uncompressed`
 answers the same question ("would this write land in compressed storage?") for a
 chunk identity instead of a time range; #1339's identity-backfill runner was its
-production caller and went with #1342's contract (task 6.3), so it is currently
-a library entry point with unit coverage only. Both share the registry check,
-the statement-timeout discipline, and the fail-closed catalog-error contract;
-neither is a per-caller reimplementation, which is exactly what design D5
-forbids.
+production caller and went with #1342's contract (task 6.3), so it has **no
+production caller today** — it is a library entry point whose behaviour is
+pinned by ``tests/test_timescale_write_guard.py`` and nothing else. Both share
+the registry check, the statement-timeout discipline, and the fail-closed
+catalog-error contract; neither is a per-caller reimplementation, which is
+exactly what design D5 forbids.
 """
 
 from __future__ import annotations

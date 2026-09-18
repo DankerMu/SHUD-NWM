@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,10 +51,23 @@ def _connect(database_url: str) -> Any:
 
 
 def _scalar(connection: Any, sql: str, params: Any = None) -> Any:
+    """First column of the first row, whatever cursor factory the caller owns.
+
+    Most of this module reads through ``_connect``'s ``RealDictCursor``, but the
+    decline tests drive ``scripts.node27_autopipeline._declined_runs``, which
+    indexes its rows POSITIONALLY (``row[0]``/``row[1]``/``row[2]``,
+    ``scripts/node27_autopipeline.py:1075``) — a ``RealDictRow`` would raise
+    ``KeyError: 0`` there, so those tests must own a TUPLE cursor.
+    Branching here keeps one helper for both, the same way ``_explain``
+    (``tests/test_river_timeseries_stats_index_choice_integration.py:433``)
+    does it.
+    """
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         row = cursor.fetchone()
-    return None if row is None else next(iter(row.values()))
+    if row is None:
+        return None
+    return next(iter(row.values())) if isinstance(row, Mapping) else row[0]
 
 
 def _rows(connection: Any, sql: str, params: Any = None) -> list[dict[str, Any]]:
@@ -625,6 +639,9 @@ def test_a_historical_legacy_decline_is_governed_by_its_key_not_by_the_column(
     from scripts.node27_autopipeline import _decline_key, _declined_runs
 
     apply_migrations_from_zero(throwaway_database_url)
+    # NOT `_connect`: `_declined_runs` reads its rows positionally (`row[0]`),
+    # which is how the production cursor behaves and what a `RealDictRow` would
+    # turn into `KeyError: 0`. `_scalar` handles both row shapes.
     connection = psycopg2.connect(throwaway_database_url)
     try:
         _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")

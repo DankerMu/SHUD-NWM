@@ -1,20 +1,27 @@
 """Seeding for the #2451 condition cross product: shape x stats x branch x chunk.
 
-``design.md`` ("How the selection is made") gates a candidate on EVERY cell of
-predicate shape x statistics state x store branch x chunk compression state.
-This module builds the database side of that: one scenario per
-(branch, chunk state, statistics state), each with its own day, its own segment
-block and its own pair of runs, so the cells never contaminate each other.
+``design.md`` ("How the selection is made",
+``openspec/changes/fix-narrow-segment-read-index-applicability/design.md:296-313``)
+gates a candidate on EVERY cell of predicate shape x statistics state x store
+branch x chunk compression state. This module builds the database side of that:
+one scenario per (branch, chunk state, statistics state), each with its own day,
+its own segment block and its own pair of runs, so the cells never contaminate
+each other.
+
+The BRANCH axis is now single-valued (see ``BRANCHES``): #1342's contract
+(task 6.3) deleted the legacy rendering and the per-run routing, so no reader can
+reach a legacy-routed run's facts and the legacy half of that axis is not
+measurable rather than merely failing. design.md still states the two-valued
+axis; that divergence is deliberate and reported, not silently reconciled.
 
 Why each scenario needs its OWN day and its OWN segments
 -------------------------------------------------------
 
-* Its own day, 21 days apart — the narrow hypertable is chunked at 1 day and the
-  legacy one at the 7-day default, and a forecast read spans
-  ``[cycle_time, cycle_time + 7 days]``. 21 days apart puts every scenario's
-  chunk outside every other scenario's read window, so one measurement touches
-  one chunk and the statistics state of a cell is the statistics state of the
-  node it measures.
+* Its own day, 21 days apart — the narrow hypertable is chunked at 1 day and a
+  forecast read spans ``[cycle_time, cycle_time + 7 days]``. 21 days apart puts
+  every scenario's chunk outside every other scenario's read window, so one
+  measurement touches one chunk and the statistics state of a cell is the
+  statistics state of the node it measures.
 * Its own ``cycle_time`` — ``_per_source_latest_cycles`` and
   ``_resolve_run_identity`` (``packages/common/forecast_store.py:743``, ``:650``)
   resolve by ``cycle_time`` x ``scenario_id`` x ``model_id``, NOT by segment.
@@ -71,8 +78,8 @@ STEP_COUNT = 24
 #: Well clear of ``seed_issue_126_data``'s 2026-05-03, so no constant window of
 #: this module's can reach the it126 chunk.
 BASE_DAY = datetime(2026, 6, 1, tzinfo=UTC)
-#: > 7 days (the forecast read's window AND the legacy chunk interval), so each
-#: scenario's chunk is invisible to every other scenario's measurement.
+#: > 7 days (the forecast read's window), so each scenario's chunk is invisible
+#: to every other scenario's measurement.
 DAY_STRIDE = timedelta(days=21)
 #: ``seed_issue_126_data`` already owns low ``segment_order`` values; the offset
 #: keeps each scenario's block disjoint from it and from every other scenario.
@@ -94,7 +101,16 @@ DECOY_SCENARIO_ID = "forecast_ifs_deterministic"
 #: run, the `latest` read reports one run per selected scenario.
 EXPECTED_SERIES_BY_SHAPE = {"run_bound": 1, "latest": 2}
 
-BRANCHES = ("narrow", "legacy")
+#: ONE branch since #1342's contract (task 6.3). ``design.md``'s cross product
+#: named "narrow **and** legacy" because one template rendered both (F1c) and
+#: the read path routed per run. 6.3 deleted the legacy rendering and the
+#: routing, so a ``legacy``-routed run's facts are not reachable by ANY reader:
+#: the cell cannot be MEASURED, only reported as not measured, and a required
+#: cell that can never be measured turns the gate permanently red without
+#: testing anything. The narrow indices are unchanged (``product`` is
+#: branch-major, so narrow kept 0..3), which is what keeps every narrow
+#: ``RECORDED_ROW_DIGESTS`` entry a comparison against the same seed.
+BRANCHES = ("narrow",)
 CHUNK_STATES = ("uncompressed", "compressed")
 STATISTICS_STATES = ("absent", "stale")
 SHAPES = ("run_bound", "latest")
@@ -138,7 +154,11 @@ class Scenario:
 
     @property
     def hypertable_name(self) -> str:
-        return "river_timeseries" if self.branch == "narrow" else "river_timeseries_legacy"
+        # `branch` survives as the cell key's third field — the recorded digests
+        # and the gate's table are keyed on it — but it no longer selects a
+        # table: `BRANCHES` has one member and the narrow hypertable is the only
+        # one any reader reads.
+        return "river_timeseries"
 
     @property
     def hypertable(self) -> str:
@@ -434,7 +454,7 @@ def seed_matrix(write_connection: Any, autocommit_connection: Any) -> dict[str, 
         "day_stride_days": DAY_STRIDE.days,
         "hypertable_autovacuum_disable": {
             hypertable: disable_autovacuum(write_connection, hypertable)
-            for hypertable in ("hydro.river_timeseries", "hydro.river_timeseries_legacy")
+            for hypertable in ("hydro.river_timeseries",)
         },
         "scenarios": {},
     }
@@ -693,53 +713,14 @@ WHERE h.run_id = %(run_id)s
   AND rnv.river_network_version_id = %(river_network_version_id)s
 """
 
-#: The legacy table keeps BOTH identity layers (000050 added the surrogate keys
-#: beside the text columns and 000059 renamed the table without dropping either),
-#: and `render_river_ts_sql(..., "legacy")` binds the text ones. A legacy row
-#: missing them would make the legacy branch return nothing and the cell vacuous.
-_LEGACY_FACTS_SQL = """
-INSERT INTO hydro.river_timeseries_legacy (
-    run_id, basin_version_id, river_network_version_id, river_segment_id,
-    valid_time, lead_time_hours, variable, value, unit, quality_flag,
-    run_key, basin_version_key, river_network_version_key, river_segment_key,
-    variable_e, unit_e, quality_flag_e
-)
-SELECT
-    h.run_id,
-    %(basin_version_id)s,
-    %(river_network_version_id)s,
-    rs.river_segment_id,
-    %(day)s::timestamptz + make_interval(hours => step),
-    step,
-    'q_down',
-    rs.river_segment_key + step,
-    'm3/s',
-    'ok',
-    h.run_key,
-    bv.basin_version_key,
-    rnv.river_network_version_key,
-    rs.river_segment_key,
-    'q_down'::hydro.river_variable,
-    'm3/s'::hydro.river_unit,
-    'ok'::hydro.river_quality_flag
-FROM hydro.hydro_run h
-CROSS JOIN core.basin_version bv
-CROSS JOIN core.river_network_version rnv
-JOIN core.river_segment rs
-  ON rs.river_network_version_id = %(river_network_version_id)s
- AND rs.segment_order BETWEEN %(order_lo)s AND %(order_hi)s
-CROSS JOIN generate_series(0, %(last_step)s) AS hours(step)
-WHERE h.run_id = %(run_id)s
-  AND bv.basin_version_id = %(basin_version_id)s
-  AND rnv.river_network_version_id = %(river_network_version_id)s
-"""
-
-
 def _insert_facts(connection: Any, scenario: Scenario, run_id: str) -> int:
-    statement = _NARROW_FACTS_SQL if scenario.branch == "narrow" else _LEGACY_FACTS_SQL
+    # One statement since #1342's contract (task 6.3) retired the legacy branch:
+    # `_LEGACY_FACTS_SQL` seeded `hydro.river_timeseries_legacy` for a branch no
+    # reader can reach any more, so it could only ever have produced rows the
+    # gate cannot measure.
     rows = execute(
         connection,
-        statement,
+        _NARROW_FACTS_SQL,
         {
             "day": scenario.day,
             "river_network_version_id": RIVER_NETWORK_VERSION_ID,
