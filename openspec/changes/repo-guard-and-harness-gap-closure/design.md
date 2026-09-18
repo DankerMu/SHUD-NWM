@@ -40,7 +40,8 @@ skill copies under .agents/skills*"）**有意 untrack**，理由是每次装包
   搬到「被跟踪、CI 会跑」的仓库测试里。
 - 缺陷 1 的**写路径**通道：**未覆盖**。未跟踪的 `cmd_close` 在不带 `--outcome` 时仍会写出词表外的
   `"closed"`（实测该通道近期仍在触发：issue 2013 / PR 2117）。本 PR 只能让守卫把它**抓红**并在失败信息里
-  指出修法（`--outcome merged` 一个 flag），不能让它不再发生。
+  指出修法，不能让它不再发生。修法分两段：当场 `close` 时补 `--outcome merged`；已写入的记录 `close` 改不了，
+  只能按 `gh pr view <pr> --json state` 手改该字段并提交。
 - 缺陷 2（verdict table 落盘 + `record-round` 挂钩 + 文档口径，占 6 条验收中的第 4、5 条）：**零覆盖、无替代**。
 
 这两项差额由 G-6 逐条写进 #2261 的留言，不 close。六条验收的完整处置：**4 条不可在本仓落地**
@@ -113,10 +114,11 @@ skill copies under .agents/skills*"）**有意 untrack**，理由是每次装包
   同构的 exact-set 全等断言。
 - **#2107**：记录型 delegating monkeypatch 包 `reconcile_module.subprocess.Popen`，
   启动确认边界落在生产代码真正持有子进程句柄的那一点；删掉对 shell 写 PID 文件的依赖。
-- **#1829**：`json_doc()` 内部沿用 `json_cwd()`（`:39-41`）既有的 `python3 -c` 形式。
+- **#1829**：`json_doc()` 内部沿用改前 `json_cwd()` 既有的 `python3 -c` 形式（`json_cwd()` 已被 `json_doc()` 吸收删除）。
   hook 运行在 venv 之外，这是 CLAUDE.md「Python 一律用 uv」让位于 hook 运行时现实的那一处，
-  不在此引入第三种写法。真正的裸插值槽位是三处（`:19`——`command` 与 `cwd` 都裸插、`:46`、`:354`）；
-  `:168` 是无 `%s` 的字面量文档，一并改用 `json_doc()` 但不计入裸插值。实现者先机械枚举确认没有第四处。
+  不在此引入第三种写法。改前真正的裸插值槽位是三处：`run_hook`（`command` 与 `cwd` 都裸插）、`run_hook_split`、
+  `run_hook_from`；另有一处无 `%s` 的手写字面量文档（第 6 组 legacy 用例），一并改用 `json_doc()` 但不计入裸插值。
+  实现者先机械枚举确认没有第四处。
 - **#1897**：**保留**脚本（issue 的推荐路径），不退役——退役会触及 `scripts/select_ci_tests.py` 里
   `tests/test_m24_gateway_proof.py` 的映射，与 #2211/#1827 的写集冲撞。token 只经 `read_configured_service_token` 进入进程。
 

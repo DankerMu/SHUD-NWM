@@ -43,8 +43,8 @@
 ### E. #1829
 
 - [x] E-1 加 `json_doc()`，一次性序列化整个 tool-call 文档（command + 可选 cwd）
-- [x] E-2 三处裸插值槽位（`:19` 的 `command` 与 `cwd`、`:46`、`:354`）统一改用 `json_doc()`；
-      `:168` 是无 `%s` 的字面量文档，一并改用同一 helper 但不计入裸插值。先机械枚举确认没有第四处
+- [x] E-2 三处裸插值槽位（`run_hook` 的 `command` 与 `cwd`、`run_hook_split`、`run_hook_from`）统一改用 `json_doc()`；
+      第 6 组 legacy 用例的无 `%s` 字面量文档一并改用同一 helper 但不计入裸插值。先机械枚举确认没有第四处
 - [x] E-3 新增用例：command 含双引号/反斜杠/换行/CR/tab，断言 hook exit 为 0 或 2，而非 1
 
 ### F. #1897
@@ -69,7 +69,8 @@
       (c) 每个 issue 条目结构完整（`ceilingPrs` / `gateEntries` / `closed` 俱在，类型正确）
 - [x] G-3 守卫写成对 dict 的纯函数；测试对真实文件的变异体（加裸顶层 key / `outcome: "closed"` / 缺 `ceilingPrs`）取红
 - [x] G-3b 词表违规的失败信息必须指出成因与修法：`close` 未带 `--outcome` 时未跟踪工具的兜底值不在词表内，
-      重跑 `close --outcome merged` 即可。这条通道本 PR 修不了（design.md D1），守卫只能抓红并告知修法
+      修法分两段：当场 `close` 时补 `--outcome merged`；已写入的记录 `close` 改不了，须按 `gh pr view` 手改并提交。
+      这条通道本 PR 修不了（design.md D1），守卫只能抓红并告知修法
 - [x] G-4 `.github/workflows/ci.yml` 的 `backend` filter 加 `.review-gate-issues.json` 字面量，并按仓内既有先例
       （`tests/test_select_ci_tests.py` 的 `test_calibration_declaration_backend_filter_entry_is_block_scoped`
       与 `test_calibration_declaration_backend_filter_entry_reds_when_removed_or_moved` 等 #1571/#1860/#1688 pin）

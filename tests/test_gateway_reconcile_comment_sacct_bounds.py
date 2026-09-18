@@ -270,6 +270,9 @@ def test_real_sacct_process_bounds_reap_and_leave_inflight_cohort_unchanged(
     terminated_path = tmp_path / f"{boundary}.terminated"
     executable.write_text(
         """#!/bin/sh
+if [ "$FAKE_SACCT_BOUNDARY" = wall_time ]; then
+    exec sleep 60
+fi
 terminated() {
     : > "$FAKE_SACCT_TERMINATED_PATH"
     exit 0
@@ -281,9 +284,6 @@ case "$FAKE_SACCT_BOUNDARY" in
         ;;
     row)
         while :; do printf '17667|nhms_forecast|RUNNING|0:0||scheduler|account\\n'; done
-        ;;
-    wall_time)
-        exec sleep 60
         ;;
 esac
 """,
@@ -337,12 +337,13 @@ esac
     child = started_processes[0]
     assert child.args[0] == str(executable)
     if boundary == "wall_time":
-        # This fake ``exec``s ``sleep``, which discards the shell's TERM trap, so it can
-        # leave no ``terminated_path`` marker: the signalled returncode is the only
-        # available proof that production *terminated* the runaway child instead of
-        # merely blocking until it finished on its own.  Both reap paths signal
-        # (SIGTERM -> -15, the ``kill()`` fallback -> -9); any non-negative code means
-        # the child ran to natural completion and was never terminated.
+        # This fake ``exec``s ``sleep`` before any trap is installed, so no TERM handler
+        # exists on this path at any instant and it leaves no ``terminated_path`` marker.
+        # TERM before the exec kills the shell by default action; after it, TERM kills
+        # ``sleep``.  Either way the child dies by signal (SIGTERM -> -15, the ``kill()``
+        # fallback -> -9), so a negative returncode is the proof that production
+        # *terminated* the runaway child; a non-negative code means it ran to natural
+        # completion while production only waited for it.
         assert child.returncode is not None and child.returncode < 0, (
             "production must terminate and reap the runaway sacct child, but its "
             f"returncode is {child.returncode!r}; a non-negative code means the child "

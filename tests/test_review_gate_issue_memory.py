@@ -111,18 +111,36 @@ def review_gate_issue_memory_violations(history: Any) -> list[str]:
                 violations.append(f"issues[{issue}].closed[{index}] is missing 'outcome'")
                 continue
             outcome = record["outcome"]
-            if outcome not in OUTCOMES:
-                pr = record.get("pr", "<unknown>")
+            pr = record.get("pr", "<unknown>")
+            hand_fix = (
+                f"Remedy for this already-written record (issue {issue} / PR {pr}): close "
+                "cannot rewrite history, so set this field by hand to the PR's real outcome "
+                f"(`gh pr view {pr} --json state`) and commit .review-gate-issues.json."
+            )
+            # Type first: a JSON list/object outcome is unhashable, so the
+            # membership test below would raise instead of reporting.
+            if not isinstance(outcome, str):
                 violations.append(
-                    f"issues[{issue}].closed[{index}].outcome={outcome!r} is outside the "
-                    f"OUTCOMES vocabulary {sorted(OUTCOMES)}. Cause: review_gate.py's cmd_close "
+                    f"issues[{issue}].closed[{index}].outcome must be a string from "
+                    f"{sorted(OUTCOMES)}, got {type(outcome).__name__} {outcome!r}. {hand_fix}"
+                )
+                continue
+            if outcome not in OUTCOMES:
+                # The cmd_close cause is only true of the literal fallback value
+                # "closed"; any other string did not come from that path.
+                cause = (
+                    "Cause: review_gate.py's cmd_close "
                     'writes `args.outcome or "closed"`, so a close run that omits --outcome '
                     "persists a value neither its own vocabulary nor evidence_check.py accepts. "
+                    if outcome == "closed"
+                    else ""
+                )
+                violations.append(
+                    f"issues[{issue}].closed[{index}].outcome={outcome!r} is outside the "
+                    f"OUTCOMES vocabulary {sorted(OUTCOMES)}. {cause}"
                     "Remedy when closing: it is one flag — `review_gate.py close --outcome merged` "
                     "(close takes no --issue/--pr; it reads both from the live gate state). "
-                    f"Remedy for this already-written record (issue {issue} / PR {pr}): close "
-                    "cannot rewrite history, so set this field by hand to the PR's real outcome "
-                    f"(`gh pr view {pr} --json state`) and commit .review-gate-issues.json."
+                    f"{hand_fix}"
                 )
 
     return violations
@@ -230,3 +248,49 @@ def test_guard_tolerates_malformed_input_without_raising() -> None:
         "history['issues'] must be a JSON object, got list"
     ]
     assert review_gate_issue_memory_violations({}) == ["top-level 'issues' map is missing"]
+    # JSON list/object outcomes are unhashable: a bare vocabulary membership
+    # test on them raises TypeError instead of reporting.
+    for outcome, type_name in ((["merged"], "list"), ({"a": 1}, "dict")):
+        history = {"issues": {"1": {"ceilingPrs": [], "gateEntries": 1, "closed": [{"pr": 7, "outcome": outcome}]}}}
+        violations = review_gate_issue_memory_violations(history)
+        assert isinstance(violations, list) and len(violations) == 1, violations
+        assert f"outcome must be a string from {sorted(OUTCOMES)}, got {type_name} {outcome!r}" in violations[0]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "type_name"),
+    [
+        pytest.param(["merged"], "list", id="list"),
+        pytest.param({"a": 1}, "dict", id="dict"),
+        pytest.param(3, "int", id="int"),
+        pytest.param(None, "NoneType", id="null"),
+    ],
+)
+def test_guard_reports_non_string_outcome_without_raising(outcome: object, type_name: str) -> None:
+    # A list/object outcome is unhashable; a vocabulary membership test on it
+    # would raise TypeError instead of reporting. A non-string outcome also did
+    # not come from cmd_close's `"closed"` fallback, so that cause must not be
+    # claimed for it.
+    history = {"issues": {"1": {"ceilingPrs": [], "gateEntries": 1, "closed": [{"pr": 7, "outcome": outcome}]}}}
+
+    violations = review_gate_issue_memory_violations(history)
+
+    assert len(violations) == 1, violations
+    assert f"issues[1].closed[0].outcome must be a string from {sorted(OUTCOMES)}, got {type_name} {outcome!r}" in (
+        violations[0]
+    ), violations
+    assert "cmd_close" not in violations[0], violations
+
+
+def test_out_of_vocabulary_string_other_than_closed_omits_cmd_close_cause() -> None:
+    # Only the literal "closed" is produced by cmd_close's fallback; attributing
+    # any other string to it would misdescribe the input.
+    history = {"issues": {"1": {"ceilingPrs": [], "gateEntries": 1, "closed": [{"pr": 7, "outcome": "merge"}]}}}
+
+    violations = review_gate_issue_memory_violations(history)
+
+    assert len(violations) == 1, violations
+    assert "issues[1].closed[0].outcome='merge' is outside the OUTCOMES vocabulary" in violations[0], violations
+    assert "cmd_close" not in violations[0], violations
+    assert "`review_gate.py close --outcome merged`" in violations[0], violations
+    assert "issue 1 / PR 7" in violations[0], violations

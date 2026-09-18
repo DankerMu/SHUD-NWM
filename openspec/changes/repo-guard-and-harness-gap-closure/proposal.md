@@ -31,8 +31,9 @@ e2e 门、测试夹具的确定性、hook 测试 harness 的编码、诊断发�
 
 七件事一个 PR，写集互不重叠（重叠的两组已串行化，见 design.md）。**#2261 被降范围**：
 其六条验收里有**四条**（第 1/3/4/5 条）要求修改 `.claude/skills/subagent-workflow/scripts/{review_gate,evidence_check}.py`
-与 `references/*.md`——这些文件**不在版本控制内**（`git ls-files | grep -ci subagent` = 0），由 `002ba4b59`
-（2026-09-14）有意 untrack。要改它们就得先把它们重新纳入跟踪，那是推翻一条四天前的治理决定，
+与 `references/*.md`——这些文件**不在版本控制内**（`git ls-files | grep -ci subagent` = 0；`.claude/` 一直被
+`.gitignore:90` 忽略，这些路径从未被跟踪）。要改它们就得先**首次** force-add 纳入跟踪，而同一套脚本的
+`.agents/skills/` 副本刚由 `002ba4b59`（2026-09-14）因装包覆盖问题有意 untrack——首次纳入与该判断正相反，
 #2261 没提出、用户的预授权也不覆盖（见 design.md D1）。本 PR 只交付其**可落地切片**
 （committed JSON 的修复 + 一条 tracked 的结构守卫 + 让该守卫真能被 CI 选中），
 差额回报给 #2261，**不 `Closes #2261`**。
