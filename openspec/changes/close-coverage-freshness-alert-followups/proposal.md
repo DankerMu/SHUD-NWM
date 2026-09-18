@@ -6,7 +6,7 @@ PR #2462 (issue #2080) shipped the node-27 coverage-freshness alert lane and lef
 
 ## What Changes
 - Runbook §11.2: the exit-2 row names the import-time display-module / `PYTHONPATH` case with its own first step; the exit-3 row is qualified as *observation-stage*.
-- Runbook §11.3: a third branch for the class D0 was rewritten around — coverage rows populated but unlistable — which both existing branches currently dead-end on.
+- Runbook §11.3: a third branch for the class D0 was rewritten around — a cycle the catalog will not list although branches A and B both come back clean — which both existing branches currently dead-end on. It has two landing points: the coverage row is missing or zero (the `no_coverage_row` rc=0 path, which branch B cannot rule out because B's numerator never joins `run_display_coverage`), or the row is populated and the catalog's window/phase checks reject it. The diagnostic dedups to the newest run per `(network, cycle)` the way the catalog does, `LEFT JOIN`s coverage so a missing row surfaces rather than vanishing, and its remediation carries the **writer** DSN — the refresh is an `INSERT … ON CONFLICT DO UPDATE` and the alerting env is read-only.
 - Runbook §11.5: the governance-registration sentence §10.8 carries for the sibling lane.
 - `scripts/node27_resource_governance.py`: register both units in `DEFAULT_SERVICES`; `tests/test_node27_resource_governance.py`: the tuple pin and the collector twin, mirroring the #1368 pair.
 - `tests/test_node27_coverage_freshness_alert.py`: pin the import-time failure's exit code and structured stderr code.
@@ -19,7 +19,7 @@ None.
 - `display-coverage-freshness`: gains a failure-stage attribution requirement and a unit-registration requirement.
 
 ## Impact
-`scripts/node27_resource_governance.py` (one tuple), two test files, `docs/runbooks/current-production-ops.md` (§11.2/§11.3/§11.5), the archived change's `design.md`/`tasks.md` correction notes, and one spec delta. The only edit to `scripts/node27_coverage_freshness_alert.py` is its D3 journal-budget comment at `:106-110`, whose line attribution contradicts the node-27 measurement; every executable line is unchanged, because its behaviour is the deliberate one and is not in question.
+`scripts/node27_resource_governance.py` (one tuple), two test files, `docs/runbooks/current-production-ops.md` (§11.2/§11.3/§11.5), the archived change's `design.md`/`tasks.md` correction notes, and one spec delta. The only edits to `scripts/node27_coverage_freshness_alert.py` are non-executable: its D3 journal-budget comment (`:109-117`) and the module docstring's D3 bullet (`:56-58`), both of which stated a line attribution the node-27 measurement contradicts. Every executable line is unchanged — proven by `ast.dump` equality over the docstring-stripped tree — because the script's behaviour is the deliberate one and is not in question.
 
 `design.md` is exempt at this fixture level; the decisions are small enough to carry in `tasks.md`.
 

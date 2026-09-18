@@ -5465,16 +5465,20 @@ SELECT r.run_id, r.cycle_time, r.river_network_version_id,
        -- 相位校验：窗口起点必须落在该 cycle 的整点网格上
        (EXTRACT(EPOCH FROM (rdc.river_valid_time_start - r.cycle_time))::bigint % 3600 = 0) AS phase_ok
 FROM ranked r
--- LEFT JOIN，不是 INNER：缺覆盖行的 run 必须以整行 NULL 现身，而不是从结果里消失。
+-- LEFT JOIN，不是 INNER：缺覆盖行的 run 必须以 segment_count 等 rdc.* 全 NULL 现身，而不是从结果里消失。
 LEFT JOIN hydro.run_display_coverage rdc ON rdc.run_id = r.run_id
 WHERE r.rn = 1
 ORDER BY r.cycle_time DESC, r.run_id DESC
 LIMIT 20;
 ```
 
-四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。**整行 NULL**（连
-`segment_count` 都是 NULL）是另一个读法：这个 run 压根没有覆盖行，即上面那条
-`no_coverage_row`，处置是直接补刷新，不必查几何。还要留一手：目录侧的 JOIN 多带
+四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。两种读法靠
+`rdc.segment_count` 分：**它为 NULL** 就是这个 run 压根没有覆盖行，即上面那条
+`no_coverage_row`，处置是直接补刷新，不必查几何；`segment_count` 有值而布尔列挂，才是
+几何问题。缺行的那一行**不会"整行 NULL"**：`window_cols_ok` 是一串 `IS NOT NULL` 的合取，
+按三值逻辑永不为 NULL，缺行时它读 `false`（psql 显示 `f`），而 `sample_count_ok`、
+`span_ok`、`phase_ok` 连同所有 `rdc.*` 值列才是 NULL（psql 里留空）——认这个形状即可。
+还要留一手：目录侧的 JOIN 多带
 `rdc.segment_count > 0`，最新 run 缺行或被归零时它会**回退到该 cycle 上次新的 run**，
 所以最新行为 NULL/零时要回头看同 cycle 更早的 `run_id` 是不是正扛着覆盖。**这一类不是假想
 的**：覆盖行由 `packages/common/display_coverage.py` 一次扫描算出，`river_sample_count`
