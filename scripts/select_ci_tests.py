@@ -460,6 +460,19 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     SELECTOR_META_GUARD_TEST,
 )
 
+# #2261: the committed review-gate round-ceiling memory. It is hand-edited when
+# sessions conflict (that is how two bare top-level keys got in), and its only
+# assertion-level consumer is the structural guard below — a JSON data file has
+# no import closure, so the route must be explicit. The meta-guard rides along
+# because `select_tests` only adds it for changed `tests/` paths, and this path
+# is a root JSON file; it also holds this route's own pins.
+REVIEW_GATE_ISSUE_MEMORY_PATH = ".review-gate-issues.json"
+REVIEW_GATE_ISSUE_MEMORY_TEST = "tests/test_review_gate_issue_memory.py"
+REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS: tuple[str, ...] = (
+    REVIEW_GATE_ISSUE_MEMORY_TEST,
+    SELECTOR_META_GUARD_TEST,
+)
+
 # #1912/#1903: the Basins package publication corpus has six frozen baseline
 # partitions plus one additive river/segment mapping owner, all below the 1,000-line
 # structural limit and sharing one non-collectible helper. A model-registry change must
@@ -2668,10 +2681,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # security metadata, so a patch-owner PR must reach the drift + 3.1
         # contract suites in addition to the broad API consumers it already
         # carried.
+        # #2211 quantified this module's 13 `_patch_*_openapi` implementations
+        # against the six targets above. Only ONE capability suite was both
+        # unreached and able to observe the module:
+        # tests/test_hydro_display_mvt_scaling.py, which asserts the PATCHED
+        # runtime document directly (`main.create_app().openapi()` in
+        # `test_runtime_openapi_documents_the_national_identity_tile_route` and
+        # `test_runtime_openapi_documents_both_424_codes_on_the_canonical_
+        # national_route_only`). Measured: no-op'ing `_patch_mvt_tile_openapi`
+        # reds exactly those two, and the suite was not selected before.
+        # Cost +22.6s.
+        #
+        # The rest of the #2211 candidates were REJECTED on measured evidence,
+        # not on cost. This module's only observable output is the OpenAPI
+        # document (its sole production importer is apps/api/main.py's schema
+        # hook), so a suite that never reads that document cannot be an oracle
+        # for it however public its routes are: no-op mutants of
+        # `_patch_precip_openapi`, `_patch_runtime_openapi` and the combined
+        # layer-metadata / forecast-series / station-series trio red only
+        # tests/test_openapi_drift.py and tests/test_openapi_31_contract.py —
+        # tests/test_precip_overlay.py (reads the STATIC openapi/nhms.v1.yaml),
+        # tests/test_forecast_api.py and
+        # tests/test_forecast_api_met_station_series.py (never read the schema)
+        # and tests/test_runtime_mode.py (reads /openapi.json but asserts route
+        # PRESENCE, which registration decides) all stay green. Routing them
+        # would buy assertions that run but cannot observe the change — a cousin
+        # of the #1447 ruling on constant skips. The runtime-vs-static
+        # comparison the drift target already carries is the residual oracle
+        # for the other twelve implementations.
+        #
+        # Per-capability literals, never a directory pattern: every rule here is
+        # an explicit tuple so the exact-set anchor in
+        # tests/test_select_ci_tests.py can pin it.
         "apps/api/openapi_patching.py",
         (
             "tests/test_api.py",
             "tests/test_api_contract.py",
+            "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -3609,6 +3655,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # fallback or a zero-assertion collect-only run.
         CALIBRATION_OVERRIDES_PATH,
         CALIBRATION_OVERRIDES_CONSUMER_TESTS,
+    ),
+    PathTestRule(
+        # #2261: the review-gate issue memory's structural guard. The exact
+        # ci.yml backend filter entry starts the targeted gate for an
+        # accounting-only PR; this rule turns that lane into real assertions
+        # instead of the zero-assertion collect-only collapse.
+        REVIEW_GATE_ISSUE_MEMORY_PATH,
+        REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS,
     ),
     PathTestRule(
         # #1646: a pytest-config change must re-prove the thread-exception

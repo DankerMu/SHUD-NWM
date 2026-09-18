@@ -1,26 +1,4 @@
 {
-  "1660": {
-    "ceilingPrs": [],
-    "closed": [
-      {
-        "outcome": "merged",
-        "pr": 1696,
-        "rounds": 2
-      }
-    ],
-    "gateEntries": 1
-  },
-  "1736": {
-    "ceilingPrs": [],
-    "closed": [
-      {
-        "outcome": "merged",
-        "pr": 1751,
-        "rounds": 2
-      }
-    ],
-    "gateEntries": 0
-  },
   "issues": {
     "1086": {
       "ceilingPrs": [],
@@ -488,7 +466,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1184,
           "rounds": 3
         }
@@ -748,7 +726,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1385,
           "rounds": 3
         }
@@ -913,7 +891,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1271,
           "rounds": 5
         }
@@ -924,7 +902,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1275,
           "rounds": 2
         }
@@ -1201,7 +1179,7 @@
       ],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1377,
           "rounds": 5
         }
@@ -1234,7 +1212,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1443,
           "rounds": 2
         }
@@ -1370,7 +1348,7 @@
       ],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1379,
           "rounds": 5
         }
@@ -1381,7 +1359,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1381,
           "rounds": 3
         }
@@ -1493,7 +1471,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1687,
           "rounds": 3
         }
@@ -2007,7 +1985,7 @@
           "rounds": 2
         }
       ],
-      "gateEntries": 0
+      "gateEntries": 1
     },
     "1664": {
       "ceilingPrs": [],
@@ -2090,7 +2068,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1706,
           "rounds": 2
         }
@@ -2172,7 +2150,7 @@
           "rounds": 3
         },
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1788,
           "rounds": 2
         }
@@ -2194,7 +2172,7 @@
       "ceilingPrs": [],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 1751,
           "rounds": 2
         }
@@ -2748,7 +2726,7 @@
       ],
       "closed": [
         {
-          "outcome": "closed",
+          "outcome": "merged",
           "pr": 2117,
           "rounds": 5
         }
