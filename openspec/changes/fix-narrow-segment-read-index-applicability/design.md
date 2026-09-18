@@ -36,23 +36,23 @@ candidate can make the text twin non-matchable, and the bench measured the plann
 Two details worth pinning, since a grep for the legacy table name finds neither index: both are created
 `ON hydro.river_timeseries` and reach the legacy table by inheritance through `000059:9`'s `RENAME`. And
 they carry **separate** oracles — `tests/test_migrations.py:385` pins the surrogate twin's columns, `:400`
-the text twin's — so a change touching only one of them does not go silently green on the other. `tests/test_migrations.py:385` still lists it as
-retained and `tests/test_river_identity_normalization_integration.py:270` comments that the legacy text
-indexes remain on the renamed table. **It has the same column order as F1's discovery index and the same
+the text twin's — so a change touching only one of them does not go silently green on the other.
+`tests/test_river_identity_normalization_integration.py:270` comments that the legacy text indexes
+remain on the renamed table. **Both have the same column order as F1's discovery index and the same
 missing column.** The narrow index is therefore the key-column *analogue* of 000051's, not its
 successor: `openspec/changes/timeseries-narrow-store-expand-contract/design.md:57` says "替代 000051",
 but that replacement is scoped to the narrow table only.
 
-**F1c — one template renders both branches.** `packages/common/forecast_store.py:121-132`
+**F1c — one template renders both branches.** `packages/common/forecast_store.py:136-143`
 (`_segment_rows_source_template`) formats the **same** `_SEGMENT_ROWS_SOURCE_SQL` for `legacy` and
-`narrow`, and `:135-138` (`_segment_rows_source_sql`) concatenates them as
+`narrow`, and `:146-148` (`_segment_rows_source_sql`) concatenates them as
 `f"({legacy}\nUNION ALL\n{narrow})"`. Any change to the template lands on both branches, and by F1b the
 legacy branch has the same exposure.
 
 **F2 — the segment read already binds the segment key on every call site.** Every caller of
-`_SEGMENT_ROWS_SOURCE_SQL` — `_latest_issue_time` (`packages/common/forecast_store.py:729`),
-`_per_source_latest_cycles` (`:759`), `_latest_analysis_issue_time` (`:792`),
-`_fetch_analysis_segment_rows` (`:825`), and the forecast/run-type segment fetches — takes a
+`_SEGMENT_ROWS_SOURCE_SQL` — `_latest_issue_time` (`packages/common/forecast_store.py:740`),
+`_per_source_latest_cycles` (`:770`), `_latest_analysis_issue_time` (`:803`),
+`_fetch_analysis_segment_rows` (`:836`), and the forecast/run-type segment fetches — takes a
 `segment_id` and goes through `_segment_identity_params`. **The defect is index choice, not a missing
 predicate.**
 
@@ -69,14 +69,14 @@ the hydro tile point lookup, was rewritten as a per-segment `CROSS JOIN LATERAL`
 `core.river_segment` one `river_network_version_id` per segment
 (`db/migrations/000004_core.sql:33-42`), surrogate keys added by
 `db/migrations/000050_river_identity_normalization.sql:185,192`. Pinned: neither conjunct carries a
-`remove with #1342` aid marker in `packages/common/forecast_store.py:29-54`.
+`remove with #1342` aid marker in `packages/common/forecast_store.py:44-69`.
 
 **F4b — but `_assert_key_predicates_retained` will not catch a symmetric rewrite.** It is a *relative*
 check: `render_river_ts_sql` calls it at `packages/common/river_ts_render.py:2641` comparing the
 template against the rendering derived from that same template, with aid lines removed. Rewriting a
 conjunct in `_SEGMENT_ROWS_SOURCE_SQL` changes both sides, so the guard stays silent and needs no edit.
 **Its silence is not evidence.** The oracle that actually bites is
-`tests/test_river_ts_text_identity_cleanup.py:939-953`, which asserts the literal substrings
+`tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)`, which asserts the literal substrings
 `"rt.basin_version_key = ("` and `"rt.river_network_version_key = ("` across all eight segment blocks.
 `tests/test_river_ts_template_golden.py` does **not** bite: `forecast_store:segment_rows_source` is in
 `ROUTED_SOURCE_KEYS` (`:95-107`, `:124-128`) and is excluded from the golden chain comparison.
@@ -145,7 +145,7 @@ must become un-servable by an index lacking `river_segment_key` — on **both** 
 ### The candidate set, after review
 
 **C4 is withdrawn: it cannot be written.** The proposed branch-level `ORDER BY` is a syntax error —
-`_segment_rows_source_sql` (`packages/common/forecast_store.py:135-138`) concatenates the two branches
+`_segment_rows_source_sql` (`packages/common/forecast_store.py:146-148`) concatenates the two branches
 bare, `f"({legacy}\nUNION ALL\n{narrow})"`, with no per-branch parentheses. And even if it could be
 written, `river_ts_run_discovery_key_idx` ends in `valid_time DESC`, so after its equality prefix is
 bound it yields the same `valid_time` order the primary key does; an `ORDER BY` cannot discriminate.
@@ -182,7 +182,7 @@ cannot form an index condition on the discovery index's 2nd and 3rd columns (for
 `IS NOT DISTINCT FROM`; both columns are `NOT NULL`, so the predicate is equivalent). The discovery
 index's usable prefix collapses to `run_key`, while the primary key still binds four columns.
 
-Costs: the conjunct text changes, so `tests/test_river_ts_text_identity_cleanup.py:939-953` goes red and
+Costs: the conjunct text changes, so `tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)` goes red and
 must be updated deliberately (F4b). Depends on a planner property that must be measured, never assumed.
 Lands on the legacy branch too (F1c) — which is desirable here, since by F1b the legacy branch has the
 same exposure, but it must be measured there rather than hoped for.
@@ -194,8 +194,8 @@ already joins `hydro.hydro_run` and `core.river_network_version`, carries the id
 
 Costs: runs against #2417's "pushdown is additive" rule. Moving predicates outward is the reverse motion
 and must be justified on its own evidence, including the cycle-window envelope argument that change
-relied on (`packages/common/forecast_store.py:87-93` `_CYCLE_WINDOW_PUSHDOWN_SQL`, applied at
-`:862-865`). Also weakens the per-branch predicate set, which is closer to the fail-open class of F4
+relied on (`packages/common/forecast_store.py:98-104` `_CYCLE_WINDOW_PUSHDOWN_SQL`, applied at
+`:873-876`). Also weakens the per-branch predicate set, which is closer to the fail-open class of F4
 than C1 is — the predicate survives, but no longer inside the scan it was protecting.
 
 **Measured costs of the spike, 2026-09-18 — C2 is materially worse than C1, before any plan is read.**
@@ -322,7 +322,7 @@ proves needs three conditions that are all false in production today and cannot 
 section asserted that outside `tests/` and `openspec/` no source file references
 `hydro.river_timeseries_legacy`. That came from a `grep` truncated at 30 lines and is wrong. The legacy
 branch is rendered **unconditionally into every forecast-series read** —
-`packages/common/forecast_store.py:246-250` builds `f"({legacy}\nUNION ALL\n{narrow})"` with no
+`packages/common/forecast_store.py:146-148` builds `f"({legacy}\nUNION ALL\n{narrow})"` with no
 condition, and `services/tiles/mvt.py:910,1014,1017,2003` does the same — and the table name is a source
 constant in two places: `packages/common/river_ts_render.py:101` (`RIVER_TABLE_LEGACY`) and
 `packages/common/node27_pgdata_workload_plan.py:34` (`LEGACY_HYPERTABLE`). **Legacy plan nodes are
@@ -388,8 +388,16 @@ NestLoop parameterisation, C2 would have reproduced base's three failures; it re
 **So the plan outcomes do not discriminate, and the selection is made on the measured costs**, which do:
 
 - **C1 reddens one oracle** — the F4b-predicted conjunct-spelling pin at
-  `tests/test_river_ts_text_identity_cleanup.py:942` — plus 11 text pins in
-  `tests/test_forecast_store_routing.py:197,214` that F4b did not name.
+  `tests/test_river_ts_text_identity_cleanup.py:981` — plus 11 text pins in
+  `tests/test_forecast_store_routing.py` that F4b did not name. **Corrected while implementing**: those
+  11 all land on the single literal at `:214`, not on `:197` as recorded here earlier — `:197`
+  (`sql.count(PROJECTION) == 2`) is a C2 red only, since C1 does not touch the SELECT list. Each of the
+  11 was classified before being touched and all 11 are spelling, not behaviour; three of them assert the
+  exact response payload *before* reaching the SQL pin, so the payload had already passed.
+  **A twelfth red was masked behind them**: `:215`'s `\bDISTINCT\b` matches `IS NOT DISTINCT FROM`, so
+  fixing `:214` would have moved all 11 onto `:215` rather than clearing them. Narrowed to
+  `(?<!NOT )DISTINCT`, with `SELECT DISTINCT` and `MAX(` verified still caught. This is why the count in
+  a review note is not a substitute for running the suite after the fix.
 - **C2 reddens five**, and two of them are semantic, not spelling: it leaves the legacy branch's
   transitional **text** aid as that branch's only network identity conjunct, which is the F4 fail-open
   class that #2050/#2086/#2112/#2114/#2141/#2148 closed. C2 also depends on a JOIN the planner is free to
@@ -404,19 +412,33 @@ which no variant discriminates here because base already passes it — §4's liv
 gate. And `run_bound/stale/legacy` remains open by construction: it is reached through the text twin,
 which C1 has no lever on, so §6.3 files it rather than folding it in.
 
+### §3 verified — shipped code, node-27, 2026-09-18
+
+`1 passed in 33.29s`. 24 cells measured, 23 passed, 1 excused, **0 row-digest mismatches**, findings
+empty. The two cells this change exists to close:
+
+| cell | before | after |
+|---|---|---|
+| `run_bound/absent/narrow/uncompressed` | `run_discovery_key_idx`, ratio 999.0, 5 977 hits | `segment_time_key_idx`, ratio 1.0, 50 hits |
+| `run_bound/absent/legacy/uncompressed` | `selected_identity_key_valid_time_idx`, ratio 999.0, 12 841 hits | `segment_time_idx`, ratio 1.0, 51 hits |
+
+The excused cell still carries its real verdict in `matrix.json` — `passed: false`,
+`defect_reproduced: true`, ratio 999.0, 12 841 hits — so the evidence says what happened, and only the
+gate's assertion is relaxed. Filed as #2471.
+
 ## Must-preserve behaviour
 
 1. Row identity: every measured shape returns byte-identical rows, by the receipt's digest
    (`sha256("\n".join(repr(sorted(row.items()))))[:16]`).
 2. `basin_version_key` and `river_network_version_key` remain enforced predicates of the segment read.
-   If their spelling or position changes, `tests/test_river_ts_text_identity_cleanup.py:939-953` is
+   If their spelling or position changes, `tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)` is
    updated **deliberately and visibly** (F4b), never loosened to a weaker match.
 3. The three discovery-index consumers (F3) do not regress. Per F6 this is a measured claim.
 4. **The legacy branch does not regress.** F1b/F1c: the same template renders it and the legacy table
    carries a same-shaped index. The receipt's three legacy cases (300 / 324 shared hits) are the
    baseline.
 5. **The other four call sites of the shared template do not regress** — in particular
-   `_per_source_latest_cycles` (`packages/common/forecast_store.py:759`), which is 631 496 shared hits
+   `_per_source_latest_cycles` (`packages/common/forecast_store.py:770`), which is 631 496 shared hits
    and 98.8 % of the `latest` shape's cost. `probe1987latest.py` already captures it, so this is a
    missing criterion, not missing evidence.
 6. `_REQUIRED_EQUALS` in `packages/common/node27_pgdata_workload_query.py:57-63` still matches the
@@ -427,7 +449,7 @@ which C1 has no lever on, so §6.3 files it rather than folding it in.
 ## Open questions to settle during implementation
 
 - **Q1** Does the selected candidate hold for `issue_time=latest`, where the binding is
-  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:516-524`, `:859-866`,
+  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:527-535`, `:870-877`,
   `:82-85`)? A `ScalarArrayOpExpr` matches a btree leading column, and F8 shows it is taken.
 - **Q2** For C3 only: what do the three F3 consumers cost with `valid_time` demoted to a filter,
   measured on node-27 per F6?

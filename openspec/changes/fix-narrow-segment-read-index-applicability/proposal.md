@@ -38,7 +38,7 @@ river_ts_run_discovery_key_idx      (run_key, basin_version_key, river_network_v
 ```
 
 The third does not contain `river_segment_key`. #2417 began binding `run_key` into the fact scan of
-`_SEGMENT_ROWS_SOURCE_SQL` (`packages/common/forecast_store.py:29-54`, the `{run_pushdown}` slot), which
+`_SEGMENT_ROWS_SOURCE_SQL` (`packages/common/forecast_store.py:44-69`, the `{run_pushdown}` slot), which
 made that index newly matchable for the segment read. When the planner takes it, the segment predicate
 falls out of the `Index Cond` into a `Filter` and the node reads **every segment of the run** for that
 chunk's slice.
@@ -72,14 +72,14 @@ guard keeps up is not a fixed read path.
 ## What changes
 
 The segment read - on **both** UNION branches, since one template renders them
-(`packages/common/forecast_store.py:121-138`) and both physical tables carry a same-shaped index missing
+(`packages/common/forecast_store.py:136-148`) and both physical tables carry a same-shaped index missing
 the segment key - stops being satisfiable by an index that does not bind `river_segment_key`, under any
 statistics state.
 
 **The mechanism is selected by measurement, not by argument.** Two candidates survive as peers in
 `design.md` — C1 and C2 — with C3 a gated fallback that needs a maintenance window, and C4 **withdrawn**
 because a branch-level `ORDER BY` is a syntax error against
-`packages/common/forecast_store.py:135-138`, which concatenates the two UNION branches bare. Claiming a
+`packages/common/forecast_store.py:146-148`, which concatenates the two UNION branches bare. Claiming a
 four-way measured choice the code cannot support would be theatre. The extended throwaway oracle decides
 between C1 and C2 before either is committed to, across the full condition cross product in `design.md`
 — predicate shape × statistics state × store branch × chunk compression state.
@@ -94,7 +94,7 @@ between C1 and C2 before either is committed to, across the full condition cross
   identical column order with the identical missing segment column, and **neither was ever dropped**:
   `000042:5` and `000049:52,84` dropped three *different* indexes, and `000059` renames the table and
   drops no index. The same template renders both branches
-  (`packages/common/forecast_store.py:121-138`), so the legacy branch's exposure is structurally
+  (`packages/common/forecast_store.py:136-148`), so the legacy branch's exposure is structurally
   analogous — and it is now **measured**: the 2026-09-18 bench run reproduces the breach on legacy at
   ratio 999.0, through the key twin under absent statistics and through the text twin under stale
   statistics (`design.md`, "What the bench measured"; Q4 answered). C1 and C2 move only
@@ -116,7 +116,7 @@ between C1 and C2 before either is committed to, across the full condition cross
   `_assert_key_predicates_retained` (`packages/common/river_ts_render.py:2556-2611`) is a *relative*
   check between a template and a rendering derived from it, so a symmetric rewrite leaves it silent and
   needing no edit - its silence is not evidence. The oracle that actually bites is
-  `tests/test_river_ts_text_identity_cleanup.py:939-953`. Both exist because of
+  `tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)`. Both exist because of
   #2050/#2086/#2112/#2114/#2141/#2148. Dropping either conjunct outright is out of scope here and would
   need its own issue.
 - **Row identity.** Every measured shape must return byte-identical rows before and after.

@@ -10,13 +10,13 @@ one predicate shape, one statistics state, the narrow branch only, and uncompres
 gap below is a way a wrong implementation would go green.
 
 - [x] 1.1 Add the **`issue_time=latest`** predicate shape. It binds
-  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:516-524`, `:859-866`,
+  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:527-535`, `:870-877`,
   `:82-85`) and production shows it flipping a *different* chunk than the run-bound shape (design.md
   F8), so one shape's result does not carry to the other. Note that `_capture_fact_statement`
   (`tests/test_river_timeseries_stats_index_choice_integration.py:505-513`, assertion at `:510`) filters
   on `"hydro.river_timeseries" in statement["sql"]` and demands exactly one hit. The `latest` shape
   yields **two** through that filter, not one: `_per_source_latest_cycles`
-  (`packages/common/forecast_store.py:759`) and the cycle-window segment read (`:898`) both inline
+  (`packages/common/forecast_store.py:770`) and the cycle-window segment read (`:909`) both inline
   `_segment_rows_source_sql`. The relaxation is therefore to select the statement carrying
   `pushdown_run_keys` / `_CYCLE_WINDOW_PUSHDOWN_SQL`; `_per_source_latest_cycles`'s nodes are §4.3's
   business, not §1.1's.
@@ -30,7 +30,7 @@ gap below is a way a wrong implementation would go green.
   failure on `_hyper_9_170_chunk` is **not** explained by staleness alone, and leave the question open
   rather than dropping it.
 - [x] 1.3 Add the **legacy branch**. `_segment_rows_source_template` renders one template for both
-  stores (`packages/common/forecast_store.py:121-132`) and `river_timeseries_legacy` still carries
+  stores (`packages/common/forecast_store.py:136-143`) and `river_timeseries_legacy` still carries
   `river_ts_selected_identity_key_valid_time_idx` — same column order, same missing segment key, never
   dropped (design.md F1b). Seed a legacy-routed run with legacy fact rows for the target segment, and
   extend the node extractor (`_narrow_access_nodes`, def at `:554`) — its filter is a caller-supplied
@@ -71,7 +71,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 - [x] 2.1 Implement **C1** and **C2** (design.md) far enough to be measured. These are throwaway spikes;
   only the selected one is committed. C4 is withdrawn — a branch-level `ORDER BY` is a syntax error
-  against `packages/common/forecast_store.py:135-138`, which concatenates the branches bare. C3 is a
+  against `packages/common/forecast_store.py:146-148`, which concatenates the branches bare. C3 is a
   gated fallback, attempted only if both C1 and C2 fail, and it carries §5. Verify: for each candidate,
   a recorded result for every cell of the condition cross product in design.md — shape × statistics
   state × branch × chunk state — giving criterion 1 judged **per branch**
@@ -94,12 +94,20 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 ## 3. Implement the selected mechanism
 
-- [ ] 3.1 Apply the selected change to `packages/common/forecast_store.py`. Verify:
-  `uv run ruff check .`; the §1 oracle green across the **whole** condition cross product on a throwaway
-  database on node-27 — including the stale condition if §1.2 showed it reproduces.
-- [ ] 3.2 If the selected candidate changes the spelling or position of the `basin_version_key` or
+- [x] 3.1 Apply the selected change to `packages/common/forecast_store.py`. Verify:
+  `uv run ruff check .`; the §1 oracle green across the condition cross product on a throwaway database
+  on node-27, including the stale condition.
+  **Amended after §2.2**: this clause said "the **whole** cross product", which contradicts §2.2's own
+  bound — `run_bound/stale/legacy/uncompressed` is reached through the legacy text twin that C1 has no
+  lever on, and §2.2 states in writing that leaving it red is not a failure of the candidate. The bench
+  carries that as `EXPECTED_OPEN_CELLS`, a one-entry allowlist that excuses **only** that cell's plan
+  criteria: the cell is still seeded, still measured, still carries its real verdict into the table and
+  `matrix.json`, its row identity and non-vacuity are never excused, and the gate **reports it if it ever
+  starts passing** so the excuse cannot outlive #1988's DROP. Verify additionally: the allowlist has
+  exactly one entry, it names #2471, and removing it reddens exactly that one cell.
+- [x] 3.2 If the selected candidate changes the spelling or position of the `basin_version_key` or
   `river_network_version_key` conjuncts, the oracle that must be updated is
-  **`tests/test_river_ts_text_identity_cleanup.py:939-953`**, which asserts the literal substrings
+  **`tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)`**, which asserts the literal substrings
   `"rt.basin_version_key = ("` and `"rt.river_network_version_key = ("` across all eight segment blocks.
   `_assert_key_predicates_retained` (`packages/common/river_ts_render.py:2556-2611`) is a **relative**
   check — template versus a rendering derived from that same template — so a symmetric rewrite leaves it
@@ -109,14 +117,14 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   guard's exact-equality character — that hole was closed by review #1996 C8. Verify:
   `uv run pytest -q tests/test_river_ts_render.py tests/test_river_ts_text_identity_cleanup.py`; state
   the census delta and show the new red-proof.
-- [ ] 3.3 If the selected candidate changes the index set, update `tests/test_migrations.py:278-282` and
+- [x] 3.3 If the selected candidate changes the index set, update `tests/test_migrations.py:278-282` and
   `:1498-1499` and `tests/test_river_identity_normalization_integration.py:270-296` (design.md F5), and
   note that two archived window tools also pin the three index names
   (`openspec/changes/archive/2026-09-15-refresh-node27-window-admission/tools/window_execute.py:1019-1025`,
   `.../2026-09-15-node27-post-d12-reforward/tools/window_execute.py:1167-1173`) — archived and therefore
   non-blocking, but they would refuse on reuse. Verify: `uv run pytest -q tests/test_migrations.py`;
   real-DB identity-normalisation test on node-27.
-- [ ] 3.4 Row identity: every measured shape returns byte-identical rows, by the receipt digest
+- [x] 3.4 Row identity: every measured shape returns byte-identical rows, by the receipt digest
   `sha256("\n".join(repr(sorted(row.items()))))[:16]`. Verify: the throwaway digest regression passes
   for both shapes and both branches, and §4's node-27 probe reports the same digests as
   `receipts/2026-09-17-i8-explain-gate/explain-1987.json` and `explain-1987-latest.json`.
@@ -151,11 +159,11 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   after, any regression stated in absolute terms. Mandatory regardless of candidate; for C3 it is the
   admission gate, per `db/migrations/000049_...`.
 - [ ] 4.3 No regression on the other call sites of the shared template. There are eight
-  (`packages/common/forecast_store.py:729, 759, 792, 825, 898, 950, 986, 1024`); only `:898` and `:950`
-  bind `rt.run_key` into the fact scan, `:792`/`:825` push `h.scenario_id` and `:986`/`:1024` push
-  `h.run_type` (`:97-98`, `:101-102`), and `:729`/`:759` push nothing — so no exposed call site is
+  (`packages/common/forecast_store.py:740, 770, 803, 836, 909, 961, 997, 1035`); only `:909` and `:961`
+  bind `rt.run_key` into the fact scan, `:803`/`:836` push `h.scenario_id` and `:997`/`:1035` push
+  `h.run_type` (`:108-109`, `:112-113`), and `:740`/`:770` push nothing — so no exposed call site is
   unmeasured. Measure in particular
-  `_per_source_latest_cycles` (`packages/common/forecast_store.py:759`) at 631 496 shared hits — 98.8 %
+  `_per_source_latest_cycles` (`packages/common/forecast_store.py:770`) at 631 496 shared hits — 98.8 %
   of the `latest` shape's cost. `probe1987latest.py` already captures it. Verify: its shared hits and
   warm P95, before and after, recorded as a pass/fail criterion rather than as background.
 - [ ] 4.4 The D11 capture path is unmodified and still accepts the statement: `_REQUIRED_EQUALS`
