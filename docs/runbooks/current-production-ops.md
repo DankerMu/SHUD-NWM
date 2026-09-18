@@ -5483,9 +5483,10 @@ ORDER BY 1;
 ```
 
 差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
-`active_flag` 置 false（退出业务化的口径见 §7）。处置之后，要等覆盖刷新把该 cycle 收进目录
-gap 才会回落——下一次 autopipe 刷新自然会做，要立刻做就用分支 C 末尾的刷新块对该 cycle 的 run 补刷新；
-之后用 §11.4 那条 `systemctl --user start` 手跑一次（读法见 §11.4 末尾）。刷新过了仍退 1 → 回来重跑上面
+`active_flag` 置 false（退出业务化的口径见 §7）。置 false 不需要补刷新：目录的活跃网络集合是
+`services/tiles/mvt.py` 的 `_national_discharge_coverage_rows` 每次现读 `core.model_instance`（`mi.active_flag`）
+得来的，没有物化；重新产出的 run 由 autopipe 自己的 coverage 刷新腿写覆盖行，那条腿失败是分支 A 的事。
+处置之后直接用 §11.4 那条 `systemctl --user start` 手跑一次（读法见 §11.4 末尾）。仍退 1 → 回来重跑上面
 两条语句，差集已空就走分支 C（推导）。差集为空 → 直接走分支 C。
 
 **分支 C —— A 和 B 都查空：目录仍然不收这个 cycle**
@@ -5614,8 +5615,9 @@ docker ps -a --filter name=^nhms-db$ --format '{{.Names}} {{.Status}} {{.Ports}}
 
 正常读 `nhms-db Up <时长> … 127.0.0.1:55432->5432/tcp`。状态不是 `Up`、或没有
 `127.0.0.1:55432->5432/tcp` → 是库本身的事故，不是本车道的，按 §5.1（容器事实与重建指针）
-处理。`Up` 的时长很短而告警是 `AdminShutdown` → 观测中途容器重启过。本车道无状态，库恢复后
-下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码。
+处理。告警是 `AdminShutdown` → 不论 `Up` 的时长：时长很短是观测中途容器重启过，时长很长是车道的
+后端连接被人终止了（`pg_terminate_backend`，口径见 §9.2）。本车道无状态，库恢复后下一 tick 自然转绿；
+要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码（推导）。
 健康（`Up`、映射是 `127.0.0.1:55432->5432/tcp`）而告警不是 `AdminShutdown` → 库本身在听，问题在车道
 这一侧：做第 2 步。若你是从第 2 步探针读法跳回来的，就回到那一条接着做它的下一个动作，别再从第 2 步开头来
 （推导）。
@@ -5743,7 +5745,8 @@ where datname = 'nhms'
 order by query_start;"
 ```
 
-用超级用户 `nhms` 走 `docker exec`，是因为只读角色看不到别的角色会话的语句文本。
+用超级用户 `nhms` 走 `docker exec`，是因为只读角色看不到别的角色会话的语句文本。这条语句自己也卡住或
+连不上（容器挂死时就是这样）→ 不是争用，是库本身的事故，按 §5.1 处理（推导）。
 2026-09-18 实测的一次常态：一行 `nhms_ingest_rw`、`active`、`IO` 的
 `SELECT compress_chunk(...)`（压缩 timer 的正常后台工作）。本车道自己的连接读空串
 `application_name`、`usename` 是 `nhms_display_ro`（代码里没设名字，见 §9.2 表里「空串」那行）。
@@ -5835,7 +5838,7 @@ ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 
 2. 库对了，再查 `core.model_instance` 里还剩多少能进 ready 前沿的活跃实例：
 
    ```bash
-   docker exec nhms-db psql -X -U nhms -d nhms -Atc "select count(*) filter (where active_flag), count(*) filter (where active_flag and river_network_version_id is not null) from core.model_instance;"
+   docker exec nhms-db psql -X -U nhms -d nhms -Atc "select count(*) filter (where active_flag), count(*) filter (where active_flag and river_network_version_id is not null) from core.model_instance;"; echo "rc=$?"
    ```
 
    输出是 `<活跃实例数>|<其中带 river network 的数>`，健康时读 `38|38`、`rc=0`（2026-09-18 node-27 实测；列与
