@@ -1293,6 +1293,32 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # I11 #1990 forcing_ts_render (cut a): the forcing counterpart of the
+        # river register above — the non-collectible module that owns the
+        # discovery roots, the exemption/unwired-reader ledgers, the renderer
+        # constant declarations and the mention counter the forcing
+        # discovery-set census judges the tree with. Everything that census
+        # asserts (which files may name `met.forcing_station_timeseries`, how
+        # many times each does, which mentions are registered reads) is DERIVED
+        # from this module, so an edit here rewrites the verdict without
+        # touching the suite that renders it.
+        # Its non-gated importer closure is exactly one suite,
+        # tests/test_forcing_ts_template_census.py, derived over both edge kinds
+        # (module-scope import + literal-path consumption). Nothing is
+        # deliberately excluded here: unlike tests/river_ts_template_registry.py
+        # (#2208) this module has no integration-gated importer at all, so no
+        # `database:` entry in ci.yml is owed for it.
+        # Cut (a) lands the register EMPTY of reader entries (`FORCING_REGISTRY`
+        # is `()`; the nine reader mentions sit in the unwired ledger) and cut
+        # (b) populates it. The routing is the same either way — the census is
+        # the suite that judges the register in both states — so this rule
+        # already covers cut (b)'s register edit. If cut (b) brings a NEW
+        # importer suite, the closure guard in tests/test_select_ci_tests.py
+        # names it rather than letting it go unrouted.
+        "tests/forcing_ts_template_registry.py",
+        ("tests/test_forcing_ts_template_census.py",),
+    ),
+    PathTestRule(
         # #2451: the segment-index measurement bench's pass criteria. This module
         # owns the three `design.md` criteria a measured plan must satisfy, the
         # branch identity columns and the shared-hit floors — so an edit here
@@ -2458,6 +2484,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # be routed here.
         "packages/common/river_ts_render.py",
         SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        # I11 #1990 forcing_ts_render: the forcing per-store renderer, and the
+        # same gap as the river rule above one layer up from the register.
+        # No pattern matched this path before — `packages/common/**` is not a
+        # broad rule, it only re-adds the core-smoke baseline (#1744 path B) —
+        # so a renderer diff selected its same-name suite and nothing else.
+        # It is a registered source of the forcing discovery-set census
+        # (FORCING_TABLE_CENSUS pins it at 2: `FORCING_TABLE` and
+        # `FORCING_TABLE_LEGACY`, the same two-constant shape river_ts_render.py
+        # carries), so a third table-name mention here, or a mention deleted,
+        # reds a suite this path did not run — post-merge, exactly the failure
+        # river's wiring meta-test exists to prevent. The census also imports
+        # FORCING_STORES and render_forcing_ts_sql at module scope and renders
+        # every registered template through them.
+        # The same-name suite is named explicitly rather than left to same-name
+        # derivation, as the river rule does through SQL_SHAPE_ORACLE_TESTS: the
+        # rule should read as the renderer's full unit closure, not as the half
+        # that derivation misses. Both targets are non-gated.
+        "packages/common/forcing_ts_render.py",
+        (
+            "tests/test_forcing_ts_render.py",
+            "tests/test_forcing_ts_template_census.py",
+        ),
     ),
     PathTestRule(
         # I1 #1980 river_ts_render: the captured golden of every registered read
