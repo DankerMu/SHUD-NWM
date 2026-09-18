@@ -4892,3 +4892,28 @@ phase lens，所以这类价值在现有指标里不可见。
 沿用上一条 revisit 的处置：**记录 deferral，不改规则**——keep/cut 仍是维护者的人工决策，
 merge 预授权不含审核策略调整。若维护者要动，本 PR 支持的窄改动是：让审计把 `fixture-review`
 纳入 per-lens yield，否则「实现前一次读」与「实现后一轮席位」的成本效益无法比较。
+
+## Revisit 2026-09-18 (post PR #2468 / issues #2465, #2466)
+
+审计第三次在同一天给出 DECIDABLE：**228 个多轮已合并 PR，later-round catches core=367 /
+rotated=274 / phase=68**（15 条不可归属已排除）。rotated 份额 **42.7%**（274/641），与上一条
+revisit 的 43% 基本持平——判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠
+default-keep。本 PR 的增量是 core +9 / rotated +3 / phase +2。
+
+数量上微不足道，但本 PR 是一个很干净的对照样本，值得记下它**是哪一种** rotated 价值：
+
+- round 1、2 的 pinned core（correctness + spec-compliance）各自尽职：round 1 抓到只读 DSN 跑写脚本的
+  P1（两席独立撞上），round 2 抓到 fix pass 遗留的契约文本陈旧。
+- round 3 轮换进来的 **integration** 席位从没在这个 PR 上坐过，它不再逐条核对断言，而是沿着运维从
+  邮件出发的路径**走到终态**，于是抓到两条 core 三轮都没看见的**组合缺陷**：本 PR 自己的 #2466
+  交付句把治理 receipt 说成自动存活信号（`_recommendations` 根本不读 `systemd` 段，fixture 自己就
+  写着这个事实），以及新写的分支 C 没有收尾步骤。每一条单独的句子都「对」，拼起来才错——这恰好是
+  逐条核对的 lens 结构上看不到的。
+- 本 PR 分量最重的一条发现却不来自任何席位：「缺覆盖行 = 整行 NULL」是把 runbook 里的 SQL 逐字放到
+  生产库上只读执行（E8）才测出来的假话；correctness 席位靠静态推导也得出了同样结论，但只把它当 Note。
+  这与 2026-09-17 那条 revisit 的结论同向：**判据/执行比再加一席便宜**。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2468 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定。若要动，本 PR 支持的窄改动是：rotated 席位的价值在「沿路径组合」而非「多一双眼睛
+逐条核对」，所以后续轮换候选优先选**与 core 检查方式不同**的 lens（integration / invariant-state），
+而不是与 core 同类的 lens。
