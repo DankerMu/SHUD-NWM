@@ -263,7 +263,8 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 )
 
 # #2185: the river-segment write-surface scan. It AST-parses every Python file
-# under the five directories it walks and pins that exactly one in-place
+# under the six directories it walks (plus, since #2154, every `db/**/*.sql`
+# statement) and pins that exactly one in-place
 # `UPDATE core.river_segment` exists in production code, that it lives in
 # workers/model_registry/basins_registry_import.py, and that it bumps
 # core.river_network_version.geometry_generation in the same transaction. A
@@ -273,11 +274,12 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 # `matched`, no stop rules, no effect on the unknown-backend fallback.
 RIVER_SEGMENT_WRITE_SURFACE_TEST = "tests/test_river_segment_write_surface_scan.py"
 
-# #2185: the five roots the write-surface scan walks, mirroring its own
-# module-level PRODUCTION_DIRS binding (tests/test_river_segment_write_surface_scan.py:48)
+# #2185: the roots the write-surface scan walks, mirroring its own
+# module-level PRODUCTION_DIRS binding (tests/test_river_segment_write_surface_scan.py)
 # mapped to `<dir>/**` globs. A selector meta-guard parses that binding out of
-# the scan's source and asserts it equals this set, so adding a sixth directory
-# to the scan without wiring it here reddens that meta-guard by name.
+# the scan's source and asserts it equals this set, so adding a directory
+# to the scan without wiring it here reddens that meta-guard by name. #2154
+# added `db/**` (the scan now reads db/seeds and every migration).
 # `apps/**` and `packages/**` are deliberately at full width — the scan walks
 # both directories whole. TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS above is not a
 # precedent for narrowing them: only ITS packages root is `packages/common/**`,
@@ -288,7 +290,15 @@ RIVER_SEGMENT_WRITE_SURFACE_ROOTS: tuple[str, ...] = (
     "workers/**",
     "packages/**",
     "scripts/**",
+    "db/**",
 )
+
+# #2154: the roots whose `*.sql` files the write-surface scan reads as statement
+# text, mirroring its module-level SQL_DIRS binding the same way (a meta-guard
+# parses it). Only `.sql` under these roots routes to the scan: the scan does
+# not read `.sql` anywhere else, so a `tests/fixtures/*.sql` or an
+# `openspec/**/*.sql` receipt stays out.
+RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS: tuple[str, ...] = ("db/**",)
 
 # #1627 / ADR 0009 (docs/adr/0009-path-canonicalization-dereference-doctrine.md):
 # the path-canonicalisation family guard. It AST-scans every Python file under
@@ -2197,6 +2207,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sorted, so it is INTERPOSED among them by position only and the
             # #1597 census stays true.
             "tests/test_node27_mvt_prewarm.py",
+            # #2156 (D-2): guard-derived, not hand-curated — the run/river-
+            # network geometry-identity suite imports TileInput, cache_key and
+            # display_ready_run from services.tiles.mvt at file level, so it is
+            # a DIRECT non-gated importer here. Unlike the #2032 pair above it
+            # ALSO imports apps.api.routes.hydro_display at file level (the
+            # _river_network_source_version / _run_row / _run_source_version
+            # SQL and the route cache keys), so it sits on that rule too. Its
+            # own entry, so the #1597 "eight below" census stays true.
+            "tests/test_mvt_run_and_river_network_geometry_identity.py",
             # #2017: the coordinate-budget harness imports
             # postgis_tile_sql / collection_coordinate_limit / MVT_MAX_COORDINATES
             # from services.tiles.mvt at module level, so its suite is a DIRECT
@@ -2266,6 +2285,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_display_publish_status_only.py",
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            # #2156 (D-2): guard-derived — the run/river-network geometry-
+            # identity suite imports this module at file level and runs the real
+            # SQL of _river_network_source_version / _run_row /
+            # _run_source_version plus the route cache keys, so it is a DIRECT
+            # non-gated importer (and on the services/tiles/mvt.py rule too).
+            "tests/test_mvt_run_and_river_network_geometry_identity.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             # #2017: the checked-in 2.4/2.5 coordinate-budget harness imports
@@ -4117,15 +4142,19 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             selected.add(TIMESCALE_WRITE_GUARD_INVARIANT_TEST)
 
     # #2185: supplemental river-segment write-surface routing, same shape as the
-    # #1656 loop above. Every Python path under the five roots the write-surface
+    # #1656 loop above. Every Python path under the roots the write-surface
     # scan walks selects that scan IN ADDITION to its ordinary selection. Purely
     # additive: no `matched`, no stop-rule participation, no effect on whether a
     # path counts as known for the unknown-backend fallback. The root match is
     # the only gate — the scan parses `*.py` under these roots regardless of the
     # backend-prefix classification, so `apps/` outside `apps/api/` (not a
-    # backend prefix) is covered exactly as the scan reads it.
+    # backend prefix) is covered exactly as the scan reads it. #2154: `*.sql`
+    # under the SQL roots routes the same way, because the scan reads those
+    # statements too.
     for path in changed:
-        if path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS):
+        if (path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS)) or (
+            path.endswith(".sql") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS)
+        ):
             selected.add(RIVER_SEGMENT_WRITE_SURFACE_TEST)
 
     # #1627 / ADR 0009: supplemental path-canonicalisation family routing, same

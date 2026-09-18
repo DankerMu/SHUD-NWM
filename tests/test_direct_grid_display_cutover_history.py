@@ -363,7 +363,9 @@ def test_hydro_display_flow_product_route_sql_does_not_join_met_station() -> Non
     ``apps/api/routes/hydro_display.py::_run_row`` is where the display
     plane dispatches a run-id -> flow-product resolution (identified via
     ``grep 'FROM hydro.hydro_run' apps/api/routes/hydro_display.py``).
-    It resolves via ``hydro.hydro_run LEFT JOIN core.model_instance`` only.
+    It resolves via ``hydro.hydro_run LEFT JOIN core.model_instance`` plus
+    ``LEFT JOIN core.river_network_version rnv`` (#2156, to project
+    ``geometry_generation``), and nothing else.
 
     ``apps/api/routes/hydro_display.py::_require_hydro_mvt_source_identity``
     is the sibling MVT source-identity guard that resolves flow-plane rows

@@ -67,6 +67,7 @@ from packages.common.display_coverage import (
     refresh_run_display_coverage,
 )
 from packages.common.river_ts_render import render_river_ts_sql
+from services.tiles import mvt as mvt_module
 from services.tiles.mvt import (
     _valid_times_any_source_template,
     _valid_times_named_source_template,
@@ -600,7 +601,11 @@ def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
             "AND ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)"
         ), params)
     elif case == "budget":
-        monkeypatch.setattr(hydro_display, "MVT_MAX_FEATURES", 2)
+        # Re-targeted by #2165 (design D4 contract change, not a loosening): the
+        # bind and the 413 predicate now read `services.tiles.mvt.feature_limit`,
+        # which reads `MVT_MAX_FEATURES` from its own module, so that is where the
+        # lowered budget has to land. The assertions below are unchanged.
+        monkeypatch.setattr(mvt_module, "MVT_MAX_FEATURES", 2)
     bind = hydro_display._postgis_tile_params(params, z=9, x=x, y=y, layer="hydro")
     result = _rows(session, postgis_tile_sql("hydro"), bind)
     assert len(result) == 1

@@ -53,6 +53,18 @@ MVT_MAX_COORDINATES = 50_000
 # threshold of all five tile layers, so a global raise would also loosen
 # hydro-national's fair budget window and the per-basin layer's truncation.
 NATIONAL_RIVER_COLLECTION_COORDINATE_LIMIT = 120_000
+# Feature budget of the national discharge layer only (#2165). Measured on the
+# node-27 production DB (q_down, one valid_time): the z0-z3 China tiles
+# intersect 13,770 / 13,770 / 13,392 / 10,991 features, all above
+# MVT_MAX_FEATURES (10,000), so the fair budget window was dropping up to ~27%
+# of the segments; z4/z5 peak at 7,242 / 7,035. 20,000 leaves ~45% headroom
+# over 13,770. At a measured 160-202 bytes per feature it stays under
+# MVT_MAX_BYTES (a hard 413, not a graceful truncation), and at 2.0-2.3
+# coordinates per feature under the layer's 50,000 collection coordinate
+# budget, so the feature arm remains the one that trips first. Raising
+# MVT_MAX_FEATURES globally was rejected for the same reason as the coordinate
+# limit above: it is also the feature budget of the other four layers.
+NATIONAL_DISCHARGE_FEATURE_LIMIT = 20_000
 MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
@@ -77,7 +89,14 @@ NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"
 # given tile is painted from. The legacy source-less route's cache key rotates
 # once as a result -- one post-deploy cold miss per legacy tile, expected, not a
 # regression in the node-27 cold/hot numbers.
-NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
+#
+# Now at v6, bumped for the layer's own feature budget
+# (`NATIONAL_DISCHARGE_FEATURE_LIMIT`, #2165): the SQL text is unchanged, but
+# the bound `:feature_limit` moves from 10,000 to 20,000, so every tile that
+# intersects more than 10,000 features now paints more of them. The cache key
+# hashes neither the SQL nor its binds, so without this bump the truncated
+# pre-switch bytes would keep being served under the old key.
+NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v6"
 
 # The national run selection is bound to the requested `(source, cycle)`
 # identity (issue #2007). `postgis_tile_sql(layer)` keeps its single-argument
@@ -442,6 +461,19 @@ def collection_coordinate_limit(layer: str | None) -> int:
     if layer == "river-network-national":
         return NATIONAL_RIVER_COLLECTION_COORDINATE_LIMIT
     return MVT_MAX_COORDINATES
+
+
+def feature_limit(layer: str | None) -> int:
+    """Feature budget of one tile layer.
+
+    Only `hydro-national` carries a raised budget; every other layer -- and a
+    caller that supplies no layer -- keeps `MVT_MAX_FEATURES`. The route binds
+    this value as `:feature_limit` and uses the same value for its 413
+    predicate and its `MVT_TILE_BUDGET_TRUNCATED` signal.
+    """
+    if layer == "hydro-national":
+        return NATIONAL_DISCHARGE_FEATURE_LIMIT
+    return MVT_MAX_FEATURES
 
 
 def build_tile_response(
@@ -1814,14 +1846,21 @@ def _layer_source_refs(
 
 
 def display_ready_run(session: Session) -> Mapping[str, Any] | None:
-    """Latest display-ready hydro run for layer catalog discovery."""
+    """Latest display-ready hydro run for layer catalog discovery.
+
+    Projects `rnv.geometry_generation` exactly like
+    `apps/api/routes/hydro_display.py::_run_row`: both rows feed the same
+    `_run_source_version`, and the catalog's `source_version` for a run must equal
+    the one the run-scoped tile route computes for it (#2156).
+    """
     row = session.execute(
         text(
             """
             SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
-                   mi.river_network_version_id
+                   mi.river_network_version_id, rnv.geometry_generation
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            LEFT JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id
             WHERE h.status IN ('succeeded', 'parsed', 'published')
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT 1

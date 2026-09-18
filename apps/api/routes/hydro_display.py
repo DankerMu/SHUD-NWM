@@ -41,6 +41,7 @@ from services.tiles.mvt import (
     canonical_mvt_time,
     collection_coordinate_limit,
     display_ready_run,
+    feature_limit,
     layer_metadata,
     national_discharge_cycle_coverage,
     national_discharge_cycles,
@@ -792,6 +793,8 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
     )
     max_coordinates = collection_coordinate_limit(layer)
     bind = _postgis_tile_params(params, z=z, x=x, y=y, layer=layer)
+    # #2165: one value for the bind, the 413 predicate and the truncation signal.
+    max_features = bind["feature_limit"]
     row = session.execute(text(postgis_tile_sql(layer)), bind).mappings().first()
     feature_count = int(row.get("feature_count") or 0) if row else 0
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
@@ -803,6 +806,10 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
     intersecting_coordinate_count = int(row.get("intersecting_coordinate_count") or 0) if row else 0
     feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
     coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
+    # #2166: the largest per-feature coordinate count / dimension over
+    # `bounded_rows`, reported next to the limits when an overflow blanks the tile.
+    feature_coordinate_count = int(row.get("feature_coordinate_count") or 0) if row else 0
+    coordinate_dimension_count = int(row.get("coordinate_dimension_count") or 0) if row else 0
     if invalid_property_count > 0:
         raise ApiError(
             status_code=500,
@@ -817,7 +824,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
                 "properties": _mvt_invalid_properties(row.get("invalid_properties") if row else None),
             },
         )
-    if feature_count > MVT_MAX_FEATURES or coordinate_count > max_coordinates:
+    if feature_count > max_features or coordinate_count > max_coordinates:
         raise ApiError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
@@ -828,7 +835,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
                 "x": x,
                 "y": y,
                 "feature_count": feature_count,
-                "max_features": MVT_MAX_FEATURES,
+                "max_features": max_features,
                 "coordinate_count": coordinate_count,
                 "max_coordinates": max_coordinates,
             },
@@ -860,7 +867,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             y,
             feature_count,
             intersecting_feature_count,
-            MVT_MAX_FEATURES,
+            max_features,
             coordinate_count,
             intersecting_coordinate_count,
             max_coordinates,
@@ -871,10 +878,46 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
                 "y": y,
                 "feature_count": feature_count,
                 "intersecting_feature_count": intersecting_feature_count,
-                "max_features": MVT_MAX_FEATURES,
+                "max_features": max_features,
                 "coordinate_count": coordinate_count,
                 "intersecting_coordinate_count": intersecting_coordinate_count,
                 "max_coordinates": max_coordinates,
+            },
+        )
+    # #2166: either overflow counter empties the shared `budget_gate`, so the tile
+    # is a 200 with zero features and is cached like any other generation. HTTP
+    # status and caching stay as they are (an error would never be cached and
+    # every request would re-run SQL that cannot succeed); say so instead. The two
+    # maxima are the values bound for THIS query, so the record reports the
+    # limits that were actually in force.
+    if feature_coordinate_overflow_count > 0 or coordinate_dimension_overflow_count > 0:
+        max_feature_coordinates = bind["feature_coordinate_limit"]
+        max_coordinate_dimensions = bind["max_coordinate_dimensions"]
+        logger.warning(
+            "MVT_TILE_FEATURE_OVERFLOW_BLANKED layer_id=%s z=%s x=%s y=%s "
+            "feature_coordinate_overflow_count=%s feature_coordinate_count=%s max_feature_coordinates=%s "
+            "coordinate_dimension_overflow_count=%s coordinate_dimension_count=%s max_coordinate_dimensions=%s",
+            detail_layer_id,
+            z,
+            x,
+            y,
+            feature_coordinate_overflow_count,
+            feature_coordinate_count,
+            max_feature_coordinates,
+            coordinate_dimension_overflow_count,
+            coordinate_dimension_count,
+            max_coordinate_dimensions,
+            extra={
+                "layer_id": detail_layer_id,
+                "z": z,
+                "x": x,
+                "y": y,
+                "feature_coordinate_overflow_count": feature_coordinate_overflow_count,
+                "feature_coordinate_count": feature_coordinate_count,
+                "max_feature_coordinates": max_feature_coordinates,
+                "coordinate_dimension_overflow_count": coordinate_dimension_overflow_count,
+                "coordinate_dimension_count": coordinate_dimension_count,
+                "max_coordinate_dimensions": max_coordinate_dimensions,
             },
         )
     return bytes(row["tile"] or b"")
@@ -981,10 +1024,21 @@ def _fetch_station_mvt_tile_bytes(
 
 
 def _river_network_source_version(session: Session, basin_version_id: str) -> str:
+    """Digest every river network of one basin version, per network.
+
+    The basis is `id|segment_count|checksum|geometry_generation` (#2156), the
+    same inventory members `national_river_network_source_version` digests.
+    `geometry_generation` is what sees an in-place geometry rewrite:
+    `_backfill_output_segment_geometry` moves `core.river_segment.geom` and
+    `stream_type` under an unchanged network id and bumps that counter in the
+    same transaction. `segment_count`/`checksum` move with row-level inventory
+    refreshes. The returned string keeps the `river-network-set:` prefix and the
+    trailing id list so the catalog stays readable.
+    """
     rows = session.execute(
         text(
             """
-            SELECT DISTINCT river_network_version_id
+            SELECT DISTINCT river_network_version_id, segment_count, checksum, geometry_generation
             FROM core.river_network_version
             WHERE basin_version_id = :basin_version_id
             ORDER BY river_network_version_id
@@ -992,7 +1046,8 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
         ),
         {"basin_version_id": basin_version_id},
     ).mappings().all()
-    versions = [str(row["river_network_version_id"]) for row in rows if row.get("river_network_version_id") is not None]
+    networks = [row for row in rows if row.get("river_network_version_id") is not None]
+    versions = [str(row["river_network_version_id"]) for row in networks]
     if not versions:
         raise ApiError(
             status_code=404,
@@ -1001,7 +1056,12 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
             details={"layer_id": "river-network", "basin_version_id": basin_version_id},
         )
     joined = ",".join(versions)
-    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    basis = "\n".join(
+        f"{row['river_network_version_id']}|{row.get('segment_count')}|{row.get('checksum')}|"
+        f"{row.get('geometry_generation')}"
+        for row in networks
+    )
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
     return f"river-network-set:{digest}:{joined}"
 
 
@@ -1198,10 +1258,18 @@ def _require_run_source_identity(run: dict[str, Any] | Any, *, layer_id: str) ->
 
 
 def _run_source_version(run: dict[str, Any] | Any) -> str:
+    """Revision identity of one run-scoped hydro tile set.
+
+    `geometry_generation` (#2156) is the run's network counter, projected by BOTH
+    run readers (`_run_row` and `services.tiles.mvt.display_ready_run`): the run
+    row alone cannot see `_backfill_output_segment_geometry` rewriting the
+    segment geometry the tile paints. `None` when the run has no network.
+    """
     base_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run.get("run_id"))
     revision_basis = {
         "basin_version_id": run.get("basin_version_id"),
         "cycle_time": _format_time(run.get("cycle_time")) if run.get("cycle_time") is not None else None,
+        "geometry_generation": run.get("geometry_generation"),
         "river_network_version_id": run.get("river_network_version_id"),
         "run_id": run.get("run_id"),
         "source_id": run.get("source_id"),
@@ -1235,9 +1303,12 @@ def _run_row(session: Session, run_id: str) -> dict[str, Any]:
         text(
             """
             SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
-                   h.updated_at, mi.river_network_version_id, h.timeseries_store
+                   h.updated_at, mi.river_network_version_id, h.timeseries_store, rnv.geometry_generation
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            -- #2156: the same projection `display_ready_run` carries, so the catalog
+            -- and the tile route feed `_run_source_version` the same revision basis.
+            LEFT JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id
             WHERE h.run_id = :run_id
             LIMIT 1
             """
@@ -1409,7 +1480,7 @@ def _postgis_tile_params(
         "z": z,
         "x": x,
         "y": y,
-        "feature_limit": MVT_MAX_FEATURES,
+        "feature_limit": feature_limit(layer),
         "feature_coordinate_limit": MVT_MAX_COORDINATES,
         "collection_coordinate_limit": collection_coordinate_limit(layer),
         "max_coordinate_dimensions": 3,

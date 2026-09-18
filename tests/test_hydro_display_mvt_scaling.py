@@ -1019,11 +1019,16 @@ def test_national_discharge_query_version_is_pinned_to_the_literal_the_spec_name
 
     Every other assertion on this constant imports it from the module under
     test and interpolates it, so reverting the value would keep them all green
-    while silently un-rotating the cache key that #2007's new run selection
-    requires. The spec names `fair-network-budget-v5`; this is the only place
-    the repo says so.
+    while silently un-rotating the cache key that a tile-shape change requires.
+    The spec names `fair-network-budget-v6`; this is the only place the repo
+    says so.
+
+    Deliberately re-pinned from v5 to v6 by #2165 (design D4, a contract
+    change, not a loosening): the layer's own `NATIONAL_DISCHARGE_FEATURE_LIMIT`
+    binds `:feature_limit` at 20,000 instead of 10,000, which changes the bytes
+    of every national discharge tile that intersects more than 10,000 features.
     """
-    assert NATIONAL_DISCHARGE_QUERY_VERSION == "fair-network-budget-v5"
+    assert NATIONAL_DISCHARGE_QUERY_VERSION == "fair-network-budget-v6"
 
 
 def test_sibling_tile_layers_carry_no_source_or_cycle_bind() -> None:
@@ -4261,10 +4266,20 @@ def test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_rout
     assert _code_enum("MvtLivePostgisUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE"]
 
 
-# Captured on the pre-#2153 tree (origin/master 015423c71) for exactly this
-# request and fake session, never recomputed from the module under test: the
-# refusal must leave a fully covered identity's cache key and tile binds alone.
-_PRE_2153_FULL_COVERAGE_CACHE_KEY = "f408b0dfaa543ad513cd11a9c9bb231c2b1d2cdebf98e2c20fda26c72da47141"
+# Never recomputed from the module under test: the #2153 refusal must leave a
+# fully covered identity's cache key and tile binds alone.
+#
+# Deliberately re-pinned by #2165 (design D4, a contract change, not a
+# loosening): `NATIONAL_DISCHARGE_QUERY_VERSION` moved v5 -> v6 and the
+# hydro-national `feature_limit` bind moved 10000 -> 20000. The key below was
+# captured on a scratch export of 258b06ecf with ONLY the
+# `NATIONAL_DISCHARGE_QUERY_VERSION` literal edited to `fair-network-budget-v6`,
+# running exactly this test's request; reverting that literal to v5 in the same
+# export reproduced the previous pin `f408b0dfaa54...` (captured on the
+# pre-#2153 tree, origin/master 015423c71), so the version literal is the only
+# input that moved. The cache key hashes neither the SQL nor the binds, so the
+# `feature_limit` re-pin below does not feed it.
+_PRE_2153_FULL_COVERAGE_CACHE_KEY = "0b6ae6d0223c3a694e233bbcb01092fffff733a66b299a53acad78105efcd4a0"
 _PRE_2153_FULL_COVERAGE_TILE_BINDS: dict[str, Any] = {
     "variable": "q_down",
     "valid_time": datetime(2026, 9, 3, 0, 0, tzinfo=UTC),
@@ -4273,7 +4288,7 @@ _PRE_2153_FULL_COVERAGE_TILE_BINDS: dict[str, Any] = {
     "z": 4,
     "x": 13,
     "y": 6,
-    "feature_limit": 10000,
+    "feature_limit": 20000,
     "feature_coordinate_limit": 50000,
     "collection_coordinate_limit": 50000,
     "max_coordinate_dimensions": 3,
@@ -4288,6 +4303,10 @@ def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monke
 
     The coverage pair runs once each, bound to the requested identity, between the
     digest and the tile SQL. Byte-level sameness on real rows is E11's job.
+
+    The expected key and `feature_limit` were re-pinned by #2165 (design D4 contract
+    change: v6 query version, 20,000 national discharge feature budget); see the
+    derivation above `_PRE_2153_FULL_COVERAGE_CACHE_KEY`.
     """
     session = _NationalRouteSession(
         active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b", "rn-c")
@@ -4643,3 +4662,275 @@ def test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_disp
     assert after.covered_networks == frozenset({"rn-b"})
     assert after.active_networks == frozenset({"rn-b", "rn-c"})
     assert after.complete is False
+
+
+# ---------------------------------------------------------------------------
+# #2165: the national discharge layer's own feature budget, and #2166: a tile
+# blanked by a per-feature overflow is an observable event. Appended at the END,
+# for the reason stated above the #2009 round-4 block.
+# ---------------------------------------------------------------------------
+
+# The value design D4 / the `postgis-tile-clipping-cache` spec name, spelled as a
+# literal so it is not read back from the module under test.
+_NATIONAL_DISCHARGE_FEATURE_LIMIT = 20_000
+_GLOBAL_FEATURE_LIMIT = 10_000
+_LAYER_PARAMS: dict[str, dict[str, Any]] = {
+    "river-network-national": {},
+    "river-network": {"basin_version_id": "bv_a"},
+    "hydro": {"variable": "q_down"},
+    "hydro-national": {"variable": "q_down"},
+    "met-stations": {"basin_version_id": "bv_a"},
+}
+_DETAIL_LAYER_IDS = {
+    "river-network-national": "river-network-national",
+    "river-network": "river-network",
+    "hydro": "discharge",
+    "hydro-national": "discharge",
+    "met-stations": "met-stations",
+}
+
+
+def _blanked_records(caplog: Any) -> list[Any]:
+    return [record for record in caplog.records if "MVT_TILE_FEATURE_OVERFLOW_BLANKED" in record.getMessage()]
+
+
+def test_feature_limit_is_raised_only_for_the_national_discharge_layer() -> None:
+    assert mvt_module.feature_limit("hydro-national") == _NATIONAL_DISCHARGE_FEATURE_LIMIT
+    # The other four layers, and a caller that names no layer, keep the global
+    # budget -- whose value this change does not move.
+    assert mvt_module.MVT_MAX_FEATURES == _GLOBAL_FEATURE_LIMIT
+    for layer in ("river-network", "river-network-national", "hydro", "met-stations", None):
+        assert mvt_module.feature_limit(layer) == mvt_module.MVT_MAX_FEATURES, layer
+
+
+def test_postgis_tile_params_bind_each_layer_its_own_feature_limit() -> None:
+    expected = {layer: _GLOBAL_FEATURE_LIMIT for layer in _LAYER_PARAMS}
+    expected["hydro-national"] = _NATIONAL_DISCHARGE_FEATURE_LIMIT
+
+    for layer, value in expected.items():
+        assert hydro_display._postgis_tile_params({}, z=3, x=6, y=3, layer=layer)["feature_limit"] == value, layer
+    # Script callers pass no layer and compare the exact binding dictionary.
+    assert hydro_display._postgis_tile_params({}, z=3, x=6, y=3)["feature_limit"] == _GLOBAL_FEATURE_LIMIT
+
+
+def test_production_tile_bind_site_binds_the_layer_feature_limit(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+
+    for layer, params in _LAYER_PARAMS.items():
+        session = _Session([_budget_row(10)])
+
+        assert hydro_display._fetch_postgis_tile_bytes(session, layer, params, z=3, x=6, y=3) == b"pbf-bytes"
+
+        expected = _NATIONAL_DISCHARGE_FEATURE_LIMIT if layer == "hydro-national" else _GLOBAL_FEATURE_LIMIT
+        assert session.executions[0][1]["feature_limit"] == expected, layer
+
+
+def test_national_discharge_tile_above_the_old_limit_is_served_whole_and_silent(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """13,770 intersecting features were measured on node-27; 15,000 is above 10,000 too."""
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(30_000), "feature_count": 15_000, "intersecting_feature_count": 15_000}
+    session = _Session([row])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=0, x=0, y=0)
+
+    assert tile == b"pbf-bytes"
+    assert _truncation_records(caplog) == []
+    assert _blanked_records(caplog) == []
+
+
+def test_national_discharge_truncation_reports_the_layer_feature_limit(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(40_000), "feature_count": 20_000, "intersecting_feature_count": 21_000}
+    session = _Session([row])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=0, x=0, y=0)
+
+    assert tile == b"pbf-bytes"
+    records = _truncation_records(caplog)
+    assert len(records) == 1
+    assert records[0].max_features == _NATIONAL_DISCHARGE_FEATURE_LIMIT
+    assert records[0].max_features == session.executions[0][1]["feature_limit"]
+    assert "feature_count=20000/21000 max_features=20000" in records[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("layer", "feature_count", "max_features"),
+    (
+        pytest.param("hydro-national", 20_001, _NATIONAL_DISCHARGE_FEATURE_LIMIT, id="hydro-national"),
+        pytest.param("river-network", 10_001, _GLOBAL_FEATURE_LIMIT, id="river-network"),
+        pytest.param("hydro", 10_001, _GLOBAL_FEATURE_LIMIT, id="hydro"),
+    ),
+)
+def test_feature_budget_413_uses_the_layer_feature_limit(
+    monkeypatch: Any, layer: str, feature_count: int, max_features: int
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(10), "feature_count": feature_count, "intersecting_feature_count": feature_count}
+    session = _Session([row])
+
+    with pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(session, layer, _LAYER_PARAMS[layer], z=3, x=6, y=3)
+
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.code == "MVT_TILE_BUDGET_EXCEEDED"
+    assert excinfo.value.details["max_features"] == max_features
+    assert excinfo.value.details["max_features"] == session.executions[0][1]["feature_limit"]
+    assert excinfo.value.details["feature_count"] == feature_count
+
+
+def _overflow_row(**overrides: Any) -> dict[str, Any]:
+    """The row shape a per-feature overflow really produces.
+
+    Either overflow counter empties the shared `budget_gate`, so nothing is
+    selected: `tile` is NULL (ST_AsMVT over zero rows) and the selected counts are
+    0, while `prefilter_stats` still reports what intersected.
+    """
+    return {
+        "tile": None,
+        "feature_count": 0,
+        "coordinate_count": 0,
+        "source_identity_count": 1,
+        "invalid_property_count": 0,
+        "invalid_properties": "",
+        "intersecting_feature_count": 23,
+        "intersecting_coordinate_count": 86_160,
+        "feature_coordinate_overflow_count": 0,
+        "feature_coordinate_count": 12,
+        "coordinate_dimension_overflow_count": 0,
+        "coordinate_dimension_count": 2,
+        **overrides,
+    }
+
+
+_BLANKED_FIELDS = (
+    "layer_id",
+    "z",
+    "x",
+    "y",
+    "feature_coordinate_overflow_count",
+    "feature_coordinate_count",
+    "max_feature_coordinates",
+    "coordinate_dimension_overflow_count",
+    "coordinate_dimension_count",
+    "max_coordinate_dimensions",
+)
+
+
+def _assert_one_blanked_record(caplog: Any, session: _Session, layer: str, **expected: Any) -> None:
+    records = _blanked_records(caplog)
+    assert len(records) == 1, [record.getMessage() for record in records]
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.name == _TILE_ROUTE_LOGGER
+    bind = session.executions[0][1]
+    values = {name: getattr(record, name) for name in _BLANKED_FIELDS}
+    assert values == {
+        "layer_id": _DETAIL_LAYER_IDS[layer],
+        "z": 3,
+        "x": 6,
+        "y": 3,
+        "max_feature_coordinates": bind["feature_coordinate_limit"],
+        "max_coordinate_dimensions": bind["max_coordinate_dimensions"],
+        **expected,
+    }
+    message = record.getMessage()
+    for name, value in values.items():
+        assert f"{name}={value}" in message, (name, message)
+
+
+@pytest.mark.parametrize("layer", tuple(_LAYER_PARAMS))
+def test_per_feature_coordinate_overflow_blanks_the_tile_observably(
+    monkeypatch: Any, caplog: Any, layer: str
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(feature_coordinate_overflow_count=1, feature_coordinate_count=60_000)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, layer, _LAYER_PARAMS[layer], z=3, x=6, y=3)
+
+    # HTTP 200 semantics unchanged: empty bytes, no error.
+    assert tile == b""
+    assert _truncation_records(caplog) == []
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        layer,
+        feature_coordinate_overflow_count=1,
+        feature_coordinate_count=60_000,
+        coordinate_dimension_overflow_count=0,
+        coordinate_dimension_count=2,
+    )
+    assert session.executions[0][1]["feature_coordinate_limit"] == MVT_MAX_COORDINATES
+    assert session.executions[0][1]["max_coordinate_dimensions"] == 3
+
+
+def test_coordinate_dimension_overflow_blanks_the_tile_observably(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(coordinate_dimension_overflow_count=1, coordinate_dimension_count=4)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(
+            session, "hydro-national", {"variable": "q_down"}, z=3, x=6, y=3
+        )
+
+    assert tile == b""
+    assert _truncation_records(caplog) == []
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        "hydro-national",
+        feature_coordinate_overflow_count=0,
+        feature_coordinate_count=12,
+        coordinate_dimension_overflow_count=1,
+        coordinate_dimension_count=4,
+    )
+
+
+def test_blanked_record_reports_the_limit_actually_bound(monkeypatch: Any, caplog: Any) -> None:
+    """The maxima come from the query's bind, so a lowered limit is what gets reported."""
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(hydro_display, "MVT_MAX_COORDINATES", 100)
+    session = _Session([_overflow_row(feature_coordinate_overflow_count=2, feature_coordinate_count=640)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
+
+    assert session.executions[0][1]["feature_coordinate_limit"] == 100
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        "river-network-national",
+        feature_coordinate_overflow_count=2,
+        feature_coordinate_count=640,
+        coordinate_dimension_overflow_count=0,
+        coordinate_dimension_count=2,
+    )
+    assert _blanked_records(caplog)[0].max_feature_coordinates == 100
+
+
+def test_no_overflow_emits_no_blanked_record(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        for layer, params in _LAYER_PARAMS.items():
+            empty = _Session([_overflow_row(intersecting_feature_count=0, intersecting_coordinate_count=0)])
+            assert hydro_display._fetch_postgis_tile_bytes(empty, layer, params, z=3, x=6, y=3) == b""
+            full = _Session([_budget_row(10)])
+            assert hydro_display._fetch_postgis_tile_bytes(full, layer, params, z=3, x=6, y=3) == b"pbf-bytes"
+
+    assert _blanked_records(caplog) == []
+
+
+def test_overflow_on_a_424_identity_raises_before_any_blanked_record(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(source_identity_count=0, feature_coordinate_overflow_count=1)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER), pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=3, x=6, y=3)
+
+    assert excinfo.value.status_code == 424
+    assert _blanked_records(caplog) == []

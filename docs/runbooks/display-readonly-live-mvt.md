@@ -433,6 +433,17 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
   生成即触发本记录。
 - **`layer_id=discharge` 在本记录里恒指 `hydro-national`**：预算窗口只在全国层（`services/tiles/mvt.py` 的
   `national_budget_window` CTE），按 run 的 `hydro` 层没有该窗口。
+- **单要素超限清空信号**（WARNING，#2166）：`MVT_TILE_FEATURE_OVERFLOW_BLANKED layer_id z x y
+  feature_coordinate_overflow_count feature_coordinate_count max_feature_coordinates
+  coordinate_dimension_overflow_count coordinate_dimension_count max_coordinate_dimensions`；同一 logger、同一
+  bind site（`_fetch_postgis_tile_bytes`），缓存语义同上（每次生成一条）。含义：瓦片内有要素的单要素坐标数或
+  坐标维数超过上限（`*_overflow_count` 为超限要素数，`feature_coordinate_count` / `coordinate_dimension_count`
+  为瓦片内单要素最大值，两个 `max_*` 为本次查询实际绑定的上限），共享的 `budget_gate` 因此清空，整张瓦片以
+  **HTTP 200、零要素**返回并照常缓存。不限全国层，任何 live MVT 层都可能触发。与 `MVT_TILE_BUDGET_TRUNCATED`
+  **对同一瓦片互斥**（后者要求两个 overflow 计数均为 0）。注意：上一条「`layer_id=discharge` 恒指 `hydro-national`」只对
+  TRUNCATED 成立；本记录的 `layer_id=discharge` 既可能来自全国层也可能来自按 run 的 `hydro` 层，以 z/x/y 与请求路径区分。
+- **grep**：`grep -E 'MVT_TILE_BUDGET_TRUNCATED|MVT_TILE_FEATURE_OVERFLOW_BLANKED' /tmp/display-api.log`
+  （单查截断：`grep MVT_TILE_BUDGET_TRUNCATED`，单查清空：`grep MVT_TILE_FEATURE_OVERFLOW_BLANKED`）。
 
 ## 残留风险与处置
 

@@ -67,6 +67,7 @@ from apps.api.routes import hydro_display
 from packages.common.forecast_store import MVP_STATION_VARIABLES, QHH_LATEST_EXPECTED_HORIZON_HOURS
 from services.tiles.mvt import (
     MVT_MEDIA_TYPE,
+    display_ready_run,
     national_discharge_source_version,
     national_river_network_source_version,
     postgis_tile_sql,
@@ -2321,3 +2322,164 @@ def test_national_identity_tile_serves_a_fully_covered_identity(
         f"E11(c) gfs {_stamp(_CYCLE_TIME)} {_stamp(_WINDOW_END)} z={_ZOOM} "
         f"sha256={hashlib.sha256(response.content).hexdigest()} etag={response.headers['etag']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2156: the per-basin `river-network` tile and the run-scoped `hydro` tile read
+# the same `core.river_segment` geometry the national layers do, but their
+# digests (`_river_network_source_version`, `_run_source_version`) could not see
+# `_backfill_output_segment_geometry` rewriting it in place: the cache key stayed
+# put and every cached tile kept serving the pre-backfill geometry forever (the
+# per-basin layer has no run identity to rotate it at all). Appended at the end
+# so every line citation above keeps its number.
+#
+# Real routes, real PostGIS, real backfill: the fake-session and sqlite tests
+# cannot show that a key rotation actually reaches the tile bytes.
+# ---------------------------------------------------------------------------
+
+_OUTPUT_SEGMENT_VALUE = 300.0
+
+
+def _seed_output_segment_fact(database_url: str) -> None:
+    """One `q_down` fact for the output row at `_WINDOW_END`, on the base run.
+
+    The run-scoped `hydro` tile paints `river_timeseries x river_segment`, so
+    without a fact on the backfilled row its bytes could not change whatever the
+    geometry did. Seeded BEFORE `post_expand_forecast_database`, like `_seed`'s
+    facts, so the run's authoritative store receives a copy instead of a
+    poisoned decoy.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        _RUN_ID,
+                        _BASIN_VERSION_ID,
+                        _NETWORK_ID,
+                        _OUTPUT_SEGMENT_ID,
+                        _WINDOW_END,
+                        1,
+                        _VARIABLE,
+                        _OUTPUT_SEGMENT_VALUE,
+                        "m3/s",
+                        "ok",
+                    )
+                ],
+            )
+    finally:
+        connection.close()
+
+
+def _run_backfill(database_url: str, *, only_missing: bool) -> int:
+    """One committed backfill transaction, the shape a bootstrap tick runs."""
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = False
+    try:
+        with connection.cursor() as cursor:
+            updated = _backfill_output_segment_geometry(cursor, _NETWORK_ID, only_missing=only_missing)
+        connection.commit()
+    finally:
+        connection.close()
+    return updated
+
+
+def _request_per_basin_and_run_tiles(client: TestClient) -> dict[str, Any]:
+    x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, _ZOOM)
+    return {
+        "river-network": client.get(f"/api/v1/tiles/river-network/{_BASIN_VERSION_ID}/{_ZOOM}/{x}/{y}.pbf"),
+        "hydro": client.get(
+            f"/api/v1/tiles/hydro/{_RUN_ID}/{_VARIABLE}/{_stamp(_WINDOW_END)}/{_ZOOM}/{x}/{y}.pbf"
+        ),
+    }
+
+
+def _catalog_and_tile_run_versions(database_url: str) -> tuple[str, str, Any]:
+    """`_run_source_version` of the same run read by both run readers."""
+    engine = sqlalchemy_engine(database_url)
+    try:
+        with Session(engine) as session:
+            catalog_row = display_ready_run(session)
+            tile_row = hydro_display._run_row(session, _RUN_ID)
+    finally:
+        engine.dispose()
+    assert catalog_row is not None and catalog_row["run_id"] == _RUN_ID
+    return (
+        hydro_display._run_source_version(catalog_row),
+        hydro_display._run_source_version(tile_row),
+        tile_row.get("geometry_generation"),
+    )
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_geometry_backfill_rotates_the_per_basin_and_run_scoped_tiles(
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    """#2156: a backfill that rewrites rows moves both tiles' keys AND bytes; a no-op moves neither.
+
+    Before the backfill the output row has NULL geometry, so neither tile can
+    carry it. The backfill copies the reach geometry and `Type` onto it and bumps
+    `geometry_generation`; both routes must then compute a new
+    `X-Tile-Cache-Key`, miss the cache, and regenerate bytes that DO carry the
+    row. Without the counter in their digests the key is unchanged, the second
+    request is a cache hit, and it replays the pre-backfill bytes -- the stale
+    tile this issue is about.
+
+    The `only_missing=True` pass that follows is what every bootstrap tick runs
+    on a complete network: it updates nothing, so both keys and both byte
+    strings must stay exactly as they were (a cache hit).
+    """
+    database_url, client = national_tile
+    _seed_output_and_reach_rows(database_url)
+    _seed_output_segment_fact(database_url)
+    post_expand_forecast_database({_RUN_ID: store})
+    assert _geometry_generation(database_url, _NETWORK_ID) == 0
+
+    before = _request_per_basin_and_run_tiles(client)
+    for layer, response in before.items():
+        assert response.status_code == 200, (layer, response.text)
+        assert response.headers["content-type"].startswith(MVT_MEDIA_TYPE), layer
+        assert response.headers["X-Tile-Cache"] == "miss", layer
+        # Non-vacuity: the tiles really are painted, just not with the NULL-geom row.
+        assert _SEGMENT_IDS[0].encode() in response.content, layer
+        assert _OUTPUT_SEGMENT_ID.encode() not in response.content, layer
+    assert _REACH_SEGMENT_ID.encode() in before["river-network"].content
+
+    assert _run_backfill(database_url, only_missing=True) == 1, "the backfill must rewrite the seeded output row"
+    assert _geometry_generation(database_url, _NETWORK_ID) == 1
+
+    after = _request_per_basin_and_run_tiles(client)
+    for layer, response in after.items():
+        assert response.status_code == 200, (layer, response.text)
+    rotated = {
+        layer: after[layer].headers["X-Tile-Cache-Key"] != before[layer].headers["X-Tile-Cache-Key"]
+        for layer in before
+    }
+    assert rotated == {"river-network": True, "hydro": True}, (
+        "an in-place geometry rewrite must rotate the per-basin and run-scoped tile cache keys"
+    )
+    for layer, response in after.items():
+        assert response.headers["X-Tile-Cache"] == "miss", layer
+        assert response.content != before[layer].content, layer
+        assert _OUTPUT_SEGMENT_ID.encode() in response.content, (
+            f"{layer}: the regenerated tile must carry the backfilled row's new geometry"
+        )
+
+    # The catalog (`display_ready_run`) and the tile route (`_run_row`) read the
+    # same generation and so advertise the same run identity.
+    catalog_version, tile_version, generation = _catalog_and_tile_run_versions(database_url)
+    assert generation == 1
+    assert catalog_version == tile_version
+
+    assert _run_backfill(database_url, only_missing=True) == 0
+    assert _geometry_generation(database_url, _NETWORK_ID) == 1, "a zero-row backfill must not bump"
+
+    unchanged = _request_per_basin_and_run_tiles(client)
+    for layer, response in unchanged.items():
+        assert response.status_code == 200, (layer, response.text)
+        assert response.headers["X-Tile-Cache-Key"] == after[layer].headers["X-Tile-Cache-Key"], layer
+        assert response.headers["X-Tile-Cache"] == "hit", layer
+        assert response.content == after[layer].content, layer
