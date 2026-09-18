@@ -166,7 +166,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   `_per_source_latest_cycles` (`packages/common/forecast_store.py:770`) at 631 496 shared hits — 98.8 %
   of the `latest` shape's cost. `probe1987latest.py` already captures it. Verify: its shared hits and
   warm P95, before and after, recorded as a pass/fail criterion rather than as background.
-- [ ] 4.4 The D11 capture path is unmodified and still accepts the statement: `_REQUIRED_EQUALS`
+- [x] 4.4 The D11 capture path is unmodified and still accepts the statement: `_REQUIRED_EQUALS`
   (`packages/common/node27_pgdata_workload_query.py:57-63`) matches the captured statement. Verify: the
   D11 live receipt runs and reports `status: PASS`, with the buffer count recorded. This is the gate
   #1987 task 5.2 and #1988 both depend on.
@@ -184,7 +184,11 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 - **4.3 = PASS.** Every statement's shared-hit delta is exactly 0 with identical digests,
   `_per_source_latest_cycles` included (631 833 and 632 045 hits, unchanged). The lower p95 on the head
   arm is run order, not a speedup, and is recorded as such.
-- **4.4 = half done, half BLOCKED.** `_REQUIRED_EQUALS` is measurably unaffected (it pins neither changed
+- **4.4 = DONE, 2026-09-18.** The user authorised the deployment; the live tree went `a31aec64` →
+  `258b06ec` and the display API restarted. **D11 live receipt `status: PASS`**, 569 plan buffers against
+  the 5 000 ceiling, SQL 5.40–6.00 ms over 20 accepted samples. The production response body is
+  byte-identical to the pre-restart baseline. Receipt: `receipts/2026-09-18-live-ab/d11-live-receipt.json`.
+  Superseded note: `_REQUIRED_EQUALS` is measurably unaffected (it pins neither changed
   column, and only matches the `= %(key)s` form those conjuncts never had; 55 passed under all variants).
   The live D11 receipt drives the display API on `/home/nwm/NWM`, so producing one for this change means
   deploying this branch — **explicit GO required**, and it would carry #2417 into production per §6.4.
