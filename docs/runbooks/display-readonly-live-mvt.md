@@ -143,7 +143,8 @@ Root-equality pairings (template comments at
    `display.example`'s `/tmp/nhms-mvt-cache`.
 
 If the retention key is absent, the PNG lane records
-`precip_cache_root_unconfigured` and raw + canonical still prune. That
+`precip_cache_root_unconfigured` and raw still prunes (canonical is the
+system unit's lane, below). That
 is the #2431 defect: PNG then only grows. Activation of the PNG lane
 requires a configured non-null `precip_cache_root`, both configured
 sources (`GFS`→`gfs`, `IFS`→`IFS`) safely evaluated, and none of
@@ -153,11 +154,20 @@ Zero expired PNG candidates is legitimate only after that evaluation;
 it is not deletion proof. Do not create cache fixtures.
 
 Canonical copyback lock `/home/ghdc/nwm/object-store/.nhms-copyback-batch.lock`
-is `0600` uid 1103. The retention unit runs as uid 1005, so aged
-canonical cycles fail `lock_unsafe` and the oneshot returns rc=1. That
-is #2360, fail-closed, and out of this batch: never chmod / chown /
-delete / bypass the lock to green PNG pruning. Record canonical
-`lock_unsafe` separately from PNG planned/deleted/failed.
+is `0600` uid 1103. Since #2360 (2026-09-18) retention is split by
+lane: the `nwm` user unit `nhms-node27-raw-retention.service` (uid 1005)
+runs `NODE27_RAW_RETENTION_LANES=raw,precip-cache`, so canonical appears
+in its summary only as `skipped[]` `lane_not_selected` (no lock taken);
+aged canonical cycles are pruned by the system unit
+`nhms-node27-canonical-retention.service` as `frd_muziyao` (uid 1103).
+A canonical `lock_unsafe` after the split means a lane runs under the
+wrong account (the `nwm` env lost its `LANES` line, or the system unit's
+`User=` changed) — an incident. Never chmod / chown / delete / bypass
+the lock to green PNG pruning. Record canonical separately from PNG
+planned/deleted/failed: canonical results are in the system unit's
+summary under `/var/log/nhms-node27-canonical-retention/`, PNG results
+in the `nwm` unit's summary. Split, install and rollback:
+[`current-production-ops.md`](current-production-ops.md) §"node-27 canonical 删除持锁".
 
 Plan-only must set `NODE27_RAW_RETENTION_PLAN_ONLY=true` **after**
 sourcing the env file (the wrapper `set -a; . env`). The current

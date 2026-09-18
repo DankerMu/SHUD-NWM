@@ -57,6 +57,15 @@ object-store root 与 copyback root 同一，走 same-root skip，不取锁）�
 owner 接受的后果：在 unit 以 copyback root 属主运行之前，到龄 canonical cycle 一律
 `lock_failure: lock_unsafe`、不删；raw 与 PNG 缓存不受影响。
 
+> **补记（2026-09-18，#2360）**：上面的过渡态已解除，锁身份契约不变（锁文件仍 `0600`、属主
+> 1103，模式/属主都没动）。canonical 车道拆到系统 unit
+> `nhms-node27-canonical-retention.service`，以 copyback root 属主 `frd_muziyao`(1103) 运行；
+> `nwm` user unit 设 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`，不再选 canonical
+> （`lane_not_selected`，不取锁）。唯一的 `posix` 调用方仍是同一个单线程 CLI。拆分后再出现
+> canonical `lock_unsafe` 即车道跑错账号，按事故处理。现行操作与回滚见
+> [`docs/runbooks/current-production-ops.md`](../runbooks/current-production-ops.md)
+> §「node-27 canonical 删除持锁」。
+
 ## 已知限制
 
 - 跨主机互斥只有 receipt 证明；CI 与 node-27 测试只能覆盖同机 `posix` 对 `posix`。

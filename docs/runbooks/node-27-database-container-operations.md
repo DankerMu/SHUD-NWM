@@ -134,7 +134,9 @@ It does not authorize a live `REVOKE`, `DROP`, tablespace/data deletion, or
 cleanup of SOURCE `/home/nwm/NWM-maintenance-reviewed-95481481`, its `.venv`,
 or STATE/config
 `/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/`. Those
-paths remain active deployment inputs. Normal PGDATA, container restart,
+paths remain rollback and recovery inputs after the 2026-09-18
+compression-unit rebind (#2285), not the active deployment; still do not
+clean them. Normal PGDATA, container restart,
 governance, compression, and retention operations remain under their existing
 owners. Historical probe records and completed receipts remain evidence, not
 current commands. Archive and issue closeout are being completed in this PR.

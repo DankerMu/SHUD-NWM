@@ -1,0 +1,14 @@
+[Unit]
+Description=NHMS node-27 timeseries compression
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM-maintenance-reviewed-95481481
+Environment="NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM-maintenance-reviewed-95481481"
+Environment="NODE27_TIMESERIES_COMPRESSION_ENV_FILE=/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env"
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
+ExecStartPre=/home/nwm/NWM-maintenance-reviewed-95481481/.venv/bin/python -E /home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_budget_preflight.py --compression-env /home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env --check
+ExecStart=/home/nwm/NWM-maintenance-reviewed-95481481/scripts/node27_timeseries_compression_once.sh --enforce
+StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log
+StandardError=append:/home/nwm/node27-timeseries-compression-logs/systemd.err
+TimeoutStartSec=3941

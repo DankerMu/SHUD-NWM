@@ -1,0 +1,32 @@
+{
+  "blockers": [
+    {
+      "field": "lanes",
+      "reason": "unknown_lane",
+      "value": [
+        "canon"
+      ]
+    }
+  ],
+  "copyback_lock_failures": {
+    "lock_budget_exhausted": 0,
+    "lock_timeout": 0,
+    "lock_unsafe": 0
+  },
+  "counts": {
+    "deleted": 0,
+    "failed": 0,
+    "planned": 0,
+    "skipped": 0
+  },
+  "deleted": [],
+  "execution_mode": "preflight_blocked",
+  "failed": [],
+  "finished_at": "2026-09-18T15:02:51Z",
+  "freed_bytes": 0,
+  "planned": [],
+  "schema_version": "nhms.node27_raw_retention.production.v5",
+  "skipped": [],
+  "started_at": "2026-09-18T15:02:51Z",
+  "status": "preflight_blocked"
+}

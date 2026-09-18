@@ -115,6 +115,25 @@ safe disposition.
 Operator-facing current state:
 [`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
 
+## Amendment (2026-09-18): per-tick bound 2; compression unit rebound to the repo
+
+The 2026-09-16 record above stays as history. On 2026-09-18 (#2425) the
+compression per-tick bound became **2**: narrow one-day
+`hydro.river_timeseries` chunks (~20 GB each, ~55 s/GB) mean `bound 4` no
+longer fits the 3900 s wrapper wall. The live env moved 4 → 2 that day.
+
+The compression unit is rebound (#2285) from the #1895 fence tree
+`/home/nwm/NWM-maintenance-reviewed-95481481` to the repo unit on
+`/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` and env
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env`). The fence
+SOURCE, its `.venv` and STATE/config are retained as **rollback inputs**, not
+the active deployment. Do not clean them.
+
+Current state and the bound derivation:
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md);
+decision record: OpenSpec change `restore-node27-maintenance-services`
+(design D7; under `openspec/changes/archive/` once archived).
+
 ## Context
 
 Live measurements on node-27 (2026-07-04 CST; governance receipt
