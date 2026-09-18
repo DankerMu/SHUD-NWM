@@ -1,0 +1,10 @@
+['systemctl', '--user', 'show', 'nhms-compute-scheduler.service', '-p', 'MainPID', '-p', 'ActiveState', '-p', 'ExecMainStartTimestamp', '-p', 'ExecMainExitTimestamp'] MainPID=3033690
+ExecMainStartTimestamp=Wed 2026-09-16 23:47:08 CST
+ExecMainExitTimestamp=
+ActiveState=activating
+ 
+['systemctl', '--user', 'is-active', 'nhms-compute-scheduler.timer'] active
+ 
+['squeue', '-u', 'frd_muziyao', '-h', '-o', '%A %j %T'] 49263 nhms_forecast RUNNING
+ 
+IFS_ROW {"status": "permanently_failed", "slurm_job_id": null, "error_code": "SLURM_PARSE_ERROR", "updated_at": "2026-09-16T15:59:36.561849Z"}

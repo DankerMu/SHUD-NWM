@@ -1,0 +1,6 @@
+source_commit=c9589e0fb75f4b4fa28b8890c613775dc514ecf5
+command=cd /home/nwm/tmp/wt-2439-red && export PATH="$HOME/.local/bin:$PATH" TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/wt-2439-red UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv && uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_production_scheduler.py::test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard tests/test_production_scheduler.py::test_strict_upgrade_preserves_recognized_pre_forecast_aliases_and_precedence tests/test_production_scheduler.py::test_forecast_later_mismatch_without_forcing_stays_blocked tests/test_production_scheduler.py::test_retry_with_stale_cold_manifest_is_upgraded_to_warm_forecast_rerun tests/test_production_scheduler.py::test_missing_forcing_repair_rechecks_blocker_created_by_warm_manifest_upgrade tests/test_production_scheduler.py::test_manual_retry_claim_superseded_by_strict_warm_start_upgrade_degrades_to_derived_attempt
+......                                                                   [100%]
+6 passed in 9.03s
+
+exit=0

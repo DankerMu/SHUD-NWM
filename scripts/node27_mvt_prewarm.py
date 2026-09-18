@@ -58,7 +58,7 @@ from services.precip.mirror import horizon_valid_times  # noqa: E402 - after the
 
 CHINA_BOUNDS = (73.5, 18.1, 134.8, 53.6)
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
-SUMMARY_SCHEMA = "nhms.node27-mvt-prewarm.v2"
+SUMMARY_SCHEMA = "nhms.node27-mvt-prewarm.v3"
 PREWARM_SOURCES = ("gfs", "ifs")
 # Fixed by the spec, NOT `zooms & {3, 4}`: an operator setting
 # AUTOPIPE_MVT_PREWARM_ZOOMS=5,6,7 must not silently warm zero discharge tiles.
@@ -506,6 +506,10 @@ def prewarm(
             entry = per_source[job.source]
             if job.kind == "discharge":
                 entry["discharge_requests"] += 1
+                if ok:
+                    entry["discharge_ok"] += 1
+                else:
+                    entry["discharge_failed"] += 1
             elif job.kind == "png":
                 if ok:
                     entry["png_ok"] += 1
@@ -559,6 +563,8 @@ def _new_source_entry() -> dict[str, Any]:
         "valid_times_available": 0,
         "valid_times_warmed": 0,
         "discharge_requests": 0,
+        "discharge_ok": 0,
+        "discharge_failed": 0,
         "png_ok": 0,
         "png_not_mirrored": 0,
         "png_window_incomplete": 0,

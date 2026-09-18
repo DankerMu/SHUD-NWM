@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from services.orchestrator.accepted_submit_identity import (
@@ -40,6 +41,13 @@ from services.orchestrator.accepted_submit_identity import (
     ordered_cohort_members,
 )
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+from services.orchestrator.forcing_submit_identity import (
+    FORCING_ATTEMPT_COMMENT_PREFIX,
+    FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES,
+    forcing_submit_identity_is_complete,
+    is_current_forcing_attempt_comment,
+    is_forcing_stage_name,
+)
 from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
@@ -564,6 +572,219 @@ def _fallback_eligibility(
     return _strict_utc_datetime(submission_attempt_started_at) is not None
 
 
+def _forcing_controller_identity_request(
+    *,
+    enabled: bool,
+    expected_user: str,
+    expected_account: str,
+    forcing_stage: str | None,
+    forcing_task_count: int | None,
+    submission_attempt_started_at: datetime | None,
+) -> datetime | None:
+    """Return a strict forcing-attempt anchor eligible for controller proof."""
+
+    if (
+        not enabled
+        or not expected_user
+        or not expected_account
+        or not is_forcing_stage_name(forcing_stage)
+        or type(forcing_task_count) is not int
+        or forcing_task_count < 1
+    ):
+        return None
+    return _strict_utc_datetime(submission_attempt_started_at)
+
+
+def _controller_job_records(stdout: str) -> tuple[dict[str, str], ...]:
+    """Parse bounded ``scontrol show job -o`` records without trusting omissions."""
+
+    records: list[dict[str, str]] = []
+    lines: list[str] = []
+    for line in stdout.splitlines():
+        if line.lstrip().startswith("JobId="):
+            if lines:
+                records.append(_controller_job_fields(lines))
+            lines = [line]
+        elif lines:
+            lines.append(line)
+    if lines:
+        records.append(_controller_job_fields(lines))
+    return tuple(record for record in records if record)
+
+
+_CONTROLLER_IDENTITY_FIELDS = frozenset(
+    {
+        "JobId",
+        "ArrayJobId",
+        "ArrayTaskId",
+        "JobName",
+        "UserId",
+        "Account",
+        "JobState",
+        "ExitCode",
+        "SubmitTime",
+        "Comment",
+    }
+)
+
+
+def _controller_job_fields(lines: Sequence[str]) -> dict[str, str]:
+    """Read only fixed scontrol fields; duplicate identity fields fail closed."""
+
+    fields: dict[str, str] = {}
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("JobId="):
+            allowed = _CONTROLLER_IDENTITY_FIELDS
+        elif line.startswith("UserId="):
+            allowed = ("UserId",)
+        elif line.startswith("Priority="):
+            allowed = ("Account",)
+        elif line.startswith("JobState="):
+            allowed = ("JobState",)
+        elif line.startswith("Requeue="):
+            allowed = ("ExitCode",)
+        elif line.startswith("SubmitTime="):
+            allowed = ("SubmitTime",)
+        elif line.startswith("Comment="):
+            allowed = ("Comment",)
+        else:
+            continue
+        for token in line.split():
+            key, separator, value = token.partition("=")
+            if not separator or key not in allowed or not value:
+                continue
+            if key in fields:
+                fields["_identity_unparseable"] = "1"
+                continue
+            fields[key] = value
+    return fields
+
+
+def _controller_array_task_identity_is_compatible(
+    value: str | None,
+    *,
+    task_count: int,
+) -> bool:
+    """Accept only task ids/ranges inside the reserved forcing array."""
+
+    text = str(value or "").strip()
+    if not text:
+        return False
+    for raw_part in text.split(","):
+        part, separator, throttle = raw_part.partition("%")
+        if separator and (not throttle.isdigit() or int(throttle) < 1):
+            return False
+        if "-" in part:
+            start_text, separator, end_text = part.partition("-")
+            if not separator or "-" in end_text:
+                return False
+        else:
+            start_text = end_text = part
+        if not start_text.isdigit() or not end_text.isdigit():
+            return False
+        start = int(start_text)
+        end = int(end_text)
+        if start > end or start < 0 or end >= task_count:
+            return False
+    return True
+
+
+def _controller_forcing_job_name_matches(job_name: str | None, expected_stage: str) -> bool:
+    stage = str(job_name or "").strip().removeprefix("nhms_")
+    return is_forcing_stage_name(stage) and _stages_match(stage, expected_stage)
+
+
+def _query_forcing_controller_identity(
+    *,
+    scontrol: str,
+    target_comment: str,
+    expected_user: str,
+    expected_account: str,
+    expected_stage: str,
+    expected_task_count: int,
+) -> "CommentAccountingResult":
+    """Find uniquely controller-retained forcing identity; never prove absence."""
+
+    try:
+        stdout = _bounded_visibility_stdout([scontrol, "show", "job", "-o"])
+    except ReconcileQueryUnavailable as error:
+        raise ReconcileQueryUnavailable(
+            "controller forcing identity query unavailable",
+            reason_class=error.reason_class,
+        ) from error
+
+    candidates: dict[str, dict[str, Any]] = {}
+    identity_unproven = False
+    for fields in _controller_job_records(stdout):
+        if fields.get("Comment") != target_comment:
+            continue
+        raw_job_id = str(fields.get("JobId") or "")
+        master_id = str(fields.get("ArrayJobId") or "")
+        user = str(fields.get("UserId") or "").split("(", 1)[0]
+        account = str(fields.get("Account") or "")
+        job_name = str(fields.get("JobName") or "")
+        submitted_at = _parse_fallback_submit_instant(fields.get("SubmitTime"))
+        task_identity_matches = _controller_array_task_identity_is_compatible(
+            fields.get("ArrayTaskId"),
+            task_count=expected_task_count,
+        )
+        if (
+            fields.get("_identity_unparseable") is not None
+            or not SLURM_JOB_ID_RE.fullmatch(master_id)
+            or not (
+                SLURM_JOB_ID_RE.fullmatch(raw_job_id)
+                or _fallback_master_id(raw_job_id) == master_id
+            )
+            or user != expected_user
+            or account != expected_account
+            or not _controller_forcing_job_name_matches(job_name, expected_stage)
+            or not task_identity_matches
+        ):
+            identity_unproven = True
+            continue
+        identity = (user, account, job_name)
+        candidate = candidates.setdefault(
+            master_id,
+            {
+                "identity": identity,
+                "raw_state": str(fields.get("JobState") or ""),
+                "exit_code": str(fields.get("ExitCode") or "") or None,
+                "submitted_at": submitted_at,
+            },
+        )
+        if candidate["identity"] != identity or not candidate["raw_state"]:
+            identity_unproven = True
+            continue
+
+    if identity_unproven or not candidates:
+        raise ReconcileQueryUnavailable(
+            "controller did not prove forcing identity",
+            reason_class="comment_accounting_unproven",
+        )
+    records: list[SacctRecord] = []
+    for master_id, candidate in candidates.items():
+        records.append(
+            SacctRecord(
+                slurm_job_id=master_id,
+                raw_state=str(candidate["raw_state"]),
+                job_name=str(candidate["identity"][2]),
+                exit_code=candidate["exit_code"],
+                comment=target_comment,
+                user=str(candidate["identity"][0]),
+                account=str(candidate["identity"][1]),
+                submitted_at=candidate["submitted_at"],
+            )
+        )
+        if len(records) >= MAX_EXACT_COMMENT_MATCHES:
+            break
+    return CommentAccountingResult(
+        tuple(records),
+        scope="owner",
+        controller_exact_comment=True,
+    )
+
+
 def default_comment_sacct_querier(
     slurm_bin_path: str = "",
     *,
@@ -571,16 +792,18 @@ def default_comment_sacct_querier(
     comment_storage_probe: Callable[[], bool | None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> CommentSacctQuerier:
-    """Build a comment querier: idempotency_key -> the job sbatch recorded.
+    """Build the bounded comment/controller querier for a crashed reservation.
 
-    Queries ``sacct`` for the master row whose ``Comment`` is
-    ``nhms_idem:<idempotency_key>`` so a crashed reservation can be reconciled
-    back to the real ``slurm_job_id`` even though the durable bind never ran.
+    ``sacct`` owns the normal exact-comment proof.  On an explicitly
+    comment-less cluster, an explicitly identified forcing array MAY instead
+    use the controller's still-retained exact comment to bind one original
+    master; controller expiry never proves absence.
     """
 
     from services.orchestrator.reservation import slurm_comment_for
 
     sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
+    scontrol = f"{slurm_bin_path.rstrip('/')}/scontrol" if slurm_bin_path else "scontrol"
 
     indexed_matches_by_page: dict[
         tuple[str, str, str, str], dict[str, tuple[SacctRecord, ...]]
@@ -633,9 +856,14 @@ def default_comment_sacct_querier(
         expected_account: str | None = None,
         accepted_submit_contract_version: str | None = None,
         submission_attempt_started_at: datetime | None = None,
+        forcing_controller_identity: bool = False,
+        forcing_stage: str | None = None,
+        forcing_task_count: int | None = None,
+        forcing_exact_comment: str | None = None,
+        forcing_current_attempt_comment: bool = False,
     ) -> CommentAccountingResult:
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
-        target_comment = slurm_comment_for(idempotency_key)
+        target_comment = str(forcing_exact_comment or "") or slurm_comment_for(idempotency_key)
         nonlocal visibility_proven, comment_storage_proven, comment_storage_probed
         if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
             raise ReconcileQueryUnavailable("accepted-submit contract version is unsupported")
@@ -653,6 +881,24 @@ def default_comment_sacct_querier(
                 reason_class="comment_accounting_unproven",
             )
         if comment_storage_proven is False:
+            controller_anchor = _forcing_controller_identity_request(
+                enabled=forcing_controller_identity,
+                expected_user=owner_scope[0],
+                expected_account=owner_scope[1],
+                forcing_stage=forcing_stage,
+                forcing_task_count=forcing_task_count,
+                submission_attempt_started_at=submission_attempt_started_at,
+            )
+            if controller_anchor is not None:
+                assert type(forcing_task_count) is int
+                return _query_forcing_controller_identity(
+                    scontrol=scontrol,
+                    target_comment=target_comment,
+                    expected_user=owner_scope[0],
+                    expected_account=owner_scope[1],
+                    expected_stage=str(forcing_stage or ""),
+                    expected_task_count=forcing_task_count,
+                )
             # Explicitly comment-less (including (null)): exact-comment search
             # is provably useless, so refuse it — but a current accepted-submit
             # forecast cohort with strict anchor and exact ownership MAY enter
@@ -938,7 +1184,7 @@ def _index_comment_sacct_matches(
         if len(fields) < 5:
             continue
         comment = fields[4].strip()
-        if not comment.startswith("nhms_idem:"):
+        if not comment.startswith(("nhms_idem:", FORCING_ATTEMPT_COMMENT_PREFIX)):
             continue
         user = fields[5].strip() if len(fields) > 5 and fields[5].strip() else None
         account = fields[6].strip() if len(fields) > 6 and fields[6].strip() else None
@@ -1358,7 +1604,11 @@ def reconcile_inflight_jobs(
             continue
         expected_token = _expected_job_name_token(job.stage, job.job_type)
         normalized = _normalize_slurm_state(record.raw_state) if record is not None else None
-        slurm_status = SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED) if normalized is not None else None
+        slurm_status = (
+            SLURM_STATE_MAP.get(normalized, SlurmJobStatus.FAILED)
+            if normalized is not None
+            else None
+        )
         cohort_members = getattr(job, "cohort_members", None)
         file_cohort = bool(
             getattr(store, "supports_accepted_submit_reconcile", False)
@@ -1368,14 +1618,27 @@ def reconcile_inflight_jobs(
             and not isinstance(cohort_members, str | bytes)
             and cohort_members
         )
-        requires_durable_identity = slurm_status in TERMINAL_STATUSES and not file_cohort
-
-        if record is None or not _identity_matches(
-            record,
-            expected_token,
-            job,
-            require_durable_identity=requires_durable_identity,
-        ):
+        forcing_bound = _bound_forcing_submit_reconcile_job(job)
+        requires_durable_identity = (
+            slurm_status in TERMINAL_STATUSES and not file_cohort and not forcing_bound
+        )
+        identity_matches = (
+            _forcing_accounting_identity_matches(
+                record,
+                job,
+                require_exact_comment=False,
+                require_bound_master=True,
+            )
+            if record is not None and forcing_bound
+            else record is not None
+            and _identity_matches(
+                record,
+                expected_token,
+                job,
+                require_durable_identity=requires_durable_identity,
+            )
+        )
+        if not identity_matches:
             # Cannot prove this is our candidate: mark typed, do NOT resubmit.
             if file_cohort:
                 write_count = _transition_file_runtime_status(
@@ -1514,6 +1777,74 @@ def _is_forecast_cohort_job(job: Any) -> bool:
     if stage:
         return stage in FORECAST_COHORT_STAGE_ALIASES
     return str(getattr(job, "job_type", None) or "") in FORECAST_COHORT_STAGE_ALIASES
+
+
+def _forcing_submit_reconcile_job(job: Any) -> bool:
+    identity = vars(job) if hasattr(job, "__dict__") else {}
+    return forcing_submit_identity_is_complete(identity)
+
+
+def _bound_forcing_submit_reconcile_job(job: Any) -> bool:
+    if not _forcing_submit_reconcile_job(job):
+        return False
+    slurm_job_id = str(getattr(job, "slurm_job_id", None) or "")
+    return bool(
+        slurm_job_id.isdigit()
+        and getattr(job, "submit_outcome", None) == "accepted"
+        and getattr(job, "reconciliation_source", None)
+        in FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES
+        and getattr(job, "reconciliation_decision", None) == "matched_bound"
+        and getattr(job, "matched_slurm_job_id", None) == slurm_job_id
+    )
+
+
+def _forcing_accounting_identity_matches(
+    record: SacctRecord,
+    job: Any,
+    *,
+    require_exact_comment: bool,
+    require_bound_master: bool,
+) -> bool:
+    if not _forcing_submit_reconcile_job(job):
+        return False
+    if not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
+        return False
+    expected_comment = str(getattr(job, "slurm_comment", None) or "")
+    if not expected_comment:
+        return False
+    if require_exact_comment and str(record.comment or "") != expected_comment:
+        return False
+    if not require_exact_comment and record.comment not in (None, ""):
+        if str(record.comment) != expected_comment:
+            return False
+    expected_master = str(getattr(job, "slurm_job_id", None) or "")
+    if require_bound_master and (not expected_master or record.slurm_job_id != expected_master):
+        return False
+    expected_token = _expected_job_name_token(
+        getattr(job, "stage", None), getattr(job, "job_type", None)
+    )
+    if not _identity_matches(record, expected_token, job, require_durable_identity=False):
+        return False
+    for record_value, job_field in (
+        (record.run_id, "run_id"),
+        (record.stage, "stage"),
+        (record.pipeline_job_id, "job_id"),
+    ):
+        expected = getattr(job, job_field, None)
+        if record_value not in (None, "") and expected not in (None, ""):
+            if str(record_value) != str(expected):
+                return False
+    expected_user = str(getattr(job, "expected_slurm_user", None) or "")
+    expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+    if bool(getattr(job, "slurm_ownership_required", False)) and (
+        not expected_user or not expected_account or not record.user or not record.account
+    ):
+        return False
+    if expected_user and record.user != expected_user:
+        return False
+    if expected_account and record.account != expected_account:
+        return False
+    return True
 
 
 def _file_cohort_runtime_identity_matches(store: Any, identity: Mapping[str, Any]) -> bool:
@@ -1673,6 +2004,9 @@ class CommentAccountingResult(Sequence[SacctRecord]):
     # run through the exact-comment global-visibility round. Never durable.
     fallback_name_window: bool = False
     fallback_submit_unparsable: bool = False
+    # Controller retention is positive-only evidence: it identifies a unique
+    # forcing master but never authorizes absence or a global accounting scan.
+    controller_exact_comment: bool = False
 
     def __getitem__(self, index: int) -> SacctRecord:
         return self.records[index]
@@ -1694,6 +2028,63 @@ class _CommentAccountingProof:
 
 
 CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None"]
+
+
+def _targeted_reserved_unbound_jobs(
+    store: Any,
+    job_id: str,
+    *,
+    target_submission_attempt: int | None = None,
+    target_submission_attempt_started_at: datetime | str | None = None,
+    target_slurm_comment: str | None = None,
+) -> tuple[Any, ...]:
+    """Read one current reserved row without enumerating the reconcile inventory."""
+
+    job_id = str(job_id or "")
+    if not job_id:
+        return ()
+    if target_submission_attempt is not None and (
+        type(target_submission_attempt) is not int or target_submission_attempt < 1
+    ):
+        return ()
+    expected_target_anchor = (
+        _strict_utc_datetime(target_submission_attempt_started_at)
+        if target_submission_attempt_started_at is not None
+        else None
+    )
+    if target_submission_attempt_started_at is not None and expected_target_anchor is None:
+        return ()
+
+    direct_reader = getattr(store, "get_reserved_unbound_job", None)
+    if callable(direct_reader):
+        job = direct_reader(job_id)
+    else:
+        reader = getattr(store, "get_pipeline_job", None)
+        if not callable(reader):
+            return ()
+        record = reader(job_id)
+        job = SimpleNamespace(**dict(record)) if isinstance(record, Mapping) else record
+    if (
+        str(getattr(job, "job_id", "") or "") != job_id
+        or str(getattr(job, "status", "") or "") != "reserved"
+        or getattr(job, "slurm_job_id", None) not in (None, "")
+        or not str(getattr(job, "idempotency_key", "") or "")
+        or (
+            target_submission_attempt is not None
+            and _job_submission_attempt(job) != target_submission_attempt
+        )
+        or (
+            expected_target_anchor is not None
+            and _strict_utc_datetime(getattr(job, "submission_attempt_started_at", None))
+            != expected_target_anchor
+        )
+        or (
+            target_slurm_comment is not None
+            and str(getattr(job, "slurm_comment", "") or "") != target_slurm_comment
+        )
+    ):
+        return ()
+    return (job,)
 
 
 @dataclass(frozen=True)
@@ -1737,6 +2128,11 @@ def reconcile_reserved_unbound_jobs(
     accepted_submit_grace: timedelta | None = None,
     identity_blocked_streak_limit: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    target_job_id: str | None = None,
+    target_submission_attempt: int | None = None,
+    target_submission_attempt_started_at: datetime | str | None = None,
+    target_slurm_comment: str | None = None,
+    bind_only: bool = False,
 ) -> list[ReservationReconcileOutcome]:
     """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
 
@@ -1772,6 +2168,12 @@ def reconcile_reserved_unbound_jobs(
     demotes to ``reservation_lost`` so liveness never regresses. ``now`` is
     injectable for deterministic tests.
 
+    ``target_job_id`` selects one current row through its direct reader instead
+    of enumerating the reserved inventory. Its optional attempt, anchor, and
+    comment pins must still match that row before any accounting query. With
+    ``bind_only=True``, only a positive trusted forcing bind may write; absence
+    stays reserved for the normal global reconciliation path.
+
     ``identity_blocked_streak_limit`` converges the third failure mode: a
     reserved-unbound row whose identity can never be verified was recorded
     ``identity_mismatch_blocked`` every pass while STAYING ``reserved``, so the
@@ -1783,13 +2185,24 @@ def reconcile_reserved_unbound_jobs(
     """
 
     outcomes: list[ReservationReconcileOutcome] = []
-    # #1850 D2 + Fix D: capability probing is LAZY. Snapshot the reserved rows
-    # first; the querier's cached tri-state verdict is computed at most once,
-    # only when the first current-contract forecast row that needs lane
-    # selection is processed. An empty or unversioned-only inventory never
-    # triggers the probe or any accounting query. One stable verdict serves
-    # the whole pass.
-    reserved_jobs = list(store.query_reserved_unbound_jobs())
+    # #1850 D2 + Fix D: capability probing is LAZY. Select either the global
+    # reserved snapshot or one direct current row first; the querier's cached
+    # tri-state verdict is computed at most once only when a row needs lane
+    # selection. An empty selection never triggers an accounting query. One
+    # stable verdict serves the whole invocation.
+    reserved_jobs = (
+        list(store.query_reserved_unbound_jobs())
+        if target_job_id is None
+        else list(
+            _targeted_reserved_unbound_jobs(
+                store,
+                target_job_id,
+                target_submission_attempt=target_submission_attempt,
+                target_submission_attempt_started_at=target_submission_attempt_started_at,
+                target_slurm_comment=target_slurm_comment,
+            )
+        )
+    )
     comment_capability: bool | None = None
     comment_capability_known = False
 
@@ -1809,6 +2222,18 @@ def reconcile_reserved_unbound_jobs(
         # cycle abort resolution of every other reserved row and the pass.
         outcome_floor = len(outcomes)
         try:
+            forcing_submit_reconcile = _forcing_submit_reconcile_job(job)
+            if bind_only and not forcing_submit_reconcile:
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="query_unavailable",
+                        status=str(job.status),
+                        reconciliation_reason_class="comment_accounting_unproven",
+                    )
+                )
+                continue
             accepted_submit_reconcile = _accepted_submit_reconcile_job(
                 store,
                 job,
@@ -1860,20 +2285,63 @@ def reconcile_reserved_unbound_jobs(
                     job,
                     AcceptedSubmitTransition.timeout(status=str(job.status)),
                 )
-
-            attempt_anchor = _job_attempt_anchor(job, accepted_submit_reconcile=accepted_submit_reconcile)
+            elif forcing_submit_reconcile and getattr(job, "submit_outcome", None) is None:
+                if bind_only:
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action="query_unavailable",
+                            status=str(job.status),
+                            reconciliation_source="slurm_exact_comment",
+                            reconciliation_reason_class="comment_accounting_unproven",
+                        )
+                    )
+                    continue
+                _transition_forcing_submit_ambiguity(store, job)
+            trusted_submit_reconcile = accepted_submit_reconcile or forcing_submit_reconcile
+            attempt_anchor = _job_attempt_anchor(
+                job, accepted_submit_reconcile=trusted_submit_reconcile
+            )
             try:
                 expected_user = str(getattr(job, "expected_slurm_user", None) or "")
                 expected_account = str(getattr(job, "expected_slurm_account", None) or "")
+                forcing_members = getattr(job, "cohort_members", None)
+                forcing_task_count = (
+                    len(forcing_members)
+                    if forcing_submit_reconcile
+                    and isinstance(forcing_members, Sequence)
+                    and not isinstance(forcing_members, str | bytes)
+                    else None
+                )
                 proof = _query_comment_accounting_proof(
                     comment_query,
                     str(idempotency_key),
-                    expected_user=expected_user if accepted_submit_reconcile else "",
-                    expected_account=expected_account if accepted_submit_reconcile else "",
+                    expected_user=expected_user if trusted_submit_reconcile else "",
+                    expected_account=expected_account if trusted_submit_reconcile else "",
                     accepted_submit_contract_version=(
                         ACCEPTED_SUBMIT_CONTRACT_VERSION if accepted_submit_reconcile else None
                     ),
-                    submission_attempt_started_at=(attempt_anchor if accepted_submit_reconcile else None),
+                    submission_attempt_started_at=(
+                        attempt_anchor if trusted_submit_reconcile else None
+                    ),
+                    forcing_controller_identity=forcing_submit_reconcile,
+                    forcing_stage=(
+                        str(getattr(job, "stage", None) or getattr(job, "job_type", None) or "")
+                        if forcing_submit_reconcile
+                        else None
+                    ),
+                    forcing_task_count=forcing_task_count,
+                    forcing_exact_comment=(
+                        str(getattr(job, "slurm_comment", None) or "")
+                        if forcing_submit_reconcile
+                        else None
+                    ),
+                    forcing_current_attempt_comment=(
+                        is_current_forcing_attempt_comment(vars(job))
+                        if forcing_submit_reconcile
+                        else False
+                    ),
                 )
             except ReconcileQueryUnavailable as error:
                 # Transient failure: we did NOT confirm absence. Keep the row
@@ -1918,6 +2386,11 @@ def reconcile_reserved_unbound_jobs(
                     )
                 )
                 continue
+            forcing_reconciliation_source = (
+                "slurm_controller_exact_comment"
+                if forcing_submit_reconcile and proof.kind == "controller_match"
+                else "slurm_exact_comment"
+            )
             if (
                 accepted_submit_reconcile
                 and proof.kind == "global_absence"
@@ -1940,6 +2413,56 @@ def reconcile_reserved_unbound_jobs(
                         reconciliation_reason_class="coverage_incomplete",
                         durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                         durable_write_count=write_count,
+                    )
+                )
+                continue
+            if (
+                forcing_submit_reconcile
+                and proof.kind == "global_absence"
+                and not _effective_versioned_absence_coverage(
+                    proof, attempt_anchor=attempt_anchor
+                )
+            ):
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=ABSENCE_UNCONFIRMED_ACTION,
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_reason_class="coverage_incomplete",
+                    )
+                )
+                continue
+            if forcing_submit_reconcile and proof.kind not in {
+                "owned_match",
+                "controller_match",
+                "global_absence",
+            }:
+                action = (
+                    "multiple_matches_blocked"
+                    if proof.kind == "ambiguous"
+                    else "identity_mismatch_blocked"
+                    if proof.kind == "foreign_collision"
+                    else "query_unavailable"
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=action,
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        match_count=(
+                            min(len(proof.records), MAX_EXACT_COMMENT_MATCHES + 1)
+                            if proof.records
+                            else 0
+                        ),
+                        reconciliation_reason_class=(
+                            "comment_accounting_unproven"
+                            if action == "query_unavailable"
+                            else None
+                        ),
                     )
                 )
                 continue
@@ -2052,7 +2575,11 @@ def reconcile_reserved_unbound_jobs(
             record = (
                 proof.records[0]
                 if proof.records
-                and (proof.kind in {"owned_match", "fallback_unique"} or not accepted_submit_reconcile)
+                and (
+                    proof.kind in {"owned_match", "fallback_unique"}
+                    or (forcing_submit_reconcile and proof.kind == "controller_match")
+                    or (not accepted_submit_reconcile and not forcing_submit_reconcile)
+                )
                 else None
             )
             fallback_unique = accepted_submit_reconcile and proof.kind == "fallback_unique"
@@ -2106,14 +2633,108 @@ def reconcile_reserved_unbound_jobs(
                     )
                 )
                 continue
-            # Confirm the accounting row truly carries our idempotency comment AND
-            # that its slurm_job_id has a valid Slurm shape (``\d+`` or ``\d+_\d+``)
-            # before binding — symmetric with the identity guard in
-            # reconcile_inflight_jobs, guarding against a malformed/garbage JobID
-            # being durably bound onto the reservation. On the name-window
-            # fallback an empty comment is expected (the cluster does not store
-            # it) and the comment gate was already applied by the reserved
-            # identity check; only a present-but-different comment is fatal.
+            if (
+                forcing_submit_reconcile
+                and record is not None
+                and not _forcing_accounting_identity_matches(
+                    record,
+                    job,
+                    require_exact_comment=True,
+                    require_bound_master=False,
+                )
+            ):
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="identity_mismatch_blocked",
+                        status=str(job.status),
+                        reconciliation_source=forcing_reconciliation_source,
+                        match_count=1,
+                    )
+                )
+                continue
+            # Confirm the accounting row carries this reservation's current
+            # durable comment and a valid Slurm id before binding — symmetric
+            # with the identity guard in ``reconcile_inflight_jobs``. On the
+            # name-window fallback an empty comment is expected because the
+            # cluster does not store it; a present different comment is fatal.
+            if forcing_submit_reconcile and record is None:
+                if bind_only:
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action=ABSENCE_UNCONFIRMED_ACTION,
+                            status=str(job.status),
+                            reconciliation_source="slurm_exact_comment",
+                        )
+                    )
+                    continue
+                credible_absence = (
+                    proof.kind == "global_absence"
+                    and _effective_versioned_absence_coverage(
+                        proof, attempt_anchor=attempt_anchor
+                    )
+                )
+                if credible_absence and attempt_anchor is not None:
+                    anchor = attempt_anchor
+                    if anchor.tzinfo is None:
+                        anchor = anchor.replace(tzinfo=UTC)
+                    if now() - anchor < grace:
+                        outcomes.append(
+                            ReservationReconcileOutcome(
+                                job_id=job.job_id,
+                                idempotency_key=str(idempotency_key),
+                                action=ABSENCE_UNCONFIRMED_ACTION,
+                                status=str(job.status),
+                                reconciliation_source="slurm_exact_comment",
+                            )
+                        )
+                        continue
+                retry_permission = None
+                if credible_absence:
+                    permit_forcing_retry = getattr(
+                        store, "permit_forcing_submit_retry", None
+                    )
+                    if callable(permit_forcing_retry):
+                        retry_permission = permit_forcing_retry(
+                            job.job_id,
+                            expected_submission_attempt=_job_submission_attempt(job),
+                            expected_submission_attempt_started_at=attempt_anchor,
+                        )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action=(
+                            "absence_retry_permitted"
+                            if retry_permission is not None
+                            else ABSENCE_UNCONFIRMED_ACTION
+                        ),
+                        status=(
+                            RESERVATION_LOST_STATUS
+                            if retry_permission is not None
+                            else str(job.status)
+                        ),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision=(
+                            "absence_retry_permitted"
+                            if retry_permission is not None
+                            else None
+                        ),
+                        reconciliation_reason_class=(
+                            None if credible_absence else "coverage_incomplete"
+                        ),
+                        durable_write_kind=(
+                            "forcing_retry_permission"
+                            if retry_permission is not None
+                            else None
+                        ),
+                        durable_write_count=1 if retry_permission is not None else 0,
+                    )
+                )
+                continue
             if record is None or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
                 if fallback_unique:
                     write_count = _record_file_reconciliation(
@@ -2142,7 +2763,15 @@ def reconcile_reserved_unbound_jobs(
                 not fallback_unique
                 and (
                     record is None
-                    or idempotency_key_from_comment(record.comment) != idempotency_key
+                    or (
+                        forcing_submit_reconcile
+                        and str(record.comment or "")
+                        != str(getattr(job, "slurm_comment", None) or "")
+                    )
+                    or (
+                        not forcing_submit_reconcile
+                        and idempotency_key_from_comment(record.comment) != idempotency_key
+                    )
                     or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
                 )
             ):
@@ -2382,6 +3011,33 @@ def reconcile_reserved_unbound_jobs(
                     continue
                 bound = commit_result.row
                 write_count = int(commit_result.wrote)
+            elif forcing_submit_reconcile:
+                forcing_binder = getattr(store, "bind_forcing_submit_attempt", None)
+                if not callable(forcing_binder):
+                    raise ReconcileQueryUnavailable("forcing submit bind API unavailable")
+                bind_kwargs: dict[str, Any] = {
+                    "expected_submission_attempt": (
+                        target_submission_attempt
+                        if target_submission_attempt is not None
+                        else _job_submission_attempt(job)
+                    ),
+                    "expected_submission_attempt_started_at": (
+                        target_submission_attempt_started_at
+                        if target_submission_attempt_started_at is not None
+                        else attempt_anchor
+                    ),
+                    "slurm_job_id": record.slurm_job_id,
+                    "reconciliation_source": forcing_reconciliation_source,
+                }
+                if target_slurm_comment is not None:
+                    if not _callable_accepts_keyword(forcing_binder, "expected_slurm_comment"):
+                        bound = None
+                    else:
+                        bind_kwargs["expected_slurm_comment"] = target_slurm_comment
+                        bound = forcing_binder(str(idempotency_key), **bind_kwargs)
+                else:
+                    bound = forcing_binder(str(idempotency_key), **bind_kwargs)
+                write_count = 1 if bound is not None else 0
             else:
                 bound = store.bind_reservation(
                     str(idempotency_key),
@@ -2394,18 +3050,36 @@ def reconcile_reserved_unbound_jobs(
                 ReservationReconcileOutcome(
                     job_id=job.job_id,
                     idempotency_key=str(idempotency_key),
-                    action="bound",
+                    action="bound" if bound is not None else "stale_attempt_blocked",
                     status=bound_status,
                     slurm_job_id=record.slurm_job_id,
                     reconciliation_source=(
-                        "slurm_name_window_unique" if fallback_unique else "slurm_exact_comment"
+                        "slurm_name_window_unique"
+                        if fallback_unique
+                        else forcing_reconciliation_source
+                        if forcing_submit_reconcile
+                        else "slurm_exact_comment"
                     )
-                    if accepted_submit_reconcile
+                    if accepted_submit_reconcile or forcing_submit_reconcile
                     else None,
-                    reconciliation_decision="matched_bound" if accepted_submit_reconcile else None,
-                    matched_slurm_job_id=record.slurm_job_id if accepted_submit_reconcile else None,
-                    match_count=1 if accepted_submit_reconcile else None,
-                    durable_write_kind="reservation_bind" if write_count else None,
+                    reconciliation_decision=(
+                        "matched_bound"
+                        if accepted_submit_reconcile or forcing_submit_reconcile
+                        else None
+                    ),
+                    matched_slurm_job_id=(
+                        record.slurm_job_id
+                        if accepted_submit_reconcile or forcing_submit_reconcile
+                        else None
+                    ),
+                    match_count=1 if accepted_submit_reconcile or forcing_submit_reconcile else None,
+                    durable_write_kind=(
+                        "forcing_submit_bind"
+                        if forcing_submit_reconcile and write_count
+                        else "reservation_bind"
+                        if write_count
+                        else None
+                    ),
                     durable_write_count=write_count,
                 )
             )
@@ -2526,10 +3200,24 @@ def _query_comment_accounting_proof(
     expected_account: str,
     accepted_submit_contract_version: str | None = None,
     submission_attempt_started_at: datetime | None = None,
+    forcing_controller_identity: bool = False,
+    forcing_stage: str | None = None,
+    forcing_task_count: int | None = None,
+    forcing_exact_comment: str | None = None,
+    forcing_current_attempt_comment: bool = False,
 ) -> _CommentAccountingProof:
     """Obtain an owner match or an authoritative global exact-comment proof."""
-
     supports_scope = _comment_query_accepts_scope(comment_query)
+    if forcing_current_attempt_comment and (
+        not forcing_exact_comment
+        or not supports_scope
+        or not _callable_accepts_keyword(comment_query, "forcing_exact_comment")
+        or not _callable_accepts_keyword(comment_query, "forcing_current_attempt_comment")
+    ):
+        raise ReconcileQueryUnavailable(
+            "forcing exact-comment query adapter unavailable",
+            reason_class="comment_accounting_unproven",
+        )
     if not supports_scope:
         # A legacy one-argument fake represents a global collection. Never
         # owner-filter it into a false zero-match proof.
@@ -2549,6 +3237,24 @@ def _query_comment_accounting_proof(
         scoped_kwargs["accepted_submit_contract_version"] = accepted_submit_contract_version
     if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
         scoped_kwargs["submission_attempt_started_at"] = submission_attempt_started_at
+    if forcing_exact_comment and _callable_accepts_keyword(comment_query, "forcing_exact_comment"):
+        scoped_kwargs["forcing_exact_comment"] = forcing_exact_comment
+    if (
+        forcing_current_attempt_comment
+        and _callable_accepts_keyword(comment_query, "forcing_current_attempt_comment")
+    ):
+        scoped_kwargs["forcing_current_attempt_comment"] = True
+    if (
+        forcing_controller_identity
+        and _comment_query_accepts_forcing_controller_identity(comment_query)
+    ):
+        scoped_kwargs.update(
+            {
+                "forcing_controller_identity": True,
+                "forcing_stage": forcing_stage,
+                "forcing_task_count": forcing_task_count,
+            }
+        )
     owner_value = comment_query(idempotency_key, **scoped_kwargs)
     owner_records = _bounded_comment_records(owner_value)
     if isinstance(owner_value, CommentAccountingResult) and owner_value.scope == "global":
@@ -2560,6 +3266,22 @@ def _query_comment_accounting_proof(
             coverage_start=owner_value.coverage_start,
             coverage_end=owner_value.coverage_end,
         )
+    if isinstance(owner_value, CommentAccountingResult) and owner_value.controller_exact_comment:
+        if owner_value.scope != "owner":
+            raise ReconcileQueryUnavailable("controller adapter did not provide owner identity")
+        owned = _comment_query_records(
+            owner_records,
+            expected_user=expected_user,
+            expected_account=expected_account,
+        )
+        if len(owned) > 1:
+            return _CommentAccountingProof("ambiguous", owned)
+        if len(owner_records) != 1 or len(owned) != 1:
+            raise ReconcileQueryUnavailable(
+                "controller did not prove one owned forcing master",
+                reason_class="comment_accounting_unproven",
+            )
+        return _CommentAccountingProof("controller_match", owned)
     if isinstance(owner_value, CommentAccountingResult) and owner_value.fallback_name_window:
         # #1565: the name-window fallback result is a complete owner-exact
         # proof by itself — the query was name-scoped and already filtered by
@@ -2679,6 +3401,19 @@ def _comment_query_accepts_attempt_anchor(comment_query: CommentSacctQuerier) ->
         return False
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
         parameter.name == "submission_attempt_started_at" for parameter in parameters
+    )
+
+
+def _comment_query_accepts_forcing_controller_identity(
+    comment_query: CommentSacctQuerier,
+) -> bool:
+    return all(
+        _callable_accepts_keyword(comment_query, name)
+        for name in (
+            "forcing_controller_identity",
+            "forcing_stage",
+            "forcing_task_count",
+        )
     )
 
 
@@ -2861,6 +3596,22 @@ def _release_identity_blocked_reservation(store: Any, job: Any, *, identity_bloc
             identity_blocked_streak=identity_blocked_streak,
         )
     )
+
+
+def _transition_forcing_submit_ambiguity(store: Any, job: Any) -> int:
+    """Persist a pre-outcome forcing reservation as unknown before querying it."""
+
+    transitioner = getattr(store, "transition_pipeline_job_submit_evidence", None)
+    if not callable(transitioner):
+        return 0
+    result = transitioner(
+        job.job_id,
+        AcceptedSubmitTransition.timeout(status=str(job.status)),
+        expected_submission_attempt=_job_submission_attempt(job),
+        expected_statuses=(str(job.status),),
+        require_unbound=getattr(job, "slurm_job_id", None) in (None, ""),
+    )
+    return int(getattr(result, "wrote", False))
 
 
 def _transition_file_reconciliation(

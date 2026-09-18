@@ -14,6 +14,15 @@ from services.orchestrator.chain_types import (
     OrchestratorError,
     StageDefinition,
 )
+from services.orchestrator.forcing_submit_identity import (
+    basin_model_ids,
+    forcing_member_model_ids,
+    forcing_members_overlap,
+    is_forcing_array_stage,
+    is_resolved_forcing_attempt,
+    is_unresolved_forcing_attempt,
+    reordered_forcing_resume_basins,
+)
 from services.orchestrator.scheduler_generation import (
     PACKAGED_IC_BOOTSTRAP_MODE,
     PACKAGED_IC_QUALITY,
@@ -498,6 +507,30 @@ def find_existing_stage_job(
     context: CycleOrchestrationContext,
 ) -> dict[str, Any] | None:
     matches = [dict(job) for job in jobs if self._job_matches_stage(job, stage)]
+    if is_forcing_array_stage(stage):
+        current_models = basin_model_ids(context.active_basins)
+        active_matches = [
+            job for job in matches if str(job.get("status")) not in _terminal_job_statuses()
+        ]
+        if not active_matches:
+            cycle_jobs = self._query_pipeline_jobs_by_cycle(context.cycle_id)
+            recovered = [
+                dict(job)
+                for job in cycle_jobs
+                if is_resolved_forcing_attempt(job)
+                and forcing_member_model_ids(job) == current_models
+                and reordered_forcing_resume_basins(context.active_basins, job) is not None
+            ]
+            blockers = [
+                dict(job)
+                for job in cycle_jobs
+                if is_unresolved_forcing_attempt(job)
+                and forcing_members_overlap(job, current_models)
+            ]
+            if blockers:
+                matches = blockers
+            elif recovered:
+                matches = recovered
     if not matches:
         return None
     active_matches = [job for job in matches if str(job.get("status")) not in _terminal_job_statuses()]

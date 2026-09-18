@@ -228,7 +228,7 @@ def _raising_urlopen(exc: Exception) -> Any:
     return _fake_urlopen
 
 
-_SUMMARY_V2_KEYS = {
+_SUMMARY_V3_KEYS = {
     "schema",
     "base_url",
     "zooms",
@@ -297,6 +297,8 @@ def _empty_source_entry(cycle: str | None = None) -> dict[str, Any]:
         "valid_times_available": 0,
         "valid_times_warmed": 0,
         "discharge_requests": 0,
+        "discharge_ok": 0,
+        "discharge_failed": 0,
         "png_ok": 0,
         "png_not_mirrored": 0,
         "png_window_incomplete": 0,
@@ -350,7 +352,7 @@ def test_envelope_is_river_43_plus_70_per_source_and_counts_183_warm_requests() 
     assert len(expected) == _RIVER_TILE_COUNT + 2 * _PER_SOURCE_REQUESTS
     assert _GOLDEN_REQUESTS_TOTAL == 183
     assert rc == 0
-    assert summary["schema"] == "nhms.node27-mvt-prewarm.v2"
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
     assert summary["requests_total"] == _GOLDEN_REQUESTS_TOTAL
     assert summary["river_tile_count"] == _RIVER_TILE_COUNT
     assert summary["lead_hours"] == prewarm.PREWARM_LEAD_HOURS == 12
@@ -370,6 +372,8 @@ def test_envelope_is_river_43_plus_70_per_source_and_counts_183_warm_requests() 
         assert entry["valid_times_available"] == _VALID_TIME_COUNT == 56
         assert entry["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT == 5
         assert entry["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
+        assert entry["discharge_ok"] == entry["discharge_requests"]
+        assert entry["discharge_failed"] == 0
         assert entry["png_ok"] == _WARMED_VALID_TIME_COUNT
 
 
@@ -384,8 +388,11 @@ def test_discharge_zooms_are_fixed_and_do_not_follow_the_river_zoom_flag() -> No
     assert set(warmer.urls) & _river_urls([5]) == _river_urls([5])
     for source, cycle in (("gfs", _GFS_CYCLE), ("ifs", _IFS_CYCLE)):
         assert (
-            summary["per_source"][source]["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
+            summary["per_source"][source]["discharge_requests"]
+            == summary["per_source"][source]["discharge_ok"]
+            == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
         )
+        assert summary["per_source"][source]["discharge_failed"] == 0
         assert _discharge_urls(source, cycle, _warmed(cycle)) <= set(warmer.urls)
     assert rc == 0
 
@@ -456,6 +463,10 @@ def test_both_sources_failing_discovery_warm_the_river_network_but_fail_the_run(
     assert summary["per_source"]["gfs"]["error"]
     assert summary["per_source"]["ifs"]["error"]
     assert summary["per_source"]["gfs"]["cycle"] is None
+    for source in ("gfs", "ifs"):
+        assert summary["per_source"][source]["discharge_requests"] == 0
+        assert summary["per_source"][source]["discharge_ok"] == 0
+        assert summary["per_source"][source]["discharge_failed"] == 0
     assert rc != 0
     # The full summary survives a total discovery failure.
     assert summary["elapsed_seconds"] >= 0.0
@@ -481,6 +492,9 @@ def test_unexpected_200_envelope_is_a_source_error_not_a_zero_request_success(ho
     assert not [url for url in warmer.urls if "/gfs/" in url]
     # NOT the legitimate "this source contributes zero requests" terminal state.
     assert summary["per_source"]["gfs"] != _empty_source_entry()
+    assert summary["per_source"]["gfs"]["discharge_requests"] == 0
+    assert summary["per_source"]["gfs"]["discharge_ok"] == 0
+    assert summary["per_source"]["gfs"]["discharge_failed"] == 0
 
 
 @pytest.mark.parametrize("hop", ["cycles", "valid_times"])
@@ -497,9 +511,14 @@ def test_one_source_discovery_failure_does_not_swallow_the_other(hop: str) -> No
         _river_urls() | _discharge_urls("ifs", _IFS_CYCLE, ifs_times) | _png_urls("ifs", _IFS_CYCLE, ifs_times)
     )
     assert summary["per_source"]["ifs"]["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
+    assert summary["per_source"]["ifs"]["discharge_ok"] == summary["per_source"]["ifs"]["discharge_requests"]
+    assert summary["per_source"]["ifs"]["discharge_failed"] == 0
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert summary["per_source"]["ifs"]["error"] is None
     assert summary["per_source"]["gfs"]["error"]
+    assert summary["per_source"]["gfs"]["discharge_requests"] == 0
+    assert summary["per_source"]["gfs"]["discharge_ok"] == 0
+    assert summary["per_source"]["gfs"]["discharge_failed"] == 0
     assert summary["requests_total"] == _RIVER_TILE_COUNT + _PER_SOURCE_REQUESTS
     assert rc != 0
 
@@ -512,8 +531,11 @@ def test_unparseable_valid_time_element_is_a_source_error_not_a_process_failure(
     assert summary["per_source"]["gfs"]["error"]
     assert rc != 0
     assert not [url for url in warmer.urls if "/gfs/" in url]
+    assert summary["per_source"]["gfs"]["discharge_requests"] == 0
+    assert summary["per_source"]["gfs"]["discharge_ok"] == 0
+    assert summary["per_source"]["gfs"]["discharge_failed"] == 0
     # The full summary, not `main()`'s one-line failure envelope.
-    assert summary["schema"] == "nhms.node27-mvt-prewarm.v2"
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
     assert "status" not in summary
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
 
@@ -878,14 +900,15 @@ def test_job_submission_interleaves_the_two_sources_lead_by_lead() -> None:
     assert rc == 0
 
 
-def test_summary_v2_key_set_and_accounting_identity() -> None:
+def test_summary_v3_key_set_and_accounting_identity() -> None:
     plan, overrides, _ = _precip_override_plan()
 
     _, summary, _, _ = _run(plan, overrides=overrides)
 
-    assert set(summary) == _SUMMARY_V2_KEYS
+    assert set(summary) == _SUMMARY_V3_KEYS
     accounted = summary["river_tile_count"]
     for entry in summary["per_source"].values():
+        assert entry["discharge_requests"] == entry["discharge_ok"] + entry["discharge_failed"]
         accounted += entry["discharge_requests"]
         accounted += entry["png_ok"] + entry["png_not_mirrored"] + entry["png_window_incomplete"] + entry["png_failed"]
     assert summary["requests_total"] == accounted
@@ -897,6 +920,44 @@ def test_summary_v2_key_set_and_accounting_identity() -> None:
     json.dumps(summary, ensure_ascii=False, sort_keys=True)
 
 
+def test_mixed_source_discharge_outcomes_are_attributed_separately() -> None:
+    """GFS mixed HTTP/transport failures stay isolated from a different IFS mix.
+
+    Mixed outcomes expose misclassification and cross-source attribution that
+    all-success accounting cannot. Failures are selected by URL, not by
+    completion order, so the source association does not depend on the pool's
+    execution order.
+    """
+    gfs_tiles = sorted(_discharge_urls("gfs", _GFS_CYCLE, _warmed(_GFS_CYCLE)))
+    ifs_tiles = sorted(_discharge_urls("ifs", _IFS_CYCLE, _warmed(_IFS_CYCLE)))
+    gfs_http_failed = gfs_tiles[:2]
+    gfs_transport_failed = gfs_tiles[2]
+    ifs_http_failed = ifs_tiles[0]
+    overrides = {url: (503, None, None) for url in (*gfs_http_failed, ifs_http_failed)}
+
+    rc, summary, _, _ = _run(
+        _plan(),
+        overrides=overrides,
+        raises={gfs_transport_failed: http.client.IncompleteRead(b"")},
+    )
+
+    gfs = summary["per_source"]["gfs"]
+    ifs = summary["per_source"]["ifs"]
+    assert (gfs["discharge_requests"], gfs["discharge_ok"], gfs["discharge_failed"]) == (65, 62, 3)
+    assert (ifs["discharge_requests"], ifs["discharge_ok"], ifs["discharge_failed"]) == (65, 64, 1)
+    assert gfs["discharge_requests"] == gfs["discharge_ok"] + gfs["discharge_failed"]
+    assert ifs["discharge_requests"] == ifs["discharge_ok"] + ifs["discharge_failed"]
+    assert summary["failed_count"] == 4
+    failed_urls = {entry["url"] for entry in summary["failures"]}
+    assert failed_urls == {*gfs_http_failed, gfs_transport_failed, ifs_http_failed}
+    assert {entry["status"] for entry in summary["failures"] if entry["url"] == gfs_transport_failed} == {0}
+    assert gfs["png_ok"] == _WARMED_VALID_TIME_COUNT
+    assert ifs["png_ok"] == _WARMED_VALID_TIME_COUNT
+    assert gfs["png_failed"] == ifs["png_failed"] == 0
+    assert rc != 0
+    assert summary["schema"] == "nhms.node27-mvt-prewarm.v3"
+
+
 def test_the_summary_reports_the_effective_worker_count_not_the_module_default() -> None:
     """`workers` must round-trip the PARAMETER, not `DEFAULT_WORKERS`.
 
@@ -905,7 +966,7 @@ def test_the_summary_reports_the_effective_worker_count_not_the_module_default()
     tell the #2017 receipt what concurrency actually ran. A silent fallback to
     the module constant would make the receipt read 8 against a deployed 2 and
     record round-3 B-2 closed on a value production never uses. Membership in
-    `_SUMMARY_V2_KEYS` proves the key exists; only this proves its value.
+    `_SUMMARY_V3_KEYS` proves the key exists; only this proves its value.
 
     The discriminating mechanism is that the two counts differ from EACH OTHER,
     not that either differs from `DEFAULT_WORKERS`: any implementation that
@@ -1082,7 +1143,10 @@ def test_incomplete_read_during_discovery_is_a_source_error_not_a_lost_summary()
     assert rc != 0
     assert not [url for url in warmer.urls if "/gfs/" in url]
     # The full summary, not `main()`'s one-line failure envelope.
-    assert set(summary) == _SUMMARY_V2_KEYS
+    assert summary["per_source"]["gfs"]["discharge_requests"] == 0
+    assert summary["per_source"]["gfs"]["discharge_ok"] == 0
+    assert summary["per_source"]["gfs"]["discharge_failed"] == 0
+    assert set(summary) == _SUMMARY_V3_KEYS
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert summary["per_source"]["ifs"]["error"] is None
 
@@ -1100,7 +1164,10 @@ def test_a_cycle_whose_horizon_arithmetic_overflows_is_a_source_error() -> None:
     assert "OverflowError" in summary["per_source"]["gfs"]["error"]
     assert rc != 0
     assert not [url for url in warmer.urls if "/gfs/" in url]
-    assert set(summary) == _SUMMARY_V2_KEYS
+    assert summary["per_source"]["gfs"]["discharge_requests"] == 0
+    assert summary["per_source"]["gfs"]["discharge_ok"] == 0
+    assert summary["per_source"]["gfs"]["discharge_failed"] == 0
+    assert set(summary) == _SUMMARY_V3_KEYS
     assert summary["per_source"]["ifs"]["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert summary["per_source"]["ifs"]["error"] is None
 
@@ -1117,7 +1184,7 @@ def test_a_raising_warm_call_is_a_failed_request_not_a_lost_summary() -> None:
     assert summary["failures"][0]["url"] == tile
     assert summary["failures"][0]["error"] == "IncompleteRead"
     assert summary["failures"][0]["status"] == 0
-    assert set(summary) == _SUMMARY_V2_KEYS
+    assert set(summary) == _SUMMARY_V3_KEYS
     # rc 1 == "some requests failed"; rc 2 is reserved for process-level failure.
     assert rc == 1
 
@@ -1133,7 +1200,7 @@ def test_main_reserves_exit_2_and_the_one_line_envelope_for_process_failures(
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "nhms.node27-mvt-prewarm.v2"
+    assert payload["schema"] == "nhms.node27-mvt-prewarm.v3"
     assert payload["status"] == "failed"
     assert "per_source" not in payload
 
@@ -1227,7 +1294,7 @@ def test_the_run_stops_issuing_requests_once_the_wall_clock_deadline_passes() ->
         }
     assert summary["failed_count"] == 0
     # The summary is still emitted in full, and the run still fails.
-    assert set(summary) == _SUMMARY_V2_KEYS
+    assert set(summary) == _SUMMARY_V3_KEYS
     assert rc != 0
     json.dumps(summary, ensure_ascii=False, sort_keys=True)
 
@@ -1252,6 +1319,8 @@ def test_a_deadline_truncation_still_warms_both_sources_lead_zero_views() -> Non
         assert _png_urls(source, cycle, lead_zero) <= set(warmer.urls)
         assert summary["per_source"][source]["png_ok"] == 1
         assert summary["per_source"][source]["discharge_requests"] == _DISCHARGE_TILE_COUNT
+        assert summary["per_source"][source]["discharge_ok"] == _DISCHARGE_TILE_COUNT
+        assert summary["per_source"][source]["discharge_failed"] == 0
     assert summary["deadline_skipped"] == _GOLDEN_REQUESTS_TOTAL - 71
     assert rc != 0
 
@@ -1307,7 +1376,7 @@ def test_an_empty_zoom_set_is_rejected_before_prewarm_is_ever_called(
 
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema"] == "nhms.node27-mvt-prewarm.v2"
+    assert payload["schema"] == "nhms.node27-mvt-prewarm.v3"
     assert payload["status"] == "failed"
     assert "zoom" in payload["error"]
     assert calls == []

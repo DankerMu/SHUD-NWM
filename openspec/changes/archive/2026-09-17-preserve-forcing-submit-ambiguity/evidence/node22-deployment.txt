@@ -1,0 +1,17 @@
+source_patch_id=f28c301716e0fd3e32814f9b1e2349acc54278a9 0000000000000000000000000000000000000000
+Thu Sep 17 07:30:39 AM UTC 2026
+6031eb829b1ee801ee9334976f87a4b147829d8e
+c5a45356a2e08242e6548e69997f11a7d48765110a0bd322ddfb0af8aa790e42  pyproject.toml
+261d3706f52ff59960d3cbcd7313e16e9d2b27d874cb607c067d3829e855a763  uv.lock
+49a506dd32096b010d75205acf3430c9ae6c40351888129499e5a5e487126c93  .python-version
+Python 3.12.7
+enabled
+ActiveState=active
+SubState=waiting
+MainPID=2647849
+ActiveState=activating
+SubState=start
+Previous HEAD position was e7bd8160 fix(scheduler): preserve canonical pre-forecast retry stages (#2439)
+HEAD is now at 6031eb82 fix(orchestrator): backport current-attempt task mapping correction
+
+exit=0

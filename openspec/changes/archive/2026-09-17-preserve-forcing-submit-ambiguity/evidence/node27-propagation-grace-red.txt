@@ -1,0 +1,8 @@
+[ReservationReconcileOutcome(job_id='job_cycle_gfs_2026050100_forcing_young', idempotency_key='cycle_gfs_2026050100_forcing_young:forcing', action='absence_retry_permitted', status='reservation_lost', slurm_job_id=None, reconciliation_source='slurm_exact_comment', reconciliation_decision='absence_retry_permitted', matched_slurm_job_id=None, match_count=None, reconciliation_reason_class=None, durable_write_kind='forcing_retry_permission', durable_write_count=1, quarantine_reason=None, quarantine_field=None, identity_blocked_streak=None)]
+young_attempt_status reservation_lost
+
+Traceback (most recent call last):
+  File "<stdin>", line 16, in <module>
+AssertionError: One-second-old attempt must retain the existing propagation grace
+
+exit=1

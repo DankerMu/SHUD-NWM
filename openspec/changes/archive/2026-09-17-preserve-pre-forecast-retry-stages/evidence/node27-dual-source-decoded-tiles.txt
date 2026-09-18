@@ -1,0 +1,33 @@
+OBSERVED 2026-09-16T23:06:01.374844+00:00
+SOURCE gfs RUN fcst_gfs_2026091512_dg_0883c7e9c1006c6fd347df500315e9df CYCLE 2026-09-15T12:00:00Z STATUS ready published HTTP 200 BYTES 244130
+FIRST_FEATURE OGRFeature(hydro):0
+  feature_id (String) = basins_qhh_rivnet_vbasins::basins_qhh_shud_shud_riv_000001
+  segment_id (String) = basins_qhh_shud_shud_riv_000001
+  river_segment_id (String) = basins_qhh_shud_shud_riv_000001
+  river_network_version_id (String) = basins_qhh_rivnet_vbasins
+  basin_version_id (String) = basins_qhh_vbasins
+  value (Real) = 0.00412100347222222
+  unit (String) = m3/s
+  quality_flag (String) = qc_warning
+  run_id (String) = fcst_gfs_2026091512_dg_0883c7e9c1006c6fd347df500315e9df
+  variable (String) = q_down
+  valid_time (String) = 2026-09-15T12:00:00Z
+
+
+DECODED_FEATURES 1616
+SOURCE ifs RUN fcst_ifs_2026091512_dg_9ccb261a39d51c24f4de9173fb4461b6 CYCLE 2026-09-15T12:00:00Z STATUS ready published HTTP 200 BYTES 244122
+FIRST_FEATURE OGRFeature(hydro):0
+  feature_id (String) = basins_qhh_rivnet_vbasins::basins_qhh_shud_shud_riv_000001
+  segment_id (String) = basins_qhh_shud_shud_riv_000001
+  river_segment_id (String) = basins_qhh_shud_shud_riv_000001
+  river_network_version_id (String) = basins_qhh_rivnet_vbasins
+  basin_version_id (String) = basins_qhh_vbasins
+  value (Real) = 0.00391779513888889
+  unit (String) = m3/s
+  quality_flag (String) = ok
+  run_id (String) = fcst_ifs_2026091512_dg_9ccb261a39d51c24f4de9173fb4461b6
+  variable (String) = q_down
+  valid_time (String) = 2026-09-15T12:00:00Z
+
+
+DECODED_FEATURES 1616

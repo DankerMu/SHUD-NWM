@@ -1,0 +1,10 @@
+.....................                                                    [100%]
+21 passed in 14.48s
+
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              verify/issue-2447-deployment -> FETCH_HEAD
+   7f0e0a5b..e5c60ffa  verify/issue-2447-deployment -> origin/verify/issue-2447-deployment
+Previous HEAD position was 7f0e0a5b test: attach forcing regressions to exact deployment source tree
+HEAD is now at e5c60ffa test: limit deployment overlay to #2439 and #2447 regressions
+
+exit=0

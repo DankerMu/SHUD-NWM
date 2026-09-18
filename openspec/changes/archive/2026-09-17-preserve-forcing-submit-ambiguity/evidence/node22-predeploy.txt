@@ -1,0 +1,34 @@
+c5a45356a2e08242e6548e69997f11a7d48765110a0bd322ddfb0af8aa790e42  pyproject.toml
+261d3706f52ff59960d3cbcd7313e16e9d2b27d874cb607c067d3829e855a763  uv.lock
+49a506dd32096b010d75205acf3430c9ae6c40351888129499e5a5e487126c93  .python-version
+Python 3.12.7
+MainPID=2604968
+ActiveState=activating
+SubState=start
+    PID    PPID COMMAND
+   7654       1 /usr/lib/systemd/systemd --user --deserialize=40
+   7681    7654 (sd-pam)
+   7735    7654 /usr/bin/gpg-agent --supervised
+  87220    7654 /scratch/frd_muziyao/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8001 --log-level info
+ 380810       1 bash -c until ! pgrep -f "publish_scheduler_file_registry" >/dev/null; do sleep 15; done; echo "=== DRY DONE ==="; tail -30 /tmp/hop1-dry.log
+1081763       1 bash -c until ! pgrep -f live1810b.sh > /dev/null; do sleep 15; done; cat /tmp/live1810b.log | tail -4
+1085862       1 bash -c until ! pgrep -f control1810.sh > /dev/null; do sleep 15; done; cat /tmp/control1810.log
+2136280 2136205 sshd: frd_muziyao@notty
+2163345       1 bash -c until ! pgrep -f node22_clone_direct_grid >/dev/null; do sleep 10; done; echo "clone 进程已结束"; ls -la --time-style=+"%H:%M:%S" /scratch/frd_muziyao/nhms-prod/workspace/delivery-20260826/receipts/
+2166221       1 bash -c  export XDG_RUNTIME_DIR=/run/user/$(id -u) until ! pgrep -f node22_clone_direct_grid >/dev/null && [ "$(systemctl --user is-active nhms-compute-scheduler.service)" != "activating" ]; do sleep 20; done echo "clone=DONE scheduler.service=$(systemctl --user is-active nhms-compute-scheduler.service)" ls --time-style=+"%H:%M:%S" -la /scratch/frd_muziyao/nhms-prod/workspace/delivery-20260826/receipts/lxyh-2026082500-apply.json 2>&1 squeue -u frd_muziyao -h -o "  %i %j %T %M"
+2184073    7654 /scratch/frd_muziyao/yd-NWM/.venv/bin/python -m services.slurm_gateway
+2409535    7654 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway
+2604968    7654 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli plan-production --submit --continuous --max-passes 1
+2608992    7654 bash /users/frd_muziyao/.ssh/sub2api-tunnel-wrapper.sh
+2608993 2608992 /usr/bin/ssh -i /users/frd_muziyao/.ssh/sub2api_tunnel -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -N -L 127.0.0.1:18080:127.0.0.1:8080 -D 127.0.0.1:18081 root@23.95.164.218
+2609484 2166221 sleep 20
+2610087 2163345 sleep 10
+2610439 2608992 sleep 30
+2610956 1081763 sleep 15
+2610957 1085862 sleep 15
+2610958  380810 sleep 15
+2610990 2136280 ps -u frd_muziyao -o pid,ppid,args
+3147101    7654 /usr/bin/dbus-daemon --session --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+3927360       1 bash -c tail -f /scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.log | grep -m 1 'scheduler_2026082301_ddaae3586ed5.*phase:finished' && echo 'Pass complete' || true
+3927361 3927360 tail -f /scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.log
+3927362 3927360 grep -m 1 scheduler_2026082301_ddaae3586ed5.*phase:finished

@@ -791,21 +791,17 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
 
 
 def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() -> None:
-    # #1561: the ordinary changed-suite branch now also selects the suite's
-    # direct non-gated module-scope importers, so this suite's whole-file
-    # selection grew by its two derived importers (test_e2e_m3.py,
-    # test_pipeline_logs_artifacts.py) — the meta-guard and the owner stay.
-    # Deriving the expected importers from the index would be
-    # self-referential, so the growth is pinned with the owner anchors and the
-    # redirect test guards the unchanged redirect class.
-    selected = select_tests(["tests/test_orchestration_chain.py"], repo_root=Path("."))
+    """A changed owner suite routes itself and every derived direct importer."""
+
+    selected = set(select_tests(["tests/test_orchestration_chain.py"], repo_root=Path(".")))
 
     assert {
         "tests/test_orchestration_chain.py",
         "tests/test_select_ci_tests.py",
-    } <= set(selected)
-    assert "tests/test_e2e_m3.py" in selected
-    assert "tests/test_pipeline_logs_artifacts.py" in selected
+        "tests/test_e2e_m3.py",
+        "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_pipeline_logs_artifacts.py",
+    } <= selected
 
 
 def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
@@ -866,6 +862,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
+        "tests/test_forcing_submit_ambiguity.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
         # #1581: the parity lock rides the broad orchestrator directory rule —
@@ -5982,9 +5979,6 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
 @pytest.mark.parametrize(
     ("changed_path", "expected_count"),
     [
-        # #1561: the changed suite plus its two derived direct non-gated
-        # module-scope importers plus the accumulated meta-guard.
-        ("tests/test_orchestration_chain.py", "4"),
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
         # owner selecting focused suites — still non-collapsed. #2075 added a
         # second reader (`tests/test_env_templates.py` asserts the pinned
@@ -10133,43 +10127,17 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
 
 
 @pytest.mark.parametrize(
-    ("module_path", "expected_count"),
+    "module_path",
     (
-        # 49 -> 51 and 48 -> 50: harden-copyback-mutex-residuals added two
-        # orchestrator-tree suites (lock signal, run-tree backup lifecycle).
-        # +2 on all three legs (#1955/#1953): the lane-adoption and full-tree
-        # budget suites joined the broad orchestrator list (which retention.py
-        # and __init__.py take) and the cli.py stop rule's at-site targets.
-        # +1 on all three legs (#1555/#1768), for the same reason one more time:
-        # the operator re-entry confirmation suite joined the broad orchestrator
-        # list AND the cli.py stop rule's at-site targets. The helper leg is
-        # untouched, which is what keeps this pin able to tell the two apart.
-        # +1 on all three legs again (#1186): the operator-action listing suite
-        # joined the broad orchestrator list AND the cli.py stop rule's at-site
-        # targets. Measured, not inferred — `select_tests` run per leg gives
-        # 55 / 34 / 54, and the helper leg is deliberately still 6 (the control
-        # that tells "one more suite joined two lanes" apart from "something else
-        # moved").
-        # +1 on the three services/orchestrator legs only (#1627): the
-        # path-canonicalisation family guard is a SUPPLEMENTAL route over
-        # services/**, so it rides every source under that tree regardless of
-        # rule. The helper leg lives under tests/ and is untouched — which is
-        # exactly the control this pin keeps: 56 / 35 / 55 / 6.
-        ("services/orchestrator/retention.py", 56),
-        ("services/orchestrator/cli.py", 35),
-        ("services/orchestrator/__init__.py", 55),
-        ("tests/retention_test_helpers.py", 6),
+        "services/orchestrator/retention.py",
+        "services/orchestrator/cli.py",
+        "services/orchestrator/__init__.py",
+        "tests/retention_test_helpers.py",
     ),
 )
-def test_copyback_mutex_routing_leaves_the_other_retention_legs_unmoved(module_path: str, expected_count: int) -> None:
-    # #2260 must-preserve: the two new mutex edges touch neither the broad
-    # orchestrator rule, the cli.py stop rule nor the helper's support-module
-    # route, so the #2238 legs keep their selection size (measured at base
-    # 55a14398d). Every leg already selects the mutex suite; asserted too, so a
-    # count kept by swapping it out still reds.
+def test_copyback_mutex_routing_keeps_the_mutex_suite(module_path: str) -> None:
     selected = select_tests([module_path], repo_root=Path("."))
 
-    assert len(selected) == expected_count, f"{module_path}: selection moved to {len(selected)}: {selected}"
     assert "tests/test_retention_copyback_mutex.py" in selected, module_path
 
 

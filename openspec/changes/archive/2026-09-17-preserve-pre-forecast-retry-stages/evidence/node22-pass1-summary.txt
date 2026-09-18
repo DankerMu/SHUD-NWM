@@ -1,0 +1,43 @@
+EVIDENCE /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence/scheduler_2026091614_9b8dfdb3c8d4.json sha256 0235cbd07659550217c7568b1d14f71de8ac9c020458874496356fb9f7bdae0a
+pass_id "scheduler_2026091614_9b8dfdb3c8d4"
+status "submitted"
+started_at "2026-09-16T14:05:02.636577Z"
+finished_at "2026-09-16T15:43:53.328380Z"
+counts {"blocked_candidate_count": 0, "candidate_count": 38, "failed_count": 0, "partial_count": 0, "selected_model_count": 76, "skipped_candidate_count": 0, "slurm_cancellation_blocked_count": 0, "slurm_cancellation_unknown_count": 0, "slurm_cancelled_count": 0, "slurm_status_sync_count": 0, "slurm_status_sync_unknown_count": 0, "source_cycle_count": 1, "submitted_count": 38}
+source_cycles [{"available": true, "cycle_hour": 0, "cycle_id": "gfs_2026091500", "cycle_time_utc": "2026-09-15T00:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "gfs", "status": "gap", "type": "backfill_deferred"}, {"available": true, "cycle_hour": 12, "cycle_id": "gfs_2026091512", "cycle_time_utc": "2026-09-15T12:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "gfs", "status": "gap", "type": "backfill_deferred"}, {"available_gap_count": 3, "breaker_released_gap_count": 0, "complete_count": 6, "deferred_count": 2, "discovered_count": 9, "gap_count": 3, "selected_count": 1, "source_id": "gfs", "type": "backfill_audit", "unavailable_gap_count": 0}, {"available": true, "classifier": "node27_nfs_raw_manifest", "cycle_hour": 12, "cycle_id": "gfs_2026091412", "cycle_status_candidate": "discovered", "cycle_time_utc": "2026-09-14T12:00:00Z", "db_cycle_status_written": null, "discovery_evidence": {"checked_file_count": 57, "cycle_id": "gfs_2026091412", "cycle_time": "2026-09-14T12:00:00Z", "entry_count": 397, "manifest_key": "raw/gfs/2026091412/manifest.json", "manifest_path": "[local-path]", "manifest_uri": "[object-uri]", "metadata": {"first_forecast_hour": 0, "last_forecast_hour": 168, "physical_file_count": 57, "physical_file_layout": "per_forecast_hour_bundle", "total_file_count": 397, "variable_count": 7}, "object_store_root": "[local-path]", "physical_file_count": 57, "reason": null, "required": true, "source": "node27_nfs_raw_manifest", "source_id": "gfs", "status": "ready", "total_bytes": 47496226}, "horizon": {"forecast_horizon_hours": 168, "forecast_start_hour": 0, "forecast_step_hours": 3, "max_lead_hours": 168, "policy": "source_cycle"}, "probe_uri": null, "reason": null, "retryable": false, "source_id": "gfs", "status": "discovered"}, {"available": true, "cycle_hour": 12, "cycle_id": "ifs_2026091512", "cycle_time_utc": "2026-09-15T12:00:00Z", "reason": "backfill_deferred_waiting_for_prior_cycle", "source_id": "IFS", "status": "gap", "type": "backfill_deferred"}, {"available_gap_count": 2, "breaker_released_gap_count": 0, "complete_count": 7, "deferred_count": 1, "discovered_count": 9, "gap_count": 2, "selected_count": 1, "source_id": "IFS", "type": "backfill_audit", "unavailable_gap_count": 0}, {"available": true, "classifier": "node27_nfs_raw_manifest", "cycle_hour": 0, "cycle_id": "ifs_2026091500", "cycle_status_candidate": "discovered", "cycle_time_utc": "2026-09-15T00:00:00Z", "db_cycle_status_written": null, "discovery_evidence": {"checked_file_count": 53, "cycle_id": "ifs_2026091500", "cycle_time": "2026-09-15T00:00:00Z", "entry_count": 424, "manifest_key": "raw/IFS/2026091500/manifest.json", "manifest_path": "[local-path]", "manifest_uri": "[object-uri]", "metadata": {"first_forecast_hour": 0, "last_forecast_hour": 168, "max_lead_hours": 168, "physical_file_count": 53, "physical_file_layout": "per_forecast_hour_bundle", "total_file_count": 424, "variable_count": 8}, "object_store_root": "[local-path]", "physical_file_count": 53, "reason": null, "required": true, "source": "node27_nfs_raw_manifest", "source_id": "IFS", "status": "ready", "total_bytes": 52600582}, "horizon": {"forecast_horizon_hours": 168, "forecast_start_hour": 0, "forecast_step_hours": 3, "max_lead_hours": 168, "policy": "source_cycle"}, "probe_uri": null, "reason": null, "retryable": false, "source_id": "IFS", "status": "discovered"}, {"available": true, "cycle_hour": 0, "cycle_id": "ifs_2026091500", "cycle_time_utc": "2026-09-15T00:00:00Z", "reason": "backfill_deferred_waiting_for_global_prior_cycle", "source_id": "IFS", "status": "gap", "type": "backfill_deferred"}]
+SHAPE backfill dict 3
+SHAPE blocked_candidates list 0
+SHAPE candidates list 38
+SHAPE counts dict 13
+SHAPE cycle_window dict 5
+SHAPE duplicate_exclusions list 0
+SHAPE evidence_pre_execution dict 9
+SHAPE execution_write_proof dict 22
+SHAPE filters dict 4
+SHAPE journal_read_attribution dict 6
+SHAPE lock dict 5
+SHAPE model_discovery dict 8
+SHAPE model_run_evidence list 39
+SHAPE no_mutation_proof dict 9
+SHAPE no_progress_circuit dict 4
+SHAPE operator_filters dict 4
+SHAPE production_contract dict 9
+SHAPE progress_guard dict 7
+SHAPE readiness dict 9
+SHAPE resolved_runtime_roots dict 8
+SHAPE restart_reconcile dict 3
+SHAPE restart_reconcile_proof dict 13
+SHAPE retention dict 14
+SHAPE review_contract dict 4
+SHAPE root_preflight dict 5
+SHAPE runtime_config dict 26
+SHAPE skipped_candidates list 0
+SHAPE slurm_cancellation_evidence list 0
+SHAPE slurm_cancellation_proof dict 5
+SHAPE slurm_preflight dict 4
+SHAPE slurm_status_sync_proof dict 9
+SHAPE source_cycles list 8
+SHAPE sources list 2
+SHAPE submit_overlap_receipt dict 3
+SHAPE timing dict 5
+MODEL_SAMPLE {"cycle_id": "gfs_2026091412", "cycle_time": "2026-09-14T12:00:00Z", "manifest_key": "raw/gfs/2026091412/manifest.json", "manifest_uri": "[object-uri]", "reason": "already_staged", "source": "node27_nfs_raw_manifest", "source_id": "gfs", "source_object_store_root": "[local-path]", "staged_file_count": 0, "staged_manifest_bytes": 0, "staged_raw_bytes": 0, "status": "skipped", "target_object_store_root": "[local-path]", "type": "nfs_raw_manifest_staging"}

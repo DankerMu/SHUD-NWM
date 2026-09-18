@@ -18,7 +18,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeVar
 
-from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.auth_policy import (
+    PolicyDecision,
+    require_policy_evidence,
+    trusted_internal_policy_decision,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -73,8 +77,23 @@ from services.orchestrator.chain_repository import (
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
 )
-from services.orchestrator.chain_source_cycle import _datetime_sort_key, _pipeline_job_truth_sort_key
-from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
+from services.orchestrator.chain_source_cycle import (
+    _datetime_sort_key,
+    _pipeline_job_truth_sort_key,
+)
+from services.orchestrator.chain_types import (
+    ForcingContext,
+    ModelContext,
+    OrchestratorError,
+)
+from services.orchestrator.forcing_submit_identity import (
+    FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES,
+    forcing_attempt_comment_for,
+    forcing_member_identity_is_complete,
+    forcing_member_model_ids,
+    forcing_submit_identity_is_complete,
+    overlapping_unresolved_forcing_job,
+)
 from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import (
     _DB_FREE_REQUIRED_SELECTOR_FIELDS,
@@ -137,9 +156,18 @@ from services.orchestrator.scheduler_init_state_match import (
     INIT_STATE_IDENTITY_FIELDS,
     init_state_field,
 )
-from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
-from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
-from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, HYDRO_RUN_CODE_CLEARING_STATUSES
+from services.orchestrator.scheduler_state import (
+    _ensure_utc,
+    _evidence_safe,
+    _format_utc,
+)
+from services.orchestrator.scheduler_state_manual_retry import (
+    MARKER_TARGET_ROW_DETAIL_FIELDS,
+)
+from services.orchestrator.scheduler_state_types import (
+    ACTIVE_HYDRO_STATUSES,
+    HYDRO_RUN_CODE_CLEARING_STATUSES,
+)
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -1948,6 +1976,25 @@ class FileOrchestrationJournalRepository:
             return _blocked_query_job(error, job_id=job_id)
         return None
 
+    def get_reconcile_pipeline_job(self, job_id: str) -> SimpleNamespace | None:
+        """Read one pipeline row in the internal reconciliation representation."""
+
+        job = self._pipeline_job_for_id_unlocked(job_id)
+        return _file_reconcile_namespace(job) if job is not None else None
+
+    def get_reserved_unbound_job(self, job_id: str) -> SimpleNamespace | None:
+        """Read one current reserved row with the normal reconciliation shape."""
+
+        job = self.get_reconcile_pipeline_job(job_id)
+        if (
+            job is None
+            or str(getattr(job, "status", "") or "") != "reserved"
+            or getattr(job, "slurm_job_id", None) not in (None, "")
+            or not str(getattr(job, "idempotency_key", "") or "")
+        ):
+            return None
+        return job
+
     def _pipeline_job_for_id_unlocked(self, job_id: str) -> dict[str, Any] | None:
         expected_job_id = _safe_segment(job_id)
         direct_job = self._direct_pipeline_job_record(expected_job_id)
@@ -2918,6 +2965,8 @@ class FileOrchestrationJournalRepository:
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             if self._pipeline_job_conflicts_unlocked(row):
                 return None
+            if self._overlapping_unresolved_forcing_reservation_unlocked(row) is not None:
+                return None
             # #1796: the authority append inside ``_write_pipeline_job_unlocked``
             # is the commit point of this reservation.  A derived
             # direct/inventory/latest projection fault after it is contained to
@@ -2954,7 +3003,8 @@ class FileOrchestrationJournalRepository:
                 else self._candidate_job_for_idempotency_unlocked(idempotency_key)
             )
             matched_by_key = bool(
-                existing is not None and str(existing.get("idempotency_key") or "") == idempotency_key
+                existing is not None
+                and str(existing.get("idempotency_key") or "") == idempotency_key
             )
             if existing is None and request_row.get("job_id") not in (None, ""):
                 existing = (
@@ -2963,6 +3013,18 @@ class FileOrchestrationJournalRepository:
                     else self._pipeline_job_for_id_unlocked(str(request_row["job_id"]))
                 )
             if existing is None:
+                return None
+            forcing_reclaim = forcing_member_identity_is_complete(existing)
+            if forcing_member_identity_is_complete(request_row):
+                overlap_request = dict(request_row)
+                overlap_request["job_id"] = str(existing.get("job_id") or "")
+                if self._overlapping_unresolved_forcing_reservation_unlocked(overlap_request) is not None:
+                    return None
+            if (
+                forcing_reclaim
+                and str(existing.get("status") or "") == "reservation_lost"
+                and existing.get("reconciliation_decision") != "absence_retry_permitted"
+            ):
                 return None
             existing_is_current_master = bool(
                 accepted_submit_contract_is_current(existing)
@@ -3039,7 +3101,7 @@ class FileOrchestrationJournalRepository:
                     existing,
                     AcceptedSubmitTransition.begin_attempt(),
                 )
-                if accepted_submit_row_kind(existing) == "master"
+                if accepted_submit_row_kind(existing) == "master" or forcing_reclaim
                 else dict(existing)
             )
             row.update(
@@ -3084,6 +3146,17 @@ class FileOrchestrationJournalRepository:
             # authority anchor is captured here, never copied from a stale
             # lock-external reclaim request.
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
+            if forcing_reclaim:
+                # A reclaimed forcing reservation is a distinct execution
+                # attempt. Mint its exact controller comment inside the lock
+                # and persist the current request's validated task map so the
+                # Gateway payload and durable recovery mapping agree.
+                row["slurm_comment"] = forcing_attempt_comment_for(
+                    idempotency_key,
+                    row["submission_attempt"],
+                )
+                if forcing_member_identity_is_complete(request_row):
+                    row["cohort_members"] = list(request_row["cohort_members"])
             if not versioned_master:
                 # INIT_STATE_IDENTITY_FIELD is deliberately absent from this
                 # backfill set (#1188): keeping it out is what makes the reclaim
@@ -3096,7 +3169,7 @@ class FileOrchestrationJournalRepository:
                 # rests on the guard AND on this omission. Adding the field back
                 # to the tuple alone would not change versioned-master behaviour,
                 # and flipping the guard alone would not either; both must hold.
-                for key in (
+                keys = (
                     "run_id",
                     "cycle_id",
                     "model_id",
@@ -3111,7 +3184,17 @@ class FileOrchestrationJournalRepository:
                     "expected_slurm_account",
                     "slurm_ownership_required",
                     "native_shud_resubmitted",
-                ):
+                )
+                for key in keys:
+                    if forcing_reclaim and key in {
+                        "slurm_comment",
+                        "cohort_members",
+                        "restart_stage",
+                        "expected_slurm_user",
+                        "expected_slurm_account",
+                        "slurm_ownership_required",
+                    }:
+                        continue
                     if key in request_row and request_row.get(key) not in (None, ""):
                         row[key] = request_row[key]
                 for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
@@ -3176,6 +3259,154 @@ class FileOrchestrationJournalRepository:
                 row["array_task_id"] = array_task_id
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+
+    def bind_forcing_submit_attempt(
+        self,
+        idempotency_key: str,
+        *,
+        expected_submission_attempt: int,
+        expected_submission_attempt_started_at: datetime | str,
+        slurm_job_id: str,
+        reconciliation_source: str = "slurm_exact_comment",
+        expected_slurm_comment: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically bind one trusted, current forcing ambiguity attempt."""
+
+        initial = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+        if initial is None or not forcing_submit_identity_is_complete(initial):
+            return None
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        requested_id = str(slurm_job_id)
+        requested_source = str(reconciliation_source or "")
+        requested_comment = (
+            str(expected_slurm_comment) if expected_slurm_comment is not None else None
+        )
+        if (
+            not requested_id.isdigit()
+            or requested_source not in FORCING_EXACT_COMMENT_RECONCILIATION_SOURCES
+        ):
+            return None
+        try:
+            expected_anchor = _optional_format_datetime(
+                expected_submission_attempt_started_at,
+                field="expected_submission_attempt_started_at",
+            )
+        except FileOrchestrationJournalError:
+            return None
+        if expected_anchor is None:
+            return None
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._candidate_job_for_idempotency_unlocked(idempotency_key)
+            if existing is None or not forcing_submit_identity_is_complete(existing):
+                return None
+            try:
+                current_anchor = _optional_format_datetime(
+                    existing.get("submission_attempt_started_at"),
+                    field="submission_attempt_started_at",
+                )
+            except FileOrchestrationJournalError:
+                return None
+            if (
+                current_anchor != expected_anchor
+                or max(int(existing.get("submission_attempt") or 1), 1)
+                != max(int(expected_submission_attempt), 1)
+                or (
+                    requested_comment is not None
+                    and str(existing.get("slurm_comment") or "") != requested_comment
+                )
+            ):
+                return None
+            current_id = str(existing.get("slurm_job_id") or "")
+            if current_id:
+                if (
+                    current_id == requested_id
+                    and existing.get("submit_outcome") == "accepted"
+                    and existing.get("reconciliation_source") == requested_source
+                    and existing.get("reconciliation_decision") == "matched_bound"
+                    and existing.get("matched_slurm_job_id") == requested_id
+                ):
+                    return dict(existing)
+                return None
+            if str(existing.get("status") or "") != "reserved":
+                return None
+            row = apply_accepted_submit_transition(
+                existing, AcceptedSubmitTransition.accepted(status="submitted")
+            )
+            row.update(
+                {
+                    "slurm_job_id": requested_id,
+                    "submitted_at": existing.get("submitted_at") or _format_utc(_utcnow()),
+                    "submit_outcome": "accepted",
+                    "reconciliation_source": requested_source,
+                    "reconciliation_decision": "matched_bound",
+                    "matched_slurm_job_id": requested_id,
+                    "reconciliation_reason_class": None,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(
+                row, exclusive_direct=False, model_id=model_id
+            )
+
+    def permit_forcing_submit_retry(
+        self,
+        job_id: str,
+        *,
+        expected_submission_attempt: int,
+        expected_submission_attempt_started_at: datetime | str,
+    ) -> dict[str, Any] | None:
+        """Release only a coverage-proven absent forcing ambiguity attempt."""
+
+        initial = self._pipeline_job_for_id_unlocked(job_id)
+        if initial is None or not forcing_submit_identity_is_complete(initial):
+            return None
+        source_id = _source_id_from_job(initial)
+        cycle_time = _cycle_time_from_job(initial)
+        try:
+            expected_anchor = _optional_format_datetime(
+                expected_submission_attempt_started_at,
+                field="expected_submission_attempt_started_at",
+            )
+        except FileOrchestrationJournalError:
+            return None
+        if expected_anchor is None:
+            return None
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._pipeline_job_for_id_unlocked(job_id)
+            if existing is None or not forcing_submit_identity_is_complete(existing):
+                return None
+            try:
+                current_anchor = _optional_format_datetime(
+                    existing.get("submission_attempt_started_at"),
+                    field="submission_attempt_started_at",
+                )
+            except FileOrchestrationJournalError:
+                return None
+            if (
+                str(existing.get("status") or "") != "reserved"
+                or existing.get("slurm_job_id") not in (None, "")
+                or max(int(existing.get("submission_attempt") or 1), 1)
+                != max(int(expected_submission_attempt), 1)
+                or current_anchor != expected_anchor
+            ):
+                return None
+            row = dict(existing)
+            row.update(
+                {
+                    "status": "reservation_lost",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "absence_retry_permitted",
+                    "reconciliation_reason_class": None,
+                    "matched_slurm_job_id": None,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            model_id = _optional_safe_identity(row, "model_id")
+            return self._write_pipeline_job_unlocked(
+                row, exclusive_direct=False, model_id=model_id
+            )
 
     def commit_pipeline_job_submit_attempt(
         self,
@@ -9619,6 +9850,61 @@ class FileOrchestrationJournalRepository:
             return True
         idempotency_key = row.get("idempotency_key")
         return idempotency_key not in (None, "") and self.query_candidate_state(str(idempotency_key)) is not None
+
+    def _overlapping_unresolved_forcing_reservation_unlocked(
+        self, row: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        if not forcing_member_identity_is_complete(row):
+            return None
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+        return overlapping_unresolved_forcing_job(
+            list(rows.pipeline_jobs.values()),
+            member_models=forcing_member_model_ids(row),
+            exclude_job_id=str(row.get("job_id") or ""),
+        )
+
+    def query_overlapping_forcing_reservation(
+        self, record: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a current unresolved forcing blocker for one proposed reservation."""
+
+        row = self._pipeline_job_row(dict(record))
+        if not forcing_member_identity_is_complete(row):
+            return None
+        source_id = _source_id_from_job(row)
+        cycle_time = _cycle_time_from_job(row)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            blocker = self._overlapping_unresolved_forcing_reservation_unlocked(row)
+            return _public_scheduler_row(blocker) if blocker is not None else None
+
+    def has_unresolved_forcing_submission_overlap(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_ids: Sequence[str],
+    ) -> bool:
+        """Whether self-sufficient unresolved forcing owns any requested model."""
+
+        member_models = frozenset(str(model_id) for model_id in model_ids if str(model_id))
+        if not member_models:
+            return False
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(
+                source_id=canonical_source_id, cycle_time=cycle_time, model_id=None
+            )
+        except FileOrchestrationJournalError:
+            return False
+        return (
+            overlapping_unresolved_forcing_job(
+                list(rows.pipeline_jobs.values()),
+                member_models=member_models,
+            )
+            is not None
+        )
 
     def _append_validated_record(
         self,

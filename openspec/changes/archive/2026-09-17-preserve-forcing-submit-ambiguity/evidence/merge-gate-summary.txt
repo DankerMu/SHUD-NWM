@@ -1,0 +1,13 @@
+## 工作情况说明（Merge 前）
+
+关联 Issue #2447，PR #2448，冻结提交 `26b91a64afd07380c0062525bc084b96711c8bb6`。
+
+最小生命周期修复已部署 node22 source-only6031eb82，保留歧义、跨cohort互斥、当前attempt可信绑定和允许重试时的任务映射；无历史认领/迁移/通用恢复平台。运行时最终源eee47464e经原生三席及两轮fresh复审，最终CLEAN；之后e27证据文档，10fc/26b仅CI-routing修复（Phase4例外）。无未关闭P0/P1/coverage finding。
+
+node27主线3499 passed1skipped；实际旧基线部署树3364 passed1skipped；CI selector714 passed。最终CI35198628331：6076 passed1skipped2warnings；Markdown及Governance PASS，未声称全量/DB/frontend执行。初次CI暴露selector遗漏，修复未触及生产运行时。
+
+部署等待旧pass自然排空且Slurm队列为空；依赖文件hash与Python3.12.7不变，timer恢复active/enabled。新进程完整bounded pass正常结束但planning_only，未新提交forcing。实际controller缺身份查询保持unknown；正向丢响应恢复由真实HTTP/FileJournal回归证明，没有故障注入。07:33Z双源2026091612 ready/published，07:35Z精确run MVT各1616features可读；这些产品产生于本次部署前，非新forcing成功证明。
+
+偏离：用户批准删除过宽历史adoption；controller查询仅有界目标bind-only；规格纠正normal完成与forecast-restart witness边界；错误混入较新测试的deployment overlay已按issue-only纠正。剩余限制：未等待下一次自然新forcing来重演丢响应、不强制重算健康周期；不声称全backlog/QC或displayC1-C4。原始证据及final-native-review.json随fixture归档。
+
+CI successful:6076 passed,1 skipped,2 warnings in933.62s.

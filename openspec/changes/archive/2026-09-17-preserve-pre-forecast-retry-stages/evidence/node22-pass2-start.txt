@@ -1,0 +1,5 @@
+MainPID=3033690
+ExecMainStartTimestamp=Wed 2026-09-16 23:47:08 CST
+ActiveState=activating
+
+PASS_PRE_EXECUTION scheduler_2026091614_9b8dfdb3c8d4.pre_execution.json {'artifact_path': '[local-path]', 'candidate_count': 38, 'final_evidence_artifact': '[local-path]', 'pass_id': 'scheduler_2026091614_9b8dfdb3c8d4', 'proof': 'scheduler_evidence_directory_write_before_production_mutation', 'reserved_at': '2026-09-16T14:12:38.936842Z', 'schema_version': 'nhms.production_scheduler.pre_execution_evidence_reservation.v1', 'started_at': '2026-09-16T14:05:02.636577Z', 'status': 'reserved'}

@@ -1,0 +1,115 @@
+source_commit=8e5938e491ba74f2e56153e52407d27bc5cec645
+command=cd /home/nwm/tmp/wt-2439-red && export PATH="$HOME/.local/bin:$PATH" TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/wt-2439-red UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv && uv run --no-sync python -m pytest -q -p no:cacheprovider tests/test_production_scheduler.py tests/test_forced_resubmit_veto.py tests/test_warm_start_chaining.py --durations=10
+.F...................................................................... [  3%]
+........................................................................ [  6%]
+........................................................................ [  9%]
+........................................................................ [ 13%]
+........................................................................ [ 16%]
+........................................................................ [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 32%]
+........................................................................ [ 36%]
+........................................................................ [ 39%]
+........................................................................ [ 42%]
+........................................................................ [ 45%]
+........................................................................ [ 49%]
+........................................................................ [ 52%]
+........................................................................ [ 55%]
+........................................................................ [ 58%]
+........................................................................ [ 62%]
+........................................................................ [ 65%]
+........................................................................ [ 68%]
+........................................................................ [ 72%]
+........................................................................ [ 75%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+........................................................................ [ 85%]
+........................................................................ [ 88%]
+........................................................................ [ 91%]
+........................................................................ [ 95%]
+........................................................................ [ 98%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+_ test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f9a1148d290>
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-212/test_convert_only_strict_ready0')
+
+    def test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#2439: convert-only resume must keep forcing, not become a forecast missing-forcing block."""
+    
+        object_store_root = tmp_path / "empty-object-store"
+        object_store_root.mkdir()
+        monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+        candidate = _scheduler_candidate_fixture()
+        state = _convert_only_completed_stage_state(candidate)
+        strict = _strict_ready_without_forecast_manifest()
+    
+        state_decision = scheduler_module._candidate_state_decision(candidate, state)
+        assert state_decision is not None
+        assert state_decision.action == "retry"
+        assert state_decision.reason == "resume_after_completed_stage"
+        assert state_decision.evidence["restart_stage"] == "forcing"
+        assert state_decision.evidence.get("artifact_guard") is None
+    
+        upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+            state_decision,
+            strict,
+        )
+        guarded = scheduler_candidates_module._strict_warm_start_forcing_witness_decision(
+            candidate,
+            state,
+            upgraded,
+        )
+    
+        assert upgraded.action == "retry"
+        assert upgraded.reason == "resume_after_completed_stage"
+        assert upgraded.evidence["decision"] == "retry_after_completed_stage"
+        assert upgraded.evidence["restart_stage"] == "forcing"
+    
+        assert guarded is not None
+        assert guarded.action == "retry"
+        assert guarded.reason == "resume_after_completed_stage"
+        assert guarded.evidence["decision"] == "retry_after_completed_stage"
+        assert guarded.evidence["restart_stage"] == "forcing"
+        assert guarded.evidence.get("artifact_guard") is None
+        assert guarded.reason != "strict_warm_start_retry_run_manifest_mismatch"
+        assert guarded.reason != "forcing_version_row_absent"
+        from services.orchestrator import chain_runtime_utils
+        from services.orchestrator.chain_forced_resubmit import (
+            _terminal_stage_needs_forced_resubmit,
+        )
+    
+        basin = {
+            "model_id": candidate.model_id,
+            "basin_id": candidate.basin_id,
+            "candidate_id": candidate.candidate_id,
+            "state_evidence": dict(guarded.evidence),
+        }
+>       assert chain_runtime_utils._replacement_retry_scoped_cycle_execution([basin]) is False
+E       AssertionError: assert True is False
+E        +  where True = <function _replacement_retry_scoped_cycle_execution at 0x7f9a1308b6a0>([{'basin_id': 'basin_a', 'candidate_id': 'gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic', 'model_id': 'm...ision': 'retry_after_completed_stage', 'forcing_version': {'forcing_version_id': 'forc_gfs_2026052106_model_a'}, ...}}])
+E        +    where <function _replacement_retry_scoped_cycle_execution at 0x7f9a1308b6a0> = <module 'services.orchestrator.chain_runtime_utils' from '/home/nwm/tmp/wt-2439-red/services/orchestrator/chain_runtime_utils.py'>._replacement_retry_scoped_cycle_execution
+
+tests/test_production_scheduler.py:290: AssertionError
+============================= slowest 10 durations =============================
+37.31s call     tests/test_production_scheduler.py::test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal[True-gfs]
+37.22s call     tests/test_production_scheduler.py::test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal[True-IFS]
+34.66s call     tests/test_production_scheduler.py::test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal[False-gfs]
+34.58s call     tests/test_production_scheduler.py::test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal[False-IFS]
+14.04s call     tests/test_production_scheduler.py::test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages[same_stale_token]
+13.96s call     tests/test_production_scheduler.py::test_the_operator_path_out_of_a_sink_refusal_restarts_at_forecast_and_consumes_once
+13.61s call     tests/test_production_scheduler.py::test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages[different_stale_token]
+11.21s call     tests/test_production_scheduler.py::test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_even_if_it_fails
+8.37s call     tests/test_production_scheduler.py::test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_breaker_arm
+8.36s call     tests/test_production_scheduler.py::test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast[breaker]
+=========================== short test summary info ============================
+FAILED tests/test_production_scheduler.py::test_convert_only_strict_ready_resume_preserves_forcing_through_upgrade_and_guard
+1 failed, 2196 passed in 469.20s (0:07:49)
+
+exit=1

@@ -1,0 +1,11 @@
+COMMAND: exact active .venv/bin/python via SSH stdin; guarded Git-only deployment
+BEFORE 2026-09-16T14:04:33.293828+00:00 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc '?? .nhms-work/' ({'ActiveState': 'inactive', 'SubState': 'dead', 'UnitFileState': 'enabled'}, {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead', 'UnitFileState': 'static'})
+AFTER 2026-09-16T14:04:37.127448+00:00 e7bd816060a25b72112048c9b24e9d8a9980581a patch_id=299d90a4fe444bc7cc39cc7521a423222d1e54ab environment_bytes_unchanged=true Python3.12.7 ({'ActiveState': 'inactive', 'SubState': 'dead', 'UnitFileState': 'enabled'}, {'MainPID': '0', 'ActiveState': 'inactive', 'SubState': 'dead', 'UnitFileState': 'static'})
+CHANGED_FILE services/orchestrator/scheduler_candidates.py
+ROLLBACK 7b38bcb8bebd65ce051dae0771c896e1ca96c0fc only while quiescent; timer currently stopped pending smoke and bounded pass
+From https://github.com/DankerMu/SHUD-NWM
+ * branch              deploy/issue-2439-forcing-phase -> FETCH_HEAD
+ * [new branch]        deploy/issue-2439-forcing-phase -> origin/deploy/issue-2439-forcing-phase
+HEAD is now at e7bd8160 fix(scheduler): preserve canonical pre-forecast retry stages (#2439)
+
+exit=0
