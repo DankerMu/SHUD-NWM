@@ -4977,3 +4977,12 @@ integration），没有发生轮换，所以本 PR 对 rotated 这一侧不提�
 
 处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2482 本身，不含审核策略调整；keep/cut
 仍由维护者人工决定，且应在 #2477 落地、重算比例之后再做。
+
+## Revisit 2026-09-18 (post PR #2496 / issue #2024)
+
+审计第七次给出 DECIDABLE，数字与上一条**完全相同**：231 个多轮已合并 PR，later-round catches
+core=388 / rotated=275 / phase=74（15 条不可归属已排除），rotated 份额仍是 41.5%。本 PR 是
+fixture `none` 的 spec-only 改动，0 轮审查、没有派席位，对 core、rotated、phase 三侧都不提供证据。
+
+处置同前：**记录 deferral，不改规则**。合并授权只覆盖 #2024 本身，不含审核策略调整；keep/cut 仍由
+维护者人工决定，并且应在 #2477 落地、重算比例之后再做。
