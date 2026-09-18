@@ -56,6 +56,8 @@ from scripts.select_ci_tests import (
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
     RELEASED_RESERVATION_RECOVERY_TESTS,
+    REVIEW_GATE_ISSUE_MEMORY_PATH,
+    REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
@@ -2187,6 +2189,89 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
         selected = select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path("."))
         assert removed not in selected, removed
         assert "tests/test_select_ci_tests.py" in selected
+
+
+def test_review_gate_issue_memory_selects_exactly_its_guard_and_the_meta_guard() -> None:
+    # #2261 selector leg, exact set (same shape as
+    # test_demote_helper_rule_selects_public_chain_consumer_exactly): the
+    # committed round-ceiling memory routes to its structural guard plus the
+    # selector meta-guard, nothing more and nothing less. The meta-guard has to
+    # be an explicit rule target — select_tests only rides it in for changed
+    # `tests/` paths, and this is a root JSON file. Exact set: the path is not a
+    # backend Python path, so no core-smoke fallback, no same-name derivation
+    # and no supplemental routing can join it, and a membership pin would stay
+    # green if the guard target were dropped for the meta-guard alone.
+    selected = set(select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")))
+
+    assert selected == {REVIEW_GATE_ISSUE_MEMORY_TEST, SELECTOR_META_GUARD_TEST}
+    assert not set(CORE_SMOKE_TESTS) & selected
+
+
+def test_review_gate_issue_memory_route_reds_when_the_rule_or_its_guard_is_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2261 selector leg, red (constructed rule table; tracked selector
+    # untouched): deleting the rule empties the selection, and dropping the
+    # guard from its targets leaves the accounting PR running the meta-guard
+    # only — the same selector call the green row uses, not a read of the rule.
+    from scripts import select_ci_tests
+
+    stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REVIEW_GATE_ISSUE_MEMORY_PATH)
+    assert len(stripped) == len(PATH_TEST_RULES) - 1, "review-gate memory rule not found"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", stripped)
+    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == []
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != REVIEW_GATE_ISSUE_MEMORY_TEST),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == REVIEW_GATE_ISSUE_MEMORY_PATH
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+
+
+def test_review_gate_issue_memory_backend_filter_entry_is_block_scoped() -> None:
+    # #2261 backend-filter leg, positive: without this exact literal inside the
+    # ci.yml `backend:` block, the post-merge accounting PR shape (docs/** +
+    # openspec/** + this JSON — the `e78cf98a` commit that introduced the bare
+    # top-level key) starts no targeted Unit Tests job, and the structural guard
+    # above never runs. A mention under another filter opens no job, and a root
+    # `*.json` glob would drag unrelated data files into the backend lane.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{REVIEW_GATE_ISSUE_MEMORY_PATH}'\n"
+    assert literal in _backend_filter_block(workflow), (
+        "review-gate issue memory missing from ci.yml backend filter"
+    )
+    assert Path(REVIEW_GATE_ISSUE_MEMORY_TEST).is_file(), "the guard the filter entry exists to start is gone"
+
+    entries = _filter_entries(_backend_filter_block(workflow))
+    assert not any(
+        fnmatch.fnmatch(REVIEW_GATE_ISSUE_MEMORY_PATH, pattern) and pattern != REVIEW_GATE_ISSUE_MEMORY_PATH
+        for pattern in entries
+    ), "backend filter must not cover the review-gate memory with a broad glob"
+
+
+def test_review_gate_issue_memory_backend_filter_entry_reds_when_removed_or_moved() -> None:
+    # #2261 backend-filter leg, red (constructed workflow text; tracked ci.yml
+    # untouched): deleting the exact entry, or moving it under another filter,
+    # must fail the same block-scoped assertion the positive row pins — `docs:`
+    # and `frontend:` start no targeted Unit Tests job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{REVIEW_GATE_ISSUE_MEMORY_PATH}'\n"
+    assert literal in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(literal, "")
+    assert literal not in _backend_filter_block(deleted)
+
+    moved_to_docs = deleted.replace("            docs:\n", "            docs:\n" + literal)
+    assert literal in moved_to_docs
+    assert literal not in _backend_filter_block(moved_to_docs)
 
 
 def test_shared_auth_owners_select_their_focused_contract_suites() -> None:

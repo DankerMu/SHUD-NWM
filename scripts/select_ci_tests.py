@@ -460,6 +460,19 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     SELECTOR_META_GUARD_TEST,
 )
 
+# #2261: the committed review-gate round-ceiling memory. It is hand-edited when
+# sessions conflict (that is how two bare top-level keys got in), and its only
+# assertion-level consumer is the structural guard below — a JSON data file has
+# no import closure, so the route must be explicit. The meta-guard rides along
+# because `select_tests` only adds it for changed `tests/` paths, and this path
+# is a root JSON file; it also holds this route's own pins.
+REVIEW_GATE_ISSUE_MEMORY_PATH = ".review-gate-issues.json"
+REVIEW_GATE_ISSUE_MEMORY_TEST = "tests/test_review_gate_issue_memory.py"
+REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS: tuple[str, ...] = (
+    REVIEW_GATE_ISSUE_MEMORY_TEST,
+    SELECTOR_META_GUARD_TEST,
+)
+
 # #1912/#1903: the Basins package publication corpus has six frozen baseline
 # partitions plus one additive river/segment mapping owner, all below the 1,000-line
 # structural limit and sharing one non-collectible helper. A model-registry change must
@@ -3610,6 +3623,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # fallback or a zero-assertion collect-only run.
         CALIBRATION_OVERRIDES_PATH,
         CALIBRATION_OVERRIDES_CONSUMER_TESTS,
+    ),
+    PathTestRule(
+        # #2261: the review-gate issue memory's structural guard. The exact
+        # ci.yml backend filter entry starts the targeted gate for an
+        # accounting-only PR; this rule turns that lane into real assertions
+        # instead of the zero-assertion collect-only collapse.
+        REVIEW_GATE_ISSUE_MEMORY_PATH,
+        REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS,
     ),
     PathTestRule(
         # #1646: a pytest-config change must re-prove the thread-exception

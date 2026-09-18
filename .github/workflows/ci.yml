@@ -82,6 +82,12 @@ jobs:
               # meta-guard must run on a declaration-only PR. Exact literal
               # only; other config files have different consumers.
               - 'config/calibration_overrides.yaml'
+              # #2261: the committed review-gate round-ceiling memory. Its
+              # realistic corruption path is the post-merge accounting commit
+              # (docs/** + openspec/** + this JSON), which matched no backend
+              # pattern — so the structural guard over it never started the
+              # targeted gate. Exact literal only; no root `*.json` glob.
+              - '.review-gate-issues.json'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
