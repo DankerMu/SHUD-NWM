@@ -10,11 +10,11 @@ boundary with its reason, never a parked defect: after this change no sentence i
 ## Change surface
 
 - `openspec/changes/fix-coverage-freshness-spec-and-routing/specs/display-coverage-freshness/spec.md` (three MODIFIED requirements)
-- `docs/runbooks/current-production-ops.md` — §10.8 (one sentence), §11.2 (exit-2 and exit-3 rows + their note), §11.3 (branch C's §-pointer; the last entry's scope; one new entry), §11.5 (import check + conditional sync; the governance paragraph)
+- `docs/runbooks/current-production-ops.md` — §9.2 (the 「空串」 row), §10.8 (one sentence), §11.2 (exit-2 and exit-3 rows + their note + the stage-split closing sentence), §11.3 (heading; branch C's §-pointer; the last entry's scope; new DB-side and non-driver entries), §11.5 (import check + conditional sync; the governance paragraph)
 - `scripts/node27_resource_governance.py` — `collect_systemd`'s `systemctl show -p` property list **only**
 - `tests/test_node27_coverage_freshness_alert.py`, `tests/test_node27_resource_governance.py`
-- `scripts/select_ci_tests.py` — the `docs/runbooks/current-production-ops.md` `PathTestRule` (around `:2788` on `origin/master`) gains `tests/test_node27_coverage_freshness_alert.py`, because T4 makes that test a reader of the runbook
-- `tests/test_select_ci_tests.py` — the exact expected lists for that path (around `:2691` and `:5532`) and its count (around `:5988`, `"3"` → `"4"`)
+- `scripts/select_ci_tests.py` — the `docs/runbooks/current-production-ops.md` `PathTestRule` (around `:2788` on `origin/master`) gains `tests/test_node27_coverage_freshness_alert.py`, because T4 makes that test a reader of the runbook — and, from review round 1, the three pre-existing content readers it was missing (`tests/test_node22_entrypoint_invariant.py`, `tests/test_python_environment_truth.py`, `tests/test_role_boundary_static.py`)
+- `tests/test_select_ci_tests.py` — the exact expected lists for that path (around `:2691` and `:5532`) and its count (around `:5988`, `"3"` → `"7"`)
 - `openspec/changes/archive/2026-09-18-node27-coverage-freshness-alert/design.md` (appended dated note)
 
 ## Must preserve
@@ -99,6 +99,13 @@ Every item is a predicate over the tree, not a count that the change itself can 
 - **#2473's pointer to container recreation** is not used as a first step: an alerting mail's first step is diagnosis, and recreation stays one hop further behind §5.1's existing pointer. (The runbook must not describe §4.3.3 as forbidden in general — `tier-node27-timeseries-storage.md` forbids it only for the cold bind.)
 - **#2473 proposes `uv sync` as the remedy**; it becomes conditional on a failed import check, because on node-27 it would mutate the shared production venv (R4).
 - **Scope beyond both issues**, all surfaced while doing them and fixed per the directive: the CI selector's runbook rule missing the test that now reads the runbook; the NO_SOURCES path's wrong 「再查只读角色权限」 step; §11.5's false list-timers claim and the governance collector gap behind it; the governance requirement's scenario that overclaimed; §10.8's automaticity overclaim; §11.3 branch C's §2 → §3.1; the archived design.md's two stale claims.
+- **Found during implementation and review round 1, fixed per the directive** (each outside the surface this fixture first declared):
+  - §9.2's 「空串」 row gains the three read-only monitoring lanes that set no `application_name`, because §11.3's `pg_stat_activity` step identifies this lane's connection by it. The root fix (naming the connection in the alert script) is not taken: the script is pinned byte-identical.
+  - §11.3's heading becomes 「退 1 的三个真分支 + 退 3 的三条」, because it gained two exit-3 entries; nothing links the anchor.
+  - §11.2's closing sentence no longer says 「退 3 查库」 (false for observation-phase display-module errors) nor 「退 3 不查库」 (false for their SQL errors): exit 2 → §11.5 「导入期失败」, exit 3 → the routing table.
+  - The exit-2 row discriminates by the reason's `<ExceptionClass>: ` prefix (import time, any class) versus none (`CoverageAlertConfigError`: DSN / threshold), with a characterization pin, because `main`'s generic handler prefixes every non-config exception.
+  - DB-side step 2 reads the unit's `EnvironmentFiles` before the probe (a leftover scratch drop-in makes the probe test a different DSN); gains leaves for a healthy probe with an `Undefined*` reason (schema drift: migration ledger + `\d`, measured baseline) and for base-class texts beyond the three measured ones; step 4 also checks schema `USAGE`.
+  - §11.5's `uv sync` lines carry `cd /home/nwm/NWM` on the same line: the new text tripped `tests/test_node22_entrypoint_invariant.py`, which the CI selector did not run for this runbook — hence the three readers added to the rule above.
 
 ## Non-goals (design boundaries, each with its reason — none is a parked defect)
 

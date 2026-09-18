@@ -5352,7 +5352,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、或 venv 里没有展示栈），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason`：`ImportError:` / `ModuleNotFoundError:` 开头就是导入期，按 §11.5 的「导入期失败」那段先做导入检查（venv 缺展示栈、unit 缺 `PYTHONPATH=` 各有一步），**不是** §11.4 的阈值旋钮；其余（缺 DSN、阈值非法）才去 §11.4 改 env 文件 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、venv 里没有展示栈、或展示模块的依赖漂移），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。按 §11.5 的「导入期失败」那段先做导入检查（venv 缺展示栈、unit 缺 `PYTHONPATH=` 各有一步），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。推导（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` + 单测钉住两半：`AttributeError` 前缀、两种配置错误无前缀）；未在 node-27 实测 |
 | `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
 
 **退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
@@ -5366,13 +5366,18 @@ SQLAlchemy 类**分不开**原因——`OperationalError` 既是连不上也是 
 |---|---|---|---|
 | `OperationalError: (psycopg2.errors.QueryCanceled)` | statement 超时（车道自设 `statement_timeout` 30 s） | §11.3「库侧观测失败」第 3 步（`pg_stat_activity`） | 推导：`QueryCanceled` 是 `psycopg2.OperationalError` 的子类 |
 | `ProgrammingError: (psycopg2.errors.InsufficientPrivilege)` | 只读角色缺 grant | §11.3「库侧观测失败」第 4 步（grant） | 推导：`InsufficientPrivilege` 是 `psycopg2.ProgrammingError` 的子类 |
-| `ProgrammingError: (psycopg2.errors.Undefined`…（`UndefinedTable`、`UndefinedSchema`…） | 连上的库里没有本车道的表（DSN 指错了库），或 schema 漂移 | §11.3「库侧观测失败」第 2 步（探针报出连到哪个库、`hydro.hydro_run` 在不在） | `UndefinedTable` 实测 |
-| 其余任何带 `(psycopg2.` 的 | 基类 `psycopg2.OperationalError`（三种原文见下）、`psycopg2.errors.AdminShutdown`（观测中途容器重启）、`InterfaceError`、死锁 / 锁等待类错误… | §11.3「库侧观测失败」，从第 1 步（容器状态）做起 | 基类三种原文实测；其余推导 |
+| `ProgrammingError: (psycopg2.errors.Undefined`…（`UndefinedTable`、`UndefinedColumn`、`UndefinedFunction`、`UndefinedSchema`…） | 连上的库里没有本车道的表（DSN 指错了库），或 schema 漂移（部署的代码期待的表 / 列 / 函数库里没有） | §11.3「库侧观测失败」第 2 步：先查 unit 读哪份 env 文件，再用探针分——探针报出库连错了 → 改 DSN；探针健康 → 那一步里 schema 漂移那一支 | `UndefinedTable`（连错库）实测；schema 漂移那一支推导 |
+| 其余任何带 `(psycopg2.` 的 | 基类 `psycopg2.OperationalError`（常见三种原文与兜底见下）、`psycopg2.errors.AdminShutdown`（观测中途容器重启）、`InterfaceError`、死锁 / 锁等待类错误… | §11.3「库侧观测失败」，从第 1 步（容器状态）做起 | 基类常见三种原文实测；其余推导 |
 | 不带 `(psycopg2.` | 根本没走到驱动，或不是数据库错误 | 按下面「不带驱动类」三条分 | 见各条 |
 
-基类 `(psycopg2.OperationalError)` 后面的原文分三种，2026-09-18 在 node-27 上逐一实测：
+基类 `(psycopg2.OperationalError)` 后面的原文**常见三种**，2026-09-18 在 node-27 上逐一实测：
 `Connection refused`（库没在听：容器停了 / 端口不对）、`password authentication failed`（口令错）、
-`database "…" does not exist`（DSN 里的库名错）。一封真实的（已脱敏）`reason`：
+`database "…" does not exist`（DSN 里的库名错）。**这三种不是穷举**：车道连库带
+`connect_timeout=10`，容器挂死或网络不通时读 `timeout expired`；连接数打满读
+`sorry, too many clients already`；容器正在起读 `the database system is starting up`。三种之外的
+**任何**原文都走同一条兜底：库在、但没在接受或服务连接 → 先 §11.3「库侧观测失败」第 1 步（容器
+状态），再第 3 步（`pg_stat_activity`）/ §9.2 看是谁占着。兜底这条是推导，未在 node-27 实测。
+一封真实的（已脱敏）`reason`：
 
 ```text
 OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "***"
@@ -5384,8 +5389,8 @@ OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1
 不带驱动类时，看 `VERDICT: FAIL` 之后的引导词：
 
 - `observation failed:` 且类是 `ValueError` / `ArgumentError`（URL scheme 不认识时是其子类
-  `NoSuchModuleError`）→ **先跑 §11.3「库侧观测失败」第 2 步的探针**，别凭异常类直接去改 env
-  文件：观测期的展示模块同样可能抛 `ValueError`。探针以**同一个**异常失败 → env 文件里的
+  `NoSuchModuleError`）→ **先做 §11.3「库侧观测失败」第 2 步**（先查 unit 读哪份 env 文件，再跑
+  探针），别凭异常类直接去改 env 文件：观测期的展示模块同样可能抛 `ValueError`。探针以**同一个**异常失败 → env 文件里的
   `DATABASE_URL` 解析不了，改 §11.4 那份 env 文件；探针成功 → 异常来自观测期，走 §11.3
   「非驱动观测失败」。`ValueError` 这条实测过：DSN 端口写成 `notaport` 时车道报
   `ValueError: invalid literal for int() with base 10: 'notaport'`，探针原样复现同一行、`rc=1`；
@@ -5398,8 +5403,9 @@ OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1
 展示模块报错分**导入期**与**观测期**两种，落在哪个退出码取决于它发生在哪一期：`config_from_env` 先读
 `DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
 的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
-`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 修解释器路径（§11.5「导入期失败」），
-退 3 不查库，按上面的路由走 §11.3「非驱动观测失败」。
+`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 → §11.5「导入期失败」（修解释器路径 /
+展示栈）；退 3 → 照上面的「退 3 路由」读 `reason`，与别的退 3 没有区别——观测期展示模块自己发的
+SQL 失败了，`reason` 就带 `(psycopg2.`，照样去 §11.3「库侧观测失败」；不带的才去「非驱动观测失败」。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
 且总行数 ≤ 24 —— verdict 必须活在尾窗里。尾窗预算要**分两类算，不能合成一个数**：
@@ -5579,8 +5585,8 @@ dedup、也不发"恢复"邮件（口径见 §11.2 末尾那两行），此后�
 
 **退出 3 —— 库侧观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 带 `(psycopg2.`）**
 
-先诊断、别急着重建：下面四步都只读。重建 `nhms-db` 容器是再往后一跳的事（§5.1 有指针），
-不是收到这封信的第一步。按 §11.2「退 3 路由」查到是哪一步就从哪一步做起。
+先诊断、别急着重建：下面四步的诊断动作都只读，写操作只出现在查明原因之后的处置里。重建
+`nhms-db` 容器是再往后一跳的事（§5.1 有指针），不是收到这封信的第一步。按 §11.2「退 3 路由」查到是哪一步就从哪一步做起。
 
 **第 1 步 —— 容器在不在、端口映射对不对**
 
@@ -5594,7 +5600,33 @@ docker ps -a --filter name=^nhms-db$ --format '{{.Names}} {{.Status}} {{.Ports}}
 处理。`Up` 的时长很短而告警是 `AdminShutdown` → 观测中途容器重启过。本车道无状态，库恢复后
 下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次看退出码。
 
-**第 2 步 —— 探针**：走本车道**自己的** venv、env 文件与只读角色，用与车道同一个 SQLAlchemy
+**第 2 步 —— 先看 unit 读哪份 env 文件，再跑探针**
+
+第一个动作不碰库，只问 systemd。探针（以及 §11.5 那段手工调用）源的是仓库里的
+`infra/env/node27-frontier-alert.env`，而 unit 读的是它自己 `EnvironmentFile=` 列表里的文件——
+§11.5 验投递时没删干净的 scratch drop-in 会把这个列表换掉。两边不一致时探针验的是另一个 DSN，
+它的读数全都不算数，所以这一步必须在探针之前：
+
+```bash
+systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service
+```
+
+健康时**恰好**读这一行（2026-09-18 node-27 实测）：
+
+```text
+EnvironmentFiles=/home/nwm/NWM/infra/env/node27-frontier-alert.env (ignore_errors=no)
+```
+
+读到别的（别的路径、多出一行、或空）→ 原因就在这里，不在库：
+`ls ~/.config/systemd/user/nhms-node27-coverage-freshness-alert.service.d/` 找到那个 scratch
+drop-in，按 §11.5 末尾那段 `rm` 掉、`systemctl --user daemon-reload`，再 show 一次确认回到上面
+那一行，然后用 §11.4 那条 `systemctl --user start` 手跑一次看退出码。健康状态下这个 `.service.d/`
+目录**根本不存在**：`ls` 报 `No such file or directory`、退 2（2026-09-18 node-27 实测）。所以
+「目录不存在」与「目录在、里面没有 drop-in」是同一种读数：读数却仍不是上面那一行 → 装进去的 unit
+文件被改过，重跑 §11.5 安装块里的两条 `install` 与 `daemon-reload`。（健康值与健康时目录不存在是
+实测；异常读数这两支是推导。）
+
+读数正确之后跑**探针**：走本车道**自己的** venv、env 文件与只读角色，用与车道同一个 SQLAlchemy
 URL 解析，并报出连到了哪个库、本车道的表在不在：
 
 ```bash
@@ -5608,14 +5640,48 @@ with engine.connect() as conn:
 '; echo "rc=$?"
 ```
 
-健康读 `('nhms', 'nhms_display_ro', True)` 加 `rc=0`（2026-09-18 node-27 实测）。库名不是
-`nhms`、或第三列是 `False` → DSN 指错了库：先用
-`systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service`
-确认 unit 读的是 `…/infra/env/node27-frontier-alert.env`（§11.5 验投递时没删干净的 scratch
-drop-in 会把它指走），再改 env 文件里的 `DATABASE_URL`。探针自己也以基类
-`psycopg2.OperationalError` 失败 → 按 §11.2 的三种原文分：拒连回第 1 步，口令错 / 库不存在改
-env 文件。探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次
-unit 看到退 0 即闭环。探针的报错只落在你自己的终端，但驱动报错可能回显 DSN，别原样贴进 issue。
+健康读 `('nhms', 'nhms_display_ro', True)` 加 `rc=0`（2026-09-18 node-27 实测）。其余读法：
+
+- 库名不是 `nhms`、或第三列是 `False` → DSN 指错了库。unit 读的就是这份文件（上面第一个动作已确认），
+  改 env 文件里的 `DATABASE_URL`。
+- 探针自己也以基类 `psycopg2.OperationalError` 失败 → 按 §11.2 的原文分：拒连回第 1 步，口令错 /
+  库不存在改 env 文件；常见三种之外的原文（`timeout expired`、`too many clients` 一类）→ 第 1 步看
+  容器、再第 3 步看 `pg_stat_activity`（推导）。
+- 探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次 unit 看到
+  退 0 即闭环。
+- 探针一切正常、而告警是 `Undefined*`（`UndefinedTable` / `UndefinedColumn` / `UndefinedFunction`…）
+  → 库连对了，是**部署的代码与库的 schema 对不上**（schema 漂移）。探针只查 `hydro.hydro_run`
+  在不在，而车道还要读 `hydro.run_display_coverage` 与 `core.model_instance` 的若干列、以及
+  `services/tiles/mvt.py` 目录语句用到的对象，所以探针健康证明不了它们都在。下面这一支整条是推导。
+
+探针的报错只落在你自己的终端，但驱动报错可能回显 DSN，别原样贴进 issue。
+
+**schema 漂移那一支**：先读 `reason` 里点名的对象（`relation "…"`、`column … does not exist`、
+`function …`），再看代码和迁移账本两头：
+
+```bash
+cd /home/nwm/NWM
+git log -5 --oneline -- services/tiles/mvt.py scripts/node27_coverage_freshness_alert.py
+comm -3 <(ls db/migrations | grep '\.sql$' | sort) \
+        <(docker exec nhms-db psql -X -U nhms -d nhms -Atc "select version from public.schema_migrations" | sort)
+docker exec nhms-db psql -X -U nhms -d nhms -P pager=off -c '\d <schema.table>'
+```
+
+`comm -3` 顶格的行是这棵树里有、账本 `public.schema_migrations` 里没有的迁移（代码期待、库没施加）；
+缩进一列的是账本里有、这棵树里没有的。**健康的 node-27 并不是空输出**（2026-09-18 实测）：顶格 0 行、
+缩进 7 行（`000007_flood.sql`、`000015_…`、`000017_…`、`000020_…`、`000031_…`、`000034_…`、
+`000036_…`），都是账本记过、后来被 `b97c16e28`「Remove retired frequency display pipeline」从树里
+删掉的已退役频率展示管线迁移。所以缩进行本身不是信号；这一支的信号是**顶格行**（代码期待、账本
+没有），即便有顶格行也仍以下面的 `\d` 为准。账本记的是 `packages/common/migrate.py` 施加过的
+迁移文件名，而 `psql -f` 直接跑的迁移**不写**账本（`tier-node27-timeseries-storage.md` 里「施加
+000052 的运维口径」那段；拿账本对照 `db/migrations` 的既有口径见同一份 runbook §9.6），所以
+账本只是旁证；**对象在不在以 `\d` 为准**——把 `reason` 点名的表代进 `<schema.table>`，缺列就看列清单里有没有它；缺函数改用 `\df <函数名>`。
+
+处置**不是**在生产库上手工补迁移：迁移由超级用户 `nhms` 经 `packages/common/migrate.py` 施加，
+施加后还要重跑 `scripts/node27_provision_write_roles.sh`（§5.1），那是一次需要另行批准的变更。
+收到这封的动作是开 code / migration issue，附 stderr 那行结构化 JSON 里完整的 `reason`（`VERDICT:` 行是
+拍平、截断过的）、上面 `git log` 与 `comm -3` 的输出、以及 `\d` 的结果。本车道无状态、无 dedup，
+修好之前每天 06:00 一封。
 
 **第 3 步 —— statement 超时（`QueryCanceled`）**：车道每条语句限 30 s，看是谁在跟它抢：
 
@@ -5635,27 +5701,42 @@ order by query_start;"
 归因与取消纪律一律按 §9.2——生产 tick 不得随手取消；争用过去后手跑一次 unit 确认。天天超时属于
 容量 / 计划问题，按 §9.2 走 issue。
 
-**第 4 步 —— 权限拒绝（`InsufficientPrivilege`）**：`nhms_display_ro` 需要 `hydro.hydro_run`、
-`hydro.run_display_coverage`、`core.model_instance` 三张表的 SELECT。逐张核对：
+**第 4 步 —— 权限拒绝（`InsufficientPrivilege`）**：`nhms_display_ro` 需要 `hydro`、`core` 两个
+schema 的 USAGE，以及 `hydro.hydro_run`、`hydro.run_display_coverage`、`core.model_instance` 三张表的
+SELECT。一条语句全核对：
 
 ```bash
 docker exec nhms-db psql -X -U nhms -d nhms -P pager=off -Atc "
-select rel, has_table_privilege('nhms_display_ro', rel, 'SELECT')
+select 'schema ' || s, has_schema_privilege('nhms_display_ro', s, 'USAGE')
+from unnest(array['hydro', 'core']) as s
+union all
+select 'table ' || rel, has_table_privilege('nhms_display_ro', rel, 'SELECT')
 from unnest(array['hydro.hydro_run', 'hydro.run_display_coverage', 'core.model_instance']) as rel;"
 ```
 
-读 `f` 的那张就是缺的 grant。补 grant 是一次权限变更，由关系 owner `nhms_ingest_rw` 或超级
-用户 `nhms` 执行（角色见 §5.1 角色表）。先想清楚它是怎么丢的：display API 也以
+健康时五行全 `t`（2026-09-18 node-27 实测）。读 `f` 的那行就是缺的：
+
+- `schema hydro|f` / `schema core|f` → 缺 schema 的 USAGE，驱动原文是
+  `permission denied for schema …`。**这时三张表照样读 `t`**——`has_table_privilege` 只看表自己的
+  ACL，只查表会查不出来（推导）。`hydro`、`core` 两个 schema 的 owner 都是 `nhms`（2026-09-18
+  node-27 实测），所以 USAGE 由超级用户 `nhms` 授予。
+- `table …|f` → 缺那张表的 SELECT，驱动原文是 `permission denied for table …`。由关系 owner
+  `nhms_ingest_rw` 或超级用户 `nhms` 补（角色见 §5.1 角色表）。
+
+补 grant 是一次权限变更。先想清楚它是怎么丢的：display API 也以
 `nhms_display_ro` 读这三张表（`national_discharge_cycles` 就是它发布的目录），它若同时在报错，
 这是一次波及展示面的权限回退，不只是本车道的事。
 
 **退出 3 —— 非驱动观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 不带 `(psycopg2.`）**
 
-`ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」跑上一条第 2 步的
-探针排除 DSN；探针成功的、别的异常类的、以及引导词是 `observation unusable:` 的，才到这里。
+`ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」做上一条第 2 步（先查
+unit 读哪份 env 文件，再跑探针）排除 DSN；探针成功的、别的异常类的、以及引导词是
+`observation unusable:` 的，才到这里。
 这是展示模块（`services/tiles/mvt.py`）或本车道与它之间契约的**代码缺陷**，不是运维旋钮：
 
-1. 用 §11.5 那段手工调用复现：同一份 env 文件，所以会回来同一行。
+1. 用 §11.5 那段手工调用复现。它源的是仓库里那份 env 文件，unit 读的也是它时就会回来同一行。
+   复现不出 → 回到上面「库侧观测失败」第 2 步的第一个动作查 `EnvironmentFiles`：unit 读的可能
+   根本不是这份文件（推导）。
 2. 看展示模块最近动过什么：`cd /home/nwm/NWM && git log -5 --oneline -- services/tiles/mvt.py`。
 3. 按代码缺陷开 issue，附上 stderr 那行结构化 JSON 里完整的 `reason`（`VERDICT:` 行是拍平、
    截断过的）。本车道无状态、无 dedup，修好之前每天 06:00 一封。
@@ -5673,10 +5754,8 @@ ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 
 图层已经黑了。这正是本 issue 要消除的构造性沉默。收到这封：
 
 1. 先查 `core.model_instance` 的 `active_flag` / `river_network_version_id`。
-2. 确认车道读的是哪个库：
-   `systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service`
-   应指向 `…/infra/env/node27-frontier-alert.env`——§11.5 验投递时留下的 scratch drop-in 会把
-   它指到一个有表、没数据的库，在那里查就是零行；再跑上面「库侧观测失败」第 2 步的探针看
+2. 确认车道读的是哪个库：做上面「库侧观测失败」第 2 步——先查 `EnvironmentFiles`（§11.5 验投递时
+   留下的 scratch drop-in 会把 unit 指到一个有表、没数据的库，在那里查就是零行），再跑探针看
    `current_database()`。
 
 缺 grant **不会**走到这里：权限不足抛 `InsufficientPrivilege`，是
@@ -5743,24 +5822,24 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
 PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_coverage_freshness_alert.py; echo "rc=$?"
 ```
 
-**导入期失败（退 2，`reason` 以 `ImportError:` / `ModuleNotFoundError:` 开头）**：先做导入检查，
-它用的就是 unit 的那个解释器：
+**导入期失败（退 2，`reason` 以 `<异常类>: …` 开头，最常见 `ImportError:` / `ModuleNotFoundError:`，
+依赖漂移时也可能是 `AttributeError:` 之类，判据见 §11.2 退 2 那行）**：先做导入检查，它用的就是 unit
+的那个解释器：
 
 ```bash
 cd /home/nwm/NWM
 PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "rc=$?"
 ```
 
-- **失败** → venv 里没有展示栈，同步依赖：
+- **失败**（报出与告警同一个异常）→ venv 里的展示栈缺失，或版本与锁文件漂移，同步依赖：
 
   ```bash
-  export PATH=$HOME/.local/bin:$PATH
-  uv sync --all-extras --dev --dry-run   # 先看它要装 / 卸什么
-  uv sync --all-extras --dev
+  cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv sync --all-extras --dev --dry-run   # 先看它要装 / 卸什么
+  cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv sync --all-extras --dev
   ```
 
   这**不是**默认动作：node-27 的 `.venv` 是生产共享的（display API、autopipe、本车道都跑在它
-  上面），`uv sync` 就地改它，而且默认是精确同步、锁文件之外的包会被卸掉。2026-09-18 实测
+  上面），在 node-27 上 `uv sync` 会就地改它，而且默认是精确同步、锁文件之外的包会被卸掉。2026-09-18 实测
   `--dry-run` 报 `Would install 3 packages`（`mapbox-vector-tile`、`pyclipper`、`shapely`），
   本车道却照样 import 得了——所以只在导入检查失败时才 sync。
 - **通过** → 这条检查自己带了 `PYTHONPATH`，看不见 unit 缺它。查 unit：

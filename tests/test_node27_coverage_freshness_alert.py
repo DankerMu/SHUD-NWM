@@ -327,6 +327,93 @@ def test_import_time_display_failure_is_a_config_error(
     assert DSN_PASSWORD not in captured.err
 
 
+class _RaisingDisplayModuleFinder:
+    """Meta-path finder whose `services.tiles.mvt` module body raises on execution.
+
+    Stands in for dependency drift inside the display module (e.g. a shapely
+    release that dropped an attribute the module touches at import). The error
+    is raised while the module BODY executes, so CPython propagates it unchanged
+    through the real `from services.tiles.mvt import …` statement — unlike a
+    missing attribute on an already-imported module, which `import_from` would
+    convert to `ImportError: cannot import name`.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname != "services.tiles.mvt":
+            return None
+        import importlib.util
+
+        return importlib.util.spec_from_loader(fullname, self)
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def exec_module(self, module: Any) -> None:
+        raise self.error
+
+
+def test_any_import_time_exception_class_prefixes_the_config_reason(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2472/#2473 round 1: the exit-2 discriminator the runbook routes on is the
+    `<ExceptionClass>: ` prefix, not `ImportError:` specifically. `main`'s generic
+    config-stage handler prefixes EVERY non-`CoverageAlertConfigError` class, and
+    the only unguarded call in `config_from_env` is the lazy display import, so a
+    non-ImportError class raised there (AttributeError from dependency drift) is the
+    same import stage and must read `AttributeError: …` under the same code.
+    """
+
+    monkeypatch.delitem(sys.modules, "services.tiles.mvt", raising=False)
+    finder = _RaisingDisplayModuleFinder(AttributeError("module 'shapely' has no attribute 'drifted'"))
+    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=_env())
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"] == "AttributeError: module 'shapely' has no attribute 'drifted'"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_reason"),
+    [
+        ({}, "DATABASE_URL must be set"),
+        (_env(NHMS_COVERAGE_GAP_DAYS="abc"), "NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'"),
+    ],
+    ids=["missing-dsn", "non-numeric-threshold"],
+)
+def test_config_error_reasons_carry_no_exception_class_prefix(
+    capsys: pytest.CaptureFixture[str],
+    env: dict[str, str],
+    expected_reason: str,
+) -> None:
+    """The other half of the runbook's exit-2 split: a `CoverageAlertConfigError`
+    (missing DSN, unusable threshold) is reported as its bare message, so a
+    `reason` WITHOUT a `<ExceptionClass>: ` prefix routes to the env file (§11.4),
+    never to the import check (§11.5).
+    """
+
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=env)
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"] == expected_reason
+    assert not re.match(r"^[A-Za-z_][A-Za-z0-9_]*: ", payload["reason"])
+
+
 def test_evidence_17_default_threshold_is_derived_from_the_display_constant() -> None:
     lookback = alerter.lookback_days()
     assert alerter.default_gap_days() == lookback / alerter.GAP_THRESHOLD_DIVISOR

@@ -28,7 +28,7 @@ None.
 - `display-coverage-freshness`: three requirements modified as above.
 
 ## Impact
-`docs/runbooks/current-production-ops.md` (§10.8, §11.2, §11.3, §11.5), `scripts/node27_resource_governance.py` (`collect_systemd`'s property list only), `scripts/select_ci_tests.py` (one path rule), three test files, the archived #2080 `design.md` (appended note), one spec delta. `scripts/node27_coverage_freshness_alert.py` is **not touched** — its failure-line format is what the new routing reads, and it is pinned, not changed. The governance audit's exit code and recommendations do not move (`_recommendations` never reads the `systemd` section); the receipt gains two keys per unit under an existing unconstrained map (no JSON schema covers it — `grep -rl resource_governance schemas/` is empty).
+`docs/runbooks/current-production-ops.md` (§9.2 one row, §10.8, §11.2, §11.3, §11.5), `scripts/node27_resource_governance.py` (`collect_systemd`'s property list only), `scripts/select_ci_tests.py` (one path rule, four readers added), three test files, the archived #2080 `design.md` (appended note), one spec delta. `scripts/node27_coverage_freshness_alert.py` is **not touched** — its failure-line format is what the new routing reads, and it is pinned, not changed. The governance audit's exit code and recommendations do not move (`_recommendations` never reads the `systemd` section); the receipt gains two keys per unit under an existing unconstrained map (no JSON schema covers it — `grep -rl resource_governance schemas/` is empty).
 
 Issue type: bugfix (spec + operator documentation, one monitoring-inventory collector)
 Fixture level: expanded
