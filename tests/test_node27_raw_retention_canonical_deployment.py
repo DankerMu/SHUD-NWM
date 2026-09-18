@@ -131,6 +131,15 @@ def test_the_installer_installs_exactly_the_committed_system_units() -> None:
     assert os.access(INSTALLER, os.X_OK)
 
 
+def test_the_installer_runs_the_nwm_venv_python_only_as_the_unit_user() -> None:
+    """Root never executes the nwm-writable venv interpreter."""
+    calls = [line for line in _directives(INSTALLER) if "/.venv/bin/python" in line]
+
+    assert len(calls) >= 2, calls
+    for line in calls:
+        assert 'runuser -u "$UNIT_USER" -- ' in line.split("/.venv/bin/python")[0], line
+
+
 # --- installer: refusal before any write --------------------------------------
 
 # Every command the installer could write or change state with. Each stub
@@ -266,7 +275,7 @@ def test_a_valid_lock_and_nwm_env_pass_their_checks(tmp_path: Path) -> None:
             _GOOD_NWM_ENV,
             "export NODE27_RAW_RETENTION_LANES='raw'\n"
             'NODE27_RAW_RETENTION_OBJECT_STORE_ROOT="/home/ghdc/nwm/object-store"\n',
-            "NODE27_RAW_RETENTION_LANES=precip-cache, raw\n"
+            'export NODE27_RAW_RETENTION_LANES="raw,precip-cache"\n'
             "  export NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n",
         )
     ):
@@ -318,9 +327,21 @@ def test_the_installer_refuses_a_missing_copyback_lock(tmp_path: Path) -> None:
         ),
         (
             "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n"
-            'export NODE27_RAW_RETENTION_LANES="raw, canonical"\n',
+            'export NODE27_RAW_RETENTION_LANES="raw,canonical"\n',
             "600",
             "may name only raw / precip-cache",
+        ),
+        *(
+            (
+                "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n" + line,
+                "600",
+                "must be a comma list with no spaces",
+            )
+            for line in (
+                "NODE27_RAW_RETENTION_LANES=raw, precip-cache\n",
+                "export NODE27_RAW_RETENTION_LANES=raw, precip-cache\n",
+                'NODE27_RAW_RETENTION_LANES="raw, precip-cache"\n',
+            )
         ),
         (
             "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\nNODE27_RAW_RETENTION_LANES=,\n",
@@ -344,6 +365,9 @@ def test_the_installer_refuses_a_missing_copyback_lock(tmp_path: Path) -> None:
         "lanes-missing",
         "lanes-twice",
         "lanes-canonical",
+        "lanes-space",
+        "lanes-space-export",
+        "lanes-space-quoted",
         "lanes-empty",
         "root-mismatch",
         "root-missing",

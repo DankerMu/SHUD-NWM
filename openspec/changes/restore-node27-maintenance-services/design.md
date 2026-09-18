@@ -126,8 +126,8 @@ appended, so no key is duplicated and no path points into `/home/nwm`. Written
 with umask 077 and `chown frd_muziyao` (the wrapper requires mode 600, no
 symlink). Values are never printed. It is a snapshot: after any change to the
 `nwm` env the operator re-runs the install script (runbook), and the Stage B
-receipt checks both summaries carry equal `cutoff`, `retention_days` and
-`sources`.
+receipt checks both summaries carry equal `retention_days` and `sources`
+(`cutoff` follows the watermark of each run, so it is not a snapshot check).
 
 Access facts (node-27 2026-09-18): uid 1103 groups `nfsdata,nwmuser`;
 `/home/nwm`, `/home/nwm/NWM` 755, `.venv` 775, the uv interpreter tree 775 —
@@ -202,7 +202,10 @@ Stage B (after merge): `git pull --ff-only` in `/home/nwm/NWM`; D7 rebind; add
 `NODE27_RAW_RETENTION_LANES=raw,precip-cache` to the `nwm` env; install the
 repo `raw-retention.service` (OnFailure) + `daemon-reload`; operator runs D6;
 start the `nwm` raw-retention unit once (a normal production tick: raw and PNG
-cache prune) and the compression unit once under the repo code; start the
+cache prune) and the compression unit once under the repo code; a manual
+compression start (or a timer restart that triggers a `Persistent=` catch-up)
+must begin by 05:30Z so the 3941 s wall ends before the 06:36Z retention tick,
+otherwise the next 04:25Z tick is the proof run; start the
 system alert template once by hand
 (`nhms-node27-system-unit-failure-alert@nhms-node27-canonical-retention.service.service`)
 and record its `SENT` / `SMTP-ACCEPTED` lines from the system journal; record
@@ -225,6 +228,13 @@ which database and hypertables `yd-node27-timeseries-retention` touches
 - **Transitional edge**: while a river backlog drains, the last remaining
   backlog chunk can be the second slot on the day retention drops it (one chunk,
   once). Accepted over coupling compression to the retention window.
+- **Execution trust (inherent in the chosen #2360 split; surfaced to the
+  operator in the PR)**: the canonical system
+  unit runs the `nwm`-owned checkout (wrapper, runner, `.venv`) as uid 1103,
+  and the operator runs the installer from that checkout with sudo; both trust
+  the `nwm` account. The installer itself never executes the checkout's
+  interpreter as root (its import probe and summary report run via `runuser`
+  as the unit user).
 - **Two processes prune one cycle** (D3): canonical and its PNGs leave on the
   same cutoff date but not atomically; if one unit fails, the other lane still
   prunes. That partial state is already allowed today — the living requirement

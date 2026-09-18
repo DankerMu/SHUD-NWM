@@ -82,7 +82,7 @@ REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
 
 1. `systemctl --user stop nhms-node27-timeseries-compression.timer`, then
    `systemctl --user is-active nhms-node27-timeseries-compression.service`
-   must print `inactive` (a run in progress: wait for it to end).
+   must not print `active` or `activating` (a run in progress: wait for it to end).
 2. `cp -p "$REPO_ENV" "$REPO_ENV.bak-pre-rebind-$(date -u +%Y%m%d)"`.
 3. `install -m 0600 "$FENCE_ENV" "$REPO_ENV"`.
 4. `sed -i 's#^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=.*#NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM#' "$REPO_ENV"`.
@@ -108,7 +108,10 @@ REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
 9. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
    after the next run: the receipt's `head_sha`
    (`jq -r .head_sha /home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json`)
-   equals `git -C /home/nwm/NWM rev-parse HEAD`.
+   equals `git -C /home/nwm/NWM rev-parse HEAD`. Restarting the timer after a
+   missed 04:25Z elapse fires a `Persistent=` catch-up run immediately, so do
+   step 9 only when a run started now ends before the 06:36Z retention tick
+   (start by 05:30Z, the 3941 s wall) or after that retention tick has finished.
 
 Rollback: `install -m 0644` the pre-rebind unit kept at
 `/home/nwm/NWM/docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/stage-a/before/nhms-node27-timeseries-compression.service`
@@ -3552,7 +3555,9 @@ free slot goes to `hydro.river_timeseries_legacy`. Its uncompressed 558 GB
 chunk `_hyper_3_110_chunk` (range 2026-09-10 → 2026-09-17) is
 compression-eligible from ~2026-09-19 and is dropped by retention ~2026-10-08.
 Between the river drain date (~2026-09-25) and ~2026-10-08, slot 2 can select
-it and every tick ends `rc=124` (the unit alerts). This trajectory is the same
+it and every tick ends `rc=124`, seen only by the daily check or
+`systemctl --user show -p Result nhms-node27-timeseries-compression.service`
+(the unit has no `OnFailure=`). This trajectory is the same
 under oldest-first. Check before ~2026-09-25 and daily until the chunk is gone:
 
 ```sql

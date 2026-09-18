@@ -2894,7 +2894,10 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
   `df -h` 实测为准。
 
 **一次性安装（运维 sudo）**。前提（按顺序）：先在 nwm env 加 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`（安装脚本强制
-检查这一行，缺失或含 `canonical` 即拒绝），repo 已 `git pull --ff-only`；然后：
+检查这一行，缺失或含 `canonical` 即拒绝），repo 已 `git pull --ff-only`；再以 nwm 装 repo 的 nwm unit 并 reload：
+`install -m 0644 /home/nwm/NWM/infra/systemd/nhms-node27-raw-retention.service ~/.config/systemd/user/ && systemctl --user daemon-reload`，
+`diff ~/.config/systemd/user/nhms-node27-raw-retention.service /home/nwm/NWM/infra/systemd/nhms-node27-raw-retention.service` 无输出、
+`systemctl --user show -p OnFailure nhms-node27-raw-retention.service` 列出 `nhms-node27-unit-failure-alert@` 模板；然后：
 
 ```bash
 sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh
@@ -2916,7 +2919,7 @@ rc≠0 退出、什么都不写。然后：生成 `/etc/nhms/node27-canonical-re
 `Result` 不是 `success` 就 rc≠0。
 
 **改了 nwm raw-retention env 之后必须重跑同一条 sudo 命令**：系统 unit 的 env 是安装时的快照，
-不会跟着变（两份 summary 的 `cutoff`、`retention_days`、`sources` 应当相等，不等就是快照过期）。
+不会跟着变（比较两份 summary 的 `retention_days`、`sources`，不等就重跑安装脚本）。
 
 **回滚**（回到"canonical 不删"的状态；锁文件不动）：
 

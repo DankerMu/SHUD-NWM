@@ -120,7 +120,8 @@ check_source_env() {
 
   lanes=$(env_file_value "$env" NODE27_RAW_RETENTION_LANES) \
     || refuse "source env must set NODE27_RAW_RETENTION_LANES on exactly one line (raw,precip-cache)"
-  lanes=${lanes// /}
+  [[ "$lanes" =~ ^[a-z,-]+$ ]] \
+    || refuse "source env NODE27_RAW_RETENTION_LANES must be a comma list with no spaces (raw,precip-cache)"
   [ -n "${lanes//,/}" ] || refuse "source env NODE27_RAW_RETENTION_LANES names no lane"
   IFS=, read -r -a names <<<"$lanes"
   for lane in "${names[@]}"; do
@@ -192,7 +193,7 @@ install_units() {
 }
 
 report_newest_summary() {
-  "$REPO/.venv/bin/python" - "$LOG_DIR" <<'PY' || true
+  (cd "$REPO" && runuser -u "$UNIT_USER" -- env PYTHONPATH="$REPO" "$REPO/.venv/bin/python" - "$LOG_DIR") <<'PY' || true
 import json
 import sys
 from pathlib import Path

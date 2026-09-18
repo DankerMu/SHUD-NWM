@@ -116,10 +116,12 @@ validate), frontend/API (untouched).
   `nwm` raw-retention run `Result=success`, `lanes=["precip-cache","raw"]`,
   `failed=[]`; canonical system unit `Result=success`, `User=frd_muziyao`,
   canonical `deleted[] > 0`, lock failures 0; both summaries carry equal
-  `cutoff`, `retention_days`, `sources`; `systemctl is-active
+  `retention_days` and `sources` (`cutoff` follows the watermark of each run); `systemctl is-active
   nhms-node27-canonical-retention.timer` = active with a next elapse in
   `list-timers`; system alert template started by hand logs `SENT` and
-  `SMTP-ACCEPTED` in the system journal; lock file still
+  `SMTP-ACCEPTED` in the system journal, and its mail body contains real
+  `nhms-node27-canonical-retention.service` system-journal lines (not the
+  placeholder or a permission error); lock file still
   `-rw------- frd_muziyao`; `systemctl --user --failed` without the three units.
 - E5 #2285 acceptance: `diff ~/.config/systemd/user/X infra/systemd/X` empty and
   `DropInPaths` empty for raw-retention service, retention timer, compression

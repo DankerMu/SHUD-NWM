@@ -66,7 +66,7 @@ NODE27_RAW_RETENTION_DAYS=14
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
 # Lane selection (#2360). Comma-separated subset of `raw`, `canonical`,
-# `precip-cache` (exact lowercase names, surrounding whitespace trimmed).
+# `precip-cache` (exact lowercase names, no spaces).
 # Unset = all three lanes, exactly the pre-#2360 run. A value that is empty
 # after trimming, or names anything else, is a preflight blocker
 # (`{"field": "lanes"}`, rc=2) and NOTHING is deleted. A lane left out is one

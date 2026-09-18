@@ -44,7 +44,7 @@ repo units, immediate retention catch-up, bound 2).
   54.5 s/GB.
 
 State capture 2026-09-18T15:20:04Z (`systemctl --user show` of the three units
-+ journal 21:50–22:40 CST):
+and journal 21:50–22:40 CST):
 [`stage-a/after/state-after-stage-a.txt`](stage-a/after/state-after-stage-a.txt) —
 retention and compression `Result=success` / `ExecMainStatus=0` with the start
 and exit timestamps above; raw-retention still `exit-code` / 1 from 03:35:32Z.
