@@ -4940,3 +4940,22 @@ rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.
 处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2469 本身，不含审核策略调整；keep/cut
 仍由维护者人工决定。若要动，先落 #2477，再用修复后的审计重算这组比例——在归因算法本身未经验证的情况下
 做 keep/cut 决定，等于用一把没校准过的尺子量。
+
+## Revisit 2026-09-18 (post PR #2489 / issues #2156, #2154, #2157, #2166, #2165, #2160)
+
+审计第五次在同一天给出 DECIDABLE：**230 个多轮已合并 PR，later-round catches core=377 /
+rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.2%**（275/652），与上一条的 42.3%
+持平，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。
+本 PR 增量：core +2 / rotated +0 / phase +0。
+
+- round 1 是 high fixture 的 4 席，round 2 按 pinned-core 规则只开 2 席（correctness+invariant-state 全量、
+  test-evidence+spec-compliance 聚焦修复增量），没有轮换位——上一轮无 P1、无失败类重复，规则不给 free slot。
+- round 2 的两条 P2 都是陈述类：PR 正文证据行与实跑不符；另一个未归档 change 的 delta 仍钉旧版本号
+  （本 PR 自己的 v6 轮转造成）。全量席对代码零发现，Phase 7 CLEAN。
+- round 1 唯一有运行时后果的缺陷（JSON-null `Type` 判据分叉）被 correctness / invariant-state / security-perf
+  三席独立撞到：round-1 的席位广度在这里是冗余而不是互补，这条证据不支持也不反对轮换。
+
+本次数字仍由缺 #2036 修复的装载副本算出（#2477 未落地），可信度折扣同上一条。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2489 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定，且应在 #2477 落地、用修复后的审计重算之后再做。
