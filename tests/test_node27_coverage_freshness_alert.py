@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -326,6 +327,93 @@ def test_import_time_display_failure_is_a_config_error(
     assert DSN_PASSWORD not in captured.err
 
 
+class _RaisingDisplayModuleFinder:
+    """Meta-path finder whose `services.tiles.mvt` module body raises on execution.
+
+    Stands in for dependency drift inside the display module (e.g. a shapely
+    release that dropped an attribute the module touches at import). The error
+    is raised while the module BODY executes, so CPython propagates it unchanged
+    through the real `from services.tiles.mvt import …` statement — unlike a
+    missing attribute on an already-imported module, which `import_from` would
+    convert to `ImportError: cannot import name`.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname != "services.tiles.mvt":
+            return None
+        import importlib.util
+
+        return importlib.util.spec_from_loader(fullname, self)
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def exec_module(self, module: Any) -> None:
+        raise self.error
+
+
+def test_any_import_time_exception_class_prefixes_the_config_reason(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2472/#2473 round 1: the exit-2 discriminator the runbook routes on is the
+    `<ExceptionClass>: ` prefix, not `ImportError:` specifically. `main`'s generic
+    config-stage handler prefixes EVERY non-`CoverageAlertConfigError` class, and
+    the only unguarded call in `config_from_env` is the lazy display import, so a
+    non-ImportError class raised there (AttributeError from dependency drift) is the
+    same import stage and must read `AttributeError: …` under the same code.
+    """
+
+    monkeypatch.delitem(sys.modules, "services.tiles.mvt", raising=False)
+    finder = _RaisingDisplayModuleFinder(AttributeError("module 'shapely' has no attribute 'drifted'"))
+    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=_env())
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"] == "AttributeError: module 'shapely' has no attribute 'drifted'"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_reason"),
+    [
+        ({}, "DATABASE_URL must be set"),
+        (_env(NHMS_COVERAGE_GAP_DAYS="abc"), "NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'"),
+    ],
+    ids=["missing-dsn", "non-numeric-threshold"],
+)
+def test_config_error_reasons_carry_no_exception_class_prefix(
+    capsys: pytest.CaptureFixture[str],
+    env: dict[str, str],
+    expected_reason: str,
+) -> None:
+    """The other half of the runbook's exit-2 split: a `CoverageAlertConfigError`
+    (missing DSN, unusable threshold) is reported as its bare message, so a
+    `reason` WITHOUT a `<ExceptionClass>: ` prefix routes to the env file (§11.4),
+    never to the import check (§11.5).
+    """
+
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=env)
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"] == expected_reason
+    assert not re.match(r"^[A-Za-z_][A-Za-z0-9_]*: ", payload["reason"])
+
+
 def test_evidence_17_default_threshold_is_derived_from_the_display_constant() -> None:
     lookback = alerter.lookback_days()
     assert alerter.default_gap_days() == lookback / alerter.GAP_THRESHOLD_DIVISOR
@@ -357,6 +445,134 @@ def test_evidence_14_observation_failure_is_fail_closed_and_redacted(
     payload = json.loads(captured.err.strip().splitlines()[-1])
     assert payload["code"] == alerter.CODE_OBSERVATION_FAILED
     assert _verdict_lines(captured.out)
+
+
+def _driver_error(kind: str) -> BaseException:
+    """Real SQLAlchemy-wrapped psycopg2 errors, built the way SQLAlchemy builds
+    them (`DBAPIError(statement, params, orig)`), with the driver messages
+    measured on node-27 (2026-09-18) — never a hand-made reason string."""
+
+    import psycopg2
+    import psycopg2.errors
+    import sqlalchemy.exc
+
+    if kind == "refused":
+        return sqlalchemy.exc.OperationalError(
+            "SET statement_timeout = 30000",
+            {},
+            psycopg2.OperationalError(
+                'connection to server at "127.0.0.1", port 1 failed: Connection refused\n'
+                "\tIs the server running on that host and accepting TCP/IP connections?\n"
+            ),
+        )
+    return sqlalchemy.exc.ProgrammingError(
+        alerter.READY_FRONTIER_QUERY,
+        {},
+        psycopg2.errors.UndefinedTable('relation "hydro.hydro_run" does not exist\nLINE 4: FROM hydro.hydro_run h\n'),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "prefix"),
+    [
+        ("refused", "OperationalError: (psycopg2.OperationalError) "),
+        ("wrong-database", "ProgrammingError: (psycopg2.errors.UndefinedTable) "),
+    ],
+)
+def test_observation_failure_reason_carries_the_class_and_driver_class_the_runbook_routes_on(
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    prefix: str,
+) -> None:
+    """Characterization pin (#2473) — the code already behaves so.
+
+    Runbook §11.2 routes `COVERAGE_FRESHNESS_OBSERVATION_FAILED` on the reason's
+    `<SQLAlchemy class>: (<driver class>) …` shape: the SQLAlchemy class alone
+    cannot route (`OperationalError` is both "unreachable" and "statement
+    timeout"; `ProgrammingError` is both "permission denied" and "database
+    without the lane's relations"). If the reason format drifts, the runbook's
+    routing reads a line the mail no longer carries.
+    """
+
+    observe = RecordingObserve(error=_driver_error(kind))
+
+    rc, out, err = _run(capsys, env=_env(), observe=observe)
+
+    assert rc == alerter.EXIT_OBSERVATION == 3
+    payload = json.loads(err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"].startswith(prefix)
+    assert _verdict_lines(out)[0].startswith(f"VERDICT: FAIL observation failed: {prefix}")
+
+
+def test_unparsable_dsn_never_reaches_the_driver(capsys: pytest.CaptureFixture[str]) -> None:
+    """Characterization pin (#2473) for the routing leg WITHOUT `(psycopg2.`.
+
+    Runs the REAL `default_observe` (no injected provider): SQLAlchemy rejects
+    the DSN while building the engine, before any connection, so no database is
+    needed. The reason is exactly the one measured on node-27 for the same DSN
+    shape — a bare `ValueError:` with no driver class — which is why the runbook
+    sends this leg to the probe instead of to the database.
+    """
+
+    env = {"DATABASE_URL": f"postgresql://nhms_display_ro:{DSN_PASSWORD}@127.0.0.1:notaport/nhms"}
+
+    rc = alerter.main([], now=T0, env=env)
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"] == "ValueError: invalid literal for int() with base 10: 'notaport'"
+    assert "(psycopg2." not in payload["reason"]
+    assert _verdict_lines(captured.out)[0] == (
+        "VERDICT: FAIL observation failed: ValueError: invalid literal for int() with base 10: 'notaport'"
+    )
+    assert DSN_PASSWORD not in captured.out + captured.err
+
+
+class _MissingDriverFinder:
+    """Meta-path finder that makes `psycopg2` (and every submodule) look uninstalled."""
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname == "psycopg2" or fullname.startswith("psycopg2."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+def test_missing_driver_withholds_the_reason_at_observation_time(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization pin (#2472/#2473 round 2) for the runbook's
+    `redaction unavailable` routing leg.
+
+    With the driver gone the display module still imports (config stage passes),
+    so the failure lands at `create_engine` — exit 3, not exit 2 — and the same
+    missing package makes `packages.common.redaction` (module-scope
+    `psycopg2.extensions`) unimportable, so the chokepoint withholds the text.
+    The class is the raw `ModuleNotFoundError` SQLAlchemy re-raises from the
+    dialect's DBAPI import, not `NoSuchModuleError` (that one is an unknown URL
+    scheme). The runbook routes on the `redaction unavailable` substring; if this
+    shape drifts, §11.2 sends the operator to the DSN probe instead.
+    """
+
+    for name in [n for n in sys.modules if n == "psycopg2" or n.startswith("psycopg2.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.delitem(sys.modules, "packages.common.redaction", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_MissingDriverFinder(), *sys.meta_path])
+    env = {"DATABASE_URL": f"postgresql://nhms_display_ro:{DSN_PASSWORD}@127.0.0.1:55432/nhms"}
+
+    rc = alerter.main([], now=T0, env=env)
+    captured = capsys.readouterr()
+
+    withheld = "ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>"
+    assert rc == alerter.EXIT_OBSERVATION == 3
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"] == withheld
+    assert _verdict_lines(captured.out)[0] == f"VERDICT: FAIL observation failed: {withheld}"
+    assert DSN_PASSWORD not in captured.out + captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -639,3 +855,36 @@ def test_lazy_display_import_keeps_the_module_import_light() -> None:
     assert not any("services.tiles" in line for line in module_scope)
     assert not any("sqlalchemy" in line for line in module_scope)
     assert alerter.build_parser().description
+
+
+# ---------------------------------------------------------------------------
+# #2473 — every structured failure code has a documented destination.
+# ---------------------------------------------------------------------------
+
+_RUNBOOK_PATH = Path(__file__).resolve().parents[1] / "docs/runbooks/current-production-ops.md"
+
+
+def _runbook_section_11(text: str) -> str:
+    """Runbook §11, delimited by its own `## 11.` and `## 12.` headings."""
+
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("## 11."))
+    end = next(index for index, line in enumerate(lines) if index > start and line.startswith("## 12."))
+    return "\n".join(lines[start:end])
+
+
+def test_every_structured_failure_code_is_named_in_runbook_section_11() -> None:
+    """Spec scenario "Every structured failure code has a documented destination".
+
+    The codes are read from the script's own executable string literals, never
+    restated here, so a code added to the script without a runbook destination
+    turns this red.
+    """
+
+    literals = _non_docstring_literals(Path(alerter.__file__).read_text(encoding="utf-8"))
+    codes = sorted({literal for literal in literals if re.fullmatch(r"COVERAGE_FRESHNESS_[A-Z_]+", literal)})
+    assert codes, "no COVERAGE_FRESHNESS_* code found in the script — the scan itself is broken"
+
+    section = _runbook_section_11(_RUNBOOK_PATH.read_text(encoding="utf-8"))
+    missing = [code for code in codes if code not in section]
+    assert not missing, f"codes the script emits but runbook §11 never names: {missing}"

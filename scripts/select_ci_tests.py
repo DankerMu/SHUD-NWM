@@ -2862,12 +2862,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # real `build_receipt` call, the receipt root, and the probe timer's own
     # steady-state row. Same lane caveat: selected when the backend lane runs
     # and this runbook is in the diff.
+    # #2473 widened it by one more: the coverage freshness alert suite reads
+    # this runbook's §11 (between the `## 11.` and `## 12.` headings) and fails
+    # when a `COVERAGE_FRESHNESS_*` code the script emits is not named there.
+    # #2472/#2473 round 1 added the three content readers the row had been
+    # missing: the node-22 entrypoint invariant suite scans every `uv run` /
+    # `uv sync` line of this runbook for a node-27 marker (a bare `uv sync`
+    # added here reddens it), the Python environment truth suite pins the
+    # `df -h / /home /data/GHDC` capacity check in it, and the role boundary
+    # static suite pins its node-27/node-22 topology sentences.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
         (
             SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
             "tests/test_env_templates.py",
             "tests/test_node22_refresh_timer_health.py",
+            "tests/test_node27_coverage_freshness_alert.py",
+            NODE22_ENTRYPOINT_INVARIANT_TEST,
+            PYTHON_ENVIRONMENT_TRUTH_TEST,
+            "tests/test_role_boundary_static.py",
         ),
     ),
     PathTestRule(
