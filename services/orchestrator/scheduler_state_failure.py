@@ -1538,6 +1538,13 @@ def _realpath_or_none(text: str) -> Path | None:
     that into a distinguishable fail-closed reason rather than a phantom root.
     """
 
+    # ADR 0009 clause 1, verified rather than assumed: the caller's `path.exists()` at
+    # scheduler_state_failure.py:1401 runs immediately after this ENOENT admission, and
+    # openspec/specs/job-retry-mechanism/spec.md:1585-1589 already makes it a SHALL that
+    # a null-reason "absent" verdict arise only after the path was actually probed. The
+    # lane is described elsewhere as a recorded residual (retry.py's
+    # _db_free_selector_allowed_roots note, and the #1365 D4 note at :1390); that wording
+    # stands, but the admission itself is a clause 1 instance, not a fail-open.
     expanded = os.path.expanduser(text)
     try:
         return Path(os.path.realpath(expanded, strict=True))

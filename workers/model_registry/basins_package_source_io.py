@@ -805,10 +805,10 @@ def _ensure_under_root(
 
 
 def _resolve_package_path(path: Path, *, model_id: str | None = None, version: str | None = None) -> Path:
-    # Strict resolution + errno split: non-strict resolution stopped raising
-    # on symlink loops in CPython 3.13+, so the loop verdict must come from
-    # the kernel errno. ENOENT keeps pre-change parity (missing paths resolve
-    # non-strictly and are classified by the callers downstream).
+    # ADR 0009 clause 1: callers dereference the admitted product before any verdict.
+    # Strict resolution + errno split: non-strict resolution stopped raising on symlink
+    # loops in CPython 3.13+, so the loop verdict must come from the kernel errno. ENOENT
+    # keeps pre-change parity (missing paths resolve non-strictly, classified downstream).
     try:
         return Path(os.path.realpath(path, strict=True))
     except OSError as error:
