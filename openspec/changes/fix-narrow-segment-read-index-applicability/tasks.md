@@ -200,15 +200,39 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 ## 6. Close out
 
-- [ ] 6.1 Record the result on #2451, including whether the sub-mechanism question (design.md F9 — why
+- [x] 6.1 Record the result on #2451, including whether the sub-mechanism question (design.md F9 — why
   the discovery index wins without statistics) was answered by the candidate measurements or remains
   open. Do not close it as answered if it was not.
-- [ ] 6.2 State explicitly whether remedy (b) — keeping the write frontier's statistics fresh — is still
+- [x] 6.2 State explicitly whether remedy (b) — keeping the write frontier's statistics fresh — is still
   wanted after this change, and if so leave #2451 open for it or file the follow-up. The user chose (a);
   that choice does not by itself decide that (b) is unnecessary.
-- [ ] 6.3 If §1.3 showed the legacy branch reproduces the failure and the selected candidate does not
+- [x] 6.3 If §1.3 showed the legacy branch reproduces the failure and the selected candidate does not
   reach it, file that as its own issue rather than folding it in silently. It expires with #1988's DROP,
   which is a reason to record it, not a reason to ignore it.
-- [ ] 6.4 Note the #2417 deploy hold: the live tree `/home/nwm/NWM` was at `7ecc46be` on 2026-09-17,
+- [x] 6.4 Note the #2417 deploy hold: the live tree `/home/nwm/NWM` was at `7ecc46be` on 2026-09-17,
   older than #2417's merge-base, so the defect this change fixes is latent in production and activates
   on the next ff-only pull. Verify: the PR body states which commit the live tree carries at merge time.
+
+### §6 results — 2026-09-18
+
+- **6.1 The sub-mechanism is NOT answered, and is recorded as open.** The candidate measurements settled
+  *which* remedy works, not *why* the discovery index wins without statistics. The reproducing nodes
+  report `Plan Rows = 1` at `Total Cost = 2.53` — an estimate clamped to the minimum, not merely a low
+  one — and what the primary-key path would have cost without statistics was never measured, so whether
+  that choice was a near-tie broken by index size or OID order is undetermined. §4.1 adds a second
+  unexplained fact: chunks carrying 10 802 448 modifications since their last analyse, and one with a
+  NULL `last_analyze`, all plan correctly. No claim in this change rests on the unproven mechanism.
+- **6.2 Remedy (b) is not required for this defect, and that is a measured statement, not a preference.**
+  C1 makes the segment read bind the segment under absent, stale **and** fresh statistics — all three are
+  cells of the §1 cross product and all pass on the shipped code. So the read path no longer depends on
+  an ingest-side guard keeping up, which was the whole argument for (a) over (b). No follow-up is filed
+  for (b) itself. What remains open is 6.1's sub-mechanism, which is a different question and is recorded
+  there rather than being folded into (b).
+- **6.3 Filed as #2471** — the legacy branch reproduces through the **text** twin
+  `river_timeseries_mvt_selected_identity_valid_time_discovery_idx`, which C1 has no lever on. Its three
+  production preconditions are measured false today and it expires with #1988's DROP.
+- **6.4 The live tree `/home/nwm/NWM` is at `7ecc46be`**, older than #2417's merge-base, so the defect
+  this change fixes is latent in production and activates on the next ff-only pull. Stated in the PR body.
+- **§4.4's live D11 receipt is deferred to a deployment window by decision (a)**: the PR merges first and
+  the receipt is produced when the live tree is pulled forward, because producing it beforehand would
+  itself be that deployment. The offline half of 4.4 is already decisive.
