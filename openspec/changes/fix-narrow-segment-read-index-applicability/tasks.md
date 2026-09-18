@@ -69,7 +69,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 ## 2. Select the mechanism by measurement
 
-- [ ] 2.1 Implement **C1** and **C2** (design.md) far enough to be measured. These are throwaway spikes;
+- [x] 2.1 Implement **C1** and **C2** (design.md) far enough to be measured. These are throwaway spikes;
   only the selected one is committed. C4 is withdrawn — a branch-level `ORDER BY` is a syntax error
   against `packages/common/forecast_store.py:135-138`, which concatenates the branches bare. C3 is a
   gated fallback, attempted only if both C1 and C2 fail, and it carries §5. Verify: for each candidate,
@@ -78,7 +78,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
   (`river_segment_key` in the `Index Cond` on narrow nodes, `river_segment_id` on legacy nodes including
   the `compress_hyper_7_*` child), plus per-node ratio and node shared hits. Written into `design.md` as
   a table.
-- [ ] 2.2 Select one candidate and record why, **citing the measurements, not the design argument**.
+- [x] 2.2 Select one candidate and record why, **citing the measurements, not the design argument**.
   Rejected by definition: any candidate that holds only after `ANALYZE`; and, if §1.2 showed staleness
   reproduces the failure, any candidate that fails the stale condition. If **neither** C1 nor C2 holds
   across the cross product, stop and report to the user before attempting C3 — do not ship the

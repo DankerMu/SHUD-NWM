@@ -193,6 +193,42 @@ relied on (`packages/common/forecast_store.py:87-93` `_CYCLE_WINDOW_PUSHDOWN_SQL
 `:862-865`). Also weakens the per-branch predicate set, which is closer to the fail-open class of F4
 than C1 is — the predicate survives, but no longer inside the scan it was protecting.
 
+**Measured costs of the spike, 2026-09-18 — C2 is materially worse than C1, before any plan is read.**
+
+| | C1 | C2 |
+|---|---|---|
+| `test_river_ts_text_identity_cleanup.py` | 1 red, the F4b-predicted pin at `:942` | 5 red |
+| `test_forecast_store_routing.py` (`:197`, `:214`) | 11 red, all text pins | 11 red, all text pins |
+| nature of the extra reds | none | **2 semantic, 2 fixture** |
+
+The two extra *semantic* reds are the finding: `…segment_blocks_carry_only_their_sanctioned_aids` and its
+pushed twin report `text aid rt.river_network_version_id is not AND-ed with rt.river_network_version_key`.
+C2 leaves the legacy branch's transitional **text** aid as that branch's *only* network identity
+conjunct — which is the fail-open class of F4, the class #2050/#2086/#2112/#2114/#2141/#2148 closed. That
+is a different order of cost from C1's single spelling pin, and §2.2 weighs it as such. The two fixture
+reds are `_union_branches` pinning `_PROJECTION` verbatim, which C2's SELECT-list change breaks.
+
+**F4b was incomplete**: it named only the text-identity oracle. `tests/test_forecast_store_routing.py:214`
+(`assert_spanning_route`) pins the same literals and reddens 11 times under *either* candidate — every one
+a text pin, none a behaviour difference (its parameter-set assertion still passes). Conversely the golden
+fixture is **weaker** than F4b implied: it stores the eight `forecast_store:<label>` chains but no test
+compares them, so `test_river_ts_template_golden.py` stays green under both candidates and is not a guard
+here.
+
+**must-preserve #6 / §4.4 is not at risk from either candidate**: `_REQUIRED_EQUALS`
+(`packages/common/node27_pgdata_workload_query.py:57-63`) pins the two legacy text aids
+`rt.river_segment_id` and `rt.river_network_version_id`, not `basin_version_key` /
+`river_network_version_key`. Measured: the three `test_node27_pgdata_workload*` suites are `55 passed`
+under all three variants.
+
+**A trap when reading C2's plans.** C2 cannot be an outer `WHERE`: `pull_up_simple_union_all` promotes the
+`UNION ALL` subquery and `set_append_rel_size` redistributes a single-relation qual back into each child,
+returning the conjunct to the branch scan and making C2 a no-op. The spike therefore writes it as a JOIN —
+but a JOIN can be defeated too, by a NestLoop with `spike_bv` as outer handing
+`basin_version_key = spike_bv.basin_version_key` back to the chunk scan as a parameterised `Index Cond`.
+**Read the `Index Cond`**: `spike_bv.` / `spike_rnv.` means the planner pushed back what C2 moved out and
+the cell is measuring base; only `$N` is the intended C2 shape. This is decided on node-27, not locally.
+
 ### Ruled out, with reasons
 
 - **Dropping either discovery index** — F3: three live consumers on the narrow one; the legacy one is
@@ -311,6 +347,47 @@ one, so this baseline run is re-readable under the new rule without re-running i
   carrying 10 802 448 modifications since its last analyze. Recorded as: staleness reproduces on legacy
   through a different index; on narrow this fixture's staleness is insufficient to clamp the estimate.
   That is a limit of the fixture, not a finding about production.
+
+## §2.2 Selection — C1, on the measurements
+
+Three-variant run, one process, node-27, 2026-09-18 (`/home/nwm/tmp/2451/matrix.json`; each variant's
+natural statistics state measured before the single shared `ANALYZE`):
+
+| variant | cells passed | cells failed | row-digest mismatches |
+|---|---|---|---|
+| base | 21 / 24 | 3 | 0 |
+| **C1** | **23 / 24** | 1 | 0 |
+| C2 | 23 / 24 | 1 | 0 |
+
+Both candidates close the two cells this change exists to close, and both leave exactly the same one:
+
+| cell | base | C1 | C2 |
+|---|---|---|---|
+| `run_bound/absent/narrow/uncompressed` | `run_discovery_key_idx`, ratio 999.0, 5 977 hits | `segment_time_key_idx`, ratio 1.0, 50 hits | same as C1 |
+| `run_bound/absent/legacy/uncompressed` | `selected_identity_key_valid_time_idx`, ratio 999.0, 12 841 hits | `segment_time_idx`, ratio 1.0, 51 hits | same as C1 |
+| `run_bound/stale/legacy/uncompressed` | text twin, ratio 999.0, 12 841 hits | **unchanged** | **unchanged** |
+
+**C2 was not a no-op**, so the tie is real and not an artefact: had the planner defeated its JOIN by
+NestLoop parameterisation, C2 would have reproduced base's three failures; it reproduces one.
+
+**So the plan outcomes do not discriminate, and the selection is made on the measured costs**, which do:
+
+- **C1 reddens one oracle** — the F4b-predicted conjunct-spelling pin at
+  `tests/test_river_ts_text_identity_cleanup.py:942` — plus 11 text pins in
+  `tests/test_forecast_store_routing.py:197,214` that F4b did not name.
+- **C2 reddens five**, and two of them are semantic, not spelling: it leaves the legacy branch's
+  transitional **text** aid as that branch's only network identity conjunct, which is the F4 fail-open
+  class that #2050/#2086/#2112/#2114/#2141/#2148 closed. C2 also depends on a JOIN the planner is free to
+  push back into the scan, so its effect would have to be re-verified on every future plan change.
+
+Both preserve row identity exactly (0 digest mismatches across 24 cells each). **C1 is selected.** The
+mechanism by which C1 works is *not* claimed: F9's sub-mechanism is still unproven, and the selection
+rests on the table above, not on "more bound columns → smaller estimate".
+
+**What this selection may not claim** (per §2.2's bound): nothing about the `issue_time=latest` shape,
+which no variant discriminates here because base already passes it — §4's live A/B on node-27 is its only
+gate. And `run_bound/stale/legacy` remains open by construction: it is reached through the text twin,
+which C1 has no lever on, so §6.3 files it rather than folding it in.
 
 ## Must-preserve behaviour
 
