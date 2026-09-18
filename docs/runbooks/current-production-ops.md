@@ -5514,8 +5514,24 @@ echo "rc=$?"
 新扫描算出非空时会直接覆盖旧的窗口列，**不需要** `--force`。只有新扫描算成空时
 （#1446 拒绝守卫退 **3** 并打一行 `DISPLAY_COVERAGE_REFRESH_REFUSED`，见 §2）才谈得上
 `--force`，而且必须运维逐条确认后再加：`--force` 的动作是把行**归零**，对一个正被全国
-图层使用的 run 用它就是直接熄灯，别拿它当默认手段。重算后四项判据仍不过关的，问题在
-上游产出（河段样本残缺 / 输出网格相位），归 parse/output 侧，刷新脚本修不了。
+图层使用的 run 用它就是直接熄灯，别拿它当默认手段。
+
+刷新完把上面那条四判据 SQL 再跑一遍（四列全 `true` 的还要按前面「四个布尔列不是完整的
+拒绝集合」那段的 `max(river_valid_time_start)` / `min(river_valid_time_end)` 跨行判定再看
+一眼），全绿之后**再验一次车道本身**，别等下一 tick：用 §11.4 那条
+`systemctl --user start nhms-node27-coverage-freshness-alert.service` 看退出码。
+**要走 unit**——它自带 `EnvironmentFile=`，跑出来的是本车道真正用的只读
+`nhms_display_ro` DSN；若只从 shell 历史里重跑 §11.5 那段手工调用的 python 那一行、没有
+重新源 `infra/env/node27-frontier-alert.env`，环境里还留着刚才刷新用的
+`infra/env/node27-ingest.env`，那是以写角色 `nhms_ingest_rw` 在跑，压根没检验只读角色的
+grant，可能给你一个假绿（要跑就把那两行整段一起跑）。退 0 即闭环：本车道无状态、无
+dedup、也不发"恢复"邮件（口径见 §11.2 末尾那两行），此后下一个预定信号就是下一个 06:00
+那一 tick。
+
+重算后判据仍不过关的，问题在上游产出（河段样本残缺 / 输出网格相位），刷新脚本修不了：
+本 runbook 没有对应的处置段，把 `run_id`、四个布尔列与跨行判定的实测值、以及
+`/home/nwm/autopipe-logs/*.log`（分支 A 用的同一批日志）里该 `run_id` 的 ingest / parse
+行留成证据，对 parse/output 侧开 issue。
 
 **退出 3 —— "什么都观测不到"（fail-closed，不是健康）**
 
@@ -5556,9 +5572,13 @@ systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-p
 ```
 
 service 与 timer 都已注册进 `scripts/node27_resource_governance.py`
-`DEFAULT_SERVICES`（#2466），治理审计 receipt 里能看到它们的 systemd 状态——与 §10.8
-的 frontier 车道同一口径：timer 被人 disable 掉时靠治理面发现，而不是靠"怎么没收到
-邮件"。本车道无状态、无 receipt、无自有日志，这个注册是它进自动审计面的唯一存活信号。
+`DEFAULT_SERVICES`（#2466）：治理审计 receipt 因此带上它们的 `ActiveState` / `SubState`，
+以及 `systemctl --user list-timers --all` 那张表里对应的行——**装了但被 disable** 的
+timer 在表里仍然出现、只是没有 NEXT，**从没装过**的 unit 整行缺席，两者靠这张表才分得开
+（只看 per-service 那块分不开）。**但这不是自动告警**：治理审计不对 receipt 的 `systemd`
+段产任何建议、不因此非零、也不发邮件，timer 被人 disable 掉不会自己冒出来。定期看治理
+receipt 里的 unit 状态就是为了这个——与 §10.8 的 frontier 车道同一口径，同样是靠人按周期
+读。本车道无状态、无自有 receipt、无自有日志，这份治理 receipt 是它唯一留下存活痕迹的地方。
 
 单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
 `Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import
