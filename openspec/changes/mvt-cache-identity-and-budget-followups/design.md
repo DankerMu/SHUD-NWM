@@ -73,8 +73,11 @@ OpenSpec change: mvt-cache-identity-and-budget-followups (generated)
    AND EXISTS (SELECT 1 FROM core.river_segment s WHERE s.river_network_version_id = t.river_network_version_id
    AND COALESCE(s.properties_json->>'shud_output_river','false') <> 'true' AND s.properties_json ? 'iRiv'
    AND (s.properties_json->>'iRiv') ~ '^[0-9]+$' AND s.properties_json->>'iRiv' = t.properties_json->>'shud_riv_index'
-   AND s.geom IS NOT NULL AND s.properties_json ? 'Type')`。
-   **刻意不含** `ST_Length(s.geom) > 0`——正是这一差异让「源几何退化 → backfill 返回 0」被断言抓到（B-5 绿腿）。
+   AND s.geom IS NOT NULL AND s.properties_json->>'Type' IS NOT NULL)`。
+   源侧 `Type` 判据取 `->> IS NOT NULL` 而非键存在 `?`：backfill 以 `properties_json->'Type'` 读出后仅在 `is not None` 时
+   复制，键缺失与 JSON `null`（dbf 数值字段空值经 pyshp 读为 `None`）两者都算「无 `Type`」；用 `?` 会把 JSON `null` 源判成
+   「可恢复却未恢复」而让 seed/bootstrap 永久回滚（round-1 cand-01）。
+   **刻意不含** `ST_Length(s.geom) > 0`——这是与 backfill 的**唯一**差异，正是它让「源几何退化 → backfill 返回 0」被断言抓到（B-5 绿腿）。
    计数 > 0 即抛 `QhhProductionBootstrapError`（code `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE`，details 带 rnv 与计数），
    事务回滚。**行为变化（有意）**：源 reach 零长度但带 `Type` 的网络上，`seed_qhh_output_segments` 过去成功（报告
    `geometry_missing_count`），现在 fail-closed。该 code **不**加入 `_persist_inactive_on_scheduler_visibility_blocker` 的持久停用集合：回滚保留此前已提交的
@@ -128,8 +131,8 @@ SQL 零变更、无 `*_QUERY_VERSION` bump（四列已在共享 SELECT 投影）
 
 ### D6 — #2160：回收 runner 收尾
 
-按 issue 推荐三条：`fstat` 并入既有 try 的 `except OSError → ("failed", error)`；`_hex_directories` / `_lane_targets`
-前置 `except (FileNotFoundError, NotADirectoryError): return [], None`（cache root 自身不豁免，`EACCES`/`ESTALE` 仍 failed）；
+按 issue 推荐三条：`fstat` 并入既有 try 的 `except OSError → ("failed", error)`；仅 `_lane_targets`（扫 `<root>/<hh>` 与 `.locks/<hh>`）
+前置 `except (FileNotFoundError, NotADirectoryError): return [], None`；`_hex_directories` 只列 cache root 与 `.locks`，**刻意不加**（cache root / `.locks` 自身不豁免），`EACCES`/`ESTALE` 仍 failed；
 wrapper 给 `SUMMARY_PATH` / `LOG_FILE` 各加 `LOG_ROOT` 同款 `case` 卫兵（`SUMMARY_PATH_NOT_ABSOLUTE` /
 `LOG_FILE_NOT_ABSOLUTE`，blocked 在取锁与任何写之前）。同类兄弟 `LOCK_PATH`（env 模板里**有**文档化的变量，
 `exec 9>` 在 `cd` 之前按调用方 cwd 解析）一并加 `LOCK_PATH_NOT_ABSOLUTE`。`BOOTSTRAP_LOG` 不纳入：它在 env 文件 source

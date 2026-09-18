@@ -1434,11 +1434,15 @@ def _assert_complete_qhh_output_segment_stream_type(
     candidate is dropped by its ``ST_Length(source.geom) > 0`` filter -- the
     erasure would commit with the tile cache identity unrotated.
 
-    The predicate reuses the backfill's candidate/source predicates verbatim
-    and deliberately omits ``ST_Length(s.geom) > 0``: a degenerate source reach
+    The predicate reuses the backfill's candidate/source predicates and
+    deliberately omits ``ST_Length(s.geom) > 0``: a degenerate source reach
     that still carries ``Type`` is exactly the case the backfill skips and this
-    check must catch. Run it after the trailing backfill; raising rolls the
-    whole transaction back, upsert included.
+    check must catch. "Carries ``Type``" means a non-null value
+    (``->>'Type' IS NOT NULL``), mirroring the backfill, which copies ``Type``
+    only when the source value is not JSON null: a source whose ``Type`` is
+    ``null`` (a blank dbf cell) legitimately leaves the output row without one.
+    Run it after the trailing backfill; raising rolls the whole transaction
+    back, upsert included.
     """
     cursor.execute(
         """
@@ -1457,7 +1461,7 @@ def _assert_complete_qhh_output_segment_stream_type(
                 AND (s.properties_json->>'iRiv') ~ '^[0-9]+$'
                 AND s.properties_json->>'iRiv' = t.properties_json->>'shud_riv_index'
                 AND s.geom IS NOT NULL
-                AND s.properties_json ? 'Type'
+                AND s.properties_json->>'Type' IS NOT NULL
           )
         """,
         (river_network_version_id,),

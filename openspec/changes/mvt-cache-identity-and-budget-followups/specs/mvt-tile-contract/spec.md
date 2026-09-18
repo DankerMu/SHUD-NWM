@@ -70,13 +70,21 @@ Every production path that rewrites EXISTING `core.river_segment` rows in place 
 
 ### Requirement: The output-segment upsert cannot commit a silently erased stream type
 
-Both entry points that run `qhh_production_bootstrap.py::_seed_output_segment_rows` (whose `ON CONFLICT DO UPDATE` rewrites `properties_json` and so erases the STORED `stream_type`) SHALL, after their trailing `_backfill_output_segment_geometry` call on the same cursor, fail with `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE` and roll the transaction back when any `shud_output_river` row of the network lacks a `Type` while its matching source reach (same network, not an output row, `iRiv` equal to the row's `shud_riv_index`, non-NULL geometry) carries one.
+Both entry points that run `qhh_production_bootstrap.py::_seed_output_segment_rows` (whose `ON CONFLICT DO UPDATE` rewrites `properties_json` and so erases the STORED `stream_type`) SHALL, after their trailing `_backfill_output_segment_geometry` call on the same cursor, fail with `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE` and roll the transaction back when any `shud_output_river` row of the network lacks a `Type` while its matching source reach (same network, not an output row, `iRiv` equal to the row's `shud_riv_index`, non-NULL geometry) carries a non-null one. A source `Type` that is absent or JSON `null` counts as no `Type`, exactly as the backfill (which copies `Type` only when it is not null) treats it.
 
 `_backfill_output_segment_geometry(..., only_missing=False)`, which both entry points run, rewrites and bumps even when the values are unchanged; this over-rotation — one extra cold miss per network for each operator-run bootstrap or seed — is accepted, because the seed path must keep rewriting unconditionally. Row-level `INSERT`/`DELETE` of river segments and imports run with `backfill_output_segment_geometry=False` are outside the `geometry_generation` counter: they refresh the network's `segment_count`/`checksum`, which the per-basin and national river-network digests include; the run-painted `hydro`/`hydro-national` layers are driven by run identity and are not rotated by those row-level paths.
 
 #### Scenario: Trailing backfill that restores nothing fails the seed closed
 - **WHEN** a network's output rows carry `Type` from an earlier backfill, their source reach geometry is degenerate so the trailing backfill updates 0 rows, and `seed_qhh_output_segments` runs
 - **THEN** it raises `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE`, and afterwards every output row still carries its `Type` and `geometry_generation` is unchanged
+
+#### Scenario: Trailing backfill that restores nothing fails the bootstrap closed
+- **WHEN** the same degenerate-source state is reached through the bootstrap main path (`_bootstrap_database`)
+- **THEN** it raises `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE` after its trailing backfill on the same cursor and the transaction rolls back
+
+#### Scenario: A source reach whose Type is JSON null does not block the seed
+- **WHEN** a source reach carries `"Type": null` (a blank numeric dbf cell) and the seed runs
+- **THEN** the seed commits, the matching output row has no `Type` and a NULL `stream_type`, and no `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE` is raised
 
 #### Scenario: A healthy seed passes
 - **WHEN** every output row whose source reach has a `Type` carries it after the trailing backfill

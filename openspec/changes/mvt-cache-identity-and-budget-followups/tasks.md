@@ -99,6 +99,16 @@
       在 3/6/3 上 BLANKED 响一次且瓦片零要素；维度超限一支的 oracle 是桩行单测（写明分工）；
       (f) 缓存 key 一次性轮转说明（river-network、run 级 hydro、全国 discharge）
 
+## R. Round-1 审查修复（PR #2489，verify-*.md 全部 CONFIRMED/FIX_NOW）
+
+- [x] R-1（cand-01）D3-1 源侧 `Type` 判据改 `s.properties_json->>'Type' IS NOT NULL`（与 backfill 的 `is not None` 同义）；
+      真实 DB 用例：源 reach `"Type": null`、几何正常 → `seed_qhh_output_segments` 提交成功、output 行无 `Type`、`stream_type` NULL、
+      不抛 `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE`（改前源码红：抛该 code）
+- [x] R-2（cand-02）bootstrap 入口 fail-closed 的回归覆盖：删掉或前移 `_bootstrap_database` 里的
+      `_assert_complete_qhh_output_segment_stream_type` 调用必须让某条测试变红（真实 DB 腿优先，或结构钉：同一 cursor、在尾随 backfill 之后）
+- [x] R-3（cand-03）design.md D6 更正：carve-out 仅 `_lane_targets`，`_hex_directories` 刻意不加
+- [x] R-4（cand-04）`docs/runbooks/display-readonly-live-mvt.md` §预算窗口截断信号 补 `MVT_TILE_FEATURE_OVERFLOW_BLANKED`（字段、含义、与 TRUNCATED 互斥）
+
 ## Evidence Floor
 
 | issue | 验收 | 证据 |
