@@ -72,6 +72,32 @@ GOLDEN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / f"river_ts_templates_{GOLDEN
 #: keeps its 54 chains and the file its 215, and all 19 other entries are
 #: byte-identical to the `51f9d273` capture. `base_sha` is therefore left
 #: alone — every other entry genuinely still comes from that base.
+#:
+#: NOT moved for #2451, and that is the point. #2451 changed
+#: `_SEGMENT_ROWS_SOURCE_SQL`'s two identity conjuncts from `=` to
+#: `IS NOT DISTINCT FROM`:
+#:
+#:     rt.basin_version_key IS NOT DISTINCT FROM (SELECT basin_version_key ...)
+#:     rt.river_network_version_key IS NOT DISTINCT FROM (SELECT ...)
+#:
+#: The golden's eight `forecast_store:<label>` entries and
+#: `forecast_store:segment_identity_predicates` still record the `= (` spelling.
+#: That is not stale data: it is `51f9d273`'s own text (`git show
+#: 51f9d273:packages/common/forecast_store.py`, lines 92 and 105), which is
+#: exactly what a base-tree capture is supposed to say. Those nine keys are
+#: RECORD-ONLY — they are not in `REGISTRY` at all (13 registered entries, 20
+#: golden entries), so no `source()` can replay them and
+#: `test_legacy_renderer_preserves_every_current_template_predicate` never
+#: compares them. The live source for that SQL is
+#: `forecast_store:segment_rows_source`, which is in `ROUTED_SOURCE_KEYS` and is
+#: not in the golden.
+#:
+#: The fixture was NOT regenerated and the base did not move. Regenerating it
+#: from the post-#2451 tree is the self-certifying capture the fixture's own
+#: `note` field, `test_the_golden_was_captured_at_the_change_base` and this pin
+#: exist to prevent; regenerating it from a pristine `51f9d273` tree — the
+#: documented path (I1-1980 decisions 11/12) — reproduces the `= (` spelling
+#: byte for byte, so it is a no-op for this change.
 GOLDEN_SHA256 = "d104d1c69cea55cdb86bd8a44d90d8f93c621580b43f74744f6b5cca7cd5a453"
 
 

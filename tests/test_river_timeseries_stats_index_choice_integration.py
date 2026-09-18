@@ -190,8 +190,8 @@ RECORDED_ROW_DIGESTS: dict[tuple[str, str], str] = {
     ("legacy/compressed/absent", "latest"): "13de2f519e437f3a",
 }
 
-#: The one cell design.md §2.2 leaves OPEN by construction, excused from the
-#: gate's assertion and from nothing else.
+#: The one cell design.md §2.2 leaves OPEN by construction, tracked as **#2471**,
+#: excused from the gate's assertion and from nothing else.
 #:
 #: ``run_bound/stale/legacy/uncompressed`` is reached through the legacy TEXT
 #: twin ``river_timeseries_mvt_selected_identity_valid_time_discovery_idx``
@@ -201,14 +201,16 @@ RECORDED_ROW_DIGESTS: dict[tuple[str, str], str] = {
 #: no lever on this cell: base, C1 and C2 all measured it red at ratio 999.0.
 #: ``tasks.md`` §2.2's bound says explicitly that a candidate leaving this cell
 #: red has not thereby failed, and §6.3 files it as its own issue rather than
-#: folding it in. It expires with #1988's DROP.
+#: folding it in — that issue is **#2471**. It expires with #1988's DROP, which
+#: removes the text twin this entry exists for.
 #:
-#: What this does NOT excuse: row identity. A digest failure on this cell is
-#: reported like any other, because must-preserve #1 has nothing to do with which
-#: index the planner took.
+#: What this does NOT excuse: row identity and non-vacuity — see
+#: ``_NEVER_EXCUSED_PREFIXES``. Neither has anything to do with which index the
+#: planner took.
 EXPECTED_OPEN_CELLS: dict[str, str] = {
     "run_bound/stale/legacy/uncompressed": (
-        "design.md §2.2 / tasks.md §6.3: reached through the legacy TEXT twin, which C1 has no lever on"
+        "#2471 (design.md §2.2 / tasks.md §6.3): reached through the legacy TEXT twin, "
+        "which C1 has no lever on; expires with #1988's DROP"
     ),
 }
 

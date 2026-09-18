@@ -545,8 +545,12 @@ def test_the_expected_open_entry_names_the_cell_design_md_leaves_open() -> None:
     cell nobody argued for, which is the failure mode an allowlist has.
     """
     assert set(EXPECTED_OPEN_CELLS) == {_OPEN_CELL}
-    assert "TEXT twin" in EXPECTED_OPEN_CELLS[_OPEN_CELL]
-    assert "§6.3" in EXPECTED_OPEN_CELLS[_OPEN_CELL]
+    reason = EXPECTED_OPEN_CELLS[_OPEN_CELL]
+    assert "TEXT twin" in reason
+    assert "§6.3" in reason
+    # The tracking issue, by number: a reader must be able to reach #2471 from
+    # the gate's own output without grepping the OpenSpec fixture for it.
+    assert "#2471" in reason
 
 
 def test_an_expected_open_cell_is_excused_for_its_plan_criteria() -> None:

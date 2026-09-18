@@ -229,8 +229,9 @@ def evaluate_cell(
     inflated and would make criterion 3 unfalsifiable.
 
     Criterion 3 fails a node only when BOTH bounds are exceeded: the multiple of
-    the baseline AND ``shared_hit_absolute_floor``. The 2026-09-18 run measured
-    why (matrix.json, base variant): ``latest/absent/legacy/uncompressed`` read
+    the baseline AND ``shared_hit_absolute_floor``. The 2026-09-18 baseline run
+    measured why (``matrix-baseline-20260918.json``, taken against the unfixed
+    tree before C1 was selected): ``latest/absent/legacy/uncompressed`` read
     51 shared hits against a baseline of 8 (limit 64) and PASSED, while
     ``latest/absent/narrow/uncompressed`` read 50 against a baseline of 6
     (limit 48) and FAILED — the same healthy plan shape, the segment key bound in
