@@ -202,11 +202,12 @@
 ## 5. River rollout on node-27 (I8)
 
 - [x] 5.1 Runbook: maintenance-window checklist in the pinned order (timers stop → API/parser stop → `git pull --ff-only` → `migrate.py` → start → timers start), the pre-expand legacy-backlog compression recipe, the D12 reverse sequence with the allowed intermediate state, and the "transitional cold tier does not cover `_legacy`" note. Verify: rollback rehearsal on a throwaway cluster recorded.
-- [ ] 5.2 Execute and post the receipt: per-statement wall time; first narrow chunk size after one full cycle; curve EXPLAIN gate for SHJ-NJ and a small network on narrow uncompressed, narrow compressed and legacy (bounds: `river_segment_key` in Index Cond / segmentby pruning, `Rows Removed / returned ≤ 10`, `shared hit ≤ 5000`, SQL warm P95 ≤ 300 ms over ≥ 5 samples, local single-source `forecast-series` warm P95 ≤ 500 ms); identity-existence probe miss branch before/after with coverage-loss list; registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with screenshots; display deny-write receipt (checklist C1–C4); `/ops` reachable; the regression criterion recorded.
+- [x] 5.2 Execute and post the receipt: per-statement wall time; first narrow chunk size after one full cycle; curve EXPLAIN gate for SHJ-NJ and a small network on narrow uncompressed, narrow compressed and legacy (bounds: `river_segment_key` in Index Cond / segmentby pruning, `Rows Removed / returned ≤ 10`, `shared hit ≤ 5000`, SQL warm P95 ≤ 300 ms over ≥ 5 samples, local single-source `forecast-series` warm P95 ≤ 500 ms over ≥ 30 samples on a quiescent node — autopipe unit inactive and 1-min load < 2.0); identity-existence probe miss branch before/after with coverage-loss list; registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with screenshots; display deny-write receipt (checklist C1–C4); `/ops` reachable; the regression criterion recorded.
 
-  **5.2 status, 2026-09-18 (`receipts/2026-09-18-i8-task52/`, reviewed process sha
-  `258b06ec`):** nine of the eleven items are measured and green, one spec bound reads
-  green or red depending on a decision about machine state, and one item is unobtainable.
+  **5.2 CLOSED, 2026-09-18 (`receipts/2026-09-18-i8-task52/`, reviewed process sha
+  `258b06ec`).** Ten of the eleven items are measured and green; the eleventh is waived by
+  the user. Both open decisions were taken on 2026-09-18 and are recorded at the end of
+  this block.
 
   Green: curve EXPLAIN gate GREEN on all six cells (2 networks × 3 storage states), worst
   `shared hit` 569 against 5000, worst SQL warm P95 3.156 ms against 300 ms, worst
@@ -220,7 +221,7 @@
   `/ops` 200. Regression criterion recorded, worst ratio 2.19×, zero fact Seq Scans — not
   tripped.
 
-  **The local API bound is state-dependent, and that is the second open decision.**
+  **The local API bound: GREEN under the bound as now written.**
   Single-source `forecast-series` warm P95 ≤ 500 ms, same script and same six runs,
   measured in both machine states:
 
@@ -236,19 +237,41 @@
   4.44 → 6.92, and the contended measurement sat inside it. An earlier n = 8 pass reading
   233.4 ms is **retracted** (at n = 8 the P95 index lands on the maximum). The **relative**
   regression criterion passes in both states — worst 2.19× contended, 1.17× quiescent.
-  The spec line carries no machine-state qualifier, so whether this gate reads green is a
-  decision, not a measurement: if the bound must hold under co-located ingest, I9 (#1988)
-  is blocked on **#2486**; if it is a quiescent bound, I9 waits only on the wall-time item
-  below plus the separate GO. Receipt §2 has both distributions and both raw JSONs.
+  Receipt §2 has both distributions and both raw JSONs.
 
-  **The one item left, and why the box stays unchecked:** per-statement expand wall time
-  for the live application of `000059` **does not exist and cannot be produced**. The only
-  per-statement timing in the repo is the disposable-cluster rehearsal
+  **The eleventh item, waived.** Per-statement expand wall time for the live application
+  of `000059` **does not exist and cannot be produced**. The only per-statement timing in
+  the repo is the disposable-cluster rehearsal
   (`receipts/2026-09-12-i8-rollback/receipt.json:868-873`, 0.027 s); the production
   reforward window found `000059` already applied (`0 applied, 53 skipped`) and recorded
-  only window wall clock. Re-running it is forbidden and would measure nothing. This needs
-  a user decision — waive the item or accept the window-level timing in its place — not a
-  fabricated number.
+  only window wall clock. Re-running it is forbidden and would measure nothing.
+
+  **The two decisions, taken by the user on 2026-09-18:**
+
+  1. **Per-statement expand wall time — WAIVED.** The window-level wall clock
+     (`receipts/2026-09-15-i8-reforward/production-reforward-receipt.json`: T0 02:28:31Z →
+     `WINDOW_VALIDATED` 02:29:30Z) stands in its place. No number was fabricated.
+  2. **The API bound is a quiescent, read-path bound** — not a capacity bound. Decisive
+     reason: while a full-cycle ingest saturates the node the **legacy** path misses the
+     same bound (`shj_nj/legacy` 623.7 ms, 3/30 over), so in that state the measurement
+     cannot discriminate this change and would have blocked the migration before it began.
+     The bound text was amended accordingly in all three places that carry it
+     (`specs/timeseries-narrow-store/spec.md`, `design.md`, and task 5.2 above): the
+     measurement condition is now explicit and reproducible — autopipe unit inactive and
+     1-minute load < 2.0 — and the sample floor of 30 is stated, because n = 8 read the
+     same cell as 233.4 ms and then 699.3 ms. The number itself did not move.
+
+  **Consequences of decision 2, both carried forward rather than dropped:**
+
+  - **#2486 is re-scoped, not closed.** It is no longer a spec-gate failure; it is a
+    production capacity item — roughly 40 minutes of every forecast cycle at up to 955 ms
+    P95 is user-visible. Its real guard is the user-facing river-click P95 bound, one tier
+    above this one.
+  - **The `@live-river-click` lane is on I9's pre-GO checklist.** The oracle exists
+    (#1970, `apps/frontend/e2e/live-display.spec.ts:90`, one warmup + 20 serial clicks,
+    nearest-rank P95) but has produced **no receipt against node-27** — no lane evidence
+    file exists under `artifacts/`. Since the user-facing guarantee is now explicitly
+    delegated to that bound, it cannot stay empty through I9.
 
   **Execution split:** `fixtures/I8-1987.md` (expanded/high). First PR is task 5.1;
   second PR is task 5.2 after the separately authorized live window. Keep #1987 open.
