@@ -51,7 +51,7 @@ buffers warm), not an HTTP cache hit.
 | 3/6/2 | 398 948 | `c40f42814bfa755eee4692023cffafef` | 398 948 | equal | 2 406 | 4 841 | 0.84 | 0.83 |
 | 3/6/3 | 1 847 138 | `683bc60100b529c2482afe1fb6ed0020` | 2 043 786 | `fd271597c86ae1c92869b26f523bcb75` | 10 991 | 21 987 | 2.30 | 2.30 |
 
-Exactly the five tiles that intersect more than 10 000 features changed bytes; every tile under the old limit is
+Exactly the four tiles that intersect more than 10 000 features changed bytes; every tile under the old limit is
 md5-identical. That is the reason `NATIONAL_DISCHARGE_QUERY_VERSION` moves to v6 (the cache key hashes neither SQL
 nor binds).
 
@@ -104,7 +104,7 @@ The dimension-overflow arm cannot be forced on real 2D data; its oracle is the s
 
 ## Real-DB test lane
 
-The selector's 68 test files for this PR (including every integration file) ran on the clone above:
+The selector's 68 test files for this PR (including every integration file) ran on the same clone at `33b999d8a` (the head before the guard-revert commit):
 `4757 passed, 1 failed, 4 skipped in 1887.98s`. The single failure was the #1948 structural-guard contract rejecting
 a `.large-file-guard.json` exclusion this branch had added; the exclusion was removed (the guard file is identical to
 master) and that group re-ran green.

@@ -100,7 +100,7 @@ OpenSpec change: mvt-cache-identity-and-budget-followups (generated)
 ### D4 — #2165：按层 feature 预算（产品裁定）
 
 裁定：**按层 feature limit**（issue 推荐项；备选 B 全局提限有 `services/tiles/mvt.py` 注释记录的否决先例，备选 A 改变制图口径）。
-开工前实测（见 proposal）推翻了 issue「只有 z3」的前提：z0–z3 五张全被截，最大相交 13 770。取值
+开工前实测（见 proposal）推翻了 issue「只有 z3」的前提：z0–z3 各一张（共 4 张）全被截，最大相交 13 770。取值
 `NATIONAL_DISCHARGE_FEATURE_LIMIT = 20_000`：对 13 770 留约 45% 余量。字节：实测 160–202 B/feature
 （z2 2/3/1 = 160，3/6/3 = 186，4/12/6 = 190，5/25/12 = 202）⇒ 20 000 约 3.2–4.0 MB，低于 `MVT_MAX_BYTES = 5_000_000`
 （超限是**硬 413**，不是优雅截断，故不再往上取）；坐标：实测 2.0–2.3 coord/feature，20 000 ≈ 40–46k，仍低于该层

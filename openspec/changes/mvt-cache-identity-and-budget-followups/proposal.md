@@ -15,7 +15,7 @@
     bootstrap/重导入窗口内并发会 `deadlock detected`。
 - **瓦片预算组**（同一个绑定点 `_fetch_postgis_tile_bytes`）
   - **#2165** 全国流量层 feature 臂被 `MVT_MAX_FEATURES=10000` 截断。本批开工前在 node-27 生产库只读实测
-    （`nhms_display_ro`，q_down，valid_time `2026-09-23T23:00:00Z`）：**不止 z3**，z0/z1/z2/z3 共 5 张中国瓦片
+    （`nhms_display_ro`，q_down，valid_time `2026-09-23T23:00:00Z`）：**不止 z3**，z0/z1/z2/z3 各一张、共 4 张中国瓦片
     相交数 13770/13770/13392/10991 全部超 10000；z4/z5 最大 7242/7035。
   - **#2166** 单要素坐标/维度超限让 `budget_gate` 空集，整张瓦片零要素 200、零日志、照常入缓存。
 - **回收 runner 组**
