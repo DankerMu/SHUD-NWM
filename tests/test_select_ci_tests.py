@@ -9250,6 +9250,22 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_baseline_cutover_cli.py"): "edge-consumer",
+    # -- edge-consumer: the forcing read-path suite's package drag-in (#1990) -
+    # tests/test_forcing_read_path_store_routing.py belongs to the FORCING read
+    # surface: FORCING_SQL_SHAPE_ORACLE_TESTS is ridden by every registered
+    # forcing reader path, INCLUDING
+    # workers/model_registry/qhh_production_bootstrap.py, which is the module
+    # this suite actually contracts (reader #8). The gap is only the PACKAGE
+    # BASE: `from workers.model_registry import qhh_production_bootstrap`
+    # contributes `workers.model_registry` to the importer index as well as the
+    # submodule, exactly as the slurm array-job `__init__.py` entries above do.
+    # Copying the suite into `workers/model_registry/**` would make every
+    # model-registry PR — list-basins, bootstrap CLI, registry writes — pay for
+    # nine forcing template oracles it cannot break.
+    (
+        "workers/model_registry/__init__.py",
+        "tests/test_forcing_read_path_store_routing.py",
+    ): "edge-consumer",
 }
 
 

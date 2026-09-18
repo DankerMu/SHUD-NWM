@@ -271,6 +271,15 @@ def _delete_rendered(
     ``table`` survives only as the ``deleted`` payload key, which is therefore
     the *physical* relation the statement touched and follows task 7.3's rename
     for free.
+
+    SO THE RECEIPT KEY CHANGES AT 7.3, AND THAT IS INTENDED. The forcing entry
+    reads ``met.forcing_station_timeseries`` today and will read
+    ``met.forcing_station_timeseries_legacy`` the moment
+    ``forcing_ts_render.FORCING_TABLE_LEGACY`` is flipped in the migration's own
+    commit, because a receipt that names the relation the DELETE did not touch is
+    worse than no receipt. No consumer pins either spelling — the smoke receipt is
+    read by a human — so 7.3 has nothing to migrate here and should not treat the
+    changed key as a regression.
     """
     cur.execute(statement, params)
     deleted[table] = cur.rowcount

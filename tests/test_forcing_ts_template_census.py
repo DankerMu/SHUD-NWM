@@ -24,11 +24,21 @@ Cut (a) (task 7.2a) landed this census with an EMPTY register, which made its
 closure assertion vacuous in the ``registered`` term. **Cut (b) (task 7.2) wired
 all nine readers**, so:
 
-* **the closure assertion now bites in both terms.** Every mention the sweep
-  finds must be either a registered template's own or an exempt row's, and
-  ``set(discovered) == set(FORCING_TABLE_CENSUS)`` is what catches a wired reader
-  that goes back to spelling the table name: its file re-enters the discovered
-  set and the equality fails.
+* **the closure assertion bites on every SPELLING, and on nothing else.** Every
+  mention the sweep finds must be either a registered template's own or an
+  exempt row's, and ``set(discovered) == set(FORCING_TABLE_CENSUS)`` is what
+  catches a wired reader that goes back to spelling the table name: its file
+  re-enters the discovered set and the equality fails. What it does NOT catch,
+  and a green run must not be read as catching, is a new TEMPLATE: D1's token
+  means every registered entry carries ``mentions=0``, so ``registered + exempt
+  == mentions`` is really ``exempt == mentions`` and the ``registered`` term
+  constrains nothing. River keeps that grip because its entries carry
+  ``mentions=1``; the forcing side buys it back structurally instead —
+  :func:`test_every_forcing_template_pair_in_the_tree_is_registered` walks the
+  same files for ``ForcingTemplatePair`` construction sites and demands the
+  register name every one of them. A tenth pair beside the nine is red there,
+  which is also what stops it from silently skipping ``test_i1_i2_*``,
+  ``test_i5_*``, the byte-identity pins and the ``params`` claim.
 * **the five wired reader files are GONE from the census, by design.** Their
   templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
   rather than the name, so ``packages/common/display_coverage.py``,
@@ -95,9 +105,11 @@ from tests.forcing_ts_template_registry import (
     REPO_ROOT,
     UNWIRED_READERS,
     discover_forcing_mentions,
+    discover_forcing_template_pairs,
     exempt_by_path,
     forcing_table_mentions,
     registered_by_path,
+    registered_template_pairs,
 )
 
 # ---------------------------------------------------------------------------
@@ -195,6 +207,129 @@ def _assert_census_closes(discovered: dict[str, int]) -> None:
             f"{path}: {registered.get(path, 0)} mentions in registered templates + "
             f"{exempt.get(path, 0)} declared exempt mentions != {mentions} in the source"
         )
+
+
+def _assert_every_pair_is_registered(discovered: dict[str, tuple[str, ...]]) -> None:
+    """Every ``ForcingTemplatePair`` under the discovery roots is a registered one.
+
+    Factored out for the same reason :func:`_assert_census_closes` is: the live
+    tree is green by construction, so the only way to show this guard BITES is to
+    hand it a planted offender.
+    """
+    registered = registered_template_pairs()
+    found = {(path, name) for path, names in discovered.items() for name in names}
+    declared = {(path, name) for path, names in registered.items() for name in names}
+    assert found == declared, (
+        "every ForcingTemplatePair constructed under the discovery roots must be in FORCING_REGISTRY; "
+        f"unregistered: {sorted(found - declared)}; "
+        f"registered but not found in the tree: {sorted(declared - found)}"
+    )
+
+
+def test_every_forcing_template_pair_in_the_tree_is_registered() -> None:
+    """The exhaustiveness guard D1 owes the census.
+
+    ``registered + exempt == mentions`` cannot see a new template any more —
+    every entry carries ``mentions=0`` — so this is the assertion that forces a
+    tenth pair into the register, and through it into the shape oracles
+    (``test_i1_i2_*``, ``test_i3_i4_*``, ``test_i5_*``, ``params``) and the M6
+    AST sweep, whose ``WIRED_READER_PATHS`` is itself DERIVED from the register
+    and therefore blind to a sixth file on its own.
+
+    Task 7.3 is where this stops being hypothetical: the write-side row-count
+    payloads (``forcing_ts_render.py`` docstring, "become templates in task
+    7.3") land in ``workers/forcing_producer/store.py`` and
+    ``packages/common/forcing_domain_handoff_apply.py``, neither of which the
+    register covers today.
+    """
+    _assert_every_pair_is_registered(discover_forcing_template_pairs())
+
+
+def test_the_registered_nine_are_exactly_the_pairs_the_tree_holds() -> None:
+    """The per-file shape of the same equality, which the set form flattens away.
+
+    Nine pairs across five files, five of them in ``forecast_store.py``. Pinned
+    per file because "the register names nine things" and "the tree holds nine
+    pairs in the files the register names" are different claims, and only the
+    second one is what the guard above rests on.
+    """
+    assert discover_forcing_template_pairs() == {
+        "packages/common/best_available.py": ("_FORCING_INPUTS_TEMPLATES",),
+        "packages/common/display_coverage.py": ("_STATION_SAMPLE_ROWS_TEMPLATES",),
+        "packages/common/forecast_store.py": (
+            "_FORCING_READINESS_OVERALL_TEMPLATES",
+            "_FORCING_READINESS_VARIABLE_ROWS_TEMPLATES",
+            "_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES",
+            "_STATION_FORCING_MEMBERSHIP_TEMPLATES",
+            "_STATION_SERIES_ROWS_TEMPLATES",
+        ),
+        "scripts/reset_qhh_smoke_db.py": ("_FORCING_TIMESERIES_DELETE_TEMPLATES",),
+        "workers/model_registry/qhh_production_bootstrap.py": ("_DYNAMIC_FORCING_COUNT_TEMPLATES",),
+    }
+    assert registered_template_pairs() == discover_forcing_template_pairs()
+
+
+def test_an_unregistered_template_pair_is_red() -> None:
+    """The guard against a planted offender, in both directions that matter.
+
+    A tenth pair in an ALREADY REGISTERED file is the case D1 made invisible to
+    the closure check (``forecast_store.py`` scores 0 registered mentions, so a
+    tenth entry would not move a single number there), and a pair in a BRAND NEW
+    file is the case ``WIRED_READER_PATHS`` cannot see because it is derived from
+    the register. Both must name the offender.
+    """
+    tenth_in_a_registered_file = dict(discover_forcing_template_pairs())
+    tenth_in_a_registered_file["packages/common/forecast_store.py"] += ("_FORCING_QUANTILE_ROWS_TEMPLATES",)
+    with pytest.raises(AssertionError, match="_FORCING_QUANTILE_ROWS_TEMPLATES"):
+        _assert_every_pair_is_registered(tenth_in_a_registered_file)
+
+    brand_new_file = dict(discover_forcing_template_pairs())
+    brand_new_file["workers/forcing_producer/store.py"] = ("_FORCING_ROW_COUNT_TEMPLATES",)
+    with pytest.raises(AssertionError, match="workers/forcing_producer/store.py"):
+        _assert_every_pair_is_registered(brand_new_file)
+
+    deregistered = dict(discover_forcing_template_pairs())
+    del deregistered["packages/common/best_available.py"]
+    with pytest.raises(AssertionError, match="registered but not found in the tree"):
+        _assert_every_pair_is_registered(deregistered)
+
+
+def test_the_pair_sweep_sees_every_callee_form_and_refuses_an_unnameable_pair(tmp_path) -> None:
+    """The sweep's own contract, on a synthetic tree.
+
+    Three escapes a ``ast.Name``-only, module-level-only walk would hand an
+    author for free, all closed: the ``Attribute`` callee form, the aliased
+    import, and — fail-closed rather than ignored — a pair built where no
+    module-level name can hold it, which
+    :func:`registered_template_pairs` could never resolve and which would
+    therefore read as "no template here".
+    """
+    (tmp_path / "packages").mkdir(parents=True)
+    (tmp_path / "packages" / "attribute_form.py").write_text(
+        "from packages.common import forcing_ts_render\n"
+        'PAIR = forcing_ts_render.ForcingTemplatePair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "aliased.py").write_text(
+        "from packages.common.forcing_ts_render import ForcingTemplatePair as Pair\n"
+        'ALIASED: Pair = Pair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "no_pairs.py").write_text("X = 1\n", encoding="utf-8")
+
+    assert discover_forcing_template_pairs(tmp_path, ("packages",)) == {
+        "packages/aliased.py": ("ALIASED",),
+        "packages/attribute_form.py": ("PAIR",),
+    }
+
+    (tmp_path / "packages" / "built_in_a_function.py").write_text(
+        "from packages.common.forcing_ts_render import ForcingTemplatePair\n"
+        "def templates():\n"
+        '    return ForcingTemplatePair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="built_in_a_function.py"):
+        discover_forcing_template_pairs(tmp_path, ("packages",))
 
 
 def test_the_sweep_finds_exactly_the_declared_files() -> None:

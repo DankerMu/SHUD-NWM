@@ -61,6 +61,24 @@ from packages.common.forcing_ts_render import (
 )
 from scripts import reset_qhh_smoke_db
 from tests.forcing_ts_template_registry import FORCING_REGISTRY, REPO_ROOT, entry_by_key
+
+# AT MODULE SCOPE ON PURPOSE, and the scope is the whole point rather than a
+# style preference. Reader #2's byte-identity pin is driven through four private
+# helpers of ``tests/test_qhh_latest_fallback_pushdown.py``, which is a member of
+# river's ``SQL_SHAPE_ORACLE_TESTS``. ``select_ci_tests._build_suite_importer_index``
+# inverts MODULE-LEVEL import edges only, so while this import sat inside
+# ``_executed_latest_product`` a PR renaming ``_fallback_statements`` over there
+# did not select this suite and went red on the post-merge master run instead —
+# the exact debt class #1990 cut (b) was sent to repay, pointing the other way.
+# Hoisting it is what makes the dependency visible to the selector; it is also
+# the shape that file already uses for its own cross-suite helper import
+# (``from tests.test_sql_shape_helpers import outer_predicates``, :38).
+from tests.test_qhh_latest_fallback_pushdown import (
+    _HEADER_ROW,
+    BindingCheckedCursor,
+    _fallback_statements,
+    _run_fallback,
+)
 from workers.model_registry import qhh_production_bootstrap
 
 PRE_WIRING_FIXTURE = REPO_ROOT / "tests/fixtures/forcing_read_path_pre_wiring_0c92093e7.json"
@@ -215,13 +233,6 @@ def _executed_forcing_delete() -> tuple[str, Any]:
 
 
 def _executed_latest_product() -> str:
-    from tests.test_qhh_latest_fallback_pushdown import (
-        _HEADER_ROW,
-        BindingCheckedCursor,
-        _fallback_statements,
-        _run_fallback,
-    )
-
     cursor = BindingCheckedCursor(header_rows=[dict(_HEADER_ROW)])
     _run_fallback(cursor)
     _header_sql, heavy_sql = _fallback_statements(cursor)
@@ -321,17 +332,24 @@ def test_the_delete_payload_key_follows_the_renderer_constant() -> None:
     were a literal in the script the census would count it as an unregistered
     read; taking it from the constant also makes the key follow task 7.3's rename
     for free, which is the behaviour the smoke receipt should have.
+
+    ``next(...)`` would take the FIRST call and pin only that one. There is
+    exactly one today and the count is asserted rather than assumed: task 7.3
+    adds the narrow table's delete, and that PR should have to edit this pin
+    deliberately rather than inherit a silent pass on its new call site.
     """
     source = (REPO_ROOT / "scripts/reset_qhh_smoke_db.py").read_text(encoding="utf-8")
-    call = next(
+    calls = [
         node
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_delete_rendered"
-    )
-    assert isinstance(call.args[2], ast.Name)
-    assert call.args[2].id == "FORCING_TABLE_LEGACY"
+    ]
+    assert len(calls) == 1, f"expected exactly one _delete_rendered call site, found {len(calls)}"
+    table = calls[0].args[2]
+    assert isinstance(table, ast.Name)
+    assert table.id == "FORCING_TABLE_LEGACY"
 
 
 # ---------------------------------------------------------------------------
@@ -419,15 +437,53 @@ def test_station_series_predicates_survived_the_templating() -> None:
 # ---------------------------------------------------------------------------
 
 
+RENDER_FUNCTION = "render_forcing_ts_sql"
+
+
+def _is_render_call(node: ast.AST) -> bool:
+    """A call to the forcing renderer, in either callee form.
+
+    BOTH forms, because ``store`` is what M6 rests on and a sweep with a
+    published bypass proves nothing: an ``ast.Name``-only check made
+    ``forcing_ts_render.render_forcing_ts_sql(pair, "narrow")`` invisible, and
+    the modules under this sweep are free to import the module rather than the
+    function.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id == RENDER_FUNCTION
+    return isinstance(node.func, ast.Attribute) and node.func.attr == RENDER_FUNCTION
+
+
 def _render_call_stores(source: str) -> list[ast.expr]:
-    return [
-        node.args[1]
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "render_forcing_ts_sql"
-        and len(node.args) >= 2
-    ]
+    """The ``store`` expression of every renderer call site, FAIL-CLOSED.
+
+    ``store`` is positional-or-keyword
+    (``packages/common/forcing_ts_render.py``), so
+    ``render_forcing_ts_sql(pair, store="narrow")`` has ``len(node.args) == 1``.
+    The previous ``len(node.args) >= 2`` filter therefore SKIPPED it — not
+    flagged, skipped — and ``assert stores`` only noticed for the four modules
+    that call the renderer exactly once. ``forecast_store.py`` calls it five
+    times and could have lost one silently.
+
+    A call whose store cannot be determined statically (``*args``, ``**kwargs``,
+    or no store at all) yields the CALL NODE itself rather than being dropped, so
+    it fails the literal-``legacy`` assertion below instead of disappearing from
+    it. That keeps this strictly a superset of the sweep it replaces: nothing
+    that was checked before is now skipped.
+    """
+    stores: list[ast.expr] = []
+    for node in ast.walk(ast.parse(source)):
+        if not _is_render_call(node):
+            continue
+        assert isinstance(node, ast.Call)
+        if len(node.args) >= 2 and not isinstance(node.args[1], ast.Starred):
+            stores.append(node.args[1])
+            continue
+        keyword = next((word.value for word in node.keywords if word.arg == "store"), None)
+        stores.append(keyword if keyword is not None else node)
+    return stores
 
 
 @pytest.mark.parametrize("path", WIRED_READER_PATHS)
@@ -449,8 +505,84 @@ def test_every_render_call_site_passes_the_literal_legacy(path: str) -> None:
     for node in stores:
         assert isinstance(node, ast.Constant) and node.value == "legacy", (
             f"{path}: render_forcing_ts_sql must be called with the literal 'legacy' in this task "
-            f"(got {ast.dump(node)})"
+            f"(got {ast.dump(node)}; a whole Call node here means the store could not be determined "
+            "statically, which is refused rather than skipped)"
         )
+
+
+@pytest.mark.parametrize(
+    ("label", "call"),
+    [
+        ("keyword store", 'render_forcing_ts_sql(PAIR, store="narrow")'),
+        ("attribute callee", 'forcing_ts_render.render_forcing_ts_sql(PAIR, "narrow")'),
+        ("attribute callee, keyword store", 'forcing_ts_render.render_forcing_ts_sql(PAIR, store="narrow")'),
+    ],
+)
+def test_the_render_call_sweep_resolves_the_store_it_used_to_skip(label: str, call: str) -> None:
+    """Every spelling that used to be SKIPPED rather than flagged, RESOLVED.
+
+    The sweep's two old filters (``ast.Name`` callee, ``len(args) >= 2``) each
+    dropped a call SILENTLY, and a dropped call is indistinguishable from a
+    compliant one — ``assert stores`` only notices when a module's EVERY call is
+    dropped, which is four of the five wired modules and not the one with five
+    call sites. A guard a caller steps around by moving one argument to a keyword
+    is not the thing M6 is written against.
+
+    Asserted on the RESOLVED NODE rather than on "does not equal legacy": the
+    fail-closed sentinel below also does not equal ``legacy``, so a keyword
+    resolution that was broken and always fell through to the sentinel would pass
+    a negative assertion while being unable to tell ``store="legacy"`` from
+    ``store="narrow"``. This pins that it reads the actual argument.
+    """
+    stores = _render_call_stores(f"{call}\n")
+    assert len(stores) == 1, label
+    assert isinstance(stores[0], ast.Constant) and stores[0].value == "narrow", label
+
+
+@pytest.mark.parametrize(
+    ("label", "call"),
+    [
+        ("store from a name", "render_forcing_ts_sql(PAIR, store)"),
+        ("splatted arguments", "render_forcing_ts_sql(*ARGS)"),
+        ("splatted positional store", "render_forcing_ts_sql(PAIR, *REST)"),
+        ("splatted keywords", "render_forcing_ts_sql(PAIR, **KWARGS)"),
+    ],
+)
+def test_the_render_call_sweep_fails_closed_on_a_store_it_cannot_read(label: str, call: str) -> None:
+    """A store no static reader can resolve is REFUSED, not dropped.
+
+    ``store`` from a name was always refused (an ``ast.Name`` is not the literal
+    ``legacy``); the three splatted forms are new, and dropping them would be the
+    same silent skip in a new spelling. The whole ``ast.Call`` is what the sweep
+    yields, so the M6 assertion fails and its message says the store could not be
+    determined.
+    """
+    stores = _render_call_stores(f"{call}\n")
+    assert len(stores) == 1, label
+    assert not (isinstance(stores[0], ast.Constant) and stores[0].value == "legacy"), label
+    if "*" in call:
+        assert isinstance(stores[0], ast.Call), label
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'render_forcing_ts_sql(PAIR, "legacy", entry="probe")',
+        'render_forcing_ts_sql(PAIR, store="legacy", entry="probe")',
+        'forcing_ts_render.render_forcing_ts_sql(PAIR, store="legacy")',
+    ],
+)
+def test_the_render_call_sweep_still_accepts_the_compliant_form(call: str) -> None:
+    """The other direction: the superset must not have become a blanket refusal.
+
+    The keyword and attribute spellings are here too, and that is the half that
+    matters — a resolver that refused everything it could not read positionally
+    would pass every negative test above while making the compliant keyword form
+    unwritable.
+    """
+    stores = _render_call_stores(f"{call}\n")
+    assert len(stores) == 1
+    assert isinstance(stores[0], ast.Constant) and stores[0].value == "legacy"
 
 
 #: Identifiers that exist ONLY on the narrow forcing table. Scoped to the forcing

@@ -37,6 +37,16 @@ of the discovery sweep. The closure assertion's weight moved onto
 ``packages/common/forcing_ts_render.py``'s own two constants and onto the exempt
 files. See the execution split in ``fixtures/I11-1990.md``.
 
+AND THAT IS WHY THERE IS A SECOND SWEEP. ``mentions=0`` everywhere makes
+``registered + exempt == mentions`` degenerate to ``exempt == mentions``: the
+closure keeps every grip it had on a new SPELLING and loses the one river still
+has on a new TEMPLATE (river's entries carry ``mentions=1``, so a tenth
+statement in a registered file moves that file's count and must be registered to
+close). :func:`discover_forcing_template_pairs` and
+:func:`registered_template_pairs` are what replaces it — a structural walk over
+the same files insisting that every ``ForcingTemplatePair`` constructed under
+the discovery roots is one this register names.
+
 The census counter
 ------------------
 
@@ -52,8 +62,9 @@ from __future__ import annotations
 import ast
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -524,12 +535,33 @@ def discover_forcing_mentions(
     and a file that does not parse, or that is not UTF-8, now fails the sweep
     closed rather than being silently skipped. Both failures NAME THE FILE: the
     parse one through the ``filename`` handed to :func:`forcing_table_mentions`,
-    the decode one through the re-raise below, because it fires in ``read_text``
-    before the counter is entered. Fail-closed over a few hundred files is only
-    usable if the diagnostic points at one of them.
+    the decode one through the re-raise in :func:`_iter_python_sources`, because
+    it fires in ``read_text`` before the counter is entered. Fail-closed over a
+    few hundred files is only usable if the diagnostic points at one of them.
+
+    This is the census's TEXT half. :func:`discover_forcing_template_pairs` is
+    the structural half over the same walk, and since D1 it is the one that can
+    see a new template at all — the token means a wired reader spells the table
+    name nowhere, so it contributes nothing here.
     """
-    base = REPO_ROOT if root is None else root
     found: dict[str, int] = {}
+    for path, relative, source in _iter_python_sources(REPO_ROOT if root is None else root, roots):
+        count = forcing_table_mentions(source, filename=str(path))
+        if count:
+            found[relative] = count
+    return found
+
+
+def _iter_python_sources(base: Path, roots: tuple[str, ...]) -> Iterator[tuple[Path, str, str]]:
+    """Every ``.py`` file under ``roots``, as ``(absolute path, base-relative path, source)``.
+
+    The ONE walk both sweeps below are defined over, factored out rather than
+    copied so "the exhaustiveness guard looks where the census looks" is true by
+    construction: same roots, same :data:`_PRUNED_DIRECTORIES`, same sorted
+    order, same fail-closed contract on a file that cannot be decoded. A second
+    walk with its own prune list would let a directory be added to one and not
+    the other, which is precisely the escape both sweeps exist to close.
+    """
     for name in roots:
         for directory, subdirectories, filenames in os.walk(base / name):
             subdirectories[:] = [entry for entry in sorted(subdirectories) if entry not in _PRUNED_DIRECTORIES]
@@ -541,7 +573,145 @@ def discover_forcing_mentions(
                     source = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError as error:
                     raise ValueError(f"{path}: not valid UTF-8, so the census cannot count it ({error})") from error
-                count = forcing_table_mentions(source, filename=str(path))
-                if count:
-                    found[path.relative_to(base).as_posix()] = count
+                yield path, path.relative_to(base).as_posix(), source
+
+
+# ---------------------------------------------------------------------------
+# The exhaustiveness guard
+#
+# The closure check above is the census's grip on "a new SPELLING of the table
+# name must be registered or exempt". Since D1 it has no grip at all on "a new
+# TEMPLATE must be registered": every wired reader carries
+# `FORCING_TABLE_TOKEN` and therefore `mentions=0`, so `registered + exempt ==
+# mentions` degenerates to `exempt == mentions` and the `registered` term
+# constrains nothing. River does not have this hole — its entries carry
+# `mentions=1`, so a new statement in a registered file moves its count and the
+# closure forces a registration. D1 bought a one-line 7.3 flip and paid for it
+# with exactly that grip.
+#
+# This is what replaces it, in river's own shape ("counter permissive, walk
+# strict"): the counter stays blind to the token, and a STRUCTURAL walk over the
+# same files insists that every `ForcingTemplatePair` constructed under the
+# discovery roots is one the register names. A tenth pair added beside the nine
+# then gets `test_i1_i2_*`, `test_i5_*`, the byte-identity pins and the `params`
+# claim — or it gets a red census. It is also what covers
+# `test_forcing_read_path_store_routing.WIRED_READER_PATHS`, which is DERIVED
+# from the register and therefore cannot see an unregistered sixth file on its
+# own.
+#
+# `tasks.md` 7.3 is where this stops being theoretical: the write-side row-count
+# payloads (`forcing_ts_render.py:266-272`) become templates then, in files the
+# register does not cover today.
+# ---------------------------------------------------------------------------
+
+#: The pair class's name as written at a construction site. Matched on the NAME
+#: rather than resolved through an import graph, so a construction site is found
+#: in a file the sweep has never imported and never will.
+TEMPLATE_PAIR_CLASS = "ForcingTemplatePair"
+
+
+def _template_pair_names(tree: ast.AST) -> frozenset[str]:
+    """Local names bound to :data:`TEMPLATE_PAIR_CLASS` in one module.
+
+    The bare class name is ALWAYS in the set, whether or not the module imports
+    it: a file that defines its own unrelated ``ForcingTemplatePair`` and
+    instantiates it would be flagged, which is the fail-closed direction. The
+    import walk on top of that is what catches
+    ``from … import ForcingTemplatePair as Pair``, which would otherwise be a
+    one-word escape from the whole guard.
+    """
+    names = {TEMPLATE_PAIR_CLASS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            for alias in node.names:
+                if alias.name.rsplit(".", 1)[-1] == TEMPLATE_PAIR_CLASS:
+                    names.add(alias.asname or alias.name)
+    return frozenset(names)
+
+
+def _is_template_pair_construction(node: ast.AST, names: frozenset[str]) -> bool:
+    """``ForcingTemplatePair(...)``, however the class was named at the call site.
+
+    Both callee forms, for the same reason the M6 store sweep accepts both: an
+    ``ast.Name``-only check makes
+    ``forcing_ts_render.ForcingTemplatePair(...)`` invisible, and a guard with a
+    published one-token bypass is not a guard.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in names
+    return isinstance(node.func, ast.Attribute) and node.func.attr == TEMPLATE_PAIR_CLASS
+
+
+def _module_level_pair_bindings(tree: ast.Module, names: frozenset[str]) -> list[str]:
+    """Names a module binds AT MODULE SCOPE to a freshly constructed pair."""
+    bound: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: tuple[ast.expr, ...] = tuple(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+            value = node.value
+        else:
+            continue
+        if value is None or not _is_template_pair_construction(value, names):
+            continue
+        bound.extend(target.id for target in targets if isinstance(target, ast.Name))
+    return bound
+
+
+def discover_forcing_template_pairs(
+    root: Path | None = None,
+    roots: tuple[str, ...] = DISCOVERY_ROOTS,
+) -> dict[str, tuple[str, ...]]:
+    """Every module-level ``ForcingTemplatePair`` under ``roots``, path-keyed and name-sorted.
+
+    FAILS CLOSED, naming the file, on a pair the register could not name even if
+    its author wanted to: one constructed inside a function, in a comprehension,
+    inside a container literal or bound by unpacking. Such a pair has no
+    module-level identity for :func:`registered_template_pairs` to resolve, so
+    silently ignoring it would reopen the whole escape — the counter would say
+    "no sites here" about a file with a live template in it. The registered nine
+    are all plain module-level assignments; a reader that needs another shape has
+    to make that a deliberate edit here.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for path, relative, source in _iter_python_sources(REPO_ROOT if root is None else root, roots):
+        tree = ast.parse(source, filename=str(path))
+        names = _template_pair_names(tree)
+        constructions = sum(1 for node in ast.walk(tree) if _is_template_pair_construction(node, names))
+        if not constructions:
+            continue
+        bound = _module_level_pair_bindings(tree, names)
+        if constructions > len(bound):
+            raise ValueError(
+                f"{path}: {constructions} {TEMPLATE_PAIR_CLASS} construction(s) but only {len(bound)} bound at "
+                "module scope. A pair the register cannot name is a pair no shape oracle covers; bind it to a "
+                "module-level name and register it in FORCING_REGISTRY."
+            )
+        found[relative] = tuple(sorted(bound))
     return found
+
+
+def registered_template_pairs() -> dict[str, tuple[str, ...]]:
+    """What :data:`FORCING_REGISTRY` resolves to, in the discovered sweep's shape.
+
+    Resolved by IDENTITY against the production module's namespace and then
+    reported as a NAME, which is the only way the two sides can be compared: the
+    sweep never imports the files it walks (it must work on a file that does not
+    import), and the register never spells a variable name (its ``source`` is a
+    callable). ``vars(module)`` is the join.
+    """
+    resolved: dict[str, set[str]] = {}
+    for entry in FORCING_REGISTRY:
+        module = import_module(entry.path.removesuffix(".py").replace("/", "."))
+        pair = entry.source("legacy")
+        bound = {name for name, value in vars(module).items() if value is pair}
+        if not bound:
+            raise ValueError(
+                f"{entry.key}: source() returns a pair {entry.path} does not hold under any module-level name"
+            )
+        resolved.setdefault(entry.path, set()).update(bound)
+    return {path: tuple(sorted(names)) for path, names in resolved.items()}
