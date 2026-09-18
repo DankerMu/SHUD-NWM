@@ -880,10 +880,17 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 # The two sets have different subjects and different lifetimes: `tasks.md` 6.3
 # deletes the river renderer's legacy path and collapses its oracles while the
 # forcing transition is still open (`tasks.md` 8.3 is what finally retires this
-# one), and no forcing suite imports `packages/common/river_ts_render.py` or
-# `tests/river_ts_template_registry.py`. Folding them together would route every
-# river reader diff at three forcing suites for nothing, and would make the
-# river contract migration a forcing problem.
+# one). Folding them together would route every river reader diff at three
+# forcing suites for nothing.
+#
+# Separate does NOT mean uncoupled, and the coupling that exists is deliberately
+# visible here: `tests/test_forcing_read_path_store_routing.py` imports four
+# private helpers of `tests/test_qhh_latest_fallback_pushdown.py` — a member of
+# the river group above — at MODULE scope, so `_build_suite_importer_index`
+# carries the edge. A 6.3 PR that touches those helpers therefore selects the
+# forcing suite and goes red on that PR, which is the correct outcome: the
+# dependency is real, and the PR that breaks it is the one that should see it
+# rather than the post-merge master run.
 #
 # WHAT THIS RIDER IS FOR. The forcing discovery-set census pins a mention count
 # for sixteen production files, but none of their own rules routed the census

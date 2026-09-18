@@ -133,6 +133,16 @@ class TemplateEntry:
 #: the argument is the seam a reader that composes caller-owned store-specific
 #: literals around its pair would use (river's ``_segment_rows_source_template``
 #: has that shape), and dropping it would make such a reader unregisterable.
+#:
+#: The seam is necessary but NOT sufficient for river's exact shape. River builds
+#: the pair inside a function body, and :func:`discover_forcing_template_pairs`
+#: rejects that outright: a construction with no module-level binding raises and
+#: aborts the whole sweep, by design (see its docstring and the guard at the end
+#: of its loop). So registering a function-body-construction reader takes a
+#: deliberate edit to ``discover_forcing_template_pairs`` in the SAME change —
+#: and to :func:`registered_template_pairs`, whose identity join against
+#: ``vars(module)`` cannot see a pair built fresh on every call either. Writing
+#: the ``source`` callable alone will turn the census red, not green.
 FORCING_REGISTRY: tuple[TemplateEntry, ...] = (
     TemplateEntry(
         key="best_available.forcing_inputs",
