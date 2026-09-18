@@ -4917,3 +4917,26 @@ default-keep。本 PR 的增量是 core +9 / rotated +3 / phase +2。
 仍由维护者人工决定。若要动，本 PR 支持的窄改动是：rotated 席位的价值在「沿路径组合」而非「多一双眼睛
 逐条核对」，所以后续轮换候选优先选**与 core 检查方式不同**的 lens（integration / invariant-state），
 而不是与 core 同类的 lens。
+
+## Revisit 2026-09-18 (post PR #2469 / issues #2261, #2211, #2107, #2105, #1827, #1829, #1897)
+
+审计第四次在同一天给出 DECIDABLE：**229 个多轮已合并 PR，later-round catches core=375 /
+rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.3%**（275/650），与上一条的
+42.7% 持平，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。
+本 PR 增量：core +8 / rotated +1 / phase +2。
+
+- round 2 的 pinned core（test-evidence + spec-compliance）产出 8 条，**全部**是关于 PR 自身的陈述
+  （归因、陈旧数字、无出处的计时、两处口径不一致），没有一条是代码缺陷。
+- 唯一的代码缺陷来自轮换进来的 **correctness**（换下 invariant-state）：新守卫对不可哈希的 outcome
+  抛 `TypeError`，违反它自己 docstring 的 never-raises。core 席位读过同一个函数，核对的是「它拦不拦词表外的值」，
+  而不是「它在什么输入上会自己崩」——又一次是检查方式不同，而不是多一双眼睛。
+- phase +2 都来自 Phase 7：GitHub 上的正文仍是旧版，以及一行表格缺实测出处。
+
+**本次审计数字的可信度须打折**：#2477 查实，`loop_log_audit.py` 的装载副本（`.claude/skills/...`，277 行）
+缺 #2036 的归因修复——对它跑 `tests/test_loop_log_audit_attribution.py` 是 28 failed / 32，而那个测试自
+`002ba4b59` 起在每个 checkout 里都 module-level skip，所以没人看见。上面三个计数是修复前的算法算出来的；
+在 #2477 落地并重算之前，本 ADR 近期各条 revisit 引用的 core/rotated 数字都不应被当作已校准的判据输入。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2469 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定。若要动，先落 #2477，再用修复后的审计重算这组比例——在归因算法本身未经验证的情况下
+做 keep/cut 决定，等于用一把没校准过的尺子量。
