@@ -12,8 +12,6 @@ from packages.common.timescale_write_guard import (
 )
 
 from .parser import (
-    LEGACY_STORE_REFUSED_EXIT_CODE,
-    LegacyStoreWriteRefused,
     OutputParser,
     OutputParsingError,
 )
@@ -62,9 +60,6 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
-        except LegacyStoreWriteRefused as error:
-            click.echo(f"OUTPUT_PARSE_LEGACY_STORE_REFUSED: {error}", err=True)
-            raise SystemExit(LEGACY_STORE_REFUSED_EXIT_CODE) from error
         except CompressedChunkWriteError as error:
             # Subclass arm FIRST: a compressed chunk was really detected.
             click.echo(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", err=True)
@@ -85,9 +80,6 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
-        except LegacyStoreWriteRefused as error:
-            click.echo(f"OUTPUT_PARSE_LEGACY_STORE_REFUSED: {error}", err=True)
-            raise SystemExit(LEGACY_STORE_REFUSED_EXIT_CODE) from error
         except CompressedChunkWriteError as error:
             # Subclass arm FIRST: a compressed chunk was really detected.
             click.echo(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", err=True)
@@ -121,9 +113,6 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
-        except LegacyStoreWriteRefused as error:
-            print(f"OUTPUT_PARSE_LEGACY_STORE_REFUSED: {error}", file=sys.stderr)
-            return LEGACY_STORE_REFUSED_EXIT_CODE
         except CompressedChunkWriteError as error:
             # Subclass arm FIRST: a compressed chunk was really detected.
             print(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", file=sys.stderr)
@@ -140,9 +129,6 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
-        except LegacyStoreWriteRefused as error:
-            print(f"OUTPUT_PARSE_LEGACY_STORE_REFUSED: {error}", file=sys.stderr)
-            return LEGACY_STORE_REFUSED_EXIT_CODE
         except CompressedChunkWriteError as error:
             # Subclass arm FIRST: a compressed chunk was really detected.
             print(f"OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: {error}", file=sys.stderr)

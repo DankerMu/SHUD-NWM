@@ -14,6 +14,16 @@ something that will:
    table-name constants spell the deployed name today, so the legacy render
    cannot differ by so much as the ``_legacy`` suffix.
 
+   TWO of the eight carry a declared delta (``delta_from`` in the fixture, task
+   6.3 / #1988): ``display_coverage.refresh_statement`` and
+   ``forecast_store.latest_product_statement`` embed a RIVER leg, and #1342's
+   contract deleted that leg's second store, its routing predicate and its
+   transitional aids. Their forcing legs are byte-unchanged. This is the
+   deliberate coupling working, not a failure — and the pins keep their
+   WHOLE-STATEMENT scope rather than being narrowed to the station leg, because
+   narrowing them to accommodate a legal river change is how forcing's own M1
+   would stop meaning anything.
+
    The ninth (``forecast_store.station_series_rows``) is excluded ON PURPOSE and
    is the reason M1a exists — it was not a template before this task, so its text
    and its positional tuple both change. Its pin is the ``station_series()``
@@ -118,9 +128,21 @@ NARROW_FACT_COLUMNS = frozenset(
 NARROW_ENUM_COLUMNS = ("variable_e", "unit_e", "quality_flag_e")
 
 
+#: The statements re-recorded by a DECLARED delta rather than captured at
+#: ``PRE_WIRING_COMMIT``. The fixture carries the same list under ``delta_from``;
+#: both are asserted against each other so a silent re-record of a third
+#: statement cannot pass as the same evidence.
+DELTA_RECORDED_STATEMENTS = frozenset(
+    {"display_coverage.refresh_statement", "forecast_store.latest_product_statement"}
+)
+
+
 def _frozen() -> dict[str, str]:
     payload = json.loads(PRE_WIRING_FIXTURE.read_text(encoding="utf-8"))
     assert payload["captured_from_commit"] == PRE_WIRING_COMMIT
+    delta = payload["delta_from"]
+    assert delta["captured_from_commit"] == PRE_WIRING_COMMIT
+    assert set(delta["statements"]) == DELTA_RECORDED_STATEMENTS
     return payload["statements"]
 
 
@@ -272,7 +294,9 @@ def test_display_coverage_refresh_statement_is_byte_identical() -> None:
     alone would pass while the surrounding indentation or the trailing ``),`` had
     drifted. This is also the strongest available evidence for C4: a single
     legacy render, no union, and the statement every process that imports this
-    module builds at import time is the statement node-27 has been running.
+    module builds at import time is the statement node-27 has been running. Its
+    river half is one of the two declared deltas — see
+    ``DELTA_RECORDED_STATEMENTS`` and the module docstring.
     """
     assert display_coverage._REFRESH_SQL == FROZEN["display_coverage.refresh_statement"]
 
@@ -280,9 +304,10 @@ def test_display_coverage_refresh_statement_is_byte_identical() -> None:
 def test_latest_product_fallback_statement_is_byte_identical() -> None:
     """Reader #2, pinned on the whole composed statement.
 
-    This one composes at CALL time and interleaves a RIVER render (which routes
-    per store) with the forcing leg (which does not), so the splice is the risk
-    and whole-statement equality is the only thing that sees it.
+    This one composes at CALL time and interleaves a RIVER render with the
+    forcing leg, so the splice is the risk and whole-statement equality is the
+    only thing that sees it. Its river half is one of the two declared deltas —
+    see ``DELTA_RECORDED_STATEMENTS`` and the module docstring.
     """
     assert _executed_latest_product() == FROZEN["forecast_store.latest_product_statement"]
 

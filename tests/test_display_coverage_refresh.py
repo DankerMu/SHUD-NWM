@@ -28,12 +28,8 @@ from typing import Any
 import pytest
 
 from packages.common import display_coverage
-from tests.river_ts_template_registry import historical_display_coverage_sql
-from tests.test_sql_shape_helpers import (
-    SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
-    outer_predicates,
-    text_fact_columns,
-)
+from tests.river_ts_template_registry import AID_MARKER_TAG
+from tests.test_sql_shape_helpers import outer_predicates, text_fact_columns
 
 _HEADER_ROW = {
     "run_id": "run-1",
@@ -119,65 +115,59 @@ def _executed_sqls(connection: _Connection) -> list[str]:
     return [sql for sql, _params in connection.cursor_obj.executed]
 
 
-def _assert_executed_store_union(sql: str, params: dict[str, Any]) -> None:
-    """Check the actual cursor DML, never render a composed statement."""
-    historical = historical_display_coverage_sql()
+def _assert_executed_narrow_river_cte(sql: str, params: dict[str, Any]) -> None:
+    """Check the actual cursor DML, never render a composed statement.
+
+    Before #1342's contract (task 6.3) this compared the executed statement
+    against a frozen pre-routing capture and then asserted the two-branch
+    ``UNION ALL`` the routing wiring had added on top of it. The contract
+    deleted the routing column, ``hydro.river_timeseries_legacy`` and the
+    transitional aids, which also retired the frozen capture, so the CTE is
+    pinned STRUCTURALLY instead: one sample CTE, one fact table, one branch, the
+    exact projection, the five scan-pushdown binds with their NULL escapes, and
+    the join/window predicates that select the rows.
+    """
     assert sql.count("        river_sample_rows AS (\n") == 1
     assert sql.count("        ),\n        river_identity_coverage AS (") == 1
-    before, river = sql.split("        river_sample_rows AS (\n")
-    body, after = river.split("        ),\n        river_identity_coverage AS (", 1)
-    old_before, old_river = historical.split("        river_sample_rows AS (\n")
-    old_body, old_after = old_river.split("        ),\n        river_identity_coverage AS (", 1)
-    assert before.replace("                h.timeseries_store,\n", "") == old_before
-    assert "                h.timeseries_store,\n" in before
-    assert after == old_after  # rollup, reconstruction, station-independent DML guard
-    assert sql.count("UNION ALL") == body.count("UNION ALL") == 1
+    _before, river = sql.split("        river_sample_rows AS (\n")
+    body, _after = river.split("        ),\n        river_identity_coverage AS (", 1)
+    assert "timeseries_store" not in sql
+    assert AID_MARKER_TAG not in sql
+    assert "UNION ALL" not in sql
     assert sql.count("INSERT INTO hydro.run_display_coverage") == 1
     assert sql.count("ON CONFLICT") == sql.count("RETURNING run_id") == 1
     assert set(re.findall(r"%\(([^)]*)\)s", sql)) == set(params)
-    for branch, store, table in zip(
-        body.split("UNION ALL"),
-        ("legacy", "narrow"),
-        ("hydro.river_timeseries_legacy", "hydro.river_timeseries"),
-        strict=True,
+
+    projection, rest = body.strip().split("FROM", 1)
+    assert projection.split() == (
+        "SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, "
+        "rt.river_segment_key, cr.expected_segment_count, rt.valid_time, rt.lead_time_hours"
+    ).split()
+    assert re.findall(r"\bhydro\.river_timeseries(?:_legacy)?\b", rest) == ["hydro.river_timeseries"]
+    assert set(re.findall(r"%\(([^)]*)\)s", body)) == {
+        "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
+        "scan_display_start", "scan_display_end",
+    }
+    for key in (
+        "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
+        "scan_display_start", "scan_display_end",
     ):
-        projection, rest = branch.strip().split("FROM", 1)
-        assert projection.split() == (
-            "SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, "
-            "rt.river_segment_key, cr.expected_segment_count, rt.valid_time, rt.lead_time_hours"
-        ).split()
-        assert re.findall(r"\bhydro\.river_timeseries(?:_legacy)?\b", rest) == [table]
-        assert re.findall(r"cr\.timeseries_store = '([^']+)'", rest) == [store]
-        assert set(re.findall(r"%\(([^)]*)\)s", branch)) == {
-            "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
-            "scan_display_start", "scan_display_end",
-        }
-        for key in (
-            "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
-            "scan_display_start", "scan_display_end",
-        ):
-            assert f"(%({key})s IS NULL" in branch
-        outer = outer_predicates(branch)
-        assert "rt.valid_time >= cr.display_start_time" in outer
-        assert "rt.valid_time <= cr.display_end_time" in outer
-        assert "rt.variable_e = 'q_down'::hydro.river_variable" in outer
-        assert text_fact_columns(branch, "rt") == (
-            set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if store == "legacy" else set()
-        )
-        assert (
-            "JOIN candidate_runs cr ON cr.run_key = rt.run_key "
-            "AND cr.basin_version_key = rt.basin_version_key "
-            "AND cr.river_network_version_key = rt.river_network_version_key"
-        ) in outer
-        assert "OR rt.basin_version_key = )" in outer
-        assert "OR rt.valid_time >= %(scan_display_start)s)" in outer
-        assert "OR rt.valid_time <= %(scan_display_end)s)" in outer
-        if store == "legacy":
-            restored = branch.replace(table, "hydro.river_timeseries").replace(
-                "WHERE cr.timeseries_store = 'legacy'\n              AND rt.variable_e",
-                "WHERE rt.variable_e",
-            )
-            assert restored.strip() == old_body.strip()
+        assert f"(%({key})s IS NULL" in body
+    outer = outer_predicates(body)
+    assert "rt.valid_time >= cr.display_start_time" in outer
+    assert "rt.valid_time <= cr.display_end_time" in outer
+    assert "rt.variable_e = 'q_down'::hydro.river_variable" in outer
+    # The whole point of the contract: the narrow fact table has no text
+    # identity column, so nothing may be predicated on one.
+    assert text_fact_columns(body, "rt") == set()
+    assert (
+        "JOIN candidate_runs cr ON cr.run_key = rt.run_key "
+        "AND cr.basin_version_key = rt.basin_version_key "
+        "AND cr.river_network_version_key = rt.river_network_version_key"
+    ) in outer
+    assert "OR rt.basin_version_key = )" in outer
+    assert "OR rt.valid_time >= %(scan_display_start)s)" in outer
+    assert "OR rt.valid_time <= %(scan_display_end)s)" in outer
 
 
 def test_eligible_run_binds_header_values_as_scan_pushdown() -> None:
@@ -191,7 +181,7 @@ def test_eligible_run_binds_header_values_as_scan_pushdown() -> None:
     assert display_coverage._REFRESH_SQL in sqls
     _sql, params = connection.cursor_obj.executed[-1]
     assert _sql is display_coverage._REFRESH_SQL
-    _assert_executed_store_union(_sql, params)
+    _assert_executed_narrow_river_cte(_sql, params)
     assert sqls.index(display_coverage._SCAN_HEADER_SQL) < sqls.index(_sql)
     assert sqls.count(display_coverage._REFRESH_SQL) == 1
     assert len(sqls) == 3  # timeout, seven-column header, one upsert
@@ -226,7 +216,7 @@ def test_all_runs_mode_disables_pushdown() -> None:
     assert display_coverage._SCAN_HEADER_SQL not in sqls
     _sql, params = connection.cursor_obj.executed[-1]
     assert _sql is display_coverage._REFRESH_SQL
-    _assert_executed_store_union(_sql, params)
+    _assert_executed_narrow_river_cte(_sql, params)
     assert sqls.count(display_coverage._REFRESH_SQL) == 1
     assert len(sqls) == 2  # timeout and one upsert, no route-bearing prefetch
     for key in display_coverage._SCAN_PARAM_KEYS:
@@ -344,16 +334,21 @@ def test_all_runs_form_protects_without_classifying_refusals() -> None:
 
 
 def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
-    """Both sample CTEs keep their scan pushdown; the river one now pushes keys.
+    """Both sample CTEs keep their scan pushdown; the river one pushes keys only.
 
-    Re-pinned by issue #1341, then again by its round-1 hybrid amendment. The
-    ``scan_*`` parameters keep their text semantics (they are still the run's
-    scalar text identity, prefetched by the header query). The row-selection
-    authority is now the surrogate key, resolved inside the query; the text
-    conjunct beside it is the transitional compressed-chunk pushdown aid, kept
-    only for the columns compression actually segments by. Dropping either half
-    seq-scans a 730M-row hypertable — the key half loses the index, the text
-    half loses compressed-chunk pushdown — so both are pinned literally.
+    Re-pinned by issue #1341, then by its round-1 hybrid amendment, and now by
+    #1342's contract (task 6.3): the transitional compressed-chunk pushdown aids
+    — the text twin conjoined to each key predicate — are physically gone with
+    the column they segmented by, so the SURROGATE half is all that is left and
+    it is the half that carries the index. Dropping it seq-scans a 730M-row
+    hypertable, so it is pinned literally, and the aids' absence is pinned just
+    as literally: a reintroduced text conjunct on this fact table is a read
+    against a column ``hydro.river_timeseries`` does not have.
+
+    The ``scan_*`` parameters keep their text semantics — they are still the
+    run's scalar text identity, prefetched by the header query, and are compared
+    against ``hydro.hydro_run`` / ``core.river_network_version`` inside the
+    key-resolution sub-selects, never against the fact table.
     """
     sql = display_coverage._REFRESH_SQL
     assert "fst.forcing_version_id = %(scan_forcing_version_id)s" in sql
@@ -367,32 +362,25 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
 
     outer = outer_predicates(sql)
 
-    # Positive half: every sanctioned text aid sits in the SAME conjunction as
-    # its key/enum counterpart. Asserted as one substring each, because two
-    # independent `in` checks also pass when the pair is split across the query
-    # and the "strict no-op" argument no longer holds.
-    # #1980 re-pin: the `variable` aid moved off the `WHERE` line onto its own
-    # marked `AND` line, and the two guards' aids moved inside `OR (` with the
-    # marker above them (hence the space after the bracket once comments are
-    # stripped). Same conjunctions, same truth table, same fold-away on NULL.
-    assert "AND rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
-    assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
-    assert (
-        "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
-    ) in outer
+    # Positive half: the enum/key predicates that used to carry a text twin are
+    # still there, alone. The two guards still fold away on a NULL binding —
+    # `outer_predicates` strips the resolution sub-select bodies, which is why
+    # the key comparison ends in a bare `=`.
+    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable" in outer
+    assert "( rt.run_key = )" in outer
+    assert "( rt.river_network_version_key = )" in outer
 
-    # Negative half: the aids are bounded to the sanctioned three, and nothing
-    # joins the fact table on a text column (a join equality buys no
-    # compressed-chunk pushdown anyway, so it would be cost without benefit).
+    # Negative half: NOTHING on the fact table is a text identity column any
+    # more, and nothing joins it on one.
     #
     # The set equality carries the whole forbidden-column half on its own:
     # `text_fact_columns` scans the same `outer` text for every column in
-    # SANCTIONED | FORBIDDEN under word boundaries, so any `rt.basin_version_id`
-    # / `rt.river_segment_id` / `rt.unit` / `rt.quality_flag` reference widens
-    # the left side and fails. A bare `f"rt.{forbidden}" not in outer` loop
-    # beside it adds nothing and actively false-reds: "rt.unit" is a prefix of
-    # the legitimate `rt.unit_e`, and it would also fail on correct post-#1342
-    # code for the same reason.
-    assert text_fact_columns(sql, "rt") == set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
+    # SANCTIONED | FORBIDDEN under word boundaries, so any `rt.run_id` /
+    # `rt.basin_version_id` / `rt.river_segment_id` / `rt.variable` / `rt.unit` /
+    # `rt.quality_flag` reference widens the left side and fails. A bare
+    # `f"rt.{forbidden}" not in outer` loop beside it adds nothing and actively
+    # false-reds: "rt.unit" is a prefix of the legitimate `rt.unit_e`.
+    assert text_fact_columns(sql, "rt") == set()
+    assert AID_MARKER_TAG not in sql
     assert "cr.run_id = rt.run_id" not in outer
     assert "cr.river_network_version_id = rt.river_network_version_id" not in outer

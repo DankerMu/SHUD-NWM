@@ -1,8 +1,15 @@
 """I2 capture/serialization evidence, not a PostgreSQL selection simulator.
 
 The cursor supplies independently selected rows. SQL assertions own the placement
-of selection and routing; public response assertions own serialization only.
-Actual mixed-store row execution belongs to I7.
+of selection; public response assertions own serialization only.
+
+The module was named for ROUTING, and routing is what #1342's contract (task
+6.3) deleted: there is one physical river fact table, no
+``hydro.hydro_run.timeseries_store`` to read, no ``UNION ALL`` spanning two
+stores and no transitional pushdown aids. What survives here is the half that
+was never about the store — that every forecast read lands on the SAME single
+narrow fact read, with the #2451 sargability spelling and the #2417 run-identity
+push intact, and that the public payload is unchanged by any of it.
 """
 
 from __future__ import annotations
@@ -15,10 +22,8 @@ import pytest
 
 from packages.common import forecast_store
 from packages.common.forecast_store import ForecastStoreError
-from packages.common.river_ts_render import PUSHDOWN_AID_MARKER
-from tests.river_ts_template_registry import FORECAST_STORE_EXECUTIONS
+from tests.river_ts_template_registry import AID_MARKER_TAG, FORECAST_STORE_EXECUTIONS
 from tests.test_forecast_api import SqlCaptureForecastStore, _qhh_candidate_row
-from tests.test_qhh_latest_fallback_pushdown import _HEADER_ROW, BindingCheckedCursor, _run_fallback
 from tests.test_river_ts_text_identity_cleanup import _CaptureCursor
 
 GFS = datetime(2026, 9, 1, 6, tzinfo=UTC)
@@ -179,27 +184,29 @@ OUTER_CLAUSES = {
 }
 
 
-def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) -> str:
-    """``legacy_aids`` is 4 exactly when this capture seeded a resolved run set.
+def assert_narrow_fact_read(sql: str, params: Mapping) -> str:
+    """One fact read, on one table, with no store predicate and no aid left.
 
-    #2417's run-identity convergence adds one marker-guarded ``rt.run_id`` aid to
-    the legacy branch, and only there — the narrow table has no such column and
-    the renderer strips it. Owners whose capture pushes nothing keep the three
-    historical aids, which is why this is a per-call argument and not a new
-    global constant.
+    Before #1342's contract (task 6.3) this helper asserted a two-branch ``UNION
+    ALL`` whose branches were told apart by ``h.timeseries_store``, and counted
+    the marker-guarded text aids in the legacy branch. The contract deleted the
+    second branch, the routing column and the aids, so the assertions that
+    remain are the ones that were never about the store: the projection appears
+    ONCE, the sub-query reads ``hydro.river_timeseries`` and nothing else, the
+    #2451 sargability spelling is intact, and no fact-table text identity column
+    is predicated on anywhere.
     """
     assert isinstance(params, Mapping)
     assert "%s" not in sql
     assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
-    assert sql.count("UNION ALL") == 1
-    assert sql.count("FROM hydro.river_timeseries_legacy rt") == 1
+    assert "UNION ALL" not in sql
+    assert "hydro.river_timeseries_legacy" not in sql
+    assert "timeseries_store" not in sql
     assert len(re.findall(r"FROM hydro\.river_timeseries rt\b", sql)) == 1
-    assert sql.count(PROJECTION) == 2
+    assert sql.count(PROJECTION) == 1
     start = sql.index(PROJECTION)
-    end = sql.index(") rt", sql.index("UNION ALL"))
-    legacy, narrow = sql[start:end].split("UNION ALL")
-    for branch, route in ((legacy, "legacy"), (narrow, "narrow")):
-        assert f"WHERE h.timeseries_store = '{route}'" in branch
+    end = sql.index(") rt", start)
+    for branch in (sql[start:end],):
         assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch
         for predicate in (
             # #2451 C1: the two redundant identity conjuncts are spelled
@@ -207,12 +214,12 @@ def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) ->
             # index condition on `river_ts_run_discovery_key_idx`'s 2nd and 3rd
             # columns. The guard is the half that keeps this the SAME predicate,
             # enforced in the same place: `IS NOT DISTINCT FROM` alone is TRUE
-            # when BOTH sides are NULL, where `=` is UNKNOWN, and the columns are
-            # NOT NULL only on `hydro.river_timeseries` — on
-            # `hydro.river_timeseries_legacy` they are nullable
-            # (`db/migrations/000050_river_identity_normalization.sql:216-222`),
-            # and one template renders both branches. With the guard only
-            # sargability changed. A pin update, not a behaviour change — the
+            # when BOTH sides are NULL, where `=` is UNKNOWN. The nullable side
+            # was `hydro.river_timeseries_legacy`
+            # (`db/migrations/000050_river_identity_normalization.sql:216-222`)
+            # and #1342's contract (task 6.3) dropped it; the guard is KEPT
+            # because it is what makes the conjunct non-sargable, which is the
+            # behaviour #2451 bought. A pin update, not a behaviour change — the
             # parameter-set assertion at the top of this helper and every
             # row-level case in this module are untouched by it.
             "rt.basin_version_key IS NOT NULL",
@@ -234,22 +241,18 @@ def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) ->
         # FROM` is a scalar comparison operator and is not that, so the lookbehind
         # excludes it — `DISTINCT` itself is NOT dropped from the alternation.
         assert not re.search(r"\b(MAX|(?<!NOT )DISTINCT|ORDER BY|GROUP BY|LIMIT)\b", branch)
-    assert legacy.count(PUSHDOWN_AID_MARKER) == legacy_aids
-    assert "rt.river_segment_id = %(river_segment_id)s" in legacy
-    assert "rt.river_network_version_id = %(river_network_version_id)s" in legacy
-    assert "rt.variable = 'q_down'" in legacy
-    assert PUSHDOWN_AID_MARKER not in narrow
-    assert not re.search(
-        r"rt\.(run_id|basin_version_id|river_segment_id|river_network_version_id|variable|unit|quality_flag)\b",
-        narrow,
-    )
+        assert AID_MARKER_TAG not in branch
+        assert not re.search(
+            r"rt\.(run_id|basin_version_id|river_segment_id|river_network_version_id|variable|unit|quality_flag)\b",
+            branch,
+        )
     return " ".join((sql[:start] + " SOURCE_ROWS " + sql[end:]).split())
 
 
 @pytest.mark.parametrize("owner", tuple(OUTER_CLAUSES))
-def test_each_spanning_execution_routes_before_one_outer_selection(owner):
+def test_each_registered_execution_reads_one_fact_table_before_one_outer_selection(owner):
     sql, params = FORECAST_STORE_EXECUTIONS[owner]()
-    outer = assert_spanning_route(sql, params)
+    outer = assert_narrow_fact_read(sql, params)
     for clause in OUTER_CLAUSES[owner]:
         assert outer.count(clause) == 1, (owner, clause)
     assert params["basin_version_id"] == "basin_v1"
@@ -282,56 +285,38 @@ def test_each_spanning_execution_routes_before_one_outer_selection(owner):
         )
         assert selected == datetime(2026, 9, 1, 6, tzinfo=UTC)
         assert len(cursor.executed) == 1
-        assert_spanning_route(*cursor.executed[0])
+        assert_narrow_fact_read(*cursor.executed[0])
 
 
-@pytest.mark.parametrize("route", ["legacy", "narrow"])
-def test_latest_product_uses_header_route_and_preserves_public_response(route):
-    candidate = _qhh_candidate_row()
-    candidate["timeseries_store"] = route
-    store = SqlCaptureForecastStore([[candidate]])
+def test_latest_product_reads_one_narrow_river_cte_and_preserves_public_response():
+    """The retired routing half of A9, re-pinned as its narrow remainder.
+
+    This used to be parametrised over ``h.timeseries_store`` and asserted the
+    header carried the routing column and the river CTE was rewritten per store.
+    #1342's contract (task 6.3) deleted the column, so what is pinned is that
+    the header does NOT select it, the river CTE reads the canonical table once
+    with no store predicate and no transitional aid, and the public response is
+    byte-for-byte the pre-routing A9 contract above.
+    """
+    store = SqlCaptureForecastStore([[_qhh_candidate_row()]])
+
     response = store.latest_qhh_display_product("GFS")
-    legacy = SqlCaptureForecastStore([[_qhh_candidate_row()]])
-    assert response == legacy.latest_qhh_display_product("GFS") == A9_RESPONSE
+
+    assert response == A9_RESPONSE
     assert response["run_id"] == "qhh_gfs_2026050700"
     assert response["status"] == "ready"
     assert "timeseries_store" not in repr(response)
-    header, header_params = store.cursor.header_executions[0]
+    header, _header_params = store.cursor.header_executions[0]
+    assert "timeseries_store" not in header
     sql, params = next((sql, params) for sql, params in store.cursor.executions if "river_sample_rows AS" in sql)
-    assert "h.timeseries_store" in header
-    assert "run_id,\n                timeseries_store," in header
     river = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]
-    assert f"cr.timeseries_store = '{route}'" in river
-    tables = re.findall(r"FROM (hydro\.river_timeseries(?:_legacy)?) rt", river)
-    assert tables == ["hydro.river_timeseries_legacy" if route == "legacy" else "hydro.river_timeseries"]
+    assert re.findall(r"FROM (hydro\.river_timeseries(?:_legacy)?) rt", river) == ["hydro.river_timeseries"]
     assert "UNION ALL" not in river
+    assert "timeseries_store" not in river
+    assert AID_MARKER_TAG not in river
+    assert "rt.run_id" not in river
     assert params["scan_run_id"] == "qhh_gfs_2026050700"
     assert "h.run_id = %(scan_run_id)s" in sql
-    assert params == legacy.cursor.executions[0][1]
-    assert header_params == legacy.cursor.header_executions[0][1]
-    old_sql = legacy.cursor.executions[0][0]
-    assert (
-        sql[sql.index("station_sample_rows AS") : sql.index("river_sample_rows AS")]
-        == old_sql[old_sql.index("station_sample_rows AS") : old_sql.index("river_sample_rows AS")]
-    )
-    if route == "narrow":
-        assert PUSHDOWN_AID_MARKER not in river
-        assert "rt.run_id" not in river
-    else:
-        assert river.count(PUSHDOWN_AID_MARKER) == 3
-
-
-@pytest.mark.parametrize("route", [None, "other", "missing"])
-def test_invalid_header_route_fails_before_heavy_execution(route):
-    header = dict(_HEADER_ROW, timeseries_store=route)
-    if route == "missing":
-        del header["timeseries_store"]
-    cursor = BindingCheckedCursor(header_rows=[header])
-    with pytest.raises(ForecastStoreError) as error:
-        _run_fallback(cursor)
-    assert error.value.status_code == 500
-    assert error.value.code == "TIMESERIES_STORE_INVALID"
-    assert not any("river_sample_rows AS" in sql for sql, _ in cursor.executed)
 
 
 def _target_rows():
@@ -408,8 +393,9 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     assert len(facts) == 2
     # The cycle discovery read spans runs by design and pushes nothing (#2424);
     # the fact read it feeds is the one that converges on a resolved run set.
-    for (sql, params), legacy_aids in zip(facts, (3, 4), strict=True):
-        assert_spanning_route(sql, params, legacy_aids=legacy_aids)
+    # Both are the same single narrow read now that routing is gone.
+    for sql, params in facts:
+        assert_narrow_fact_read(sql, params)
         assert params["scenario_tokens"] == ["gfs", "ifs"]
         assert params["scenario_ids"] == ["forecast_gfs_deterministic", "forecast_ifs_deterministic", "gfs", "ifs"]
     selected = facts[1][1]
@@ -425,7 +411,9 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     assert selected["pushdown_window_start"] == IFS
     assert selected["pushdown_window_end"] == GFS + timedelta(days=7)
     assert selected["pushdown_run_keys"] == [101, 202]
-    assert selected["pushdown_run_ids"] == ["run_gfs_2026090106", "run_ifs_2026090100"]
+    # #1342's contract (task 6.3) deleted the text twin of this push with the
+    # column it predicated on; an unbound placeholder would raise at execute().
+    assert "pushdown_run_ids" not in selected
     # Both scenarios survive the push, at the public response boundary.
     assert {series["scenario_id"] for series in response["series"]} == {
         "forecast_gfs_deterministic",
@@ -443,14 +431,14 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
 
 
 def _fact_reads(store):
-    return [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+    return [(sql, params) for sql, params in store.cursor.executions if "FROM hydro.river_timeseries rt" in sql]
 
 
 def _resolve_reads(store):
     return [
         (sql, params)
         for sql, params in store.cursor.executions
-        if "FROM hydro.hydro_run h" in sql and "UNION ALL" not in sql
+        if "FROM hydro.hydro_run h" in sql and "FROM hydro.river_timeseries rt" not in sql
     ]
 
 
@@ -524,7 +512,7 @@ def test_an_empty_run_resolution_still_raises_the_explicit_cycle_404():
     facts = _fact_reads(store)
     assert len(facts) == 1, "the fact read must still be issued, not skipped"
     assert facts[0][1]["pushdown_run_keys"] == []
-    assert facts[0][1]["pushdown_run_ids"] == []
+    assert "pushdown_run_ids" not in facts[0][1]
 
 
 def test_an_empty_run_resolution_keeps_the_latest_shape_at_an_empty_200():
@@ -610,16 +598,18 @@ def test_public_splice_preserves_cross_store_analysis_winner():
     facts = [(sql, params) for sql, params in store.cursor.executions if "hydro.river_timeseries" in sql]
     assert len(facts) == 3
     for sql, params in facts:
-        assert_spanning_route(sql, params)
+        assert_narrow_fact_read(sql, params)
     assert "SELECT DISTINCT ON (rt.valid_time)" in facts[-1][0]
     assert "ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC" in facts[-1][0]
 
 
-def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload():
-    # Independent result snapshots representing the same all-legacy/all-narrow
-    # values. Different input ordering makes response sorting observable. This
-    # double does not evaluate SQL or pretend to select a physical store.
-    legacy_rows = [
+def test_row_arrival_order_does_not_change_the_exact_forecast_payload():
+    # Two independent result snapshots carrying the SAME values in DIFFERENT
+    # order — the shape that used to stand for "all-legacy rows" vs "all-narrow
+    # rows" before #1342's contract (task 6.3) left one store. What it still
+    # proves is the half that mattered: response sorting is the serializer's
+    # job, not the cursor's. This double does not evaluate SQL.
+    ascending_rows = [
         {
             "scenario_id": "forecast_gfs_deterministic",
             "source_id": "GFS",
@@ -637,7 +627,7 @@ def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload
             "unit": "m3/s",
         },
     ]
-    narrow_rows = [
+    descending_rows = [
         {
             "scenario_id": "forecast_gfs_deterministic",
             "source_id": "GFS",
@@ -671,7 +661,7 @@ def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload
             }
         ],
     }
-    for result_rows in (legacy_rows, narrow_rows):
+    for result_rows in (ascending_rows, descending_rows):
         store = SqlCaptureForecastStore(_target_rows() + [RESOLVED_RUNS[:1], result_rows])
         response = store.forecast_series(
             **IDENTITY,
@@ -683,9 +673,9 @@ def test_equivalent_legacy_only_and_narrow_only_rows_keep_exact_forecast_payload
         facts = [
             (sql, params)
             for sql, params in store.cursor.executions
-            if "hydro.river_timeseries" in sql and "UNION ALL" in sql
+            if "FROM hydro.river_timeseries rt" in sql
         ]
         assert len(facts) == 1
-        outer = assert_spanning_route(*facts[0], legacy_aids=4)
+        outer = assert_narrow_fact_read(*facts[0])
         assert "h.cycle_time = %(issue_time)s" in outer
         assert facts[0][1]["pushdown_run_keys"] == [101]

@@ -20,9 +20,9 @@ surrogate keys (this module is inside the display boundary), while
 ``forecast_store``'s fallback copy stays on the text identity columns (it is
 outside the boundary and its static index evidence is pinned by
 ``tests/test_forecast_api.py``). The two produce the same numbers for every row
-that carries surrogate keys — which is every row the dual write has produced
-since #1340 — and differ only on legacy NULL-key rows, which the key form
-excludes by design until the text columns retire in #1342.
+that carries surrogate keys — which is every row in the table, since #1342's
+contract (task 6.3) left only the narrow key/enum fact table, whose keys are its
+primary key and cannot be NULL.
 
 Refresh is scoped to one ``run_id`` (or all parsed/finished QHH forecast runs).
 It never touches node-22; it runs against whichever DB ``DATABASE_URL`` points
@@ -86,7 +86,6 @@ _CANDIDATE_RUNS_SQL = """
                 -- the keys cost no extra join; the river scan below joins on
                 -- them instead of on the repeated text identity columns.
                 h.run_key,
-                h.timeseries_store,
                 bv.basin_version_key,
                 rnv.river_network_version_key,
                 COALESCE(
@@ -155,16 +154,11 @@ _RIVER_SAMPLE_ROWS_SQL = """
               ON cr.run_key = rt.run_key
              AND cr.basin_version_key = rt.basin_version_key
              AND cr.river_network_version_key = rt.river_network_version_key
-            WHERE {store_predicate}
-              AND rt.variable_e = 'q_down'::hydro.river_variable
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND rt.variable = 'q_down'
+            WHERE rt.variable_e = 'q_down'::hydro.river_variable
               AND rt.valid_time >= cr.display_start_time
               AND rt.valid_time <= cr.display_end_time
               AND (%(scan_run_id)s IS NULL
                    OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.run_id = %(scan_run_id)s AND
                        rt.run_key = (SELECT run_key FROM hydro.hydro_run
                                      WHERE run_id = %(scan_run_id)s)))
               AND (%(scan_basin_version_id)s IS NULL
@@ -172,8 +166,6 @@ _RIVER_SAMPLE_ROWS_SQL = """
                                               WHERE basin_version_id = %(scan_basin_version_id)s))
               AND (%(scan_river_network_version_id)s IS NULL
                    OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.river_network_version_id = %(scan_river_network_version_id)s AND
                        rt.river_network_version_key = (SELECT river_network_version_key
                                                        FROM core.river_network_version
                                                        WHERE river_network_version_id
@@ -186,17 +178,12 @@ _RIVER_SAMPLE_ROWS_SQL = """
 
 
 def _river_sample_rows_template(store: str) -> str:
-    if store == "legacy":
-        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'legacy'")
     if store == "narrow":
-        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
+        return _RIVER_SAMPLE_ROWS_SQL
     raise ValueError(f"Invalid river timeseries store: {store!r}")
 
 
-_RIVER_SAMPLE_ROWS_UNION_SQL = "\nUNION ALL\n".join(
-    render_river_ts_sql(_river_sample_rows_template(store), store).sql
-    for store in ("legacy", "narrow")
-)
+_RIVER_SAMPLE_ROWS_NARROW_SQL = render_river_ts_sql(_river_sample_rows_template("narrow"), "narrow").sql
 
 
 # The forcing station leg (#1990 task 7.2, reader #1). Same pair shape as
@@ -291,19 +278,23 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
 """,
 )
 
-# C4 — a SINGLE render, not river's two-store `UNION ALL` above.
+# C4 — a SINGLE render, and the forcing leg is still on the LEGACY store.
 #
 # `_COVERAGE_CTES` and `_REFRESH_SQL` are module-level constants built at IMPORT
 # time, in every process that imports this module — including the display API on
-# node-27. A narrow branch would have to reference `met.forcing_version.
-# timeseries_store` and the narrow key/enum columns, none of which exist until
-# task 7.3, so an import-time union would put unrunnable SQL on master. Store is
-# the constant `legacy` for every forcing reader in this task anyway (there is no
-# routing column to read), so the union would also be pure dead text.
+# node-27. A narrow branch would have to reference
+# `met.forcing_version.timeseries_store` and the narrow key/enum columns, none of
+# which exist until task 7.3, so an import-time union would put unrunnable SQL on
+# master. Store is the constant `legacy` for every forcing reader in this task
+# anyway (there is no routing column to read), so the union would also be pure
+# dead text.
 #
-# THE UNION LANDS IN 7.3, with the routing column, mirroring
-# `_RIVER_SAMPLE_ROWS_UNION_SQL` exactly. The narrow variant is registered and
-# text-pinned here so that change is a join, not an authoring exercise.
+# THE UNION LANDS IN 7.3, with the routing column. River's own two-store union is
+# gone — #1342's contract (task 6.3) dropped river's routing column and the legacy
+# river table, leaving `_RIVER_SAMPLE_ROWS_NARROW_SQL` as one leg — so forcing's
+# 7.3 union has no river twin left to mirror; author it from `ForcingTemplatePair`
+# directly. The narrow variant is registered and text-pinned here so that change
+# is a join, not an authoring exercise.
 _STATION_SAMPLE_ROWS_LEGACY_SQL = render_forcing_ts_sql(
     _STATION_SAMPLE_ROWS_TEMPLATES,
     "legacy",
@@ -519,18 +510,13 @@ _COVERAGE_CTES = (
         -- Do not spell a psycopg2 placeholder inside a comment in this string:
         -- psycopg2 interpolates the entire statement, comments included, and
         -- an unbound name there raises at execute time.
-        -- Which conjuncts are transitional pushdown aids is stated per line by
-        -- the removal marker below, one marker per aid (#1980); this paragraph
-        -- states only WHY they exist. Compression still segments compressed
-        -- chunks by the text columns, so a pure-key predicate cannot be pushed
-        -- into them. Each aid sits in the same conjunction as its key
-        -- counterpart, so it only narrows, and all of them go with the text
-        -- columns in #1342. They are CONSTANT-valued predicates on purpose; the
-        -- join to candidate_runs is key-only, because a text join equality is
-        -- not pushdown material and a text fact join is forbidden.
+        -- The redundant text conjuncts that used to sit beside each key in
+        -- this chain went with the text columns in #1342's contract (task 6.3):
+        -- the fact table is key/enum-only now and the scan is a single narrow
+        -- leg, not a per-store union. The join to candidate_runs stays key-only.
         river_sample_rows AS (
 """
-    + _RIVER_SAMPLE_ROWS_UNION_SQL
+    + _RIVER_SAMPLE_ROWS_NARROW_SQL
     + """        ),
         river_identity_coverage AS (
             SELECT
@@ -655,9 +641,11 @@ _COVERAGE_CTES = (
 # The skip is whole-row: the `DO UPDATE` sets all 16 columns, so a refused row
 # keeps its station-side values and its `refreshed_at` too. Accepted, not
 # overlooked — the protected cohort is finished pre-cutover runs whose station
-# inputs no longer change, and the freeze ends when the #1408 identity backfill
-# restores their surrogate keys and the next refresh succeeds. The standing
-# cost is bounded by staleness: because a refused row keeps its old
+# inputs no longer change. After #1342's contract (task 6.3) the freeze on the
+# legacy-routed cohort is PERMANENT rather than temporary: their river rows went
+# with `hydro.river_timeseries_legacy`, so no later refresh can ever rescan them
+# and this guard is what keeps their measured counts instead of zeroing them.
+# The standing cost is bounded by staleness: because a refused row keeps its old
 # `refreshed_at`, the cron `--all --skip-fresh` loop rescans the run every tick
 # only while `refreshed_at < hydro_run.updated_at` -- a refused run whose row is
 # already fresh is not rescanned at all.
@@ -784,10 +772,10 @@ class DisplayCoverageRefreshRefused(RuntimeError):
 
 
 _REFUSAL_ADVICE = (
-    "The empty scan is the observation, not the diagnosis: most likely the run's "
-    "hydro.river_timeseries rows still carry NULL surrogate keys (pre-#1340), and the "
-    "identity back-fill (#1408) heals that on its own; the next refresh then succeeds "
-    "with real counts. Rows that were legitimately removed (retention, a re-parse) "
+    "The empty scan is the observation, not the diagnosis: most likely the run was "
+    "routed to the legacy river store before #1342's contract, so its rows went with "
+    "hydro.river_timeseries_legacy and its coverage row stays frozen at the counts it "
+    "last measured. Rows that were legitimately removed (retention, a re-parse) "
     "produce exactly the same refusal. To materialize the empty scan deliberately, "
     "rerun with --run-id <run> --force."
 )

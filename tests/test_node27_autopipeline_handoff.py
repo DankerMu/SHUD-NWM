@@ -2670,49 +2670,97 @@ def test_cancelled_decline_record_keeps_the_run_failing_with_its_forcing_stage(
     assert published_calls == []
 
 
-@pytest.mark.parametrize("write_fails", [False, True])
-def test_legacy_parse_refusal_declines_only_after_ledger_commit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    capsys: pytest.CaptureFixture[str], write_fails: bool,
-) -> None:
-    store = _DeclineStore()
-    if write_fails:
-        store.write_error = RuntimeError("ledger unavailable")
-
-    def command(argv: list[str], _env: dict[str, str]) -> tuple[int, str, str]:
-        if "workers.output_parser.cli" in argv:
-            return 3, "", "OUTPUT_PARSE_LEGACY_STORE_REFUSED: legacy run"
-        return 0, "{}", ""
-
-    root, calls, _published = _prepare_autopipe(
-        monkeypatch, tmp_path, runs={RUN_A: True},
-        decline_store=store, command_handler=command,
-    )
-    rc, summary = _run_main(capsys, root)
-    assert rc == (1 if write_fails else 0)
-    assert summary["runs"]["details"][0]["outcome"] == ("failed" if write_fails else "declined")
-    assert summary["runs"]["details"][0]["reason_code"] == "legacy_store_refused"
-    assert _command_kinds(calls) == ["register", "parse"]
-    assert NODE27_DATABASE_URL not in json.dumps(summary)
-    if write_fails:
-        assert store.rows == []
-    else:
-        assert store.rows[0]["reason_code"] == "legacy_store_refused"
-        assert summary["runs"]["declined_runs"] == [
-            {"run_id": RUN_A, "reason_code": "legacy_store_refused"},
-        ]
+# ---------------------------------------------------------------------------
+# M2 — the river-routing refusal is no longer a special case (#1988, task 6.3)
+#
+# `legacy_store_refused` was written by the parser when a run's rows still lived
+# on the retired store, and `_declined_runs` suppressed those runs
+# UNCONDITIONALLY: the reason code bypassed the `(init_state_id, product_mtime)`
+# key comparison every other decline is governed by. #1342's contract deleted
+# the store, the refusal and the exit code, so the reason code is a dead
+# vocabulary word and its historical rows are governed like any other.
+#
+# The two tests below are the two boundary changes that produces. Both are RED
+# against the pre-change `scripts/node27_autopipeline.py`, where the
+# `if row[3] == "legacy_store_refused": declined.add(...)` branch answers first.
+# ---------------------------------------------------------------------------
 
 
-def test_legacy_decline_suppresses_newer_products_without_reading_them(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
+def _decline_cursor(rows: list[tuple[str, str, float]]) -> tuple[Any, Any]:
+    connection = _IngestedRunsConnection(decline_rows=rows)
+    return connection, connection.cursor()
+
+
+def test_a_historical_legacy_refusal_with_a_changed_key_is_re_queued(tmp_path: Path) -> None:
+    """Boundary 1: the key comparison now decides, and it says "retry".
+
+    The decline record carries the state id the run had when it was refused;
+    the run's manifest now carries a different one, so the evidence the record
+    was written about is gone and the run must be re-evaluated. Before task 6.3
+    the reason code short-circuited that comparison and the run stayed
+    suppressed forever — which is the loop #1781 exists to prevent, reachable
+    through a vocabulary word nothing writes any more.
+    """
     root = tmp_path / "objects"
     _write_run(root, RUN_A)
     _set_initial_state(root, RUN_A, "new-state")
-    connection = _IngestedRunsConnection(
-        decline_rows=[(RUN_A, "old-state", 1.0, "legacy_store_refused")],
+    mtime = autopipe._run_product_mtime(root, RUN_A)
+    assert mtime is not None
+    _connection, cursor = _decline_cursor([(RUN_A, "old-state", mtime)])
+
+    assert autopipe._declined_runs(cursor, [RUN_A], root) == set()
+
+    # Non-vacuity: the SAME record with the CURRENT key still suppresses, so
+    # this test is about the key having changed and not about the read failing.
+    _connection, cursor = _decline_cursor([(RUN_A, "new-state", mtime)])
+    assert autopipe._declined_runs(cursor, [RUN_A], root) == {RUN_A}
+
+
+def test_a_historical_legacy_refusal_with_an_unobtainable_key_is_re_queued(tmp_path: Path) -> None:
+    """Boundary 2: an unknowable ``product_mtime`` re-queues, it does not suppress.
+
+    ``_decline_key`` returns ``None`` only when the run has no product to stat,
+    and the key loop's ``continue`` then leaves the run out of the suppressed
+    set. Before task 6.3 a ``legacy_store_refused`` row was added to that set
+    before the key was ever computed, so a run with no product on disk was
+    suppressed on the strength of a record nothing could be compared against.
+    """
+    root = tmp_path / "objects"
+    # No manifest and no output: `_run_product_mtime` stats the manifest too, so
+    # "nothing to stat" means the run directory is empty, which is the shape a
+    # purged or half-written run has.
+    (root / "runs" / RUN_A).mkdir(parents=True)
+    assert autopipe._run_product_mtime(root, RUN_A) is None, "the run must have no product to stat"
+    _connection, cursor = _decline_cursor([(RUN_A, "old-state", 1.0)])
+
+    assert autopipe._declined_runs(cursor, [RUN_A], root) == set()
+
+
+def test_the_decline_read_no_longer_selects_or_filters_on_a_reason_code(tmp_path: Path) -> None:
+    """The query text, because the branch above cannot be reached without it.
+
+    The pre-change statement selected ``d.reason_code`` as a fourth column and
+    excluded the refusal rows from the result entirely with
+    ``d.reason_code <> 'legacy_store_refused' OR ...`` over a ``LEFT JOIN`` to
+    ``hydro.hydro_run``. Excluded rows reach neither the suppressed set nor the
+    key comparison, so those runs retried every tick unconditionally — the
+    opposite failure to the branch's, from the same vocabulary word. Both are
+    gone; the read is three columns and one predicate.
+    """
+    root = tmp_path / "objects"
+    _write_run(root, RUN_A)
+    _set_initial_state(root, RUN_A, "state-a")
+    connection, cursor = _decline_cursor([])
+
+    autopipe._declined_runs(cursor, [RUN_A], root)
+
+    decline_reads = [sql for sql in connection.executed if "ops.ingest_recompute_decline" in sql]
+    assert len(decline_reads) == 1
+    statement = " ".join(decline_reads[0].split())
+    assert statement == (
+        "SELECT d.run_id, d.init_state_id, d.product_mtime "
+        "FROM ops.ingest_recompute_decline d "
+        "WHERE d.run_id = ANY(%s)"
     )
-    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: connection)
-    reads = _count_object_store_reads(monkeypatch)
-    assert autopipe._already_ingested_runs(NODE27_DATABASE_URL, [RUN_A], object_store_root=root) == {RUN_A}
-    assert reads == []
+    for absent in ("reason_code", "legacy_store_refused", "LEFT JOIN", "timeseries_store", "hydro.hydro_run"):
+        assert absent not in statement, absent

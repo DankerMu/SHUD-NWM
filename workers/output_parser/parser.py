@@ -37,11 +37,6 @@ DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
 IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
-LEGACY_STORE_REFUSED_EXIT_CODE = 3
-
-
-class LegacyStoreWriteRefused(RuntimeError):
-    """A legacy run cannot be replaced by the narrow writer."""
 
 
 def _result_value(row: Any, key: str, index: int) -> Any:
@@ -268,9 +263,6 @@ class OutputParser:
                 qc_passed=qc_record.passed,
                 max_value_m3s=qc_record.checks_json["range_check"].get("max_value"),
             )
-        except LegacyStoreWriteRefused:
-            # A routing refusal must not mutate the legacy run's terminal state.
-            raise
         except OutputParsingError as error:
             self._mark_run_failed_preserving_error(context.run_id, error.error_code, error.message)
             raise
@@ -869,14 +861,13 @@ class PsycopgOutputParserRepository:
                 )
             return
         with self._connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT timeseries_store FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE",
-                (run_key,),
-            )
-            store = _result_value(cursor.fetchone(), "timeseries_store", 0)
-            if store == "legacy":
-                raise LegacyStoreWriteRefused(f"Run {rows[0].run_id} belongs to the legacy store")
-            if store != "narrow":
+            # Locks the authority row for the replacement-window computation
+            # below (same transaction, the lock fences the replace chain) AND
+            # detects a missing run row. #1342's contract (task 6.3) removed the
+            # routing column this statement used to read, and with it the legacy
+            # refusal; the lock and the existence check are what stays.
+            cursor.execute("SELECT 1 FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE", (run_key,))
+            if cursor.fetchone() is None:
                 raise OutputParsingError("DATABASE_ROW_MISSING", "Narrow run identity is missing")
         incoming_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
@@ -1112,8 +1103,8 @@ class PsycopgOutputParserRepository:
         self._fetch_all(
             """
             UPDATE hydro.hydro_run
-            SET parsed_at = now(), timeseries_store = 'narrow'
-            WHERE run_id = %s AND timeseries_store = 'narrow'
+            SET parsed_at = now()
+            WHERE run_id = %s
             """,
             (run_id,),
         )

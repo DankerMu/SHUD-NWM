@@ -350,7 +350,13 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
-    post_expand_forecast_database({})
+    # `{FORECAST_RUN_ID: "narrow"}`, never `{}`: `000059:78-79` seeds this run
+    # (status `parsed`) as `legacy`, and the fixture POISONS every row whose run
+    # is routed `legacy` on `hydro.river_timeseries` — which, since #1342's
+    # contract (task 6.3), is the only table any reader reads. Under `{}` the
+    # assertions below would run against deliberately corrupted rows. Same rule
+    # as `_parity_pair`'s override further down this module.
+    post_expand_forecast_database({FORECAST_RUN_ID: "narrow"})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
@@ -372,7 +378,9 @@ def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
-    post_expand_forecast_database({})
+    # Narrow routing for the same reason as the fallback test above: `{}` leaves
+    # this run `legacy` and the fixture poisons the only table readers read.
+    post_expand_forecast_database({FORECAST_RUN_ID: "narrow"})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
@@ -472,30 +480,34 @@ def test_out_of_band_write_without_updated_at_bump_backstop_visibility(
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
-    post_expand_forecast_database({})
+    # Narrow routing for the same reason as the fallback test above: `{}` leaves
+    # this run `legacy` and the fixture poisons the only table readers read.
+    post_expand_forecast_database({FORECAST_RUN_ID: "narrow"})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
         assert autopipe._publish_display_runs(throwaway_database_url) == 1
 
-        # Explicit fixture write to this parsed run's authoritative legacy
-        # table. Do not use the pre-expand dual writer against the narrow table.
+        # Explicit fixture write to this run's authoritative table. Since #1342's
+        # contract (task 6.3) that is `hydro.river_timeseries` for every run —
+        # the write used to go to `hydro.river_timeseries_legacy` because this
+        # run was routed `legacy`, which no reader would look at now, so the
+        # out-of-band row would be invisible for the wrong reason and the
+        # backstop measurement below would be about nothing. Identity is keyed:
+        # the text `river_segment_id` lives on `core.river_segment`.
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO hydro.river_timeseries_legacy (
-                    run_id, basin_version_id, river_network_version_id, river_segment_id,
-                    valid_time, lead_time_hours, variable, value, unit, quality_flag,
+                INSERT INTO hydro.river_timeseries (
                     run_key, basin_version_key, river_network_version_key, river_segment_key,
-                    variable_e, unit_e, quality_flag_e)
-                SELECT rt.run_id, rt.basin_version_id, rt.river_network_version_id, rt.river_segment_id,
-                       %s, 3, rt.variable, 275.0, rt.unit, rt.quality_flag,
-                       rt.run_key, rt.basin_version_key, rt.river_network_version_key, rt.river_segment_key,
-                       rt.variable_e, rt.unit_e, rt.quality_flag_e
-                FROM hydro.river_timeseries_legacy rt
+                    valid_time, lead_time_hours, variable_e, value, unit_e, quality_flag_e)
+                SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, rt.river_segment_key,
+                       %s, 3, rt.variable_e, 275.0, rt.unit_e, rt.quality_flag_e
+                FROM hydro.river_timeseries rt
                 JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-                WHERE h.run_id = %s AND h.timeseries_store = 'legacy'
-                  AND rt.river_segment_id = %s AND rt.valid_time = %s AND rt.variable = 'q_down'
+                JOIN core.river_segment rs ON rs.river_segment_key = rt.river_segment_key
+                WHERE h.run_id = %s
+                  AND rs.river_segment_id = %s AND rt.valid_time = %s AND rt.variable_e = 'q_down'
                 """,
                 (VALID_TIME_2 + timedelta(hours=1), FORECAST_RUN_ID,
                  f"{ISSUE_126_PREFIX}_seg_inside", VALID_TIME_2),
@@ -750,12 +762,10 @@ def _insert_null_forcing_run(connection: Any) -> str:
     return _NULL_FORCING_RUN_ID
 
 
-@pytest.mark.parametrize("store_kind", ["legacy", "narrow"])
 def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store_kind: str,
 ) -> None:
     """The spec's "Result parity" scenario, against its literal baseline.
 
@@ -773,7 +783,11 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
     new_rows, legacy_rows = _parity_pair(
         PsycopgForecastStore(throwaway_database_url),
         post_expand_forecast_database,
-        store_overrides={FORECAST_RUN_ID: "narrow"} if store_kind == "narrow" else {},
+        # One store since #1342's contract (task 6.3). The override is kept
+        # rather than dropped: the fixture poisons every run whose column still
+        # says `legacy`, so naming the run narrow is what puts the decoys on the
+        # retired table where a reader must not find them.
+        store_overrides={FORECAST_RUN_ID: "narrow"},
     )
 
     # Non-vacuity first: "equal" must not mean "both empty" or "both all-NULL".

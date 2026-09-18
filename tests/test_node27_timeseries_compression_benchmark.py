@@ -65,9 +65,8 @@ class _FakeCursor:
             # The mvt statement binds one run_id scalar and has no resolved set.
             return None
         parameters = self.executions[-1][1]
-        run_ids = ",".join(str(value) for value in parameters["pushdown_run_ids"])
         run_keys = ",".join(str(value) for value in parameters["pushdown_run_keys"])
-        return f"((run_id = ANY ('{{{run_ids}}}'::text[])) AND (run_key = ANY ('{{{run_keys}}}'::integer[])))"
+        return f"(run_key = ANY ('{{{run_keys}}}'::integer[]))"
 
     def fetchone(self) -> dict[str, Any]:
         reads = next(self.plan_reads)
@@ -261,7 +260,6 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
         "basin_version_id",
         "end_time",
         "issue_time",
-        "pushdown_run_ids",
         "pushdown_run_keys",
         "river_network_version_id",
         "river_segment_id",
@@ -272,7 +270,6 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
         "basin-heihe-v1",
         "2026-07-12T00:00:00Z",
         "2026-07-05T00:00:00Z",
-        ["fcst_ifs_2026070500_basins_heihe_shud"],
         [4242],
         "heihe-network-v1",
         "heihe_shud_riv_000001",
@@ -303,7 +300,6 @@ def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connect
             "basin_version_id": "basin-heihe-v1",
             "end_time": datetime(2026, 7, 12, tzinfo=UTC),
             "issue_time": datetime(2026, 7, 5, tzinfo=UTC),
-            "pushdown_run_ids": ["fcst_ifs_2026070500_basins_heihe_shud"],
             "pushdown_run_keys": [4242],
             "river_network_version_id": "heihe-network-v1",
             "river_segment_id": "heihe_shud_riv_000001",

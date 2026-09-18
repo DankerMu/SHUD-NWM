@@ -35,16 +35,23 @@ predicate shape x statistics state x store branch x chunk compression state.
   shared hits are must-preserve #5's baseline) but is §4.3's business.
 * statistics — ``absent``, ``stale`` in design.md F9b's shape (analyse, THEN
   write the target run, never re-analyse), and ``fresh`` after ``ANALYZE``.
-* branch — narrow and legacy. One template renders both (F1c) and the legacy
-  table still carries ``river_ts_selected_identity_key_valid_time_idx``, same
-  column order, same missing segment key, never dropped (F1b).
+* branch — NARROW ONLY since #1342's contract (task 6.3). design.md's axis reads
+  "narrow **and** legacy" (F1b/F1c) because one template rendered both and the
+  read path routed per run; 6.3 deleted the legacy rendering and the routing, so
+  a legacy-routed run's facts are unreachable by every reader and its cells can
+  only be reported NOT MEASURED — a required cell that can never be measured is
+  a permanently red gate that tests nothing, which is the opposite of what the
+  coverage check is for. The single-valued axis lives in
+  ``tests/river_ts_stats_matrix_seed.BRANCHES``; the divergence from design.md is
+  deliberate and reported rather than edited into the spec.
 * chunk — uncompressed and compressed.
 
-Criterion 1 is judged PER BRANCH — ``river_segment_key`` on a narrow node,
-``river_segment_id`` on a legacy one. See ``tests/river_ts_plan_criteria`` for
-why, and ``tests/test_river_ts_plan_criteria`` for the offline proof that all
-three criteria bite (including the synthetic "segment key late in the Index
-Cond" plan of ``tasks.md`` 1.5, which passes criteria 1 and 2).
+Criterion 1 is judged PER BRANCH — ``river_segment_key`` on a narrow node. See
+``tests/river_ts_plan_criteria`` for why the judgement is branch-scoped (its
+legacy entry is now unreachable from here), and ``tests/test_river_ts_plan_criteria``
+for the offline proof that all three criteria bite (including the synthetic
+"segment key late in the Index Cond" plan of ``tasks.md`` 1.5, which passes
+criteria 1 and 2).
 
 Ways this harness could be green for the wrong reason — named, not hidden
 -------------------------------------------------------------------------
@@ -58,7 +65,10 @@ Ways this harness could be green for the wrong reason — named, not hidden
    would be inflated and would silence criterion 3, so it is only used when the
    ``fresh`` cell passed 1 and 2; otherwise criterion 3 records ``None``.
 1b. An EXPECTED-OPEN cell would be a way for the gate to be green about a cell it
-   never judged. ``EXPECTED_OPEN_CELLS`` excuses exactly one cell's PLAN
+   never judged. ``EXPECTED_OPEN_CELLS`` is EMPTY since task 6.3 (its one entry's
+   cell left the cross product with the legacy branch), so today nothing is
+   excused at all; the mechanism stays because the next open cell must be argued
+   for in that table rather than in a comment. An entry excuses a cell's PLAN
    criteria — never its row identity, never its non-vacuity and never an EMPTY
    EXTRACT, which is how #1 above would otherwise reach this gate through this
    entry (``_NEVER_EXCUSED_PREFIXES``) — the cell is still measured, still
@@ -184,37 +194,36 @@ RECORDED_ROW_DIGESTS: dict[tuple[str, str], str] = {
     ("narrow/uncompressed/stale", "latest"): "f0c49f0cc1d44e7a",
     ("narrow/compressed/absent", "run_bound"): "7d1371a978fc3756",
     ("narrow/compressed/absent", "latest"): "d7c1c629924ece79",
-    ("legacy/uncompressed/absent", "run_bound"): "d96f189e0f695766",
-    ("legacy/uncompressed/absent", "latest"): "7d743734a52c6cc9",
-    ("legacy/uncompressed/stale", "run_bound"): "74998225bc345f25",
-    ("legacy/uncompressed/stale", "latest"): "bcc9f6c16fb0bfe1",
-    ("legacy/compressed/absent", "run_bound"): "27557bb07f0263fa",
-    ("legacy/compressed/absent", "latest"): "13de2f519e437f3a",
+    # The six ``legacy/*`` recordings went with the branch (``BRANCHES``,
+    # ``tests/river_ts_stats_matrix_seed.py``): task 6.3 removed the reader that
+    # produced them, so there is no statement left whose rows they could be the
+    # identity of. The six narrow values are UNCHANGED — the seed's narrow
+    # scenario indices, days and segment blocks are the same, so these are still
+    # the node-27 measurement and not a re-recording.
 }
 
-#: The one cell design.md §2.2 leaves OPEN by construction, tracked as **#2471**,
-#: excused from the gate's assertion and from nothing else.
+#: Cells excused from the gate's PLAN assertion — and from nothing else. EMPTY.
 #:
-#: ``run_bound/stale/legacy/uncompressed`` is reached through the legacy TEXT
-#: twin ``river_timeseries_mvt_selected_identity_valid_time_discovery_idx``
-#: (design.md F1b, corrected) — matched by the legacy rendering's text aid
-#: conjuncts, not by ``run_key``. C1 moves ``basin_version_key`` and
-#: ``river_network_version_key``, which are not columns of that index, so it has
-#: no lever on this cell: base, C1 and C2 all measured it red at ratio 999.0.
-#: ``tasks.md`` §2.2's bound says explicitly that a candidate leaving this cell
-#: red has not thereby failed, and §6.3 files it as its own issue rather than
-#: folding it in — that issue is **#2471**. It expires with #1988's DROP, which
-#: removes the text twin this entry exists for.
+#: It held exactly one entry, ``run_bound/stale/legacy/uncompressed`` (**#2471**):
+#: that cell was reached through the legacy TEXT twin
+#: ``river_timeseries_mvt_selected_identity_valid_time_discovery_idx``
+#: (design.md F1b, corrected), matched by the legacy rendering's text aid
+#: conjuncts rather than by ``run_key``, and C1 had no lever on it because it
+#: moves key columns that index does not carry.
 #:
-#: What this does NOT excuse: row identity and non-vacuity — see
-#: ``_NEVER_EXCUSED_PREFIXES``. Neither has anything to do with which index the
-#: planner took.
-EXPECTED_OPEN_CELLS: dict[str, str] = {
-    "run_bound/stale/legacy/uncompressed": (
-        "#2471 (design.md §2.2 / tasks.md §6.3): reached through the legacy TEXT twin, "
-        "which C1 has no lever on; expires with #1988's DROP"
-    ),
-}
+#: The entry is GONE rather than stale because task 6.3 deleted the legacy
+#: rendering and the routing, so that cell is no longer part of the measured
+#: cross product at all (``BRANCHES``,
+#: ``tests/river_ts_stats_matrix_seed.py``) — an excuse for a cell nobody
+#: measures is exactly the rot ``_reported_cell_failures``'s "now passes" check
+#: exists to prevent. #2471 itself is moot on the read path for the same reason;
+#: the text twin index survives until task 6.2 DROPs it with the table.
+#:
+#: The mechanism stays, empty and still exercised
+#: (``tests/test_river_ts_stats_harness_offline.py``): a future open cell must be
+#: argued for here, and what an entry never excuses — row identity, non-vacuity,
+#: an empty extract — is pinned in ``_NEVER_EXCUSED_PREFIXES``.
+EXPECTED_OPEN_CELLS: dict[str, str] = {}
 
 #: A failure this prefix opens is a ROW-identity failure, never a plan one.
 _ROW_IDENTITY_PREFIX = "ROW IDENTITY"
@@ -565,9 +574,10 @@ def _reported_cell_failures(cells: Sequence[Mapping[str, Any]]) -> list[str]:
     like any other cell's.
 
     An expected-open cell that PASSES is itself reported. Otherwise the allowlist
-    would outlive the reason for it — #1988's DROP removes the text twin this
-    entry exists for — and the gate would go on quietly excusing a cell that no
-    longer needs it.
+    would outlive the reason for it and the gate would go on quietly excusing a
+    cell that no longer needs it. (The table is empty today — task 6.3 removed
+    the branch its one entry lived on — so this path currently reports every
+    failed cell in full; the check is what keeps the next entry honest.)
     """
     reported: list[str] = []
     for cell in cells:
@@ -853,7 +863,7 @@ def _analyze_everything(
     """
     outcomes = {
         hypertable: analyze_relation(connection, hypertable)
-        for hypertable in ("hydro.river_timeseries", "hydro.river_timeseries_legacy")
+        for hypertable in ("hydro.river_timeseries",)
     }
     for scenario in scenarios:
         relation = scenario_states[scenario.key]["statistics_relation"]

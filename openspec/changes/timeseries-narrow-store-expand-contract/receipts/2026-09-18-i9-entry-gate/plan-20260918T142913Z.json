@@ -1,0 +1,29 @@
+{
+  "artifact_missing": 0,
+  "artifact_missing_by_code": {},
+  "artifact_missing_runs": [],
+  "candidates": 0,
+  "candidates_by_status": {},
+  "compressed_narrow_overlap": [],
+  "end_time_after": null,
+  "estimated_rows": 0,
+  "generated_at": "2026-09-18T14:29:13.459091+00:00",
+  "legacy_route_counts": [
+    {
+      "in_window": false,
+      "runs": 2685,
+      "status": "published"
+    },
+    {
+      "in_window": false,
+      "runs": 234,
+      "status": "superseded"
+    }
+  ],
+  "newest_cycle": null,
+  "oldest_cycle": null,
+  "oldest_cycle_with_artifact": null,
+  "seed_runs": 0,
+  "tool_version": "node27-river-narrow-reparse-backfill/2",
+  "window_days": 21
+}

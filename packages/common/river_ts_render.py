@@ -1,43 +1,29 @@
-"""Per-store rendering of the river fact-table read templates (#1980, epic #1979).
+"""Narrow-store validation of the river fact-table read templates (#1980, epic #1979).
 
-Issue #1342 replaces ``hydro.river_timeseries``'s text identity columns with
-surrogate keys through an expand/contract pair: the expand migration renames the
-text-shaped table to ``hydro.river_timeseries_legacy`` and creates a narrow,
-key-only table under the canonical name. During the transition BOTH tables are
-live, one run's rows in exactly one of them, and every read template therefore
-has to be rendered twice:
+Issue #1342 replaced ``hydro.river_timeseries``'s text identity columns with
+surrogate keys through an expand/contract pair. The CONTRACT half has landed
+(task 6.3): ``hydro.river_timeseries_legacy`` and the routing column on
+``hydro.hydro_run`` are gone, every template is authored directly against the
+narrow key/enum table under the canonical name, and the transitional
+compressed-chunk pushdown aids — the marker line plus the single text conjunct
+beneath it that the expand-window renderer deleted per store — have been
+physically removed from the templates themselves.
 
-``legacy``
-    the template verbatim against ``hydro.river_timeseries_legacy``. Nothing
-    else changes — in particular every transitional compressed-chunk pushdown
-    aid stays, because the legacy table is still compressed with the text
-    columns as its segmentby set and a pure-key predicate cannot be pushed into
-    a compressed chunk there (000047).
+What is left is the VALIDATOR. ``store`` survives as a formal parameter
+(``spec.md:66``: "the renderer SHALL accept only the narrow store") so every
+call site keeps naming the store it means and a reintroduced ``"legacy"`` is a
+loud :class:`RiverTemplateError` rather than a silently routed read. The forcing
+renderer in ``packages/common/forcing_ts_render.py`` is this module's mirror and
+is still mid-expand, so the shape stays symmetrical.
 
-``narrow``
-    the template against the canonical name with every aid deleted: each
-    :data:`PUSHDOWN_AID_MARKER` line and the single conjunct on the line
-    immediately below it. The narrow
-    table has no text identity column at all, so an aid left behind is not a
-    slow query, it is ``column river_segment_id does not exist``.
-
-Why a line-deletion renderer and not a SQL rewriter
----------------------------------------------------
+Why a text validator and not a SQL rewriter
+-------------------------------------------
 
 The repo has no SQL parser and three placeholder dialects coexist in these
 templates (``%s`` positional psycopg2, ``%(name)s`` named psycopg2, ``:name``
 SQLAlchemy), so anything that had to understand the statements would have to
-understand all three. It does not need to: #1980 first NORMALISES every template
-so that an aid is exactly one conjunct on its own line with exactly one verbatim
-marker line immediately above it, which turns "remove the aids" into a purely
-textual, reviewable, line-addressed deletion.
-
-That only works if the layout invariant is enforced rather than assumed, so this
-module is fail-closed on it: if the line under a marker is not exactly one aid
-conjunct — two conjuncts, a keyword line, the end of the template — it raises
-:class:`RiverTemplateError` NAMING THE ENTRY instead of returning SQL. The
-alternative (skip it, or delete it anyway) is a silently wrong statement shipped
-to a production read path.
+understand all three. It does not need to: the checks below are all
+text-scanner-based and each names the entry it refuses instead of returning SQL.
 
 What is verified before any rendered SQL is returned
 ----------------------------------------------------
@@ -50,31 +36,23 @@ What is verified before any rendered SQL is returned
   text, a connective or a bare ``WHERE`` / ``ON`` immediately before a keyword of
   ``_KEYWORD_FAMILY`` (which includes the row-locking ``FOR UPDATE`` family), a
   doubled connective, a connective stranded before the statement terminator
-  (``AND ;``) or a predicate spliced behind it (``; AND``), a conjunct spliced
-  into a row-count clause (``LIMIT 1 AND …``), and a leftover marker. The
+  (``AND ;``) or a predicate spliced behind it (``; AND``), and a conjunct
+  spliced into a row-count clause (``LIMIT 1 AND …``). The
   patterns run over CODE: comments and string bodies are blanked first
   (:func:`non_code_spans`), so a literal that spells a fault is data rather than
   a refusal, and a fault cannot hide inside one. A statement can be malformed in
   a way this list does not name; what it guarantees is that these specific
-  deletion artefacts do not reach a database.
-* **table-scoped no-text-identity** (narrow only) — no text identity column of
+  edit artefacts do not reach a database.
+* **table-scoped no-text-identity** — no text identity column of
   the FACT table survives. Table-scoped, not a grep: ``rt.run_key = (SELECT
   run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)`` legitimately
   reads ``run_id`` on the AUTHORITY table (so a grep is wrong), and three
   registered statements give the fact table no alias at all (so an alias-only
   check is blind). Attribution therefore resolves the fact table's aliases from
   its own ``FROM`` / ``JOIN`` clauses and falls back to a bare-column
-  comparison-position scan only where an unaliased reference exists.
-* **key/enum predicate retention** (narrow only) — every conjunct of the legacy
-  variant survives into the narrow variant. A conjunct is exempt ONLY when it
-  EQUALS a removed aid; a conjunct that merely holds one (``EXISTS (… AND aid AND
-  …)``, the ``OR (aid AND key)`` guard) is not exempt — it must reappear in its
-  aid-deleted form, which is computed and looked up. Containment was the earlier
-  rule and it let the authority predicate ``run_key = (SELECT … WHERE run_id =
-  :run_id)`` exempt itself, because the aid of an unaliased statement is a
-  substring of it. Computed from the same chain normaliser the golden
-  equivalence oracle uses, so "the deletion removed one line too many" is red
-  here rather than in production.
+  comparison-position scan only where an unaliased reference exists. This is the
+  check that made the contract mechanical and is the one that keeps a
+  reintroduced text predicate out of a narrow statement.
 
 Ownership note
 --------------
@@ -93,26 +71,16 @@ by the renderer and by every oracle.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 RIVER_TABLE = "hydro.river_timeseries"
-RIVER_TABLE_LEGACY = "hydro.river_timeseries_legacy"
 
-#: The marker every retained transitional text predicate carries, verbatim.
-#: #1341 introduced the wording, #1980 normalised it to one marker per aid on
-#: the line immediately above it, and #1342 deletes both lines.
-PUSHDOWN_AID_MARKER = "-- transitional compressed-chunk pushdown aid, remove with #1342"
-
-#: The issue tag alone. Any comment carrying it that is not the verbatim marker
-#: is a NON-normalised aid marker (mvt's pre-#1980 wording covered four
-#: conjuncts under one comment), and the renderer must refuse it rather than
-#: silently leave four text predicates in a narrow statement. Spelled as the tag
-#: alone so this module contributes no non-verbatim marker line to the census.
-_MARKER_TAG = "remove with #1342"
-
-STORES: tuple[str, ...] = ("legacy", "narrow")
+#: The only store the river fact table has after the #1342 contract. Kept as a
+#: tuple of one, and kept as a required argument of :func:`render_river_ts_sql`,
+#: so a reintroduced ``"legacy"`` is refused by name instead of silently
+#: rendering against a table that no longer exists.
+STORES: tuple[str, ...] = ("narrow",)
 
 # ---------------------------------------------------------------------------
 # Text identity vocabulary (moved here from tests/test_sql_shape_helpers.py by
@@ -177,24 +145,16 @@ class RiverTemplateError(ValueError):
 
 @dataclass(frozen=True)
 class RenderedSql:
-    """One rendered variant of a river read template.
+    """One validated river read template.
 
-    ``removed_placeholders`` lists the ZERO-BASED indices, in template order, of
-    the positional ``%s`` placeholders that fell on a deleted aid line. Deleting
-    an aid changes the caller's parameter tuple arity, and psycopg2 reports that
-    only at execute time, so the arithmetic is returned rather than left to be
-    rediscovered. Always empty for named-parameter templates and for ``legacy``.
-
-    ``removed_aids`` is the canonical text of each deleted aid conjunct, in
-    template order. Returned so a caller — or an oracle — can check the
-    placeholder arithmetic against the aids THEMSELVES rather than against
-    ``count('%s')`` before minus after, which is an identity of the deletion and
-    therefore cannot go red (round-2 H7-a). Empty for ``legacy``.
+    A wrapper of one field rather than a bare ``str``: the expand window's
+    ``removed_placeholders`` / ``removed_aids`` are gone with the aids (#1342
+    contract, task 6.3), but every call site spells ``.sql`` and the forcing
+    renderer returns the same shape, so collapsing this to a string would be
+    churn in nine readers for no behaviour.
     """
 
     sql: str
-    removed_placeholders: tuple[int, ...] = ()
-    removed_aids: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1801,7 +1761,7 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     REFUSED upstream by :func:`_lexical_subset_violation`, called from
     :func:`_assert_modelled_reference_forms` before any counter, traversal or
     structural check runs — so no RENDER and no text-identity ANSWER is produced
-    for a statement outside the subset: :func:`render_river_ts_sql` (both stores)
+    for a statement outside the subset: :func:`render_river_ts_sql`
     and :func:`fact_table_text_identity_columns` refuse it first. The helpers
     that carry NO guard — :func:`text_fact_columns`, :func:`sql_chains`,
     :func:`fact_table_attribution`, :func:`fact_table_name_occurrences` — are
@@ -1902,10 +1862,6 @@ def _unterminated_span(sql: str) -> tuple[int, int, str] | None:
         return None
     start, stop, kind, closed = spans[-1]
     return None if closed else (start, stop, kind)
-
-
-def _in_non_code(spans: tuple[tuple[int, int, str], ...], position: int) -> bool:
-    return any(start <= position < stop for start, stop, _kind in spans)
 
 
 def _blank_non_code(sql: str, *, keep_literal_quotes: bool = False) -> str:
@@ -2206,40 +2162,6 @@ def _collect_chains(text: str, *, top: bool) -> list[tuple[int, tuple[str, ...]]
     return found
 
 
-def _collect_conjuncts(text: str, *, top: bool) -> list[str]:
-    """Every conjunct at every bracket level, single-conjunct groups included.
-
-    Deliberately more inclusive than :func:`sql_chains`: a chain needs at least
-    two conjuncts to be a chain, but the retention check must still see the ONE
-    predicate a rewritten ``OR (…)`` disjunct is left holding once its aid has
-    been deleted. Keeping the two collectors separate is what lets the golden
-    form stay free of one-element noise chains while the retention check stays
-    exhaustive.
-    """
-    found: list[str] = []
-    starts = _region_starts(text)
-    stops = _top_level_spans(text, _REGION_STOP)
-    for start in starts:
-        end = len(text)
-        for stop in stops:
-            if stop.start() >= start.end():
-                end = stop.start()
-                break
-        found.extend(_conjuncts(text[start.end() : end]))
-    for _content_start, content in _top_level_groups(text):
-        if _SUBQUERY_START.match(f"({content}") is None:
-            found.extend(_conjuncts(content))
-        found.extend(_collect_conjuncts(content, top=False))
-    if top and not starts and not _top_level_spans(text, _TOP_LEVEL_SELECT):
-        found.extend(_conjuncts(text))
-    return found
-
-
-def sql_conjunct_census(sql: str) -> Counter[str]:
-    """Multiset of every conjunct the statement holds, at any bracket level."""
-    return Counter(_collect_conjuncts(strip_comments(sql), top=True))
-
-
 def sql_chains(sql: str) -> tuple[tuple[str, ...], ...]:
     """The statement's AND-chains, in document order, each a sorted conjunct multiset.
 
@@ -2269,48 +2191,6 @@ def sql_chains(sql: str) -> tuple[tuple[str, ...], ...]:
     found = _collect_chains(stripped, top=True)
     found.sort(key=lambda item: item[0])
     return tuple(chain for _offset, chain in found)
-
-
-# ---------------------------------------------------------------------------
-# Aid lines
-# ---------------------------------------------------------------------------
-
-_LEADING_AND = re.compile(r"^AND\b\s*", re.IGNORECASE)
-_TRAILING_AND = re.compile(r"\s*\bAND$", re.IGNORECASE)
-_AID_KEYWORDS = re.compile(
-    r"\b(?:WHERE|FROM|JOIN|ON|SELECT|OR|GROUP|ORDER|LIMIT|HAVING|UNION|EXCEPT|INTERSECT|WITH|CASE|WHEN)\b",
-    re.IGNORECASE,
-)
-_AID_PREDICATE = re.compile(
-    rf"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?P<column>{'|'.join(TEXT_IDENTITY_COLUMNS)})\b\s*(?:=|<>|!=)\s*(?P<value>\S.*)$"
-)
-_COMPARISON = re.compile(r"(?<![-=<>!])(<>|!=|<=|>=|=)")
-
-
-def aid_conjunct(line: str) -> str | None:
-    """The line's single text-identity conjunct, or ``None`` if it is not one.
-
-    Accepts exactly the normalised shapes #1980 produces — ``AND rt.run_id = %s``
-    (the ordinary conjunct), ``rt.run_id = %(scan_run_id)s AND`` (the first
-    conjunct inside a rewritten ``OR (…)`` disjunct) and the bare form — and
-    nothing else. The compared VALUE may be a literal, a placeholder of any of
-    the three dialects, or another relation's column (mvt's correlated lateral
-    probes bind ``lr.run_id`` / ``seg.river_segment_id``), so it is deliberately
-    not restricted to constants; what is restricted is that the line carries one
-    comparison and no keyword that would make deleting it change the statement's
-    structure.
-    """
-    text = _WHITESPACE.sub(" ", strip_comments(line)).strip()
-    if not text:
-        return None
-    text = _TRAILING_AND.sub("", _LEADING_AND.sub("", text)).strip()
-    if not text or _AID_KEYWORDS.search(text) is not None:
-        return None
-    if len(_COMPARISON.findall(text)) != 1:
-        return None
-    if text.count("(") != text.count(")"):
-        return None
-    return text if _AID_PREDICATE.match(text) is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -2359,15 +2239,14 @@ _STRUCTURAL_FAULTS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def assert_structurally_intact(sql: str, entry: str, *, allow_markers: bool = False) -> None:
+def assert_structurally_intact(sql: str, entry: str) -> None:
     """The stand-in for "it still parses" — see the module docstring, decision 3.
 
     Not a parser: the repo has none and three placeholder dialects coexist in
-    these templates. What is checked is exactly what a line deletion can break.
-
-    ``allow_markers`` is for the legacy variant, which is the template verbatim
-    and therefore KEEPS its markers; the narrow variant must have none left, and
-    a leftover marker there means a whole aid block escaped the deletion.
+    these templates. What is checked is exactly what an edit to a predicate
+    chain can break — the enumeration was derived from the aid deletion #1342's
+    expand window performed, and it keeps its value as an authoring guard now
+    that the templates are hand-maintained.
 
     The fault patterns run over CODE, not over data: comments and string bodies
     are blanked first (:func:`non_code_spans`), so a literal reading ``'... AND
@@ -2403,101 +2282,11 @@ def assert_structurally_intact(sql: str, entry: str, *, allow_markers: bool = Fa
         match = pattern.search(folded)
         if match is not None:
             raise RiverTemplateError(f"{entry}: {label} -> ...{folded[max(0, match.start() - 60) : match.end() + 20]}")
-    if _MARKER_TAG in sql and not allow_markers:
-        raise RiverTemplateError(f"{entry}: a transitional aid marker survived rendering")
 
 
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-
-# `re.IGNORECASE` because an unquoted SQL identifier is case-insensitive: with
-# this the module has ONE case policy for the fact table's name, shared by the
-# counter, the FROM/JOIN walk, the quoted-alias guard and this rename. Without
-# it, `FROM HYDRO.RIVER_TIMESERIES` passed both counters and the equality guard
-# and then rendered "legacy" naming the CANONICAL table — the narrow one, which
-# holds none of the legacy rows (review #2018 round-2, F2).
-_CANONICAL_NAME = re.compile(rf"{re.escape(RIVER_TABLE)}\b", re.IGNORECASE)
-_POSITIONAL_PLACEHOLDER = re.compile(r"%s")
-
-
-def _rename_table(template: str, store: str) -> str:
-    """The canonical table name replaced by the store's physical name — IN CODE ONLY.
-
-    ``\\b`` refuses to match before ``_legacy``, so rendering an already-legacy
-    text is idempotent rather than producing ``..._legacy_legacy``.
-
-    Substituted only OUTSIDE comments and single-quoted literals
-    (:func:`non_code_spans`, fixture decision 14; dollar-quoted bodies are not a
-    third case any more — a ``$`` in code is refused by
-    :func:`_lexical_subset_violation` before any render is attempted, decision
-    18). A name inside a literal
-    is DATA — ``'reads hydro.river_timeseries' AS note`` is a string a caller may
-    compare, log or store — and rewriting it changed the statement's output in
-    the legacy branch while the occurrence counter, which already ignored
-    literals, saw nothing (round-3 L2-3). A name inside a comment is likewise
-    left as written: the transitional markers and the surrounding prose name the
-    canonical table on purpose, and the narrow branch deletes them by line rather
-    than by rewrite.
-    """
-    if store != "legacy":
-        return template
-    spans = non_code_spans(template)
-    return _CANONICAL_NAME.sub(
-        lambda match: match.group(0) if _in_non_code(spans, match.start()) else RIVER_TABLE_LEGACY,
-        template,
-    )
-
-
-def _strip_aids(template: str, entry: str) -> tuple[str, tuple[int, ...], tuple[str, ...]]:
-    """Delete every marker line and the single aid conjunct beneath it.
-
-    Fail-closed on every shape the normalisation forbids, because each of them
-    means the deletion would change the statement rather than only remove a
-    redundant conjunct: a non-verbatim marker (mvt's pre-#1980 one-marker-covers-
-    four form), a marker with no line under it, and a next line that is not
-    exactly one aid conjunct (two conjuncts, a keyword line, a key predicate).
-    """
-    lines = template.split("\n")
-    placeholder_lines = _placeholder_line_indices(template)
-    removed_lines: set[int] = set()
-    removed_aids: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if _MARKER_TAG not in line:
-            index += 1
-            continue
-        if line.strip() != PUSHDOWN_AID_MARKER:
-            raise RiverTemplateError(
-                f"{entry}: line {index + 1} carries a NON-VERBATIM aid marker {line.strip()!r}; "
-                f"every aid must carry exactly {PUSHDOWN_AID_MARKER!r} on its own line"
-            )
-        if index + 1 >= len(lines):
-            raise RiverTemplateError(f"{entry}: the aid marker on line {index + 1} is the last line of the template")
-        aid = aid_conjunct(lines[index + 1])
-        if aid is None:
-            raise RiverTemplateError(
-                f"{entry}: the line under the aid marker on line {index + 1} is not exactly one aid conjunct "
-                f"-> {lines[index + 1].strip()!r}"
-            )
-        removed_lines.update({index, index + 1})
-        removed_aids.append(aid)
-        index += 2
-    kept = "\n".join(line for number, line in enumerate(lines) if number not in removed_lines)
-    removed_placeholders = tuple(
-        position for position, line_number in enumerate(placeholder_lines) if line_number in removed_lines
-    )
-    return kept, removed_placeholders, tuple(removed_aids)
-
-
-def _placeholder_line_indices(template: str) -> tuple[int, ...]:
-    """Line number of each positional ``%s`` placeholder, in template order.
-
-    ``%(name)s`` contains no ``%s`` substring, so the two psycopg2 dialects do
-    not collide here.
-    """
-    return tuple(template.count("\n", 0, match.start()) for match in _POSITIONAL_PLACEHOLDER.finditer(template))
 
 
 def _assert_no_fact_text_identity(sql: str, entry: str) -> None:
@@ -2509,121 +2298,18 @@ def _assert_no_fact_text_identity(sql: str, entry: str) -> None:
         )
 
 
-def _raw_conjuncts(text: str) -> list[str]:
-    """``text`` split on its own top-level ``AND``, pieces UNcanonicalised.
-
-    The canonicalising :func:`_conjuncts` is for comparison; this one is for
-    rebuilding, so the nested structure of each piece survives the round trip.
-    """
-    pieces: list[str] = []
-    previous = 0
-    for match in _top_level_spans(text, _AND_SEPARATOR):
-        pieces.append(text[previous : match.start()])
-        previous = match.end()
-    pieces.append(text[previous:])
-    return [piece for piece in pieces if piece.strip()]
-
-
-def _without_aids(text: str, exempt: set[str]) -> str:
-    """``text`` with every aid deleted from inside its bracketed sub-expressions.
-
-    What a conjunct that CONTAINS an aid must look like after the aid is gone —
-    ``EXISTS (… AND rt.variable = 'q_down' AND …)`` and the ``(%(scan_run_id)s IS
-    NULL OR (aid AND key))`` guard both change text when their aid goes, and
-    both must still be accounted for.
-
-    Computed rather than exempted, because "it holds the aid somewhere" is the
-    hole this replaced: the aid of an unaliased statement is ``run_id =
-    :run_id``, a substring of the authority predicate ``run_key = (SELECT
-    run_key FROM hydro.hydro_run WHERE run_id = :run_id)``, so containment let
-    that predicate exempt ITSELF and deleting it outright passed every assert
-    (review #1996, C8). Here it does not: the aid is not a top-level conjunct of
-    the sub-select — the piece is the whole ``SELECT … WHERE run_id = :run_id``
-    — so nothing is dropped, the expected form equals the original, and its
-    absence is reported.
-    """
-    rebuilt: list[str] = []
-    last = 0
-    for content_start, content in _top_level_groups(text):
-        kept = [piece for piece in _raw_conjuncts(content) if _canonical(piece) not in exempt]
-        rebuilt.append(text[last:content_start])
-        rebuilt.append(" AND ".join(_without_aids(piece, exempt).strip() for piece in kept))
-        last = content_start + len(content)
-    rebuilt.append(text[last:])
-    return "".join(rebuilt)
-
-
-def _assert_key_predicates_retained(
-    legacy_sql: str,
-    narrow_sql: str,
-    removed_aids: tuple[str, ...],
-    entry: str,
-) -> None:
-    """Every legacy conjunct survives, except the aids and the guards holding one.
-
-    Expressed against :func:`sql_chains` rather than against the "aid is adjacent
-    to its counterpart" oracle on purpose: mvt's correlated lateral probes put
-    three conjuncts between ``ts.run_key`` and ``ts.run_id``, so adjacency is not
-    a property this check can assume. Conjunct survival is both stronger and
-    independent of layout.
-
-    A guard that CONTAINS an aid (``(%(scan_run_id)s IS NULL OR (rt.run_id = …
-    AND rt.run_key = …))``, ``EXISTS (… AND rt.variable = 'q_down' AND …)``)
-    necessarily changes text when the aid goes. It is NOT exempted: the form it
-    must have without the aid is computed by :func:`_without_aids` and that form
-    is required to be present, so the guard's other conjuncts stay protected.
-
-    The one exemption is EXACT, not substring containment. An unaliased
-    statement spells its aid ``run_id = :run_id``, and that is a substring of the
-    authority predicate ``run_key = (SELECT run_key FROM hydro.hydro_run WHERE
-    run_id = :run_id)`` the whole check exists to protect: under containment the
-    key predicate exempted itself, and deleting it outright passed every assert
-    (review #1996, C8).
-    """
-    exempt = {_canonical(aid) for aid in removed_aids}
-    # An aid whose compared value is a GROUPED expression (`= ANY(%(keys)s)`)
-    # contributes nested conjuncts of its own to the census — `_collect_conjuncts`
-    # walks into every bracket — and those leave with the aid line. Accounted for
-    # from each aid's OWN text, so the exemption stays an exact statement of what
-    # was deleted; it is still equality, never containment, and therefore does not
-    # reopen the hole review #1996 C8 closed (for every aid whose value is a bare
-    # literal or placeholder this set is the aid itself and nothing more).
-    removed = set(exempt)
-    for aid in removed_aids:
-        removed.update(sql_conjunct_census(aid))
-    narrow_conjuncts = sql_conjunct_census(narrow_sql)
-    for conjunct, count in sql_conjunct_census(legacy_sql).items():
-        if conjunct in removed or narrow_conjuncts[conjunct] >= count:
-            continue
-        expected = _canonical(_without_aids(conjunct, exempt))
-        if expected != conjunct and narrow_conjuncts[expected] >= count:
-            continue
-        raise RiverTemplateError(
-            f"{entry}: the narrow variant lost the predicate {conjunct!r} that is not a transitional aid"
-        )
-    # No "the aid text is gone" substring check here on purpose: the unaliased
-    # statements spell their aid `run_id = :run_id`, which is ALSO the authority
-    # sub-select's own required predicate (`SELECT run_key FROM hydro.hydro_run
-    # WHERE run_id = :run_id`). Removal is asserted table-scoped instead, by
-    # :func:`_assert_no_fact_text_identity`, which answers a DIFFERENT question
-    # from this one — it detects the PRESENCE of a text identity column on the
-    # fact table, never the LOSS of a key predicate, so it is a complement to
-    # this check and not a substitute for it.
-
-
 def render_river_ts_sql(template: str, store: str, *, entry: str = "<template>") -> RenderedSql:
-    """Render one river read template for one timeseries store.
+    """Validate one river read template for the narrow store and return it.
 
-    ``legacy`` renames ``hydro.river_timeseries`` to ``hydro.river_timeseries_legacy``
-    and changes NOTHING else — every transitional aid stays, because the legacy
-    table keeps the text-column compression layout that makes them load-bearing
-    for the plan.
+    ``store`` must be ``"narrow"``: after the #1342 contract (task 6.3) there is
+    no second store, and ``spec.md:66`` requires this renderer to accept only the
+    narrow one. It stays a REQUIRED argument rather than being dropped so a
+    caller that still believes in routing is refused by name here instead of
+    reaching a database with a table that no longer exists.
 
-    ``narrow`` keeps the canonical name and deletes every aid marker line
-    together with the single aid conjunct on the line beneath it, then proves the
-    result: structurally intact, free of every fact-table text identity column and
-    of every marker, and still carrying every key/enum predicate the legacy
-    variant had.
+    The template is proved before it is returned: every reference form it uses is
+    one this module models, it is structurally intact, and it predicates on no
+    fact-table text identity column at all.
 
     Raises :class:`RiverTemplateError`, naming ``entry``, rather than returning
     SQL whenever any of that does not hold.
@@ -2631,12 +2317,6 @@ def render_river_ts_sql(template: str, store: str, *, entry: str = "<template>")
     if store not in STORES:
         raise RiverTemplateError(f"{entry}: unknown timeseries store {store!r} (expected one of {list(STORES)})")
     _assert_modelled_reference_forms(template, entry)
-    if store == "legacy":
-        sql = _rename_table(template, "legacy")
-        assert_structurally_intact(sql, entry, allow_markers=True)
-        return RenderedSql(sql)
-    sql, removed_placeholders, removed_aids = _strip_aids(template, entry)
-    assert_structurally_intact(sql, entry)
-    _assert_no_fact_text_identity(sql, entry)
-    _assert_key_predicates_retained(template, sql, removed_aids, entry)
-    return RenderedSql(sql, removed_placeholders, removed_aids)
+    assert_structurally_intact(template, entry)
+    _assert_no_fact_text_identity(template, entry)
+    return RenderedSql(template)

@@ -1005,8 +1005,11 @@ def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
             )
             cursor.execute("ANALYZE it1468_backfill_batch")
 
-            # The `_BATCH_UPDATE_SQL` join shape (scripts/node27_river_identity_backfill.py):
-            # both identity columns bound by equality against a batch of rows.
+            # The `_BATCH_UPDATE_SQL` join shape the #1339 identity backfill used
+            # (its runner went with #1342's contract, task 6.3): both identity
+            # columns bound by equality against a batch of rows. The index trap
+            # this case pins is a property of `core.river_segment`, not of that
+            # runner, so the case outlives it.
             equality_join = """
                 SELECT rs.river_segment_id
                 FROM core.river_segment rs, it1468_backfill_batch t
@@ -1633,17 +1636,17 @@ def test_three_day_chunk_migration_preserves_existing_chunks_and_only_changes_ne
         connection.close()
 
 
-@pytest.mark.parametrize(
-    "store_overrides",
-    [{}, {FORECAST_RUN_ID: "narrow"}, {HINDCAST_RUN_ID: "narrow"},
-     {FORECAST_RUN_ID: "narrow", HINDCAST_RUN_ID: "narrow"}],
-    ids=["legacy", "narrow-forecast", "narrow-history", "narrow"],
-)
 def test_real_history_window_excludes_old_points_without_shortening_forecasts(
     throwaway_database_url: str,
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store_overrides: Mapping[str, str],
 ) -> None:
+    """The history/forecast window split, on one physical fact table.
+
+    This was parametrised over the four routings of the two runs. #1342's
+    contract (task 6.3) left one store, so both runs are marked narrow: the
+    fixture's decoys then land entirely on the retired table, which is still
+    what makes the assertion below a real one.
+    """
     from datetime import timedelta
 
     import psycopg2
@@ -1709,7 +1712,7 @@ def test_real_history_window_excludes_old_points_without_shortening_forecasts(
         # All text-era seed writes finish before this test-only transition.
         # Opposite-store points differ in time and value; all four assignments
         # must preserve the same literal public history/forecast window results.
-        post_expand_forecast_database(store_overrides)
+        post_expand_forecast_database({FORECAST_RUN_ID: "narrow", HINDCAST_RUN_ID: "narrow"})
 
         store = PsycopgForecastStore(throwaway_database_url)
         parameters = {

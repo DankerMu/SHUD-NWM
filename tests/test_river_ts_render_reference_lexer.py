@@ -509,29 +509,33 @@ def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
 
 
 def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None:
-    """The deterministic sibling: current registered templates, raw and rendered for each store.
+    """The deterministic sibling: current registered templates, raw and rendered.
 
     The fuzz above samples a construct space; this asserts the thing decision 18
     is actually paid for — that the production read templates are all INSIDE the
     declared subset (so the subset costs the readers nothing) and that the module
     lexes every one of them exactly as PostgreSQL does.
+
+    It ran each entry for BOTH stores until #1342's contract (task 6.3) left one
+    and made the renderer refuse every other name. The refusal is asserted here
+    too, so this file still proves the loop is exhaustive over what exists rather
+    than silently covering half of what it used to.
     """
     compared = 0
     for entry in REGISTRY:
-        texts = []
-        for store in ("legacy", "narrow"):
-            source = entry.source(store)
-            texts.append((f"{entry.key}:{store}:raw", source))
-            try:
-                texts.append((f"{entry.key}:{store}", render_river_ts_sql(source, store, entry=entry.key).sql))
-            except RiverTemplateError as error:  # pragma: no cover - a refusing entry is a red elsewhere
-                raise AssertionError(f"{entry.key} does not render for {store}: {error}") from error
-        for label, sql in texts:
+        source = entry.source("narrow")
+        try:
+            rendered = render_river_ts_sql(source, "narrow", entry=entry.key).sql
+        except RiverTemplateError as error:  # pragma: no cover - a refusing entry is a red elsewhere
+            raise AssertionError(f"{entry.key} does not render for narrow: {error}") from error
+        with pytest.raises(RiverTemplateError, match="unknown timeseries store"):
+            render_river_ts_sql(source, "legacy", entry=entry.key)
+        for label, sql in ((f"{entry.key}:narrow:raw", source), (f"{entry.key}:narrow", rendered)):
             assert _lexical_subset_violation(sql) is None, f"{label} is outside the declared lexical subset"
             assert non_code_spans(sql) == reference_non_code_spans(sql), f"{label} lexes differently from §4.1"
             compared += 1
 
-    assert compared == 4 * len(REGISTRY)
+    assert compared == 2 * len(REGISTRY)
 
 
 @pytest.mark.parametrize(
