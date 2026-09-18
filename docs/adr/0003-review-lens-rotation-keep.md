@@ -4870,3 +4870,25 @@ round 3 换入 `test-evidence`。逐条记录支持的 27 条 later-round catche
 复核者」（那是再买人力），而是**每当一条断言被写进被评审件，先问它能不能变成一条会跑的判据；
 不能，就别把它写成断言**。本 PR 的实测是：判据抓到 3 条人读漏掉的，而人读五轮抓到的 38 条里
 有约 30 条是散文——把散文换成判据比再加一席便宜得多。
+
+## Revisit 2026-09-18 (post PR #2462 / issue #2080)
+
+审计在更大样本上再次 DECIDABLE：**227 个多轮已合并 PR，later-round catches core=358 /
+rotated=271 / phase=66**（另有 15 条因缺 `round` 或 `lens` 不可归属，已被审计排除）。
+
+方向仍是 keep，但比例已和早期revisit不同：rotated 份额从 2026-08-07 的 97.5% 回落到
+**43%**（271/629）。这不是轮换变差了，而是样本从 32 个 PR 长到 227 个之后，pinned-core
+在 fix 触及面上的回归召回被记全了——两边都在真出货，而判据问的是「later-round catches 是否
+集中在 rotated-in lenses」，43% 谈不上「集中」。**因此这是第一次，keep 的理由不再是判据本身
+给出的，而是 workflow 的 default-keep（correctness over cost）。** 如实记下来，别把 43% 说成
+仍然满足原判据。
+
+本 PR 对这个样本**零贡献**：Round 1 即 clean（四席零 P0/P1，三条 P2 按 P2-note 规则记录不修），
+没有 later round，故 `round_lenses` 只有一项。它能提供的是另一面的数据点——真正抓住设计缺陷的
+是**实现之前**的 fixture review：16 条 catches 里 12 条来自 `fixture-review` 席，其中一条直接
+推翻了初稿的 covered 侧谓词（会在图层已黑时报 gap=0）。审计的 `NOTE per-lens yield` 不统计
+phase lens，所以这类价值在现有指标里不可见。
+
+沿用上一条 revisit 的处置：**记录 deferral，不改规则**——keep/cut 仍是维护者的人工决策，
+merge 预授权不含审核策略调整。若维护者要动，本 PR 支持的窄改动是：让审计把 `fixture-review`
+纳入 per-lens yield，否则「实现前一次读」与「实现后一轮席位」的成本效益无法比较。
