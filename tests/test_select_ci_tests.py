@@ -10279,6 +10279,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # oracle anchors the raw corpus; #2208 also imports its frozen coverage
     # loader in the capture owner and national historical fixture preparation.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
+    # I11 #1990: the forcing read-template register. Its derived closure is a
+    # single suite — the discovery-set census — so that suite is both the anchor
+    # and the whole routed set; an anchor that stops deriving here means the
+    # census stopped importing the register, which is itself the alarm.
+    ("tests/forcing_ts_template_registry.py", "tests/test_forcing_ts_template_census.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     (
         "tests/state_clone_recalibration_fixtures.py",
