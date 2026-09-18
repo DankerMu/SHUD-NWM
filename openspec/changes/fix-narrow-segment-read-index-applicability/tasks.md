@@ -9,7 +9,7 @@ The oracle is `tests/test_river_timeseries_stats_index_choice_integration.py`. A
 one predicate shape, one statistics state, the narrow branch only, and uncompressed chunks only. Every
 gap below is a way a wrong implementation would go green.
 
-- [ ] 1.1 Add the **`issue_time=latest`** predicate shape. It binds
+- [x] 1.1 Add the **`issue_time=latest`** predicate shape. It binds
   `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:516-524`, `:859-866`,
   `:82-85`) and production shows it flipping a *different* chunk than the run-bound shape (design.md
   F8), so one shape's result does not carry to the other. Note that `_capture_fact_statement`
@@ -22,14 +22,14 @@ gap below is a way a wrong implementation would go green.
   business, not §1.1's.
   Verify: both shapes reproduce the failure against today's code on a no-statistics chunk, and both go
   green after `ANALYZE`. Record the two failure ratios.
-- [ ] 1.2 Add the **stale**-statistics condition, in the shape production actually has (design.md F9b):
+- [x] 1.2 Add the **stale**-statistics condition, in the shape production actually has (design.md F9b):
   `ANALYZE`, **then insert the target run's rows**, then do not re-analyse — so the target `run_key` is
   absent from the column's MCV list and histogram. Merely adding rows for runs already present will not
   reproduce it. Verify: the stale condition either reproduces the failure — in which case §2.2 and §3.1
   treat it as a hard gate — or it does not, in which case record plainly that production's `latest`
   failure on `_hyper_9_170_chunk` is **not** explained by staleness alone, and leave the question open
   rather than dropping it.
-- [ ] 1.3 Add the **legacy branch**. `_segment_rows_source_template` renders one template for both
+- [x] 1.3 Add the **legacy branch**. `_segment_rows_source_template` renders one template for both
   stores (`packages/common/forecast_store.py:121-132`) and `river_timeseries_legacy` still carries
   `river_ts_selected_identity_key_valid_time_idx` — same column order, same missing segment key, never
   dropped (design.md F1b). Seed a legacy-routed run with legacy fact rows for the target segment, and
@@ -38,17 +38,34 @@ gap below is a way a wrong implementation would go green.
   narrow-chunk-name restriction so
   legacy nodes are measured rather than silently excluded. Verify: the legacy branch's nodes are
   present in the extract for both shapes; record whether the failure reproduces there (design.md Q4).
-- [ ] 1.4 Add the **compressed-chunk** condition. Seed a second chunk and `SELECT compress_chunk(...)`;
+- [x] 1.4 Add the **compressed-chunk** condition. Seed a second chunk and `SELECT compress_chunk(...)`;
   000059 already configures the compression settings. The extractor must map `compress_hyper_*_chunk`
   relations to the measured chunk, or the new condition runs empty and passes for nothing. The current
   test asserts the measured chunk is **not** compressed (`:376-379`); that assertion belongs to the
   uncompressed condition only. Verify: the compressed condition yields a node with
   `Index Cond ((run_key = …) AND (river_segment_key = …))` and reddens if that pruning is lost.
-- [ ] 1.5 Add the third pass criterion: **node `Shared Hit Blocks` within a fixed multiple of the
+- [x] 1.5 Add the third pass criterion: **node `Shared Hit Blocks` within a fixed multiple of the
   post-`ANALYZE` primary-key baseline**. Criteria 1 and 2 alone are satisfiable by a bad plan
   (design.md, "How the selection is made"); the field is already collected at `:587`, it just has
   no gate. Verify: a synthetic plan that carries `river_segment_key` late in the `Index Cond` and
   removes nothing at the heap layer is **rejected** by the extended criteria.
+
+### §1 results — baseline run 2026-09-18, node-27, 24 measured cells
+
+Recorded in `design.md`, "What the bench measured"; evidence `/home/nwm/tmp/2451/matrix.json`.
+Three deviations from what the Verify clauses above expected, recorded rather than smoothed over:
+
+- **1.1's expectation is not met.** The `latest` shape does **not** reproduce the failure in the bench —
+  every `latest` cell binds the segment with ratio 0.0, while production breached at 16 008 on that very
+  shape. Both shapes are measured and their ratios recorded; only the run-bound one reproduces here.
+- **1.2 took its second branch on narrow and its first on legacy.** Stale statistics reproduce the
+  failure on the legacy branch (through the text twin) but not on narrow, where the node still reports a
+  real `Plan Rows = 48` instead of the reproducing cells' clamped `Plan Rows = 1`. So staleness is
+  recorded as **not an independent explanation on narrow at this fixture's staleness**, and production's
+  `_hyper_9_170_chunk` failure — 10 802 448 modifications since analyze — stays open, not explained.
+- **1.5's criterion needed recalibration after it was measured**, not before: the multiple alone failed a
+  healthy 50-hit node while passing a healthy 51-hit one. An absolute floor of 256 buffers was added and
+  both verdicts are recorded per node. Criteria 1 and 2 untouched.
 
 ## 2. Select the mechanism by measurement
 
@@ -67,6 +84,13 @@ gap below is a way a wrong implementation would go green.
   across the cross product, stop and report to the user before attempting C3 — do not ship the
   least-bad one. Verify: the selection and its rejected alternatives are in `design.md` with the
   measured numbers beside each.
+  **Bound on what this selection may claim (from the §1 results):** the bench reproduces the defect only
+  on the run-bound shape, so §2.2 **must not** state that a candidate holds for `issue_time=latest` — on
+  that shape the bench discriminates nothing and §4's live A/B on node-27 is the only gate. Likewise a
+  candidate that leaves `run_bound/stale/legacy` red has not thereby failed: that cell is reached through
+  the **text** twin, which neither C1 nor C2 has a lever on (design.md F1b, corrected), and §6.3 governs
+  it. Neither allowance extends to `run_bound/absent/narrow` or `run_bound/absent/legacy`, which are the
+  cells this change exists to close.
 
 ## 3. Implement the selected mechanism
 

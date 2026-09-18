@@ -86,16 +86,22 @@ between C1 and C2 before either is committed to, across the full condition cross
 
 ## What does not change
 
-- **The discovery index is not dropped** — and so does the legacy table's same-shaped twin.
+- **The discovery index is not dropped** — and neither are the legacy table's **two** same-shaped twins.
   `river_ts_selected_identity_key_valid_time_idx`
-  (`db/migrations/000051_river_ts_surrogate_key_read_index.sql:100`) carries the identical column order
-  with the identical missing segment key and was **never dropped**; `000059` renames the table and drops
-  no index. The same template renders both branches (`packages/common/forecast_store.py:121-138`), so
-  the legacy branch's exposure is structurally analogous — and it is **measured, not assumed either
-  way**. Empirically it looks different: the legacy rendering keeps its text aid conjuncts, and in every
-  plan measured on 2026-09-17 the text primary key or text segmentby index wins, with
-  `river_ts_selected_identity_key_valid_time_idx` appearing in no plan. `design.md` Q4 carries that as
-  an open question rather than a conclusion. The narrow index has
+  (`db/migrations/000051_river_ts_surrogate_key_read_index.sql:100`, surrogate keys) and
+  `river_timeseries_mvt_selected_identity_valid_time_discovery_idx`
+  (`db/migrations/000021_latest_ready_run_discovery_idx.sql:15`, text identities) each carry the
+  identical column order with the identical missing segment column, and **neither was ever dropped**:
+  `000042:5` and `000049:52,84` dropped three *different* indexes, and `000059` renames the table and
+  drops no index. The same template renders both branches
+  (`packages/common/forecast_store.py:121-138`), so the legacy branch's exposure is structurally
+  analogous — and it is now **measured**: the 2026-09-18 bench run reproduces the breach on legacy at
+  ratio 999.0, through the key twin under absent statistics and through the text twin under stale
+  statistics (`design.md`, "What the bench measured"; Q4 answered). C1 and C2 move only
+  `basin_version_key` and `river_network_version_key`, which are not columns of the text twin, so a
+  candidate that fixes narrow may not reach legacy; `tasks.md` §6.3 governs that, and the legacy
+  exposure is closed in production today by three independently measured facts recorded in `design.md`.
+  The narrow index has
   three live consumers that bind `run_key`,
   `basin_version_key` and `river_network_version_key` **without** a segment key:
   `apps/api/routes/hydro_display.py:1123-1164` (MVT source-identity existence probe),

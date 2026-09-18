@@ -13,12 +13,25 @@ branch, the collapse of the candidate set, the guard that actually bites — the
 `river_ts_run_discovery_key_idx (run_key, basin_version_key, river_network_version_key, variable_e,
 valid_time DESC)`.
 
-**F1b — the legacy table carries a same-shaped index, and it was never dropped.**
+**F1b — the legacy table carries TWO same-shaped indexes, and neither was ever dropped.**
 `db/migrations/000051_river_ts_surrogate_key_read_index.sql:100` creates
 `river_ts_selected_identity_key_valid_time_idx (run_key, basin_version_key,
 river_network_version_key, variable_e, valid_time DESC)` on what is now
 `hydro.river_timeseries_legacy`. `000059` renames the table (`:8-9`) and **drops no index**; a
-repository-wide grep finds no `DROP INDEX` for it. `tests/test_migrations.py:385` still lists it as
+repository-wide grep finds no `DROP INDEX` for it.
+
+**Corrected 2026-09-18 by measurement (§1.3's run):** there is a *second* surviving twin, the **text**
+one. `db/migrations/000021_latest_ready_run_discovery_idx.sql:15` creates
+`river_timeseries_mvt_selected_identity_valid_time_discovery_idx (run_id, basin_version_id,
+river_network_version_id, variable, valid_time DESC)` — the same column order, the same missing segment
+column, expressed in text identities. The later DROPs targeted **different** indexes:
+`000042_drop_redundant_river_selected_identity_lookup_idx.sql:5` drops
+`river_timeseries_mvt_selected_identity_lookup_idx` (the one that *did* carry `river_segment_id`, as its
+6th column), and `000049:52,84` drop `river_timeseries_mvt_identity_lookup_idx` and
+`river_timeseries_valid_time_discovery_idx`. This matters for the candidate set: **C1 and C2 move
+`basin_version_key` and `river_network_version_key`, which are not columns of the text twin.** Neither
+candidate can make the text twin non-matchable, and the bench measured the planner taking it
+(§1.3 cell `run_bound/stale/legacy/uncompressed`). `tests/test_migrations.py:385` still lists it as
 retained and `tests/test_river_identity_normalization_integration.py:270` comments that the legacy text
 indexes remain on the renamed table. **It has the same column order as F1's discovery index and the same
 missing column.** The narrow index is therefore the key-column *analogue* of 000051's, not its
@@ -221,11 +234,83 @@ Pass criteria, per fact-reading node (three, not two — the third closes the ho
 2. the node's `Rows Removed by Filter / Actual Rows` is within `filter_ratio_limit`, read off
    `evaluate_explain_json_plan`'s signature so the test reddens if D11 moves the bound;
 3. the node's `Shared Hit Blocks` is within a fixed multiple of the post-`ANALYZE` primary-key baseline
-   (27 in the current throwaway fixture). **Criteria 1 and 2 alone are satisfiable by a bad plan**:
+   **and above an absolute floor of 256 buffers** — it must exceed both to fail (see "Criterion 3 was
+   miscalibrated"; the multiple alone put 50 hits on the failing side of a line that 51 hits passed).
+   **Criteria 1 and 2 alone are satisfiable by a bad plan**:
    PostgreSQL lists every qual on an indexed column in `Index Cond`, including non-boundary quals, and
    rows discarded in the index layer are not counted in `Rows Removed by Filter`, which D11 reads from
    the heap layer. An index shape carrying `river_segment_key` after `valid_time` would pass 1 and 2
    while still traversing every index entry for the run on that chunk.
+
+## What the bench measured — baseline run, 2026-09-18, node-27
+
+`tests/test_river_timeseries_stats_index_choice_integration.py` against unfixed code, 24 measured cells
+(12 of them `fresh@*` post-`ANALYZE` controls, which carry no criterion-3 baseline and so are scored on
+criteria 1–2 only). Evidence: `/home/nwm/tmp/2451/matrix.json`. **Three cells reproduce the defect**, and
+all three are the **run-bound** shape on an **uncompressed** chunk:
+
+| cell | index taken | segment bound? | ratio | node shared hits (baseline) |
+|---|---|---|---|---|
+| `run_bound/absent/narrow/uncompressed` | `river_ts_run_discovery_key_idx` | no (`river_segment_key` in `Filter`) | 999.0 | 5 977 (3) |
+| `run_bound/absent/legacy/uncompressed` | `river_ts_selected_identity_key_valid_time_idx` | no | 999.0 | 12 841 (4) |
+| `run_bound/stale/legacy/uncompressed` | `river_timeseries_mvt_selected_identity_valid_t…` | no | 999.0 | 12 841 (4) |
+
+The ratio equals the fixture network's segment count, as production's 16 008 equals its own — the same
+signature.
+
+**Q4 is answered: the legacy branch is exposed, through two different indexes.** The absent-statistics
+cell takes the **key** twin via `run_key = $3`; the stale cell takes the **text** twin via
+`run_id = '…'::text AND river_network_version_id AND variable AND valid_time`, i.e. matched by the legacy
+rendering's **text aid conjuncts**, not by `run_key` at all. C1 and C2 touch neither text column
+(F1b, corrected). A candidate that fixes narrow is therefore *predicted* to leave
+`run_bound/stale/legacy` red; §2.1 measures rather than assumes this, and §6.3 governs what happens if
+the prediction holds.
+
+**Production closure for the legacy branch (READ ONLY, node-27, 2026-09-18).** The exposure the bench
+proves needs three conditions that are all false in production today and cannot become true before
+#1988's DROP:
+
+1. *a run routed to legacy* — #1988 gate 6.1 measured **0** legacy-routed runs in the retention window;
+2. *a legacy chunk with absent or stale statistics* — all five chunks carry a `last_analyze`
+   (2026-08-28 … 2026-09-14) and `n_mod_since_analyze = 0`;
+3. *continuing writes to make those statistics drift* — no modification on any chunk since the latest
+   analyze (2026-09-15 03:21Z), and outside `tests/` and `openspec/` **no source file references
+   `hydro.river_timeseries_legacy` at all**; the render layer reaches it only through the `store`
+   parameter.
+
+This is a reason to record the legacy exposure, not to ignore it, and not a licence to widen the
+candidate set: extending C1's non-sargable rule to the legacy text aids would touch the conjuncts the
+#2050/#2086/#2112/#2114/#2141/#2148 family installed, which is a fixture amendment, not a spike.
+
+### Criterion 3 was miscalibrated, and the baseline run proves it
+
+Two cells sit on opposite sides of the verdict with the **same healthy plan** — `river_segment_key` (resp.
+`river_segment_id`) in the `Index Cond`, ratio 0.0, ~48 rows returned:
+
+- `latest/absent/legacy/uncompressed`: 51 hits, baseline 8, limit 64 → **pass**
+- `latest/absent/narrow/uncompressed`: 50 hits, baseline 6, limit 48 → **fail**
+
+The line fell between 50 and 51 because the post-`ANALYZE` baseline happened to be 6 on one branch and 8
+on the other. Meanwhile the genuine defect cells sit at 5 977 and 12 841. The multiple alone therefore
+cannot separate "the planner picked a different but healthy index" from "the node reads the whole
+network". Criterion 3 gains an absolute floor, `SHARED_HIT_ABSOLUTE_FLOOR = 256` (2 MB at 8 kB pages):
+a node must exceed **both** the multiple and the floor to fail. The rationale is geometric, not
+empirical — below 2 MB a node cannot have read a full network's segments at any geometry this bench
+seeds. Criteria 1 and 2 are untouched. Each node records the raw multiple verdict alongside the floored
+one, so this baseline run is re-readable under the new rule without re-running it.
+
+### Two gaps between the bench and production, which bound what the bench can select
+
+- **The `latest` shape never reproduces in the bench**, while production breached at 16 008 on exactly
+  that shape (`receipts/2026-09-17-i8-explain-gate/`). Every `latest` cell here binds the segment and
+  shows ratio 0. So **the bench cannot select between candidates for the `latest` shape**; §4's live A/B
+  on node-27 is the only gate for it, and §2.2 must not claim otherwise.
+- **`narrow/stale` does not reproduce**, but not because staleness is safe: the cell's node reports
+  `Plan Rows = 48`, a real estimate, whereas the reproducing cells report the clamped `Plan Rows = 1`.
+  The fixture's "stale" is a **milder** state than production's, whose `latest` breach was on a chunk
+  carrying 10 802 448 modifications since its last analyze. Recorded as: staleness reproduces on legacy
+  through a different index; on narrow this fixture's staleness is insufficient to clamp the estimate.
+  That is a limit of the fixture, not a finding about production.
 
 ## Must-preserve behaviour
 
@@ -255,9 +340,10 @@ Pass criteria, per fact-reading node (three, not two — the third closes the ho
 - **Q2** For C3 only: what do the three F3 consumers cost with `valid_time` demoted to a filter,
   measured on node-27 per F6?
 - **Q3** Does the selected candidate hold under F9b staleness, not only under absent statistics?
-- **Q4** Does the legacy branch need any treatment at all? Its exposure is structurally analogous
-  (F1b/F1c) but **empirically different**: it retains the text aid conjuncts, and in every measured
-  legacy plan the text primary key or text segmentby index wins, with
-  `river_ts_selected_identity_key_valid_time_idx` appearing in no measured plan. Its chunking is also
-  much coarser (7-day, 5 chunks). Measured, not reasoned — and if it turns out to be exposed,
-  `tasks.md` 6.3 files it rather than folding it in.
+- **Q4 — ANSWERED 2026-09-18 by the baseline bench run: yes, the legacy branch is exposed.** The
+  2026-09-17 production plans showed `river_ts_selected_identity_key_valid_time_idx` in no plan, which
+  was read here as "empirically different". Under the run-bound pushdown with absent statistics the
+  planner does take it, and under stale statistics it takes the **text** twin instead
+  (F1b, corrected). Both breach at ratio 999.0. See "What the bench measured". What remains open is not
+  whether legacy is exposed but whether the selected candidate reaches it — §2.1 measures that, §6.3
+  governs the answer, and the production-closure facts recorded above bound the urgency.
