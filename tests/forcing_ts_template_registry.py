@@ -20,19 +20,22 @@ deliberate divergences:
   between two texts instead of transforming one, so the pair is what a reader
   hands it.
 
-CUT (a) REGISTERS NOTHING
--------------------------
+THE NINE READERS ARE WIRED (cut (b) = task 7.2)
+-----------------------------------------------
 
-``tasks.md`` splits #1990 in two. This file lands with **cut (a) = task 7.2a**:
-the renderer, this register and the discovery-set census, with zero production
-callers. :data:`FORCING_REGISTRY` is therefore EMPTY, and that is the delivered
-state of cut (a), not an unfinished stub — **cut (b) = task 7.2** wires the nine
-readers and populates it.
+``tasks.md`` splits #1990 in two. Cut (a) landed the renderer, this register and
+the discovery-set census with zero production callers and an EMPTY
+:data:`FORCING_REGISTRY`; cut (b) — this state — wires all nine readers and
+populates it, which is what makes the census's closure assertion
+``registered + exempt == mentions`` non-vacuous for the first time.
 
-The consequence has to be stated rather than discovered: the closure assertion
-``registered + exempt == mentions`` is **vacuous in its ``registered`` term**
-here. The live pins in cut (a) are the discovery sweep and the per-file mention
-counts. See ``tests/test_forcing_ts_template_census.py``.
+Every wired reader contributes ``mentions=0``. That is not an omission: the
+templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
+and the renderer substitutes the constant, so the five reader FILES stopped
+containing a schema-qualified spelling of the fact table at all and dropped out
+of the discovery sweep. The closure assertion's weight moved onto
+``packages/common/forcing_ts_render.py``'s own two constants and onto the exempt
+files. See the execution split in ``fixtures/I11-1990.md``.
 
 The census counter
 ------------------
@@ -53,6 +56,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from packages.common import best_available, display_coverage, forecast_store
+from scripts import reset_qhh_smoke_db
+from workers.model_registry import qhh_production_bootstrap
 
 if TYPE_CHECKING:
     from packages.common.forcing_ts_render import ForcingTemplatePair
@@ -75,6 +82,12 @@ class TemplateEntry:
 
     ``kind``
         ``statement`` is a raw renderer input, never composed executed SQL.
+        ``dml`` is the same, for a template that writes rather than projects —
+        the QHH smoke reset's forcing ``DELETE``. It is carried as a kind rather
+        than left to the oracle to sniff from the text, because the projection
+        invariant (I5, same column names in the same order across the pair) is
+        meaningless for it and "this one has no SELECT list" must be a declared
+        property, not an inferred one.
     ``params``
         ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``). Pinned
         per entry because no deletion computes it: the two variants of a pair are
@@ -101,10 +114,88 @@ class TemplateEntry:
     source: Callable[[str], ForcingTemplatePair]
 
 
-#: Cut (a) registers no reader. Cut (b) (``tasks.md`` 7.2) appends one block per
-#: reader module, in stable path-sorted order, mirroring the river register's
-#: layout so several PRs can touch this file without colliding on one tuple.
-FORCING_REGISTRY: tuple[TemplateEntry, ...] = ()
+#: The nine readers ``tasks.md`` 7.2 wires, one block per reader module, in
+#: stable path-sorted order, mirroring the river register's layout so several
+#: PRs can touch this file without colliding on one tuple.
+#:
+#: ``source`` takes the store even though every pair here is store-independent:
+#: the argument is the seam a reader that composes caller-owned store-specific
+#: literals around its pair would use (river's ``_segment_rows_source_template``
+#: has that shape), and dropping it would make such a reader unregisterable.
+FORCING_REGISTRY: tuple[TemplateEntry, ...] = (
+    TemplateEntry(
+        key="best_available.forcing_inputs",
+        path="packages/common/best_available.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: best_available._FORCING_INPUTS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="display_coverage.station_sample_rows",
+        path="packages/common/display_coverage.py",
+        kind="statement",
+        params="named",
+        mentions=0,
+        source=lambda _store: display_coverage._STATION_SAMPLE_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.forcing_readiness_overall",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._FORCING_READINESS_OVERALL_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.forcing_readiness_variable_rows",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._FORCING_READINESS_VARIABLE_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.latest_product_station_source",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="named",
+        mentions=0,
+        source=lambda _store: forecast_store._LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.station_forcing_membership",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._STATION_FORCING_MEMBERSHIP_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.station_series_rows",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._STATION_SERIES_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="reset_qhh_smoke_db.forcing_timeseries_delete",
+        path="scripts/reset_qhh_smoke_db.py",
+        kind="dml",
+        params="positional",
+        mentions=0,
+        source=lambda _store: reset_qhh_smoke_db._FORCING_TIMESERIES_DELETE_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="qhh_production_bootstrap.dynamic_forcing_count",
+        path="workers/model_registry/qhh_production_bootstrap.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: qhh_production_bootstrap._DYNAMIC_FORCING_COUNT_TEMPLATES,
+    ),
+)
 
 
 def entry_by_key(key: str) -> TemplateEntry:
@@ -137,51 +228,19 @@ class ExemptMentions:
     note: str
 
 
-#: The nine reader sites, which are exempt ONLY because cut (a) has not wired
-#: them yet. Cut (b) deletes these five rows as it registers each reader, and the
-#: files' mention counts go to zero with them (the templates carry the token, not
-#: the name), so closure for these files becomes ``0 + 0 == 0``. That is the
-#: designed end state, not an omission.
-UNWIRED_READERS: tuple[ExemptMentions, ...] = (
-    ExemptMentions(
-        path="packages/common/best_available.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="best-available forcing-inputs listing; already joins met.forcing_version",
-    ),
-    ExemptMentions(
-        path="packages/common/display_coverage.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="_COVERAGE_CTES station leg; legacy-variant render only (C4 — the CTE is an import-time constant)",
-    ),
-    ExemptMentions(
-        path="packages/common/forecast_store.py",
-        count=5,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note=(
-            "QHH latest-product fallback CTE, station-series rows helper (an f-string today, not a template), "
-            "station-forcing membership validation, forcing-readiness overall and per-variable rows"
-        ),
-    ),
-    ExemptMentions(
-        path="scripts/reset_qhh_smoke_db.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="one _delete; river's two-group split needs a routing column forcing does not have until 7.3",
-    ),
-    ExemptMentions(
-        path="workers/model_registry/qhh_production_bootstrap.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="_dynamic_forcing_counts forcing-state count; does not join met.forcing_version at all",
-    ),
-)
+#: NOTHING. Cut (a) carried five ``reader, unwired`` rows here — one per reader
+#: FILE, nine mentions in total — because the readers still spelled the table
+#: name themselves. Cut (b) wired all nine through the renderer, so those files
+#: now carry the token instead of the name, score **0** in the sweep and leave the
+#: discovery set entirely. The rows are deleted rather than zeroed:
+#: :func:`test_every_exemption_row_names_a_shape_and_an_owner` refuses a
+#: zero-count row, and a zero-count row would in any case claim an exemption for
+#: a file that has nothing left to exempt.
+#:
+#: The name survives as an empty tuple so the census can assert the transition
+#: HAPPENED rather than merely that the numbers add up — see
+#: ``test_the_nine_readers_left_the_exemption_ledger``.
+UNWIRED_READERS: tuple[ExemptMentions, ...] = ()
 
 #: The 38 mentions that are not reads at all and are not this transition's to
 #: convert. Measured, not estimated: the issue text's "the two write-side

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common.forcing_ts_render import FORCING_TABLE_LEGACY
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_BASENAME,
@@ -1023,7 +1024,18 @@ def test_qhh_reset_routes_catalog_runs(monkeypatch, tmp_path, capsys, expanded, 
                 "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
             )
     if expected is not None:
-        assert any(sql.startswith("DELETE FROM met.forcing_station_timeseries ") for sql, _ in cursor.statements)
+        # #1990 M1b: EQUALITY on the whole rendered DELETE, not a prefix match.
+        # The forcing leg is a SINGLE `_delete` rendered `legacy` — river's
+        # two-group split above needs `hydro_run.timeseries_store`, and forcing
+        # has no routing column until task 7.3. A `startswith` pin cannot tell
+        # "still one legacy DELETE" from "the table was renamed and the predicate
+        # rewritten"; this can.
+        forcing_deletes = [
+            sql for sql, _ in cursor.statements if sql.startswith(f"DELETE FROM {FORCING_TABLE_LEGACY}")
+        ]
+        assert forcing_deletes == [
+            f"DELETE FROM {FORCING_TABLE_LEGACY} WHERE forcing_version_id = ANY(%s)"
+        ]
     assert "secret-do-not-print" not in capsys.readouterr().out
 
 

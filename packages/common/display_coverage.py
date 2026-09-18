@@ -38,6 +38,11 @@ from typing import Any, Callable, NamedTuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from packages.common.forcing_ts_render import (
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
 from packages.common.forecast_store import (
     MVP_STATION_VARIABLES,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
@@ -194,13 +199,11 @@ _RIVER_SAMPLE_ROWS_UNION_SQL = "\nUNION ALL\n".join(
 )
 
 
-_COVERAGE_CTES = (
-    """
-        WITH candidate_runs AS ("""
-    + _CANDIDATE_RUNS_SQL
-    + """        ),
-        station_sample_rows AS (
-            SELECT
+# The forcing station leg (#1990 task 7.2, reader #1). Same pair shape as
+# `packages/common/forecast_store.py`'s twin four spaces further in — the two are
+# separate templates, not one shared constant, exactly as the river legs are.
+_STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""            SELECT
                 cr.run_id,
                 cr.model_id,
                 cr.display_start_time,
@@ -214,7 +217,7 @@ _COVERAGE_CTES = (
                 fst.valid_time,
                 fst.unit,
                 fst.quality_flag
-            FROM met.forcing_station_timeseries fst
+            FROM {FORCING_TABLE_TOKEN} fst
             JOIN candidate_runs cr
               ON cr.forcing_version_id = fst.forcing_version_id
              AND fst.basin_version_id = cr.basin_version_id
@@ -240,7 +243,83 @@ _COVERAGE_CTES = (
                     AND iw.variable = fst.variable
                     AND LOWER(iw.source_id) = LOWER(cr.source_id)
               )
-        ),
+""",
+    narrow=f"""            SELECT
+                cr.run_id,
+                cr.model_id,
+                cr.display_start_time,
+                cr.display_end_time,
+                fv.forcing_version_id,
+                ms.basin_version_id,
+                LOWER(fv.source_id) AS station_source_id,
+                ms.station_id,
+                fst.variable_e::text AS variable,
+                cr.expected_station_count,
+                fst.valid_time,
+                fst.unit_e::text AS unit,
+                fst.quality_flag_e::text AS quality_flag
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_key = fst.forcing_version_key
+            JOIN met.met_station ms
+              ON ms.station_key = fst.station_key
+            JOIN candidate_runs cr
+              ON cr.forcing_version_id = fv.forcing_version_id
+             AND ms.basin_version_id = cr.basin_version_id
+             AND LOWER(fv.source_id) = LOWER(cr.source_id)
+            WHERE fst.variable_e = ANY(%(variables)s::met.forcing_variable[])
+              AND fst.valid_time >= cr.display_start_time
+              AND fst.valid_time <= cr.display_end_time
+              AND (%(scan_forcing_version_id)s IS NULL
+                   OR fv.forcing_version_id = %(scan_forcing_version_id)s)
+              AND (%(scan_basin_version_id)s IS NULL
+                   OR ms.basin_version_id = %(scan_basin_version_id)s)
+              AND (%(scan_source_id_lower)s IS NULL
+                   OR LOWER(fv.source_id) = %(scan_source_id_lower)s)
+              AND (%(scan_display_start)s IS NULL
+                   OR fst.valid_time >= %(scan_display_start)s)
+              AND (%(scan_display_end)s IS NULL
+                   OR fst.valid_time <= %(scan_display_end)s)
+              AND EXISTS (
+                  SELECT 1
+                  FROM met.interp_weight iw
+                  WHERE iw.model_id = cr.model_id
+                    AND iw.station_id = ms.station_id
+                    AND iw.variable = fst.variable_e::text
+                    AND LOWER(iw.source_id) = LOWER(cr.source_id)
+              )
+""",
+)
+
+# C4 — a SINGLE render, not river's two-store `UNION ALL` above.
+#
+# `_COVERAGE_CTES` and `_REFRESH_SQL` are module-level constants built at IMPORT
+# time, in every process that imports this module — including the display API on
+# node-27. A narrow branch would have to reference `met.forcing_version.
+# timeseries_store` and the narrow key/enum columns, none of which exist until
+# task 7.3, so an import-time union would put unrunnable SQL on master. Store is
+# the constant `legacy` for every forcing reader in this task anyway (there is no
+# routing column to read), so the union would also be pure dead text.
+#
+# THE UNION LANDS IN 7.3, with the routing column, mirroring
+# `_RIVER_SAMPLE_ROWS_UNION_SQL` exactly. The narrow variant is registered and
+# text-pinned here so that change is a join, not an authoring exercise.
+_STATION_SAMPLE_ROWS_LEGACY_SQL = render_forcing_ts_sql(
+    _STATION_SAMPLE_ROWS_TEMPLATES,
+    "legacy",
+    entry="display_coverage.station_sample_rows",
+).sql
+
+
+_COVERAGE_CTES = (
+    """
+        WITH candidate_runs AS ("""
+    + _CANDIDATE_RUNS_SQL
+    + """        ),
+        station_sample_rows AS (
+"""
+    + _STATION_SAMPLE_ROWS_LEGACY_SQL
+    + """        ),
         station_identity_coverage AS (
             SELECT
                 run_id, model_id, display_start_time, display_end_time,

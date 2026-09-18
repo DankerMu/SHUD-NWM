@@ -874,6 +874,36 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 )
 
 
+# I11 #1990 task 7.2 — the FORCING counterpart of the group above, and
+# deliberately a SEPARATE tuple rather than three more members of it.
+#
+# The two sets have different subjects and different lifetimes: `tasks.md` 6.3
+# deletes the river renderer's legacy path and collapses its oracles while the
+# forcing transition is still open (`tasks.md` 8.3 is what finally retires this
+# one), and no forcing suite imports `packages/common/river_ts_render.py` or
+# `tests/river_ts_template_registry.py`. Folding them together would route every
+# river reader diff at three forcing suites for nothing, and would make the
+# river contract migration a forcing problem.
+#
+# WHAT THIS RIDER IS FOR. The forcing discovery-set census pins a mention count
+# for sixteen production files, but none of their own rules routed the census
+# suite — so a new `met.forcing_station_timeseries` mention in, say,
+# `workers/forcing_producer/store.py` was red only on the POST-MERGE master run,
+# not on the PR that introduced it. River carries the identical rider on every
+# registered path plus a wiring meta-test; this is the forcing half of both.
+# `tests/test_select_ci_tests.py` derives the path set from the census and the
+# register, so a file entering either is routed or red.
+FORCING_SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
+    "tests/test_forcing_ts_render.py",
+    "tests/test_forcing_ts_template_census.py",
+    # Task 7.2's own oracle: byte identity against the pre-wiring snapshot, the
+    # "store is the literal legacy" AST sweep (must-preserve M6) and the narrow
+    # variants' shape invariants. It reads every wired reader module, so a diff
+    # to one of them must run it.
+    "tests/test_forcing_read_path_store_routing.py",
+)
+
+
 # Canonical readonly-boundary corpus. The three partitions import the generic
 # validator directly; retired selective-cold acceptance wrappers are not
 # consumers of this surviving contract.
@@ -1308,15 +1338,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # deliberately excluded here: unlike tests/river_ts_template_registry.py
         # (#2208) this module has no integration-gated importer at all, so no
         # `database:` entry in ci.yml is owed for it.
-        # Cut (a) lands the register EMPTY of reader entries (`FORCING_REGISTRY`
-        # is `()`; the nine reader mentions sit in the unwired ledger) and cut
-        # (b) populates it. The routing is the same either way — the census is
-        # the suite that judges the register in both states — so this rule
-        # already covers cut (b)'s register edit. If cut (b) brings a NEW
-        # importer suite, the closure guard in tests/test_select_ci_tests.py
-        # names it rather than letting it go unrouted.
+        # Cut (a) landed the register EMPTY of reader entries; cut (b) (task
+        # 7.2) populated it with the nine and brought a SECOND importer,
+        # tests/test_forcing_read_path_store_routing.py, which parametrises its
+        # byte-identity / M6 / narrow-shape assertions over this register — so
+        # an entry added or dropped here rewrites what that suite asserts too.
+        # Both importers are listed; both are non-gated.
         "tests/forcing_ts_template_registry.py",
-        ("tests/test_forcing_ts_template_census.py",),
+        (
+            "tests/test_forcing_ts_template_census.py",
+            # Cut (b)'s second importer: the register is now the parametrisation
+            # source of the byte-identity / M6 / narrow-shape oracle too, so an
+            # entry added or dropped here changes what that suite asserts
+            # without touching it.
+            "tests/test_forcing_read_path_store_routing.py",
+        ),
     ),
     PathTestRule(
         # #2451: the segment-index measurement bench's pass criteria. This module
@@ -1406,8 +1442,13 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # suites are MERGED into those instead of listed here: a duplicate pattern
 # splits a module's ownership across two rules
 # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+# #1990 removed best_available.py from this tuple and gave it an exact rule (see
+# the forcing-census block in PATH_TEST_RULES): it holds a registered forcing
+# read template, so it needs the forcing oracle rider, and a duplicate pattern
+# would split its ownership across two rules. CONNECTION_ATTRIBUTION_TESTS is
+# MERGED into that entry — the same disposition forecast_store.py and
+# state_manager.py already have, for the same reason.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
-    "packages/common/best_available.py",
     "packages/common/model_registry.py",
     "packages/common/object_store_forcing.py",
 )
@@ -2504,10 +2545,79 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # rule should read as the renderer's full unit closure, not as the half
         # that derivation misses. Both targets are non-gated.
         "packages/common/forcing_ts_render.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
+    ),
+    # I11 #1990 task 7.2 — the forcing census's remaining unrouted files.
+    #
+    # Each of these carries mentions the census pins a NUMBER for, and none of
+    # them reached a rule that runs it: `packages/common/**`,
+    # `workers/**` and `services/**` are not broad backend rules (they only
+    # re-add the core-smoke baseline, #1744 path B), and four of the seven have no
+    # same-name suite to fall back to either. So a forcing table mention added or
+    # removed in any of them was red on the post-merge master run and nowhere
+    # else — exactly the failure river's per-site rider exists to prevent.
+    #
+    # Each rule pairs the rider with the file's own owning suites where those
+    # were also unrouted, so the rule reads as the path's real closure rather
+    # than as a census appendage.
+    PathTestRule(
+        "packages/common/forcing_domain_handoff.py",
         (
-            "tests/test_forcing_ts_render.py",
-            "tests/test_forcing_ts_template_census.py",
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_domain_handoff_contract.py",
+            "tests/test_forcing_domain_handoff_apply.py",
         ),
+    ),
+    PathTestRule(
+        "packages/common/forcing_domain_handoff_apply.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_domain_handoff_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "workers/forcing_producer/store.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_producer.py",
+        ),
+    ),
+    PathTestRule(
+        "workers/forcing_producer/file_store.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_producer.py",
+        ),
+    ),
+    PathTestRule(
+        # A wired reader (the QHH bootstrap forcing-state count) with no rule of
+        # its own: its templates live here, so the byte-identity and M6 pins have
+        # to run on a diff to it.
+        "workers/model_registry/qhh_production_bootstrap.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_qhh_scripts_static.py",
+        ),
+    ),
+    PathTestRule(
+        # A wired reader (the forcing-inputs listing) AND a #1728
+        # connection-attribution store. Both sets live on this one rule rather
+        # than on two rows with the same pattern — see
+        # CONNECTION_ATTRIBUTION_STORE_PATHS, which this path was removed from.
+        "packages/common/best_available.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            *CONNECTION_ATTRIBUTION_TESTS,
+            "tests/test_best_available.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_live_evidence.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        "services/production_closure/two_node_e2e_readonly_db_lane.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
         # I1 #1980 river_ts_render: the captured golden of every registered read
@@ -2520,6 +2630,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # new base is routed the same way.
         "tests/fixtures/river_ts_templates_*.json",
         SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        # I11 #1990 task 7.2's forcing counterpart of the rule above, for the
+        # identical reason (review #1996, C10). This is the PRE-WIRING snapshot
+        # the byte-identity pins compare against — captured by executing the nine
+        # readers in a worktree at the cut-(a) merge, which is the whole reason
+        # those pins are evidence rather than a golden certifying its own source.
+        # It is data, not Python, so the `tests/**.py` branch never sees it and it
+        # reached no rule at all: a PR that re-captured it after editing a
+        # template would select zero backend tests. Globbed on the capture SHA so
+        # a re-capture at a new base routes the same way.
+        "tests/fixtures/forcing_read_path_pre_wiring_*.json",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
         # #2208: these are the non-gated frozen-coverage owners. The national
@@ -2548,6 +2671,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/forecast_store.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
             "tests/test_node27_pgdata_workload.py",
@@ -2607,6 +2735,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
         "packages/common/display_coverage.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_display_coverage_refresh.py",
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",
@@ -2699,6 +2832,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_container_contract.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_node27_external_contract_snapshot.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_capture.py",
@@ -2817,6 +2955,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # in the register.
         "db/seeds/seed_demo.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_river_ts_text_identity_cleanup.py",
             "tests/test_seed.py",
             "tests/test_river_ts_dual_write_integration.py",
@@ -3019,7 +3162,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/reset_qhh_smoke_db.py",
-        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
+        (
+            "tests/test_river_ts_text_identity_cleanup.py",
+            "tests/test_qhh_scripts_static.py",
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+        ),
     ),
     PathTestRule(
         # No same-name tests/test_node27_autopipeline.py exists, so without this
@@ -3027,6 +3178,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # none of its own suites run.
         "scripts/node27_autopipeline.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
             # #1647: the `_connect` bounds and the stats-guard flag parser live
@@ -3233,7 +3389,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/node27_timeseries_compression_capture.py",
-        ("tests/test_node27_timeseries_discovery.py",),
+        (
+            "tests/test_node27_timeseries_discovery.py",
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node27-timeseries-compression.service",
