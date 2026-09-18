@@ -1,0 +1,263 @@
+# Design: keep the segment key in the segment read's index condition
+
+Revised after fixture review round 1 (verdict `revise`, 5×P1, 3×P2, 9 citation errors). The review's
+corrections are applied here, not argued with; where it changed the shape of the design — the legacy
+branch, the collapse of the candidate set, the guard that actually bites — the change is called out.
+
+## Context (facts, each cited; nothing here is inferred)
+
+**F1 — the three indexes on `hydro.river_timeseries`.**
+`db/migrations/000059_river_timeseries_narrow_expand.sql:23-35`:
+`river_timeseries_narrow_pkey (run_key, river_segment_key, variable_e, valid_time)`;
+`river_ts_segment_time_key_idx (river_segment_key, variable_e, valid_time DESC)`;
+`river_ts_run_discovery_key_idx (run_key, basin_version_key, river_network_version_key, variable_e,
+valid_time DESC)`.
+
+**F1b — the legacy table carries a same-shaped index, and it was never dropped.**
+`db/migrations/000051_river_ts_surrogate_key_read_index.sql:100` creates
+`river_ts_selected_identity_key_valid_time_idx (run_key, basin_version_key,
+river_network_version_key, variable_e, valid_time DESC)` on what is now
+`hydro.river_timeseries_legacy`. `000059` renames the table (`:8-9`) and **drops no index**; a
+repository-wide grep finds no `DROP INDEX` for it. `tests/test_migrations.py:385` still lists it as
+retained and `tests/test_river_identity_normalization_integration.py:270` comments that the legacy text
+indexes remain on the renamed table. **It has the same column order as F1's discovery index and the same
+missing column.** The narrow index is therefore the key-column *analogue* of 000051's, not its
+successor: `openspec/changes/timeseries-narrow-store-expand-contract/design.md:57` says "替代 000051",
+but that replacement is scoped to the narrow table only.
+
+**F1c — one template renders both branches.** `packages/common/forecast_store.py:121-132`
+(`_segment_rows_source_template`) formats the **same** `_SEGMENT_ROWS_SOURCE_SQL` for `legacy` and
+`narrow`, and `:135-138` (`_segment_rows_source_sql`) concatenates them as
+`f"({legacy}\nUNION ALL\n{narrow})"`. Any change to the template lands on both branches, and by F1b the
+legacy branch has the same exposure.
+
+**F2 — the segment read already binds the segment key on every call site.** Every caller of
+`_SEGMENT_ROWS_SOURCE_SQL` — `_latest_issue_time` (`packages/common/forecast_store.py:729`),
+`_per_source_latest_cycles` (`:759`), `_latest_analysis_issue_time` (`:792`),
+`_fetch_analysis_segment_rows` (`:825`), and the forecast/run-type segment fetches — takes a
+`segment_id` and goes through `_segment_identity_params`. **The defect is index choice, not a missing
+predicate.**
+
+**F3 — the discovery index has three live consumers that bind no segment key.**
+`apps/api/routes/hydro_display.py:1123-1164` (called from `:1093`), `services/tiles/mvt.py:702-730`,
+`packages/common/display_coverage.py:139-160` (whose comment at `:64-65` names the index's column tuple
+as its intended plan). Purpose stated at
+`openspec/changes/timeseries-narrow-store-expand-contract/design.md:57`. A fourth historical consumer,
+the hydro tile point lookup, was rewritten as a per-segment `CROSS JOIN LATERAL` and no longer uses it
+(`db/migrations/000051_river_ts_surrogate_key_read_index.sql:44-57`, Round-3 amendment).
+
+**F4 — `basin_version_key` / `river_network_version_key` are redundant but pinned.** Redundant:
+`hydro.hydro_run` carries one `basin_version_id` per run (`db/migrations/000006_hydro.sql:2-6`),
+`core.river_segment` one `river_network_version_id` per segment
+(`db/migrations/000004_core.sql:33-42`), surrogate keys added by
+`db/migrations/000050_river_identity_normalization.sql:185,192`. Pinned: neither conjunct carries a
+`remove with #1342` aid marker in `packages/common/forecast_store.py:29-54`.
+
+**F4b — but `_assert_key_predicates_retained` will not catch a symmetric rewrite.** It is a *relative*
+check: `render_river_ts_sql` calls it at `packages/common/river_ts_render.py:2641` comparing the
+template against the rendering derived from that same template, with aid lines removed. Rewriting a
+conjunct in `_SEGMENT_ROWS_SOURCE_SQL` changes both sides, so the guard stays silent and needs no edit.
+**Its silence is not evidence.** The oracle that actually bites is
+`tests/test_river_ts_text_identity_cleanup.py:939-953`, which asserts the literal substrings
+`"rt.basin_version_key = ("` and `"rt.river_network_version_key = ("` across all eight segment blocks.
+`tests/test_river_ts_template_golden.py` does **not** bite: `forecast_store:segment_rows_source` is in
+`ROUTED_SOURCE_KEYS` (`:95-107`, `:124-128`) and is excluded from the golden chain comparison.
+
+**F5 — the index name is pinned by two live oracles and two archived tools.** Live:
+`tests/test_migrations.py:278-282` (`RETAINED_RIVER_TIMESERIES_INDEXES`) and `:1498-1499`;
+`tests/test_river_identity_normalization_integration.py:270-296` ("exactly three indexes" by name and
+column list). Archived, non-blocking but would refuse on reuse:
+`openspec/changes/archive/2026-09-15-refresh-node27-window-admission/tools/window_execute.py:1019-1025`
+and `openspec/changes/archive/2026-09-15-node27-post-d12-reforward/tools/window_execute.py:1167-1173`.
+No hard-coded index-name list exists in `packages/common/node27_pgdata_workload_*.py`,
+`scripts/node27_timeseries_*.py`, or `validate_current_d3`
+(`scripts/node27_timeseries_compression_supervisor.py:1718`), which pins compression settings.
+
+**F6 — dropping or restructuring an index of this family has a precedent that demands live evidence.**
+`db/migrations/000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql` proceeded only
+behind a measured before/after `EXPLAIN (ANALYZE, BUFFERS)` receipt on node-27. A design-time argument
+was not accepted then and is not accepted here. Note also
+`db/migrations/000051_river_ts_surrogate_key_read_index.sql:67-74`: `CREATE INDEX CONCURRENTLY` is
+refused on this hypertable, so any index rebuild is a plain `CREATE INDEX` holding a SHARE lock.
+
+**F7 — there is no plan-steering mechanism in this read path.** The only `SET LOCAL` in it is
+`statement_timeout` at `packages/common/display_coverage.py:740` (its value comes from
+`_refresh_statement_timeout_ms()` at `:646`). No `enable_indexscan`, `enable_seqscan` or `pg_hint_plan`
+usage exists in the repo's Python read path; `ForecastStore._transaction`
+(`packages/common/forecast_store.py:2810-2811`) issues no session GUCs.
+
+**F8 — the measured failure.** Receipt
+`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/`:
+run-bound flips `_hyper_9_175_chunk` (192 096 / 12 = 16 008 per-node ratio, 2 204 node hits);
+`issue_time=latest` flips `_hyper_9_170_chunk` (384 192 / 24 = 16 008, 4 480 node hits). Different
+chunks, so the defect is not chunk-specific. D11 evaluates the ratio per node: the loop starts at
+`packages/common/node27_pgdata_workload_plan.py:503`, compares at `:514` and refuses at `:515` with
+`PLAN_FILTER_RATIO`; `filter_ratio_limit = 10` is the default at `:405`.
+
+**F9 — the trigger, proven.** `tests/test_river_timeseries_stats_index_choice_integration.py` on a
+throwaway database: with `ANALYZE` as the only variable, the index flips, `river_segment_key` moves from
+`Filter` into the `Index Cond`, ratio 2 999 → 0, 22.254 ms → 0.255 ms. **Sufficient cause established.**
+The sub-mechanism (*why* the discovery index wins without statistics) is **not**: before `ANALYZE` the
+node reports `Plan Rows = 1` at `Total Cost = 2.53` — the estimate clamped — and the primary-key path's
+no-statistics cost was not measured.
+
+**F9b — production staleness has a specific shape.** `_hyper_9_170_chunk` was analysed at
+2026-09-17T00:16Z and then accumulated 10 802 448 modifications. The relevant staleness is not "more
+rows": it is that **the target run was written after the last `ANALYZE`**, so its `run_key` is absent
+from the column's MCV list and histogram. A reproduction that only adds rows for runs already present
+will not reproduce it.
+
+**F10 — D11's segment-bound check cannot catch this.** `_segment_identity_bound` reads a node's `Filter`
+and `Index Cond` concatenated (`packages/common/node27_pgdata_workload_plan.py:240` `_node_predicate_raw`),
+so the offending node satisfies it from its own `Filter`. Only `PLAN_FILTER_RATIO` catches it.
+
+**F11 — statistics on the production chunks are refreshed continuously.**
+`_analyze_frontier_chunks` (`scripts/node27_autopipeline.py:1628`, called at `:1761`) refreshes
+`hydro.river_timeseries` candidates. It is **not** unconditional: the stats guard is opt-out via
+`NODE27_AUTOPIPE_STATS_GUARD` (`:1742-1753`) and the frontier leg additionally requires
+`ingested_runs >= 1` (`:1758`) — consistent with `_hyper_9_175_chunk` having never been analysed. By the time this change reaches live measurement, the two chunks
+that failed on 2026-09-17 may carry fresh statistics — in which case an **unfixed** tree would also
+measure green. Any cross-day before/after comparison is therefore confounded.
+
+## The decision this design must make
+
+Given F3 (the discovery index stays) and F4 (no identity predicate may be dropped here), the segment read
+must become un-servable by an index lacking `river_segment_key` — on **both** branches, by F1b/F1c.
+
+### The candidate set, after review
+
+**C4 is withdrawn: it cannot be written.** The proposed branch-level `ORDER BY` is a syntax error —
+`_segment_rows_source_sql` (`packages/common/forecast_store.py:135-138`) concatenates the two branches
+bare, `f"({legacy}\nUNION ALL\n{narrow})"`, with no per-branch parentheses. And even if it could be
+written, `river_ts_run_discovery_key_idx` ends in `valid_time DESC`, so after its equality prefix is
+bound it yields the same `valid_time` order the primary key does; an `ORDER BY` cannot discriminate.
+
+**C3 — reorder the discovery index so it also binds the segment key.**
+`(run_key, basin_version_key, river_network_version_key, variable_e, river_segment_key,
+valid_time DESC)`: even when the planner picks it, the segment predicate is an index condition and the
+failure mode cannot occur. Its cost is that the three F3 consumers lose `valid_time` as an index
+condition — a column after an unbound one cannot be used — and two of them bind it
+(`apps/api/routes/hydro_display.py:1123-1164`, `packages/common/display_coverage.py:139-160`);
+`services/tiles/mvt.py:702-730` does not. **It is a gated fallback, not a peer.** It requires an index rebuild on a 504 GB hypertable without
+`CREATE INDEX CONCURRENTLY` (F6), i.e. a maintenance window, and a `000049`-style before/after receipt
+for all three consumers in F3. It is considered only if C1 and C2 both fail the oracle, and it carries
+its own admission tasks.
+
+**So the live selection is C1 versus C2.** Saying otherwise would keep the appearance of a four-way
+measured choice that the code does not support.
+
+**C1 and C2 are not independent, and the fixture should not pretend they are.** Both work through the
+same lever — shortening `river_ts_run_discovery_key_idx`'s usable prefix to `run_key` — so one planner
+property decides both. If it does not hold, they fail **together** and the change lands on C3 and its
+maintenance window. §2.2's stop-and-report exists for exactly that outcome.
+
+**A tension to hold consciously.** `proposal.md` forbids justifying any candidate by the unproven
+"more bound columns → smaller estimate → wins" mechanism. C1's and C2's rationale above is that
+mechanism read backwards. That is why it is written as a *hypothesis to be measured*, not as a reason to
+believe: §2.1 measures the cross product and §2.2 decides on the numbers. If a candidate passes, the
+fixture records that it passed — not that the mechanism was thereby proven.
+
+#### C1 — make the two redundant conjuncts non-sargable
+
+Keep `basin_version_key` and `river_network_version_key` as enforced predicates but express them so they
+cannot form an index condition on the discovery index's 2nd and 3rd columns (for example
+`IS NOT DISTINCT FROM`; both columns are `NOT NULL`, so the predicate is equivalent). The discovery
+index's usable prefix collapses to `run_key`, while the primary key still binds four columns.
+
+Costs: the conjunct text changes, so `tests/test_river_ts_text_identity_cleanup.py:939-953` goes red and
+must be updated deliberately (F4b). Depends on a planner property that must be measured, never assumed.
+Lands on the legacy branch too (F1c) — which is desirable here, since by F1b the legacy branch has the
+same exposure, but it must be measured there rather than hoped for.
+
+#### C2 — verify the two redundant conjuncts in the outer layer instead of the branch scan
+
+The fact scan binds `run_key`, `river_segment_key`, `variable_e`, `valid_time`; the outer layer, which
+already joins `hydro.hydro_run` and `core.river_network_version`, carries the identity verification.
+
+Costs: runs against #2417's "pushdown is additive" rule. Moving predicates outward is the reverse motion
+and must be justified on its own evidence, including the cycle-window envelope argument that change
+relied on (`packages/common/forecast_store.py:87-93` `_CYCLE_WINDOW_PUSHDOWN_SQL`, applied at
+`:862-865`). Also weakens the per-branch predicate set, which is closer to the fail-open class of F4
+than C1 is — the predicate survives, but no longer inside the scan it was protecting.
+
+### Ruled out, with reasons
+
+- **Dropping either discovery index** — F3: three live consumers on the narrow one; the legacy one is
+  retained by an explicit oracle (F1b) and its removal belongs to #1342/#1988, not here.
+- **Dropping the redundant conjuncts outright** — F4: reopens the fail-open identity class closed across
+  #2050/#2086/#2112/#2114/#2141/#2148. A separate issue if ever wanted.
+- **`SET LOCAL enable_indexscan` or similar** — F7: nothing to extend, far too blunt, and PostgreSQL has
+  no per-index disable.
+- **Anything relying on statistics being fresh** — that is remedy (b), which the user did not choose,
+  and F8/F11 show the mis-planned chunk is always the one being actively written.
+
+## How the selection is made
+
+The oracle is `tests/test_river_timeseries_stats_index_choice_integration.py`, extended per `tasks.md`
+§1. A candidate is selected only if it holds under **every** condition below. A candidate that holds
+only after `ANALYZE` has fixed nothing: that is the state the defect already has.
+
+Conditions (the cross product is the gate):
+
+- predicate shape: run-bound **and** `issue_time=latest` — F8 shows they flip different chunks;
+- statistics state: absent **and**, if §1.2 shows it reproduces, stale-in-the-F9b-sense;
+- branch: narrow **and** legacy — F1b/F1c, each judged against its own branch's segment
+  identity column (see criterion 1);
+- chunk state: uncompressed **and** compressed.
+
+Pass criteria, per fact-reading node (three, not two — the third closes the hole the review found):
+
+1. **The node's segment identity is bound in its `Index Cond`** — `river_segment_key` on a narrow node,
+   `river_segment_id` on a legacy node, including the `compress_hyper_7_*` child of a legacy
+   `DecompressChunk`. **The two branches are not the same predicate and requiring the key on legacy
+   would be a permanent false red**: `render_river_ts_sql(..., "legacy")` retains the text aid conjuncts
+   (`packages/common/river_ts_render.py:2634-2637`, which does not call the key-predicate assertion at
+   all) and the legacy compression segmentby is text-based, so in every measured legacy plan the text
+   primary key or text segmentby index wins and `river_segment_key` sits in the `Filter`. Verified in
+   `receipts/2026-09-17-i8-explain-gate/explain-1987.json`, case `shj_nj/legacy`:
+   `compress_hyper_7_104_chunk` binds `river_segment_id` in its `Index Cond` while
+   `_hyper_3_62_chunk` carries `river_segment_key` only as a filter. Forcing legacy onto the key index
+   would be exactly the regression must-preserve #4 forbids;
+2. the node's `Rows Removed by Filter / Actual Rows` is within `filter_ratio_limit`, read off
+   `evaluate_explain_json_plan`'s signature so the test reddens if D11 moves the bound;
+3. the node's `Shared Hit Blocks` is within a fixed multiple of the post-`ANALYZE` primary-key baseline
+   (27 in the current throwaway fixture). **Criteria 1 and 2 alone are satisfiable by a bad plan**:
+   PostgreSQL lists every qual on an indexed column in `Index Cond`, including non-boundary quals, and
+   rows discarded in the index layer are not counted in `Rows Removed by Filter`, which D11 reads from
+   the heap layer. An index shape carrying `river_segment_key` after `valid_time` would pass 1 and 2
+   while still traversing every index entry for the run on that chunk.
+
+## Must-preserve behaviour
+
+1. Row identity: every measured shape returns byte-identical rows, by the receipt's digest
+   (`sha256("\n".join(repr(sorted(row.items()))))[:16]`).
+2. `basin_version_key` and `river_network_version_key` remain enforced predicates of the segment read.
+   If their spelling or position changes, `tests/test_river_ts_text_identity_cleanup.py:939-953` is
+   updated **deliberately and visibly** (F4b), never loosened to a weaker match.
+3. The three discovery-index consumers (F3) do not regress. Per F6 this is a measured claim.
+4. **The legacy branch does not regress.** F1b/F1c: the same template renders it and the legacy table
+   carries a same-shaped index. The receipt's three legacy cases (300 / 324 shared hits) are the
+   baseline.
+5. **The other four call sites of the shared template do not regress** — in particular
+   `_per_source_latest_cycles` (`packages/common/forecast_store.py:759`), which is 631 496 shared hits
+   and 98.8 % of the `latest` shape's cost. `probe1987latest.py` already captures it, so this is a
+   missing criterion, not missing evidence.
+6. `_REQUIRED_EQUALS` in `packages/common/node27_pgdata_workload_query.py:57-63` still matches the
+   captured D11 statement; the D11 capture path is not modified.
+7. The compressed-chunk access path stays as measured: `Index Cond ((run_key = …) AND
+   (river_segment_key = …))` on the compressed chunk's segmentby index, one batch, nothing removed.
+
+## Open questions to settle during implementation
+
+- **Q1** Does the selected candidate hold for `issue_time=latest`, where the binding is
+  `rt.run_key = ANY(%(pushdown_run_keys)s)` (`packages/common/forecast_store.py:516-524`, `:859-866`,
+  `:82-85`)? A `ScalarArrayOpExpr` matches a btree leading column, and F8 shows it is taken.
+- **Q2** For C3 only: what do the three F3 consumers cost with `valid_time` demoted to a filter,
+  measured on node-27 per F6?
+- **Q3** Does the selected candidate hold under F9b staleness, not only under absent statistics?
+- **Q4** Does the legacy branch need any treatment at all? Its exposure is structurally analogous
+  (F1b/F1c) but **empirically different**: it retains the text aid conjuncts, and in every measured
+  legacy plan the text primary key or text segmentby index wins, with
+  `river_ts_selected_identity_key_valid_time_idx` appearing in no measured plan. Its chunking is also
+  much coarser (7-day, 5 chunks). Measured, not reasoned — and if it turns out to be exposed,
+  `tasks.md` 6.3 files it rather than folding it in.
