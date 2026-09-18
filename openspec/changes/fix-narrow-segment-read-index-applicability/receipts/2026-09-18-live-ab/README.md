@@ -123,7 +123,62 @@ The offline half is decisive. `_REQUIRED_EQUALS`
 the `= %(key)s` form, which those two conjuncts never had: they are subselects. Measured:
 `tests/test_node27_pgdata_workload{,_io,_plan}.py` are `55 passed` under base, C1 and C2 alike.
 
-The live half is **not run and must not be run on the orchestrator's own authority.**
+### The live half: deployed and run, 2026-09-18 — **PASS**
+
+The user authorised the deployment. `/home/nwm/NWM` was pulled `--ff-only` from `a31aec64` to
+`258b06ec` (dependencies unchanged, so no `uv sync`) and `nhms-display-api.service` was restarted; the
+`yd-NWM` service on :8081 was not touched.
+
+**A correction that changed the reading of this whole task.** §6.4 recorded the live tree as `7ecc46be`,
+older than #2417, and concluded the defect was latent until the next pull. By 2026-09-18 that was stale
+twice over, and the true state was neither of the two things this receipt had claimed:
+
+- the tree had already been pulled to `a31aec64` at 2026-09-18 09:28:37 +0800, which **does** carry
+  #2417's `{run_pushdown}` and does **not** carry #2451's fix;
+- but the serving process had started at 2026-09-17 15:30:57, when `git reflog` shows HEAD at
+  `7ecc46be`, and `apps/api/main.py:11` → `apps/api/openapi_patching.py:42` imports `forecast_store` at
+  application start, so all three uvicorn processes held **pre-#2417** code in `sys.modules`. uvicorn
+  runs without `--reload`; none of the three had restarted since.
+
+So the defect was latent, but the trigger was **any restart**, not the next pull — a window in which an
+unrelated operational restart would have activated it. Reading runtime state off tree state is what
+produced both wrong claims; the settling evidence was process start times against the reflog.
+
+**Before / after, same endpoint, same five-request shape:**
+
+| | pre-restart (`7ecc46be`) | post-restart (`258b06ec`) |
+|---|---|---|
+| `forecast-series?issue_time=latest` warm | 6.83 – 6.88 s | **3.82 – 4.01 s** |
+| response body | sha256 `327f49a53b92a93c` | **byte-identical**, `cmp` clean |
+| `/ops`, `/`, `https://test.nwm.ac.cn/` | 200 | 200 |
+| journal errors | — | none |
+
+Row identity therefore holds in production, not only on the throwaway bench. The latency figure is five
+samples on one endpoint, not a controlled A/B; it is reported because its bias runs the wrong way (the
+new process's in-process caches were cold while the old one had 22 h of warmth), not because it is
+conclusive. It also cannot be attributed to this change alone — the pull carried 19 commits.
+
+**D11 live receipt — `status: PASS`, `evidence_kind: live`, reviewed sha `258b06ec`**
+(`d11-live-receipt.json`):
+
+| | value | gate |
+|---|---|---|
+| plan buffers | **569** | `PLAN_BUFFER_LIMIT = 5000` |
+| SQL, 20 accepted samples | **5.40 – 6.00 ms** (warm-up 17.3 ms) | — |
+| API, 20 accepted samples | **128.6 – 159.0 ms** (warm-up 168.0 ms) | — |
+
+Both gates this family has broken are now clear on the same statement: #2417's defect measured 18 621
+buffers against the 5 000 ceiling (3.7× over) and #2451's measured a per-node ratio of 16 008 against a
+limit of 10. **569 buffers is 8.8× under the ceiling.**
+
+Two things this PASS does **not** cover. It measures the **run-bound** shape — explicit `issue_time` and
+`run_id` — so it says nothing about `issue_time=latest`, which remains the shape no measurement in this
+change discriminates. And the `latest` endpoint is still ~3.9 s warm, which is **#2424**, an open issue
+about `_per_source_latest_cycles` scanning the fact table, untouched by this fix.
+
+### The original blocked note, kept for the record
+
+The live half was **not run on the orchestrator's own authority.**
 `scripts/node27_pgdata_workload.py measure` drives `--api-origin`, i.e. the live display API on
 `/home/nwm/NWM`, which is at `7ecc46be`. Producing a D11 receipt *for this change* would require pulling
 the live tree to this branch — a production deployment, which needs an explicit GO, and which would also
