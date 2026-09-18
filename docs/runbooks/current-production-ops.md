@@ -5578,7 +5578,11 @@ timer 在表里仍然出现、只是没有 NEXT，**从没装过**的 unit 整�
 （只看 per-service 那块分不开）。**但这不是自动告警**：治理审计不对 receipt 的 `systemd`
 段产任何建议、不因此非零、也不发邮件，timer 被人 disable 掉不会自己冒出来。定期看治理
 receipt 里的 unit 状态就是为了这个——与 §10.8 的 frontier 车道同一口径，同样是靠人按周期
-读。本车道无状态、无自有 receipt、无自有日志，这份治理 receipt 是它唯一留下存活痕迹的地方。
+读。本车道无状态、无自有 receipt、无自有日志：它自己的痕迹只在 journal 里
+（`journalctl --user -u nhms-node27-coverage-freshness-alert.service`），而 journal 只能告诉你
+**跑过的那些 tick** 怎么样了——timer 被 disable 之后它就不再有新行，而「没有新行」与「一切
+正常、只是没告警」在那里长得一模一样。治理 receipt 是这两个 unit 出现在**清单**上的唯一地方，
+这才是它在这里值一句话的原因。
 
 单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
 `Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import
