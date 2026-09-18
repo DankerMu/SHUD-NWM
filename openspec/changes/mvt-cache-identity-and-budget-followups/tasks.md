@@ -89,7 +89,7 @@
 
 - [x] D-1 spec delta：`mvt-tile-contract`（I-geom 扩展 + D3-4/D3-5 边界）、`postgis-tile-clipping-cache`（按层预算 + BLANKED）、
       `mvt-tile-cache-lifecycle`（D6 carve-out、fstat、wrapper 卫兵）；`openspec validate --strict` 通过
-- [ ] D-2 集成后对全部新增/改动测试文件核对选择器路由（`scripts/select_ci_tests.py` 由 B 组单一 owner；A/C 组若需新规则，集成后串行委派）
+- [x] D-2 集成后对全部新增/改动测试文件核对选择器路由（`scripts/select_ci_tests.py` 由 B 组单一 owner；A/C 组若需新规则，集成后串行委派）
 - [x] D-3 node-27 receipt `docs/runbooks/receipts/2026-09-18-batch-10-mvt-followups-node27.md`：
       (a) `geometry_generation` 列存在；(b) 生产 bind、只读角色 `nhms_display_ro`，`hydro-national q_down` 最新 valid_time
       的 z0–z5 全部中国瓦片：零 `MVT_TILE_BUDGET_TRUNCATED(layer_id=discharge)`、零 413，逐 zoom 记 feature 与 coordinate 的
