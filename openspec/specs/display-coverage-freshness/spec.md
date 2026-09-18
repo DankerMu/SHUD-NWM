@@ -152,25 +152,47 @@ check SHALL hold no persistent state.
 #### Scenario: The verdict survives the mailed journal tail
 
 - **WHEN** more sources exist than the report may print
-- **THEN** the report is truncated with an explicit omission line, breaching sources are kept,
-  and the verdict block is printed last so it remains inside the journal tail the failure
-  handler mails
+- **THEN** the report is truncated with an explicit omission line that states exactly how many
+  rows it dropped, and the verdict block is printed last and is never itself truncated, so it
+  remains inside the journal tail the failure handler mails
+- **AND** breaching sources are ordered ahead of the others, so the rows dropped first are the
+  non-breaching ones; the guarantee is bounded by the capacity of the truncated table (one of
+  its rows goes to the omission line), and once breaching sources alone exceed it, breaching
+  rows are dropped from the table as well
+- **AND** no truncation is silent about what it dropped: the report header states the true
+  count of breaching sources, and the verdict names a bounded number of them followed by the
+  count of the rest when any remain
 
 ### Requirement: Coverage freshness failure stages SHALL be attributable by exit code
 
-The coverage freshness check SHALL distinguish its two failure stages by exit code, and the operator documentation SHALL route each stage to a remediation that can actually close it. A failure to import the display module happens in the configuration stage, before any database work, and SHALL therefore be reported as a configuration failure; a display-module failure raised during observation SHALL be reported as an observation failure, alongside database unreachability, statement timeout and permission denial. Live operator documentation SHALL NOT describe "display-module error" without naming the stage it belongs to. An archived change record is exempt: it is the record of what was decided, and it is corrected by an appended dated note rather than by rewriting the original row.
+The coverage freshness check SHALL distinguish its two failure stages by exit code, and the operator documentation SHALL route each stage to a remediation that can actually close it. A failure to import the display module happens in the configuration stage, before any database work, and SHALL therefore be reported as a configuration failure; a display-module failure raised during observation SHALL be reported as an observation failure, alongside database unreachability, statement timeout and permission denial. Live operator documentation SHALL NOT describe "display-module error" without naming the stage it belongs to. The operator documentation SHALL name every structured failure code the check can emit and give each a first step that can close it; where one code covers several causes, it SHALL name the discriminator the mailed failure line already carries — the exception class that prefixes the reason, and the driver error class that follows it — rather than routing every cause of that code to a single remediation. An archived change record is exempt: it is the record of what was decided, and it is corrected by an appended dated note rather than by rewriting the original row.
 
 #### Scenario: Import-time display failure is a configuration failure
 
 - **WHEN** the display module cannot be imported (for example the unit's `PYTHONPATH` is missing, or the virtualenv lacks the display stack)
 - **THEN** the check exits with the configuration exit code before attempting any observation, emits its structured configuration error line, and the runbook's row for that exit code names this case with a first step that addresses the interpreter path rather than the threshold knob
 
+#### Scenario: Every structured failure code has a documented destination
+
+- **WHEN** the check's structured failure codes are compared against the lane's operator documentation
+- **THEN** every code the check can emit is named there with a first step, and a regression test fails if a code is added to the check without being named there
+
+#### Scenario: One observation-failure code, several causes, routed by what the mail carries
+
+- **WHEN** an observation failure is mailed because the database is unreachable, a statement timed out, permission was denied, the configured database lacks the lane's relations, or the display module raised during observation
+- **THEN** the documentation routes each of those causes to its own first step using the reason's exception-class prefix and the driver class that follows it, and a cause that matches none of them has an explicit fallback rather than landing on another cause's remediation
+
 ### Requirement: Every node-27 coverage freshness unit SHALL be registered in the governance liveness inventory
 
-The coverage freshness service and timer SHALL appear in the node-27 resource-governance audit's default service inventory, so that a disabled or masked timer is visible in the governance receipt rather than only in the alerting lane's own absence of mail. The installation documentation for the lane SHALL state that registration as part of its closure, as the sibling frontier-stall lane's documentation does.
+The coverage freshness service and timer SHALL appear in the node-27 resource-governance audit's default service inventory, and the audit SHALL collect, for every unit in that inventory, the unit's load state and unit-file state, so that a disabled or masked timer is distinguishable in the governance receipt from one that was never installed, rather than being visible only in the alerting lane's own absence of mail. Registration makes that state visible for periodic human reading; it is not an alert, and the documentation SHALL NOT describe it as one. The installation documentation for the lane SHALL state that registration as part of its closure, as the sibling frontier-stall lane's documentation does.
 
 #### Scenario: A disabled timer is visible to the governance oracle
 
 - **WHEN** the governance audit collects systemd state over its default service inventory
-- **THEN** the receipt carries an entry for both the coverage freshness service and its timer, so a timer that was never enabled or was later disabled is observable there
+- **THEN** the receipt carries an entry for both the coverage freshness service and its timer, including each unit's load state and unit-file state, so a timer that was installed and later disabled reads differently there from one that was never installed
+
+#### Scenario: Registration is visibility, not an alert
+
+- **WHEN** a registered timer is disabled
+- **THEN** the governance audit's exit code and recommendations are unchanged, and the lane's documentation states that a disabled timer is found by reading the receipt, not by an alert
 
