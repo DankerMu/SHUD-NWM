@@ -1,89 +1,76 @@
-"""#2451: does a MISSING chunk statistic pick ``river_ts_run_discovery_key_idx``?
+"""#2451: the segment read must keep the segment key in its index condition.
 
-What this module tries to falsify
----------------------------------
+What this module is
+-------------------
 
-The node-27 measurement archived under
-``openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/``
-is correlation only. On the newest narrow chunk — the ONE chunk of the three
-newest whose ``pg_stat_all_tables.last_analyze`` and ``last_autoanalyze`` are
-both NULL — the run-bound forecast-series statement read
-``river_ts_run_discovery_key_idx`` and demoted ``river_segment_key`` into a
-``Filter`` (``Rows Removed by Filter: 192096`` against 12 returned rows). Every
-analysed chunk in the very same plan used ``river_timeseries_narrow_pkey``.
+It started as a one-cell hypothesis test — "does a MISSING chunk statistic make
+the planner pick ``river_ts_run_discovery_key_idx``?" — and it answered yes
+(``ANALYZE`` as the only variable; per-node ratio 2999 -> 0, 22.254 ms ->
+0.255 ms, archived as
+``openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/stats-proof-2451.json``).
 
-The hypothesis under test, stated so it can lose:
+It is now the MEASUREMENT HARNESS ``tasks.md`` §2.1 runs against each candidate
+mechanism, and a GATE. It asserts that every measured cell of the condition
+cross product satisfies ``design.md``'s three pass criteria; whether a cell
+reproduces #2451 is recorded as DATA (``defect_reproduced``) and is never
+asserted, so the module stays readable — and stays a regression guard — once a
+candidate makes the cells green.
 
-    On a narrow chunk with NO statistics, the run-bound forecast-series
-    statement picks an index that does NOT carry ``river_segment_key``, pushing
-    it into a ``Filter`` whose ``Rows Removed by Filter / Actual Rows`` ratio
-    breaks the D11 bound; after ``ANALYZE hydro.river_timeseries`` the same
-    statement picks an index that carries ``river_segment_key`` in its
-    ``Index Cond`` and respects the bound.
+Against today's code it is expected to be RED: the absent/stale narrow cells are
+the defect. Every failing cell is listed in one message; one red cell must not
+hide the others.
 
-A negative result is a fully acceptable outcome. Both halves are asserted, both
-failure messages name the index the planner actually chose, and the full
-before/after plan extract is written out when ``NHMS_STATS_PROOF_OUTPUT`` names
-a path, so a refutation is readable rather than a bare ``assert False``.
+The cross product (design.md, "How the selection is made")
+----------------------------------------------------------
 
-A HYPOTHESISED mechanism, recorded so the run can contradict it
----------------------------------------------------------------
+predicate shape x statistics state x store branch x chunk compression state.
 
-``db/migrations/000059_river_timeseries_narrow_expand.sql:23-35`` gives the
-narrow table three indexes. The run-bound statement binds ``run_key``,
-``basin_version_key``, ``river_network_version_key``, ``river_segment_key``,
-``variable_e`` and a ``valid_time`` range. That is FOUR equalities plus a range
-against ``river_ts_run_discovery_key_idx`` and THREE plus a range against
-``river_timeseries_narrow_pkey``. With no column statistics PostgreSQL gives
-every equality the same default selectivity, so the index with more bound
-columns has the smaller estimate — and ``river_segment_key`` is not one of its
-columns. After ANALYZE, ``basin_version_key`` and ``river_network_version_key``
-are single-valued while ``river_segment_key`` has thousands of distinct values,
-which reverses the ranking decisively.
+* shape — run-bound (``rt.run_key = (SELECT …)``) and ``issue_time=latest``
+  (``rt.run_key = ANY(%(pushdown_run_keys)s)``). F8 shows they flip DIFFERENT
+  chunks in production, so one shape's result does not carry to the other. The
+  ``latest`` shape puts TWO statements through a ``hydro.river_timeseries``
+  filter — ``_per_source_latest_cycles`` (``forecast_store.py:743``) and the
+  cycle-window segment read (``:898``) — and the one measured here is the second,
+  selected by its ``pushdown_run_keys`` binding. The first is recorded (its
+  shared hits are must-preserve #5's baseline) but is §4.3's business.
+* statistics — ``absent``, ``stale`` in design.md F9b's shape (analyse, THEN
+  write the target run, never re-analyse), and ``fresh`` after ``ANALYZE``.
+* branch — narrow and legacy. One template renders both (F1c) and the legacy
+  table still carries ``river_ts_selected_identity_key_valid_time_idx``, same
+  column order, same missing segment key, never dropped (F1b).
+* chunk — uncompressed and compressed.
 
-That is a hypothesis about the planner, not an assertion of this test. Both
-default estimates are small enough to clamp to one row, in which case the
-pre-ANALYZE choice is a COST TIE broken by the order the chunk's indexes were
-created rather than by selectivity at all. ``Plan Rows``, ``Startup Cost`` and
-``Total Cost`` are therefore recorded per node and the chunk's index OIDs are
-dumped alongside them: if the chosen pre-ANALYZE node reports ``Plan Rows: 1``,
-the paragraph above is falsified by the measurement and the evidence says so.
-The POST-ANALYZE half is unaffected either way — 24 estimated rows against
-72000 is not a tie.
+Criterion 1 is judged PER BRANCH — ``river_segment_key`` on a narrow node,
+``river_segment_id`` on a legacy one. See ``tests/river_ts_plan_criteria`` for
+why, and ``tests/test_river_ts_plan_criteria`` for the offline proof that all
+three criteria bite (including the synthetic "segment key late in the Index
+Cond" plan of ``tasks.md`` 1.5, which passes criteria 1 and 2).
 
-Ways this test could go GREEN for the wrong reason — named, not hidden
-----------------------------------------------------------------------
+Ways this harness could be green for the wrong reason — named, not hidden
+-------------------------------------------------------------------------
 
-1. ``ANALYZE`` refreshes ``reltuples``/``relpages`` as well as column
-   statistics. ``estimate_rel_size`` already reads the chunk's true block count
-   before ANALYZE, so the size delta is small, but this design cannot separate
-   the two contributions. Residual, not mitigated.
-2. A ``Seq Scan`` on the no-statistics chunk would also demote
-   ``river_segment_key`` to a ``Filter`` and satisfy the first half — for "no
-   index at all" rather than "the wrong index". ``Node Type`` and ``Index Name``
-   are recorded per node so the evidence distinguishes the two.
-3. The seeded fixture has one basin version and one river-network version, which
-   is what makes the discovery index look maximally selective without
-   statistics. Production's newest chunk has the same shape; a chunk holding
-   several basin versions would not, and the mechanism would differ there.
-4. Buffer-cache warmth CANNOT explain the index choice — the planner does not
-   consult the buffer cache — but it does move ``Shared Hit Blocks``. Each
-   EXPLAIN is therefore run twice and the second (warm) plan is the one kept, so
-   the block counts of the two measurements are comparable.
-5. If the three candidate index paths cost the SAME without statistics, the
-   winner is whichever path was added first, which follows index creation order,
-   not selectivity. The first half would then be green for an ordering reason
-   that statistics merely happen to override. ``Plan Rows`` / ``Total Cost`` per
-   node and ``chunk_indexes`` (name + OID, in creation order) are in the
-   evidence precisely so that reading is available to whoever archives it.
-
-Deviation from the task's suggested scaffolding, recorded deliberately:
-``tests/test_display_coverage_residual_debt_integration._prepared_database``
-stops at migration ``000058`` (PRE-expand), which is the wrong catalog for a
-narrow-table index question. This module uses the full
-``apply_migrations_from_zero`` + ``seed_issue_126_data`` pair instead — the same
-combination ``tests/test_real_database_integration.py:227-228`` already uses —
-and imports only ``_connect`` from the residual-debt module.
+1. A cell whose extract is EMPTY would satisfy every criterion vacuously. An
+   empty extract is a failure (``evaluate_cell``), and the compressed cells are
+   the ones at risk: their access shows up under a ``compress_hyper_*`` relation
+   name, mapped back to the measured chunk structurally.
+2. Criterion 3's baseline comes from the SAME cell's post-``ANALYZE``
+   measurement. A baseline taken from a plan that itself failed criteria 1 or 2
+   would be inflated and would silence criterion 3, so it is only used when the
+   ``fresh`` cell passed 1 and 2; otherwise criterion 3 records ``None``.
+3. ``ANALYZE`` refreshes ``reltuples``/``relpages`` as well as column
+   statistics. Residual, not mitigated.
+4. Buffer-cache warmth cannot explain an index CHOICE — the planner does not
+   consult the buffer cache — but it moves ``Shared Hit Blocks``, which
+   criterion 3 reads. Each EXPLAIN is run twice and the warm plan is kept.
+5. If the candidate index paths cost the SAME without statistics, the winner
+   follows path/OID order rather than selectivity. ``Plan Rows``,
+   ``Total Cost`` and each chunk's indexes in OID order are in the evidence so
+   that reading stays available.
+6. Every scenario has ONE basin version and ONE river-network version, which is
+   what makes the discovery index look maximally selective without statistics.
+   Production's newest chunk has the same shape, so this is faithful — but a
+   chunk holding several basin versions would not, and a candidate selected here
+   would not have been tested against that. Residual, carried deliberately.
 
 Run on node-27 against a throwaway database:
 
@@ -95,12 +82,12 @@ Run on node-27 against a throwaway database:
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -110,331 +97,44 @@ from packages.common.forecast_store import PsycopgForecastStore
 from packages.common.node27_pgdata_workload_plan import evaluate_explain_json_plan
 from tests.integration_helpers import (
     BASIN_VERSION_ID,
-    FORCING_VERSION_ID,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
-    SOURCE_ID,
     apply_migrations_from_zero,
     seed_issue_126_data,
+)
+from tests.river_ts_plan_criteria import DEFAULT_SHARED_HIT_MULTIPLE, cell_row, evaluate_cell, walk_plan
+from tests.river_ts_stats_matrix_seed import (
+    EXPECTED_SERIES_BY_SHAPE,
+    EXPECTED_UNCONSTRUCTIBLE,
+    SCENARIOS,
+    SHAPES,
+    STEP_COUNT,
+    Scenario,
+    analyze_relation,
+    column_statistics,
+    fetch_all,
+    relation_statistics,
+    seed_matrix,
 )
 from tests.test_display_coverage_residual_debt_integration import _connect
 
 pytestmark = pytest.mark.integration
 
-#: Seeding scale. Production's no-statistics chunk carried 32018 segments x 6
-#: hourly steps and the bad plan removed 192096 rows to return 12. The ratio is
-#: what matters, not the absolute size: with 3000 segments the bad plan reads one
-#: run's 72000 chunk rows to return 24, a ratio of ~3000 against D11's bound of
-#: 10, while the good plan reads 24 and removes none. Tuned down from
-#: production so the whole module (migrations included) stays well inside two
-#: minutes, and seeded with one ``INSERT ... SELECT`` over ``generate_series``
-#: rather than row by row.
-_SEGMENT_COUNT = 3000
-#: Hourly steps per run, chosen so 00:00..23:00 lands entirely inside ONE
-#: 1-day chunk (``create_hypertable(..., chunk_time_interval => interval '1 day')``).
-_STEP_COUNT = 24
-#: Two runs, so ``run_key`` is not single-valued: the decoy run's rows are the
-#: chunk neighbours the bad plan has to filter out, which is the production shape.
-_RUN_IDS = ("it2451_run_target", "it2451_run_decoy")
-_TARGET_RUN_ID = _RUN_IDS[0]
-
-#: A day of its own, distinct from ``seed_issue_126_data``'s 2026-05-03, so the
-#: constant ``valid_time`` bounds exclude the it126 chunk by chunk pruning and
-#: the measurement is about one chunk only.
-_CYCLE_TIME = datetime(2026, 6, 1, tzinfo=UTC)
-_ISSUE_TIME = "2026-06-01T00:00:00Z"
-
-_SEGMENT_PREFIX = "it2451_shud_riv_"
-_TARGET_SEGMENT_ID = f"{_SEGMENT_PREFIX}000001"
-
-#: The #2417 slot this whole issue is about, as it renders into the NARROW
-#: branch of ``_SEGMENT_ROWS_SOURCE_SQL`` (``packages/common/forecast_store.py:73-77``;
-#: the ``rt.run_id`` aid above it is deleted for narrow by ``river_ts_render``).
+#: The #2417 slot this issue is about, as it renders into the NARROW branch of
+#: ``_SEGMENT_ROWS_SOURCE_SQL`` (``packages/common/forecast_store.py:73-77``).
 _RUN_PUSHDOWN_MARKER = "rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)"
+#: ``_RESOLVED_RUN_PUSHDOWN_SQL`` (``forecast_store.py:82-85``), which only the
+#: cycle-window segment read carries — never ``_per_source_latest_cycles``.
+_LATEST_PUSHDOWN_MARKER = "pushdown_run_keys"
+
+_SHAPE_MARKERS = {"run_bound": _RUN_PUSHDOWN_MARKER, "latest": _LATEST_PUSHDOWN_MARKER}
 
 #: D11's own ceiling, read off the gate rather than copied, so this test goes red
 #: if ``packages/common/node27_pgdata_workload_plan.py`` moves the bound.
 _FILTER_RATIO_LIMIT: int = inspect.signature(evaluate_explain_json_plan).parameters["filter_ratio_limit"].default
 
 _EXPLAIN_ROUNDS = 2
-
-
-# ---------------------------------------------------------------------------
-# Seeding
-# ---------------------------------------------------------------------------
-
-
-def _execute(connection: Any, statement: str, parameters: Any = None) -> Any:
-    with connection.cursor() as cursor:
-        cursor.execute(statement, parameters)
-        return cursor.rowcount
-
-
-def _fetch_all(connection: Any, statement: str, parameters: Any = None) -> list[dict[str, Any]]:
-    with connection.cursor() as cursor:
-        cursor.execute(statement, parameters)
-        return [dict(row) for row in cursor.fetchall()]
-
-
-def _fetch_one(connection: Any, statement: str, parameters: Any = None) -> dict[str, Any] | None:
-    rows = _fetch_all(connection, statement, parameters)
-    return rows[0] if rows else None
-
-
-def _disable_autovacuum(connection: Any, relation: str) -> str:
-    """Turn autovacuum off for ``relation``, reporting what happened.
-
-    A fresh chunk has ``reltuples = 0``, so its autoanalyze threshold is
-    ``50 + 0.1 * 0 = 50`` modified rows — the 144000-row seed trips it the
-    instant a worker visits this database, which would erase the very state
-    being measured. Disabling it keeps the no-statistics window deterministic
-    instead of racing a background worker.
-
-    Wrapped in a savepoint because TimescaleDB versions differ on which
-    ``ALTER TABLE`` forms they accept on a chunk; the load-bearing guarantee is
-    the ``pg_statistic`` precondition below, not this call, so a refusal is
-    recorded in the evidence rather than failing the seed.
-    """
-    with connection.cursor() as cursor:
-        cursor.execute("SAVEPOINT disable_autovacuum")
-        try:
-            cursor.execute(f"ALTER TABLE {relation} SET (autovacuum_enabled = false)")
-        except Exception as error:
-            cursor.execute("ROLLBACK TO SAVEPOINT disable_autovacuum")
-            return f"{type(error).__name__}: {error}"
-        cursor.execute("RELEASE SAVEPOINT disable_autovacuum")
-    return "ok"
-
-
-def _seed_stats_probe_fixture(connection: Any) -> dict[str, Any]:
-    """Seed one day-chunk of narrow facts at the scale the two plans differ at.
-
-    Everything runs inside the caller's single transaction, so autovacuum cannot
-    observe — and therefore cannot analyse — the new chunk before the chunk-level
-    ``autovacuum_enabled = false`` is committed alongside it.
-    """
-    report: dict[str, Any] = {
-        "segment_count": _SEGMENT_COUNT,
-        "step_count": _STEP_COUNT,
-        "run_ids": list(_RUN_IDS),
-        "cycle_time": _CYCLE_TIME.isoformat(),
-    }
-    report["hypertable_autovacuum_disable"] = _disable_autovacuum(connection, "hydro.river_timeseries")
-
-    # Segment ids are built with `to_char`, never `format('%s', ...)`: a bare `%`
-    # in a statement carrying a parameter mapping is a psycopg2 interpolation
-    # error, not a literal.
-    segments = _execute(
-        connection,
-        """
-        INSERT INTO core.river_segment (
-            river_segment_id, river_network_version_id, segment_order, length_m, geom
-        )
-        SELECT
-            %(prefix)s || to_char(ordinal, 'FM000000'),
-            %(river_network_version_id)s,
-            ordinal,
-            1000.0,
-            ST_Multi(
-                ST_SetSRID(
-                    ST_MakeLine(
-                        ST_MakePoint(110.0 + ordinal * 0.0001, 30.0),
-                        ST_MakePoint(110.0 + ordinal * 0.0001, 30.001)
-                    ),
-                    4490
-                )
-            )
-        FROM generate_series(1, %(segment_count)s) AS ordinals(ordinal)
-        """,
-        {
-            "prefix": _SEGMENT_PREFIX,
-            "river_network_version_id": RIVER_NETWORK_VERSION_ID,
-            "segment_count": _SEGMENT_COUNT,
-        },
-    )
-    assert segments == _SEGMENT_COUNT, f"seeded {segments} of {_SEGMENT_COUNT} river segments"
-
-    for index, run_id in enumerate(_RUN_IDS):
-        _execute(
-            connection,
-            """
-            INSERT INTO hydro.hydro_run (
-                run_id, run_type, scenario_id, model_id, basin_version_id,
-                forcing_version_id, source_id, cycle_time, start_time, end_time,
-                status, timeseries_store, run_manifest_uri, output_uri, log_uri
-            )
-            VALUES (
-                %(run_id)s, 'forecast', 'forecast_gfs_deterministic', %(model_id)s, %(basin_version_id)s,
-                %(forcing_version_id)s, %(source_id)s, %(cycle_time)s, %(cycle_time)s, %(end_time)s,
-                'parsed', 'narrow', %(manifest_uri)s, %(output_uri)s, %(log_uri)s
-            )
-            """,
-            {
-                "run_id": run_id,
-                "model_id": MODEL_ID,
-                "basin_version_id": BASIN_VERSION_ID,
-                "forcing_version_id": FORCING_VERSION_ID,
-                "source_id": SOURCE_ID,
-                "cycle_time": _CYCLE_TIME,
-                "end_time": _CYCLE_TIME + timedelta(hours=_STEP_COUNT - 1),
-                "manifest_uri": f"s3://nhms/runs/{run_id}/input/manifest.json",
-                "output_uri": f"s3://nhms/runs/{run_id}/output/",
-                "log_uri": f"s3://nhms/runs/{run_id}/logs/",
-            },
-        )
-        report.setdefault("run_order", []).append({"position": index, "run_id": run_id})
-
-    facts = _execute(
-        connection,
-        """
-        INSERT INTO hydro.river_timeseries (
-            run_key, basin_version_key, river_network_version_key, river_segment_key,
-            valid_time, lead_time_hours, variable_e, value, unit_e, quality_flag_e
-        )
-        SELECT
-            h.run_key,
-            bv.basin_version_key,
-            rnv.river_network_version_key,
-            rs.river_segment_key,
-            %(cycle_time)s::timestamptz + make_interval(hours => step),
-            step,
-            'q_down'::hydro.river_variable,
-            rs.river_segment_key + step,
-            'm3/s'::hydro.river_unit,
-            'ok'::hydro.river_quality_flag
-        FROM hydro.hydro_run h
-        CROSS JOIN core.basin_version bv
-        CROSS JOIN core.river_network_version rnv
-        JOIN core.river_segment rs
-          ON rs.river_network_version_id = %(river_network_version_id)s
-         AND rs.segment_order BETWEEN 1 AND %(segment_count)s
-         AND rs.river_segment_id = %(prefix)s || to_char(rs.segment_order, 'FM000000')
-        CROSS JOIN generate_series(0, %(last_step)s) AS hours(step)
-        WHERE h.run_id = ANY(%(run_ids)s)
-          AND bv.basin_version_id = %(basin_version_id)s
-          AND rnv.river_network_version_id = %(river_network_version_id)s
-        """,
-        {
-            "cycle_time": _CYCLE_TIME,
-            "river_network_version_id": RIVER_NETWORK_VERSION_ID,
-            "basin_version_id": BASIN_VERSION_ID,
-            "segment_count": _SEGMENT_COUNT,
-            "prefix": _SEGMENT_PREFIX,
-            "last_step": _STEP_COUNT - 1,
-            "run_ids": list(_RUN_IDS),
-        },
-    )
-    expected_facts = _SEGMENT_COUNT * _STEP_COUNT * len(_RUN_IDS)
-    assert facts == expected_facts, (
-        f"seeded {facts} narrow fact rows, expected {expected_facts}; "
-        "an authority row (run / basin_version / river_network_version / river_segment) is missing"
-    )
-    report["fact_rows"] = facts
-
-    report["chunks"] = _narrow_chunks(connection)
-    report["chunk_autovacuum_disable"] = {
-        chunk["qualified"]: _disable_autovacuum(connection, chunk["qualified"]) for chunk in report["chunks"]
-    }
-    return report
-
-
-def _narrow_chunks(connection: Any) -> list[dict[str, Any]]:
-    """Every chunk of the NARROW hypertable (never ``river_timeseries_legacy``)."""
-    return _fetch_all(
-        connection,
-        """
-        SELECT chunk_schema, chunk_name, range_start, range_end, is_compressed,
-               quote_ident(chunk_schema) || '.' || quote_ident(chunk_name) AS qualified
-        FROM timescaledb_information.chunks
-        WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
-        ORDER BY range_start
-        """,
-    )
-
-
-def _seeded_chunk(chunks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """The ONE narrow chunk covering the seeded cycle day.
-
-    ``seed_issue_126_data`` also writes four narrow rows, at 2026-05-03, so the
-    hypertable legitimately holds a second chunk; the measurement must pick the
-    seeded one rather than demand that it be alone. Chunk boundaries are
-    resolved from ``timescaledb_information.chunks`` and the whole seeded window
-    is asserted to fall inside them, so nothing here assumes the 1-day interval
-    aligns on UTC midnight.
-    """
-    window_end = _CYCLE_TIME + timedelta(hours=_STEP_COUNT - 1)
-    covering = [chunk for chunk in chunks if chunk["range_start"] <= _CYCLE_TIME < chunk["range_end"]]
-    assert len(covering) == 1, (
-        f"expected exactly one narrow chunk covering {_CYCLE_TIME.isoformat()}; "
-        f"got {[(chunk['qualified'], str(chunk['range_start']), str(chunk['range_end'])) for chunk in chunks]}"
-    )
-    chunk = dict(covering[0])
-    assert window_end < chunk["range_end"], (
-        f"the seeded window {_CYCLE_TIME.isoformat()}..{window_end.isoformat()} spills past chunk "
-        f"{chunk['qualified']} (range_end={chunk['range_end']}); the measurement would span two chunks"
-    )
-    assert not chunk["is_compressed"], (
-        f"chunk {chunk['qualified']} is compressed; the scan would be a DecompressChunk node and neither "
-        "measurement would be about index choice"
-    )
-    return chunk
-
-
-def _chunk_indexes(connection: Any, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The chunk's indexes with their OIDs, in creation order.
-
-    Recorded because a cost TIE between index paths is broken by the order the
-    paths were added, which follows index OID order — see wrong-reason 5 in the
-    module docstring.
-    """
-    return _fetch_all(
-        connection,
-        """
-        SELECT i.relname AS index_name, i.oid AS index_oid, pg_get_indexdef(i.oid) AS definition
-        FROM pg_index x
-        JOIN pg_class c ON c.oid = x.indrelid
-        JOIN pg_class i ON i.oid = x.indexrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = %(chunk_schema)s AND c.relname = %(chunk_name)s
-        ORDER BY i.oid
-        """,
-        {"chunk_schema": chunk["chunk_schema"], "chunk_name": chunk["chunk_name"]},
-    )
-
-
-def _chunk_statistics_state(connection: Any, chunk: Mapping[str, Any]) -> dict[str, Any]:
-    """Both statistics oracles for one chunk.
-
-    ``pg_stats`` is the load-bearing one: it is catalog state, written
-    synchronously by ANALYZE. (``pg_stats`` and not ``pg_statistic`` itself:
-    the base catalog has no public SELECT grant, so a non-superuser integration
-    role would get a permission error instead of a clean precondition failure.)
-    ``pg_stat_all_tables`` is what the node-27 receipt quoted and is asserted
-    too, but its collector can lag on PostgreSQL 14 and older, so it is never
-    the sole gate.
-    """
-    _execute(connection, "SELECT pg_stat_clear_snapshot()")
-    row = _fetch_one(
-        connection,
-        """
-        SELECT
-            (SELECT count(*) FROM pg_stats
-              WHERE schemaname = %(chunk_schema)s AND tablename = %(chunk_name)s) AS pg_statistic_rows,
-            c.reltuples,
-            c.relpages,
-            c.reloptions,
-            s.last_analyze,
-            s.last_autoanalyze,
-            s.n_live_tup
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
-        WHERE n.nspname = %(chunk_schema)s AND c.relname = %(chunk_name)s
-        """,
-        {"chunk_schema": chunk["chunk_schema"], "chunk_name": chunk["chunk_name"]},
-    )
-    assert row is not None, f"chunk {chunk['qualified']} vanished from pg_class"
-    return row
+_MCV_COLUMNS = ("run_key", "river_segment_key", "run_id", "river_segment_id")
 
 
 # ---------------------------------------------------------------------------
@@ -446,9 +146,8 @@ class _RecordingCursor:
     """Pass-through cursor that records every statement and parameter mapping.
 
     Same shape as the node-27 probe's ``_RecCursor``
-    (``openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987.py``),
-    reproduced here rather than imported: that directory is archived evidence,
-    not a library.
+    (``.../receipts/2026-09-17-i8-explain-gate/probe1987.py``), reproduced here
+    rather than imported: that directory is archived evidence, not a library.
     """
 
     def __init__(self, cursor: Any, sink: list[dict[str, Any]]) -> None:
@@ -486,164 +185,84 @@ class _RecordingForecastStore(PsycopgForecastStore):
             cursor.close()
 
 
-def _capture_fact_statement(connection: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Drive the public run-bound read and return (fact statement, response)."""
+def _response_digest(response: Mapping[str, Any]) -> dict[str, Any]:
+    """Must-preserve #1's digest, in the receipt's exact spelling."""
+    points = [point for series in response.get("series") or [] for point in series.get("points") or []]
+    payload = "\n".join(repr(sorted(point.items())) for point in points)
+    return {
+        "digest": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16],
+        "point_count": len(points),
+    }
+
+
+def _capture_fact_statement(
+    connection: Any,
+    scenario: Scenario,
+    shape: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    """Drive the public read for one shape and return (measured, companions, response).
+
+    ``_capture``'s old "exactly one statement mentions hydro.river_timeseries"
+    rule does not hold for the ``latest`` shape, which puts two through that
+    filter. The selection is by PUSHDOWN MARKER instead, which names the
+    statement design.md F8 measured rather than whichever came first.
+    """
     sink: list[dict[str, Any]] = []
     store = _RecordingForecastStore(connection, sink)
-    response = store.forecast_series(
-        basin_version_id=BASIN_VERSION_ID,
-        segment_id=_TARGET_SEGMENT_ID,
-        river_network_version_id=RIVER_NETWORK_VERSION_ID,
-        issue_time=_ISSUE_TIME,
-        variables=["q_down"],
-        scenarios=["GFS"],
-        include_analysis=False,
-        run_types=["forecast"],
-        run_id=_TARGET_RUN_ID,
-        model_id=MODEL_ID,
-    )
+    common: dict[str, Any] = {
+        "basin_version_id": BASIN_VERSION_ID,
+        "segment_id": scenario.target_segment_id,
+        "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+        "variables": ["q_down"],
+        # Both scenarios, so `issue_time=latest` resolves the target AND the
+        # decoy and pushes a TWO-element `rt.run_key = ANY(...)` — design.md F8's
+        # production shape. The run-bound call pins `run_id` and still reads one.
+        "scenarios": ["GFS", "IFS"],
+        "include_analysis": False,
+        "run_types": ["forecast"],
+        "model_id": MODEL_ID,
+    }
+    if shape == "run_bound":
+        response = store.forecast_series(issue_time=scenario.issue_time, run_id=scenario.target_run_id, **common)
+    elif shape == "latest":
+        response = store.forecast_series(issue_time="latest", **common)
+    else:
+        raise ValueError(f"unknown predicate shape {shape!r}")
+
+    marker = _SHAPE_MARKERS[shape]
     fact_statements = [
         statement
         for statement in sink
         if "hydro.river_timeseries" in statement["sql"] and isinstance(statement["params"], dict)
     ]
-    assert len(fact_statements) == 1, (
-        f"expected exactly one captured statement against hydro.river_timeseries, got {len(fact_statements)}: "
-        + " | ".join(" ".join(statement["sql"].split())[:120] for statement in fact_statements)
-    )
-    return fact_statements[0], response
-
-
-# ---------------------------------------------------------------------------
-# EXPLAIN extraction
-# ---------------------------------------------------------------------------
-
-
-def _walk_plan(node: Mapping[str, Any], depth: int = 0) -> Iterator[tuple[int, Mapping[str, Any]]]:
-    yield depth, node
-    for child in node.get("Plans") or []:
-        if isinstance(child, Mapping):
-            yield from _walk_plan(child, depth + 1)
-
-
-def _index_predicate(node: Mapping[str, Any]) -> str:
-    """Everything the ACCESS METHOD evaluated, as opposed to a heap-level filter.
-
-    A bitmap plan splits the answer over two nodes: ``Index Cond`` sits on the
-    child ``Bitmap Index Scan`` (which carries no ``Relation Name``) while
-    ``Filter`` and the buffer counters sit on the parent ``Bitmap Heap Scan``.
-    Reading only the parent's own keys would lose the index predicate and report
-    every bitmap plan as a demotion. ``Recheck Cond`` is included for the same
-    reason D11's ``_node_predicate_raw`` includes it.
-    """
-    parts = [str(node.get(key)) for key in ("Index Cond", "Recheck Cond") if node.get(key)]
-    for child in node.get("Plans") or []:
-        if isinstance(child, Mapping) and child.get("Node Type") == "Bitmap Index Scan" and child.get("Index Cond"):
-            parts.append(str(child["Index Cond"]))
-    return " ".join(parts)
-
-
-def _index_names(node: Mapping[str, Any]) -> list[str]:
-    names = [str(node["Index Name"])] if node.get("Index Name") else []
-    for child in node.get("Plans") or []:
-        if isinstance(child, Mapping) and child.get("Node Type") == "Bitmap Index Scan" and child.get("Index Name"):
-            names.append(str(child["Index Name"]))
-    return names
-
-
-def _narrow_access_nodes(plan: Mapping[str, Any], narrow_relations: Sequence[str]) -> list[dict[str, Any]]:
-    """Per-node extract for every node that reads a chunk of the NARROW table.
-
-    Attribution is by relation name against the chunk list resolved from
-    ``timescaledb_information.chunks``, not by index name: the legacy hypertable
-    is read by the other branch of the same ``UNION ALL`` and must not be mixed
-    in.
-    """
-    known = set(narrow_relations)
-    extracts: list[dict[str, Any]] = []
-    for depth, node in _walk_plan(plan):
-        relation = node.get("Relation Name")
-        if relation is None or str(relation) not in known:
-            continue
-        loops = int(node.get("Actual Loops") or 1) or 1
-        actual_rows = int(node.get("Actual Rows") or 0)
-        rows_removed = int(node.get("Rows Removed by Filter") or 0)
-        predicate = _index_predicate(node)
-        returned_total = actual_rows * loops
-        removed_total = rows_removed * loops
-        extracts.append(
-            {
-                "depth": depth,
-                "node_type": node.get("Node Type"),
-                "relation": str(relation),
-                "index_names": _index_names(node),
-                "index_cond": node.get("Index Cond"),
-                "recheck_cond": node.get("Recheck Cond"),
-                "access_predicate": predicate,
-                "filter": node.get("Filter"),
-                "rows_removed_by_filter": rows_removed,
-                "actual_rows": actual_rows,
-                "actual_loops": loops,
-                "shared_hit_blocks": node.get("Shared Hit Blocks"),
-                "shared_read_blocks": node.get("Shared Read Blocks"),
-                # Estimates, not measurements: `Plan Rows == 1` on the
-                # pre-ANALYZE node means the three index paths tied on cost and
-                # the winner was decided by path order, not selectivity.
-                "plan_rows": node.get("Plan Rows"),
-                "startup_cost": node.get("Startup Cost"),
-                "total_cost": node.get("Total Cost"),
-                "segment_key_in_index_cond": "river_segment_key" in predicate,
-                "segment_key_in_filter": "river_segment_key" in str(node.get("Filter") or ""),
-                "returned_total": returned_total,
-                "removed_total": removed_total,
-                # D11's own comparison (node27_pgdata_workload_plan.py:514),
-                # spelled as a product so a zero-row node is judged the same way
-                # the gate judges it rather than dividing by zero.
-                "breaks_d11_filter_ratio": removed_total > returned_total * _FILTER_RATIO_LIMIT,
-                "filter_ratio": removed_total / max(returned_total, 1),
-            }
+    measured = [statement for statement in fact_statements if marker in statement["sql"]]
+    companions = [statement for statement in fact_statements if marker not in statement["sql"]]
+    if len(measured) != 1:
+        raise AssertionError(
+            f"{scenario.key}/{shape}: expected exactly one captured statement carrying {marker!r}, "
+            f"got {len(measured)} of {len(fact_statements)} statements against hydro.river_timeseries: "
+            + " | ".join(" ".join(statement["sql"].split())[:120] for statement in fact_statements)
         )
-    return extracts
+    return measured[0], companions, response
 
 
-def _relation_census(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Every scan node in the plan, chunk or not.
-
-    The assertions are scoped to the seeded chunk, so this census is what makes a
-    surprise legible: the ``UNION ALL``'s legacy branch, the empty hypertable
-    parent PostgreSQL's inheritance expansion may keep, and the it126 chunk if
-    chunk pruning ever failed to exclude it, all show up here.
-    """
-    return [
-        {
-            "depth": depth,
-            "node_type": node.get("Node Type"),
-            "relation": node.get("Relation Name"),
-            "schema": node.get("Schema"),
-            "index_names": _index_names(node),
-            "actual_rows": node.get("Actual Rows"),
-            "rows_removed_by_filter": node.get("Rows Removed by Filter"),
-        }
-        for depth, node in _walk_plan(plan)
-        if node.get("Relation Name")
-    ]
+# ---------------------------------------------------------------------------
+# EXPLAIN
+# ---------------------------------------------------------------------------
 
 
-def _explain(connection: Any, statement: Mapping[str, Any], narrow_relations: Sequence[str]) -> dict[str, Any]:
+def _explain(connection: Any, statement: Mapping[str, Any]) -> dict[str, Any]:
     """EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) the captured statement, warm.
 
     Two rounds, keeping the second: the planner never consults the buffer cache,
-    so this cannot change which index is chosen — it only makes the two
-    measurements' ``Shared Hit Blocks`` comparable.
+    so this cannot change which index is chosen — it only makes the cells'
+    ``Shared Hit Blocks`` comparable, which criterion 3 depends on.
     """
     plan: Mapping[str, Any] = {}
     root: Mapping[str, Any] = {}
     for _ in range(_EXPLAIN_ROUNDS):
         with connection.cursor() as cursor:
-            cursor.execute(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement["sql"],
-                statement["params"],
-            )
+            cursor.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement["sql"], statement["params"])
             row = cursor.fetchone()
         payload = next(iter(row.values())) if isinstance(row, Mapping) else row[0]
         if isinstance(payload, str):
@@ -656,30 +275,59 @@ def _explain(connection: Any, statement: Mapping[str, Any], narrow_relations: Se
         "root_shared_hit_blocks": plan.get("Shared Hit Blocks"),
         "root_shared_read_blocks": plan.get("Shared Read Blocks"),
         "root_actual_rows": plan.get("Actual Rows"),
-        "narrow_nodes": _narrow_access_nodes(plan, narrow_relations),
         "relation_census": _relation_census(plan),
         "plan": plan,
     }
 
 
-def _describe(nodes: Sequence[Mapping[str, Any]]) -> str:
-    return " | ".join(
-        f"{node['node_type']}({node['relation']}) index={node['index_names'] or None} "
-        f"index_cond={node['index_cond']!r} filter={node['filter']!r} "
-        f"removed={node['removed_total']} returned={node['returned_total']} "
-        f"ratio={node['filter_ratio']:.1f}"
-        for node in nodes
-    ) or "<no node read a chunk of hydro.river_timeseries>"
+def _relation_census(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every scan node in the plan, chunk or not.
+
+    The criteria are scoped to one cell's chunk, so this census is what makes a
+    surprise legible: the ``UNION ALL``'s other branch, the empty hypertable
+    parent PostgreSQL's inheritance expansion may keep, and any chunk that chunk
+    pruning failed to exclude all show up here.
+    """
+    return [
+        {
+            "depth": depth,
+            "node_type": node.get("Node Type"),
+            "relation": node.get("Relation Name"),
+            "index_name": node.get("Index Name"),
+            "actual_rows": node.get("Actual Rows"),
+            "rows_removed_by_filter": node.get("Rows Removed by Filter"),
+            "shared_hit_blocks": node.get("Shared Hit Blocks"),
+        }
+        for depth, node in walk_plan(plan)
+        if node.get("Relation Name")
+    ]
+
+
+def _chunk_indexes(connection: Any, chunk: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The chunk's indexes with their OIDs, in creation order (wrong-reason 5)."""
+    return fetch_all(
+        connection,
+        """
+        SELECT i.relname AS index_name, i.oid AS index_oid, pg_get_indexdef(i.oid) AS definition
+        FROM pg_index x
+        JOIN pg_class c ON c.oid = x.indrelid
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %(chunk_schema)s AND c.relname = %(chunk_name)s
+        ORDER BY i.oid
+        """,
+        {"chunk_schema": chunk["chunk_schema"], "chunk_name": chunk["chunk_name"]},
+    )
 
 
 @contextmanager
 def _evidence_dump(evidence: dict[str, Any]) -> Iterator[None]:
-    """Write the before/after extract to ``NHMS_STATS_PROOF_OUTPUT``, if set.
+    """Write EVERY cell to ``NHMS_STATS_PROOF_OUTPUT``, if set.
 
     In a ``finally`` so a REFUTATION is archived too — that is the outcome whose
     evidence is worth the most. Skipped, not failed, when the variable is unset,
     and a write error is recorded rather than raised so it cannot mask the
-    assertion that was actually being reported.
+    assertion actually being reported. No assertion below reads it.
     """
     try:
         yield
@@ -698,147 +346,389 @@ def _evidence_dump(evidence: dict[str, Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# The measurement
+# The gate
 # ---------------------------------------------------------------------------
 
 
-def test_missing_chunk_statistics_demote_river_segment_key_into_a_filter(
+def test_segment_read_binds_the_segment_key_across_the_condition_cross_product(
     throwaway_database_url: str,
 ) -> None:
-    """#2451: the no-statistics chunk picks an index without ``river_segment_key``.
-
-    Two measurements of the SAME captured statement against the SAME chunk, the
-    only difference being ``ANALYZE hydro.river_timeseries``. Both halves of the
-    hypothesis are asserted; a refutation names the index the planner chose.
-    """
+    """Every measured cell must satisfy design.md's three pass criteria."""
     apply_migrations_from_zero(throwaway_database_url)
     seed_issue_126_data(throwaway_database_url)
 
     evidence: dict[str, Any] = {
         "issue": 2451,
         "filter_ratio_limit": _FILTER_RATIO_LIMIT,
+        "shared_hit_multiple": DEFAULT_SHARED_HIT_MULTIPLE,
         "explain_rounds": _EXPLAIN_ROUNDS,
-        "target_run_id": _TARGET_RUN_ID,
-        "target_segment_id": _TARGET_SEGMENT_ID,
-        "issue_time": _ISSUE_TIME,
+        "expected_unconstructible": sorted("/".join(triple) for triple in EXPECTED_UNCONSTRUCTIBLE),
     }
     with _evidence_dump(evidence):
-        before, after = _measure_both_states(throwaway_database_url, evidence)
+        cells, findings = _measure_matrix(throwaway_database_url, evidence)
 
-    demoted = [
-        node
-        for node in before["narrow_nodes"]
-        if not node["segment_key_in_index_cond"] and node["breaks_d11_filter_ratio"]
+    table = "\n".join("  " + cell_row(cell) for cell in cells)
+    failing = [cell for cell in cells if not cell["passed"]]
+    reported = findings + [
+        f"{cell['cell_key']}: " + "; ".join(cell["failures"]) for cell in failing
     ]
-    assert demoted, (
-        "HYPOTHESIS REFUTED (first half): with NO statistics on the chunk, every node that read "
-        "hydro.river_timeseries already carried river_segment_key in its Index Cond, or stayed inside D11's "
-        f"filter-ratio bound of {_FILTER_RATIO_LIMIT}. Missing statistics do not by themselves demote "
-        f"river_segment_key into a Filter.\nwithout statistics: {_describe(before['narrow_nodes'])}"
-        f"\nwith statistics:    {_describe(after['narrow_nodes'])}"
-        f"\nevidence: {evidence['dump_path']}"
-    )
-
-    still_demoted = [
-        node
-        for node in after["narrow_nodes"]
-        if not node["segment_key_in_index_cond"] or node["breaks_d11_filter_ratio"]
-    ]
-    assert not still_demoted, (
-        "HYPOTHESIS REFUTED (second half): ANALYZE hydro.river_timeseries did NOT restore an index that "
-        "carries river_segment_key within D11's filter-ratio bound of "
-        f"{_FILTER_RATIO_LIMIT}.\nwithout statistics: {_describe(before['narrow_nodes'])}"
-        f"\nwith statistics:    {_describe(after['narrow_nodes'])}"
-        f"\nevidence: {evidence['dump_path']}"
+    assert not reported, (
+        f"#2451 gate: {len(failing)} of {len(cells)} measured cells failed, {len(findings)} finding(s).\n"
+        + "\n".join(f"  - {line}" for line in reported)
+        + f"\n\nper-cell table (criteria = 1,2,3; P pass / F fail / - not evaluated):\n{table}"
+        + f"\n\nevidence: {evidence.get('dump_path')}"
     )
 
 
-def _measure_both_states(
+def _measure_matrix(
     database_url: str,
     evidence: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Seed, assert the preconditions, and EXPLAIN the captured statement twice.
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Seed, measure every cell, then judge — with every connection closed first.
 
-    Everything that needs a database lives here so the caller can hold the two
-    plan extracts after every connection is closed — ``throwaway_database_url``
-    drops the database in its teardown, which a live connection would block.
+    ``throwaway_database_url`` drops the database in its teardown, which a live
+    connection would block, so nothing here outlives the function.
     """
+    # Two connections because the seed has two phases: a transactional one that
+    # lands rows, chunks and their autovacuum opt-out atomically, and an
+    # autocommit one for `compress_chunk` / `ANALYZE` / the post-ANALYZE write.
+    # See `seed_matrix`.
     seed_connection = _connect(database_url)
     seed_connection.autocommit = False
+    post_connection = _connect(database_url)
     try:
-        evidence["seed"] = _seed_stats_probe_fixture(seed_connection)
-        seed_connection.commit()
+        evidence["seed"] = seed_matrix(seed_connection, post_connection)
     finally:
         seed_connection.close()
+        post_connection.close()
+
+    findings: list[str] = []
+    measurements: dict[tuple[str, str, str], dict[str, Any]] = {}
+    usable: list[Scenario] = []
 
     connection = _connect(database_url)
     try:
-        chunks = _narrow_chunks(connection)
-        evidence["narrow_chunks"] = chunks
-        chunk = _seeded_chunk(chunks)
-        evidence["measured_chunk"] = chunk
-        evidence["chunk_indexes"] = _chunk_indexes(connection, chunk)
-        # Scoped to the seeded CHUNK, not to `river_timeseries`: PostgreSQL's
-        # inheritance expansion can keep the empty hypertable parent in the
-        # Append, and a 0-row parent scan would answer the Index Cond question
-        # with noise. `relation_census` in the evidence still shows it.
-        narrow_relations = [chunk["chunk_name"]]
+        evidence["scenarios"] = {}
+        for scenario in SCENARIOS:
+            state = _scenario_state(connection, scenario, evidence["seed"]["scenarios"][scenario.key])
+            evidence["scenarios"][scenario.key] = state
+            if state["status"] != "usable":
+                if scenario.triple not in EXPECTED_UNCONSTRUCTIBLE:
+                    findings.append(
+                        f"REQUIRED SCENARIO UNAVAILABLE {scenario.key}: {state['status']} — {state['reason']}"
+                    )
+                continue
+            usable.append(scenario)
+            findings.extend(_precondition_findings(scenario, state))
 
-        before_stats = _chunk_statistics_state(connection, chunk)
-        evidence["chunk_statistics_before"] = before_stats
-        # Precondition, asserted rather than assumed: if autovacuum got there
-        # first the window measured below is not the no-statistics state.
-        assert before_stats["pg_statistic_rows"] == 0, (
-            f"precondition lost: chunk {chunk['qualified']} already carries "
-            f"{before_stats['pg_statistic_rows']} pg_statistic rows before the first EXPLAIN "
-            f"(reloptions={before_stats['reloptions']}, "
-            f"autovacuum disable={evidence['seed']['chunk_autovacuum_disable']})"
-        )
-        assert before_stats["last_analyze"] is None and before_stats["last_autoanalyze"] is None, (
-            f"precondition lost: chunk {chunk['qualified']} was already analyzed "
-            f"(last_analyze={before_stats['last_analyze']}, last_autoanalyze={before_stats['last_autoanalyze']})"
-        )
+        for scenario in usable:
+            for shape in SHAPES:
+                _record(measurements, findings, connection, scenario, shape, scenario.statistics, evidence)
 
-        statement, response = _capture_fact_statement(connection)
-        evidence["statement_head"] = " ".join(statement["sql"].split())[:400]
-        evidence["statement_params"] = statement["params"]
-        # Non-vacuity on the capture: this must be the #2417 run-bound shape, not
-        # some other read that happens to mention the table.
-        assert _RUN_PUSHDOWN_MARKER in statement["sql"], (
-            "the captured statement does not carry the #2417 bound-run pushdown; "
-            f"head={evidence['statement_head']}"
-        )
-        returned_points = [point for series in response["series"] for point in series["points"]]
-        evidence["response_point_count"] = len(returned_points)
-        assert len(returned_points) == _STEP_COUNT, (
-            f"the run-bound read returned {len(returned_points)} points, expected {_STEP_COUNT}; "
-            "the plans below would be measuring the wrong rows"
-        )
+        evidence["analyze"] = _analyze_everything(connection, usable, evidence["scenarios"])
+        for scenario in usable:
+            state = evidence["scenarios"][scenario.key]
+            relation = state["statistics_relation"]
+            after = relation_statistics(connection, relation["chunk_schema"], relation["chunk_name"])
+            state["statistics_after_analyze"] = after
+            if not int(after["pg_statistic_rows"] or 0) > 0:
+                # Its own finding, its own message: if ANALYZE does not reach
+                # this relation on this server, every `fresh` cell below is a
+                # repeat of the unanalysed one and criterion 3 loses its
+                # baseline. That is a server finding, not a refutation.
+                findings.append(
+                    f"ANALYZE did not populate statistics for {relation['qualified']} ({scenario.key}): "
+                    f"either TimescaleDB did not recurse into this relation, or the connected role does not own "
+                    f"{scenario.hypertable} (000059 sets the owner to nhms_ingest_rw)"
+                )
 
-        before = _explain(connection, statement, narrow_relations)
-        evidence["explain_without_statistics"] = before
-        assert before["narrow_nodes"], (
-            "no plan node read a chunk of hydro.river_timeseries without statistics; "
-            "the comparison below would be vacuous"
-        )
-
-        _execute(connection, "ANALYZE hydro.river_timeseries")
-        after_stats = _chunk_statistics_state(connection, chunk)
-        evidence["chunk_statistics_after"] = after_stats
-        # Separate assertion, separate message: if TimescaleDB does not recurse
-        # ANALYZE into chunks on this server, that is its own finding and must
-        # not surface as a mysterious refutation of the hypothesis.
-        assert after_stats["pg_statistic_rows"] > 0, (
-            f"ANALYZE hydro.river_timeseries did not populate statistics for chunk {chunk['qualified']}: "
-            "either TimescaleDB did not recurse into chunks on this server, or the connected role does not "
-            "own hydro.river_timeseries and PostgreSQL skipped the ANALYZE with a warning "
-            "(000059 sets the owner to nhms_ingest_rw). Either way the second measurement below would be "
-            "a repeat of the first, so this is reported as its own finding rather than as a refutation."
-        )
-
-        after = _explain(connection, statement, narrow_relations)
-        evidence["explain_with_statistics"] = after
-        assert after["narrow_nodes"], "no plan node read a chunk of hydro.river_timeseries after ANALYZE"
+        for scenario in usable:
+            for shape in SHAPES:
+                _record(measurements, findings, connection, scenario, shape, "fresh", evidence)
     finally:
         connection.close()
-    return before, after
+
+    return _judge(measurements, evidence, findings)
+
+
+def _record(
+    measurements: dict[tuple[str, str, str], dict[str, Any]],
+    findings: list[str],
+    connection: Any,
+    scenario: Scenario,
+    shape: str,
+    statistics: str,
+    evidence: Mapping[str, Any],
+) -> None:
+    """Measure one cell, recording a failure as a finding instead of aborting.
+
+    One cell that cannot be measured must not hide the other fifteen — the whole
+    point of the aggregate assertion.
+    """
+    chunk_relation = str(evidence["scenarios"][scenario.key]["chunk"]["chunk_name"])
+    try:
+        measurements[(scenario.key, shape, statistics)] = _measure(connection, scenario, shape, chunk_relation)
+    except Exception as error:  # noqa: BLE001 - a cell that cannot be measured is a finding
+        findings.append(f"CELL NOT MEASURED {shape}/{statistics}/{scenario.key}: {type(error).__name__}: {error}")
+
+
+def _scenario_state(connection: Any, scenario: Scenario, construction: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve one scenario's chunk, statistics relation and pre-measurement state."""
+    state: dict[str, Any] = {
+        "key": scenario.key,
+        "construction": construction,
+        "status": "usable",
+        "reason": "",
+    }
+    if construction.get("status") != "seeded" or not construction.get("chunk"):
+        state["status"] = "unseeded"
+        state["reason"] = str(construction.get("error") or "the scenario did not seed")
+        return state
+    if construction.get("target_facts_error"):
+        state["status"] = "target_rows_missing"
+        state["reason"] = str(construction["target_facts_error"])
+        return state
+
+    chunk = dict(construction["chunk"])
+    relation = dict(construction["statistics_relation"])
+    state["chunk"] = chunk
+    state["statistics_relation"] = relation
+    state["chunk_indexes"] = _chunk_indexes(connection, chunk)
+    if scenario.compressed and not chunk.get("is_compressed"):
+        state["status"] = "not_compressed"
+        state["reason"] = f"chunk {chunk['qualified']} is not compressed; the cell would measure the wrong access path"
+        return state
+    if not scenario.compressed and chunk.get("is_compressed"):
+        state["status"] = "unexpectedly_compressed"
+        state["reason"] = f"chunk {chunk['qualified']} is compressed; this cell is the uncompressed one"
+        return state
+
+    state["run_keys"] = {
+        str(row["run_id"]): int(row["run_key"])
+        for row in fetch_all(
+            connection,
+            "SELECT run_id, run_key FROM hydro.hydro_run WHERE run_id = ANY(%(run_ids)s)",
+            {"run_ids": [scenario.target_run_id, scenario.decoy_run_id]},
+        )
+    }
+    state["statistics_before"] = relation_statistics(connection, relation["chunk_schema"], relation["chunk_name"])
+    state["column_statistics_before"] = column_statistics(
+        connection, relation["chunk_schema"], relation["chunk_name"], _MCV_COLUMNS
+    )
+    return state
+
+
+def _precondition_findings(scenario: Scenario, state: Mapping[str, Any]) -> list[str]:
+    """Assert the statistics state is the one the cell claims, never assume it."""
+    findings: list[str] = []
+    relation = state["statistics_relation"]
+    before = state["statistics_before"]
+    if scenario.statistics == "absent":
+        if int(before["pg_statistic_rows"] or 0) != 0:
+            findings.append(
+                f"PRECONDITION {scenario.key}: {relation['qualified']} already carries "
+                f"{before['pg_statistic_rows']} pg_statistic rows before the first EXPLAIN "
+                f"(reloptions={before['reloptions']}); this is not the absent-statistics state"
+            )
+        if before["last_analyze"] is not None or before["last_autoanalyze"] is not None:
+            findings.append(
+                f"PRECONDITION {scenario.key}: {relation['qualified']} was already analyzed "
+                f"(last_analyze={before['last_analyze']}, last_autoanalyze={before['last_autoanalyze']})"
+            )
+        return findings
+
+    # stale, in design.md F9b's shape: analysed, and then the target run written.
+    if int(before["pg_statistic_rows"] or 0) == 0:
+        findings.append(
+            f"PRECONDITION {scenario.key}: the pre-write ANALYZE did not reach {relation['qualified']}, "
+            "so this cell is the absent state wearing the stale label"
+        )
+        return findings
+    run_key_stats = state["column_statistics_before"].get("run_key") or {}
+    members = set(run_key_stats.get("members") or [])
+    target_key = str(state["run_keys"].get(scenario.target_run_id))
+    decoy_key = str(state["run_keys"].get(scenario.decoy_run_id))
+    if target_key in members:
+        findings.append(
+            f"PRECONDITION {scenario.key}: the target run_key {target_key} IS in {relation['qualified']}'s "
+            f"run_key MCV list {run_key_stats.get('most_common_vals')!r}; design.md F9b's staleness is that it "
+            "is absent, so this cell measures fresh statistics under a stale label"
+        )
+    if decoy_key not in members:
+        findings.append(
+            f"PRECONDITION {scenario.key}: the decoy run_key {decoy_key} is NOT in {relation['qualified']}'s "
+            f"run_key MCV list {run_key_stats.get('most_common_vals')!r}; the pre-write ANALYZE recorded nothing "
+            "about run_key, so 'stale' here is indistinguishable from 'absent'"
+        )
+    return findings
+
+
+def _measure(connection: Any, scenario: Scenario, shape: str, chunk_relation: str) -> dict[str, Any]:
+    """Capture the real statement for one cell and EXPLAIN it warm."""
+    measurement: dict[str, Any] = {
+        "branch": scenario.branch,
+        "chunk_state": scenario.chunk_state,
+        "chunk_relation": chunk_relation,
+    }
+    statement, companions, response = _capture_fact_statement(connection, scenario, shape)
+    measurement["statement_head"] = " ".join(statement["sql"].split())[:400]
+    measurement["statement_params"] = statement["params"]
+    measurement["response"] = _response_digest(response)
+    measurement["explain"] = _explain(connection, statement)
+    # Must-preserve #5: `_per_source_latest_cycles` is 98.8 % of the `latest`
+    # shape's production cost. Recorded per cell as the baseline §4.3 compares
+    # against; it is not gated here, which is what makes it §4.3's business.
+    measurement["companions"] = [
+        {
+            "statement_head": " ".join(companion["sql"].split())[:200],
+            "root_shared_hit_blocks": _explain(connection, companion)["root_shared_hit_blocks"],
+        }
+        for companion in companions
+    ]
+    return measurement
+
+
+def _analyze_everything(
+    connection: Any,
+    scenarios: list[Scenario],
+    scenario_states: Mapping[str, Any],
+) -> dict[str, Any]:
+    """``ANALYZE`` both hypertables, then each compressed relation explicitly.
+
+    A compressed chunk's planner statistics live on its ``compress_hyper_*``
+    relation, and ``ANALYZE`` on the hypertable is not relied on to reach it.
+    """
+    outcomes = {
+        hypertable: analyze_relation(connection, hypertable)
+        for hypertable in ("hydro.river_timeseries", "hydro.river_timeseries_legacy")
+    }
+    for scenario in scenarios:
+        relation = scenario_states[scenario.key]["statistics_relation"]
+        if relation["role"] == "compressed_relation":
+            outcomes[relation["qualified"]] = analyze_relation(connection, relation["qualified"])
+    return outcomes
+
+
+def _judge(
+    measurements: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    evidence: dict[str, Any],
+    findings: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Turn the raw measurements into the per-cell table tasks.md §2.1 consumes.
+
+    The ``fresh`` cells are judged on criteria 1 and 2 only and then supply
+    criterion 3's baseline to their own scenario+shape — but only if they passed
+    those two, so a broken ``fresh`` plan cannot inflate the bound into silence.
+    """
+    cells: list[dict[str, Any]] = []
+    baselines: dict[tuple[str, str], int | None] = {}
+    for scenario in SCENARIOS:
+        for shape in SHAPES:
+            measurement = measurements.get((scenario.key, shape, "fresh"))
+            if measurement is None:
+                continue
+            # `fresh@absent` / `fresh@stale`: both scenarios of a branch x chunk
+            # pair become `fresh` after ANALYZE, but they are DIFFERENT chunks
+            # holding different rows, and each supplies criterion 3's baseline to
+            # its own scenario. Collapsing them to one label would overwrite one
+            # baseline with the other's.
+            cell = _cell(scenario, shape, f"fresh@{scenario.statistics}", measurement, baseline=None)
+            cells.append(cell)
+            usable = cell["criterion_1_segment_identity_bound"] and cell["criterion_2_filter_ratio"]
+            baselines[(scenario.key, shape)] = cell["max_shared_hit_blocks"] if usable else None
+            if not usable:
+                findings.append(
+                    f"BASELINE LOST {cell['cell_key']}: the post-ANALYZE plan itself failed criterion "
+                    f"{'1' if not cell['criterion_1_segment_identity_bound'] else '2'}, so criterion 3 has no "
+                    "trustworthy bound for this scenario and is recorded as not evaluated"
+                )
+
+    for scenario in SCENARIOS:
+        for shape in SHAPES:
+            measurement = measurements.get((scenario.key, shape, scenario.statistics))
+            if measurement is None:
+                continue
+            cells.append(
+                _cell(
+                    scenario,
+                    shape,
+                    scenario.statistics,
+                    measurement,
+                    baseline=baselines.get((scenario.key, shape)),
+                )
+            )
+
+    # Coverage, asserted rather than assumed: a harness that measured NOTHING
+    # would satisfy every criterion above vacuously, which is the module-level
+    # version of the empty-extract trap.
+    present = {cell["cell_key"] for cell in cells}
+    for scenario in SCENARIOS:
+        if scenario.triple in EXPECTED_UNCONSTRUCTIBLE:
+            continue
+        for shape in SHAPES:
+            for statistics in (scenario.statistics, f"fresh@{scenario.statistics}"):
+                key = f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}"
+                if key not in present:
+                    findings.append(
+                        f"CELL MISSING {key}: a required cell of design.md's condition cross product was not "
+                        "measured, so the gate would be green for a condition it never tested"
+                    )
+
+    # Must-preserve #1, within a scenario: the rows one shape returns may not
+    # depend on the statistics state. If they do, the plan comparison between the
+    # two states is a comparison of two different questions. Grouped per SCENARIO
+    # because each scenario owns its own segments and runs, so digests are
+    # expected to differ ACROSS scenarios.
+    digests: dict[str, set[str]] = {}
+    for cell in cells:
+        digests.setdefault(f"{cell['scenario']}/{cell['shape']}", set()).add(cell["digest"])
+    for group, values in sorted(digests.items()):
+        if len(values) > 1:
+            findings.append(f"ROW IDENTITY {group}: statistics states returned different digests {sorted(values)}")
+
+    cells.sort(key=lambda cell: cell["cell_key"])
+    evidence["cells"] = cells
+    evidence["cell_table"] = [cell_row(cell) for cell in cells]
+    evidence["findings"] = findings
+    return cells, findings
+
+
+def _cell(
+    scenario: Scenario,
+    shape: str,
+    statistics: str,
+    measurement: Mapping[str, Any],
+    *,
+    baseline: int | None,
+) -> dict[str, Any]:
+    chunk_relation = str(measurement.get("chunk_relation") or "")
+    cell = evaluate_cell(
+        measurement["explain"]["plan"],
+        chunk_relation=chunk_relation,
+        branch=scenario.branch,
+        filter_ratio_limit=_FILTER_RATIO_LIMIT,
+        shared_hit_baseline=baseline,
+    )
+    cell.update(
+        {
+            "cell_key": f"{shape}/{statistics}/{scenario.branch}/{scenario.chunk_state}",
+            "shape": shape,
+            "statistics": statistics,
+            "chunk_state": scenario.chunk_state,
+            "scenario": scenario.key,
+            "digest": measurement["response"]["digest"],
+            "point_count": measurement["response"]["point_count"],
+            "execution_time_ms": measurement["explain"]["execution_time_ms"],
+            "root_shared_hit_blocks": measurement["explain"]["root_shared_hit_blocks"],
+            "companions": measurement["companions"],
+            "statement_head": measurement["statement_head"],
+        }
+    )
+    expected_points = STEP_COUNT * EXPECTED_SERIES_BY_SHAPE[shape]
+    if measurement["response"]["point_count"] != expected_points:
+        cell["failures"].append(
+            f"NON-VACUITY: the read returned {measurement['response']['point_count']} points, expected "
+            f"{expected_points}; the plan above is measuring the wrong rows"
+        )
+        cell["passed"] = False
+    return cell
