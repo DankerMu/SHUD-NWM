@@ -5422,17 +5422,34 @@ ORDER BY 1;
 差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
 `active_flag` 置 false（退出业务化的口径见 §7）。
 
-**分支 C —— A 和 B 都查空：覆盖行写进去了，目录仍然不收这个 cycle**
+**分支 C —— A 和 B 都查空：目录仍然不收这个 cycle**
 
 刷新腿日志干净（分支 A 没线索）、活跃网络集合与分子集合相等（分支 B 差集为空），
-gap 却还在涨——说明 `rdc.segment_count > 0` 成立、覆盖行确实在，是
-`services/tiles/mvt.py` 的**覆盖窗矩形校验**（`_national_coverage_window`）或
-**3h 相位校验**（`_national_cycle_valid_times`）把该 cycle 丢掉了。两处都是
-fail-closed 的：任一网络的行不过关，整条 cycle 就不进列表。逐条对这个 source 最新
-几个 cycle 查四项判据：
+gap 却还在涨。**分支 B 差集为空并不证明覆盖行在**：它的分子语句根本不 JOIN
+`hydro.run_display_coverage`，所以一个"有可展示 run、却没有覆盖行"的网络在 B 里照样
+是空差集——那正是 §11.1 点名的 `no_coverage_row` rc=0 静默路径
+（`scripts/node27_autopipeline.py:2207-2209`）。因此走到这里有两种落点：要么覆盖行缺失
+或为零，要么覆盖行确实在、而 `services/tiles/mvt.py` 的**覆盖窗矩形校验**
+（`_national_coverage_window`）或 **3h 相位校验**（`_national_cycle_valid_times`）把该
+cycle 丢掉了。后两处都是 fail-closed 的：任一网络的行不过关，整条 cycle 就不进列表。
+逐条对这个 source 最新几个 cycle 查四项判据（下面用 LEFT JOIN，就是为了让第一种落点现身）：
 
 ```sql
-SELECT h.run_id, h.cycle_time, mi.river_network_version_id,
+-- 与 `_national_discharge_coverage_rows` 同构：每个 (network, cycle) 只判最新的那个
+-- run（`rn = 1`），否则重导 cycle 上的陈旧 run 会把你指向目录根本不看的那一行。
+WITH ranked AS (
+  SELECT h.run_id, h.cycle_time, mi.river_network_version_id,
+         ROW_NUMBER() OVER (
+           PARTITION BY mi.river_network_version_id, h.cycle_time
+           ORDER BY h.run_id DESC
+         ) AS rn
+  FROM hydro.hydro_run h
+  JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+  WHERE lower(h.source_id) = 'gfs'
+    AND h.status IN ('succeeded','parsed','published')
+    AND mi.active_flag AND mi.river_network_version_id IS NOT NULL
+)
+SELECT r.run_id, r.cycle_time, r.river_network_version_id,
        rdc.segment_count, rdc.river_sample_count,
        rdc.min_lead_time_hours, rdc.max_lead_time_hours,
        rdc.river_valid_time_start, rdc.river_valid_time_end,
@@ -5446,18 +5463,20 @@ SELECT h.run_id, h.cycle_time, mi.river_network_version_id,
        (EXTRACT(EPOCH FROM (rdc.river_valid_time_end - rdc.river_valid_time_start))::bigint
         = (rdc.max_lead_time_hours - rdc.min_lead_time_hours) * 3600) AS span_ok,
        -- 相位校验：窗口起点必须落在该 cycle 的整点网格上
-       (EXTRACT(EPOCH FROM (rdc.river_valid_time_start - h.cycle_time))::bigint % 3600 = 0) AS phase_ok
-FROM hydro.hydro_run h
-JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
-JOIN hydro.run_display_coverage rdc ON rdc.run_id = h.run_id
-WHERE lower(h.source_id) = 'gfs'
-  AND h.status IN ('succeeded','parsed','published')
-  AND mi.active_flag AND mi.river_network_version_id IS NOT NULL
-ORDER BY h.cycle_time DESC, h.run_id DESC
+       (EXTRACT(EPOCH FROM (rdc.river_valid_time_start - r.cycle_time))::bigint % 3600 = 0) AS phase_ok
+FROM ranked r
+-- LEFT JOIN，不是 INNER：缺覆盖行的 run 必须以整行 NULL 现身，而不是从结果里消失。
+LEFT JOIN hydro.run_display_coverage rdc ON rdc.run_id = r.run_id
+WHERE r.rn = 1
+ORDER BY r.cycle_time DESC, r.run_id DESC
 LIMIT 20;
 ```
 
-四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。**这一类不是假想
+四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。**整行 NULL**（连
+`segment_count` 都是 NULL）是另一个读法：这个 run 压根没有覆盖行，即上面那条
+`no_coverage_row`，处置是直接补刷新，不必查几何。还要留一手：目录侧的 JOIN 多带
+`rdc.segment_count > 0`，最新 run 缺行或被归零时它会**回退到该 cycle 上次新的 run**，
+所以最新行为 NULL/零时要回头看同 cycle 更早的 `run_id` 是不是正扛着覆盖。**这一类不是假想
 的**：覆盖行由 `packages/common/display_coverage.py` 一次扫描算出，`river_sample_count`
 是**所有**样本之和，而 `min/max_lead_time_hours` 取的是各河段 lead 区间的**交集**
 （`MAX(min)` / `MIN(max)`），河段之间 lead 覆盖参差时这两个数就对不上；
@@ -5465,11 +5484,25 @@ LIMIT 20;
 整段是 NULL；输出时间网格不落在 cycle 的整点上则相位校验挂。三种几何都保持
 `segment_count > 0`，所以分支 A、B 必然查得干干净净——这正是这一类会把人卡住的原因。
 
-处置：对这些 run 重跑覆盖刷新，让窗口列按当前数据重算：
+**四个布尔列不是完整的拒绝集合**：它们只覆盖单行的矩形与相位，而
+`_national_cycle_valid_times` 还做**跨行**判定——各网络窗口取交集后为空
+（`window_end < window_start`），或交集被 cycle 截断后**一个 3h 步长时刻都装不下**
+（`last_index < first_index`）。后者尤其反直觉：`min_lead = max_lead = 1` 时四个布尔全
+`true`（跨度 0 = `(lead 数 - 1) × 3600`，相位整除），该 cycle 照样被丢。所以四列全 `true`
+还查不出原因时，别再看单行：对该 cycle 取活跃网络上的 `max(river_valid_time_start)` 与
+`min(river_valid_time_end)`，看 `cycle_time + 3k h` 有没有落进这个区间——装不下就是
+lead 跨度太短或窗口交集为空，同样归上游产出。
+
+处置：对这些 run 重跑覆盖刷新，让窗口列按当前数据重算。**这是一次写操作**
+（`packages/common/display_coverage.py` 的 `_REFRESH_SQL` 是 `INSERT … ON CONFLICT DO UPDATE`），
+所以必须带写角色的 DSN：源 `infra/env/node27-ingest.env`（`nhms_ingest_rw`），**不要**源
+§10/§11.4 那份告警 env —— 它带的是只读的 `nhms_display_ro`（见上面的角色表），
+会在 `InsufficientPrivilege` 上抛栈退 1，既不是刷新成功的 rc=0，也不是 #1446 拒绝守卫的 rc=3。
+生产刷新腿走的就是这份 ingest env（`scripts/node27_autopipe_cron.sh` 源它之后调同一个脚本）。
 
 ```bash
 cd /home/nwm/NWM
-set -a; . infra/env/node27-frontier-alert.env; set +a
+set -a; . infra/env/node27-ingest.env; set +a
 PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_refresh_coverage.py --run-id <run_id>
 echo "rc=$?"
 ```

@@ -53,7 +53,9 @@ Design pins (``openspec/changes/node27-coverage-freshness-alert/design.md``):
   ``MAX_REPORT_LINES`` lines, prints the per-source table first (breaching
   sources sorted first, truncated with an explicit omission line) and the
   ``VERDICT:`` block LAST, so the operator-critical lines are the ones that
-  survive the tail window after systemd's own ~4 framing lines.
+  survive the tail window after systemd's own five framing lines on the exit-1
+  path (measured; this lane adds no structured stderr line there — see
+  ``MAX_REPORT_LINES``).
 - **D6 fail-closed** — every internal failure raises alerting tendency:
   exit 2 config invalid (before any observation), exit 3 observation failure or
   **zero source keys**, exit 1 gap breach / no covered cycle, exit 0 healthy.
