@@ -1,0 +1,261 @@
+{
+  "probe_sql_sha": "edb920a40d261bd9",
+  "cases": {
+    "legacy/hit": {
+      "run_id": "fcst_gfs_2026081812_dg_622a6ef8657e2be00f63cfa0fe1d2812",
+      "cycle_time": "2026-08-18 12:00:00+00:00",
+      "coverage_window": [
+        "2026-08-18 12:00:00+00:00",
+        "2026-08-25 09:00:00+00:00"
+      ],
+      "valid_time": "2026-08-21 22:00:00+00:00",
+      "source_identity_count": 1,
+      "p95_exec_ms": 0.792,
+      "samples": [
+        {
+          "exec_ms": 0.792,
+          "shared_hit": 273,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.684,
+          "shared_hit": 273,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.683,
+          "shared_hit": 273,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.68,
+          "shared_hit": 273,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.677,
+          "shared_hit": 273,
+          "shared_read": 0
+        }
+      ],
+      "fact_nodes": [
+        {
+          "depth": 6,
+          "node": "Custom Scan",
+          "relation": "_hyper_3_62_chunk",
+          "filter": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (variable = 'q_down'::text) AND (variable_e = $0) AND (valid_time = '2026-08-21 22:00:00+00'::timestamp with time zone))",
+          "rows_removed_by_filter": 46,
+          "actual_rows": 1,
+          "actual_loops": 1,
+          "shared_hit": 26,
+          "shared_read": 0
+        },
+        {
+          "depth": 7,
+          "node": "Index Scan",
+          "relation": "compress_hyper_7_104_chunk",
+          "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+          "index_cond": "((run_id = h.run_id) AND (river_network_version_id = mi.river_network_version_id))",
+          "filter": "((h.timeseries_store = 'legacy'::text) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text) AND (_ts_meta_min_2 <= '2026-08-21 22:00:00+00'::timestamp with time zone) AND (_ts_meta_max_2 >= '2026-08-21 22:00:00+00'::timestamp with time zone))",
+          "rows_removed_by_filter": 0,
+          "actual_rows": 1,
+          "actual_loops": 1,
+          "shared_hit": 6,
+          "shared_read": 0
+        }
+      ]
+    },
+    "legacy/miss": {
+      "run_id": "fcst_gfs_2026081812_dg_622a6ef8657e2be00f63cfa0fe1d2812",
+      "cycle_time": "2026-08-18 12:00:00+00:00",
+      "coverage_window": [
+        "2026-08-18 12:00:00+00:00",
+        "2026-08-25 09:00:00+00:00"
+      ],
+      "valid_time": "2026-08-21 22:30:00+00:00",
+      "source_identity_count": 0,
+      "p95_exec_ms": 3194.364,
+      "samples": [
+        {
+          "exec_ms": 3106.239,
+          "shared_hit": 1523851,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3194.364,
+          "shared_hit": 1523851,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3177.31,
+          "shared_hit": 1523851,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3126.285,
+          "shared_hit": 1523851,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3116.612,
+          "shared_hit": 1523851,
+          "shared_read": 0
+        }
+      ],
+      "fact_nodes": [
+        {
+          "depth": 6,
+          "node": "Custom Scan",
+          "relation": "_hyper_3_62_chunk",
+          "filter": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (variable = 'q_down'::text) AND (variable_e = $0) AND (valid_time = '2026-08-21 22:30:00+00'::timestamp with time zone))",
+          "rows_removed_by_filter": 525914,
+          "actual_rows": 0,
+          "actual_loops": 20,
+          "shared_hit": 1523604,
+          "shared_read": 0
+        },
+        {
+          "depth": 7,
+          "node": "Index Scan",
+          "relation": "compress_hyper_7_104_chunk",
+          "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+          "index_cond": "((run_id = h.run_id) AND (river_network_version_id = mi.river_network_version_id))",
+          "filter": "((h.timeseries_store = 'legacy'::text) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text) AND (_ts_meta_min_2 <= '2026-08-21 22:30:00+00'::timestamp with time zone) AND (_ts_meta_max_2 >= '2026-08-21 22:30:00+00'::timestamp with time zone))",
+          "rows_removed_by_filter": 0,
+          "actual_rows": 3984,
+          "actual_loops": 20,
+          "shared_hit": 7024,
+          "shared_read": 0
+        }
+      ]
+    },
+    "narrow/hit": {
+      "run_id": "fcst_gfs_2026091712_dg_0a50ecb006879e7336361fc0b6191766",
+      "cycle_time": "2026-09-17 12:00:00+00:00",
+      "coverage_window": [
+        "2026-09-17 12:00:00+00:00",
+        "2026-09-24 09:00:00+00:00"
+      ],
+      "valid_time": "2026-09-20 22:00:00+00:00",
+      "source_identity_count": 1,
+      "p95_exec_ms": 0.766,
+      "samples": [
+        {
+          "exec_ms": 0.729,
+          "shared_hit": 233,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.616,
+          "shared_hit": 233,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.615,
+          "shared_hit": 233,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.766,
+          "shared_hit": 233,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 0.614,
+          "shared_hit": 233,
+          "shared_read": 0
+        }
+      ],
+      "fact_nodes": [
+        {
+          "depth": 8,
+          "node": "Index Scan",
+          "relation": "_hyper_3_113_chunk",
+          "index": "113_243_river_timeseries_pkey",
+          "index_cond": "((run_id = h.run_id) AND (river_network_version_id = mi.river_network_version_id) AND (variable = 'q_down'::text) AND (valid_time = '2026-09-20 22:00:00+00'::timestamp with time zone))",
+          "filter": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (variable_e = $0))",
+          "rows_removed_by_filter": 0,
+          "actual_rows": 0,
+          "actual_loops": 0,
+          "shared_hit": 0,
+          "shared_read": 0
+        },
+        {
+          "depth": 8,
+          "node": "Index Only Scan",
+          "relation": "_hyper_9_136_chunk",
+          "index": "_hyper_9_136_chunk_river_ts_run_discovery_key_idx",
+          "index_cond": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (variable_e = $6) AND (valid_time = '2026-09-20 22:00:00+00'::timestamp with time zone))",
+          "actual_rows": 1,
+          "actual_loops": 1,
+          "shared_hit": 12,
+          "shared_read": 0
+        }
+      ]
+    },
+    "narrow/miss": {
+      "run_id": "fcst_gfs_2026091712_dg_0a50ecb006879e7336361fc0b6191766",
+      "cycle_time": "2026-09-17 12:00:00+00:00",
+      "coverage_window": [
+        "2026-09-17 12:00:00+00:00",
+        "2026-09-24 09:00:00+00:00"
+      ],
+      "valid_time": "2026-09-20 22:30:00+00:00",
+      "source_identity_count": 0,
+      "p95_exec_ms": 4.563,
+      "samples": [
+        {
+          "exec_ms": 3.951,
+          "shared_hit": 1656,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3.488,
+          "shared_hit": 1656,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 3.398,
+          "shared_hit": 1656,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 4.563,
+          "shared_hit": 1656,
+          "shared_read": 0
+        },
+        {
+          "exec_ms": 4.337,
+          "shared_hit": 1656,
+          "shared_read": 0
+        }
+      ],
+      "fact_nodes": [
+        {
+          "depth": 8,
+          "node": "Index Scan",
+          "relation": "_hyper_3_113_chunk",
+          "index": "_hyper_3_113_chunk_river_timeseries_valid_time_idx",
+          "index_cond": "(valid_time = '2026-09-20 22:30:00+00'::timestamp with time zone)",
+          "filter": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (run_id = h.run_id) AND (river_network_version_id = mi.river_network_version_id) AND (variable = 'q_down'::text) AND (variable_e = $0))",
+          "rows_removed_by_filter": 0,
+          "actual_rows": 0,
+          "actual_loops": 0,
+          "shared_hit": 0,
+          "shared_read": 0
+        },
+        {
+          "depth": 8,
+          "node": "Index Only Scan",
+          "relation": "_hyper_9_136_chunk",
+          "index": "_hyper_9_136_chunk_river_ts_run_discovery_key_idx",
+          "index_cond": "((run_key = h.run_key) AND (river_network_version_key = rnv.river_network_version_key) AND (variable_e = $6) AND (valid_time = '2026-09-20 22:30:00+00'::timestamp with time zone))",
+          "actual_rows": 0,
+          "actual_loops": 14,
+          "shared_hit": 1435,
+          "shared_read": 0
+        }
+      ]
+    }
+  }
+}
