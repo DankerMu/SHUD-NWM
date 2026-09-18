@@ -5348,19 +5348,36 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 | 退出码 | 含义 | 第一步做什么 |
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
-| `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 两个分支 |
-| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法），**观测前**就退出 | 修 env 文件，见 §11.4 |
-| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / 展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+| `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
+| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、或 venv 里没有展示栈），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason`：`ImportError:` / `ModuleNotFoundError:` 开头就是导入期，按 §11.5 的 `Environment=PYTHONPATH=` 与安装块修，**不是** §11.4 的阈值旋钮；其余（缺 DSN、阈值非法）才去 §11.4 改 env 文件 |
+| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / **观测期**展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+
+展示模块报错分**导入期**与**观测期**两种，落在哪个退出码取决于它发生在哪一期：`config_from_env` 先读
+`DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
+的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
+`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 修解释器路径，退 3 查库。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
-且总行数 ≤ 24 —— systemd 自己要占约 4 行框架，verdict 必须活在尾窗里。source 太多时
-表会被截断并打一行 `… N more sources omitted`，**排序保证超阈的 source 先打印、不会被截掉**。
+且总行数 ≤ 24 —— verdict 必须活在尾窗里。尾窗预算要**分两类算，不能合成一个数**：
+退 1（告警）那条路径上 **systemd 自己占 5 行框架**（`Starting…`、`Main process
+exited…`、`Failed with result…`、`Failed to start…`、`Triggering OnFailure=
+dependencies.`），而**本车道在该路径一行结构化 stderr 都不打**——告警路径调 `_emit`
+时不带 `structured=`。`24 + 5 = 29 ≤ 30`，只剩 1 行余量。结构化 stderr 行只出现在
+退 2 / 退 3，而那两条路径的报告只有两行 `VERDICT:`，尾窗绰绰有余。
+
+source 太多时表会被截断并打一行 `… N more sources omitted`，**排序保证超阈的 source
+先打印**——但这条保证是**有界的、不是绝对的**：失败时 `VERDICT:` 块占 3 行，留给表的
+额度是 `24 − 1 − 3 = 20` 行，一旦 source 数超过 20 就压成 19 行表 + 1 行省略说明——
+截断一发生表就只剩 19 行，所以超阈 source 多于 19 个时**超阈的行也会被截掉**。
+截掉不等于隐瞒：表头的
+`breaching=<n>` 是真数、省略行带精确的丢弃条数、`VERDICT: breaching=` 仍点名前 8 个
+source 并补 `+N more`。把表撑大反而会把 verdict 顶出尾窗，那是更坏的失败（设计 D3）。
 DSN 口令在任何面（stdout、stderr、异常文本）都被脱敏。
 
 本车道**无状态**：没有 state 文件、没有 lock、没有 receipt、没有自己的日志文件。因此
 也**没有 dedup**——故障不消除就每天一封。沉默来自消除故障，不是压制告警。
 
-### 11.3 处置：两个真分支 + 一个"看不见"分支
+### 11.3 处置：三个真分支 + 一个"看不见"分支
 
 收到 `VERDICT: FAIL ... behind ingest ...` 时，先用 `VERDICT: breaching=` 那行拿到
 出问题的 source，再分支：
@@ -5405,6 +5422,64 @@ ORDER BY 1;
 差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
 `active_flag` 置 false（退出业务化的口径见 §7）。
 
+**分支 C —— A 和 B 都查空：覆盖行写进去了，目录仍然不收这个 cycle**
+
+刷新腿日志干净（分支 A 没线索）、活跃网络集合与分子集合相等（分支 B 差集为空），
+gap 却还在涨——说明 `rdc.segment_count > 0` 成立、覆盖行确实在，是
+`services/tiles/mvt.py` 的**覆盖窗矩形校验**（`_national_coverage_window`）或
+**3h 相位校验**（`_national_cycle_valid_times`）把该 cycle 丢掉了。两处都是
+fail-closed 的：任一网络的行不过关，整条 cycle 就不进列表。逐条对这个 source 最新
+几个 cycle 查四项判据：
+
+```sql
+SELECT h.run_id, h.cycle_time, mi.river_network_version_id,
+       rdc.segment_count, rdc.river_sample_count,
+       rdc.min_lead_time_hours, rdc.max_lead_time_hours,
+       rdc.river_valid_time_start, rdc.river_valid_time_end,
+       -- 矩形校验：窗口列齐 + 样本数等于 段数 × lead 数 + 跨度等于 (lead 数 - 1) h
+       (rdc.river_valid_time_start IS NOT NULL
+        AND rdc.river_valid_time_end IS NOT NULL
+        AND rdc.min_lead_time_hours IS NOT NULL
+        AND rdc.max_lead_time_hours IS NOT NULL) AS window_cols_ok,
+       (rdc.river_sample_count
+        = rdc.segment_count * (rdc.max_lead_time_hours - rdc.min_lead_time_hours + 1)) AS sample_count_ok,
+       (EXTRACT(EPOCH FROM (rdc.river_valid_time_end - rdc.river_valid_time_start))::bigint
+        = (rdc.max_lead_time_hours - rdc.min_lead_time_hours) * 3600) AS span_ok,
+       -- 相位校验：窗口起点必须落在该 cycle 的整点网格上
+       (EXTRACT(EPOCH FROM (rdc.river_valid_time_start - h.cycle_time))::bigint % 3600 = 0) AS phase_ok
+FROM hydro.hydro_run h
+JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+JOIN hydro.run_display_coverage rdc ON rdc.run_id = h.run_id
+WHERE lower(h.source_id) = 'gfs'
+  AND h.status IN ('succeeded','parsed','published')
+  AND mi.active_flag AND mi.river_network_version_id IS NOT NULL
+ORDER BY h.cycle_time DESC, h.run_id DESC
+LIMIT 20;
+```
+
+四个布尔列里出现 `false` 或 `NULL` 的那一行，就是压住 cycle 的 run。**这一类不是假想
+的**：覆盖行由 `packages/common/display_coverage.py` 一次扫描算出，`river_sample_count`
+是**所有**样本之和，而 `min/max_lead_time_hours` 取的是各河段 lead 区间的**交集**
+（`MAX(min)` / `MIN(max)`），河段之间 lead 覆盖参差时这两个数就对不上；
+`river_valid_time_start/end` 只统计"该时刻河段数 = 期望河段数"的完整时刻，写入残缺时
+整段是 NULL；输出时间网格不落在 cycle 的整点上则相位校验挂。三种几何都保持
+`segment_count > 0`，所以分支 A、B 必然查得干干净净——这正是这一类会把人卡住的原因。
+
+处置：对这些 run 重跑覆盖刷新，让窗口列按当前数据重算：
+
+```bash
+cd /home/nwm/NWM
+set -a; . infra/env/node27-frontier-alert.env; set +a
+PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_refresh_coverage.py --run-id <run_id>
+echo "rc=$?"
+```
+
+新扫描算出非空时会直接覆盖旧的窗口列，**不需要** `--force`。只有新扫描算成空时
+（#1446 拒绝守卫退 **3** 并打一行 `DISPLAY_COVERAGE_REFRESH_REFUSED`，见 §2）才谈得上
+`--force`，而且必须运维逐条确认后再加：`--force` 的动作是把行**归零**，对一个正被全国
+图层使用的 run 用它就是直接熄灯，别拿它当默认手段。重算后四项判据仍不过关的，问题在
+上游产出（河段样本残缺 / 输出网格相位），归 parse/output 侧，刷新脚本修不了。
+
 **退出 3 —— "什么都观测不到"（fail-closed，不是健康）**
 
 ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 0。那条语句 JOIN 了
@@ -5442,6 +5517,11 @@ journalctl --user -u nhms-node27-coverage-freshness-alert.service -n 30 --no-pag
 systemctl --user enable --now nhms-node27-coverage-freshness-alert.timer
 systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-pager
 ```
+
+service 与 timer 都已注册进 `scripts/node27_resource_governance.py`
+`DEFAULT_SERVICES`（#2466），治理审计 receipt 里能看到它们的 systemd 状态——与 §10.8
+的 frontier 车道同一口径：timer 被人 disable 掉时靠治理面发现，而不是靠"怎么没收到
+邮件"。本车道无状态、无 receipt、无自有日志，这个注册是它进自动审计面的唯一存活信号。
 
 单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
 `Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import

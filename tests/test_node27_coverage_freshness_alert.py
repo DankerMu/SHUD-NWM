@@ -289,6 +289,36 @@ def test_evidence_13_missing_database_url_is_a_config_error(
     assert "DATABASE_URL" in payload["reason"]
 
 
+def test_import_time_display_failure_is_a_config_error(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2465: a display module that will not import is a CONFIG failure (exit 2),
+    not an observation one — `lookback_days()` is called inside `config_from_env`,
+    before any database work. `DATABASE_URL` is deliberately present: it is read
+    first, so without it the run would refuse on the missing-DSN path and never
+    reach the import at all. The runbook's exit-code table is being corrected to
+    this behaviour; the pin is what stops the drift coming back.
+    """
+
+    def _no_display_stack() -> float:
+        raise ImportError("No module named 'services.tiles.mvt'")
+
+    monkeypatch.setattr(alerter, "lookback_days", _no_display_stack)
+    observe = RecordingObserve({"gfs": _frontiers("gfs", T0, T0)})
+
+    rc = alerter.main([], now=T0, observe=observe, env=_env())
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert observe.calls == 0
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == alerter.CODE_CONFIG_INVALID
+    assert payload["reason"].startswith("ImportError:")
+    assert DSN_PASSWORD not in captured.out
+    assert DSN_PASSWORD not in captured.err
+
+
 def test_evidence_17_default_threshold_is_derived_from_the_display_constant() -> None:
     lookback = alerter.lookback_days()
     assert alerter.default_gap_days() == lookback / alerter.GAP_THRESHOLD_DIVISOR
