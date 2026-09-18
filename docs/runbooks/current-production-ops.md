@@ -5352,7 +5352,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分四支（仓库代码缺陷、缺第三方依赖、已装的第三方包与代码对不上、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:`、`AttributeError:` 四种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测（`AttributeError` 那一例是 `AttributeError: module 'sqlalchemy' has no attribute 'no_such_attr_2472'`），单测另钉住 `AttributeError` 前缀；两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分四支（仓库代码缺陷、缺第三方依赖、已装的第三方包与代码对不上、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:`、`AttributeError:` 四种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测（`AttributeError` 那一例是 `AttributeError: module 'sqlalchemy' has no attribute 'no_such_attr_2472'`），单测另钉住 `AttributeError` 前缀；两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是推导 |
 | `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
 
 **退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
@@ -5686,6 +5686,9 @@ with engine.connect() as conn:
   - `password authentication failed` / `database "…" does not exist` → 改 env 文件（两种原文实测）。
   - 常见三种之外的原文（`timeout expired`、`too many clients` 一类）→ 第 1 步看容器、再第 3 步看
     `pg_stat_activity`（推导）。
+- 探针以 `ProgrammingError: (psycopg2.errors.InsufficientPrivilege)` 失败（`permission denied for schema …`）→
+  连库的角色不是 `nhms_display_ro`（第 4 步核对的就是它），读 env 文件 `DATABASE_URL` 的用户段，改 env 文件
+  （原文形状 2026-09-18 node-27 以 `nhms_download_rw` 身份实测；路由推导）。
 - 探针以 `ValueError` / `ArgumentError` / `NoSuchModuleError` 失败、且与告警是同一行 → DSN 解析不了，
   改 env 文件（`notaport` 那一例实测，见 §11.2「不带驱动类」第二条）。
 - 探针一切正常，按告警分：
@@ -5693,7 +5696,7 @@ with engine.connect() as conn:
   - 告警是 `ValueError` / `ArgumentError` / `NoSuchModuleError` → 异常来自观测期，走下面
     「非驱动观测失败」（§11.2「不带驱动类」第二条）。
   - 从下面「什么都观测不到」第 1 步过来的 → 库连对了，回那一条做第 2 步。
-  - 从第 4 步末尾那段过来的（告警是 `InsufficientPrivilege`）→ 回那一段，按探针的 `current_user` 分。
+  - 从第 4 步末尾那段过来的（告警是 `InsufficientPrivilege`）→ 回那一段，按 env 文件 `DATABASE_URL` 的用户段分。
   - 告警是别的驱动错误（拒连、口令、`AdminShutdown`、`timeout expired`…）→ 是已经过去的瞬时故障：
     手跑一次 unit，`systemctl` 返回 0（即车道退 0，读法见 §11.4 末尾）即闭环。仍失败、原文不变 →
     unit 与探针用的不是同一套连接参数，而 `EnvironmentFiles` 已确认一致：把两边原文与 `DropInPaths` 读数
@@ -5781,8 +5784,12 @@ from unnest(array['hydro.hydro_run', 'hydro.run_display_coverage', 'core.model_i
 按 §11.4 末尾的读法确认 `systemctl` 返回 0。
 
 五行全 `t`、告警却是 `InsufficientPrivilege` → 被拒的不是这五样，或连库的不是 `nhms_display_ro`
-（推导）。读驱动原文里 `permission denied for <对象>` 点名的是什么：先做第 2 步，看 unit 读的 env 文件与探针的
-`current_user`——不是 `nhms_display_ro` → DSN 用错了角色，改 §11.4 那份 env 文件；是 → 被拒的对象是车道
+（推导）。读驱动原文里 `permission denied for <对象>` 点名的是什么，再看连库的是哪个角色：先做第 2 步的第一个
+动作确认 unit 读的是哪份 env 文件，然后读那份文件里 `DATABASE_URL` 的用户段（邮件里角色名被脱敏成 `***`，见
+§11.2）——不要靠探针的 `current_user`：角色若没有 `hydro` 的 USAGE，探针自己就以
+`permission denied for schema hydro` 失败、打不出 `current_user`（2026-09-18 node-27 实测：以
+`nhms_download_rw` 身份跑探针里的 `to_regclass('hydro.hydro_run')` 即如此）。用户段不是 `nhms_display_ro` →
+DSN 用错了角色，改 §11.4 那份 env 文件；是 → 被拒的对象是车道
 或 `services/tiles/mvt.py` 新引用、而只读角色没被授权的，按上面 schema 漂移那一支同样的材料开 issue
 （附完整 `reason`），别在生产库上临时补授。
 
@@ -6031,8 +6038,7 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
     文件没了，**并且** `systemctl --user show -p Environment nhms-node27-coverage-freshness-alert.service`
     也不读 `Environment=PYTHONPATH=/home/nwm/NWM`（健康值 2026-09-18 node-27 实测）→ 两道保险都没了，
     unit 导不进 `services`。这时连 `packages.common.redaction` 也导不进，`reason` 读
-    `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`（本地复现，
-    推导）。重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再用 §11.4 那条 `systemctl --user start`
+    `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`（推导）。重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再用 §11.4 那条 `systemctl --user start`
     确认 `systemctl` 返回 0（读法见 §11.4 末尾）；venv 为什么丢了本项目，单独查（推导）。
   - 以上都干净（drop-in 没有、`.pth` 在，或 `Environment=PYTHONPATH=` 在），unit 却仍 `status=2`、两边仍
     对不上 → 重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再手跑一次（读法见 §11.4 末尾）。
