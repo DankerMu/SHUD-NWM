@@ -35,13 +35,19 @@ repo units, immediate retention catch-up, bound 2).
   `reference_time=2026-09-17T12:00:00Z`, `cutoff=2026-08-27T12:00:00Z`,
   dropped `_hyper_9_126`, `_hyper_3_62`, `_hyper_1_61`. Next elapse
   2026-09-19 06:36Z.
-- Manual compression start (fence code, bound 2) 13:58:50Z → 14:36:11Z,
-  `Result=success`, `ExecMainStatus=0`;
+- Manual compression start (`systemctl --user start --no-block`, fence code,
+  bound 2) 13:58:50Z → 14:36:11Z, `Result=success`, `ExecMainStatus=0`;
   [`compression-receipt-20260918T143611Z.json`](stage-a/after/compression-receipt-20260918T143611Z.json):
   `outcome=clean`, `per_tick_bound=2`, `now_utc=2026-09-17T12:00:00Z`,
   `head_sha=95481481…` (fence), selected `_hyper_9_153` (20.16 → 5.41 GB) and
   `_hyper_9_154` (20.97 → 5.60 GB), both `committed`: 41.13 GB in 2241 s =
   54.5 s/GB.
+
+State capture 2026-09-18T15:20:04Z (`systemctl --user show` of the three units
++ journal 21:50–22:40 CST):
+[`stage-a/after/state-after-stage-a.txt`](stage-a/after/state-after-stage-a.txt) —
+retention and compression `Result=success` / `ExecMainStatus=0` with the start
+and exit timestamps above; raw-retention still `exit-code` / 1 from 03:35:32Z.
 
 Catalog after Stage A (read-only transaction): `river_timeseries` 5/29
 compressed, 14 eligible uncompressed at W−2 d; `river_timeseries_legacy` 2/4

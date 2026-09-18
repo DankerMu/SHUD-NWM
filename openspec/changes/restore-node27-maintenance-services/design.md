@@ -232,3 +232,11 @@ which database and hypertables `yd-node27-timeseries-retention` touches
   inside one process the same way.
 - **#2425 acceptance 1/3 need two consecutive daily ticks**: observed after
   merge and posted to #2425 before it is closed.
+- **#2425 acceptance 4 (sequencing against #2417)**: the ordering is met by
+  chronology — #2417 closed with PR #2438 (merged 2026-09-16, `run_key` and
+  `valid_time` pushed into the narrow branch, `packages/common/forecast_store.py`)
+  before this change lets compressed narrow chunks persist. #2438's D11 live
+  receipt (560 of 5000 buffers) was measured with narrow `compressed=0`, so the
+  read path over compressed narrow chunks is unmeasured; E7 re-runs the D11
+  live measure after Stage B, with the measured run's window overlapping a
+  compressed narrow chunk, before #2425 is closed.

@@ -77,6 +77,65 @@ render_canonical_env() {
     "NODE27_RAW_RETENTION_LOCK_PATH=$RUN_LOCK"
 }
 
+# The value of KEY in an env file, read as text and never sourced (this runs as
+# root on a file nwm owns). Accepted shape: KEY assigned on exactly one line,
+# `[export ]KEY=value`, value optionally in one pair of '...' or "..." -- so the
+# wrapper's `set -a; .` (last assignment wins) sees the same value. Zero or
+# several assignments: rc 1.
+env_file_value() {
+  local file="$1" key="$2" re value
+  re="^[[:space:]]*(export[[:space:]]+)?${key}="
+  [ "$(grep -cE "$re" "$file")" = 1 ] || return 1
+  value=$(grep -E "$re" "$file")
+  value=${value#*=}
+  case "$value" in
+    \"*\") value=${value#\"}; value=${value%\"} ;;
+    \'*\') value=${value#\'}; value=${value%\'} ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+check_copyback_lock() {
+  local lock="$1"
+  # Never created here: a missing lock file is a node-22 / copyback-root
+  # problem, not something this installer may paper over.
+  if [ ! -f "$lock" ] || [ -L "$lock" ]; then
+    refuse "copyback lock $lock is missing or not a regular file"
+  fi
+  [ "$(stat -c %u "$lock")" = "$UNIT_UID" ] || refuse "copyback lock is not owned by uid $UNIT_UID"
+  [ "$(stat -c %a "$lock")" = "600" ] || refuse "copyback lock mode is not 600"
+}
+
+# The nwm env is the source of the generated env AND the nwm unit's own env:
+# it must already keep the nwm unit off the canonical lane (otherwise that unit
+# records canonical `lock_unsafe` every tick) and name the object-store root
+# checked above.
+check_source_env() {
+  local env="$1" lanes lane root
+  local -a names
+  if [ ! -f "$env" ] || [ -L "$env" ]; then
+    refuse "source env $env is missing or a symlink"
+  fi
+  [ "$(stat -c %a "$env")" = "600" ] || refuse "source env $env mode is not 600"
+
+  lanes=$(env_file_value "$env" NODE27_RAW_RETENTION_LANES) \
+    || refuse "source env must set NODE27_RAW_RETENTION_LANES on exactly one line (raw,precip-cache)"
+  lanes=${lanes// /}
+  [ -n "${lanes//,/}" ] || refuse "source env NODE27_RAW_RETENTION_LANES names no lane"
+  IFS=, read -r -a names <<<"$lanes"
+  for lane in "${names[@]}"; do
+    case "$lane" in
+      raw | precip-cache | "") ;;
+      *) refuse "source env NODE27_RAW_RETENTION_LANES may name only raw / precip-cache" ;;
+    esac
+  done
+
+  root=$(env_file_value "$env" NODE27_RAW_RETENTION_OBJECT_STORE_ROOT) \
+    || refuse "source env must set NODE27_RAW_RETENTION_OBJECT_STORE_ROOT on exactly one line"
+  [ "$root" = "$OBJECT_STORE_ROOT" ] \
+    || refuse "source env NODE27_RAW_RETENTION_OBJECT_STORE_ROOT is not $OBJECT_STORE_ROOT"
+}
+
 check_preconditions() {
   [ "$(id -u)" -eq 0 ] || refuse "must run as root (sudo $0)"
 
@@ -90,13 +149,7 @@ check_preconditions() {
   [ "$(stat -c %u "$OBJECT_STORE_ROOT")" = "$UNIT_UID" ] \
     || refuse "object-store root is not owned by uid $UNIT_UID"
 
-  # Never created here: a missing lock file is a node-22 / copyback-root
-  # problem, not something this installer may paper over.
-  if [ ! -f "$COPYBACK_LOCK" ] || [ -L "$COPYBACK_LOCK" ]; then
-    refuse "copyback lock $COPYBACK_LOCK is missing or not a regular file"
-  fi
-  [ "$(stat -c %u "$COPYBACK_LOCK")" = "$UNIT_UID" ] || refuse "copyback lock is not owned by uid $UNIT_UID"
-  [ "$(stat -c %a "$COPYBACK_LOCK")" = "600" ] || refuse "copyback lock mode is not 600"
+  check_copyback_lock "$COPYBACK_LOCK"
 
   local unit
   for unit in "${UNIT_FILES[@]}"; do
@@ -105,10 +158,7 @@ check_preconditions() {
     fi
   done
 
-  if [ ! -f "$SOURCE_ENV" ] || [ -L "$SOURCE_ENV" ]; then
-    refuse "source env $SOURCE_ENV is missing or a symlink"
-  fi
-  [ "$(stat -c %a "$SOURCE_ENV")" = "600" ] || refuse "source env $SOURCE_ENV mode is not 600"
+  check_source_env "$SOURCE_ENV"
 
   # The unit user must be able to import the runner from the nwm checkout
   # through the nwm venv (directory modes, uv interpreter tree).

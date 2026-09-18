@@ -14,8 +14,9 @@ committed env template SHALL carry the target value with a comment
 identifying it as a capacity conclusion and pointing at the recorded
 derivation in the operator runbook, the deployed node-27 env SHALL carry
 the same value, and every receipt echoes the effective bound via its
-existing `per_tick_bound` field. The variable remains mandatory with no
-in-code default.
+existing `per_tick_bound` field. The variable remains mandatory in the
+compression env (an env without it is refused); the in-code default, equal to
+the target, serves only direct unassembled invocations that read no env.
 
 #### Scenario: Template carries the pinned capacity target
 

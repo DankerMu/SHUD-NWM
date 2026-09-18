@@ -39,8 +39,8 @@ promoting cold requirements. GitHub records the actual issue-close events.
 
 Observed live compression unit as of the #1895 handoff (do not delete these
 paths). **2026-09-18 (#2285 / #2425, design D7):** #1895 is closed and its
-fence tree at `95481481` never receives fixes, so the unit is being rebound to
-the repo unit on `/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` under
+fence tree at `95481481` never receives fixes, so the unit is to be rebound
+(Stage B, after merge; procedure below) to the repo unit on `/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` under
 `/home/nwm/NWM`, env `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
 carried over from the fence env with `REPO_ROOT` rewritten to
 `/home/nwm/NWM`). The live env's bound moved 4 → 2 on 2026-09-18 (stage A,
@@ -62,14 +62,59 @@ still retained, not deleted. Proof the rebind took: the next receipt's
 - source/templates and all private replay env/plan/ledger/terminal/consumed-finalizer/recovery evidence retained
 
 SOURCE, `.venv`, STATE/config and private replay/rollback archives were the
-active deployment at the #1895 handoff and are rollback and recovery inputs
-after the 2026-09-18 rebind, not disposable test evidence. Do not clean
-them. Governance and retention units were not rebound; business checkout SHA
+active deployment at the #1895 handoff, stay active until the D7 rebind and
+are rollback and recovery inputs after it, not disposable test evidence. Do
+not clean them. Governance and retention units were not rebound; business checkout SHA
 `415cbd1e` is unchanged. No maintenance service was started by this handoff;
 no DB/schema/role change, `REVOKE`, `DROP`, tablespace/data deletion, or
 PGDATA/evidence/container-mount deletion is claimed. Unexpected leftover
 cold catalog/bind state still requires stop/preserve and a separately
 approved safe disposition.
+
+**Rebind to the repo unit (design D7, #2285).** As `nwm` on node-27, after
+`git pull --ff-only` in `/home/nwm/NWM`. Never print env values (no `cat` of
+either env file).
+
+```bash
+FENCE_ENV=/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env
+REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
+```
+
+1. `systemctl --user stop nhms-node27-timeseries-compression.timer`, then
+   `systemctl --user is-active nhms-node27-timeseries-compression.service`
+   must print `inactive` (a run in progress: wait for it to end).
+2. `cp -p "$REPO_ENV" "$REPO_ENV.bak-pre-rebind-$(date -u +%Y%m%d)"`.
+3. `install -m 0600 "$FENCE_ENV" "$REPO_ENV"`.
+4. `sed -i 's#^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=.*#NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM#' "$REPO_ENV"`.
+5. Each of these must print `1`; anything else: stop, restore the step-2
+   backup and restart the timer. The unit's `ExecStartPre` `--check` returns
+   before it resolves the runner root, so it cannot catch a fence `REPO_ROOT`.
+
+   ```bash
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/home/nwm/NWM/.nhms-issue1069-live/compression.lock$' "$REPO_ENV"
+   ```
+
+6. Budget preflight with the repo code against the new env, rc 0:
+   `/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py --compression-env "$REPO_ENV" --check`.
+7. `install -m 0644 /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service ~/.config/systemd/user/`
+   and `systemctl --user daemon-reload`.
+8. `diff ~/.config/systemd/user/nhms-node27-timeseries-compression.service /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service`
+   prints nothing, and
+   `systemctl --user show -p DropInPaths nhms-node27-timeseries-compression.service`
+   prints an empty `DropInPaths=`.
+9. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
+   after the next run: the receipt's `head_sha`
+   (`jq -r .head_sha /home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json`)
+   equals `git -C /home/nwm/NWM rev-parse HEAD`.
+
+Rollback: `install -m 0644` the pre-rebind unit kept at
+`/home/nwm/NWM/docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/stage-a/before/nhms-node27-timeseries-compression.service`
+into `~/.config/systemd/user/`, `systemctl --user daemon-reload`, restart the
+timer. The rebind does not touch the fence env, so rollback needs no env
+restore.
 
 Cold samples, I9, I8, issues #2162 and #2017 are not blanket retirement
 dependencies. Existing PGDATA, compression, retention, readonly/display,
@@ -3397,11 +3442,16 @@ Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
 0600). Read them on the box before quoting any value; these are the deltas
 against the committed `.example` templates as of 2026-08-01:
 
-- **Compression per-tick bound.** No longer a drift: the committed template
-  and the deployed env both carry `=2` since #2425 re-derived it on
-  2026-09-18 for the narrow one-day geometry (the live env moved to `=2` the
-  same day, stage A); before that both carried `=4` from #1237. Still read the
-  live value off the box before quoting it. See §4 "Per-tick capacity".
+- **Compression per-tick bound.** The committed template carries `=2` since
+  #2425 re-derived it on 2026-09-18 for the narrow one-day geometry; before
+  that it carried `=4` from #1237. The ACTIVE compression env today is the
+  fence env
+  `~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+  (bound `2` since Stage A, 2026-09-18);
+  `/home/nwm/NWM/infra/env/node27-timeseries-compression.env` becomes the
+  active one only after the D7 rebind (§ "Rebind to the repo unit").
+  Still read the live value off the box before quoting it. See §4 "Per-tick
+  capacity".
 - **Compression chunk-selection lag.**
   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
   box (re-confirmed 2026-08-14). The template now also ships `172800` under
@@ -3519,7 +3569,14 @@ If `river_timeseries` shows fewer than 2 rows older than `W − 2 d` while
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` in the live env** (with one
 river arrival per day, bound 1 never reaches the legacy table), and return to
 `2` once retention has dropped that chunk or #1988 has dropped the legacy
-table. Record both env changes with the receipt of the next tick.
+table. The live env is the fence env
+`~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+before the D7 rebind and `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
+after it; `systemctl --user show -p Environment,ExecStart nhms-node27-timeseries-compression.service`
+tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
+`ExecStart` = before; an `/home/nwm/NWM` `ExecStart` with an empty
+`Environment=` = after. Record both env changes with the receipt of the next
+tick.
 
 **Invalidation conditions for this derivation.** Re-derive when the chunk
 interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
@@ -5024,9 +5081,15 @@ the currently observed live `TimeoutStartUSec` has changed. Retention stays
 scheduled at 06:36 UTC; this section does not retighten that cadence.
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
-automated lane, and because selection is oldest-first (`ORDER BY range_end
-ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. A catch-up is a
+automated lane. Selection is table-major and newest `range_end` first within a
+table (#2425), then `[:per_tick_bound]`, so such a chunk is re-selected every
+tick (and burns it) only while it is among the first `per_tick_bound` of that
+order — at bound 1, while it is the newest eligible chunk of the first table
+with eligible chunks. Once at least `per_tick_bound` newer chunks of that
+table are eligible it moves to `deferred` and stops blocking. A bound-1 catch-up selects the newest
+eligible chunk of the first table with eligible chunks, so step 4a's dry-run
+check that the selection is the intended chunk stays the gate: if it shows
+another chunk, stop. A catch-up is a
 bounded one-file override window, not a manual `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**

@@ -2888,13 +2888,13 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
   `nwm:nwm 775`，uid 1103 删不动——fail-closed 只会换一条车道。
 - 拆分后 canonical 不再出现 `lock_unsafe`；再出现就是车道跑错了账号（nwm env 丢了 `LANES`
   行，或系统 unit 的 `User=` 被改了），按事故处理，**不要删锁文件**。
-- `infra/env/node27-raw-retention.example` 的 `counts.failed == 0` 判据随拆分恢复，两份 summary
-  都适用。
+- `infra/env/node27-raw-retention.example` 的 `counts.failed == 0` 判据在拆分安装后恢复，两份
+  summary 都适用；安装前 nwm unit 的到龄 canonical `lock_unsafe` 让它恒红（已知 #2360 形态）。
 - 容量：canonical 镜像 14 天两个源实测 3.7 GiB，对 `/home` 余量无压力——判定时仍以
   `df -h` 实测为准。
 
-**一次性安装（运维 sudo）**。前提：nwm env 已加 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`，
-repo 已 `git pull --ff-only`。然后：
+**一次性安装（运维 sudo）**。前提（按顺序）：先在 nwm env 加 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`（安装脚本强制
+检查这一行，缺失或含 `canonical` 即拒绝），repo 已 `git pull --ff-only`；然后：
 
 ```bash
 sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh
@@ -2902,7 +2902,10 @@ sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh
 
 脚本先做 fail-closed 前置检查（root；`frd_muziyao` 是 uid 1103；object-store 根与
 `.nhms-copyback-batch.lock` 属主 1103、锁文件已存在且 `600`——**从不创建**；三份 repo unit
-存在；源 env 存在、`600`、非符号链接；以 `frd_muziyao` 身份 import 探针通过），任一不过就
+存在；源 env 存在、`600`、非符号链接，且恰好一行 `NODE27_RAW_RETENTION_LANES` 只含
+`raw`/`precip-cache`、恰好一行 `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`
+（按文本读、不 source；接受 `[export ]KEY=value`，值可带一对引号）；以 `frd_muziyao` 身份
+import 探针通过），任一不过就
 rc≠0 退出、什么都不写。然后：生成 `/etc/nhms/node27-canonical-retention.env`（从 nwm env 去掉
 `LANES`/`LOG_ROOT`/`LOCK_PATH`/`LOG_FILE`/`SUMMARY_PATH`/`BOOTSTRAP_LOG` 行，追加
 `LANES=canonical`、`LOG_ROOT=/var/log/nhms-node27-canonical-retention`、
@@ -2936,6 +2939,7 @@ rc=1、经 `OnFailure=` 告警——这是回滚后的已知形态，不是新�
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27 '
+  red=0
   for d in /home/nwm/node27-raw-retention-logs /var/log/nhms-node27-canonical-retention; do
     f=$(ls -t "$d"/raw-retention-*.json | head -1); echo "== $f"
     jq "{lanes, execution_mode, finished_at, counts, copyback_lock_failures,
@@ -2945,13 +2949,14 @@ ssh -p 32099 nwm@210.77.77.27 '
            and ((.finished_at | fromdateiso8601) > (now - 26*3600))
            and ([.failed[]] | length == 0)
            and ([.skipped[] | select(.reason | endswith(\"_unsafe\"))] | length == 0)" "$f" >/dev/null \
-      || echo "RED: $d"
+      || { echo "RED: $d"; red=1; }
   done
   systemctl status nhms-node27-canonical-retention.service --no-pager | head -5
-  stat -c "%A %U" /home/ghdc/nwm/object-store/.nhms-copyback-batch.lock'
+  stat -c "%A %U" /home/ghdc/nwm/object-store/.nhms-copyback-batch.lock
+  [ "$red" = 0 ]'
 ```
 
-期望：两段都没有 `RED`；nwm summary `lanes=["precip-cache","raw"]`、canonical summary
+期望：两段都没有 `RED`、命令 rc=0（任一段 `RED` 则 rc=1）；nwm summary `lanes=["precip-cache","raw"]`、canonical summary
 `lanes=["canonical"]`；`copyback_lock_failures` 全 0；锁文件仍是 `-rw------- frd_muziyao`。
 判据本体与各退出码含义见 `infra/env/node27-raw-retention.example`（测试直接抽取那份 `jq`
 程序执行）。

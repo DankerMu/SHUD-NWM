@@ -199,6 +199,165 @@ def test_the_installer_refuses_for_real_as_non_root(tmp_path: Path) -> None:
     assert "REFUSED: must run as root" in result.stderr
 
 
+# The lock and source-env checks name fixed node-27 paths, so they are driven
+# as the functions `check_preconditions` calls, on tmp paths, with `stat`
+# stubbed (owner 1103 needs root; macOS `stat` has no `-c`).
+
+
+def _run_check(
+    tmp_path: Path, function: str, target: Path, *, owner: str = "1103", mode: str = "600"
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    bin_dir, record = _stub_bin(tmp_path, uid="0")
+    fake_stat = bin_dir / "stat"
+    fake_stat.write_text(
+        f'#!/usr/bin/env bash\ncase "$2" in %u) echo {owner} ;; %a) echo {mode} ;; *) exit 2 ;; esac\n',
+        encoding="utf-8",
+    )
+    fake_stat.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; "$2" "$3"', "_", str(INSTALLER), function, str(target)],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, record
+
+
+def _lock_file(tmp_path: Path) -> Path:
+    lock = tmp_path / ".nhms-copyback-batch.lock"
+    lock.write_text("", encoding="utf-8")
+    return lock
+
+
+def _nwm_env(tmp_path: Path, text: str) -> Path:
+    env = tmp_path / "node27-raw-retention.env"
+    env.write_text(text, encoding="utf-8")
+    return env
+
+
+_GOOD_NWM_ENV = (
+    "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n"
+    "NODE27_RAW_RETENTION_LANES=raw,precip-cache\n"
+    "# NODE27_RAW_RETENTION_LANES=canonical\n"
+)
+
+
+def test_the_preconditions_run_the_lock_and_env_checks_on_the_fixed_paths_before_any_write() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    body = text[text.index("check_preconditions() {") : text.index("write_env() {")]
+
+    assert (
+        body.index('check_copyback_lock "$COPYBACK_LOCK"')
+        < body.index('check_source_env "$SOURCE_ENV"')
+        < body.index("runuser")
+    )
+    assert text.index("  check_preconditions\n") < text.index("  write_env\n")
+
+
+def test_a_valid_lock_and_nwm_env_pass_their_checks(tmp_path: Path) -> None:
+    (tmp_path / "lock").mkdir()
+    lock_result, lock_record = _run_check(tmp_path / "lock", "check_copyback_lock", _lock_file(tmp_path))
+    assert lock_result.returncode == 0, lock_result.stderr
+    assert not lock_record.exists()
+
+    for index, text in enumerate(
+        (
+            _GOOD_NWM_ENV,
+            "export NODE27_RAW_RETENTION_LANES='raw'\n"
+            'NODE27_RAW_RETENTION_OBJECT_STORE_ROOT="/home/ghdc/nwm/object-store"\n',
+            "NODE27_RAW_RETENTION_LANES=precip-cache, raw\n"
+            "  export NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n",
+        )
+    ):
+        case = tmp_path / f"env-{index}"
+        case.mkdir()
+        result, record = _run_check(case, "check_source_env", _nwm_env(case, text))
+        assert result.returncode == 0, (text, result.stderr)
+        assert not record.exists()
+
+
+@pytest.mark.parametrize(
+    ("owner", "mode", "message"),
+    [
+        ("1005", "600", "REFUSED: copyback lock is not owned by uid 1103"),
+        ("1103", "660", "REFUSED: copyback lock mode is not 600"),
+    ],
+)
+def test_the_installer_refuses_an_unsafe_copyback_lock(tmp_path: Path, owner: str, mode: str, message: str) -> None:
+    result, record = _run_check(tmp_path, "check_copyback_lock", _lock_file(tmp_path), owner=owner, mode=mode)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not record.exists(), record.read_text(encoding="utf-8")
+
+
+def test_the_installer_refuses_a_missing_copyback_lock(tmp_path: Path) -> None:
+    result, record = _run_check(tmp_path, "check_copyback_lock", tmp_path / ".nhms-copyback-batch.lock")
+
+    assert result.returncode != 0
+    assert "is missing or not a regular file" in result.stderr
+    assert not record.exists(), record.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("text", "mode", "message"),
+    [
+        (_GOOD_NWM_ENV, "644", "mode is not 600"),
+        # No LANES line: the nwm unit would keep all three lanes.
+        (
+            "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n",
+            "600",
+            "must set NODE27_RAW_RETENTION_LANES on exactly one line",
+        ),
+        # Two LANES lines: refused rather than guessing which one wins.
+        (
+            _GOOD_NWM_ENV + "NODE27_RAW_RETENTION_LANES=raw\n",
+            "600",
+            "must set NODE27_RAW_RETENTION_LANES on exactly one line",
+        ),
+        (
+            "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\n"
+            'export NODE27_RAW_RETENTION_LANES="raw, canonical"\n',
+            "600",
+            "may name only raw / precip-cache",
+        ),
+        (
+            "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\nNODE27_RAW_RETENTION_LANES=,\n",
+            "600",
+            "names no lane",
+        ),
+        (
+            "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store/\n"
+            "NODE27_RAW_RETENTION_LANES=raw,precip-cache\n",
+            "600",
+            "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT is not /home/ghdc/nwm/object-store",
+        ),
+        (
+            "NODE27_RAW_RETENTION_LANES=raw,precip-cache\n",
+            "600",
+            "must set NODE27_RAW_RETENTION_OBJECT_STORE_ROOT on exactly one line",
+        ),
+    ],
+    ids=[
+        "mode-644",
+        "lanes-missing",
+        "lanes-twice",
+        "lanes-canonical",
+        "lanes-empty",
+        "root-mismatch",
+        "root-missing",
+    ],
+)
+def test_the_installer_refuses_an_unfit_nwm_env(tmp_path: Path, text: str, mode: str, message: str) -> None:
+    result, record = _run_check(tmp_path, "check_source_env", _nwm_env(tmp_path, text), mode=mode)
+
+    assert result.returncode != 0
+    assert "REFUSED: source env " in result.stderr
+    assert message in result.stderr
+    assert not record.exists(), record.read_text(encoding="utf-8")
+
+
 # --- installer: generated env --------------------------------------------------
 
 

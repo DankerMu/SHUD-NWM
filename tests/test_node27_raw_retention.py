@@ -1754,3 +1754,39 @@ def test_documented_operator_check_covers_both_units_and_stays_green_on_the_spli
     # One cutoff rule across the two units (design D3).
     for field in ("cutoff", "retention_days", "sources"):
         assert nwm[field] == canonical[field], field
+
+
+def test_documented_operator_check_loop_exits_nonzero_when_either_unit_is_red(tmp_path: Path) -> None:
+    """The documented loop as a whole, not only its `jq` program: one RED
+    directory must fail the command, so a caller (or `ssh`) sees rc != 0."""
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed; it is present on node-27")
+    lines = [line.lstrip("#").strip() for line in _RETENTION_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()]
+    start = next(index for index, line in enumerate(lines) if "for d in " in line)
+    end = next(index for index, line in enumerate(lines) if index > start and "' \"$(ls -t" in line)
+    nwm_dir, canonical_dir = tmp_path / "nwm", tmp_path / "canonical"
+    loop = (
+        "\n".join(lines[start : end + 1])
+        .replace("/home/nwm/node27-raw-retention-logs", str(nwm_dir))
+        .replace("/var/log/nhms-node27-canonical-retention", str(canonical_dir))
+    )
+    healthy = {
+        "execution_mode": "production_execute",
+        "finished_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "failed": [],
+        "skipped": [],
+    }
+    for directory in (nwm_dir, canonical_dir):
+        directory.mkdir()
+        (directory / "raw-retention-1.json").write_text(json.dumps(healthy), encoding="utf-8")
+
+    green = subprocess.run(["bash", "-c", loop], capture_output=True, text=True, timeout=60)
+    assert green.returncode == 0, green.stdout + green.stderr
+    assert "RED" not in green.stdout
+
+    red = dict(healthy, skipped=[{"key": "canonical/IFS", "reason": "canonical_source_unsafe"}])
+    (canonical_dir / "raw-retention-1.json").write_text(json.dumps(red), encoding="utf-8")
+    result = subprocess.run(["bash", "-c", loop], capture_output=True, text=True, timeout=60)
+    assert result.returncode != 0
+    assert f"RED: {canonical_dir}" in result.stdout
+    assert f"RED: {nwm_dir}" not in result.stdout

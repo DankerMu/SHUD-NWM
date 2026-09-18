@@ -66,35 +66,35 @@ validate), frontend/API (untouched).
 
 ## Implementation tasks
 
-- [ ] 1.1 `_classify`: newest-first within hypertable per design D1; update the
+- [x] 1.1 `_classify`: newest-first within hypertable per design D1; update the
       docstring and the runbook's "selection is table-major … range_end" text.
-- [ ] 1.2 Tests: overlap fixture (spec scenario 1, #2425 AC5), table order
+- [x] 1.2 Tests: overlap fixture (spec scenario 1, #2425 AC5), table order
       preserved, free slot to next hypertable, deferred order deterministic;
       update existing `_classify`/receipt tests whose expected order encoded
       oldest-first (each change named in the report).
-- [ ] 1.3 Template bound 4→2 with the D2 derivation comment, and
+- [x] 1.3 Template bound 4→2 with the D2 derivation comment, and
       `DEFAULT_COMPRESSION_PER_TICK_BOUND` 4→2; pin tests updated.
-- [ ] 1.4 Runbook per-tick capacity section: new dated re-derivation (narrow
+- [x] 1.4 Runbook per-tick capacity section: new dated re-derivation (narrow
       geometry, 55 s/GB, wall/throughput/retention-overlap, legacy #1988 limit
       and its date-bound check); fix stale "table-major range_end" wording.
-- [ ] 2.1 `NODE27_RAW_RETENTION_LANES` per design D3 + summary `lanes`.
-- [ ] 2.2 Tests for every spec scenario of the lane requirement, plus MP3
+- [x] 2.1 `NODE27_RAW_RETENTION_LANES` per design D3 + summary `lanes`.
+- [x] 2.2 Tests for every spec scenario of the lane requirement, plus MP3
       (unset → same summary as before apart from `lanes`).
-- [ ] 2.3 `infra/env/node27-raw-retention.example`: lanes variable, per-unit
+- [x] 2.3 `infra/env/node27-raw-retention.example`: lanes variable, per-unit
       values, identity paragraph (split replaces the "counts.failed paused"
       text).
-- [ ] 2.4 The documented summary `jq` check covers both summary dirs
+- [x] 2.4 The documented summary `jq` check covers both summary dirs
       (`/home/nwm/node27-raw-retention-logs/` and
       `/var/log/nhms-node27-canonical-retention/`): canonical `*_unsafe` skips
       and stale summaries are rc=0 and never reach `OnFailure=`.
-- [ ] 3.1 System units + system alert template per D4/D5; user unit
+- [x] 3.1 System units + system alert template per D4/D5; user unit
       `OnFailure=`; unit-file tests.
-- [ ] 3.2 Alert handler scope switch + test (MP5).
-- [ ] 3.3 Install script per D6 (+ `bash -n`, shellcheck if available, a
+- [x] 3.2 Alert handler scope switch + test (MP5).
+- [x] 3.3 Install script per D6 (+ `bash -n`, shellcheck if available, a
       test that runs it in a precondition-failure path without root effects).
-- [ ] 3.4 `current-production-ops.md` canonical identity section: split
+- [x] 3.4 `current-production-ops.md` canonical identity section: split
       deployment, operator sudo step, rollback, check commands.
-- [ ] 3.5 `select_ci_tests.py` rules for new files if its path rules require.
+- [x] 3.5 `select_ci_tests.py` rules for new files if its path rules require.
 - [ ] 4.1 Stage B live deployment (design D8) + receipts.
 
 ## Required evidence
@@ -128,7 +128,10 @@ validate), frontend/API (untouched).
 - E6 #2425 acceptance 1/3 (two consecutive daily ticks; compressed count
   non-decreasing; selected ∩ dropped = ∅; size drop persists): posted to #2425
   after merge from the next two ticks.
-
+- E7 #2425 acceptance 4: after Stage B, `scripts/node27_pgdata_workload.py measure
+  --evidence-kind live` (tier runbook §D11 invocation) for a run whose forecast
+  window overlaps a compressed `hydro.river_timeseries` chunk; `PASS` within the
+  D11 bounds, posted to #2425 before it is closed (design Risks).
 ## Non-goals
 
 See design "Goals / Non-Goals"; each has its reason there.

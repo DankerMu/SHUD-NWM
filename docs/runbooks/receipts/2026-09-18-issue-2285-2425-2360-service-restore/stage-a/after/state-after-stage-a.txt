@@ -1,0 +1,30 @@
+2026-09-18T15:20:04Z
+Result=success
+ExecMainStartTimestamp=Fri 2026-09-18 21:57:24 CST
+ExecMainExitTimestamp=Fri 2026-09-18 21:57:26 CST
+ExecMainStatus=0
+Id=nhms-node27-timeseries-retention.service
+ActiveState=inactive
+
+Result=success
+ExecMainStartTimestamp=Fri 2026-09-18 21:58:50 CST
+ExecMainExitTimestamp=Fri 2026-09-18 22:36:11 CST
+ExecMainStatus=0
+Id=nhms-node27-timeseries-compression.service
+ActiveState=inactive
+
+Result=exit-code
+ExecMainStartTimestamp=Fri 2026-09-18 11:35:32 CST
+ExecMainExitTimestamp=Fri 2026-09-18 11:35:32 CST
+ExecMainStatus=1
+Id=nhms-node27-raw-retention.service
+ActiveState=failed
+
+2026-09-18T21:57:24+0800 ghdc systemd[2047]: Starting NHMS node-27 timeseries retention (gated drop_chunks)...
+2026-09-18T21:57:25+0800 ghdc node27_timeseries_retention_once.sh[1634667]: {"chunk": "_timescaledb_internal._hyper_9_126_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 697.85, "outcome": "dropped"}
+2026-09-18T21:57:26+0800 ghdc node27_timeseries_retention_once.sh[1634667]: {"chunk": "_timescaledb_internal._hyper_3_62_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 1236.026, "outcome": "dropped"}
+2026-09-18T21:57:26+0800 ghdc node27_timeseries_retention_once.sh[1634667]: {"chunk": "_timescaledb_internal._hyper_1_61_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 269.269, "outcome": "dropped"}
+2026-09-18T21:57:26+0800 ghdc node27_timeseries_retention_once.sh[1634667]: {"mode": "enforce", "outcome": "enforced"}
+2026-09-18T21:57:26+0800 ghdc systemd[2047]: Finished NHMS node-27 timeseries retention (gated drop_chunks).
+2026-09-18T21:58:50+0800 ghdc systemd[2047]: Starting NHMS node-27 timeseries compression...
+2026-09-18T22:36:11+0800 ghdc systemd[2047]: Finished NHMS node-27 timeseries compression.
