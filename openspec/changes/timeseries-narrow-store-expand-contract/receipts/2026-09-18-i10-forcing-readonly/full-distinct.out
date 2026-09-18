@@ -1,0 +1,30 @@
+Timing is on.
+BEGIN
+Time: 5.746 ms
+SET
+Time: 0.184 ms
+        col        | value  |   rows    
+-------------------+--------+-----------
+ native_resolution | 3h     | 249196518
+ native_resolution | 6h     |  10058808
+ quality_flag      | ok     | 259255326
+ source_id         | IFS    | 126057966
+ source_id         | gfs    | 133197360
+ unit              | 0-1    |  43209221
+ unit              | Pa     |  43209221
+ unit              | W/m2   |  43209221
+ unit              | degC   |  43209221
+ unit              | m/s    |  43209221
+ unit              | mm/day |  43209221
+ variable          | PRCP   |  43209221
+ variable          | Press  |  43209221
+ variable          | RH     |  43209221
+ variable          | Rn     |  43209221
+ variable          | TEMP   |  43209221
+ variable          | wind   |  43209221
+(17 rows)
+
+Time: 188427.082 ms (03:08.427)
+COMMIT
+Time: 38.295 ms
+=== FULL DISTINCT DONE ===

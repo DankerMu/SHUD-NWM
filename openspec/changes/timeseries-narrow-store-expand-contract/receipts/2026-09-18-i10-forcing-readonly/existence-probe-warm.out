@@ -1,0 +1,22 @@
+                 Recheck Cond: (forcing_version_id = fv.forcing_version_id)
+                 Buffers: shared hit=11667
+                 ->  Bitmap Index Scan on "176_411_forcing_station_timeseries_pkey"  (cost=0.00..9.18 rows=142 width=0) (actual time=0.002..0.002 rows=0 loops=3889)
+                       Index Cond: (forcing_version_id = fv.forcing_version_id)
+                       Buffers: shared hit=11667
+ Planning:
+   Buffers: shared hit=1992
+ Planning Time: 9.728 ms
+ Execution Time: 238.104 ms
+(40 rows)
+
+Time: 249.282 ms
+=== D2. how many actually have rows ===
+ has_legacy_rows | count 
+-----------------+-------
+ f               |  3889
+ t               |  4764
+(2 rows)
+
+Time: 173.154 ms
+COMMIT
+Time: 37.989 ms

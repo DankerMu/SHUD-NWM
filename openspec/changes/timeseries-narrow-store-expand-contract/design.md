@@ -167,8 +167,28 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 
 ## Open Questions
 
-- forcing 两张 authority 表 IDENTITY 列的 ADD 锁时长（node-27 实测后填入 I12 issue）。
-- `native_resolution` 的现网 distinct 值实测（spec 已钉 `TEXT NULL`；实测若显示低基数词表，作为后续 change 的输入而非本 change 的变更；原问句：是否改为枚举，默认保留 TEXT 可空）。
+**两项均已由 I10（#1989）实测回填，receipt：`receipts/2026-09-18-i10-forcing-readonly/`。**
+
+- ~~forcing 两张 authority 表 IDENTITY 列的 ADD 锁时长~~ → **已实测**。`ADD COLUMN ... INTEGER GENERATED
+  ALWAYS AS IDENTITY UNIQUE` 的默认值 `nextval` 是 volatile，因此整表重写并持 `AccessExclusiveLock`，代价随**页数**
+  而非行数走。throwaway 库实测：`forcing_version`（17 MB 播种 / 生产 15 MB）**689 ms**；`met_station` 按生产**数据**
+  构成（47 MB）**1 141 ms**，按生产**页**构成（375 MB）**1 863 ms**——两者相差是因为生产 `met.met_station` 约 8 倍膨胀
+  （325 MB 页承载约 40 MB 列数据，TOAST 仅 8 kB）。**重写顺带消除膨胀**（375 MB → 47 MB），所以 I12 窗口不需要为这两张表
+  另做 `VACUUM FULL`，事先去膨胀也只省约 700 ms。锁在秒级，不构成窗口约束。
+- ~~`native_resolution` 的现网 distinct 值~~ → **已实测，全表精确**（2.59 亿行，3 分 08 秒）：只有 **`3h`
+  (249 196 518) 与 `6h` (10 058 808) 两个值，且无 NULL**，尽管列是 `TEXT NULL`。这正是原问句设想的「低基数词表」情形。
+  按原定口径，这是**后续 change 的输入，不是本 change 的变更**：spec 保持 `TEXT NULL`。同批实测的另三列：`variable` 6 值
+  （`PRCP`/`Press`/`RH`/`Rn`/`TEMP`/`wind`）、`unit` 6 值且与 `variable` 严格 1:1、`quality_flag` 仅 `ok` 1 值；
+  四列在生产上**都没有 CHECK 约束**，所以 forcing 窄表的枚举列是在「引入」词表而不是「镜像」已有词表。
+
+新增记录（I10 实测的副产物，供 I11/I12 使用）：
+
+- **D9 不对称的代价已量化**：river 按 run 读 `hydro.hydro_run` 的列即可路由，forcing 无 run 概念，backfill 必须**逐
+  `forcing_version` 探测事实表**。全部 8 653 个版本一条语句：冷 **21 849 ms**、热 **238 ms**，146 170 buffer hit。
+  其中 **4 764 个有行、3 889 个没有**（45% 是 no-op，可跳过）。一次性 22 秒可接受；但探测**必须在最后一次 legacy 写入之后
+  执行**，否则后来才获得行的版本会被误路由。
+- 生产只有 **2 个源**（`gfs`、`IFS`，`met.data_source` 中均为 `enabled`），与 task 7.1 文字里的「三源并集」不符；按实测的
+  二源记录。
 
 ## Known limits
 

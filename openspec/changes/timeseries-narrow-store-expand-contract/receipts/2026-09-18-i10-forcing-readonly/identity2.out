@@ -1,0 +1,42 @@
+throwaway database: throwaway_1989b_20260918053120_1038122
+CREATE EXTENSION
+CREATE EXTENSION
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
+INSERT 0 42029
+ERROR:  Length not in range
+=== (a) live-DATA constitution seeded ===
+forcing_version heap=0 bytes toast=8192 bytes idx=8192 bytes
+met_station heap=47 MB toast=8192 bytes idx=2072 kB
+  live target: met_station ~40 MB of column data; forcing_version heap 15 MB
+
+=== (a) ALTER ADD COLUMN IDENTITY UNIQUE, no bloat ===
+Timing is on.
+ALTER TABLE
+Time: 284.953 ms
+  locks on forcing_version: (none seen)
+Timing is on.
+  locks on met_station: AccessExclusiveLock,ShareLock
+ALTER TABLE
+Time: 1141.194 ms (00:01.141)
+forcing_version heap=0 bytes toast=8192 bytes idx=16 kB
+met_station heap=47 MB toast=8192 bytes idx=2152 kB
+
+=== building ~8x bloat on met_station to match the live 325 MB heap ===
+Timing is on.
+DO
+Time: 9942.080 ms (00:09.942)
+forcing_version heap=0 bytes toast=8192 bytes idx=16 kB
+met_station heap=375 MB toast=8192 bytes idx=8552 kB
+
+=== (b) same ALTER on the bloated table (fresh column) ===
+Timing is on.
+  locks on met_station: AccessExclusiveLock,ShareLock
+ALTER TABLE
+Time: 1863.250 ms (00:01.863)
+forcing_version heap=0 bytes toast=8192 bytes idx=16 kB
+met_station heap=47 MB toast=8192 bytes idx=3088 kB
+=== IDENTITY v2 DONE ===
+dropped throwaway_1989b_20260918053120_1038122

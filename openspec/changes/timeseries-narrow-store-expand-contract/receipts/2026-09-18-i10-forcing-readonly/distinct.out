@@ -1,0 +1,61 @@
+chunks: _timescaledb_internal._hyper_1_61_chunk _timescaledb_internal._hyper_1_87_chunk _timescaledb_internal._hyper_1_106_chunk _timescaledb_internal._hyper_1_109_chunk _timescaledb_internal._hyper_1_112_chunk _timescaledb_internal._hyper_1_176_chunk 
+scanning oldest=_timescaledb_internal._hyper_1_61_chunk newest=_timescaledb_internal._hyper_1_176_chunk
+########## _timescaledb_internal._hyper_1_61_chunk
+Timing is on.
+BEGIN
+Time: 5.569 ms
+SET
+Time: 0.153 ms
+        col        | value  |   rows   
+-------------------+--------+----------
+ native_resolution | 3h     | 35936706
+ native_resolution | 6h     |  1158480
+ quality_flag      | ok     | 37095186
+ source_id         | IFS    | 18278394
+ source_id         | gfs    | 18816792
+ unit              | 0-1    |  6182531
+ unit              | Pa     |  6182531
+ unit              | W/m2   |  6182531
+ unit              | degC   |  6182531
+ unit              | m/s    |  6182531
+ unit              | mm/day |  6182531
+ variable          | PRCP   |  6182531
+ variable          | Press  |  6182531
+ variable          | RH     |  6182531
+ variable          | Rn     |  6182531
+ variable          | TEMP   |  6182531
+ variable          | wind   |  6182531
+(17 rows)
+
+Time: 27723.248 ms (00:27.723)
+COMMIT
+Time: 9.263 ms
+########## _timescaledb_internal._hyper_1_176_chunk
+Timing is on.
+BEGIN
+Time: 5.558 ms
+SET
+Time: 0.173 ms
+        col        | value  | rows  
+-------------------+--------+-------
+ native_resolution | 6h     | 42756
+ quality_flag      | ok     | 42756
+ source_id         | IFS    | 42756
+ unit              | 0-1    |  7126
+ unit              | Pa     |  7126
+ unit              | W/m2   |  7126
+ unit              | degC   |  7126
+ unit              | m/s    |  7126
+ unit              | mm/day |  7126
+ variable          | PRCP   |  7126
+ variable          | Press  |  7126
+ variable          | RH     |  7126
+ variable          | Rn     |  7126
+ variable          | TEMP   |  7126
+ variable          | wind   |  7126
+(15 rows)
+
+Time: 259.344 ms
+COMMIT
+Time: 19.833 ms
+=== DISTINCT DONE ===
