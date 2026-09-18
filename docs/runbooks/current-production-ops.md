@@ -5352,7 +5352,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分三支（仓库代码缺陷、缺第三方依赖、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:` 三种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测；`AttributeError` 前缀与两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——venv 里没有展示栈、展示模块的依赖漂移、或仓库代码本身坏了），**观测前**就退出。unit 缺 `Environment=PYTHONPATH=` 在今天的 node-27 上**不是**退 2 的原因：venv 以 editable 方式装了本项目，不设 `PYTHONPATH` 照样导得进（2026-09-18 实测，见 §11.5） | 先看 stderr 那行结构化 JSON 的 `reason` 是不是以 `<异常类>: …` 开头。**是** → 导入期：`main` 在配置阶段给 `CoverageAlertConfigError` 以外的**任何**异常都冠上类名，而 `config_from_env` 里唯一不带守卫的调用就是 `lookback_days()`（延迟 `import services.tiles.mvt` + 读常量）。最常见的是 `ImportError:` / `ModuleNotFoundError:`，但别的类（例如仓库代码坏了时的 `SyntaxError:`、依赖漂移时展示模块体里抛的 `AttributeError:`）也是同一期。冒号后若是 `<error text withheld: redaction unavailable (…)>`，同样是导入期，只是车道连脱敏模块都导不进、把原文扣下了（node-27 上要 venv 的 editable install 也没了才会在退 2 出现，推导）。按 §11.5 的「导入期失败」那段先做导入检查，再按检查打印的最后一行分四支（仓库代码缺陷、缺第三方依赖、已装的第三方包与代码对不上、检查通过），**不是** §11.4 的阈值旋钮。**不是**（没有类名前缀，例如 `DATABASE_URL must be set`、`NHMS_COVERAGE_GAP_DAYS must be a number, got 'abc'`）→ 配置本身，去 §11.4 改 env 文件。`ImportError:`、`ModuleNotFoundError:`、`SyntaxError:` 三种前缀车道退 2：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器实测；`AttributeError` 前缀与两种配置错误无前缀由单测钉住（读 `scripts/node27_coverage_freshness_alert.py` 的 `main` 推导）；`withheld` 那一形状是本地复现，推导 |
 | `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
 
 **退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
@@ -5413,7 +5413,7 @@ OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1
 `DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
 的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
 `national_discharge_cycles`）才是退 3。两者第一步不同：退 2 → §11.5「导入期失败」（导入检查的最后一行分出
-仓库代码缺陷 / 缺第三方依赖 / 检查通过则手跑 unit 复核）；退 3 → 照上面的「退 3 路由」读 `reason`，与别的退 3 没有区别——观测期展示模块自己发的
+仓库代码缺陷 / 缺第三方依赖 / 已装的第三方包与代码对不上 / 检查通过则手跑 unit 复核）；退 3 → 照上面的「退 3 路由」读 `reason`，与别的退 3 没有区别——观测期展示模块自己发的
 SQL 失败了，`reason` 就带 `(psycopg2.`，照样去 §11.3「库侧观测失败」；不带的才去「非驱动观测失败」。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
@@ -5578,7 +5578,8 @@ echo "rc=$?"
 刷新完把上面那条四判据 SQL 再跑一遍（四列全 `true` 的还要按前面「四个布尔列不是完整的
 拒绝集合」那段的 `max(river_valid_time_start)` / `min(river_valid_time_end)` 跨行判定再看
 一眼），全绿之后**再验一次车道本身**，别等下一 tick：用 §11.4 那条
-`systemctl --user start nhms-node27-coverage-freshness-alert.service` 看退出码。
+`systemctl --user start nhms-node27-coverage-freshness-alert.service` 看退出码（读法见 §11.4 末尾：
+`systemctl` 返回 0 即车道退 0；非零时车道的退出码在 journal 的 `status=<N>` 里，而且会照发一封邮件）。
 **要走 unit**——它自带 `EnvironmentFile=`，跑出来的是本车道真正用的只读
 `nhms_display_ro` DSN；若只从 shell 历史里重跑 §11.5 那段手工调用的 python 那一行、没有
 重新源 `infra/env/node27-frontier-alert.env`，环境里还留着刚才刷新用的
@@ -5607,7 +5608,7 @@ docker ps -a --filter name=^nhms-db$ --format '{{.Names}} {{.Status}} {{.Ports}}
 正常读 `nhms-db Up <时长> … 127.0.0.1:55432->5432/tcp`。状态不是 `Up`、或没有
 `127.0.0.1:55432->5432/tcp` → 是库本身的事故，不是本车道的，按 §5.1（容器事实与重建指针）
 处理。`Up` 的时长很短而告警是 `AdminShutdown` → 观测中途容器重启过。本车道无状态，库恢复后
-下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次看退出码。
+下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码。
 
 **第 2 步 —— 先看 unit 读哪份 env 文件，再跑探针**
 
@@ -5638,7 +5639,7 @@ systemctl --user show -p DropInPaths nhms-node27-coverage-freshness-alert.servic
 （2026-09-18 node-27 实测）。把列出的、
 路径里带 `nhms-node27-coverage-freshness-alert.service.d/` 的文件逐个 `rm`，`systemctl --user daemon-reload`，
 再 show 一次 `DropInPaths` 与 `EnvironmentFiles`，确认回到上面那一行，然后用 §11.4 那条
-`systemctl --user start` 手跑一次看退出码。`DropInPaths` 里没有本 unit 的 drop-in、`EnvironmentFiles`
+`systemctl --user start` 手跑一次，按 §11.4 末尾的读法看退出码。`DropInPaths` 里没有本 unit 的 drop-in、`EnvironmentFiles`
 却仍不是上面那一行 → 装进去的 unit 文件被改过，重跑 §11.5 安装块里的两条 `install` 与
 `daemon-reload`。（`EnvironmentFiles` 与 `DropInPaths` 的健康值是实测；异常读数这两支是推导。）
 
@@ -5663,8 +5664,8 @@ with engine.connect() as conn:
 - 探针自己也以基类 `psycopg2.OperationalError` 失败 → 按 §11.2 的原文分：拒连回第 1 步，口令错 /
   库不存在改 env 文件；常见三种之外的原文（`timeout expired`、`too many clients` 一类）→ 第 1 步看
   容器、再第 3 步看 `pg_stat_activity`（推导）。
-- 探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次 unit 看到
-  退 0 即闭环。
+- 探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次 unit，
+  `systemctl` 返回 0（即车道退 0，读法见 §11.4 末尾）即闭环。
 - 探针一切正常、而告警是 `Undefined*`（`UndefinedTable` / `UndefinedColumn` / `UndefinedFunction`…）
   → 库连对了，是**部署的代码与库的 schema 对不上**（schema 漂移）。探针只查 `hydro.hydro_run`
   在不在，而车道还要读 `hydro.run_display_coverage` 与 `core.model_instance` 的若干列、以及
@@ -5716,7 +5717,7 @@ order by query_start;"
 2026-09-18 实测的一次常态：一行 `nhms_ingest_rw`、`active`、`IO` 的
 `SELECT compress_chunk(...)`（压缩 timer 的正常后台工作）。本车道自己的连接读空串
 `application_name`、`usename` 是 `nhms_display_ro`（代码里没设名字，见 §9.2 表里「空串」那行）。
-归因与取消纪律一律按 §9.2——生产 tick 不得随手取消；争用过去后手跑一次 unit 确认。天天超时属于
+归因与取消纪律一律按 §9.2——生产 tick 不得随手取消；争用过去后手跑一次 unit 确认（读法见 §11.4 末尾）。天天超时属于
 容量 / 计划问题，按 §9.2 走 issue。
 
 **第 4 步 —— 权限拒绝（`InsufficientPrivilege`）**：`nhms_display_ro` 需要 `hydro`、`core` 两个
@@ -5755,9 +5756,12 @@ cd /home/nwm/NWM
 PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import psycopg2; import packages.common.redaction; print(psycopg2.__version__)'; echo "rc=$?"
 ```
 
-健康读 `2.9.12 (dt dec pq3 ext lo64)` 加 `rc=0`（整条命令 2026-09-18 node-27 实测）。失败时按它打印的最后一行走 §11.5「导入期失败」的三支：`No module named 'psycopg2'`
-这类是缺第三方依赖那支（发行包名是 `psycopg2-binary`；sync 之后重跑的是**这条**驱动检查，不是
-§11.5 那条 `import services.tiles.mvt`——它不碰驱动，缺驱动时照样通过），`packages.…` 出错是仓库代码缺陷那支。两者都
+健康读 `2.9.12 (dt dec pq3 ext lo64)` 加 `rc=0`（整条命令 2026-09-18 node-27 实测）。失败时按它打印的最后一行套 §11.5「导入期失败」的三条失败分支：`No module named 'psycopg2'`
+这类是「缺第三方依赖」那支（发行包名是 `psycopg2-binary`；sync 之后重跑的是**这条**驱动检查，不是
+§11.5 那条 `import services.tiles.mvt`——它不碰驱动，缺驱动时照样通过），`packages.…` 出错是「仓库代码缺陷」那支；
+驱动装着却导不进（例如 `ImportError: libpq.so.5: cannot open shared object file …`，2026-09-18 node-27
+模拟实测：车道退 3、`reason` 读 `ImportError: <error text withheld: redaction unavailable (ImportError)>`）
+是「已装的第三方包与代码对不上」那支，拿 `psycopg2-binary` 对版本。两者都
 导得进、`reason` 却仍被扣 → 脱敏函数自己在这个异常上出了错，按下面第 3 条当代码缺陷开 issue（推导）。
 
 `ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」做上一条第 2 步（先查
@@ -5804,6 +5808,21 @@ ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 
 - 不设该变量时用 `回看窗 / 3`。**不要在这里写死天数**：窗口常量改小时，默认阈值自动跟着小。
 - 改完直接 `systemctl --user start nhms-node27-coverage-freshness-alert.service` 验证一次退出码。
 
+**手跑 unit 的退出码怎么读**（§11 各处说"手跑一次 unit 看退出码 / 退 0 / 仍退 N"都按这一条）：
+service 是 `Type=oneshot`，`systemctl --user start` 要等车道跑完才返回。`systemctl` 自己返回 0，
+就是车道退了 0。车道非零时，`systemctl` 打印
+`Job for … failed because the control process exited with error code` 并返回 1——那是 `systemctl` 自己的返回码，**不是**车道的退出码。车道真正的退出码
+去 journal 里读：
+
+```bash
+journalctl --user -u nhms-node27-coverage-freshness-alert.service -n 30 --no-pager
+```
+
+找 `Main process exited, code=exited, status=<N>/…` 那一行，`N` 就是车道的退出码（1 告警、2 配置、3 观测）。
+手跑失败与 timer tick 失败一样会触发 `OnFailure=`，**照样发一封告警邮件**——手跑不是静默的。
+（systemd 对 oneshot 的这套行为是推导；journal 那行的形状在 #2468 的 node-27 receipt 里实测过，
+读 `Main process exited, code=exited, status=1/FAILURE`。）
+
 ### 11.5 安装
 
 ```bash
@@ -5814,7 +5833,7 @@ install -m 644 infra/systemd/nhms-node27-coverage-freshness-alert.service ~/.con
 install -m 644 infra/systemd/nhms-node27-coverage-freshness-alert.timer   ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemd-analyze --user verify nhms-node27-coverage-freshness-alert.service
-systemctl --user start nhms-node27-coverage-freshness-alert.service   # 先手跑一次看退出码
+systemctl --user start nhms-node27-coverage-freshness-alert.service   # 先手跑一次；退出码的读法见 §11.4
 journalctl --user -u nhms-node27-coverage-freshness-alert.service -n 30 --no-pager
 systemctl --user enable --now nhms-node27-coverage-freshness-alert.timer
 systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-pager
@@ -5866,7 +5885,7 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
 ```
 
 失败时它打印完整的 traceback；告警的 `reason` 被扣成 `<error text withheld: …>` 时，这里照样是原文。
-**只看最后一行**就能分支：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器逐一做坏实测，
+**只看最后一行**就能分支（下面四支自上而下、第一条命中即停；失败而不属于前两支的，都归第三支兜底）：2026-09-18 在 node-27 的 scratch worktree 里用生产解释器逐一做坏实测，
 最后一行的异常类与消息与车道 `reason` 相同（`SyntaxError` 的文件名与行号在 `reason` 的括号里，在检查
 的 traceback 里则是上面几行）。**不要**不看这一行就 `uv sync`：仓库自己的代码坏了，sync 修不了。
 
@@ -5906,15 +5925,40 @@ PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "
   （`mapbox-vector-tile`、`pyclipper`、`shapely`），而本车道照样 import 得了。所以判据不是"有没有
   输出"，而是列表里**有没有缺的那个包**（发行包名可能与模块名不同，例如 `psycopg2` 对应
   `psycopg2-binary`）。列表里没有 → sync 不会去动它（锁文件里没有它，或 uv 认为它已经装好），
-sync 修不了：别 sync，按上一支开 issue，把 dry-run 的输出一并附上（推导）。
+  sync 修不了：别 sync，按「仓库代码缺陷」那支开 issue，把 dry-run 的输出一并附上（推导）。
   sync 会就地改生产共享的 `.venv`（display API、autopipe、本车道都跑在它上面），默认是精确同步、
-  锁文件之外的包会被卸掉——所以只在这一支才 sync。sync 完**再验两遍**：重跑上面的导入检查，再用
-  §11.4 那条 `systemctl --user start nhms-node27-coverage-freshness-alert.service` 手跑 unit，
-  两者都退 0 才算闭环。sync 之后导入检查仍失败 → 不是缺包，按上一支代码缺陷处理（推导）。
-- **通过**（`rc=0`）→ 手工已复现不出。用 §11.4 那条 `systemctl --user start` 手跑一次 unit：退 0 →
-  是已经过去的瞬时故障（例如 tick 撞上了一次做到一半、之后已补完的 pull），闭环。仍退 2 → 用本节
-  开头安装块里那条 `journalctl` 取这次的 `reason`，与导入检查对照；两边不一致说明 unit 跑的不是手工
-  这套环境（推导）：
+  锁文件之外的包会被卸掉——所以只在这一支（以及下一支里版本对不上的情形）才 sync。sync 完**再验两遍**：
+  重跑上面的导入检查（`rc=0`），再用 §11.4 那条 `systemctl --user start nhms-node27-coverage-freshness-alert.service`
+  手跑 unit，`systemctl` 返回 0（读法见 §11.4 末尾）才算闭环。sync 之后导入检查仍失败 → 不是缺包，
+  按「仓库代码缺陷」那支处理（推导）。
+- **已装的第三方包与代码对不上**（兜底：失败、而最后一行不属于上面两支的，都走这里）——典型形状：
+  - `ImportError: cannot import name '…' from '<第三方模块>' (…/site-packages/…)`；
+  - `AttributeError: module '<第三方模块>' has no attribute '…'`；
+  - 共享库加载失败：`ImportError: <库>.so…: cannot open shared object file …`。
+
+  实测样本（2026-09-18 node-27 scratch worktree，生产解释器）：
+  `ImportError: cannot import name 'NoSuchThing2472' from 'sqlalchemy.exc' (/home/nwm/NWM/.venv/lib/python3.11/site-packages/sqlalchemy/exc.py)`
+  与 `AttributeError: module 'sqlalchemy' has no attribute 'no_such_attr_2472'`，车道都退 2、`reason` 同文。
+  共享库那一形状是模拟的（让 `psycopg2._psycopg` 的导入抛 `ImportError`），驱动检查的最后一行读
+  `ImportError: libpq.so.5: cannot open shared object file: No such file or directory`，而车道落在退 3、
+  `reason` 读 `ImportError: <error text withheld: redaction unavailable (ImportError)>`——即 §11.3
+  「非驱动观测失败」开头那条路径。先拿装着的版本对锁文件（`<包>` 是发行包名，可能与模块名不同：
+  `sqlalchemy.exc` → `sqlalchemy`，`psycopg2` → `psycopg2-binary`）：
+
+  ```bash
+  cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH && uv pip show --python .venv/bin/python <包>
+  cd /home/nwm/NWM && grep -A2 '^name = "<包>"' uv.lock
+  ```
+
+  健康时两边版本一致：`sqlalchemy` 在 venv 里是 `Version: 2.0.49`、锁文件里是 `version = "2.0.49"`，
+  `psycopg2-binary` 两边都是 `2.9.12`（两条命令原样、2026-09-18 node-27 实测）。下面这套按版本分的判断是推导：
+  - 版本不同 → 依赖漂移：走上一支「缺第三方依赖」的 dry-run → sync → 再验两遍。
+  - 版本相同，或是共享库错误而包本身装着 → sync 修不了：要么仓库代码与锁定的依赖版本对不上，
+    要么系统库坏了。**不要 sync**，开 issue，附上导入检查（或驱动检查）的最后一行与这两条命令的输出。
+- **通过**（`rc=0`）→ 手工已复现不出。用 §11.4 那条 `systemctl --user start` 手跑一次 unit：`systemctl`
+  返回 0（读法见 §11.4 末尾）→ 是已经过去的瞬时故障（例如 tick 撞上了一次做到一半、之后已补完的
+  pull），闭环。仍失败（journal 里 `status=2/…`）→ 用 §11.4 末尾那条 `journalctl` 取这次的 `reason`，
+  与导入检查对照；两边不一致说明 unit 跑的不是手工这套环境（推导）：
   - 先回 §11.3「库侧观测失败」第 2 步查 `EnvironmentFiles` 与 `DropInPaths`——`EnvironmentFile=`
     也能改 `PYTHONPATH`。
   - 那里干净，再看 editable install 还在不在（上面那段双保险失效的前提）：
@@ -5929,7 +5973,7 @@ sync 修不了：别 sync，按上一支开 issue，把 dry-run 的输出一并�
     unit 导不进 `services`。这时连 `packages.common.redaction` 也导不进，`reason` 读
     `ModuleNotFoundError: <error text withheld: redaction unavailable (ModuleNotFoundError)>`（本地复现，
     推导）。重跑本节开头安装块里的两条 `install` 与 `daemon-reload`，再用 §11.4 那条 `systemctl --user start`
-    确认退 0；venv 为什么丢了本项目，单独查（推导）。
+    确认 `systemctl` 返回 0（读法见 §11.4 末尾）；venv 为什么丢了本项目，单独查（推导）。
 
 要验证真实投递链路，用 systemd drop-in 把这一次调用指到 scratch 库（**必须先用空的
 `EnvironmentFile=` 清空已有列表**，`Environment=` 赢不了后读的 `EnvironmentFile=`）：
