@@ -5,6 +5,7 @@ detection across pages, per-page limits, and real-process reaping.
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from datetime import (
     UTC,
@@ -266,11 +267,9 @@ def test_real_sacct_process_bounds_reap_and_leave_inflight_cohort_unchanged(
     executable_root = tmp_path / f"fake-sacct-{boundary}"
     executable_root.mkdir()
     executable = executable_root / "sacct"
-    pid_path = tmp_path / f"{boundary}.pid"
     terminated_path = tmp_path / f"{boundary}.terminated"
     executable.write_text(
         """#!/bin/sh
-printf '%s' "$$" > "$FAKE_SACCT_PID_PATH"
 terminated() {
     : > "$FAKE_SACCT_TERMINATED_PATH"
     exit 0
@@ -292,7 +291,6 @@ esac
     )
     executable.chmod(0o755)
     monkeypatch.setenv("FAKE_SACCT_BOUNDARY", boundary)
-    monkeypatch.setenv("FAKE_SACCT_PID_PATH", str(pid_path))
     monkeypatch.setenv("FAKE_SACCT_TERMINATED_PATH", str(terminated_path))
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128 if boundary == "byte" else 1_000_000)
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2 if boundary == "row" else 10_000)
@@ -301,6 +299,20 @@ esac
         "COMMENT_SACCT_TIMEOUT_SECONDS",
         1.0 if boundary == "wall_time" else 2.0,
     )
+
+    # The child's own startup work (a shell writing its PID) is not ordered against the
+    # wall-time deadline, so it cannot be the startup oracle.  Record the handle the
+    # production code synchronously receives from Popen instead: that handle exists the
+    # instant the child is spawned, whatever the child has or has not executed yet.
+    started_processes: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        process = real_popen(*args, **kwargs)
+        started_processes.append(process)
+        return process
+
+    monkeypatch.setattr(reconcile_module.subprocess, "Popen", recording_popen)
 
     repository = _file_cohort_repository(tmp_path / "state", member_count=1)
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
@@ -321,9 +333,13 @@ esac
     assert not before.get("candidate_projections")
     if boundary != "wall_time":
         assert terminated_path.exists()
-    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    assert len(started_processes) == 1
+    child = started_processes[0]
+    assert child.args[0] == str(executable)
+    # A settled returncode proves the production path waited on the child it owns.
+    assert child.returncode is not None
     with pytest.raises(ChildProcessError):
-        os.waitpid(child_pid, os.WNOHANG)
+        os.waitpid(child.pid, os.WNOHANG)
 
 
 def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:
