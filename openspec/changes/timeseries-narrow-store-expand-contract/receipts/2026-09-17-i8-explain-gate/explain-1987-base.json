@@ -1,0 +1,1926 @@
+{
+  "checkout": "/home/nwm/tmp/2417-base",
+  "warm_rounds": 5,
+  "cases": {
+    "shj_nj/narrow_compressed": {
+      "error": null,
+      "run_id": "fcst_gfs_2026082612_dg_6f9ed9377bd5e52240d3ebfc17291e28",
+      "run_key": 18525,
+      "cycle_time": "2026-08-26 12:00:00+00:00",
+      "store": "narrow",
+      "network": "basins_shj_nj_rivnet_vbasins",
+      "segment": "basins_shj_nj_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 168,
+          "digest": "b6e858bc2cb73818",
+          "digest_rows": 168,
+          "warm_shared_hit": 362451,
+          "p95_exec_ms": 1621.905,
+          "samples": [
+            {
+              "shared_hit": 362451,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1621.905
+            },
+            {
+              "shared_hit": 362451,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1597.441
+            },
+            {
+              "shared_hit": 362451,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1596.2
+            },
+            {
+              "shared_hit": 362451,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1605.58
+            },
+            {
+              "shared_hit": 362451,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1597.351
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 168,
+              "shared_hit": 362451,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Hash Join",
+              "actual_rows": 168,
+              "shared_hit": 362451,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash Join",
+              "actual_rows": 168,
+              "shared_hit": 362449,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Append",
+              "actual_rows": 4732,
+              "shared_hit": 362445,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 0,
+              "shared_hit": 340515,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 0,
+              "shared_hit": 340515,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_shj_nj_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 4732,
+              "shared_hit": 340347,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_62_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 2184,
+              "actual_rows": 336,
+              "shared_hit": 131909,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_104_chunk",
+              "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) AND (river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 10,
+              "actual_rows": 28,
+              "shared_hit": 131549,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_91_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 308,
+              "actual_rows": 4396,
+              "shared_hit": 208431,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_108_chunk",
+              "index": "compress_hyper_7_108_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) AND (river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 54,
+              "shared_hit": 207621,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 168,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_1.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 168,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 4732,
+              "shared_hit": 21930,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Hash Join",
+              "actual_rows": 4732,
+              "shared_hit": 21930,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_shj_nj_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries",
+              "actual_rows": 4732,
+              "shared_hit": 20627,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_9_126_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $3) AND (river_network_version_key = $5) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 312,
+              "actual_rows": 336,
+              "shared_hit": 16197,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_10_174_chunk",
+              "index": "compress_hyper_10_174_chunk__compressed_hypertable_10_run_key_r",
+              "index_cond": "(river_segment_key = $4)",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 28,
+              "shared_hit": 16197,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_150_chunk",
+              "index": "_hyper_9_150_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_151_chunk",
+              "index": "_hyper_9_151_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_152_chunk",
+              "index": "_hyper_9_152_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 676,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_153_chunk",
+              "index": "_hyper_9_153_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 676,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_154_chunk",
+              "index": "_hyper_9_154_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_155_chunk",
+              "index": "_hyper_9_155_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 676,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_156_chunk",
+              "index": "_hyper_9_156_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 364,
+              "shared_hit": 368,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Hash",
+              "actual_rows": 5638,
+              "shared_hit": 1299,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Seq Scan",
+              "relation": "hydro_run",
+              "filter": "(timeseries_store = 'narrow'::text)",
+              "rows_removed_by_filter": 2919,
+              "actual_rows": 5638,
+              "shared_hit": 1299,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Hash",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_pkey",
+              "index_cond": "(run_id = 'fcst_gfs_2026082612_dg_6f9ed9377bd5e52240d3ebfc17291e28'::text)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-08-26 12:00:00+00'::timestamp with time zone) AND (model_id = 'dg_6f9ed9377bd5e52240d3ebfc17291e28'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash",
+              "actual_rows": 44,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Seq Scan",
+              "relation": "river_network_version",
+              "actual_rows": 44,
+              "shared_hit": 2,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 362451
+    },
+    "shj_nj/narrow_uncompressed": {
+      "error": null,
+      "run_id": "fcst_gfs_2026091612_dg_6f9ed9377bd5e52240d3ebfc17291e28",
+      "run_key": 21706,
+      "cycle_time": "2026-09-16 12:00:00+00:00",
+      "store": "narrow",
+      "network": "basins_shj_nj_rivnet_vbasins",
+      "segment": "basins_shj_nj_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 168,
+          "digest": "3e5b320d680975fc",
+          "digest_rows": 168,
+          "warm_shared_hit": 14875,
+          "p95_exec_ms": 31.513,
+          "samples": [
+            {
+              "shared_hit": 14875,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 31.513
+            },
+            {
+              "shared_hit": 14875,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 25.12
+            },
+            {
+              "shared_hit": 14875,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 19.83
+            },
+            {
+              "shared_hit": 14875,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 17.417
+            },
+            {
+              "shared_hit": 14875,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 15.366
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 168,
+              "shared_hit": 14875,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Nested Loop",
+              "actual_rows": 168,
+              "shared_hit": 14875,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Nested Loop",
+              "actual_rows": 168,
+              "shared_hit": 14539,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Append",
+              "actual_rows": 2520,
+              "shared_hit": 14455,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 0,
+              "shared_hit": 4337,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 0,
+              "shared_hit": 4337,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_shj_nj_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 1080,
+              "shared_hit": 1097,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_3_110_chunk",
+              "index": "_hyper_3_110_chunk_river_ts_segment_time_idx",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (variable = 'q_down'::text) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) AND (river_network_version_key = $2) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 216,
+              "shared_hit": 221,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_3_113_chunk",
+              "index": "_hyper_3_113_chunk_river_ts_segment_time_idx",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (variable = 'q_down'::text) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) AND (river_network_version_key = $2) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 864,
+              "shared_hit": 869,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_1.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 3240,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 2520,
+              "shared_hit": 10118,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 2520,
+              "shared_hit": 10118,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_shj_nj_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries",
+              "actual_rows": 2520,
+              "shared_hit": 2554,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_132_chunk",
+              "index": "_hyper_9_132_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 336,
+              "shared_hit": 340,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_133_chunk",
+              "index": "_hyper_9_133_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 600,
+              "shared_hit": 604,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_134_chunk",
+              "index": "_hyper_9_134_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 504,
+              "shared_hit": 508,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_135_chunk",
+              "index": "_hyper_9_135_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 408,
+              "shared_hit": 412,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_136_chunk",
+              "index": "_hyper_9_136_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 312,
+              "shared_hit": 316,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_142_chunk",
+              "index": "_hyper_9_142_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 216,
+              "shared_hit": 221,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_170_chunk",
+              "index": "_hyper_9_170_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 120,
+              "shared_hit": 123,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_175_chunk",
+              "index": "_hyper_9_175_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 24,
+              "shared_hit": 27,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_4.run_key)",
+              "filter": "(timeseries_store = 'narrow'::text)",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 7560,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 84,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = \"*SELECT* 1\".run_key)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-09-16 12:00:00+00'::timestamp with time zone) AND (run_id = 'fcst_gfs_2026091612_dg_6f9ed9377bd5e52240d3ebfc17291e28'::text) AND (model_id = 'dg_6f9ed9377bd5e52240d3ebfc17291e28'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 84,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Seq Scan",
+              "relation": "river_network_version",
+              "actual_rows": 29,
+              "shared_hit": 336,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 14875
+    },
+    "shj_nj/legacy": {
+      "error": null,
+      "run_id": "fcst_gfs_2026081800_dg_6f9ed9377bd5e52240d3ebfc17291e28",
+      "run_key": 18157,
+      "cycle_time": "2026-08-18 00:00:00+00:00",
+      "store": "legacy",
+      "network": "basins_shj_nj_rivnet_vbasins",
+      "segment": "basins_shj_nj_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 120,
+          "digest": "0a5aea3665695eae",
+          "digest_rows": 120,
+          "warm_shared_hit": 132328,
+          "p95_exec_ms": 588.877,
+          "samples": [
+            {
+              "shared_hit": 132328,
+              "shared_read": 0,
+              "actual_rows": 120,
+              "exec_ms": 588.168
+            },
+            {
+              "shared_hit": 132328,
+              "shared_read": 0,
+              "actual_rows": 120,
+              "exec_ms": 588.646
+            },
+            {
+              "shared_hit": 132328,
+              "shared_read": 0,
+              "actual_rows": 120,
+              "exec_ms": 588.743
+            },
+            {
+              "shared_hit": 132328,
+              "shared_read": 0,
+              "actual_rows": 120,
+              "exec_ms": 588.877
+            },
+            {
+              "shared_hit": 132328,
+              "shared_read": 0,
+              "actual_rows": 120,
+              "exec_ms": 588.86
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 120,
+              "shared_hit": 132328,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Nested Loop",
+              "actual_rows": 120,
+              "shared_hit": 132328,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash Join",
+              "actual_rows": 120,
+              "shared_hit": 132088,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Subquery Scan",
+              "actual_rows": 960,
+              "shared_hit": 132084,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Nested Loop",
+              "actual_rows": 960,
+              "shared_hit": 132084,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_shj_nj_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 2302,
+              "shared_hit": 131988,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_62_chunk",
+              "filter": "((valid_time >= '2026-08-18 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-08-25 00:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 1034,
+              "actual_rows": 2302,
+              "shared_hit": 131981,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_104_chunk",
+              "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) AND (river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-18 00:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-08-25 00:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 6,
+              "actual_rows": 32,
+              "shared_hit": 131549,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 96,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 96,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Hash",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_pkey",
+              "index_cond": "(run_id = 'fcst_gfs_2026081800_dg_6f9ed9377bd5e52240d3ebfc17291e28'::text)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-08-18 00:00:00+00'::timestamp with time zone) AND (model_id = 'dg_6f9ed9377bd5e52240d3ebfc17291e28'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_river_network_version_key_key",
+              "index_cond": "(river_network_version_key = \"*SELECT* 1\".river_network_version_key)",
+              "actual_rows": 1,
+              "shared_hit": 240,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 132328
+    },
+    "small_tailanhe/narrow_compressed": {
+      "error": null,
+      "run_id": "fcst_gfs_2026082612_dg_510fbd39433e9cd2ee948980efd523e1",
+      "run_key": 18520,
+      "cycle_time": "2026-08-26 12:00:00+00:00",
+      "store": "narrow",
+      "network": "basins_tailanhe_rivnet_vbasins",
+      "segment": "basins_tailanhe_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 168,
+          "digest": "b1ab8bc8b921ac23",
+          "digest_rows": 168,
+          "warm_shared_hit": 362470,
+          "p95_exec_ms": 1526.754,
+          "samples": [
+            {
+              "shared_hit": 362470,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1526.754
+            },
+            {
+              "shared_hit": 362470,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1461.298
+            },
+            {
+              "shared_hit": 362470,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1461.643
+            },
+            {
+              "shared_hit": 362470,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1486.969
+            },
+            {
+              "shared_hit": 362470,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 1487.245
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 168,
+              "shared_hit": 362470,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Hash Join",
+              "actual_rows": 168,
+              "shared_hit": 362470,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash Join",
+              "actual_rows": 168,
+              "shared_hit": 362468,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Append",
+              "actual_rows": 4732,
+              "shared_hit": 362464,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 0,
+              "shared_hit": 340531,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 0,
+              "shared_hit": 340531,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_tailanhe_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 4732,
+              "shared_hit": 340363,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_62_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 2184,
+              "actual_rows": 336,
+              "shared_hit": 131925,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_104_chunk",
+              "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text) AND (river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 26,
+              "actual_rows": 28,
+              "shared_hit": 131565,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_91_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 308,
+              "actual_rows": 4396,
+              "shared_hit": 208431,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_108_chunk",
+              "index": "compress_hyper_7_108_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text) AND (river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 54,
+              "shared_hit": 207621,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 168,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_1.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 168,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 4732,
+              "shared_hit": 21933,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Hash Join",
+              "actual_rows": 4732,
+              "shared_hit": 21933,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_tailanhe_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries",
+              "actual_rows": 4732,
+              "shared_hit": 20630,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Custom Scan",
+              "relation": "_hyper_9_126_chunk",
+              "filter": "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $3) AND (river_network_version_key = $5) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 312,
+              "actual_rows": 336,
+              "shared_hit": 16199,
+              "shared_read": 0
+            },
+            {
+              "depth": 8,
+              "node": "Index Scan",
+              "relation": "compress_hyper_10_174_chunk",
+              "index": "compress_hyper_10_174_chunk__compressed_hypertable_10_run_key_r",
+              "index_cond": "(river_segment_key = $4)",
+              "filter": "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "rows_removed_by_filter": 2,
+              "actual_rows": 28,
+              "shared_hit": 16199,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_150_chunk",
+              "index": "_hyper_9_150_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 676,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_151_chunk",
+              "index": "_hyper_9_151_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_152_chunk",
+              "index": "_hyper_9_152_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_153_chunk",
+              "index": "_hyper_9_153_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 676,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_154_chunk",
+              "index": "_hyper_9_154_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_155_chunk",
+              "index": "_hyper_9_155_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 672,
+              "shared_hit": 677,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_156_chunk",
+              "index": "_hyper_9_156_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-02 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 364,
+              "shared_hit": 368,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Hash",
+              "actual_rows": 5638,
+              "shared_hit": 1299,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Seq Scan",
+              "relation": "hydro_run",
+              "filter": "(timeseries_store = 'narrow'::text)",
+              "rows_removed_by_filter": 2919,
+              "actual_rows": 5638,
+              "shared_hit": 1299,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Hash",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_pkey",
+              "index_cond": "(run_id = 'fcst_gfs_2026082612_dg_510fbd39433e9cd2ee948980efd523e1'::text)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-08-26 12:00:00+00'::timestamp with time zone) AND (model_id = 'dg_510fbd39433e9cd2ee948980efd523e1'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash",
+              "actual_rows": 44,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Seq Scan",
+              "relation": "river_network_version",
+              "actual_rows": 44,
+              "shared_hit": 2,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 362470
+    },
+    "small_tailanhe/narrow_uncompressed": {
+      "error": null,
+      "run_id": "fcst_gfs_2026091612_dg_510fbd39433e9cd2ee948980efd523e1",
+      "run_key": 21700,
+      "cycle_time": "2026-09-16 12:00:00+00:00",
+      "store": "narrow",
+      "network": "basins_tailanhe_rivnet_vbasins",
+      "segment": "basins_tailanhe_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 168,
+          "digest": "062d2e994eb5c48f",
+          "digest_rows": 168,
+          "warm_shared_hit": 14708,
+          "p95_exec_ms": 26.634,
+          "samples": [
+            {
+              "shared_hit": 14708,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 26.634
+            },
+            {
+              "shared_hit": 14708,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 24.988
+            },
+            {
+              "shared_hit": 14708,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 23.052
+            },
+            {
+              "shared_hit": 14708,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 17.283
+            },
+            {
+              "shared_hit": 14708,
+              "shared_read": 0,
+              "actual_rows": 168,
+              "exec_ms": 13.964
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 168,
+              "shared_hit": 14708,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Nested Loop",
+              "actual_rows": 168,
+              "shared_hit": 14708,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Nested Loop",
+              "actual_rows": 168,
+              "shared_hit": 14540,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Append",
+              "actual_rows": 2520,
+              "shared_hit": 14456,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 0,
+              "shared_hit": 4339,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 0,
+              "shared_hit": 4339,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_tailanhe_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 1080,
+              "shared_hit": 1099,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_3_110_chunk",
+              "index": "_hyper_3_110_chunk_river_ts_segment_time_idx",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (variable = 'q_down'::text) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text) AND (river_network_version_key = $2) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 216,
+              "shared_hit": 222,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_3_113_chunk",
+              "index": "_hyper_3_113_chunk_river_ts_segment_time_idx",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (variable = 'q_down'::text) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text) AND (river_network_version_key = $2) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 864,
+              "shared_hit": 870,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_1.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 3240,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Subquery Scan",
+              "actual_rows": 2520,
+              "shared_hit": 10117,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Nested Loop",
+              "actual_rows": 2520,
+              "shared_hit": 10117,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_tailanhe_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "river_timeseries",
+              "actual_rows": 2520,
+              "shared_hit": 2553,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_132_chunk",
+              "index": "_hyper_9_132_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 336,
+              "shared_hit": 340,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_133_chunk",
+              "index": "_hyper_9_133_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 600,
+              "shared_hit": 604,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_134_chunk",
+              "index": "_hyper_9_134_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 504,
+              "shared_hit": 508,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_135_chunk",
+              "index": "_hyper_9_135_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 408,
+              "shared_hit": 412,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_136_chunk",
+              "index": "_hyper_9_136_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 312,
+              "shared_hit": 316,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_142_chunk",
+              "index": "_hyper_9_142_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 216,
+              "shared_hit": 220,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_170_chunk",
+              "index": "_hyper_9_170_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 120,
+              "shared_hit": 123,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "_hyper_9_175_chunk",
+              "index": "_hyper_9_175_chunk_river_ts_segment_time_key_idx",
+              "index_cond": "((river_segment_key = $4) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-16 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-23 12:00:00+00'::timestamp with time zone))",
+              "filter": "((basin_version_key = $3) AND (river_network_version_key = $5))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 24,
+              "shared_hit": 27,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt_4.run_key)",
+              "filter": "(timeseries_store = 'narrow'::text)",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 7560,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 84,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = \"*SELECT* 1\".run_key)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-09-16 12:00:00+00'::timestamp with time zone) AND (run_id = 'fcst_gfs_2026091612_dg_510fbd39433e9cd2ee948980efd523e1'::text) AND (model_id = 'dg_510fbd39433e9cd2ee948980efd523e1'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 84,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Seq Scan",
+              "relation": "river_network_version",
+              "actual_rows": 3,
+              "shared_hit": 168,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 14708
+    },
+    "small_tailanhe/legacy": {
+      "error": null,
+      "run_id": "fcst_gfs_2026081812_dg_f14b54044d10944d60d66a0acca4d409",
+      "run_key": 10168,
+      "cycle_time": "2026-08-18 12:00:00+00:00",
+      "store": "legacy",
+      "network": "basins_tailanhe_rivnet_vbasins",
+      "segment": "basins_tailanhe_shud_reach_000001",
+      "fact_statements": [
+        {
+          "sql_head": "SELECT h.scenario_id, h.model_id, h.source_id, h.cycle_time, h.end_time AS run_end_time, h.forcing_version_id, rnv.river_network_version_id,",
+          "rows_returned": 132,
+          "digest": "0b6e670db0abad25",
+          "digest_rows": 132,
+          "warm_shared_hit": 132638,
+          "p95_exec_ms": 563.778,
+          "samples": [
+            {
+              "shared_hit": 132638,
+              "shared_read": 0,
+              "actual_rows": 132,
+              "exec_ms": 563.778
+            },
+            {
+              "shared_hit": 132638,
+              "shared_read": 0,
+              "actual_rows": 132,
+              "exec_ms": 547.506
+            },
+            {
+              "shared_hit": 132638,
+              "shared_read": 0,
+              "actual_rows": 132,
+              "exec_ms": 556.932
+            },
+            {
+              "shared_hit": 132638,
+              "shared_read": 0,
+              "actual_rows": 132,
+              "exec_ms": 511.093
+            },
+            {
+              "shared_hit": 132638,
+              "shared_read": 0,
+              "actual_rows": 132,
+              "exec_ms": 504.364
+            }
+          ],
+          "plan_nodes": [
+            {
+              "depth": 0,
+              "node": "Sort",
+              "actual_rows": 132,
+              "shared_hit": 132638,
+              "shared_read": 0
+            },
+            {
+              "depth": 1,
+              "node": "Nested Loop",
+              "actual_rows": 132,
+              "shared_hit": 132638,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Hash Join",
+              "actual_rows": 132,
+              "shared_hit": 132374,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Subquery Scan",
+              "actual_rows": 1584,
+              "shared_hit": 132370,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Nested Loop",
+              "actual_rows": 1584,
+              "shared_hit": 132370,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Seq Scan",
+              "relation": "basin_version",
+              "filter": "(basin_version_id = 'basins_tailanhe_vbasins'::text)",
+              "rows_removed_by_filter": 43,
+              "actual_rows": 1,
+              "shared_hit": 1,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Index Scan",
+              "relation": "river_segment",
+              "index": "river_segment_pkey",
+              "index_cond": "((river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text))",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_pkey",
+              "index_cond": "(river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text)",
+              "actual_rows": 1,
+              "shared_hit": 2,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Custom Scan",
+              "relation": "river_timeseries_legacy",
+              "actual_rows": 3724,
+              "shared_hit": 132220,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Custom Scan",
+              "relation": "_hyper_3_62_chunk",
+              "filter": "((valid_time >= '2026-08-18 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-08-25 12:00:00+00'::timestamp with time zone) AND (basin_version_key = $0) AND (river_segment_key = $1) AND (river_network_version_key = $2) AND (variable = 'q_down'::text) AND (variable_e = 'q_down'::hydro.river_variable))",
+              "rows_removed_by_filter": 908,
+              "actual_rows": 3724,
+              "shared_hit": 132213,
+              "shared_read": 0
+            },
+            {
+              "depth": 7,
+              "node": "Index Scan",
+              "relation": "compress_hyper_7_104_chunk",
+              "index": "compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
+              "index_cond": "((river_network_version_id = 'basins_tailanhe_rivnet_vbasins'::text) AND (river_segment_id = 'basins_tailanhe_shud_shud_riv_000001'::text))",
+              "filter": "((_ts_meta_max_2 >= '2026-08-18 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_2 <= '2026-08-25 12:00:00+00'::timestamp with time zone) AND (_ts_meta_min_1 <= 'q_down'::text) AND (_ts_meta_max_1 >= 'q_down'::text))",
+              "rows_removed_by_filter": 4,
+              "actual_rows": 50,
+              "shared_hit": 131565,
+              "shared_read": 0
+            },
+            {
+              "depth": 5,
+              "node": "Memoize",
+              "actual_rows": 0,
+              "shared_hit": 150,
+              "shared_read": 0
+            },
+            {
+              "depth": 6,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_run_key_key",
+              "index_cond": "(run_key = rt.run_key)",
+              "filter": "(timeseries_store = 'legacy'::text)",
+              "rows_removed_by_filter": 1,
+              "actual_rows": 0,
+              "shared_hit": 150,
+              "shared_read": 0
+            },
+            {
+              "depth": 3,
+              "node": "Hash",
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 4,
+              "node": "Index Scan",
+              "relation": "hydro_run",
+              "index": "hydro_run_pkey",
+              "index_cond": "(run_id = 'fcst_gfs_2026081812_dg_f14b54044d10944d60d66a0acca4d409'::text)",
+              "filter": "((run_type = 'forecast'::hydro.run_type) AND (cycle_time = '2026-08-18 12:00:00+00'::timestamp with time zone) AND (model_id = 'dg_f14b54044d10944d60d66a0acca4d409'::text) AND ((lower(source_id) = ANY ('{gfs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,gfs}'::text[]))))",
+              "rows_removed_by_filter": 0,
+              "actual_rows": 1,
+              "shared_hit": 4,
+              "shared_read": 0
+            },
+            {
+              "depth": 2,
+              "node": "Index Scan",
+              "relation": "river_network_version",
+              "index": "river_network_version_river_network_version_key_key",
+              "index_cond": "(river_network_version_key = \"*SELECT* 1\".river_network_version_key)",
+              "actual_rows": 1,
+              "shared_hit": 264,
+              "shared_read": 0
+            }
+          ]
+        }
+      ],
+      "total_shared_hit": 132638
+    }
+  }
+}

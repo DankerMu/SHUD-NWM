@@ -1,0 +1,14 @@
+shj_nj/narrow_compressed: run=fcst_gfs_2026082612_dg_6f9ed9377bd5e5224 fact_stmts=1 total_hit=549 err=None
+   hit=549 p95=2.342ms rows=168 digest=b6e858bc2cb73818 custom_scans=5 rels=['_hyper_3_62_chunk', '_hyper_3_91_chunk', '_hyper_9_126_chunk', '_hyper_9_150_chunk', '_hyper_9_151_chunk', '_hyper_9_152_chunk']
+shj_nj/narrow_uncompressed: run=fcst_gfs_2026091612_dg_6f9ed9377bd5e5224 fact_stmts=1 total_hit=2749 err=None
+   hit=2749 p95=43.335ms rows=168 digest=3e5b320d680975fc custom_scans=2 rels=['_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_9_132_chunk', '_hyper_9_133_chunk', '_hyper_9_134_chunk', '_hyper_9_135_chunk']
+shj_nj/legacy: run=fcst_gfs_2026081800_dg_6f9ed9377bd5e5224 fact_stmts=1 total_hit=300 err=None
+   hit=300 p95=1.246ms rows=120 digest=0a5aea3665695eae custom_scans=2 rels=['_hyper_3_62_chunk', 'basin_version', 'compress_hyper_7_104_chunk', 'hydro_run', 'river_network_version', 'river_segment']
+small_tailanhe/narrow_compressed: run=fcst_gfs_2026082612_dg_510fbd39433e9cd2e fact_stmts=1 total_hit=498 err=None
+   hit=498 p95=1.835ms rows=168 digest=b1ab8bc8b921ac23 custom_scans=5 rels=['_hyper_3_62_chunk', '_hyper_3_91_chunk', '_hyper_9_126_chunk', '_hyper_9_150_chunk', '_hyper_9_151_chunk', '_hyper_9_152_chunk']
+small_tailanhe/narrow_uncompressed: run=fcst_gfs_2026091612_dg_510fbd39433e9cd2e fact_stmts=1 total_hit=517 err=None
+   hit=517 p95=2.108ms rows=168 digest=062d2e994eb5c48f custom_scans=2 rels=['_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_9_132_chunk', '_hyper_9_133_chunk', '_hyper_9_134_chunk', '_hyper_9_135_chunk']
+small_tailanhe/legacy: run=fcst_gfs_2026081812_dg_f14b54044d10944d6 fact_stmts=1 total_hit=324 err=None
+   hit=324 p95=1.265ms rows=132 digest=0b6e670db0abad25 custom_scans=2 rels=['_hyper_3_62_chunk', 'basin_version', 'compress_hyper_7_104_chunk', 'hydro_run', 'river_network_version', 'river_segment']
+written /home/nwm/tmp/2425/explain-1987.json
+probe_rc=0
