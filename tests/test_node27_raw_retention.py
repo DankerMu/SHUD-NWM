@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -745,6 +746,7 @@ def test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes(
         "NODE27_RAW_RETENTION_SUMMARY_PATH",
         "NODE27_RAW_RETENTION_DAYS",
         "NODE27_RAW_RETENTION_SOURCES",
+        "NODE27_RAW_RETENTION_LANES",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
@@ -808,6 +810,7 @@ def test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing
         "NODE27_RAW_RETENTION_SUMMARY_PATH",
         "NODE27_RAW_RETENTION_DAYS",
         "NODE27_RAW_RETENTION_SOURCES",
+        "NODE27_RAW_RETENTION_LANES",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
@@ -885,6 +888,7 @@ def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
         "NODE27_RAW_RETENTION_PLAN_ONLY",
         "NODE27_RAW_RETENTION_DAYS",
         "NODE27_RAW_RETENTION_SOURCES",
+        "NODE27_RAW_RETENTION_LANES",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
@@ -954,6 +958,7 @@ def _production_env(
         "NODE27_RAW_RETENTION_PLAN_ONLY",
         "NODE27_RAW_RETENTION_DAYS",
         "NODE27_RAW_RETENTION_SOURCES",
+        "NODE27_RAW_RETENTION_LANES",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
@@ -1388,3 +1393,364 @@ def test_documented_operator_check_goes_red_on_an_unsafe_skip(
         ["jq", "-e", program, str(denied_summary)], capture_output=True, text=True
     )
     assert denied_check.returncode == 1, denied_check.stderr
+
+
+# ---------------------------------------------------------------------------
+# Issue #2360 - `NODE27_RAW_RETENTION_LANES` lane selection
+#
+# Contract (openspec `node27-raw-retention`, "A retention run SHALL prune only
+# the lanes its operator selected"): unset selects raw, canonical and
+# precip-cache exactly as before; a set value names lanes from that vocabulary
+# (whitespace-trimmed) or blocks the run at preflight with a `lanes` blocker;
+# an unselected lane is ONE `{"key": <lane>, "reason": "lane_not_selected"}`
+# skip, its root never probed or listed; the summary carries the sorted lanes.
+# ---------------------------------------------------------------------------
+_ALL_LANES_SORTED = ["canonical", "precip-cache", "raw"]
+
+
+def _lanes_config(root: Path, *, lanes: set[str], cache: Path | None) -> node27_raw_retention.RawRetentionConfig:
+    return node27_raw_retention.RawRetentionConfig(
+        object_store_root=root,
+        retention_days=14,
+        sources=frozenset({"gfs", "ifs"}),
+        summary_path=None,
+        precip_cache_root=cache,
+        lanes=frozenset(lanes),
+    )
+
+
+def _three_aged_lanes(store: Path, cache: Path) -> dict[str, Path]:
+    return {
+        "raw": _write_raw_cycle(store, "gfs", "2026060100"),
+        "canonical": _write_canonical_cycle(store, "IFS", "2026060100"),
+        "precip-cache": _write_cache_cycle(cache, "IFS", "2026060100"),
+    }
+
+
+def _config_for_env(monkeypatch: pytest.MonkeyPatch, store: Path, lanes: str | None) -> Any:
+    monkeypatch.setenv("NODE27_RAW_RETENTION_OBJECT_STORE_ROOT", str(store))
+    if lanes is None:
+        monkeypatch.delenv("NODE27_RAW_RETENTION_LANES", raising=False)
+    else:
+        monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", lanes)
+    return node27_raw_retention.config_from_env(node27_raw_retention.build_parser().parse_args([]))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, {"raw", "canonical", "precip-cache"}),
+        ("raw,precip-cache", {"raw", "precip-cache"}),
+        (" raw ,  precip-cache ", {"raw", "precip-cache"}),
+        ("canonical", {"canonical"}),
+        ("canonical,canonical", {"canonical"}),
+    ],
+)
+def test_lanes_env_is_parsed_into_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: set[str]
+) -> None:
+    config, blockers = _config_for_env(monkeypatch, tmp_path, value)
+
+    assert blockers == []
+    assert config is not None
+    assert config.lanes == frozenset(expected)
+
+
+def test_the_config_dataclass_defaults_to_all_three_lanes(tmp_path: Path) -> None:
+    """Keyword constructors elsewhere (the MVT cache suite) keep today's run."""
+    assert _config(tmp_path).lanes == frozenset({"raw", "canonical", "precip-cache"})
+
+
+def test_unset_lanes_selects_every_lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec scenario "unset selects every lane"."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    _three_aged_lanes(store, cache)
+    config, blockers = _config_for_env(monkeypatch, store, None)
+    assert blockers == [] and config is not None
+    assert config.lanes == frozenset({"raw", "canonical", "precip-cache"})
+    config = dataclasses.replace(config, precip_cache_root=cache, sources=frozenset({"gfs", "ifs"}))
+
+    targets, skipped = node27_raw_retention.collect_targets(config, now=datetime(2026, 6, 27, 12, tzinfo=UTC))
+
+    assert [target.key for target in targets] == [
+        "raw/gfs/2026060100",
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert "lane_not_selected" not in _reasons(skipped)
+
+
+def test_unset_lanes_summary_differs_from_the_pre_2360_shape_only_by_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MP3: with the variable unset, plan, deletions, skips and rc are today's.
+
+    The expected values are written out from the pre-#2360 contract (the three
+    lanes in raw -> canonical -> precip-cache order, the within-window and
+    grid skips); the key set is the v5 summary's plus `lanes` and nothing else.
+    """
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    fresh = _write_raw_cycle(store, "gfs", "2026062612")
+    _write_canonical_grid(store, "IFS", "grid-a")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert exit_code == 0
+    assert set(payload) - {"lanes"} == {
+        "schema_version",
+        "started_at",
+        "reference_time",
+        "object_store_root",
+        "raw_root",
+        "canonical_root",
+        "precip_cache_root",
+        "sources",
+        "retention_days",
+        "cutoff",
+        "enabled",
+        "dry_run",
+        "anchor",
+        "status",
+        "finished_at",
+        "execution_mode",
+        "counts",
+        "planned",
+        "deleted",
+        "skipped",
+        "failed",
+        "copyback_lock_failures",
+        "freed_bytes",
+    }
+    assert payload["lanes"] == _ALL_LANES_SORTED
+    assert _keys(payload["planned"]) == [
+        "raw/gfs/2026060100",
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert _keys(payload["deleted"]) == _keys(payload["planned"])
+    assert payload["skipped"] == [
+        {"key": "raw/gfs/2026062612", "reason": "within_retention_window"},
+        {"key": "canonical/IFS/grid", "reason": "grid_definitions_preserved"},
+    ]
+    assert payload["counts"] == {"planned": 3, "deleted": 3, "skipped": 2, "failed": 0}
+    assert all(not path.exists() for path in aged.values())
+    assert fresh.exists()
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+
+
+def test_the_canonical_unit_prunes_only_canonical(tmp_path: Path) -> None:
+    """Spec scenario "the canonical unit prunes only canonical"."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    aged = _three_aged_lanes(store, cache)
+
+    result = node27_raw_retention.run_retention(
+        _lanes_config(store, lanes={"canonical"}, cache=cache),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+
+    assert result["lanes"] == ["canonical"]
+    assert _keys(result["planned"]) == ["canonical/IFS/2026060100"]
+    assert _keys(result["deleted"]) == ["canonical/IFS/2026060100"]
+    assert result["skipped"] == [
+        {"key": "raw", "reason": "lane_not_selected"},
+        {"key": "precip-cache", "reason": "lane_not_selected"},
+    ]
+    assert result["failed"] == []
+    assert not aged["canonical"].exists()
+    assert aged["raw"].exists()
+    assert aged["precip-cache"].exists()
+
+
+def test_the_nwm_unit_lanes_leave_canonical_untouched(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    aged = _three_aged_lanes(store, cache)
+
+    result = node27_raw_retention.run_retention(
+        _lanes_config(store, lanes={"raw", "precip-cache"}, cache=cache),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+
+    assert result["lanes"] == ["precip-cache", "raw"]
+    assert _keys(result["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
+    assert result["skipped"] == [{"key": "canonical", "reason": "lane_not_selected"}]
+    assert aged["canonical"].is_dir()
+    assert not aged["raw"].exists()
+    assert not aged["precip-cache"].exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("raw,canon", "unknown_lane"),
+        ("RAW", "unknown_lane"),
+        ("precip_cache", "unknown_lane"),
+        ("", "empty"),
+        ("   ", "empty"),
+        (" , ,", "empty"),
+    ],
+)
+def test_an_unknown_or_empty_lane_selection_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+    reason: str,
+) -> None:
+    """Spec scenario "an unknown or empty selection fails closed"."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", value)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert exit_code == 2
+    assert payload["status"] == "preflight_blocked"
+    lane_blockers = [blocker for blocker in payload["blockers"] if blocker["field"] == "lanes"]
+    assert [blocker["reason"] for blocker in lane_blockers] == [reason]
+    # The blocked payload has no config, so it carries no `lanes` (design D3).
+    assert "lanes" not in payload
+    assert payload["counts"] == {"planned": 0, "deleted": 0, "skipped": 0, "failed": 0}
+    assert all(path.is_dir() for path in aged.values())
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+
+
+def test_an_unselected_lane_with_an_unusable_root_is_not_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec scenario "an unselected lane with an unusable root is not probed".
+
+    Both unselected roots are unusable here: `raw` does not exist and the
+    precip cache root is unconfigured. Neither may produce its usual skip, and
+    no probe may be made on either path.
+    """
+    store = tmp_path / "store"
+    canonical = _write_canonical_cycle(store, "IFS", "2026060100")
+    assert not (store / "raw").exists()
+    probed: list[Path] = []
+    real_resolve = node27_raw_retention._resolve_lane_root
+    real_iter_dirs = node27_raw_retention._iter_dirs
+
+    def recording_resolve(root: Path, **kwargs: Any) -> Any:
+        probed.append(root)
+        return real_resolve(root, **kwargs)
+
+    def recording_iter_dirs(parent: Path) -> Any:
+        probed.append(parent)
+        return real_iter_dirs(parent)
+
+    monkeypatch.setattr(node27_raw_retention, "_resolve_lane_root", recording_resolve)
+    monkeypatch.setattr(node27_raw_retention, "_iter_dirs", recording_iter_dirs)
+
+    result = node27_raw_retention.run_retention(
+        _lanes_config(store, lanes={"canonical"}, cache=None),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+
+    assert "raw_root_missing" not in _reasons(result["skipped"])
+    assert "raw_root_unsafe" not in _reasons(result["skipped"])
+    assert "precip_cache_root_unconfigured" not in _reasons(result["skipped"])
+    assert [entry for entry in result["skipped"] if entry["key"] in {"raw", "precip-cache"}] == [
+        {"key": "raw", "reason": "lane_not_selected"},
+        {"key": "precip-cache", "reason": "lane_not_selected"},
+    ]
+    assert not [path for path in probed if path == store / "raw" or store / "raw" in path.parents]
+    assert _keys(result["deleted"]) == ["canonical/IFS/2026060100"]
+    assert not canonical.exists()
+
+
+def test_an_unselected_lane_with_an_unsafe_root_is_not_reported_unsafe(tmp_path: Path) -> None:
+    """A regular file where the raw root should be is `raw_root_unsafe` today."""
+    store = tmp_path / "store"
+    _write_canonical_cycle(store, "IFS", "2026060100")
+    (store / "raw").write_text("not a directory", encoding="utf-8")
+
+    selected = node27_raw_retention.run_retention(
+        _lanes_config(store, lanes={"raw", "canonical"}, cache=None),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+    unselected = node27_raw_retention.run_retention(
+        _lanes_config(store, lanes={"canonical"}, cache=None),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+
+    assert "raw_root_unsafe" in _reasons(selected["skipped"])
+    assert [entry for entry in unselected["skipped"] if entry["key"] == "raw"] == [
+        {"key": "raw", "reason": "lane_not_selected"}
+    ]
+
+
+def test_disabled_and_plan_only_summaries_also_carry_the_lanes(tmp_path: Path) -> None:
+    (tmp_path / "raw").mkdir()
+    disabled = node27_raw_retention.run_retention(
+        node27_raw_retention.RawRetentionConfig(
+            object_store_root=tmp_path,
+            retention_days=14,
+            sources=frozenset({"gfs"}),
+            summary_path=None,
+            enabled=False,
+            lanes=frozenset({"canonical"}),
+        ),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+    plan_only = node27_raw_retention.run_retention(
+        node27_raw_retention.RawRetentionConfig(
+            object_store_root=tmp_path,
+            retention_days=14,
+            sources=frozenset({"gfs"}),
+            summary_path=None,
+            dry_run=True,
+            lanes=frozenset({"raw", "precip-cache"}),
+        ),
+        now=datetime(2026, 6, 27, 12, tzinfo=UTC),
+    )
+
+    assert disabled["lanes"] == ["canonical"]
+    assert plan_only["lanes"] == ["precip-cache", "raw"]
+    assert node27_raw_retention.SCHEMA_VERSION == "nhms.node27_raw_retention.production.v5"
+
+
+def test_documented_operator_check_covers_both_units_and_stays_green_on_the_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2360: the documented check walks BOTH summary directories, and a healthy
+    split tick (nwm unit `raw,precip-cache`, system unit `canonical`) is green in
+    both -- `lane_not_selected` is not an `*_unsafe` reason.
+    """
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed; it is present on node-27")
+    text = _RETENTION_ENV_EXAMPLE.read_text(encoding="utf-8")
+    loop = next(line for line in text.splitlines() if "for d in " in line)
+    assert "/home/nwm/node27-raw-retention-logs" in loop
+    assert "/var/log/nhms-node27-canonical-retention" in loop
+    program = _documented_operator_jq_program()
+
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    aged = _three_aged_lanes(store, cache)
+    summaries = {}
+    for lanes in ("raw,precip-cache", "canonical"):
+        summary = tmp_path / "summaries" / f"{lanes}.json"
+        _production_env(monkeypatch, store=store, cache=cache, summary_path=summary)
+        monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", lanes)
+        exit_code, payload = _production_tick(capsys)
+        assert exit_code == 0
+        summaries[lanes] = payload
+        check = subprocess.run(["jq", "-e", program, str(summary)], capture_output=True, text=True)
+        assert check.returncode == 0, (lanes, check.stderr)
+
+    assert all(not path.exists() for path in aged.values())
+    nwm, canonical = summaries["raw,precip-cache"], summaries["canonical"]
+    assert (nwm["lanes"], canonical["lanes"]) == (["precip-cache", "raw"], ["canonical"])
+    # One cutoff rule across the two units (design D3).
+    for field in ("cutoff", "retention_days", "sources"):
+        assert nwm[field] == canonical[field], field

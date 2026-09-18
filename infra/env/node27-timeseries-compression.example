@@ -23,14 +23,21 @@ DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # Chunks whose range_end is younger than the display-watermark cutoff are skipped.
 NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 
-# Maximum chunks per tick: one-day canonical chunks arrive at 2/day, below
-# bound 4. Four narrow chunks at approximately 7.5 min each fit the 65 min
-# wrapper wall. Legacy siblings are a write-frozen finite backlog, not arrivals.
-# Compress that backlog first under bound 1 before expand: a legacy 7-day
-# chunk can take approximately 51 min and cannot safely share the ordinary
-# four-chunk tick. See runbook section 4 "Per-tick capacity" and section 4.5,
+# Maximum chunks per tick: a capacity conclusion, not a default (#2425,
+# re-derived 2026-09-18 from the narrow one-day geometry; supersedes the
+# 7-day-geometry value 4). Measured on node-27: narrow hydro.river_timeseries
+# day chunks are 19-21 GB and compress at ~55 s/GB including per-chunk
+# overhead (2026-09-17 tick: 46.84 GB in 2593 s). Wall: 2 x 21 GB x 55 s/GB
+# ~= 2310 s <= the 3900 s wrapper wall; 4 x 20 GB ~= 4400 s does not fit --
+# that is the 2026-09-18 rc=124. Throughput: river arrives 1 chunk/day, so 2
+# slots/day drain a river backlog. Selection is newest-first within each
+# hypertable in (schema, name) order, so the slots stay off the chunks DB
+# retention drops next. Legacy 7-day chunks (#1988) are not arrivals: once
+# the river backlog is drained the 2nd slot can reach an uncompressed legacy
+# giant -- drop to bound 1 until it is gone (runbook dated check). Full
+# derivation: runbook section 4 "Per-tick capacity" and section 4.5,
 # docs/runbooks/tier-node27-timeseries-storage.md.
-NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
+NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2
 
 # --- Timeout budget chain ---------------------------------------------------
 # One compression env file is the operator-owned budget input. The preflight

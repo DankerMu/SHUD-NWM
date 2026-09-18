@@ -2,7 +2,10 @@
 #
 # Copy to /home/nwm/NWM/infra/env/node27-raw-retention.env on node-27, set mode
 # 0600, and install infra/systemd/nhms-node27-raw-retention.{service,timer} as
-# user units for nwm.
+# user units for nwm. The canonical lane runs in a separate SYSTEM unit
+# generated from THIS file (see NODE27_RAW_RETENTION_LANES below); rerun
+# `sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh` after
+# every change here.
 
 NODE27_RAW_RETENTION_REPO=/home/nwm/NWM
 # Read-only DSN for the display business-time watermark (this runner's ONLY
@@ -62,35 +65,57 @@ NODE27_RAW_RETENTION_DAYS=14
 # `precip_cache_root_unconfigured` and raw + canonical are still pruned.
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
+# Lane selection (#2360). Comma-separated subset of `raw`, `canonical`,
+# `precip-cache` (exact lowercase names, surrounding whitespace trimmed).
+# Unset = all three lanes, exactly the pre-#2360 run. A value that is empty
+# after trimming, or names anything else, is a preflight blocker
+# (`{"field": "lanes"}`, rc=2) and NOTHING is deleted. A lane left out is one
+# `{"key": <lane>, "reason": "lane_not_selected"}` entry in `skipped[]`; its
+# root is never probed or listed and no copyback lock is taken for it. Every
+# summary carries the selected lanes as a sorted `lanes` list.
+# node-27 splits the lanes across two units, both on the 03:35 UTC tick and the
+# same cutoff rule (same watermark, same NODE27_RAW_RETENTION_DAYS):
+#   - this nwm USER unit nhms-node27-raw-retention.service: `raw,precip-cache`
+#     (the line below). The PNG cache root is nwm-owned, so these two stay here.
+#   - SYSTEM unit nhms-node27-canonical-retention.service, User=frd_muziyao (the
+#     copyback root's owner): `canonical`. Its env
+#     /etc/nhms/node27-canonical-retention.env is GENERATED from this file by
+#     scripts/node27_canonical_retention_install.sh, which drops this file's
+#     LANES / LOG_ROOT / LOCK_PATH / LOG_FILE / SUMMARY_PATH / BOOTSTRAP_LOG
+#     lines and appends LANES=canonical, LOG_ROOT=/var/log/nhms-node27-canonical-retention
+#     and LOCK_PATH=/run/nhms-node27-canonical-retention/raw-retention.lock. It is
+#     a snapshot: rerun the installer after every edit of this file.
+NODE27_RAW_RETENTION_LANES=raw,precip-cache
+
 # HOW TO READ THIS UNIT (issue #2011; node-27 observations 2026-09-06, local
 # reproductions marked as such; the canonical lane's permission model is #2100;
 # the canonical lane's copyback lock is #2252).
 #
-# CANONICAL LANE UNDER THE COPYBACK MUTEX (#2252, owner decision 2026-09-14).
+# CANONICAL LANE UNDER THE COPYBACK MUTEX (#2252, owner decision 2026-09-14;
+# identity split #2360, 2026-09-18).
 # On node-27 NODE27_RAW_RETENTION_OBJECT_STORE_ROOT is the shared copyback root
 # node-22 writers promote canonical/ trees into, so every canonical/<S>/<cycle>
 # removal holds `<root>/.nhms-copyback-batch.lock` (POSIX record lock, one
 # acquisition per tree, 300 s pass-level wait budget). raw/ and the precip
 # cache are never locked. That lock file is `0600` and owned by the copyback
-# root's owner (frd_muziyao, uid 1103); this unit runs as nwm (uid 1005), which
-# cannot open it, and the lock identity contract is deliberately not relaxed.
-# Until this unit runs as the copyback root's owner (follow-up ops issue):
-#   - every aged canonical cycle is recorded in `failed[]` with
-#     `lock_failure: "lock_unsafe"` and is NOT removed; raw and precip-cache
-#     pruning are unaffected; `copyback_lock_failures.lock_unsafe` counts them;
-#   - on every tick that has an aged canonical cycle the runner returns rc=1, so
-#     the unit ends `Result=failed` and shows in `systemctl --user --failed`;
-#     it carries no `OnFailure=`, so nothing pages;
-#   - the `counts.failed == 0` criterion below is SUSPENDED for that period, and
-#     the `jq` check below exits 1 on those ticks by design.
+# root's owner (frd_muziyao, uid 1103), and the lock identity contract is
+# deliberately not relaxed. The canonical lane therefore runs as that owner in
+# the system unit nhms-node27-canonical-retention.service
+# (NODE27_RAW_RETENTION_LANES=canonical), and this nwm (uid 1005) unit does not
+# select it -- it records `canonical` / `lane_not_selected` and never opens the
+# lock. Before that split (#2360) this unit selected all three lanes and every
+# aged canonical cycle ended in `failed[]` with `lock_failure: "lock_unsafe"`,
+# rc=1 on every such tick. Seeing `lock_unsafe` again now means the lane is run
+# by the wrong account (a LANES line lost here, or the system unit's User=
+# changed) -- an incident, not the steady state.
 # `lock_failure` meanings: `lock_timeout` -- another process held the mutex past
 # the remaining wait budget; `lock_budget_exhausted` -- the pass budget was
 # already spent, no attempt was made; `lock_unsafe` -- the lock file is unsafe,
 # unopenable (the uid state above) or the configuration was refused. None of
 # them is fixed by deleting the lock file: that splits the mutex.
 #
-# Steady state since #2100 (and, for canonical, once the unit runs as the
-# copyback root's owner): every canonical mirror directory this runner has to
+# Steady state since #2100 (and, for canonical, since #2360 runs that lane as
+# the copyback root's owner): every canonical mirror directory the runner has to
 # remove (`<cycle>/` and its `prcp_rate_or_amount/`) or unlink from (their
 # parent `canonical/<S>/`, which needs `w+x` for the `rmdir` and is never
 # removed itself) is `2775` with group `nwmuser` (gid 1107), which `nwm` is a
@@ -112,12 +137,16 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #   - The historical ops criterion `counts.failed == 0`
 #     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md) was
 #     restored by #2100 after being suspended while the canonical tree was
-#     `755 frd_muziyao nfsdata`. It is suspended again while this unit is not the
-#     copyback root's owner (see the copyback mutex block above): each aged
-#     canonical target then fails with `lock_unsafe` on every tick.
-#   - This unit carries no `OnFailure=` (unlike nhms-node27-timeseries-retention
-#     and nhms-node27-resource-governance), so a red tick pages nobody. It is
-#     read from `systemctl --user --failed` or from the check below.
+#     `755 frd_muziyao nfsdata`, suspended again while the canonical lane ran as
+#     nwm (`lock_unsafe`, #2252), and is restored by the #2360 split: it holds
+#     for BOTH units' summaries.
+#   - Both units alert on `Result=failed` (#2360): this user unit through
+#     `OnFailure=nhms-node27-unit-failure-alert@%n.service` (user journal), the
+#     canonical system unit through
+#     `OnFailure=nhms-node27-system-unit-failure-alert@%n.service`, which runs
+#     the same handler as nwm with NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system. rc=1
+#     (any `failed[]` entry) and rc=2 (preflight blocked) reach the operator;
+#     the states below exit 0 and never reach `OnFailure=`.
 #   - `failed[]` alone is still NOT the whole signal. It stays empty in two
 #     states where retention has silently stopped:
 #       * Lanes retired silently. If `<object-store>` itself loses `x`,
@@ -149,13 +178,20 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #         non-EACCES `OSError` there -- ESTALE, EIO -- still escapes
 #         `collect_targets`. The freshness clause below is the only thing that
 #         catches any of them.
-#     Check freshness, execution mode and every failure together:
+#     Check freshness, execution mode and every failure together, on the
+#     newest summary of EACH unit (nwm user unit, then the canonical system
+#     unit, whose LogsDirectory is 0755 so nwm can read it):
+#       for d in /home/nwm/node27-raw-retention-logs /var/log/nhms-node27-canonical-retention; do
 #       jq -e '
 #         (.execution_mode == "production_execute")
 #         and ((.finished_at | fromdateiso8601) > (now - 26*3600))
 #         and ([.failed[]]                                          | length == 0)
 #         and ([.skipped[] | select(.reason | endswith("_unsafe"))] | length == 0)
-#       ' "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
+#       ' "$(ls -t "$d"/raw-retention-*.json | head -1)" || echo "RED: $d"; done
+#     A canonical `*_unsafe` skip or a stale canonical summary exits 0 at the
+#     unit level and never reaches `OnFailure=`; only this check (on the
+#     second directory) sees them. `lane_not_selected` does not end in
+#     `_unsafe`, so the split itself keeps both checks green.
 #     26h is not a magic constant: it is the 24h tick of
 #     nhms-node27-raw-retention.timer (`OnCalendar=*-*-* 03:35:00 UTC`, daily)
 #     plus slack. Exit codes over the summary shapes below -- all of them

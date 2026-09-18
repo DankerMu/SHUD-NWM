@@ -2847,7 +2847,7 @@ GNU coreutils 与 BSD 的实现都只在 `FTS_DP` 上动手），所以收权过
 `canonical/gfs`、`canonical/IFS` 两棵树的目录位；`canonical/` 本身、`runs/`、`forcing/`
 以及所有文件位都不动。
 
-#### node-27 canonical 删除持锁（#2252 / #2239 / #2262）
+#### node-27 canonical 删除持锁（#2252 / #2239 / #2262 / #2360）
 
 node-27 上 `/home/ghdc/nwm/object-store` **就是** node-22 写者 promote `canonical/` 的那个
 共享 copyback root，所以 `scripts/node27_raw_retention.py` 删每个
@@ -2867,27 +2867,94 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
 | `lock_budget_exhausted` | 本 pass 预算已被前面的等待耗尽，这一条没有尝试取锁 | 同上，跟着 `lock_timeout` 一起看 |
 | `lock_unsafe` | 锁文件不安全、打不开或配置被拒（属主/模式/硬链接/符号链接不对，或本账号无权打开） | 不是 busy；**不要删锁文件**（会把互斥拆成两个 inode），按下面的身份现状处理 |
 
-**身份现状（owner 2026-09-14 裁定，接受）**：锁文件 `0600`、属主 copyback root 属主
-`frd_muziyao`(1103)；node-27 retention unit 以 `nwm`(1005) 运行，打不开它。锁身份契约**不放宽**
-（组共享 `0660` 会被 node-22 在 #1831 前的现网代码拒掉，打断所有写者）。所以在 unit 改为以
-copyback root 属主运行之前（后续 ops issue 跟踪）：
+**身份：canonical 车道拆到系统 unit，以 copyback root 属主运行（#2360，2026-09-18）**。
+锁文件 `0600`、属主是 copyback root 属主 `frd_muziyao`(1103)；锁身份契约**不放宽**（组共享
+`0660` 会被 node-22 在 #1831 前的现网代码拒掉，打断所有写者），锁文件的模式/属主本次也不动。
+所以 retention 按车道拆成两个 unit，靠 `NODE27_RAW_RETENTION_LANES` 选车道：
 
-- 每个到龄的 canonical cycle 都记一条 `lock_failure: lock_unsafe`、**一个字节都不删**；
-  raw 与 PNG 缓存照常剪；
-- 有到龄 canonical cycle 的 tick 退出码为 1，unit `Result=failed`、出现在
-  `systemctl --user --failed`；unit 没有 `OnFailure=`，不会告警；
-- `infra/env/node27-raw-retention.example` 里 `counts.failed == 0` 的判据**暂停**，文档化的
-  `jq` 检查在这些 tick 上按设计退 1；
-- 容量：canonical 镜像 14 天两个源实测 3.7 GiB，对 `/home` 1.1 TiB 余量无压力——判定时仍以
+| unit | 作用域 / 身份 | `NODE27_RAW_RETENTION_LANES` | env | summary 目录 | 失败告警 |
+|---|---|---|---|---|---|
+| `nhms-node27-raw-retention.{service,timer}` | nwm user unit，`nwm`(1005) | `raw,precip-cache` | `/home/nwm/NWM/infra/env/node27-raw-retention.env` | `/home/nwm/node27-raw-retention-logs/` | `OnFailure=nhms-node27-unit-failure-alert@%n.service`（user journal） |
+| `nhms-node27-canonical-retention.{service,timer}` | 系统 unit，`User=frd_muziyao`(1103) | `canonical` | `/etc/nhms/node27-canonical-retention.env`（安装脚本生成） | `/var/log/nhms-node27-canonical-retention/`（0755，nwm 可读） | `OnFailure=nhms-node27-system-unit-failure-alert@%n.service`（以 nwm + `systemd-journal` 跑同一个 handler，`NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system` 读 system journal） |
+
+- 两个 timer 都是 `03:35:00 UTC`，同一条 cutoff 规则（同一 display watermark、同一
+  `NODE27_RAW_RETENTION_DAYS`），一个 cycle 的 canonical 镜像和它的 PNG 缓存在同一天到龄，
+  只是由两个进程分别删、不是原子的：一个 unit 失败，另一个车道照剪（与单进程内车道互相隔离的
+  既有语义一致）。
+- 未选中的车道在 `skipped[]` 里恰好一条 `{"key": <lane>, "reason": "lane_not_selected"}`，
+  根目录不探测、不列举、不取锁；summary 带排好序的 `lanes`，看它就知道是哪个 unit 写的。
+  `LANES` 取值为空或含未知名字 → preflight `lanes` blocker，rc=2，一个字节都不删。
+- 为什么不把整个 unit 换成 `frd_muziyao`：precip PNG 缓存根 `/home/nwm/.cache/nhms/mvt` 是
+  `nwm:nwm 775`，uid 1103 删不动——fail-closed 只会换一条车道。
+- 拆分后 canonical 不再出现 `lock_unsafe`；再出现就是车道跑错了账号（nwm env 丢了 `LANES`
+  行，或系统 unit 的 `User=` 被改了），按事故处理，**不要删锁文件**。
+- `infra/env/node27-raw-retention.example` 的 `counts.failed == 0` 判据随拆分恢复，两份 summary
+  都适用。
+- 容量：canonical 镜像 14 天两个源实测 3.7 GiB，对 `/home` 余量无压力——判定时仍以
   `df -h` 实测为准。
 
-核查一次 tick 是否是这个形态：
+**一次性安装（运维 sudo）**。前提：nwm env 已加 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`，
+repo 已 `git pull --ff-only`。然后：
 
 ```bash
-ssh -p 32099 nwm@210.77.77.27 \
-  'f=$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1);
-   jq "{schema_version, copyback_lock_failures, failed: [.failed[] | {key, lock_failure, error_type}]}" "$f"'
+sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh
 ```
+
+脚本先做 fail-closed 前置检查（root；`frd_muziyao` 是 uid 1103；object-store 根与
+`.nhms-copyback-batch.lock` 属主 1103、锁文件已存在且 `600`——**从不创建**；三份 repo unit
+存在；源 env 存在、`600`、非符号链接；以 `frd_muziyao` 身份 import 探针通过），任一不过就
+rc≠0 退出、什么都不写。然后：生成 `/etc/nhms/node27-canonical-retention.env`（从 nwm env 去掉
+`LANES`/`LOG_ROOT`/`LOCK_PATH`/`LOG_FILE`/`SUMMARY_PATH`/`BOOTSTRAP_LOG` 行，追加
+`LANES=canonical`、`LOG_ROOT=/var/log/nhms-node27-canonical-retention`、
+`LOCK_PATH=/run/nhms-node27-canonical-retention/raw-retention.lock`；属主 `frd_muziyao`、`600`；
+不打印任何值）→ `install -m 0644` 三份系统 unit 到 `/etc/systemd/system/` → `daemon-reload` →
+`enable --now` timer → 同步 `start` 一次 service，打印 `User,Result,ExecMainStatus`、timer 状态、
+最新 summary 的 `lanes`/`counts`/`copyback_lock_failures` 和锁文件 `%A %U`；service
+`Result` 不是 `success` 就 rc≠0。
+
+**改了 nwm raw-retention env 之后必须重跑同一条 sudo 命令**：系统 unit 的 env 是安装时的快照，
+不会跟着变（两份 summary 的 `cutoff`、`retention_days`、`sources` 应当相等，不等就是快照过期）。
+
+**回滚**（回到"canonical 不删"的状态；锁文件不动）：
+
+```bash
+sudo systemctl disable --now nhms-node27-canonical-retention.timer
+sudo rm -f /etc/systemd/system/nhms-node27-canonical-retention.service \
+           /etc/systemd/system/nhms-node27-canonical-retention.timer \
+           /etc/systemd/system/nhms-node27-system-unit-failure-alert@.service \
+           /etc/nhms/node27-canonical-retention.env
+sudo systemctl daemon-reload
+# 再从 /home/nwm/NWM/infra/env/node27-raw-retention.env 删掉 NODE27_RAW_RETENTION_LANES 行。
+```
+
+删掉 `LANES` 行后 nwm unit 回到三车道：每个到龄 canonical cycle 又会记 `lock_unsafe`、tick
+rc=1、经 `OnFailure=` 告警——这是回滚后的已知形态，不是新故障。
+
+**核查（两个 summary 目录都要看）**。unit 级 `OnFailure=` 只覆盖 rc≠0；canonical 的
+`*_unsafe` 跳过（车道/源根不可达）和过期 summary（tick 没跑或在写 summary 前崩了）都是 rc=0，
+**永远到不了 `OnFailure=`**，只有下面的检查能看到：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 '
+  for d in /home/nwm/node27-raw-retention-logs /var/log/nhms-node27-canonical-retention; do
+    f=$(ls -t "$d"/raw-retention-*.json | head -1); echo "== $f"
+    jq "{lanes, execution_mode, finished_at, counts, copyback_lock_failures,
+         failed: [.failed[] | {key, lock_failure, error_type}],
+         unsafe: [.skipped[] | select(.reason | endswith(\"_unsafe\"))]}" "$f"
+    jq -e "(.execution_mode == \"production_execute\")
+           and ((.finished_at | fromdateiso8601) > (now - 26*3600))
+           and ([.failed[]] | length == 0)
+           and ([.skipped[] | select(.reason | endswith(\"_unsafe\"))] | length == 0)" "$f" >/dev/null \
+      || echo "RED: $d"
+  done
+  systemctl status nhms-node27-canonical-retention.service --no-pager | head -5
+  stat -c "%A %U" /home/ghdc/nwm/object-store/.nhms-copyback-batch.lock'
+```
+
+期望：两段都没有 `RED`；nwm summary `lanes=["precip-cache","raw"]`、canonical summary
+`lanes=["canonical"]`；`copyback_lock_failures` 全 0；锁文件仍是 `-rw------- frd_muziyao`。
+判据本体与各退出码含义见 `infra/env/node27-raw-retention.example`（测试直接抽取那份 `jq`
+程序执行）。
 
 已知限制：跨主机互斥只有 receipt 证明（CI 与本机测试只覆盖同机 `posix` 对 `posix`）；node-27
 自身上 `posix` 持有者不排斥本机 `flock` 取锁者，所以 node-27 以后新增的取锁方都必须用
