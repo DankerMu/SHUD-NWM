@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -936,21 +937,248 @@ def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() 
         assert "AND rt.river_segment_id = %(river_segment_id)s" in sql, label
 
 
-def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
-    """Non-vacuity: every block really predicates on the four keys and the enum."""
-    for label, sql in _segment_block_statements().items():
-        assert "rt.basin_version_key = (" in sql, label
-        assert "SELECT basin_version_key FROM core.basin_version" in sql, label
-        assert "rt.river_segment_key = (" in sql, label
+def _assert_segment_block_identity_predicates(sql: str, label: str) -> None:
+    """The oracle design.md F4b names, factored so it can be proven to bite.
+
+    Asserted on the two UNION BRANCH texts rather than on the composed statement,
+    because sargability is a property of the BRANCH SCAN: the outer layer's
+    ``JOIN core.river_network_version rnv ON rnv.river_network_version_key =
+    rt.river_network_version_key`` is a different predicate on the same column
+    and must not be able to answer for the branch's.
+
+    #2451 C1 changed the spelling of two of these conjuncts, deliberately and
+    visibly (``packages/common/forecast_store.py``): ``basin_version_key`` and
+    ``river_network_version_key`` are compared with ``IS NOT NULL AND … IS NOT
+    DISTINCT FROM`` so they cannot form an index condition on
+    ``river_ts_run_discovery_key_idx``'s 2nd and 3rd columns; what changed is
+    sargability, not enforcement.
+
+    The ``IS NOT NULL`` half is part of the spelling, not decoration, and is
+    pinned as a CONTIGUOUS PAIR with the conjunct it guards. ``IS NOT DISTINCT
+    FROM`` on its own is NOT equivalent to ``=``: with NULL on both sides it is
+    TRUE where ``=`` is UNKNOWN, so the row is RETURNED instead of excluded. The
+    two columns are ``NOT NULL`` only on ``hydro.river_timeseries``
+    (``db/migrations/000059_river_timeseries_narrow_expand.sql:14-15``); on
+    ``hydro.river_timeseries_legacy`` they are NULLABLE
+    (``db/migrations/000050_river_identity_normalization.sql:216-222`` adds them
+    as bare ``INTEGER``, and the only ``SET NOT NULL`` lives inside
+    ``hydro.cutover_river_identity_normalization()``, which that migration's own
+    ``COMMENT`` records as never invoked by the chain) — and ONE template renders
+    both branches. With the left side guarded non-NULL the pair filters exactly
+    as ``=`` does on every input, so the branch predicate stops depending on a
+    nullability fact stated in another file. ``test_the_null_guard_is_what_makes_
+    the_c1_spelling_filter_like_equality`` is the executable proof.
+
+    Each of the two is pinned TWICE — the new spelling present AND the plain
+    ``=`` spelling absent. Presence alone would pass a half-revert that adds
+    ``rt.basin_version_key = (…)`` back BESIDE the ``IS NOT DISTINCT FROM`` one,
+    which re-enables the discovery index's prefix and reinstates the defect while
+    still "keeping the predicate". ``rt.river_segment_key`` keeps its ``=`` and is
+    deliberately NOT swept into the absence check: it is the conjunct that must
+    stay sargable, and it is pinned as an equality here.
+    """
+    for branch, route in zip(_union_branches(sql), ("legacy", "narrow"), strict=True):
+        where = (label, route)
+        assert "rt.basin_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.basin_version_key = (" not in branch, where
+        assert (
+            "  AND rt.basin_version_key IS NOT NULL\n  AND rt.basin_version_key IS NOT DISTINCT FROM (\n"
+        ) in branch, where
+        assert "SELECT basin_version_key FROM core.basin_version" in branch, where
+        assert "rt.river_segment_key = (" in branch, where
         # The segment resolution binds the network too: core.river_segment's
         # primary key is (river_segment_id, river_network_version_id), so a bare
         # segment lookup could return more than one row and raise at runtime.
-        assert "SELECT river_segment_key FROM core.river_segment" in sql, label
-        assert "AND river_network_version_id = %(river_network_version_id)s" in sql, label
-        assert "rt.river_network_version_key = (" in sql, label
-        assert "rt.variable_e = 'q_down'::hydro.river_variable" in sql, label
+        assert "SELECT river_segment_key FROM core.river_segment" in branch, where
+        assert "AND river_network_version_id = %(river_network_version_id)s" in branch, where
+        assert "rt.river_network_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.river_network_version_key = (" not in branch, where
+        assert (
+            "  AND rt.river_network_version_key IS NOT NULL\n"
+            "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"
+        ) in branch, where
+        assert "rt.variable_e = 'q_down'::hydro.river_variable" in branch, where
         # The run is reached by key, never by its text.
-        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in sql, label
+        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch, where
+
+
+def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
+    """Non-vacuity: every block really predicates on the four keys and the enum."""
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        _assert_segment_block_identity_predicates(sql, label)
+
+
+def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> None:
+    """The pin above may not be satisfiable by loosening it (tasks.md §3.2).
+
+    ``_assert_key_predicates_retained`` (``packages/common/river_ts_render.py``)
+    compares a template against a rendering derived from that same template, so a
+    symmetric rewrite of a conjunct leaves it silent — its silence is not evidence
+    the spelling survived. This pin is the one that bites, and this case is the
+    proof that it does: reverting exactly C1's substitution, on every one of the
+    eight blocks, must make it RED. If this ever passes, the pin above has been
+    weakened to something a plain ``=`` also satisfies.
+    """
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        reverted = sql.replace(" IS NOT DISTINCT FROM (", " = (")
+        assert reverted != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(reverted, label)
+        # And the same for a HALF revert, which keeps the C1 spelling and adds the
+        # sargable one back beside it — the shape a presence-only pin would miss.
+        half = sql.replace(
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+            "  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n"
+            "      WHERE basin_version_id = %(basin_version_id)s\n  )\n"
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+        )
+        assert half != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(half, label)
+        # And an UNGUARDED revert, which drops only the `IS NOT NULL` line. Every
+        # other pin above still passes on it — the C1 spelling is present, the
+        # plain `=` is absent, the authority sub-select is intact — so the
+        # contiguous-pair pin is the only thing standing between this branch and
+        # `IS NOT DISTINCT FROM`'s NULL-vs-NULL divergence from `=`.
+        for column in ("basin_version_key", "river_network_version_key"):
+            unguarded = sql.replace(f"  AND rt.{column} IS NOT NULL\n", "")
+            assert unguarded != sql, (label, column)
+            with pytest.raises(AssertionError):
+                _assert_segment_block_identity_predicates(unguarded, label)
+
+
+#: One ``IS NOT DISTINCT FROM`` identity conjunct of ``_SEGMENT_ROWS_SOURCE_SQL``,
+#: SLICED OUT of the shipped template instead of copied, so the executable
+#: semantics case below cannot drift away from the SQL the product runs.
+#:
+#: Deliberately anchored on the COMPARISON and not on the guard: the guard's
+#: presence is an assertion this test makes, so it may not also be a precondition
+#: for the test running. Anchored on the guard, deleting the guard from
+#: ``forecast_store.py`` would make the slice come up empty and the failure would
+#: read "found 0 conjuncts" instead of naming the semantics that were lost.
+_IDENTITY_COMPARISON_CONJUNCT = re.compile(
+    r"  AND rt\.(?P<column>[a-z_]+) IS NOT DISTINCT FROM \(\n(?P<subselect>(?:      [^\n]*\n)+)  \)\n"
+)
+
+#: The authority resolution inside such a conjunct, parsed so the fixture tables
+#: below are built from the template's own names rather than from a guess.
+_AUTHORITY_SUBSELECT = re.compile(
+    r"\s*SELECT (?P<key>\w+) FROM (?P<schema>\w+)\.(?P<table>\w+)\s+WHERE (?P<member>\w+) = %\((?P<param>\w+)\)s\s*"
+)
+
+#: The five NULL/non-NULL combinations the two sides of an identity comparison can
+#: take, with what PostgreSQL's ``=`` does with each inside a ``WHERE`` conjunct.
+#: ``authority_seeded`` False binds an id with no authority row, which is what
+#: makes the scalar sub-select yield NULL.
+_IDENTITY_NULL_CELLS: tuple[tuple[str, int | None, bool, int], ...] = (
+    ("both_bound_match", 7, True, 1),
+    ("both_bound_mismatch", 9, True, 0),
+    ("fact_null_authority_bound", None, True, 0),
+    ("fact_bound_authority_null", 7, False, 0),
+    # The only cell where the guard changes the answer.
+    ("both_null", None, False, 0),
+)
+
+
+def _identity_comparison_conjuncts() -> dict[str, tuple[str, bool, re.Match[str]]]:
+    """``{column: (comparison_sql, guarded, authority_match)}`` off the shipped template.
+
+    ``guarded`` is whether the line immediately ABOVE the comparison is that same
+    column's ``IS NOT NULL``. Read here, asserted by the caller.
+    """
+    template = forecast_store._SEGMENT_ROWS_SOURCE_SQL
+    found: dict[str, tuple[str, bool, re.Match[str]]] = {}
+    for match in _IDENTITY_COMPARISON_CONJUNCT.finditer(template):
+        column = match.group("column")
+        authority = _AUTHORITY_SUBSELECT.fullmatch(match.group("subselect"))
+        assert authority is not None, match.group("subselect")
+        guard = f"  AND rt.{column} IS NOT NULL\n"
+        found[column] = (match.group(0), template[: match.start()].endswith(guard), authority)
+    return found
+
+
+def _sqlite_row_count(connection: sqlite3.Connection, predicate: str, params: dict[str, Any]) -> int:
+    """Rows a one-row fact table returns under ``predicate``, in SQLite's 3VL."""
+    sql = re.sub(r"%\((\w+)\)s", r":\1", f"SELECT COUNT(*) FROM rt WHERE {predicate}")
+    return int(connection.execute(sql, params).fetchone()[0])
+
+
+def test_the_null_guard_is_what_makes_the_c1_spelling_filter_like_equality() -> None:
+    """The guard is LOAD-BEARING, proven by executing the three spellings.
+
+    Not a restatement of the text pin and not a model of SQL: the two guarded
+    conjuncts are sliced out of ``_SEGMENT_ROWS_SOURCE_SQL`` and RUN, against a
+    fact column declared NULLABLE exactly as
+    ``hydro.river_timeseries_legacy``'s three key columns really are
+    (``db/migrations/000050_river_identity_normalization.sql:216-222``; the
+    narrow table's are ``NOT NULL``, and one template renders both branches).
+    SQLite is the engine because it implements the same three-valued logic for
+    ``=`` and for ``IS NOT DISTINCT FROM`` and needs no server — the oracle is
+    the ``=`` column, which is the pre-#2451 spelling this change may not alter
+    the meaning of.
+
+    What it proves, per cell:
+
+    * the shipped guarded spelling returns exactly what ``=`` returns, on all
+      five NULL/non-NULL combinations of the two sides;
+    * dropping the ``IS NOT NULL`` makes ``both_null`` return the row that ``=``
+      excludes — a fail-open on identity verification, the class design.md F4
+      forbids reopening.
+
+    So if the guard is deleted from ``forecast_store.py``, this reddens on the
+    per-column ``guarded`` assertion, AFTER the cells above have run and pinned
+    what that deletion costs — the failure names the divergent cell rather than
+    reporting an empty slice.
+    """
+    conjuncts = _identity_comparison_conjuncts()
+    assert set(conjuncts) == {"basin_version_key", "river_network_version_key"}
+
+    for column, (comparison_sql, guarded_in_template, authority) in conjuncts.items():
+        schema, table = authority["schema"], authority["table"]
+        key, member, param = authority["key"], authority["member"], authority["param"]
+        # Built from the sliced comparison, INDEPENDENTLY of what the template
+        # currently spells, so all three columns of the table below are measured
+        # whether or not the guard is in the file right now.
+        unguarded = comparison_sql.strip().removeprefix("AND ").strip()
+        guarded = f"rt.{column} IS NOT NULL AND {unguarded}"
+        equality = unguarded.replace("IS NOT DISTINCT FROM", "=", 1)
+        assert equality != unguarded != guarded
+
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute(f"ATTACH DATABASE ':memory:' AS {schema}")
+            connection.execute(f"CREATE TABLE {schema}.{table} ({member} TEXT NOT NULL, {key} INTEGER NOT NULL)")
+            connection.execute(f"INSERT INTO {schema}.{table} VALUES ('seeded-id', 7)")
+            # NULLABLE on purpose: this is the legacy table's real column shape.
+            connection.execute(f"CREATE TABLE rt ({column} INTEGER)")
+            divergent: list[str] = []
+            for cell, fact_key, authority_seeded, expected in _IDENTITY_NULL_CELLS:
+                connection.execute("DELETE FROM rt")
+                connection.execute("INSERT INTO rt VALUES (?)", (fact_key,))
+                params = {param: "seeded-id" if authority_seeded else "absent-id"}
+                where = (column, cell)
+                assert _sqlite_row_count(connection, equality, params) == expected, where
+                assert _sqlite_row_count(connection, guarded, params) == expected, where
+                # The unguarded spelling agrees everywhere EXCEPT both-NULL, where
+                # it returns the row `=` excludes. That single divergence is the
+                # whole reason the guard is in the template.
+                fail_open = 1 if cell == "both_null" else expected
+                assert _sqlite_row_count(connection, unguarded, params) == fail_open, where
+                if fail_open != expected:
+                    divergent.append(cell)
+            assert divergent == ["both_null"], (column, divergent)
+        finally:
+            connection.close()
+
+        assert guarded_in_template, (
+            f"rt.{column}'s IS NOT DISTINCT FROM conjunct lost its `IS NOT NULL` guard; "
+            f"without it the branch predicate diverges from `=` on {divergent} and returns "
+            f"a row that identity verification excludes"
+        )
 
 
 def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> None:

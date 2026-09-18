@@ -1280,6 +1280,38 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2451: the segment-index measurement bench's pass criteria. This module
+        # owns the three `design.md` criteria a measured plan must satisfy, the
+        # branch identity columns and the shared-hit floors — so an edit here
+        # moves what every cell of the cross product is judged against without
+        # touching a line of the suites that judge. Its two non-gated importers
+        # (the synthetic-plan proof, which is also the same-name owner, and the
+        # offline capture/digest suite) import it at module scope.
+        # The integration bench (tests/test_river_timeseries_stats_index_choice_
+        # integration.py) is a third module-scope importer and is deliberately
+        # ABSENT: its file-level `pytestmark = pytest.mark.integration` would skip
+        # it in the PR lane, so routing it buys constant skips (#1447, and the
+        # same call #2208 made for tests/river_ts_template_registry.py). This
+        # table cannot open the `database:` lane for it either; that is ci.yml's.
+        # 52 passed in 0.50 s for both routed suites together.
+        "tests/river_ts_plan_criteria.py",
+        (
+            "tests/test_river_ts_plan_criteria.py",
+            "tests/test_river_ts_stats_harness_offline.py",
+        ),
+    ),
+    PathTestRule(
+        # #2451: the bench's condition seed — the scenario table, the step count
+        # and the array-literal parser the recorded fact rows are digested
+        # through. The offline suite is its only non-gated module-scope importer
+        # and asserts exactly those shapes against the real producer, so a seed
+        # edit that the suite does not run is an unjudged change to the measured
+        # input. The integration bench imports it too and is excluded for the
+        # file-level gating reason recorded on the rule above.
+        "tests/river_ts_stats_matrix_seed.py",
+        ("tests/test_river_ts_stats_harness_offline.py",),
+    ),
+    PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support
         # functions, `_FakeRiverSegmentCursor` and the four private constants. Its eight
         # direct collectible importers are the seven registry suites plus
