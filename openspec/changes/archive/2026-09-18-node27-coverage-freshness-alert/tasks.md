@@ -10,6 +10,7 @@ Fixture level: expanded · Repair intensity: high
 - `infra/systemd/nhms-node27-coverage-freshness-alert.timer` (new)
 - `docs/runbooks/current-production-ops.md` (new section 11)
 - `openspec/specs/display-coverage-freshness/spec.md` (via this change's delta)
+- `openspec/project-profile.md` (registers the new alerting-lane risk axis, domain pack and verification-matrix row this fixture consumes)
 
 ## Must preserve
 
@@ -36,7 +37,7 @@ Fixture level: expanded · Repair intensity: high
 - [x] T8 `docs/runbooks/current-production-ops.md`: insert the new lane as `## 11.` immediately after
   `## 10. 前沿停摆告警（frontier stall alert）` and renumber the existing `## 11. 相关文档` to `## 12.`
   (fix any in-document cross-reference to it). Content: what the mail means, the two handling branches (coverage refresh stalled vs a river network not producing / newly activated), the exit-3 "nothing observable" branch, the division of labour with `frontier-stalled`, and the `NHMS_COVERAGE_GAP_DAYS` knob with its validity range.
-- [ ] T9 PR body carries the design D7 adjudication verbatim — both coverage-refresh call sites stay non-fatal, with the rationale and the accepted detection-latency consequence (issue acceptance criterion 7 requires it in the PR body specifically, not only in the runbook).
+- [x] T9 PR body carries the design D7 adjudication verbatim — both coverage-refresh call sites stay non-fatal, with the rationale and the accepted detection-latency consequence (issue acceptance criterion 7 requires it in the PR body specifically, not only in the runbook).
 
 ## Risk packs considered (core)
 
@@ -102,9 +103,9 @@ Commands (local):
 
 node-27 live receipt (orchestrator, on the pushed head; `export TMPDIR=/home/nwm/tmp`):
 
-- [ ] L1 `cd /home/nwm/NWM && git status --porcelain && git pull --ff-only`.
-- [ ] L2 Read-only run against the production DSN → exit 0 plus the real per-source table, captured verbatim.
-- [ ] L3 Scratch database on node-27 seeded to reproduce the closed loop. The seed must satisfy the **whole** listing contract, because the covered side is `national_discharge_cycles` (D0) and `segment_count > 0` alone never reaches exit 0:
+- [x] L1 `cd /home/nwm/NWM && git status --porcelain && git pull --ff-only`.
+- [x] L2 Read-only run against the production DSN → exit 0 plus the real per-source table, captured verbatim.
+- [x] L3 Scratch database on node-27 seeded to reproduce the closed loop. The seed must satisfy the **whole** listing contract, because the covered side is `national_discharge_cycles` (D0) and `segment_count > 0` alone never reaches exit 0:
   - `core.model_instance`: exactly one row with `active_flag = true` and a non-NULL `river_network_version_id` (one active network keeps `covered == active` trivially satisfiable).
   - `hydro.hydro_run`: rows with `status = 'parsed'`, non-NULL `cycle_time` on whole hours, `source_id = 'gfs'`, `basin_version_id` matching that model instance.
   - `hydro.run_display_coverage` for the *healed* cycles: `segment_count > 0`; `min_lead_time_hours`/`max_lead_time_hours` non-NULL with `lead_count = max - min + 1 > 0`; `river_sample_count = segment_count * lead_count`; `river_valid_time_start`/`river_valid_time_end` non-NULL with `end - start = (lead_count - 1) * 3600` s; `river_valid_time_start` on the same whole-hour phase as `cycle_time` (so `(start - cycle) % 3600 == 0`); and the clamped window must contain at least one instant on the 3 h stride from `cycle_time`.
@@ -114,8 +115,8 @@ node-27 live receipt (orchestrator, on the pushed head; `export TMPDIR=/home/nwm
     than the threshold behind it. Seed cycles spanning roughly 5-10 days back from `now()`.
   - Gap state: the newest cycles carry **no** coverage row (or a zeroed one) so `default_cycle` falls back by more than the threshold → run → **exit 1**.
   - Healed state: insert conforming coverage rows for the newest cycle → run → **exit 0**.
-- [ ] L4 Real `OnFailure=` wiring: install both units, `systemd-analyze --user verify` them, point one invocation at the scratch DSN with the design D5 drop-in (`EnvironmentFile=` reset, then the scratch file), `systemctl --user start`, confirm the unit entered `failed` and the mail was delivered (`node27-unit-failure-alert: SENT` in the handler's journal); then heal the scratch coverage rows and `systemctl --user start` **again with the drop-in still in place**, confirming the unit now succeeds — this is the clear→recover half proven inside systemd, not just in a bare shell. Finally remove the drop-in, `daemon-reload`, confirm `systemctl --user show -p EnvironmentFiles` is back to the production env file, and re-run → exit 0.
-- [ ] L5 Enable the timer and capture `systemctl --user list-timers` showing the next elapse.
+- [x] L4 Real `OnFailure=` wiring: install both units, `systemd-analyze --user verify` them, point one invocation at the scratch DSN with the design D5 drop-in (`EnvironmentFile=` reset, then the scratch file), `systemctl --user start`, confirm the unit entered `failed` and the mail was delivered (`node27-unit-failure-alert: SENT` in the handler's journal); then heal the scratch coverage rows and `systemctl --user start` **again with the drop-in still in place**, confirming the unit now succeeds — this is the clear→recover half proven inside systemd, not just in a bare shell. Finally remove the drop-in, `daemon-reload`, confirm `systemctl --user show -p EnvironmentFiles` is back to the production env file, and re-run → exit 0.
+- [x] L5 Enable the timer and capture `systemctl --user list-timers` showing the next elapse. **Done post-merge** (`master` had to carry the script first): the installed unit ran on the production DSN → exit 0, `gfs`/`ifs` both `gap=0.0d`; `systemctl --user enable --now …timer` created the `timers.target.wants` symlink; next elapse `Sat 2026-09-19 06:00:00 CST`. Scratch database `nhms_issue2080`, the receipt worktree and the scratch env file were then removed; only the two production units remain.
 
 ## Verification matrix rows consumed
 
