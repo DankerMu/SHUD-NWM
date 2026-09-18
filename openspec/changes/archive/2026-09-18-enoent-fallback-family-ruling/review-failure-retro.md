@@ -1,6 +1,6 @@
 # Review Failure Retro
 
-PR: #2456, current head SHA: cf400794e
+PR: #2456，第 3 轮所审 head SHA: cf400794e（历史锚，非现时 head）
 Issue: #1627（本 issue 的第一个 PR，无跨 PR 上限记忆）
 
 Failure classes: duplicate-prose-drift, unverified-claim, citation-line-rot
