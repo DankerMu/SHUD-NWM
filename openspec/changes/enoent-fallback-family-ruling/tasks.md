@@ -23,7 +23,7 @@
             `tests/test_scheduler_journal_root_authority.py` 的模块 docstring、
             `::test_alias_ancestor_root_passes_db_free_path_check` 与
             `::test_symlink_leaf_and_loop_roots_are_refused_with_the_same_code` 的 docstring、
-            `tests/test_production_scheduler.py:18383`
+            `tests/test_production_scheduler.py::test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoent_arm`
       - [x] A-2e 以下**不改**（属出处/沿革，非 tracker）。C-1 接线后该类引用从 3 条增至 40+ 条，
             均为 selector 路由的出处注释，不是 tracker：`services/orchestrator/scheduler_core.py:24`、
             `docs/adr/0003-review-lens-rotation-keep.md:185`、`openspec/changes/archive/**`

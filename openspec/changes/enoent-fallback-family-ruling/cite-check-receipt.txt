@@ -34,10 +34,9 @@
 ########## openspec/changes/enoent-fallback-family-ruling/tasks.md
   archive/2026-09-02-journal-root-realpath-and-job-id-scope-census/design.md:152-155 => openspec/changes/archive/2026-09-02-journal-root-realpath-and-job-id-scope-census/design.md  - `_db_free_path_check` is untouched: #1627 is adjudicating that lane's …→   issue scopes any change there to that ruling. The factory seam is
   services/orchestrator/journal_root_authority.py:79                              The redacted blocker of that lane -- the one adjudicated by ADR 0009,
-  tests/test_production_scheduler.py:18383                                        # ``docs/adr/0009-path-canonicalization-dereference-doctrine.md`` (ADR 0009),
   services/orchestrator/scheduler_core.py:24                                  # blocked lane would raise instead of returning its redacted blocker (#1627).
   docs/adr/0003-review-lens-rotation-keep.md:185                                （tasks 5.2/5.5 勾了，而承接单 #1627 里三项义务一条都没有）是 Phase 7 终审抓的——
 
 ########## openspec/changes/enoent-fallback-family-ruling/specs/safe-filesystem-primitive-contract/spec.md
 
-==== citations: 29 | resolved: 29 | unresolved: 0 | ambiguous: 0 | past EOF: 0 | hard failures: 0
+==== citations: 28 | resolved: 28 | unresolved: 0 | ambiguous: 0 | past EOF: 0 | hard failures: 0
