@@ -35,27 +35,34 @@ run-bound shape, and list-shaped response points.
 from __future__ import annotations
 
 import hashlib
-import os
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from packages.common.forecast_store import SEGMENT_SPIKE_ENV_VAR, PsycopgForecastStore
+from packages.common import forecast_store as forecast_store_module
+from packages.common.forecast_store import PsycopgForecastStore
 from tests.river_ts_plan_criteria import cell_row
-from tests.river_ts_stats_matrix_seed import SCENARIOS, STEP_COUNT, _parse_array_literal
+from tests.river_ts_stats_matrix_seed import (
+    EXPECTED_UNCONSTRUCTIBLE,
+    SCENARIOS,
+    SHAPES,
+    STEP_COUNT,
+    _parse_array_literal,
+)
 from tests.test_river_timeseries_stats_index_choice_integration import (
-    SPIKE_VARIANTS,
+    EXPECTED_OPEN_CELLS,
+    RECORDED_ROW_DIGESTS,
     _capture_fact_statement,
     _cell,
-    _compare_digests_against_base,
+    _compare_digests_against_recorded,
     _judge,
     _measure,
     _RecordingForecastStore,
     _relation_census,
-    _spike_variant,
-    _variant_summary,
+    _reported_cell_failures,
+    _summarise,
     response_point_count,
     statement_digest,
 )
@@ -387,12 +394,8 @@ def test_measure_and_cell_agree_on_every_key_they_exchange(shape: str) -> None:
     assert cell["defect_reproduced"] is True
     assert cell["passed"] is False
     assert cell["cell_key"] == f"{shape}/absent/narrow/uncompressed"
-    assert cell["variant"] == "base"
     assert len(cell["companions"]) == (1 if shape == "latest" else 0)
-    # The variant leads the row: the table tasks.md §2.1 reads is grouped by
-    # candidate, and a row that did not say which candidate produced it would be
-    # unreadable once three variants share the file.
-    assert cell_row(cell).startswith(f"base/{shape}/absent/narrow/uncompressed: criteria=FFF")
+    assert cell_row(cell).startswith(f"{shape}/absent/narrow/uncompressed: criteria=FFF")
 
 
 def test_a_measurement_whose_statement_never_fetched_is_reported_not_crashed() -> None:
@@ -412,68 +415,77 @@ def test_a_measurement_whose_statement_never_fetched_is_reported_not_crashed() -
 
 
 # ---------------------------------------------------------------------------
-# The variant machinery (tasks.md 2.1) — offline, because none of it needs a
-# database and all of it can silently corrupt the selection §2.2 makes.
+# The gate's own bookkeeping — offline, because none of it needs a database and
+# all of it can silently turn a red cell into a green run.
 # ---------------------------------------------------------------------------
 
 
-def _variant_cell(variant: str, cell_key: str, digest: str | None, *, passed: bool = True) -> dict[str, Any]:
+def _cell_stub(scenario: str, shape: str, digest: str | None, *, passed: bool = True) -> dict[str, Any]:
     return {
-        "variant": variant,
-        "cell_key": cell_key,
+        "cell_key": f"{shape}/absent/{scenario.split('/')[0]}/{scenario.split('/')[1]}",
+        "scenario": scenario,
+        "shape": shape,
         "digest": digest,
         "passed": passed,
         "failures": [],
     }
 
 
-def test_a_candidate_that_changes_the_returned_rows_is_disqualified_on_the_cell() -> None:
-    """Must-preserve #1 across variants: the cell row must show F, not a footnote.
+def test_a_change_that_alters_the_returned_rows_is_disqualified_on_the_cell() -> None:
+    """Must-preserve #1: the cell row must show F, not a footnote.
 
-    A reader comparing two candidates' tables reads the rows, not the findings
-    list, so a digest mismatch that only produced a top-level finding would leave
-    a disqualified candidate looking green in the table it is chosen from.
+    A reader reads the per-cell table, not the findings list, so a digest
+    mismatch that only produced a top-level finding would leave a disqualified
+    cell looking green in the table the result is read from.
     """
+    scenario = "narrow/uncompressed/absent"
+    recorded = RECORDED_ROW_DIGESTS[(scenario, "latest")]
     cells = [
-        _variant_cell("base", "latest/absent/narrow/uncompressed", "aaaaaaaaaaaaaaaa"),
-        _variant_cell("c1", "latest/absent/narrow/uncompressed", "aaaaaaaaaaaaaaaa"),
-        _variant_cell("c2", "latest/absent/narrow/uncompressed", "bbbbbbbbbbbbbbbb"),
+        _cell_stub(scenario, "latest", recorded),
+        _cell_stub(scenario, "run_bound", "bbbbbbbbbbbbbbbb"),
     ]
-    reported = _compare_digests_against_base(cells)
+    reported = _compare_digests_against_recorded(cells)
 
-    assert cells[0]["digest_matches_base"] is True
-    assert cells[1]["digest_matches_base"] is True and cells[1]["passed"] is True
-    assert cells[2]["digest_matches_base"] is False
-    assert cells[2]["passed"] is False
-    assert any("disqualified regardless of plan quality" in failure for failure in cells[2]["failures"])
-    assert reported == ["ROW IDENTITY c2/latest/absent/narrow/uncompressed: bbbbbbbbbbbbbbbb != base aaaaaaaaaaaaaaaa"]
+    assert cells[0]["digest_matches_recorded"] is True and cells[0]["passed"] is True
+    assert cells[1]["digest_matches_recorded"] is False
+    assert cells[1]["passed"] is False
+    assert any("disqualified regardless of plan quality" in failure for failure in cells[1]["failures"])
+    assert len(reported) == 1
+    assert reported[0].startswith("ROW IDENTITY run_bound/absent/narrow/uncompressed: bbbbbbbbbbbbbbbb != recorded ")
 
 
-def test_a_candidate_cell_with_no_base_measurement_is_unverified_not_passed() -> None:
-    """Silence from an unmeasured base is not evidence of row identity."""
-    cells = [_variant_cell("c1", "run_bound/stale/legacy/compressed", "aaaaaaaaaaaaaaaa")]
-    reported = _compare_digests_against_base(cells)
-    assert cells[0]["digest_matches_base"] is None
+def test_a_cell_with_no_recorded_digest_is_unverified_not_passed() -> None:
+    """A missing expectation is not evidence of row identity."""
+    cells = [_cell_stub("narrow/compressed/stale", "run_bound", "aaaaaaaaaaaaaaaa")]
+    reported = _compare_digests_against_recorded(cells)
+    assert cells[0]["digest_matches_recorded"] is None
     assert cells[0]["passed"] is False
-    assert reported == ["ROW IDENTITY BASE MISSING c1/run_bound/stale/legacy/compressed"]
-
-
-def test_the_variant_summary_counts_every_variant_even_one_that_measured_nothing() -> None:
-    """A candidate that rendered nothing must read as 0 measured, not be absent."""
-    cells = [
-        _variant_cell("base", "a", "d1"),
-        _variant_cell("base", "b", "d2", passed=False),
-        _variant_cell("c1", "a", "d1"),
+    assert reported == [
+        "ROW IDENTITY EXPECTATION MISSING run_bound/absent/narrow/compressed (narrow/compressed/stale/run_bound)"
     ]
-    _compare_digests_against_base(cells)
-    summary = _variant_summary(cells)
-    assert set(summary) == {"base", "c1", "c2"}
-    assert summary["base"] == {"measured": 2, "passed": 1, "failed": 1, "digest_mismatch": 0}
-    assert summary["c1"] == {"measured": 1, "passed": 1, "failed": 0, "digest_mismatch": 0}
-    assert summary["c2"] == {"measured": 0, "passed": 0, "failed": 0, "digest_mismatch": 0}
 
 
-def test_the_per_variant_summary_is_written_into_the_evidence_not_only_the_message() -> None:
+def test_the_recorded_digests_cover_every_constructible_scenario_and_shape() -> None:
+    """The expectation table is a closure over the cross product, not a sample.
+
+    A scenario+shape missing from it would make its cells UNVERIFIED — which the
+    gate reports rather than passes — but the cheaper statement of the same
+    requirement is here, where it costs no database.
+    """
+    expected = {
+        (scenario.key, shape)
+        for scenario in SCENARIOS
+        if scenario.triple not in EXPECTED_UNCONSTRUCTIBLE
+        for shape in SHAPES
+    }
+    assert set(RECORDED_ROW_DIGESTS) == expected
+    assert len(RECORDED_ROW_DIGESTS) == 12
+    for key, digest in RECORDED_ROW_DIGESTS.items():
+        assert len(digest) == 16, key
+        assert set(digest) <= set("0123456789abcdef"), key
+
+
+def test_the_summary_is_written_into_the_evidence_not_only_the_message() -> None:
     """``matrix.json`` is what the parent reads; the assertion message is not.
 
     ``_evidence_dump`` writes the file in a ``finally``, so anything computed
@@ -484,53 +496,117 @@ def test_the_per_variant_summary_is_written_into_the_evidence_not_only_the_messa
     cells, findings = _judge({}, evidence, [])
     assert cells == []
     assert findings, "an empty measurement set must report missing cells, not pass"
-    assert set(evidence) == {"cells", "cell_table", "variant_summary", "findings"}
-    assert set(evidence["variant_summary"]) == {"base", "c1", "c2"}
-    # Every required cell of every variant is reported missing, not silently absent.
-    assert all(any(f"CELL MISSING {variant}/" in finding for finding in findings) for variant in ("base", "c1", "c2"))
+    assert set(evidence) == {"cells", "cell_table", "summary", "findings"}
+    assert evidence["summary"]["measured"] == 0
+    # Every required cell is reported missing, not silently absent.
+    assert sum(1 for finding in findings if finding.startswith("CELL MISSING ")) == 24
 
 
-def test_base_is_first_so_every_other_variant_has_a_digest_to_compare_against() -> None:
-    assert SPIKE_VARIANTS[0] == ("base", "")
-    assert [label for label, _value in SPIKE_VARIANTS] == ["base", "c1", "c2"]
-    assert [value for _label, value in SPIKE_VARIANTS] == ["", "c1", "c2"]
+def test_the_summary_counts_the_cells_the_gate_reports() -> None:
+    cells = [
+        _cell_stub("narrow/uncompressed/absent", "run_bound", "d1"),
+        _cell_stub("narrow/uncompressed/absent", "latest", "d2", passed=False),
+    ]
+    cells[1]["digest_matches_recorded"] = False
+    assert _summarise(cells) == {
+        "measured": 2,
+        "passed": 1,
+        "failed": 1,
+        "digest_mismatch": 1,
+        "expected_open_excused": 0,
+    }
 
 
-def test_the_spike_selection_is_restored_even_when_the_block_raises() -> None:
-    """A leaked ``c2`` would make every later module render a candidate silently."""
-    os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
-    with pytest.raises(RuntimeError), _spike_variant("c2"):
-        assert os.environ[SEGMENT_SPIKE_ENV_VAR] == "c2"
-        raise RuntimeError("boom")
-    assert SEGMENT_SPIKE_ENV_VAR not in os.environ
-
-    os.environ[SEGMENT_SPIKE_ENV_VAR] = "c1"
-    try:
-        with _spike_variant(""):
-            assert os.environ[SEGMENT_SPIKE_ENV_VAR] == ""
-        assert os.environ[SEGMENT_SPIKE_ENV_VAR] == "c1"
-    finally:
-        os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
+def test_an_allowlisted_cell_failing_on_row_identity_is_not_counted_as_excused() -> None:
+    """The summary must not say "excused" about a cell the gate reported."""
+    excused = _open_cell(passed=False, failures=["criterion 2: ratio 999.0"])
+    not_excused = _open_cell(passed=False, failures=["ROW IDENTITY: digest aaaa differs from the recorded bbbb"])
+    assert _summarise([excused])["expected_open_excused"] == 1
+    assert _summarise([not_excused])["expected_open_excused"] == 0
+    assert len(_reported_cell_failures([not_excused])) == 1
 
 
-def test_the_selected_variant_reaches_the_sql_the_harness_captures() -> None:
-    """The switch is only a measurement if the CAPTURED statement changes.
+# ---------------------------------------------------------------------------
+# EXPECTED_OPEN_CELLS — the one allowlisted cell, and the three ways it must not
+# become a way to be green about something the gate never judged.
+# ---------------------------------------------------------------------------
 
-    Driven through the same ``_capture_fact_statement`` the harness uses, over
-    the real store, so a variant that never reached the rendered SQL would be
-    measured as three copies of base.
+_OPEN_CELL = "run_bound/stale/legacy/uncompressed"
+
+
+def _open_cell(*, passed: bool, failures: list[str]) -> dict[str, Any]:
+    return {"cell_key": _OPEN_CELL, "passed": passed, "failures": failures}
+
+
+def test_the_expected_open_entry_names_the_cell_design_md_leaves_open() -> None:
+    """Exactly one cell, and it is the one §2.2 and §6.3 both name.
+
+    Pinned as an equality: a second entry added later would otherwise excuse a
+    cell nobody argued for, which is the failure mode an allowlist has.
     """
-    os.environ.pop(SEGMENT_SPIKE_ENV_VAR, None)
-    base_sql = _capture("run_bound")[0]["sql"]
-    with _spike_variant("c1"):
-        c1_sql = _capture("run_bound")[0]["sql"]
-    with _spike_variant("c2"):
-        c2_sql = _capture("run_bound")[0]["sql"]
+    assert set(EXPECTED_OPEN_CELLS) == {_OPEN_CELL}
+    assert "TEXT twin" in EXPECTED_OPEN_CELLS[_OPEN_CELL]
+    assert "§6.3" in EXPECTED_OPEN_CELLS[_OPEN_CELL]
 
-    assert "rt.basin_version_key = (" in base_sql
-    assert "rt.basin_version_key IS NOT DISTINCT FROM (" in c1_sql
-    assert "JOIN core.basin_version spike_bv" in c2_sql
-    assert len({base_sql, c1_sql, c2_sql}) == 3
+
+def test_an_expected_open_cell_is_excused_for_its_plan_criteria() -> None:
+    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_id is not in the Index Cond"])
+    assert _reported_cell_failures([cell]) == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "ROW IDENTITY: digest aaaaaaaaaaaaaaaa differs from the recorded bbbbbbbbbbbbbbbb",
+        "NON-VACUITY: the measured statement returned 0 rows, expected 24",
+    ],
+)
+def test_an_expected_open_cell_is_not_excused_for_rows_it_returned(failure: str) -> None:
+    """Row identity and non-vacuity are independent of which index was taken."""
+    cell = _open_cell(passed=False, failures=["criterion 1: river_segment_id is not in the Index Cond", failure])
+    reported = _reported_cell_failures([cell])
+    assert len(reported) == 1
+    assert failure in reported[0]
+    assert "criterion 1" not in reported[0]
+
+
+def test_an_expected_open_cell_that_starts_passing_is_itself_reported() -> None:
+    """The allowlist must not outlive its reason (#1988's DROP removes it)."""
+    reported = _reported_cell_failures([_open_cell(passed=True, failures=[])])
+    assert len(reported) == 1
+    assert reported[0].startswith(f"EXPECTED-OPEN CELL NOW PASSES {_OPEN_CELL}")
+
+
+def test_a_cell_that_is_not_allowlisted_is_reported_in_full() -> None:
+    cell = {
+        "cell_key": "run_bound/absent/narrow/uncompressed",
+        "passed": False,
+        "failures": ["criterion 2: ratio 999.0", "criterion 3: 5977 shared hits"],
+    }
+    reported = _reported_cell_failures([cell])
+    assert reported == ["run_bound/absent/narrow/uncompressed: criterion 2: ratio 999.0; criterion 3: 5977 shared hits"]
+
+
+def test_the_shipped_sql_carries_the_selected_c1_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§2.2 selected C1; §3.1 made it the rendering, with no switch left.
+
+    Driven through the same ``_capture_fact_statement`` the harness uses, over the
+    real store, so this is the statement the bench MEASURES and not a separately
+    rendered template. The environment variable the spike used is asserted gone:
+    if it ever comes back, the bench could be measuring something the product
+    does not ship.
+    """
+    monkeypatch.setenv("NWM_RIVER_TS_SEGMENT_SPIKE", "c2")
+    sql = _capture("run_bound")[0]["sql"]
+    assert "rt.basin_version_key IS NOT DISTINCT FROM (" in sql
+    assert "rt.river_network_version_key IS NOT DISTINCT FROM (" in sql
+    assert "rt.basin_version_key = (" not in sql
+    assert "rt.river_network_version_key = (" not in sql
+    # The conjunct #2451 exists to protect keeps its sargable `=`.
+    assert "rt.river_segment_key = (" in sql
+    # And no residue of the spike: neither the switch nor C2's outer layer.
+    assert "spike_bv" not in sql
+    assert not hasattr(forecast_store_module, "SEGMENT_SPIKE_ENV_VAR")
 
 
 def test_the_recording_store_is_the_real_store() -> None:

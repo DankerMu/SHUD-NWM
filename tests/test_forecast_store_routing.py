@@ -202,17 +202,30 @@ def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) ->
         assert f"WHERE h.timeseries_store = '{route}'" in branch
         assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch
         for predicate in (
-            "rt.basin_version_key = (",
+            # #2451 C1: the two redundant identity conjuncts are spelled
+            # `IS NOT DISTINCT FROM` so they cannot form an index condition on
+            # `river_ts_run_discovery_key_idx`'s 2nd and 3rd columns. Both columns
+            # are NOT NULL, so this is the SAME predicate, enforced in the same
+            # place; only its sargability changed. A pin update, not a behaviour
+            # change — the parameter-set assertion at the top of this helper and
+            # every row-level case in this module are untouched by it.
+            "rt.basin_version_key IS NOT DISTINCT FROM (",
             "WHERE basin_version_id = %(basin_version_id)s",
+            # `river_segment_key` keeps its `=`: it is the conjunct that MUST
+            # stay sargable, which is what #2451 exists to protect.
             "rt.river_segment_key = (",
             "WHERE river_segment_id = %(river_segment_id)s",
             "AND river_network_version_id = %(river_network_version_id)s",
-            "rt.river_network_version_key = (",
+            "rt.river_network_version_key IS NOT DISTINCT FROM (",
             "WHERE river_network_version_id = %(river_network_version_id)s",
             "rt.variable_e = 'q_down'::hydro.river_variable",
         ):
             assert predicate in branch
-        assert not re.search(r"\b(MAX|DISTINCT|ORDER BY|GROUP BY|LIMIT)\b", branch)
+        # `DISTINCT` is listed to forbid `SELECT DISTINCT` inside a branch, which
+        # would change row multiplicity under the outer layer. `IS NOT DISTINCT
+        # FROM` is a scalar comparison operator and is not that, so the lookbehind
+        # excludes it — `DISTINCT` itself is NOT dropped from the alternation.
+        assert not re.search(r"\b(MAX|(?<!NOT )DISTINCT|ORDER BY|GROUP BY|LIMIT)\b", branch)
     assert legacy.count(PUSHDOWN_AID_MARKER) == legacy_aids
     assert "rt.river_segment_id = %(river_segment_id)s" in legacy
     assert "rt.river_network_version_id = %(river_network_version_id)s" in legacy

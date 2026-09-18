@@ -936,21 +936,85 @@ def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() 
         assert "AND rt.river_segment_id = %(river_segment_id)s" in sql, label
 
 
-def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
-    """Non-vacuity: every block really predicates on the four keys and the enum."""
-    for label, sql in _segment_block_statements().items():
-        assert "rt.basin_version_key = (" in sql, label
-        assert "SELECT basin_version_key FROM core.basin_version" in sql, label
-        assert "rt.river_segment_key = (" in sql, label
+def _assert_segment_block_identity_predicates(sql: str, label: str) -> None:
+    """The oracle design.md F4b names, factored so it can be proven to bite.
+
+    Asserted on the two UNION BRANCH texts rather than on the composed statement,
+    because sargability is a property of the BRANCH SCAN: the outer layer's
+    ``JOIN core.river_network_version rnv ON rnv.river_network_version_key =
+    rt.river_network_version_key`` is a different predicate on the same column
+    and must not be able to answer for the branch's.
+
+    #2451 C1 changed the spelling of two of these conjuncts, deliberately and
+    visibly (``packages/common/forecast_store.py``): ``basin_version_key`` and
+    ``river_network_version_key`` are compared with ``IS NOT DISTINCT FROM`` so
+    they cannot form an index condition on ``river_ts_run_discovery_key_idx``'s
+    2nd and 3rd columns. Both columns are ``NOT NULL``, so the predicate is
+    EQUIVALENT to ``=``; what changed is sargability, not enforcement.
+
+    Each of the two is pinned TWICE — the new spelling present AND the plain
+    ``=`` spelling absent. Presence alone would pass a half-revert that adds
+    ``rt.basin_version_key = (…)`` back BESIDE the ``IS NOT DISTINCT FROM`` one,
+    which re-enables the discovery index's prefix and reinstates the defect while
+    still "keeping the predicate". ``rt.river_segment_key`` keeps its ``=`` and is
+    deliberately NOT swept into the absence check: it is the conjunct that must
+    stay sargable, and it is pinned as an equality here.
+    """
+    for branch, route in zip(_union_branches(sql), ("legacy", "narrow"), strict=True):
+        where = (label, route)
+        assert "rt.basin_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.basin_version_key = (" not in branch, where
+        assert "SELECT basin_version_key FROM core.basin_version" in branch, where
+        assert "rt.river_segment_key = (" in branch, where
         # The segment resolution binds the network too: core.river_segment's
         # primary key is (river_segment_id, river_network_version_id), so a bare
         # segment lookup could return more than one row and raise at runtime.
-        assert "SELECT river_segment_key FROM core.river_segment" in sql, label
-        assert "AND river_network_version_id = %(river_network_version_id)s" in sql, label
-        assert "rt.river_network_version_key = (" in sql, label
-        assert "rt.variable_e = 'q_down'::hydro.river_variable" in sql, label
+        assert "SELECT river_segment_key FROM core.river_segment" in branch, where
+        assert "AND river_network_version_id = %(river_network_version_id)s" in branch, where
+        assert "rt.river_network_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.river_network_version_key = (" not in branch, where
+        assert "rt.variable_e = 'q_down'::hydro.river_variable" in branch, where
         # The run is reached by key, never by its text.
-        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in sql, label
+        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch, where
+
+
+def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
+    """Non-vacuity: every block really predicates on the four keys and the enum."""
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        _assert_segment_block_identity_predicates(sql, label)
+
+
+def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> None:
+    """The pin above may not be satisfiable by loosening it (tasks.md §3.2).
+
+    ``_assert_key_predicates_retained`` (``packages/common/river_ts_render.py``)
+    compares a template against a rendering derived from that same template, so a
+    symmetric rewrite of a conjunct leaves it silent — its silence is not evidence
+    the spelling survived. This pin is the one that bites, and this case is the
+    proof that it does: reverting exactly C1's substitution, on every one of the
+    eight blocks, must make it RED. If this ever passes, the pin above has been
+    weakened to something a plain ``=`` also satisfies.
+    """
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        reverted = sql.replace(" IS NOT DISTINCT FROM (", " = (")
+        assert reverted != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(reverted, label)
+        # And the same for a HALF revert, which keeps the C1 spelling and adds the
+        # sargable one back beside it — the shape a presence-only pin would miss.
+        half = sql.replace(
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+            "  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n"
+            "      WHERE basin_version_id = %(basin_version_id)s\n  )\n"
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+        )
+        assert half != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(half, label)
 
 
 def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> None:
