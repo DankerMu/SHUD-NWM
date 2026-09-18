@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-09-12
+最后更新：2026-09-17
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -5301,7 +5301,173 @@ stalled；投递验证必须三重——shim exit 0 + receipt/JSONL 里 `emails[
 statement 30s + sendmail 60s 上限），900s 只兜挂死。**挂死的监控器必须变成 unit
 failed**——否则就是 2026-08-12 那套"恒 activating、零告警"的几何在监控层重演。
 
-## 11. 相关文档
+## 11. 覆盖新鲜度告警（coverage freshness alert）
+
+`hydro.run_display_coverage` 在 #2080 之前**全仓没有任何新鲜度观察者**：两处
+coverage 刷新调用点都是 non-fatal、autopipe unit 没挂 `OnFailure=`，而 §10 那条
+车道只读 `hydro.hydro_run`——coverage 停摆期间 ingest 照常前进，它的方向性进展判
+据每 tick 都被重置，**按构造恒不告警**。#2009 引入 `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`
+回看窗之后，coverage 停摆不再降级成"陈旧但在线"：被覆盖的 cycle 老出窗口，全国流量
+图层直接熄灭（`/api/v1/layers` 的 `default_cycle=null` + `valid_times=[]`）。
+`nhms-node27-coverage-freshness-alert.timer`（每天 06:00，
+`scripts/node27_coverage_freshness_alert.py`）补的就是这个探测器。
+
+### 11.1 判据（两个前沿的关系型 gap，不是 rc、不是墙上时钟）
+
+逐 source key `COALESCE(lower(source_id),'__null_source__')` 比两个前沿：
+
+| 前沿 | 取法 |
+|---|---|
+| **ready**（ingest 已产出、可展示） | 车道自己那条唯一重导语句：`hydro.hydro_run` 限 `status IN ('succeeded','parsed','published')` + `cycle_time IS NOT NULL`，JOIN `core.model_instance`（`active_flag` 且 `river_network_version_id IS NOT NULL`）后取 `max(cycle_time)` |
+| **covered**（全国目录当前列出的最新 cycle） | **直接调 `services/tiles/mvt.py` 的 `national_discharge_cycles(session, source=<key>)` 取 `default_cycle`**，一个谓词都不自己重导 |
+
+covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` 就是
+`/api/v1/layers` 发布的那个字段、就是图层熄灭时变 `null` 的那个字段。曾经的初稿用
+`rdc.segment_count > 0` 重导覆盖谓词，**那比真正点亮图层的条件弱**——目录还会因为
+覆盖窗列不一致（`river_valid_time_start/end`、`min/max_lead_time_hours` 为 NULL，
+`river_sample_count != segment_count * lead_count`，跨度不等于 `(lead_count-1)*3600` s）、
+小时网格与 cycle 的 3h 相位对不上、或活跃网络集合不完整而丢掉该 cycle。用重导谓词
+会在图层已经黑掉时报 `gap = 0`。**别再把 covered 侧改成自己查表。**
+
+判读要点：
+
+- **gap 超阈 → 退出 1 并发信**。阈值默认 `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS / 3`
+  （当前窗口 12 天 → 4.0 天），不写死天数，窗口调小阈值自动跟着小。
+- **判据是结果型（outcome-based），不看 rc**。`scripts/node27_autopipeline.py` 有
+  合法的 rc=0 `no_coverage_row` 路径；扫描因上游原因恒返回零行时，所有 rc 通道全程静默。
+- **只有一条墙上时钟规则**：source 的 ready 前沿早于 `now() - 回看窗` 时记
+  `not-evaluated`，不参与告警——这种 source 本来就不进全国图层，属于 ingest/保留
+  问题。`__null_source__` **恒** `not-evaluated`：目录按 `lower(h.source_id) = :source`
+  匹配，NULL-source 的 run 根本不可能被逐 source 目录列出。
+- **与 §10 的分工**：ingest 全线停摆时两个前沿一起冻住，gap 不增长，**本车道沉默**，
+  那是 `frontier-stalled` 的活；coverage 停摆只推进 ready 前沿，gap 单调增长，在图层
+  熄灭前数天就跳闸。
+
+### 11.2 退出码与邮件怎么读
+
+| 退出码 | 含义 | 第一步做什么 |
+|---|---|---|
+| `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
+| `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 两个分支 |
+| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法），**观测前**就退出 | 修 env 文件，见 §11.4 |
+| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / 展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+
+邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
+且总行数 ≤ 24 —— systemd 自己要占约 4 行框架，verdict 必须活在尾窗里。source 太多时
+表会被截断并打一行 `… N more sources omitted`，**排序保证超阈的 source 先打印、不会被截掉**。
+DSN 口令在任何面（stdout、stderr、异常文本）都被脱敏。
+
+本车道**无状态**：没有 state 文件、没有 lock、没有 receipt、没有自己的日志文件。因此
+也**没有 dedup**——故障不消除就每天一封。沉默来自消除故障，不是压制告警。
+
+### 11.3 处置：两个真分支 + 一个"看不见"分支
+
+收到 `VERDICT: FAIL ... behind ingest ...` 时，先用 `VERDICT: breaching=` 那行拿到
+出问题的 source，再分支：
+
+**分支 A —— coverage 刷新停摆（主因）**
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+grep -n 'coverage_refresh\|coverage backstop' /home/nwm/autopipe-logs/*.log | tail -40
+```
+
+看到 `refresh_failed_rc<N>` 或 backstop 非零 rc，就是刷新腿在失败（`rc=3` 是 #1446 的
+拒绝守卫）。修完刷新后手工补跑 `scripts/node27_refresh_coverage.py`，下一 tick 自动闭环。
+注意：刷新**故意保持 non-fatal**（设计 D7，ingest 成功不该因刷新失败变成失败），所以
+rc 只在日志里，本车道才是那个持久信号。
+
+**分支 B —— 某个 river network 不产出 / 新激活但没有可展示 run**
+
+日志里刷新腿一切正常时，问题在**网络集合**而不在刷新脚本：全国目录是**交集、fail-closed**，
+只要有一个 `active_flag` 的 network 对某 cycle 没有可展示 run，该 cycle 整条被关掉。
+新激活一个网络（`_national_discharge_coverage_rows` 会把每个 cycle 都关掉）同样会推大 gap。
+这是**真阳性**，刷新脚本救不了——去查是哪个 network：
+
+```sql
+-- 活跃网络集合（分母）
+SELECT DISTINCT mi.river_network_version_id
+FROM core.model_instance mi
+WHERE mi.active_flag AND mi.river_network_version_id IS NOT NULL
+ORDER BY 1;
+-- 该 source 最新 cycle 上实际有可展示 run 的网络（分子）
+SELECT DISTINCT mi.river_network_version_id
+FROM hydro.hydro_run h
+JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+WHERE lower(h.source_id) = 'gfs'
+  AND h.status IN ('succeeded','parsed','published')
+  AND h.cycle_time = (SELECT max(cycle_time) FROM hydro.hydro_run
+                      WHERE lower(source_id) = 'gfs'
+                        AND status IN ('succeeded','parsed','published'))
+ORDER BY 1;
+```
+
+差集里的网络就是压住全国图层的那个：要么让它重新产出，要么按业务裁定把它
+`active_flag` 置 false（退出业务化的口径见 §7）。
+
+**退出 3 —— "什么都观测不到"（fail-closed，不是健康）**
+
+ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 0。那条语句 JOIN 了
+`core.model_instance`，所以一次批量 `active_flag` 翻转或 `river_network_version_id`
+漂移就能把它清空，而 `hydro.hydro_run` 照常前进——§10 的车道不 JOIN 那张表，看得见
+"进展"因而继续沉默，同时 `national_discharge_cycles` 已经在返回 `default_cycle = null`，
+图层已经黑了。这正是本 issue 要消除的构造性沉默。收到这封先查
+`core.model_instance` 的 `active_flag` / `river_network_version_id`，再查只读角色权限
+（`nhms_display_ro` 需要 `hydro.hydro_run`、`hydro.run_display_coverage`、
+`core.model_instance` 的 SELECT）。**注意区分**：有 source key 但全部老出回看窗，是
+另一个状态，退 0 并全记 `not-evaluated`，归 §10 管。
+
+### 11.4 阈值旋钮 `NHMS_COVERAGE_GAP_DAYS`（改之前先读这段）
+
+写进 `infra/env/node27-frontier-alert.env`（与 §10 同一份文件），单位是**天**，浮点。
+
+- 合法区间：**有限数、严格大于 0、严格小于 `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`**
+  （当前 12）。`abc` / `0` / `-1` / `inf` / `nan` / `>= 12` 一律**退 2**，绝不静默夹取——
+  阈值取到窗口或以上，只能在图层**已经黑了**之后才触发，那就不是探测器了。
+- 不设该变量时用 `回看窗 / 3`。**不要在这里写死天数**：窗口常量改小时，默认阈值自动跟着小。
+- 改完直接 `systemctl --user start nhms-node27-coverage-freshness-alert.service` 验证一次退出码。
+
+### 11.5 安装
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+# env 文件与 §10 共用；若尚未创建，先按 §10.8 建好（0600、非符号链接）。
+install -m 644 infra/systemd/nhms-node27-coverage-freshness-alert.service ~/.config/systemd/user/
+install -m 644 infra/systemd/nhms-node27-coverage-freshness-alert.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemd-analyze --user verify nhms-node27-coverage-freshness-alert.service
+systemctl --user start nhms-node27-coverage-freshness-alert.service   # 先手跑一次看退出码
+journalctl --user -u nhms-node27-coverage-freshness-alert.service -n 30 --no-pager
+systemctl --user enable --now nhms-node27-coverage-freshness-alert.timer
+systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-pager
+```
+
+单元安装是 node-27 上的**手工步骤**，`git pull` 只更新 `ExecStart` 指向的脚本本体。
+`Environment=PYTHONPATH=/home/nwm/NWM` 是脚本以**文件**方式运行时能 import
+`services.tiles.mvt` 的原因——手工在 shell 里跑要自己导：
+
+```bash
+cd /home/nwm/NWM
+set -a; . infra/env/node27-frontier-alert.env; set +a
+PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_coverage_freshness_alert.py; echo "rc=$?"
+```
+
+要验证真实投递链路，用 systemd drop-in 把这一次调用指到 scratch 库（**必须先用空的
+`EnvironmentFile=` 清空已有列表**，`Environment=` 赢不了后读的 `EnvironmentFile=`）：
+
+```ini
+# ~/.config/systemd/user/nhms-node27-coverage-freshness-alert.service.d/scratch.conf
+[Service]
+EnvironmentFile=
+EnvironmentFile=/home/nwm/tmp/issue2080/scratch.env
+```
+
+验完 `rm` 掉 drop-in、`daemon-reload`，用
+`systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service`
+确认已经回到生产 env 文件。
+
+## 12. 相关文档
 
 - [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md)：current physical
   deployment source of truth.
