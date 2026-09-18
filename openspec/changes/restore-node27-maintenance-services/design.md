@@ -181,7 +181,11 @@ back up the existing `infra/env` file (`cp -p`), `install -m 0600` the fence
 env, rewrite `REPO_ROOT` to `/home/nwm/NWM`, assert with `grep -c` that
 `REPO_ROOT=/home/nwm/NWM`, `RECEIPT_PATH` and `LOCK_PATH` each appear once with
 the expected `/home/nwm/NWM/.nhms-issue1069-live/` paths, run the budget
-preflight `--check`, then install the unit and `daemon-reload`. Proof that the
+preflight `--check`, then install the unit and `daemon-reload`. Before the timer
+restart, `git -C /home/nwm/NWM diff --quiet HEAD --` must return 0: the
+enforce runner freezes HEAD with `require_clean=True`, so a tracked-file edit in
+the shared checkout fails every tick at `freeze_head` (rc 1, no receipt
+`head_sha`); the immutable fence tree never had this precondition. Proof that the
 rebind took: the next receipt's `head_sha` equals `git -C /home/nwm/NWM
 rev-parse HEAD`, and `systemctl --user show -p DropInPaths` is empty. The fence SOURCE, its `.venv` and STATE
 stay as rollback inputs (runbook "do not delete these paths" is kept, reworded

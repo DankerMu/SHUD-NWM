@@ -105,12 +105,16 @@ REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
    prints nothing, and
    `systemctl --user show -p DropInPaths nhms-node27-timeseries-compression.service`
    prints an empty `DropInPaths=`.
-9. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
+9. `git -C /home/nwm/NWM diff --quiet HEAD --; echo $?` must print `0`: the enforce runner refuses a
+   checkout whose tracked files differ from HEAD (`freeze_head`, rc 1), so after the rebind no tracked
+   edit may be left in `/home/nwm/NWM` (keep receipts under `/home/nwm/tmp/`).
+10. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
    after the next run: the receipt's `head_sha`
    (`jq -r .head_sha /home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json`)
-   equals `git -C /home/nwm/NWM rev-parse HEAD`. Restarting the timer after a
+   equals `git -C /home/nwm/NWM rev-parse HEAD`. A receipt with `outcome` `failed` and
+   `failure.stage` `freeze_head` means the checkout was dirty. Restarting the timer after a
    missed 04:25Z elapse fires a `Persistent=` catch-up run immediately, so do
-   step 9 only when a run started now ends before the 06:36Z retention tick
+   step 10 only when a run started now ends before the 06:36Z retention tick
    (start by 05:30Z, the 3941 s wall) or after that retention tick has finished.
 
 Rollback: `install -m 0644` the pre-rebind unit kept at
