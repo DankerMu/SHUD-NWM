@@ -1,0 +1,13 @@
+{
+  "counts": {
+    "active_model_count": 38,
+    "runnable_model_count": 38,
+    "selected_model_count": 38,
+    "excluded_model_count": 0
+  },
+  "exclusion_reasons": {},
+  "operator_filters": {
+    "expression": null,
+    "excluded_runnable_count": 0
+  }
+}
