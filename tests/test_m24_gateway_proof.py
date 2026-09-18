@@ -6,12 +6,29 @@ no real Slurm, gateway process, or network is involved.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
+from packages.common.request_auth import (
+    SLURM_GATEWAY_SERVICE_TOKEN_ENV,
+    read_configured_service_token,
+)
 from scripts import m24_gateway_proof as proof
 from services.m24_live.receipt import validate_receipt
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
+
+# Distinctive, could-not-occur-by-accident value: it must also satisfy the
+# shared reader's validity rules (ASCII, no whitespace, >= min length), which
+# ``test_fake_token_is_usable_configuration`` asserts so the leak test cannot
+# pass vacuously through the missing-token BLOCKED path.
+FAKE_TOKEN = "M24-FAKE-BEARER-must-not-leak-3f9a1c7e"
+OTHER_TOKEN = "M24-FAKE-BEARER-wrong-value-8b2d4a60"
+
+_TOKEN_ENV = {SLURM_GATEWAY_SERVICE_TOKEN_ENV: FAKE_TOKEN}
 
 
 class _Resp:
@@ -29,22 +46,51 @@ _HEALTHY_BINARIES = {
 }
 
 
+def _auth_required_body() -> dict[str, Any]:
+    return {
+        "request_id": "req-auth",
+        "error": {
+            "code": "AUTH_REQUIRED",
+            "message": "Authentication required for this operation.",
+            "details": {},
+        },
+    }
+
+
 class _FakeClient:
     """Scriptable fake gateway HTTP client.
 
     Short job: poll returns ``succeeded`` immediately.
     Long job: first poll ``running``; DELETE returns ``cancelled``.
+
+    Mutations (POST/DELETE) are authenticated exactly like the real gateway
+    after #1888: a missing or mismatched bearer yields 401 ``AUTH_REQUIRED``.
+    GET (health/poll) stays anonymous by contract and never inspects auth.
     """
 
-    def __init__(self, *, healthy: bool = True, reachable: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        healthy: bool = True,
+        reachable: bool = True,
+        expected_token: str = FAKE_TOKEN,
+    ) -> None:
         self.healthy = healthy
         self.reachable = reachable
+        self.expected_token = expected_token
         self._next_job = 1000
-        self.calls: list[tuple[str, str]] = []
+        # (method, url, headers) — headers recorded verbatim so the tests can
+        # assert bearer presence on mutations and absence on reads.
+        self.calls: list[tuple[str, str, dict[str, str] | None]] = []
+
+    # -- helpers -----------------------------------------------------------
+    def _authorized(self, headers: dict[str, str] | None) -> bool:
+        provided = (headers or {}).get("Authorization")
+        return provided == f"Bearer {self.expected_token}"
 
     # -- transport ---------------------------------------------------------
     def get(self, url: str) -> _Resp:
-        self.calls.append(("GET", url))
+        self.calls.append(("GET", url, None))
         if not self.reachable:
             raise ConnectionError("connection refused")
         if url.endswith("/api/v1/slurm/health"):
@@ -67,20 +113,32 @@ class _FakeClient:
             },
         )
 
-    def post(self, url: str, json: dict[str, Any]) -> _Resp:
-        self.calls.append(("POST", url))
+    def post(self, url: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> _Resp:
+        self.calls.append(("POST", url, dict(headers) if headers else headers))
+        if not self.reachable:
+            raise ConnectionError("connection refused")
+        if not self._authorized(headers):
+            return _Resp(401, _auth_required_body())
         sleep = int(json["slurm_env"]["SMOKE_SLEEP_SECONDS"])
         self._next_job = 2000 if sleep >= 600 else 1000
         return _Resp(201, {"job_id": str(self._next_job), "run_id": json["run_id"], "status": "submitted"})
 
-    def delete(self, url: str) -> _Resp:
-        self.calls.append(("DELETE", url))
+    def delete(self, url: str, headers: dict[str, str] | None = None) -> _Resp:
+        self.calls.append(("DELETE", url, dict(headers) if headers else headers))
+        if not self.reachable:
+            raise ConnectionError("connection refused")
+        if not self._authorized(headers):
+            return _Resp(401, _auth_required_body())
         job_id = url.rsplit("/", 1)[-1]
         return _Resp(200, {"job_id": job_id, "status": "cancelled", "manifest": {}})
 
 
 def _noop_sleep(_seconds: float) -> None:
     return None
+
+
+def _calls_by_method(client: _FakeClient, method: str) -> list[tuple[str, str, dict[str, str] | None]]:
+    return [call for call in client.calls if call[0] == method]
 
 
 def test_all_three_stages_pass_produces_valid_live_proof_receipt() -> None:
@@ -90,6 +148,7 @@ def test_all_three_stages_pass_produces_valid_live_proof_receipt() -> None:
         gateway_url="http://gw:8081",
         client=client,
         sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
     )
 
     validate_receipt(receipt)  # must satisfy the canonical contract
@@ -115,6 +174,7 @@ def test_terminal_and_cancel_are_two_independent_stages() -> None:
         gateway_url="http://gw:8081",
         client=client,
         sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
     )
     stages = {s["stage"]: s for s in receipt["stages"]}
 
@@ -128,8 +188,8 @@ def test_terminal_and_cancel_are_two_independent_stages() -> None:
     assert stages["submit_cancel"]["counts"]["cancelled_while_active"] is True
 
     # two POSTs (two jobs) and one DELETE were issued.
-    posts = [c for c in client.calls if c[0] == "POST"]
-    deletes = [c for c in client.calls if c[0] == "DELETE"]
+    posts = _calls_by_method(client, "POST")
+    deletes = _calls_by_method(client, "DELETE")
     assert len(posts) == 2
     assert len(deletes) == 1
 
@@ -141,6 +201,7 @@ def test_unreachable_gateway_blocks_without_fabricated_pass() -> None:
         gateway_url="http://gw:8081",
         client=client,
         sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
     )
 
     validate_receipt(receipt)  # BLOCKED receipts must still validate
@@ -161,6 +222,7 @@ def test_unhealthy_binaries_block() -> None:
         gateway_url="http://gw:8081",
         client=client,
         sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
     )
     assert receipt["status"] == "BLOCKED"
     assert receipt["live_proof_accepted"] is False
@@ -179,3 +241,176 @@ def test_smoke_job_type_mapping_and_template_resolves_within_template_dir() -> N
     # no path traversal: resolved template stays inside the template dir.
     assert candidate.is_relative_to(template_dir)
     assert candidate.exists()
+
+
+# --- #1897: authenticated mutations, anonymous reads, no secret in evidence ------
+
+
+def test_fake_token_is_usable_configuration() -> None:
+    # Guards the leak/bearer tests against passing vacuously: if the fake token
+    # were rejected by the shared reader, every case below would silently fall
+    # into the missing-token BLOCKED path.
+    assert read_configured_service_token(dict(_TOKEN_ENV)) == FAKE_TOKEN
+
+
+def test_every_mutation_carries_the_service_bearer() -> None:
+    client = _FakeClient(healthy=True)
+    receipt = proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
+    )
+    assert receipt["status"] == "PASS"
+
+    mutations = _calls_by_method(client, "POST") + _calls_by_method(client, "DELETE")
+    assert len(mutations) == 3
+    for method, url, headers in mutations:
+        assert headers is not None, f"{method} {url} carried no headers"
+        assert headers.get("Authorization") == f"Bearer {FAKE_TOKEN}", f"{method} {url}"
+
+
+def test_health_and_polls_stay_anonymous() -> None:
+    client = _FakeClient(healthy=True)
+    proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
+    )
+
+    gets = _calls_by_method(client, "GET")
+    # health + at least one poll per submit stage.
+    assert len(gets) >= 3
+    assert any(url.endswith("/api/v1/slurm/health") for _method, url, _headers in gets)
+    for _method, url, headers in gets:
+        assert headers is None or "Authorization" not in headers, f"GET {url} carried a credential"
+
+
+def test_missing_token_blocks_and_never_sends_an_anonymous_mutation() -> None:
+    client = _FakeClient(healthy=True)
+    receipt = proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=_noop_sleep,
+        env={},  # deterministically "unset", independent of the ambient shell
+    )
+
+    validate_receipt(receipt)
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["live_proof_accepted"] is False
+    assert isinstance(receipt["dependency_blocker"], str)
+    assert receipt["dependency_blocker"].strip()
+    assert SLURM_GATEWAY_SERVICE_TOKEN_ENV in receipt["dependency_blocker"]
+    # health still proves what it can; the mutation stage is the one blocked.
+    assert receipt["stages"][0] == {
+        "stage": "health",
+        "status": "PASS",
+        "counts": receipt["stages"][0]["counts"],
+    }
+    assert receipt["stages"][-1]["stage"] == "submit_poll_terminal"
+    assert receipt["stages"][-1]["status"] == "BLOCKED"
+    # no anonymous mutation may ever leave the emitter.
+    assert _calls_by_method(client, "POST") == []
+    assert _calls_by_method(client, "DELETE") == []
+
+
+def test_auth_required_401_blocks_without_fabricated_pass() -> None:
+    client = _FakeClient(healthy=True, expected_token=OTHER_TOKEN)
+    receipt = proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=_noop_sleep,
+        env=_TOKEN_ENV,
+    )
+
+    validate_receipt(receipt)
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["live_proof_accepted"] is False
+    assert "401" in receipt["dependency_blocker"]
+    assert "AUTH_REQUIRED" in receipt["dependency_blocker"]
+    assert FAKE_TOKEN not in json.dumps(receipt)
+
+
+def test_receipt_never_serializes_the_token() -> None:
+    for client in (
+        _FakeClient(healthy=True),
+        _FakeClient(healthy=True, expected_token=OTHER_TOKEN),
+        _FakeClient(reachable=False),
+    ):
+        receipt = proof.build_gateway_receipt(
+            "m24_smoke_run",
+            gateway_url="http://gw:8081",
+            client=client,
+            sleep_func=_noop_sleep,
+            env=_TOKEN_ENV,
+        )
+        serialized = json.dumps(receipt)
+        assert FAKE_TOKEN not in serialized
+        assert "Bearer" not in serialized
+        assert FAKE_TOKEN not in receipt["command"]
+        assert FAKE_TOKEN not in json.dumps(receipt["notes"])
+
+
+def test_default_env_wiring_reads_the_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(SLURM_GATEWAY_SERVICE_TOKEN_ENV, FAKE_TOKEN)
+    client = _FakeClient(healthy=True)
+    receipt = proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=_noop_sleep,
+    )
+    assert receipt["status"] == "PASS"
+    mutations = _calls_by_method(client, "POST") + _calls_by_method(client, "DELETE")
+    assert mutations
+    for _method, _url, headers in mutations:
+        assert (headers or {}).get("Authorization") == f"Bearer {FAKE_TOKEN}"
+
+
+def test_cli_help_exposes_no_token_flag_or_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(SLURM_GATEWAY_SERVICE_TOKEN_ENV, FAKE_TOKEN)
+    with pytest.raises(SystemExit) as excinfo:
+        proof.main(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert FAKE_TOKEN not in out
+    for forbidden in ("--token", "--service-token", "--bearer", "--authorization"):
+        assert forbidden not in out
+
+
+def test_httpx_adapter_forwards_mutation_headers_and_leaves_get_anonymous() -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.headers.get("Authorization")))
+        return httpx.Response(200, json={"ok": True})
+
+    client = proof._HttpxClient()
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        client.post(
+            "http://gw:8081/api/v1/slurm/jobs",
+            json={"run_id": "rid"},
+            headers={"Authorization": f"Bearer {FAKE_TOKEN}"},
+        )
+        client.delete(
+            "http://gw:8081/api/v1/slurm/jobs/1",
+            headers={"Authorization": f"Bearer {FAKE_TOKEN}"},
+        )
+        client.get("http://gw:8081/api/v1/slurm/health")
+    finally:
+        client.close()
+
+    assert seen == [
+        ("POST", f"Bearer {FAKE_TOKEN}"),
+        ("DELETE", f"Bearer {FAKE_TOKEN}"),
+        ("GET", None),
+    ]

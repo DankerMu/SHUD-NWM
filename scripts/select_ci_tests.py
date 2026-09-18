@@ -2636,10 +2636,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # security metadata, so a patch-owner PR must reach the drift + 3.1
         # contract suites in addition to the broad API consumers it already
         # carried.
+        # #2211 quantified this module's 13 `_patch_*_openapi` implementations
+        # against the six targets above. Only ONE capability suite was both
+        # unreached and able to observe the module:
+        # tests/test_hydro_display_mvt_scaling.py, which asserts the PATCHED
+        # runtime document directly (`main.create_app().openapi()` in
+        # `test_runtime_openapi_documents_the_national_identity_tile_route` and
+        # `test_runtime_openapi_documents_both_424_codes_on_the_canonical_
+        # national_route_only`). Measured: no-op'ing `_patch_mvt_tile_openapi`
+        # reds exactly those two, and the suite was not selected before.
+        # Cost +22.6s.
+        #
+        # The rest of the #2211 candidates were REJECTED on measured evidence,
+        # not on cost. This module's only observable output is the OpenAPI
+        # document (its sole production importer is apps/api/main.py's schema
+        # hook), so a suite that never reads that document cannot be an oracle
+        # for it however public its routes are: no-op mutants of
+        # `_patch_precip_openapi`, `_patch_runtime_openapi` and the combined
+        # layer-metadata / forecast-series / station-series trio red only
+        # tests/test_openapi_drift.py and tests/test_openapi_31_contract.py —
+        # tests/test_precip_overlay.py (reads the STATIC openapi/nhms.v1.yaml),
+        # tests/test_forecast_api.py and
+        # tests/test_forecast_api_met_station_series.py (never read the schema)
+        # and tests/test_runtime_mode.py (reads /openapi.json but asserts route
+        # PRESENCE, which registration decides) all stay green. Routing them
+        # would buy assertions that run but cannot observe the change — a cousin
+        # of the #1447 ruling on constant skips. The runtime-vs-static
+        # comparison the drift target already carries is the residual oracle
+        # for the other twelve implementations.
+        #
+        # Per-capability literals, never a directory pattern: every rule here is
+        # an explicit tuple so the exact-set anchor in
+        # tests/test_select_ci_tests.py can pin it.
         "apps/api/openapi_patching.py",
         (
             "tests/test_api.py",
             "tests/test_api_contract.py",
+            "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",

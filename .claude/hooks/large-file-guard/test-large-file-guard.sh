@@ -13,10 +13,21 @@ fail=0
 # summary is exactly what THIS run executed (no process substitution / tee race).
 passes=0
 
+# JSON-encode the WHOLE tool-call document in one json.dumps call, so that
+# every field -- command as well as cwd -- is a real JSON string: double
+# quotes, backslashes and control characters (LF/CR/tab) in a command or in
+# real path bytes become valid JSON escapes instead of raw bytes that would
+# make the document unparseable and kill the hook in json.loads (#1829).
+# The "cwd" key is emitted only when a second argument is passed, so legacy
+# absent-cwd callers keep exercising the CLAUDE_PROJECT_DIR fallback.
+json_doc() { # <command> [cwd]
+    python3 -c 'import json, sys; print(json.dumps({"tool_input": {"command": sys.argv[1]}, **({"cwd": sys.argv[2]} if len(sys.argv) > 2 else {})}))' "$@"
+}
+
 # run_hook <repo> <command>; echoes the hook's exit code
 run_hook() {
     local repo=$1 cmd=$2 rc=0
-    printf '{"tool_input":{"command":"%s"},"cwd":"%s"}' "$cmd" "$repo" \
+    json_doc "$cmd" "$repo" \
         | CLAUDE_PROJECT_DIR="$repo" bash "$HOOK" >/dev/null 2>&1 || rc=$?
     echo "$rc"
 }
@@ -34,16 +45,10 @@ check() {
 
 stderr_file="$TMP/stderr.txt"
 
-# JSON-encode <cwd> so control characters (CR/tab) inside real path bytes are
-# valid JSON escapes instead of raw control bytes in the tool-call document.
-json_cwd() { # <path>
-    python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
-}
-
 # run_hook_split <project_dir> <cwd> <command>; echoes exit code, keeps stderr
 run_hook_split() {
     local project_dir=$1 cwd=$2 cmd=$3 rc=0
-    printf '{"tool_input":{"command":"%s"},"cwd":%s}' "$cmd" "$(json_cwd "$cwd")" \
+    json_doc "$cmd" "$cwd" \
         | CLAUDE_PROJECT_DIR="$project_dir" bash "$HOOK" >/dev/null 2>"$stderr_file" \
         || rc=$?
     echo "$rc"
@@ -165,7 +170,7 @@ new_repo "$repo"
 big_file "$repo/big.txt" 20
 git -C "$repo" add big.txt
 rc=0
-printf '{"tool_input":{"command":"git commit -m x"}}' \
+json_doc "git commit -m x" \
     | CLAUDE_PROJECT_DIR="$repo" bash "$HOOK" >/dev/null 2>&1 || rc=$?
 check "absent cwd falls back to CLAUDE_PROJECT_DIR" 2 "$rc"
 
@@ -349,38 +354,40 @@ check "CR main git merge --continue same" 0 \
 process_cwd="$TMP/unrelated-process-cwd"
 mkdir -p "$process_cwd"
 # Runner from <process_cwd> with CLAUDE_PROJECT_DIR=fallback repo.
-run_hook_from() { # <process_cwd> <project_dir> <cwd_json> <command>
-    local pcwd=$1 project_dir=$2 cwd_json=$3 cmd=$4 rc=0
-    ( cd "$pcwd" && printf '{"tool_input":{"command":"%s"},"cwd":%s}' "$cmd" "$cwd_json" \
+run_hook_from() { # <process_cwd> <project_dir> <cwd> <command>
+    local pcwd=$1 project_dir=$2 cwd=$3 cmd=$4 rc=0
+    ( cd "$pcwd" && json_doc "$cmd" "$cwd" \
         | CLAUDE_PROJECT_DIR="$project_dir" bash "$HOOK" >/dev/null 2>"$stderr_file" ) \
         || rc=$?
     echo "$rc"
 }
-absent_json='""'
+# The hook collapses a missing "cwd" and an empty one identically
+# (`data.get("cwd") or ""`), so the empty string is the absent-cwd input here.
+absent_cwd=''
 
 fb_main="$TMP/fb-merge-clean"
 mk_link_merge "$fb_main" "$TMP/fb-merge-wt"
 check "absent-cwd fallback merge ignores other-side large file" 0 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$absent_json" "git commit --no-edit")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$absent_cwd" "git commit --no-edit")"
 check "absent-cwd fallback git merge --continue same" 0 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$absent_json" "git merge --continue")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$absent_cwd" "git merge --continue")"
 check "non-Git-cwd fallback merge ignores other-side large file" 0 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$(json_cwd "$TMP/not-a-repo")" "git commit --no-edit")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$TMP/not-a-repo" "git commit --no-edit")"
 check "non-Git-cwd fallback git merge --continue same" 0 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$(json_cwd "$TMP/not-a-repo")" "git merge --continue")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-wt" "$TMP/not-a-repo" "git merge --continue")"
 
 fb_main="$TMP/fb-merge-dirty"
 mk_link_merge "$fb_main" "$TMP/fb-merge-dirty-wt"
 big_file "$TMP/fb-merge-dirty-wt/newbig.txt" 20
 git -C "$TMP/fb-merge-dirty-wt" add newbig.txt
 check "absent-cwd fallback merge blocks newly authored large file" 2 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$absent_json" "git commit --no-edit")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$absent_cwd" "git commit --no-edit")"
 check "absent-cwd fallback git merge --continue blocks it too" 2 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$absent_json" "git merge --continue")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$absent_cwd" "git merge --continue")"
 check "non-Git-cwd fallback merge blocks newly authored large file" 2 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$(json_cwd "$TMP/not-a-repo")" "git commit --no-edit")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$TMP/not-a-repo" "git commit --no-edit")"
 check "non-Git-cwd fallback git merge --continue blocks it too" 2 \
-    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$(json_cwd "$TMP/not-a-repo")" "git merge --continue")"
+    "$(run_hook_from "$process_cwd" "$TMP/fb-merge-dirty-wt" "$TMP/not-a-repo" "git merge --continue")"
 
 # --- 13. worktree roots ending in an actual CR or LF byte -------------------
 # A root whose final byte is CR (or LF) must survive the exact-one-LF removal:
@@ -478,7 +485,31 @@ git -C "$repo" add openapi/other.yaml
 check "non-exempt sibling openapi/other.yaml over limit is rejected" 2 \
     "$(run_hook "$repo" "git commit -m x")"
 
-# --- 15. honest deterministic summary ---------------------------------------
+# --- 15. commands whose bytes need JSON escapes still reach the guard -------
+# #1829: the harness used to interpolate the command raw into a JSON string
+# literal, so a command carrying a double quote, backslash, newline, CR or tab
+# produced an invalid document -- the hook died inside json.loads with exit 1
+# and the guard logic never ran.  With json_doc serializing the whole document,
+# these bytes survive as escapes and the hook returns a real verdict (2 or 0),
+# never a parse death (1).  Both sides are asserted so a verdict that is merely
+# "not 1" cannot pass by accident.
+weird_cmd=$'git commit -m "a \\"b\\" c\\d\ne\rf\tg"'
+
+repo="$TMP/weird-command-block"
+new_repo "$repo"
+big_file "$repo/big.txt" 20
+git -C "$repo" add big.txt
+check "quote/control-byte command still blocks large file" 2 \
+    "$(run_hook "$repo" "$weird_cmd")"
+
+repo="$TMP/weird-command-pass"
+new_repo "$repo"
+echo tiny > "$repo/small.txt"
+git -C "$repo" add small.txt
+check "quote/control-byte command still passes small file" 0 \
+    "$(run_hook "$repo" "$weird_cmd")"
+
+# --- 16. honest deterministic summary ---------------------------------------
 # `passes` is incremented in-process by every PASS branch of `check` /
 # `check_stderr_contains`, so the count is exactly this run's executed
 # assertions (no tee/process-substitution race, no hard-coded number).

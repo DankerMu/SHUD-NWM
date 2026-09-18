@@ -453,12 +453,25 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # the finalizer/security truth assertions. Both supplemental scans over
     # `apps/**` ride along: the river-segment write surface (#2185) and the
     # path-canonicalisation family guard (#1627).
+    #
+    # #2211 quantified the module's 13 `_patch_*_openapi` implementations
+    # against the #1644 six and added exactly one suite:
+    # tests/test_hydro_display_mvt_scaling.py, the only unreached capability
+    # oracle that reads the PATCHED runtime document
+    # (`main.create_app().openapi()`), proven by a `_patch_mvt_tile_openapi`
+    # no-op that reds its two `test_runtime_openapi_documents_*` tile-route
+    # pins. The other candidates were measured and rejected
+    # — they never read the schema this module produces, so they cannot red on
+    # a patch change; see the rule's comment in scripts/select_ci_tests.py.
+    # Literals on purpose: this is the exact-set anchor for that rule, so it
+    # must never be derived from PATH_TEST_RULES.
     selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
 
     assert selected == sorted(
         {
             "tests/test_api.py",
             "tests/test_api_contract.py",
+            "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -13258,6 +13271,28 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_orchestration_chain.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+
+
+def test_lineage_state_index_fixtures_rule_selects_its_exact_suites() -> None:
+    # #1827, same rot as the demote anchor above. The #1735 lineage index
+    # builders are consumed by four suites, two of which
+    # (tests/test_scheduler_generation.py, tests/test_state_manager_generation_
+    # history.py) import them inside a function body, so the derived importer
+    # closure — which reads module-level statements only — cannot see them. The
+    # generic parametrized test above derives `required` from
+    # SUPPORT_MODULE_TEST_RULES itself, so deleting either function-body target
+    # from the rule shrinks both sides and stays green while a helper-only PR
+    # silently stops running that consumer's regressions. This exact-set anchor
+    # is written as literals ON PURPOSE: it must never be derived from the rule
+    # table it is pinning.
+    selected = set(select_tests(["tests/lineage_state_index_fixtures.py"], repo_root=Path(".")))
+    assert selected == {
+        "tests/test_scheduler_backfill.py",
+        "tests/test_scheduler_lineage.py",
+        "tests/test_scheduler_generation.py",
+        "tests/test_state_manager_generation_history.py",
         SELECTOR_META_GUARD_TEST,
     }
 

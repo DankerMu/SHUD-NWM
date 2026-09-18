@@ -560,7 +560,11 @@ lane that produced them:
 - `mocked-regression`: deterministic regression coverage for mocked UI behavior.
   Broad API mocks such as `page.route('**/api/v1/**')` are allowed. Receipts from
   this lane are mocked evidence only and must not be cited as live receipts or
-  live `display_readonly` proof.
+  live `display_readonly` proof. This lane is an automatic CI gate: the
+  `frontend-build` job in `.github/workflows/ci.yml` runs
+  `pnpm run test:e2e:mocked-regression` on every PR whose diff matches the
+  `frontend` path filter, so a failing mocked spec fails the `Frontend Build`
+  check.
 - `preview`: browser coverage for preview or ephemeral frontend builds where API
   responses may still be simulated. Broad API mocks such as
   `page.route('**/api/v1/**')` are allowed. Receipts from this lane are preview
@@ -574,7 +578,8 @@ lane that produced them:
 - `live-display`: live display_readonly browser proof against explicit runtime
   frontend and API bindings. Broad API mocks such as
   `page.route('**/api/v1/**')` are not allowed and cannot produce live display
-  receipts. Only this lane may produce live `display_readonly` receipts.
+  receipts. Only this lane may produce live `display_readonly` receipts. The
+  live lanes stay out of automatic CI; their oracle is node-27.
 
 ```bash
 cd apps/frontend

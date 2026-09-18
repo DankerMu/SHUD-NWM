@@ -437,3 +437,22 @@ jobs:
         run: cd apps/frontend && pnpm build && pnpm test
       - name: Check frontend bundle size
         run: cd apps/frontend && pnpm check:bundle
+      # playwright.config.ts's webServer.command hardcodes `corepack pnpm dev`,
+      # and this job gets pnpm from pnpm/action-setup (no corepack shim), so the
+      # mocked-regression dev server cannot start without activating corepack.
+      - name: Enable corepack pnpm for the Playwright dev server
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.11.0 --activate
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('apps/frontend/pnpm-lock.yaml') }}
+      - name: Install Playwright chromium
+        run: cd apps/frontend && pnpm exec playwright install --with-deps chromium
+      # Mocked-regression lane only (playwright.config.ts testIgnore excludes the
+      # preview-deeplink, live-display, live-c4-display and m15-visual specs).
+      # No retries: a failure here must stay a failure.
+      - name: Run frontend mocked-regression Playwright lane
+        run: cd apps/frontend && pnpm run test:e2e:mocked-regression
