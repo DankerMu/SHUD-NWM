@@ -59,7 +59,9 @@ Ways this harness could be green for the wrong reason — named, not hidden
    ``fresh`` cell passed 1 and 2; otherwise criterion 3 records ``None``.
 1b. An EXPECTED-OPEN cell would be a way for the gate to be green about a cell it
    never judged. ``EXPECTED_OPEN_CELLS`` excuses exactly one cell's PLAN
-   criteria — never its row identity — the cell is still measured, still
+   criteria — never its row identity, never its non-vacuity and never an EMPTY
+   EXTRACT, which is how #1 above would otherwise reach this gate through this
+   entry (``_NEVER_EXCUSED_PREFIXES``) — the cell is still measured, still
    judged, still printed in the table with its real verdict and still in
    ``matrix.json``, and a cell that starts PASSING while listed there is a
    failure too, so the allowlist cannot rot into silence.
@@ -221,7 +223,19 @@ _ROW_IDENTITY_PREFIX = "ROW IDENTITY"
 #: #1 is independent of which index the planner took; NON-VACUITY because a cell
 #: that returned the wrong number of rows measured the wrong thing, and "the plan
 #: is known-bad here" is not a reason to stop checking that.
-_NEVER_EXCUSED_PREFIXES = (_ROW_IDENTITY_PREFIX, "NON-VACUITY")
+#:
+#: EMPTY EXTRACT (``tests/river_ts_plan_criteria.py:255-258``) for a third reason,
+#: and it is the one that made the allowlist unsafe before it was listed here: an
+#: empty extract is not a bad plan, it is NO plan node for this chunk, so
+#: criteria 1 and 2 go False having judged nothing while row identity and
+#: non-vacuity still pass — the rows come back correctly regardless. Excused, the
+#: cell prints ``criteria=FF-`` / ``defect_reproduced=False``, which reads exactly
+#: like "still red as expected", and the gate goes green having measured this cell
+#: not at all. That is the module docstring's wrong-reason #1 reached THROUGH
+#: wrong-reason #1b. The reason the allowlist states is about which index the
+#: planner CHOSE, and it has nothing to say about there being no node to choose
+#: one for.
+_NEVER_EXCUSED_PREFIXES = (_ROW_IDENTITY_PREFIX, "NON-VACUITY", "EMPTY EXTRACT")
 
 
 # ---------------------------------------------------------------------------

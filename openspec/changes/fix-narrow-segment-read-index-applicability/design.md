@@ -179,8 +179,35 @@ fixture records that it passed — not that the mechanism was thereby proven.
 
 Keep `basin_version_key` and `river_network_version_key` as enforced predicates but express them so they
 cannot form an index condition on the discovery index's 2nd and 3rd columns (for example
-`IS NOT DISTINCT FROM`; both columns are `NOT NULL`, so the predicate is equivalent). The discovery
-index's usable prefix collapses to `run_key`, while the primary key still binds four columns.
+`IS NOT DISTINCT FROM`). The discovery index's usable prefix collapses to `run_key`, while the primary
+key still binds four columns.
+
+**The equivalence argument this originally gave was wrong, and the correction matters.** It said "both
+columns are `NOT NULL`, so the predicate is equivalent". That holds for the narrow table
+(`000059:14-15`) and **not** for the legacy one, which the same template renders: `000050:203` adds the
+seven surrogate columns as nullable and the only `SET NOT NULL` lives inside
+`hydro.cutover_river_identity_normalization()` (`000050:452-458`), whose own `COMMENT` at `:492-499`
+says it is never invoked by the migration chain. Confirmed live on node-27 — `pg_attribute.attnotnull`
+is true for all three narrow key columns and **false** for all three legacy ones. `=` and
+`IS NOT DISTINCT FROM` diverge only when **both** sides are NULL, so on legacy a row with a
+never-backfilled `basin_version_key`, read with a `basin_version_id` that matches nothing, would be
+excluded by `=` and **returned** by `IS NOT DISTINCT FROM`.
+
+That divergence is **not reachable through `forecast_series`**, for two reasons that are neither of them
+the one originally cited: `_validate_series_target`
+(`packages/common/forecast_store.py:611-629`) raises 404 `SOURCE_NOT_FOUND` for an unknown
+`basin_version_id` before any of the eight blocks run, in the same transaction (`:461`); and the network
+leg is gated by `rt.river_segment_key = (…)`, which deliberately keeps `=` and is keyed on the same
+`river_network_version_id`, with `core.river_segment.river_network_version_id` declared
+`NOT NULL REFERENCES core.river_network_version` (`db/migrations/000004_core.sql:35`) — so a missing
+network version makes the segment subselect NULL first and the retained `=` hard-gates the row.
+
+An explicit `IS NOT NULL` is nevertheless added beside each rewritten conjunct. Not because the hole is
+live — it is not — but because the argument above makes the branch predicate depend on an upstream
+validator that two subclasses override to a no-op (`packages/common/forecast_curve_capture.py:82`,
+`packages/common/node27_pgdata_workload_query.py:119`). §2.2 rejected C2 for moving identity
+verification out of the branch scan; accepting an equivalent dependency inside C1 would be the same
+mistake wearing a different hat.
 
 Costs: the conjunct text changes, so `tests/test_river_ts_text_identity_cleanup.py:939 (helper), :981 (the pin), :989 (its red proof)` goes red and
 must be updated deliberately (F4b). Depends on a planner property that must be measured, never assumed.
@@ -425,6 +452,85 @@ empty. The two cells this change exists to close:
 The excused cell still carries its real verdict in `matrix.json` — `passed: false`,
 `defect_reproduced: true`, ratio 999.0, 12 841 hits — so the evidence says what happened, and only the
 gate's assertion is relaxed. Filed as #2471.
+
+### What the cross product does NOT cover — four of the eight blocks
+
+Found in cross-review, and the PR's original Evidence Floor claim overstated this. The bench drives
+`forecast_series` with `include_analysis: False` and no `run_types`
+(`tests/test_river_timeseries_stats_index_choice_integration.py:369-380`), so the cross product varies
+statistics state, branch and compression across **two** of the read path's predicate shapes — run-bound
+and `issue_time=latest`. It never issues the other two: the `_ANALYSIS_SCENARIO_PUSHDOWN_SQL` blocks
+(`packages/common/forecast_store.py:803`, `:836`) and the `_RUN_TYPE_PUSHDOWN_SQL` blocks (`:997`,
+`:1035`). Those are live `/series?include_analysis` and hindcast paths and they have neither plan nor
+digest evidence here.
+
+Why that is recorded as acceptable rather than measured — and it is an **argument, not a measurement**:
+the defect requires `run_key` to be bound into the fact scan, because that is what makes the discovery
+index's leading column matchable. Those four blocks push `h.scenario_id` and `h.run_type`, not
+`run_key`, so `river_ts_run_discovery_key_idx` and `river_ts_selected_identity_key_valid_time_idx` were
+reachable for them only through a nestloop parameterised on `h.run_key`, and collapsing the usable
+prefix raises that path's cost rather than lowering it. The risk direction is favourable. It is still
+unmeasured, and the PR says so.
+
+The one input class where the rewrite is **not** a no-op — a legacy row with a NULL surrogate key read
+against a subselect that yields NULL — is also unexercised: the bench seeds legacy keys from
+`bv.basin_version_key` (`tests/river_ts_stats_matrix_seed.py:676`, `:720`), so they are never NULL. The
+"0 digest mismatches across 24 cells" result is therefore strong evidence for the shapes it covers and
+**silent** on the only divergent one. The `IS NOT NULL` guard is what closes that class, not the digests.
+
+### What criterion 3's floor costs, and what it is not tied to
+
+Raised in cross-review, and it is a fair charge against the recalibration. On the **shipped** run the
+floor is load-bearing in five cells — the multiple is exceeded and only the floor carries them — and two
+of those five are the headline cells this change exists to close:
+
+| cell | hits | baseline | 8× limit | multiple | verdict |
+|---|---|---|---|---|---|
+| `run_bound/absent/narrow/uncompressed` | 50 | 3 | 24 | 16.7 | passes on the floor |
+| `run_bound/absent/legacy/uncompressed` | 51 | 4 | 32 | 12.8 | passes on the floor |
+| `latest/absent/narrow/uncompressed` | 50 | 6 | 48 | 8.3 | passes on the floor |
+| `latest/stale/narrow/uncompressed` | 50 | 6 | 48 | 8.3 | passes on the floor |
+| `run_bound/stale/narrow/uncompressed` | 50 | 3 | 24 | 16.7 | passes on the floor |
+
+So **after the fix, criterion 3 contributes no independent signal on the two cells it was meant to
+back**: its verdict there reduces to "under 256 buffers, so nothing pathological". Criteria 1 and 2 carry
+those cells. That is acceptable — a node reading 50 buffers for 24 rows is not scanning a 1 000-segment
+network by any arithmetic — but it must be stated, because the adjacency pair used to justify the floor
+(50 vs 51 hits) came from the **baseline** run's `latest` cells while the cells that actually benefit are
+the **shipped** run's `run_bound` ones. The argument and its beneficiaries are not the same rows.
+
+Two further limits of the floor, recorded rather than papered over:
+
+- **It is not tied to the seed's geometry.** `SEGMENTS_PER_SCENARIO = 1000`
+  (`tests/river_ts_stats_matrix_seed.py:67`) is the only reason the defect cells land at 5 977 and
+  12 841, safely above 256. No assertion couples the two: shrinking the seed would silently make
+  criterion 3 unfalsifiable on the uncompressed cells too, and
+  `test_the_genuine_defect_cells_still_fail_criterion_3_under_the_floor` pins transcribed constants, not
+  seed-derived ones.
+- **It is untestable on the compressed cells.** Their healthy readings are 3 buffers (run-bound) and 102
+  (`latest`), so any degenerate compressed plan under 256 buffers is invisible to criterion 3. No receipt
+  has ever measured a degenerate plan on a compressed chunk, so the floor's stated rationale — "cannot
+  represent a full-network scan at any geometry this bench seeds" — has empirical support only on the
+  two uncompressed geometries.
+
+### Two residual risks found in cross-review, neither blocking
+
+- **`IS NOT DISTINCT FROM` is invisible to the renderer's comparison-position stripper.**
+  `_COMPARISON_TAIL` (`packages/common/river_ts_render.py:212`) matches only `=`, `<`, `>`, `<>`, `!=`,
+  `<=`, `>=`, so `_comparison_position_scalar_bodies` drops from 3 to 1 and `basin_version_id` now
+  survives `strip_scalar_subqueries`. Harmless here — attribution is alias-scoped and
+  `text_fact_columns(sql, "rt")` is still empty — and the failure direction is **fail-closed**, a false
+  refusal rather than a false accept. But the module's "authority sub-select text is stripped before
+  attribution" promise is now spelling-dependent, and a future template using this spelling against an
+  *unaliased* fact table would hit the bare-column fallback and be refused.
+- **On the legacy branch the rewrite also truncates the primary key's usable prefix to `run_key`.** The
+  legacy pkey is `(run_key, river_network_version_key, river_segment_key, variable_e, valid_time)`
+  (`db/migrations/000050_river_identity_normalization.sql:381-382`). Not a regression — criterion 1
+  already records that legacy nodes never bound `river_segment_key` in an `Index Cond`, and the live A/B
+  shows both arms identical — but it leaves `river_ts_segment_time_idx`, reachable only through the
+  `#1342` transitional text aid, as the legacy branch's **only** segment-binding index. **If #1342
+  removes the legacy text aids before #1988 drops the table, the legacy branch loses every sargable
+  segment binding.** Recorded on #2471.
 
 ## Must-preserve behaviour
 

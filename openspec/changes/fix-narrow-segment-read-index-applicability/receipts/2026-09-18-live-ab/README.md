@@ -75,7 +75,8 @@ because `000049` *dropped* an index, which C1 does not do.
 
 ## §4.3 — no regression on the other call sites, `_per_source_latest_cycles` included
 
-Twelve statements across six cases, both arms (`statement-deltas.py`):
+Twelve statements across **eight** cases, both arms (`statement-deltas.py`): the run-bound probe's six
+cases carry one fact statement each, and the `latest` probe's two carry three each.
 
 | | base | head | delta |
 |---|---|---|---|
@@ -83,10 +84,14 @@ Twelve statements across six cases, both arms (`statement-deltas.py`):
 | `_per_source_latest_cycles`, small | 632 045 hits | 632 045 hits | **0** |
 | every other statement | — | — | **0** |
 
-**Every statement's shared-hit delta is exactly 0 and every digest is identical.** The p95 figures run
-0.1 %–39 % *lower* on the head arm, but that is run order, not a speedup: the base arm ran first and the
-head arm second on a warmer cache, and a zero buffer delta on every node means no plan changed. It is
-recorded as no-regression, not as an improvement.
+**Every statement's shared-hit delta is exactly 0 and every digest is identical.** The p95 figures move
+between **-39.2 % and +1.1 %** on the head arm — ten statements lower, **two higher**
+(`shj_nj/latest` stmt 1 at +0.1 %, `small_tailanhe/latest` stmt 1 at +1.1 %). That spread is run order,
+not a speedup: the base arm ran first and the head arm second on a warmer cache, and a zero buffer delta
+on every node means no plan changed. It is recorded as no-regression, in neither direction.
+
+(An earlier revision of this file said "six cases" and "0.1 %–39 % lower", both wrong; caught in
+cross-review by recomputing from the committed probe JSON.)
 
 ## §4.4 — capture path unaffected; the live D11 receipt is **not run**, and needs a GO
 
@@ -113,8 +118,11 @@ carry #2417 into production (`tasks.md` §6.4's deploy hold). Recorded as blocke
 | `matrix-3variant-20260918.json` | §2.1's base/C1/C2 cross product — the selection evidence |
 | `matrix-shipped-20260918.json` | §3's 24-cell run against the shipped C1 |
 | `run-ab.sh` | the A/B runner; refuses any DSN whose role is not `nhms_display_ro` |
-| `compare-arms.py`, `statement-deltas.py` | the comparators whose output is quoted above |
+| `compare-arms.py`, `statement-deltas.py` | the comparators whose output is quoted above; lint-formatted after the run, so their text is not byte-identical to what executed — the archived `.txt` output is |
 | `narrow-chunk-stats.sql`, `legacy-chunk-stats.sql` | the `READ ONLY` statistics snapshots |
+| `chunk-stats-output.txt` | their result sets, plus the `pg_attribute.attnotnull` reading — the tables quoted above |
+| `bench-shipped-run.out` | the `1 passed in 33.29s` pytest output for §3's run |
+| `compare-arms-output.txt` | `compare-arms.py`'s console output |
 
 The probes themselves are **not copied here**: they are
 `openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987*.py`,

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+
 D = Path("/home/nwm/tmp/2451/live-ab")
 print(f"{'case':26s} {'stmt':5s} {'arm':5s} {'hits':>9s} {'p95_ms':>10s} {'rows':>6s}  digest")
 for probe in ("probe1987", "probe1987latest"):

@@ -203,12 +203,19 @@ def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) ->
         assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch
         for predicate in (
             # #2451 C1: the two redundant identity conjuncts are spelled
-            # `IS NOT DISTINCT FROM` so they cannot form an index condition on
-            # `river_ts_run_discovery_key_idx`'s 2nd and 3rd columns. Both columns
-            # are NOT NULL, so this is the SAME predicate, enforced in the same
-            # place; only its sargability changed. A pin update, not a behaviour
-            # change — the parameter-set assertion at the top of this helper and
-            # every row-level case in this module are untouched by it.
+            # `IS NOT NULL AND … IS NOT DISTINCT FROM` so they cannot form an
+            # index condition on `river_ts_run_discovery_key_idx`'s 2nd and 3rd
+            # columns. The guard is the half that keeps this the SAME predicate,
+            # enforced in the same place: `IS NOT DISTINCT FROM` alone is TRUE
+            # when BOTH sides are NULL, where `=` is UNKNOWN, and the columns are
+            # NOT NULL only on `hydro.river_timeseries` — on
+            # `hydro.river_timeseries_legacy` they are nullable
+            # (`db/migrations/000050_river_identity_normalization.sql:216-222`),
+            # and one template renders both branches. With the guard only
+            # sargability changed. A pin update, not a behaviour change — the
+            # parameter-set assertion at the top of this helper and every
+            # row-level case in this module are untouched by it.
+            "rt.basin_version_key IS NOT NULL",
             "rt.basin_version_key IS NOT DISTINCT FROM (",
             "WHERE basin_version_id = %(basin_version_id)s",
             # `river_segment_key` keeps its `=`: it is the conjunct that MUST
@@ -216,6 +223,7 @@ def assert_spanning_route(sql: str, params: Mapping, *, legacy_aids: int = 3) ->
             "rt.river_segment_key = (",
             "WHERE river_segment_id = %(river_segment_id)s",
             "AND river_network_version_id = %(river_network_version_id)s",
+            "rt.river_network_version_key IS NOT NULL",
             "rt.river_network_version_key IS NOT DISTINCT FROM (",
             "WHERE river_network_version_id = %(river_network_version_id)s",
             "rt.variable_e = 'q_down'::hydro.river_variable",

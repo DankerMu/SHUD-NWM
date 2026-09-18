@@ -74,10 +74,14 @@ GOLDEN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / f"river_ts_templates_{GOLDEN
 #: alone — every other entry genuinely still comes from that base.
 #:
 #: NOT moved for #2451, and that is the point. #2451 changed
-#: `_SEGMENT_ROWS_SOURCE_SQL`'s two identity conjuncts from `=` to
-#: `IS NOT DISTINCT FROM`:
+#: `_SEGMENT_ROWS_SOURCE_SQL`'s two identity conjuncts from `=` to a guarded
+#: `IS NOT DISTINCT FROM` — the `IS NOT NULL` half is what keeps the pair
+#: filtering exactly as `=` did, since `hydro.river_timeseries_legacy`'s key
+#: columns are nullable:
 #:
+#:     rt.basin_version_key IS NOT NULL
 #:     rt.basin_version_key IS NOT DISTINCT FROM (SELECT basin_version_key ...)
+#:     rt.river_network_version_key IS NOT NULL
 #:     rt.river_network_version_key IS NOT DISTINCT FROM (SELECT ...)
 #:
 #: The golden's eight `forecast_store:<label>` entries and

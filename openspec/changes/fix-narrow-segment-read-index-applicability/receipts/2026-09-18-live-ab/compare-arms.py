@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+
 D = Path("/home/nwm/tmp/2451/live-ab")
 FACT = ("_hyper_9_", "_hyper_3_", "compress_hyper_")
 
 for probe in ("probe1987", "probe1987latest"):
-    print("=" * 80); print(probe)
+    print("=" * 80)
+    print(probe)
     per = {}
     for arm in ("base", "head"):
         js = json.loads((D / f"{probe}-{arm}.json").read_text())

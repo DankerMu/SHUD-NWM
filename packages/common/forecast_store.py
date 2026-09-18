@@ -28,10 +28,39 @@ QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id
 # the caller's single ranking/window/aggregation layer. Activate only with I7.
 #
 # `basin_version_key` and `river_network_version_key` are compared with
-# `IS NOT DISTINCT FROM` rather than `=` (#2451, design.md C1, selected by the
-# 2026-09-18 node-27 measurement). Both columns are NOT NULL on both tables, so
-# the predicate is EQUIVALENT to `=` and enforces exactly as much; what it is
-# not is SARGABLE. That collapses `river_ts_run_discovery_key_idx`'s usable
+# `IS NOT NULL AND … IS NOT DISTINCT FROM` rather than `=` (#2451, design.md C1,
+# selected by the 2026-09-18 node-27 measurement). The pair FILTERS exactly as
+# `=` does and enforces exactly as much; what it is not is SARGABLE.
+#
+# The `IS NOT NULL` half is load-bearing and may not be dropped as redundant.
+# `IS NOT DISTINCT FROM` alone is not equivalent to `=`: with NULL on BOTH sides
+# it is TRUE where `=` is UNKNOWN, so it RETURNS the row that identity
+# verification excludes. The columns are NOT NULL only on the narrow table
+# (000059_river_timeseries_narrow_expand.sql:14-15); on
+# `hydro.river_timeseries_legacy` they are nullable —
+# 000050_river_identity_normalization.sql:216-222 adds them as bare `INTEGER`
+# and the only `SET NOT NULL` lives in
+# `hydro.cutover_river_identity_normalization()`, which that migration's own
+# COMMENT (:492-499) records as never invoked by the chain — and ONE template
+# renders BOTH branches. With the left side guarded non-NULL the pair agrees
+# with `=` on every input including a NULL right side, so this predicate does
+# not depend on a nullability fact stated in another file.
+#
+# No reachable fail-open is being closed here: `_validate_series_target` 404s on
+# an unknown `basin_version_id` before any of these blocks run. The guard exists
+# so the BRANCH SCAN stops depending on that upstream validator, which
+# `packages/common/forecast_curve_capture.py:82` and
+# `packages/common/node27_pgdata_workload_query.py:119` both override to
+# `return None`. The dependency is not symmetric across the two conjuncts: an
+# unknown `river_network_version_id` also empties the `core.river_segment`
+# sub-select, so the retained `rt.river_segment_key = (…)` hard-gates that leg
+# on its own — but that predicate is keyed on segment+network, so it does NOT
+# gate an unknown BASIN, and `rt.basin_version_key` is this template's only
+# basin-identity conjunct on the `rt` side. Leaving the basin leg to an
+# overridable validator is the same "verify identity outside the branch scan"
+# that got C2 rejected in design.md §2.2.
+#
+# Non-sargability collapses `river_ts_run_discovery_key_idx`'s usable
 # prefix — `(run_key, basin_version_key, river_network_version_key, variable_e,
 # valid_time DESC)` — to `run_key` alone, so on a chunk with absent statistics
 # the planner stops choosing it over the primary key and leaving
@@ -46,6 +75,7 @@ SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.uni
 FROM hydro.river_timeseries rt
 JOIN hydro.hydro_run h ON h.run_key = rt.run_key
 WHERE {store_predicate}
+  AND rt.basin_version_key IS NOT NULL
   AND rt.basin_version_key IS NOT DISTINCT FROM (
       SELECT basin_version_key FROM core.basin_version
       WHERE basin_version_id = %(basin_version_id)s
@@ -59,6 +89,7 @@ WHERE {store_predicate}
   AND rt.river_segment_id = %(river_segment_id)s
   -- transitional compressed-chunk pushdown aid, remove with #1342
   AND rt.river_network_version_id = %(river_network_version_id)s
+  AND rt.river_network_version_key IS NOT NULL
   AND rt.river_network_version_key IS NOT DISTINCT FROM (
       SELECT river_network_version_key FROM core.river_network_version
       WHERE river_network_version_id = %(river_network_version_id)s

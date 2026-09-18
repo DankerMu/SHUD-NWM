@@ -563,10 +563,25 @@ def test_an_expected_open_cell_is_excused_for_its_plan_criteria() -> None:
     [
         "ROW IDENTITY: digest aaaaaaaaaaaaaaaa differs from the recorded bbbbbbbbbbbbbbbb",
         "NON-VACUITY: the measured statement returned 0 rows, expected 24",
+        # The allowlist excuses a cell whose PLAN is known-bad. An EMPTY EXTRACT
+        # is not a bad plan — it is NO plan node for this chunk at all, so
+        # criteria 1 and 2 are False having judged nothing, and every other check
+        # on the cell (row identity, non-vacuity) still passes because the rows
+        # come back correctly. Excusing it would print `criteria=FF-` and
+        # `defect_reproduced=False` — which reads exactly like "still red as
+        # expected" — while the gate went green having measured this cell not at
+        # all. That is the module docstring's wrong-reason #1 reached THROUGH
+        # wrong-reason #1b.
+        "EMPTY EXTRACT: no plan node read _hyper_3_62_chunk; every criterion below would pass for nothing",
     ],
 )
-def test_an_expected_open_cell_is_not_excused_for_rows_it_returned(failure: str) -> None:
-    """Row identity and non-vacuity are independent of which index was taken."""
+def test_an_expected_open_cell_is_not_excused_for_what_the_allowlist_cannot_speak_to(failure: str) -> None:
+    """The allowlist's reason covers the INDEX CHOICE and nothing else.
+
+    Row identity and non-vacuity are independent of which index was taken. So is
+    an empty extract, which reports that no index was taken here to have an
+    opinion about.
+    """
     cell = _open_cell(passed=False, failures=["criterion 1: river_segment_id is not in the Index Cond", failure])
     reported = _reported_cell_failures([cell])
     assert len(reported) == 1
@@ -606,6 +621,16 @@ def test_the_shipped_sql_carries_the_selected_c1_spelling(monkeypatch: pytest.Mo
     assert "rt.river_network_version_key IS NOT DISTINCT FROM (" in sql
     assert "rt.basin_version_key = (" not in sql
     assert "rt.river_network_version_key = (" not in sql
+    # The NULL guard is part of the measured statement, not a separate concern:
+    # without it the two conjuncts diverge from `=` when both sides are NULL, and
+    # `hydro.river_timeseries_legacy` — one of the two branches this statement
+    # scans — declares all three key columns nullable. The bench must measure the
+    # spelling that ships, guard included.
+    assert "  AND rt.basin_version_key IS NOT NULL\n  AND rt.basin_version_key IS NOT DISTINCT FROM (\n" in sql
+    assert (
+        "  AND rt.river_network_version_key IS NOT NULL\n"
+        "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"
+    ) in sql
     # The conjunct #2451 exists to protect keeps its sargable `=`.
     assert "rt.river_segment_key = (" in sql
     # And no residue of the spike: neither the switch nor C2's outer layer.
