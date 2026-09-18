@@ -22,7 +22,7 @@ authority for the compression ratio, the tick pair and the causal proof.
 | task 5.2 item | verdict | where |
 |---|---|---|
 | curve EXPLAIN gate, SQL bounds, 2 networks × 3 storage states | **GREEN** | §1 |
-| the same gate's local API bound (P95 ≤ 500 ms) | **RED — and red on legacy too; #2486** | §2 |
+| the same gate's local API bound (P95 ≤ 500 ms) | **state-dependent: quiescent GREEN 6/6 (worst 202.7 ms); under full-cycle ingest RED 4/6 (worst 955.7 ms, legacy too). Cause = contention; which reading the gate takes is an open decision — #2486** | §2 |
 | identity-existence probe miss branch before/after + coverage loss | **GREEN, no loss** | §3 |
 | registry counts (active/runnable/selected/excluded) | **38 / 38 / 38 / 0** | §4 |
 | governance receipt with the working-set fields | **captured, not critical** | §5 |
@@ -116,7 +116,15 @@ Index Scan on compress_hyper_10_174_chunk / _177 / _178 / _179
 the spec names, now measured on four chunks rather than the single one that existed when
 the 2026-09-17 receipt was written.
 
-## 2. The API bound — local single-source `forecast-series` warm P95 ≤ 500 ms: **RED**
+## 2. The API bound — local single-source `forecast-series` warm P95 ≤ 500 ms: **state-dependent**
+
+Measured twice with the same script against the same six runs, once under full-cycle
+ingest and once quiescent. **Contended: RED, four of six cells over. Quiescent: GREEN,
+all six, worst 202.7 ms.** The cause is established — contention, not the read path — and
+which of the two readings the gate takes is an open decision, not something this receipt
+decides. Both measurements and the reasoning are below.
+
+### The contended measurement
 
 `api0918.py`, `http://127.0.0.1:8080`, two warm-ups then 30 timed requests per cell,
 against the same six runs §1 resolved, so the API and SQL legs measure the same work.
@@ -138,10 +146,10 @@ re-readable.
 | small / narrow uncompressed | 200 | 168 | 108.1 | 156.6 | 429.7 | **576.0** | 587.9 | 2 / 30 |
 | small / **legacy** | 200 | 132 | 100.6 | 132.6 | 370.9 | **436.5** | 710.1 | 1 / 30 |
 
-**API GATE: RED — four of six cells exceed 500 ms at P95, and one of the four is the
-legacy baseline.** The bound is not met and this receipt does not claim it is.
+**Four of six cells exceed 500 ms at P95, and one of the four is the legacy baseline.**
+The bound is not met in this state and this receipt does not claim it is.
 
-Three facts that say what the red is and is not:
+Three facts that say what the tail is and is not:
 
 1. **It is not the narrow store.** `shj_nj/legacy` misses the bound at 623.7 ms and
    `small/legacy` has a 710.1 ms sample. Whatever produces the tail produces it on the
@@ -151,7 +159,8 @@ Three facts that say what the red is and is not:
 2. **It is not the fact read.** §1 measures those exact statements at 1.252–3.156 ms warm
    over five `EXPLAIN (ANALYZE, BUFFERS)` rounds each. Three orders of magnitude separate
    the SQL from the tail.
-3. **It is not general server slowness.** `api_tail_control.py` runs the same 30-sample
+3. **It is not general server slowness** — though see below for what this control does
+   *not* cover. `api_tail_control.py` runs the same 30-sample
    shape against two routes that issue no forecast query: `/health` **2.0 / 2.0 / 2.4 /
    2.4 ms** (min/median/P95/max) and `/api/v1/runtime/config` **2.6 / 2.7 / 3.1 / 3.2 ms**.
    Flat, no tail at all.
@@ -159,24 +168,58 @@ Three facts that say what the red is and is not:
 Every distribution is bimodal — a tight body at 100–220 ms and a separate upper cluster
 at 350–1250 ms. Not a uniform slowdown: a fraction of requests falls into a second mode.
 
-**The machine state during the measurement, which must be ruled out first.**
-`api-0918.json` was written at **14:40:46**, and `nhms-node27-autopipe.service` had been
-`activating` continuously since **14:30:32** — still unfinished at 14:55, **24 minutes**.
-A normal tick is **11 seconds** (`13:58:40 Starting` → `13:58:51 Finished`). This one was
-catching up a `fcst_ifs_2026091712` backlog: `node27_autopipeline.py --workers 6`, five
-`output_parser.cli parse` children at 50–100 % CPU each with five `nhms_ingest_rw … INSERT`
-backends, load average climbing 4.44 → 6.92. **The whole 30-sample run sat inside a
-saturated catch-up window.** The flat `/health` does not rule this out: `/health` touches
-no database, no connection pool and no serialization, so it stays flat under exactly this
-kind of contention with `--workers 2`. Control 3 above bounds general server slowness, not
-pool or event-loop contention.
+### The cause, established by a controlled re-measure
 
-So the honest statement is: **the bound is unmet as measured**, and the measurement was
-taken under ingest contention that has not yet been excluded. The verdict does not change
-either way — the spec states 500 ms with no quiet-window caveat, and production carries
-these ticks. Localizing the tail between the two measured endpoints (SQL 1.3–3.2 ms ↔ API
-100–1250 ms), and a re-measure in a quiescent window, are tracked as **#2486** rather than
-guessed at here.
+`api-0918.json` was written at **14:40:46**, and `nhms-node27-autopipe.service` had been
+`activating` continuously since **14:30:32**, finishing only at **15:11:47** — **41
+minutes**, against a normal idle tick of **11 seconds** (`13:58:40 Starting` → `13:58:51
+Finished`). That run was not stuck; it was the **whole `2026-09-17 12z` cycle**: 38 GFS +
+38 IFS runs through `node27_autopipeline.py --workers 6`, five `output_parser.cli parse`
+children at 50–100 % CPU each with five `nhms_ingest_rw … INSERT` backends, load average
+4.44 → 6.92. **The entire 30-sample run above sat inside that saturated window.**
+
+The flat `/health` does not rule contention out — `/health` touches no database, no
+connection pool and no serialization, so it stays flat under exactly this kind of
+contention with `--workers 2`. So the control was re-run properly instead:
+`quiet_remeasure.sh` waits for the service to go `inactive` **and** for the 1-minute load
+to fall below 2.0, then runs the **same `api0918.py`, unchanged**, against the **same six
+runs**. The only variable is the machine state. It measured 15:30:28–15:30:57 at load
+**1.84 → 2.33**, with **no tick of either pipeline inside the window** (the next
+`nhms-` and `yd-node27-autopipe` both started at 15:31:40, and that nhms tick finished in
+11 s — back to the idle shape).
+
+| cell | min | median | p90 | **P95** | max | > 500 ms |
+|---|---|---|---|---|---|---|
+| shj_nj / narrow compressed | 139.3 | 151.1 | 167.4 | **167.5** | 167.8 | 0 / 30 |
+| shj_nj / narrow uncompressed | 125.3 | 158.2 | 180.0 | **183.6** | 202.9 | 0 / 30 |
+| shj_nj / **legacy** | 115.7 | 150.0 | 166.6 | **174.2** | 175.3 | 0 / 30 |
+| small / narrow compressed | 114.1 | 158.3 | 180.9 | **183.3** | 188.2 | 0 / 30 |
+| small / narrow uncompressed | 122.2 | 160.8 | 184.2 | **202.7** | 212.8 | 0 / 30 |
+| small / **legacy** | 108.4 | 136.8 | 159.8 | **173.9** | 176.4 | 0 / 30 |
+
+**Quiescent: all six cells PASS, worst P95 202.7 ms against 500 ms — 2.5× margin, and
+0 of 180 samples over the bound** (contended: 18 of 180). `api-0918-quiet.json`.
+
+The distribution shape is the evidence, not the P95 alone. Contended it is **bimodal** —
+a tight body at 100–220 ms plus a separate cluster at 350–1250 ms. Quiescent it is
+**unimodal**, every one of the 180 samples inside 108.4–212.8 ms: the upper cluster does
+not shrink, it **disappears**. So that cluster is not a cost of this read path. It is
+requests losing CPU and pool to the ingest workers — on legacy exactly as on narrow.
+
+### What the verdict is, stated as two facts rather than one
+
+1. **Quiescent, the bound holds** on all six cells with 2.5× margin.
+2. **Under full-cycle ingest, it does not** — four of six cells over, worst 955.7 ms.
+
+Neither state is contrived: the ingest window is ordinary production, and it occupies
+roughly **40 minutes of every forecast cycle**, not the "11 seconds every ten minutes"
+that an idle tick suggests. The spec line (`specs/timeseries-narrow-store/spec.md`) says
+`warm P95 ≤ 500 ms` with **no machine-state qualifier**, so whether this gate reads green
+depends on whether the bound is meant to hold while ingest is co-located — and that
+reading is what gates I9 (#1988). **This receipt does not pick for you**; it is listed
+with the other open decision at the end of §11. The residual work — what exactly the two
+processes contend for (CPU, pool, or a sync call blocking the event loop under
+`--workers 2`) and how the bound should be written — is **#2486**.
 
 The `issue_time=latest` shape is **not** folded into this verdict and is not hidden: it
 is still red at ~3.9 s warm, its cause is `_per_source_latest_cycles` scanning the fact
@@ -518,6 +561,8 @@ Recorded for every shape this receipt measures, narrow against its own legacy ba
 | API, SHJ-NJ, median (n=30) | 174.8 ms | 185.3 ms / 160.4 ms | 1.06× / 0.92× |
 | API, small, P95 (n=30) | 436.5 ms | 576.0 ms / 955.7 ms | 1.32× / 2.19× |
 | API, small, median (n=30) | 132.6 ms | 156.6 ms / 179.0 ms | 1.18× / 1.35× |
+| API, SHJ-NJ, P95 (n=30, **quiescent**) | 174.2 ms | 183.6 ms / 167.5 ms | 1.05× / 0.96× |
+| API, small, P95 (n=30, **quiescent**) | 173.9 ms | 202.7 ms / 183.3 ms | **1.17×** / 1.05× |
 | identity probe, miss branch | 3 194.4 ms | 4.6 ms | **0.0014×** |
 
 Worst ratio **2.19×**, well inside one order of magnitude, and the narrow curve legs
@@ -527,10 +572,12 @@ even that overstates the regression. **Fact-table Seq Scans: zero.** `gate0918.p
 Index Scan, Index Only Scan, or a Custom Scan over a compressed chunk whose child is an
 index scan. **Criterion not tripped; it does not block I9.**
 
-Note the separation this table makes explicit and §2 depends on: the API **absolute**
-bound is missed on four cells, but the API **relative** ratio never exceeds 2.19× because
-the legacy baseline carries the same tail. The regression criterion is the relative one;
-the absolute 500 ms bound is a separate, currently unmet spec bound, and §2 says so.
+Note the separation this table makes explicit and §2 depends on: under ingest the API
+**absolute** bound is missed on four cells, but the API **relative** ratio never exceeds
+2.19× because the legacy baseline carries the same tail — and quiescent, where the tail is
+gone, the worst API ratio falls to **1.17×**. The regression criterion is the relative one
+and it is not tripped in either state. The absolute 500 ms bound is a separate spec bound
+whose reading depends on the machine state; §2 gives both numbers and does not pick.
 
 ## 11. Per-statement expand wall time — not obtainable, stated rather than faked
 
@@ -555,13 +602,29 @@ be meaningless against an already-migrated table. **This item is therefore left
 unsatisfied and 5.2's checkbox reflects that**; it is listed here so the gap is a stated
 fact rather than a silent omission.
 
+## The two decisions this receipt hands back
+
+5.2's checkbox stays unchecked on **two** open items, both stated rather than resolved
+here because neither is a measurement question:
+
+1. **The per-statement expand wall time (this section).** Waive the item, or accept the
+   window-level wall clock in its place. There is no third option that is not a fabricated
+   number.
+2. **What machine state the API bound is written against (§2).** The spec says
+   `warm P95 ≤ 500 ms` with no qualifier. Quiescent it holds on all six cells with 2.5×
+   margin; during the ~40 minutes per cycle that ingest saturates the box it fails on four.
+   If the bound must hold under co-located ingest, I9 (#1988) is blocked on **#2486**; if
+   it is a quiescent bound, I9 waits only on item 1 and the separate GO. The SQL bounds and
+   the relative regression criterion are green in **both** states either way.
+
 ## Files
 
 | file | what it is |
 |---|---|
 | `probe0918.py`, `explain-0918.json` | §1, the six-cell EXPLAIN probe and its raw plans |
 | `gate0918.py` | §1, the per-node judge (prints the node count it judged) |
-| `api0918.py`, `api-0918.json` | §2, the local API warm P95, 30 samples per cell |
+| `api0918.py`, `api-0918.json` | §2, the local API warm P95, 30 samples per cell — the **contended** run (14:40, inside the 41-minute cycle ingest) |
+| `quiet_remeasure.sh`, `api-0918-quiet.json` | §2, the **quiescent** re-run of the same script: waits for the ingest unit to go inactive *and* 1-min load < 2.0, then measures. It waits; it never starts or stops anything. |
 | `api_tail_control.py`, `api-tail-control-0918.json` | §2's control — `/health` and `/api/v1/runtime/config`, same shape, no tail |
 | `probe_identity.py`, `identity-probe-0918.json` | §3, the existence-probe before/after |
 | `registry_counts.py`, `registry-counts-0918.json` | §4 |

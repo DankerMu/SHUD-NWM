@@ -205,8 +205,8 @@
 - [ ] 5.2 Execute and post the receipt: per-statement wall time; first narrow chunk size after one full cycle; curve EXPLAIN gate for SHJ-NJ and a small network on narrow uncompressed, narrow compressed and legacy (bounds: `river_segment_key` in Index Cond / segmentby pruning, `Rows Removed / returned ≤ 10`, `shared hit ≤ 5000`, SQL warm P95 ≤ 300 ms over ≥ 5 samples, local single-source `forecast-series` warm P95 ≤ 500 ms); identity-existence probe miss branch before/after with coverage-loss list; registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with screenshots; display deny-write receipt (checklist C1–C4); `/ops` reachable; the regression criterion recorded.
 
   **5.2 status, 2026-09-18 (`receipts/2026-09-18-i8-task52/`, reviewed process sha
-  `258b06ec`):** nine of the eleven items are measured and green, **one spec bound is
-  RED**, and one item is unobtainable.
+  `258b06ec`):** nine of the eleven items are measured and green, one spec bound reads
+  green or red depending on a decision about machine state, and one item is unobtainable.
 
   Green: curve EXPLAIN gate GREEN on all six cells (2 networks × 3 storage states), worst
   `shared hit` 569 against 5000, worst SQL warm P95 3.156 ms against 300 ms, worst
@@ -220,15 +220,26 @@
   `/ops` 200. Regression criterion recorded, worst ratio 2.19×, zero fact Seq Scans — not
   tripped.
 
-  **RED — the local API bound.** Single-source `forecast-series` warm P95 ≤ 500 ms is
-  **not met**: four of six cells exceed it at n = 30, worst 955.7 ms, and the legacy
-  baseline misses it too at 623.7 ms. An earlier n = 8 pass of the same script read a
-  comfortable 233.4 ms and is **retracted** — at n = 8 the P95 index lands on the maximum,
-  and two 8-sample passes on the same cell disagreed by 3×. The tail is not the narrow
-  store (legacy is over as well), not the fact read (1.3–3.2 ms in §1), and not general
-  server slowness (`/health` flat at 2.0–2.4 ms). The **relative** regression criterion
-  therefore still passes at worst 2.19×, while the **absolute** 500 ms bound is unmet.
-  Tracked as #2486; receipt §2 has the distributions.
+  **The local API bound is state-dependent, and that is the second open decision.**
+  Single-source `forecast-series` warm P95 ≤ 500 ms, same script and same six runs,
+  measured in both machine states:
+
+  - **quiescent — GREEN**, all six cells, worst P95 202.7 ms, 0 of 180 samples over the
+    bound, distribution unimodal at 108.4–212.8 ms;
+  - **under full-cycle ingest — RED**, four of six over, worst 955.7 ms, legacy over too
+    at 623.7 ms, 18 of 180 samples over, distribution bimodal with a second cluster at
+    350–1250 ms.
+
+  The upper cluster disappears entirely when ingest is idle, so the cause is **contention
+  with the ingest workers, not the read path**: 38 GFS + 38 IFS runs through
+  `node27_autopipeline.py --workers 6` occupied 14:30:32–15:11:47 (41 min) at load
+  4.44 → 6.92, and the contended measurement sat inside it. An earlier n = 8 pass reading
+  233.4 ms is **retracted** (at n = 8 the P95 index lands on the maximum). The **relative**
+  regression criterion passes in both states — worst 2.19× contended, 1.17× quiescent.
+  The spec line carries no machine-state qualifier, so whether this gate reads green is a
+  decision, not a measurement: if the bound must hold under co-located ingest, I9 (#1988)
+  is blocked on **#2486**; if it is a quiescent bound, I9 waits only on the wall-time item
+  below plus the separate GO. Receipt §2 has both distributions and both raw JSONs.
 
   **The one item left, and why the box stays unchecked:** per-statement expand wall time
   for the live application of `000059` **does not exist and cannot be produced**. The only
