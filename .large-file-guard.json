@@ -101,6 +101,11 @@
     "tests/test_node27_pgdata_workload.py",
     "tests/test_river_ts_render.py",
     "tests/test_river_ts_text_identity_cleanup.py",
-    "workers/model_registry/basins_discovery.py"
+    "workers/model_registry/basins_discovery.py",
+    "workers/model_registry/basins_registry_import.py",
+    "workers/model_registry/qhh_production_bootstrap.py",
+    "tests/test_mvt_national_identity_probe_integration.py",
+    "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+    "tests/test_node27_mvt_cache_retention.py"
   ]
 }

@@ -77,7 +77,8 @@ OpenSpec change: mvt-cache-identity-and-budget-followups (generated)
    **刻意不含** `ST_Length(s.geom) > 0`——正是这一差异让「源几何退化 → backfill 返回 0」被断言抓到（B-5 绿腿）。
    计数 > 0 即抛 `QhhProductionBootstrapError`（code `QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE`，details 带 rnv 与计数），
    事务回滚。**行为变化（有意）**：源 reach 零长度但带 `Type` 的网络上，`seed_qhh_output_segments` 过去成功（报告
-   `geometry_missing_count`），现在 fail-closed。不选「upsert 自行 bump」：它只能让被擦掉的
+   `geometry_missing_count`），现在 fail-closed。该 code **不**加入 `_persist_inactive_on_scheduler_visibility_blocker` 的持久停用集合：回滚保留此前已提交的
+   `Type`，缺 `stream_type` 只影响低 zoom 分级，不像缺几何那样让调度可见的模型失效。不选「upsert 自行 bump」：它只能让被擦掉的
    `stream_type` 以已轮转状态落库，数据本身仍是坏的。
 2. **写钉换形状**：扫描对标识符 `geometry_generation` 的**任何写**计数——`SET … geometry_generation =`（任意右值）、
    INSERT 列表中出现、`UPDATE … SET` 多列中出现——全仓恰好一处（backfill 那一句）；000057 的 `ADD COLUMN` DDL

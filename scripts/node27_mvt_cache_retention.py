@@ -184,7 +184,10 @@ def _summary_sink(args: argparse.Namespace) -> Path | None:
     result as `--summary-path`, so a second reader here would only add a way for
     the two to disagree. A RELATIVE path is a valid sink -- it is a file this
     process creates, not a tree it deletes from, so the absoluteness that
-    `cache_root` needs buys nothing here.
+    `cache_root` needs buys nothing here. The wrapper is where absoluteness is
+    enforced (`SUMMARY_PATH_NOT_ABSOLUTE`), because it `cd`s into the
+    repository before invoking this runner and a relative sink would land in
+    the git work tree.
     """
     value = (args.summary_path or "").strip()
     return Path(value).expanduser() if value else None
@@ -264,6 +267,13 @@ def _hex_directories(parent: Path) -> tuple[list[Path], dict[str, Any] | None]:
     could not be listed; the caller records it and carries on with the other
     lane, so one unreadable directory never suppresses the rest of the run.
 
+    `parent` is only ever the cache root or `<root>/.locks`, and NEITHER gets
+    the `FileNotFoundError` / `NotADirectoryError` exemption `_lane_targets`
+    grants a `<hh>` directory: a cache root that vanished after preflight, or a
+    `.locks` that vanished after `_locks_root_skip` saw it, is not the
+    concurrent-miss race -- no display worker ever removes either -- so every
+    `OSError` here, ENOENT included, stays an `enumeration_unavailable` failure.
+
     `follow_symlinks=False` throughout: `DirEntry.is_dir()` follows links by
     default, which would let a `<root>/ab -> /elsewhere` symlink drag the
     deletion surface out of the cache root. The PER-ENTRY `OSError` stays a
@@ -295,6 +305,14 @@ def _lane_targets(
 
     Same split as `_hex_directories`: an unreadable `<hh>` is a `failed[]`
     entry, a single entry that vanishes or refuses `stat` mid-scan is not.
+
+    One level up, the same race is exempt too: a `<hh>` that its parent listed
+    and that was then removed, or replaced by a non-directory, before this
+    `scandir` (`FileNotFoundError` / `NotADirectoryError`) holds no targets any
+    more, so it contributes nothing and no failure. Only those two errnos, and
+    only here, because `hex_dir` is always a `<hh>` directory: every other
+    `OSError` (`EACCES`, `ESTALE`, ...) still hides an unknown number of aged
+    files and stays `enumeration_unavailable`.
     """
     cutoff_ts = cutoff.timestamp()
     found: list[CacheTarget] = []
@@ -322,6 +340,8 @@ def _lane_targets(
                         mtime=datetime.fromtimestamp(info.st_mtime, UTC),
                     )
                 )
+    except (FileNotFoundError, NotADirectoryError):
+        return [], None
     except OSError as error:
         return [], _enumeration_failure(hex_dir, error)
     return sorted(found, key=lambda target: str(target.path)), None
@@ -439,6 +459,11 @@ def _remove_lock_target(target: CacheTarget) -> tuple[str, OSError | None]:
     it. Our non-blocking `flock` on the orphan I then SUCCEEDS, and unlinking by
     path at that point would delete J -- a lock somebody is holding right now.
     Comparing `fstat(fd)` with `lstat(path)` turns that into `already_gone`.
+
+    Every system call after the open is classified and none escapes: an
+    `OSError` from `fstat`, `flock`, the `lstat` recheck (other than ENOENT) or
+    `unlink` (other than ENOENT) is `failed`, so `run_retention` always gets to
+    write its summary. The descriptor is closed on every path.
     """
     try:
         fd = _open_lock_fd(target.path)
@@ -450,7 +475,13 @@ def _remove_lock_target(target: CacheTarget) -> tuple[str, OSError | None]:
             return "not_regular_file", None
         return "failed", error
     try:
-        held = os.fstat(fd)
+        try:
+            held = os.fstat(fd)
+        except OSError as error:
+            # ESTALE / EIO on NFS. Classified like every other step after the
+            # open: an escape from here would skip `_emit` and leave the run
+            # with NO summary, i.e. yesterday's receipt read as today's.
+            return "failed", error
         if not stat.S_ISREG(held.st_mode):
             return "not_regular_file", None
         try:

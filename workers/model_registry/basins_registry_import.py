@@ -1125,6 +1125,49 @@ def _ensure_output_river_segments(cursor: Any, sources: ImportSources) -> int:
     return inserted
 
 
+def _lock_river_network_version(cursor: Any, river_network_version_id: str) -> None:
+    """Take the parent ``core.river_network_version`` row lock (#2157).
+
+    Lock-order invariant: every production path that rewrites EXISTING
+    ``core.river_segment`` rows in place -- the ``UPDATE`` in
+    ``_backfill_output_segment_geometry`` and the ``ON CONFLICT DO UPDATE``
+    upsert in ``qhh_production_bootstrap.py::_seed_output_segment_rows`` (via
+    both of its entry points) -- takes this lock BEFORE its first statement
+    that touches those rows, so all in-place writers acquire parent then
+    children. The import transaction (``_refresh_parent_version_materialization``
+    ``UPDATE``s the parent first) already follows that order; before this lock
+    the backfill-only transactions went children -> parent (the
+    ``geometry_generation`` bump) and deadlocked against it (ABBA).
+
+    ``FOR NO KEY UPDATE`` is the lock a non-key ``UPDATE`` of the parent takes,
+    so it queues behind (and blocks) the import's parent ``UPDATE`` and the
+    generation bump, while FK checks from row-level segment ``INSERT``s (``FOR
+    KEY SHARE``) do not conflict with it. Re-taking it inside a transaction
+    that already holds it (``_import_basin`` -> ``import_basin_into_registry_core``
+    -> backfill) is a no-op, never a self-deadlock.
+
+    Boundary: the invariant covers in-place rewrites of existing rows only.
+    Row-level ``INSERT`` of new segments (``_ensure_river_segments``,
+    ``db/seeds/seed_demo.py``'s ``ON CONFLICT DO NOTHING``) and
+    ``_delete_legacy_seg_rows`` are outside it: they never lock a row either
+    in-place writer targets.
+
+    Precondition: the parent row already exists. The statement does not fetch
+    or assert the row -- on a missing row it simply locks nothing -- so every
+    caller runs after ``_ensure_river_network`` or against a network that a
+    ``core.model_instance`` row already references.
+    """
+    cursor.execute(
+        """
+        SELECT 1
+        FROM core.river_network_version
+        WHERE river_network_version_id = %s
+        FOR NO KEY UPDATE
+        """,
+        (river_network_version_id,),
+    )
+
+
 def _backfill_output_segment_geometry(
     cursor: Any,
     river_network_version_id: str,
@@ -1154,12 +1197,24 @@ def _backfill_output_segment_geometry(
     ``only_missing`` updates NULL-geom reaches and existing output reaches that
     still lack a source ``Type``. A source without ``Type`` does not cause a
     geometry-complete target to be rewritten on every pass.
+
+    Lock order (#2157): the FIRST statement is ``_lock_river_network_version``
+    -- parent row before any segment row, the order every in-place
+    ``core.river_segment`` writer follows (see that helper for the invariant
+    and its boundary). It is taken before the candidate SELECT, not after the
+    early exits, so candidates and source reaches are read under the lock: a
+    snapshot taken before waiting on a concurrent import could otherwise
+    overwrite geometry that import has just committed. Cost: a
+    geometry-complete ``only_missing=True`` tick holds the parent lock until
+    its transaction ends, yet still returns 0 and bumps nothing.
     """
     from psycopg2.extras import execute_values
 
     def _cell(row: Any, key: str, index: int) -> Any:
         # Tolerate both plain (tuple) and RealDict cursors across callers/tests.
         return row[key] if isinstance(row, dict) else row[index]
+
+    _lock_river_network_version(cursor, river_network_version_id)
 
     # Output reaches still needing geometry (honour only_missing). The index is
     # matched as text, and a non-numeric shud_riv_index is filtered out here, so

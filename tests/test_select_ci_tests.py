@@ -1103,6 +1103,12 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        # #2156 (D-2): guard-derived entry, synced from the selector's own
+        # output per the procedure above — the geometry-identity suite imports
+        # TileInput / cache_key / display_ready_run from services.tiles.mvt at
+        # file level, so the closure guard puts it on this rule as a DIRECT
+        # importer.
+        "tests/test_mvt_run_and_river_network_geometry_identity.py",
         # #2032: guard-derived entries, synced from the selector's own output
         # per the procedure above — both new suites import services.tiles.mvt
         # at file level (the lock suite drives tile_generation_lock; the
@@ -1404,12 +1410,17 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     # so a migration that adds an enum member changes what that suite asserts —
     # and only running it here makes the "closed enum" claim red on the
     # migration's own PR instead of silently stale.
+    #
+    # #2154 adds a third leg by the supplemental route: the river-segment
+    # write-surface scan reads every db/**/*.sql statement, so a migration that
+    # rewrites core.river_segment or geometry_generation reds on its own PR.
     migration = "db/migrations/000043_canonical_grid_snapshot.sql"
     assert Path(migration).exists()
     expected = [
         "tests/test_hydro_status_set_parity.py",
         "tests/test_migrations.py",
         "tests/test_node27_write_roles.py",
+        "tests/test_river_segment_write_surface_scan.py",
     ]
 
     assert select_tests([migration], repo_root=Path(".")) == expected
@@ -6088,7 +6099,12 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
         # extra collection pass on all of them and nothing here would notice.
-        ("db/schema.sql", "1"),
+        # #2154 moved this probe off `db/schema.sql`: a `.sql` under db/ now
+        # also selects the river-segment write-surface scan (two targets, kept
+        # below), so the single-target boundary needs a path that still selects
+        # exactly one file.
+        ("infra/compose.compute.yml", "1"),
+        ("db/schema.sql", "2"),
     ],
 )
 def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
@@ -11321,18 +11337,16 @@ def test_write_surface_routing_is_set_union_over_every_derived_root() -> None:
         selected = set(select_tests([probe], repo_root=Path(".")))
         assert WRITE_SURFACE_SCAN_PATH not in selected, f"{probe}: must not select {WRITE_SURFACE_SCAN_PATH}"
 
-    # `db/**` is spelled as a LITERAL, not derived. The obvious derivation
-    # `set(TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS) - _write_surface_root_globs()`
-    # is a plain string difference and also yields `packages/common/**`, whose
-    # probe DOES select the scan (it is under `packages/**`) -- so a derived
-    # negative probe would red. Derivation buys coverage on the POSITIVE side
-    # only. db/** must keep the sibling #1656 route and refuse this one.
+    # #2154 flipped `db/**` from refused to routed: the scan now walks db/ (its
+    # Python and its SQL). Spelled as a LITERAL here on top of the derived probe
+    # above, so the flip itself is pinned, and db/** must keep the sibling #1656
+    # route alongside this one.
     db_selected = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
-    assert WRITE_SURFACE_SCAN_PATH not in db_selected, (
-        f"db/brand_new_thing.py: db/ is not a scanned directory, it must not select {WRITE_SURFACE_SCAN_PATH}"
+    assert WRITE_SURFACE_SCAN_PATH in db_selected, (
+        f"db/brand_new_thing.py: db/ is a scanned directory since #2154, it must select {WRITE_SURFACE_SCAN_PATH}"
     )
     assert INVARIANT_SUITE_PATH in db_selected, (
-        f"db/brand_new_thing.py lost the sibling #1656 route while refusing {WRITE_SURFACE_SCAN_PATH}"
+        f"db/brand_new_thing.py lost the sibling #1656 route while selecting {WRITE_SURFACE_SCAN_PATH}"
     )
 
     # Live state: the same positive oracle the mutant test uses reports nothing.
@@ -11395,14 +11409,16 @@ def test_write_surface_derivation_grows_with_a_sixth_scanned_directory(
     monkeypatch.chdir(
         _write_scan_fixture(
             tmp_path,
-            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")\n',
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db", "infra")\n',
         )
     )
 
-    assert _write_surface_scan_dirs() == ("apps", "services", "workers", "packages", "scripts", "db")
-    assert "db/**" in _write_surface_root_globs()
-    assert _write_surface_future_probes()["db"] == "db/brand_new_thing.py"
-    with pytest.raises(AssertionError, match=r"missing \['db/\*\*'\]"):
+    # #2154 made `db` the live sixth directory, so the hypothetical grows to a
+    # seventh (`infra`); the derivation contract is unchanged.
+    assert _write_surface_scan_dirs() == ("apps", "services", "workers", "packages", "scripts", "db", "infra")
+    assert "infra/**" in _write_surface_root_globs()
+    assert _write_surface_future_probes()["infra"] == "infra/brand_new_thing.py"
+    with pytest.raises(AssertionError, match=r"missing \['infra/\*\*'\]"):
         _assert_write_surface_roots_match(live)
 
 
@@ -11492,6 +11508,64 @@ def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
         monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
         with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
             _write_surface_scan_dirs()
+
+
+def _write_surface_sql_roots() -> tuple[str, ...]:
+    """The selector's `.sql` write-surface root globs, read lazily (pre-change red runs)."""
+    from scripts.select_ci_tests import RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS
+
+    return RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS
+
+
+def _write_surface_sql_root_globs(path: str = WRITE_SURFACE_SCAN_PATH) -> set[str]:
+    """The scan's own SQL_DIRS binding mapped to `<dir>/**` (same derivation shape)."""
+    return {f"{directory}/**" for directory in _module_level_string_sequence(path, "SQL_DIRS")}
+
+
+def test_write_surface_sql_roots_derive_from_the_scan_sql_dirs() -> None:
+    # #2154: the scan reads `*.sql` statement text under its SQL_DIRS; the
+    # selector's `.sql` roots must be exactly that set, never a second list.
+    expected = _write_surface_sql_root_globs()
+    roots = set(_write_surface_sql_roots())
+    assert roots == expected, (
+        f"{WRITE_SURFACE_SCAN_PATH}: the selector's .sql roots and the scan's SQL_DIRS disagree -- "
+        f"missing {sorted(expected - roots)}, unexpected {sorted(roots - expected)}"
+    )
+    # Every SQL root is also a Python root: the scan walks db/ both ways.
+    assert roots <= set(_write_surface_roots()), sorted(roots - set(_write_surface_roots()))
+
+
+def test_write_surface_routing_selects_the_scan_for_sql_under_db_only() -> None:
+    # #2154: a data-fix migration is a write surface, so a `.sql` change under
+    # db/ must run the scan. `.sql` the scan never reads must not.
+    for probe in ("db/migrations/x.sql", "db/roles/brand_new_roles.sql"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH in selected, f"{probe}: does not select {WRITE_SURFACE_SCAN_PATH}"
+    for probe in (
+        "tests/fixtures/brand_new_fixture.sql",
+        "openspec/changes/x/evidence/probe.sql",
+        "scripts/brand_new_query.sql",
+        "db/migrations/README.md",
+    ):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH not in selected, f"{probe}: must not select {WRITE_SURFACE_SCAN_PATH}"
+
+
+def test_write_surface_sql_routing_reds_when_the_sql_root_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2154 mutant: the `.sql` leg reads the constant, not an inlined glob, and
+    # a `.py` under db/ still routes through the Python leg when it is dropped.
+    from scripts import select_ci_tests
+
+    monkeypatch.setattr(select_ci_tests, "RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS", ())
+
+    dropped = set(select_tests(["db/migrations/x.sql"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH not in dropped, (
+        f"emptying RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS left {WRITE_SURFACE_SCAN_PATH} selected for a .sql path"
+    )
+    retained = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH in retained
 
 
 def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_path: Path) -> None:
@@ -12118,6 +12192,10 @@ def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
     # the derived set, so a derivation that collapses to silence reds here.
     assert "tests/test_direct_grid_display_cutover_flip.py" in required
     assert "tests/test_openapi_31_contract.py" in required
+    # #2156 (D-2): the geometry-identity suite is a direct importer carrying the
+    # real _run_row / _river_network_source_version SQL; pinned by name so its
+    # routing cannot fall out with the derivation.
+    assert "tests/test_mvt_run_and_river_network_geometry_identity.py" in required
 
     selected = set(select_tests(["apps/api/routes/hydro_display.py"], repo_root=Path(".")))
     missing = required - selected

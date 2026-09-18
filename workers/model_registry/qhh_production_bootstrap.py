@@ -35,6 +35,7 @@ from .basins_registry_import import (
     _inventory_root,
     _json,
     _json_dict,
+    _lock_river_network_version,
     _prepare_sources,
     _recorded_relative_inventory_root,
     _source_root,
@@ -683,6 +684,11 @@ def seed_qhh_output_segments(
     output_segment_count, checksum = read_qhh_output_segment_count(sp_riv_path, root, model_id=model_id)
     with _transaction(database_url) as cursor:
         model = _fetch_model_identity(cursor, model_id)
+        # #2157 lock order: parent network row BEFORE the upsert takes row locks
+        # on existing output segments. Locking only inside the trailing backfill
+        # would turn this path into children -> parent and deadlock against an
+        # autopipeline backfill (parent -> children) on the same network.
+        _lock_river_network_version(cursor, model["river_network_version_id"])
         counts = _seed_output_segment_rows(
             cursor,
             model=model,
@@ -692,6 +698,11 @@ def seed_qhh_output_segments(
             sp_riv_checksum=checksum,
         )
         geometry_backfilled_count = _backfill_output_segment_geometry(cursor, model["river_network_version_id"])
+        _assert_complete_qhh_output_segment_stream_type(
+            cursor,
+            model["river_network_version_id"],
+            model_id=model_id,
+        )
         geometry_counts = _qhh_output_segment_geometry_counts(
             cursor,
             model["river_network_version_id"],
@@ -1065,6 +1076,11 @@ def _bootstrap_database(
                 model_id=model_id,
                 details={"rollback_expected": True, "failure_point": "output_segment_seed"},
             )
+        # #2157 lock order: `import_basin_into_registry_core` already UPDATEd the
+        # parent row above, so this re-take is a same-transaction no-op; it keeps
+        # "parent lock before the upsert" explicit and identical on both entry
+        # points of `_seed_output_segment_rows`.
+        _lock_river_network_version(cursor, sources.ids["river_network_version_id"])
         output_counts = _seed_output_segment_rows(
             cursor,
             model=_fetch_model_identity(cursor, model_id),
@@ -1083,6 +1099,11 @@ def _bootstrap_database(
             cursor,
             context,
             geometry_backfilled_count=geometry_backfilled_count,
+        )
+        _assert_complete_qhh_output_segment_stream_type(
+            cursor,
+            sources.ids["river_network_version_id"],
+            model_id=model_id,
         )
         forcing_after = _dynamic_forcing_counts(cursor, model_id)
         _assert_dynamic_forcing_unchanged(model_id, before=forcing_before, after=forcing_after)
@@ -1394,6 +1415,65 @@ def _assert_complete_qhh_output_segment_geometry(
             },
         )
     return geometry_counts
+
+
+def _assert_complete_qhh_output_segment_stream_type(
+    cursor: Any,
+    river_network_version_id: str,
+    *,
+    model_id: str,
+) -> None:
+    """Fail closed when the output-segment upsert left an erased ``Type`` behind (#2154).
+
+    ``_seed_output_segment_rows``' ``ON CONFLICT DO UPDATE`` rewrites
+    ``properties_json`` wholesale, dropping the ``Type`` a previous backfill
+    copied in and so NULLing the STORED ``stream_type``; it never bumps
+    ``geometry_generation`` itself. Both of its entry points rely on the
+    trailing ``_backfill_output_segment_geometry`` on the same cursor to
+    restore ``Type`` and bump. When that backfill updates nothing -- e.g. every
+    candidate is dropped by its ``ST_Length(source.geom) > 0`` filter -- the
+    erasure would commit with the tile cache identity unrotated.
+
+    The predicate reuses the backfill's candidate/source predicates verbatim
+    and deliberately omits ``ST_Length(s.geom) > 0``: a degenerate source reach
+    that still carries ``Type`` is exactly the case the backfill skips and this
+    check must catch. Run it after the trailing backfill; raising rolls the
+    whole transaction back, upsert included.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS stream_type_missing_count
+        FROM core.river_segment t
+        WHERE t.river_network_version_id = %s
+          AND COALESCE(t.properties_json->>'shud_output_river', 'false') = 'true'
+          AND (t.properties_json->>'shud_riv_index') ~ '^[0-9]+$'
+          AND NOT t.properties_json ? 'Type'
+          AND EXISTS (
+              SELECT 1
+              FROM core.river_segment s
+              WHERE s.river_network_version_id = t.river_network_version_id
+                AND COALESCE(s.properties_json->>'shud_output_river', 'false') <> 'true'
+                AND s.properties_json ? 'iRiv'
+                AND (s.properties_json->>'iRiv') ~ '^[0-9]+$'
+                AND s.properties_json->>'iRiv' = t.properties_json->>'shud_riv_index'
+                AND s.geom IS NOT NULL
+                AND s.properties_json ? 'Type'
+          )
+        """,
+        (river_network_version_id,),
+    )
+    missing = int(cursor.fetchone()["stream_type_missing_count"] or 0)
+    if missing > 0:
+        raise QhhProductionBootstrapError(
+            "QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE",
+            "QHH output river segments lost their source stream Type and the geometry backfill did not restore it.",
+            model_id=model_id,
+            details={
+                "river_network_version_id": river_network_version_id,
+                "stream_type_missing_count": missing,
+                "rollback_expected": True,
+            },
+        )
 
 
 def _qhh_output_segment_geometry_counts(
