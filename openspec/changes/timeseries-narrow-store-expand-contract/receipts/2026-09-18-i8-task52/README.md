@@ -22,7 +22,7 @@ authority for the compression ratio, the tick pair and the causal proof.
 | task 5.2 item | verdict | where |
 |---|---|---|
 | curve EXPLAIN gate, SQL bounds, 2 networks × 3 storage states | **GREEN** | §1 |
-| the same gate's local API bound (P95 ≤ 500 ms) | **state-dependent: quiescent GREEN 6/6 (worst 202.7 ms); under full-cycle ingest RED 4/6 (worst 955.7 ms, legacy too). Cause = contention; which reading the gate takes is an open decision — #2486** | §2 |
+| the same gate's local API bound (P95 ≤ 500 ms) | **GREEN** — 6/6 quiescent, worst 202.7 ms. Under full-cycle ingest 4/6 miss it, legacy included; by the 2026-09-18 decision that is a capacity item (#2486), not this bound | §2 |
 | identity-existence probe miss branch before/after + coverage loss | **GREEN, no loss** | §3 |
 | registry counts (active/runnable/selected/excluded) | **38 / 38 / 38 / 0** | §4 |
 | governance receipt with the working-set fields | **captured, not critical** | §5 |
@@ -32,7 +32,7 @@ authority for the compression ratio, the tick pair and the causal proof.
 | `/` clicks on three networks with screenshots | **3/3, GFS+IFS both 200** | §9 |
 | `/ops` reachable | **200** | §9 |
 | the regression criterion recorded | **recorded, not tripped** | §10 |
-| per-statement expand wall time | **NOT OBTAINABLE — stated, not faked** | §11 |
+| per-statement expand wall time | **NOT OBTAINABLE — waived by the user 2026-09-18; window wall clock stands** | §11 |
 
 ## 1. The curve EXPLAIN gate — six cells, all four SQL bounds
 
@@ -116,13 +116,28 @@ Index Scan on compress_hyper_10_174_chunk / _177 / _178 / _179
 the spec names, now measured on four chunks rather than the single one that existed when
 the 2026-09-17 receipt was written.
 
-## 2. The API bound — local single-source `forecast-series` warm P95 ≤ 500 ms: **state-dependent**
+## 2. The API bound — local single-source `forecast-series` warm P95 ≤ 500 ms: **GREEN**
 
 Measured twice with the same script against the same six runs, once under full-cycle
-ingest and once quiescent. **Contended: RED, four of six cells over. Quiescent: GREEN,
-all six, worst 202.7 ms.** The cause is established — contention, not the read path — and
-which of the two readings the gate takes is an open decision, not something this receipt
-decides. Both measurements and the reasoning are below.
+ingest and once quiescent. **Quiescent: GREEN, all six cells, worst 202.7 ms. Contended:
+four of six over, legacy included.** The cause is established — contention, not the read
+path.
+
+**The bound this verdict is read against was decided and made explicit on 2026-09-18.**
+When this receipt was first posted the spec line carried no machine-state qualifier, so
+§2 gave both readings and refused to pick. The user took the decision: it is a
+**quiescent, read-path bound**, and the text now says so in all three places that carry it
+(`specs/timeseries-narrow-store/spec.md`, `design.md`, `tasks.md` 5.2) — autopipe unit
+inactive and 1-minute load < 2.0, over at least 30 samples. The decisive reason is in the
+contended table below: `shj_nj/legacy`, the **pre-change** read path, misses the same
+bound at 623.7 ms. A bound the legacy store also fails cannot discriminate this change,
+and read that way it would have blocked the migration before it began. The number was not
+moved; a measurement condition of the same kind as `warm` was stated.
+
+The contention itself is not waived — it is **#2486**, re-scoped as a production capacity
+item whose guard is the user-facing river-click P95, one tier above this bound. Both
+measurements are below, contended first, because that is the order they were taken in and
+the contended one is what forced the question.
 
 ### The contended measurement
 
@@ -598,24 +613,31 @@ for the live production application of `000059` and cannot be produced now.**
   02:29:22Z, `WINDOW_VALIDATED` 02:29:30Z.
 
 Re-running `000059` to manufacture the number is forbidden (no implicit rerun) and would
-be meaningless against an already-migrated table. **This item is therefore left
-unsatisfied and 5.2's checkbox reflects that**; it is listed here so the gap is a stated
-fact rather than a silent omission.
+be meaningless against an already-migrated table.
 
-## The two decisions this receipt hands back
+**WAIVED by the user, 2026-09-18.** The window-level wall clock stands in its place: T0
+02:28:31Z, drain 02:28:32Z, display validated 02:29:22Z, `WINDOW_VALIDATED` 02:29:30Z.
+The item is recorded here as waived rather than deleted, so that the gap stays a stated
+fact and no number was invented to fill it.
 
-5.2's checkbox stays unchecked on **two** open items, both stated rather than resolved
-here because neither is a measurement question:
+## The two decisions this receipt handed back, and how they were taken
 
-1. **The per-statement expand wall time (this section).** Waive the item, or accept the
-   window-level wall clock in its place. There is no third option that is not a fabricated
-   number.
-2. **What machine state the API bound is written against (§2).** The spec says
-   `warm P95 ≤ 500 ms` with no qualifier. Quiescent it holds on all six cells with 2.5×
-   margin; during the ~40 minutes per cycle that ingest saturates the box it fails on four.
-   If the bound must hold under co-located ingest, I9 (#1988) is blocked on **#2486**; if
-   it is a quiescent bound, I9 waits only on item 1 and the separate GO. The SQL bounds and
-   the relative regression criterion are green in **both** states either way.
+Both were put to the user on 2026-09-18 and both were decided; 5.2 is checked on that
+basis. Neither was a measurement question.
+
+1. **The per-statement expand wall time (§11) — WAIVED.** The window-level wall clock
+   stands in its place. No number was fabricated.
+2. **What machine state the API bound is written against (§2) — QUIESCENT.** It is a
+   read-path bound, not a capacity bound, and the spec text now says so with a
+   reproducible condition (autopipe unit inactive, 1-min load < 2.0, ≥ 30 samples). The
+   decisive reason: under ingest the legacy path misses the same bound, so the measurement
+   stops discriminating this change. The SQL bounds and the relative regression criterion
+   are green in **both** states regardless.
+
+**Carried forward rather than dropped:** #2486 stays open as a production capacity item
+(≈40 min per cycle at up to 955 ms P95 is user-visible), and the `@live-river-click`
+oracle — which is now the explicit home of the user-facing guarantee — has produced **no
+receipt against node-27** and is on I9's pre-GO checklist for that reason.
 
 ## Files
 
