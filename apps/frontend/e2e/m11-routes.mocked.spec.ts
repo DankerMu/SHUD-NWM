@@ -1,3 +1,6 @@
+// Evidence-only branch for issue #2105 / PR #2469: this benign comment exists so the
+// diff matches the `frontend` path filter and the newly added mocked-regression CI
+// step actually executes. Do not merge this branch.
 import { expect, test } from '@playwright/test'
 
 test.describe('M11 mocked discharge routes', () => {
