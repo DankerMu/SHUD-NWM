@@ -143,16 +143,32 @@ _MCV_COLUMNS = ("run_key", "river_segment_key", "run_id", "river_segment_id")
 
 
 class _RecordingCursor:
-    """Pass-through cursor that records every statement and parameter mapping.
+    """Pass-through cursor recording every statement, binding AND returned row.
 
     Same shape as the node-27 probe's ``_RecCursor``
-    (``.../receipts/2026-09-17-i8-explain-gate/probe1987.py``), reproduced here
-    rather than imported: that directory is archived evidence, not a library.
+    (``.../receipts/2026-09-17-i8-explain-gate/probe1987.py:51-72``), reproduced
+    here rather than imported: that directory is archived evidence, not a
+    library. Two details are load-bearing and neither is cosmetic.
+
+    ``execute`` branches on ``isinstance(parameters, Mapping)``: the store binds
+    named placeholders with a mapping (``_fetch_all``,
+    ``packages/common/forecast_store.py:2778-2789``) but binds
+    ``_validate_series_target``'s statements with POSITIONAL TUPLES (``:2772``,
+    called at ``:608`` and ``:621``). ``dict(parameters)`` on a tuple raises, so
+    the branch is what keeps the capture alive on the real call path.
+
+    ``fetchall`` attaches the returned rows to the statement that produced them,
+    which is what makes must-preserve #1's digest possible: the receipt digests
+    the raw FACT ROWS (``probe1987.py`` ``digest(st["rows"])``), not the API
+    response. Returning ``dict`` rows rather than ``RealDictRow`` is what the
+    probe does too and is invisible to the store, which already wraps every row
+    in ``dict`` (``forecast_store.py:2789``).
     """
 
     def __init__(self, cursor: Any, sink: list[dict[str, Any]]) -> None:
         self._cursor = cursor
         self._sink = sink
+        self._last: dict[str, Any] | None = None
 
     def execute(self, statement: Any, parameters: Any = None) -> None:
         if isinstance(parameters, Mapping):
@@ -161,8 +177,19 @@ class _RecordingCursor:
             captured = {}
         else:
             captured = list(parameters)
-        self._sink.append({"sql": str(statement), "params": captured})
+        self._last = {"sql": str(statement), "params": captured}
+        self._sink.append(self._last)
         self._cursor.execute(statement, parameters)
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in self._cursor.fetchall()]
+        if self._last is not None:
+            self._last["rows"] = rows
+        return rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        row = self._cursor.fetchone()
+        return dict(row) if row is not None else None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cursor, name)
@@ -185,14 +212,52 @@ class _RecordingForecastStore(PsycopgForecastStore):
             cursor.close()
 
 
-def _response_digest(response: Mapping[str, Any]) -> dict[str, Any]:
-    """Must-preserve #1's digest, in the receipt's exact spelling."""
-    points = [point for series in response.get("series") or [] for point in series.get("points") or []]
-    payload = "\n".join(repr(sorted(point.items())) for point in points)
+def statement_digest(statement: Mapping[str, Any]) -> dict[str, Any]:
+    """Must-preserve #1's digest, over the FACT ROWS, in the receipt's spelling.
+
+    ``sha256("\\n".join(repr(sorted(row.items()))))[:16]`` over the rows the
+    measured statement returned — literally ``probe1987.py``'s ``digest()``
+    applied to ``st["rows"]``, so the number is comparable with
+    ``explain-1987.json`` / ``explain-1987-latest.json`` and is the one
+    ``tasks.md`` 3.4 asks for.
+
+    NOT over the API response. ``forecast_series`` builds a forecast point as a
+    two-element LIST (``forecast_store.py:4202``,
+    ``[_timestamp_ms(valid_time), float(value)]``); only the STATION series uses
+    mapping-shaped points (``:4263-4269``). ``sorted(point.items())`` on a
+    response point therefore raises ``AttributeError`` against every real
+    response — which is exactly what happened on node-27, before any cell was
+    judged. ``tests/test_river_ts_stats_harness_offline.py`` builds the response
+    with the real producer so that shape cannot drift away from this module
+    unnoticed again.
+
+    One property of the captured rows is deliberate rather than incidental:
+    ``_attach_forcing_lineage`` (``forecast_store.py:2791-2808``) sets
+    ``row["lineage_json"]`` IN PLACE on the very dicts recorded here, so the
+    digest covers the rows as the store finally left them — the same treatment
+    ``probe1987.py`` gives them. It is stable: the statement carries
+    ``ORDER BY h.scenario_id, rt.valid_time`` and the lineage value is per
+    forcing version. The offline suite proves the stability by recapturing
+    independently and requiring an identical digest.
+    """
+    rows = statement.get("rows")
+    if rows is None:
+        return {"digest": None, "digest_rows": None, "error": "the statement recorded no fetchall()"}
+    payload = "\n".join(repr(sorted(row.items())) for row in rows)
     return {
         "digest": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16],
-        "point_count": len(points),
+        "digest_rows": len(rows),
     }
+
+
+def response_point_count(response: Mapping[str, Any]) -> int:
+    """How many points the public response carries, whatever a point is made of.
+
+    Deliberately shape-agnostic: it counts points and never reads inside one, so
+    it cannot be the thing that breaks when the point representation changes.
+    It is a cross-check on the row digest above, not a second digest.
+    """
+    return sum(len(series.get("points") or []) for series in response.get("series") or [])
 
 
 def _capture_fact_statement(
@@ -563,8 +628,23 @@ def _precondition_findings(scenario: Scenario, state: Mapping[str, Any]) -> list
     return findings
 
 
-def _measure(connection: Any, scenario: Scenario, shape: str, chunk_relation: str) -> dict[str, Any]:
-    """Capture the real statement for one cell and EXPLAIN it warm."""
+def _measure(
+    connection: Any,
+    scenario: Scenario,
+    shape: str,
+    chunk_relation: str,
+    explain: Any = None,
+) -> dict[str, Any]:
+    """Capture the real statement for one cell and EXPLAIN it warm.
+
+    ``explain`` is an injection seam, not configuration: it is the ONLY step
+    here that needs a real PostgreSQL, so substituting an archived plan lets
+    ``tests/test_river_ts_stats_harness_offline.py`` run this exact body — the
+    capture, the digest, the companion handling and the keys ``_cell`` reads —
+    without a database. The node-27 failure was in this body and no offline
+    check reached it.
+    """
+    explain = _explain if explain is None else explain
     measurement: dict[str, Any] = {
         "branch": scenario.branch,
         "chunk_state": scenario.chunk_state,
@@ -573,15 +653,17 @@ def _measure(connection: Any, scenario: Scenario, shape: str, chunk_relation: st
     statement, companions, response = _capture_fact_statement(connection, scenario, shape)
     measurement["statement_head"] = " ".join(statement["sql"].split())[:400]
     measurement["statement_params"] = statement["params"]
-    measurement["response"] = _response_digest(response)
-    measurement["explain"] = _explain(connection, statement)
+    measurement["rows"] = statement_digest(statement)
+    measurement["response_point_count"] = response_point_count(response)
+    measurement["explain"] = explain(connection, statement)
     # Must-preserve #5: `_per_source_latest_cycles` is 98.8 % of the `latest`
     # shape's production cost. Recorded per cell as the baseline §4.3 compares
     # against; it is not gated here, which is what makes it §4.3's business.
     measurement["companions"] = [
         {
             "statement_head": " ".join(companion["sql"].split())[:200],
-            "root_shared_hit_blocks": _explain(connection, companion)["root_shared_hit_blocks"],
+            "rows": statement_digest(companion),
+            "root_shared_hit_blocks": explain(connection, companion)["root_shared_hit_blocks"],
         }
         for companion in companions
     ]
@@ -716,19 +798,27 @@ def _cell(
             "statistics": statistics,
             "chunk_state": scenario.chunk_state,
             "scenario": scenario.key,
-            "digest": measurement["response"]["digest"],
-            "point_count": measurement["response"]["point_count"],
+            "digest": measurement["rows"]["digest"],
+            "digest_rows": measurement["rows"]["digest_rows"],
+            "point_count": measurement["response_point_count"],
             "execution_time_ms": measurement["explain"]["execution_time_ms"],
             "root_shared_hit_blocks": measurement["explain"]["root_shared_hit_blocks"],
             "companions": measurement["companions"],
             "statement_head": measurement["statement_head"],
         }
     )
-    expected_points = STEP_COUNT * EXPECTED_SERIES_BY_SHAPE[shape]
-    if measurement["response"]["point_count"] != expected_points:
-        cell["failures"].append(
-            f"NON-VACUITY: the read returned {measurement['response']['point_count']} points, expected "
-            f"{expected_points}; the plan above is measuring the wrong rows"
-        )
-        cell["passed"] = False
+    expected_rows = STEP_COUNT * EXPECTED_SERIES_BY_SHAPE[shape]
+    # Gated on the MEASURED statement's own row count, which is what the plan
+    # above describes, with the public response counted beside it: if the two
+    # ever disagree the harness is digesting one thing and explaining another.
+    for label, observed in (
+        ("the measured statement returned", cell["digest_rows"]),
+        ("the public response carried", cell["point_count"]),
+    ):
+        if observed != expected_rows:
+            cell["failures"].append(
+                f"NON-VACUITY: {label} {observed} rows, expected {expected_rows}; "
+                "the plan above is measuring the wrong rows"
+            )
+            cell["passed"] = False
     return cell

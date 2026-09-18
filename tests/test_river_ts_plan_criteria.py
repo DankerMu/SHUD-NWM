@@ -314,6 +314,51 @@ def test_a_legacy_decompress_parent_inherits_criterion_1_from_its_compressed_chi
     assert cell["passed"] is True
 
 
+def test_the_measured_narrow_compressed_shape_passes_and_is_not_extracted_empty() -> None:
+    """must-preserve #7, transcribed from ``explain-1987.json``'s
+    ``shj_nj/narrow_compressed``: ``_hyper_9_126_chunk`` is a ``Custom Scan``
+    whose ``Filter`` does not mention ``river_segment_key`` AT ALL — the pruning
+    moved into ``compress_hyper_10_174_chunk``'s
+    ``Index Cond ((run_key = $7) AND (river_segment_key = $5))``, one batch, 4
+    shared hits, nothing removed. A chunk-name-only extractor sees the parent,
+    finds no segment key anywhere, and calls a CORRECT plan a demotion.
+    """
+    cell = _narrow(
+        _root(
+            _scan(
+                relation=_NARROW_CHUNK,
+                node_type="Custom Scan",
+                filter_text=(
+                    "((valid_time >= '2026-08-26 12:00:00+00'::timestamp with time zone) "
+                    "AND (basin_version_key = $4) AND (river_network_version_key = $6) "
+                    "AND (variable_e = 'q_down'::hydro.river_variable))"
+                ),
+                removed=0,
+                actual=12,
+                hits=4,
+                children=[
+                    _scan(
+                        relation="compress_hyper_10_174_chunk",
+                        index="compress_hyper_10_174_chunk__compressed_hypertable_10_run_key_r",
+                        index_cond="((run_key = $7) AND (river_segment_key = $5))",
+                        filter_text=(
+                            "((_ts_meta_max_2 >= '2026-08-26 12:00:00+00'::timestamp with time zone))"
+                        ),
+                        removed=0,
+                        actual=1,
+                        hits=4,
+                    )
+                ],
+            )
+        ),
+        baseline=4,
+    )
+    assert cell["node_count"] == 2
+    assert cell["nodes"][0]["identity_in_filter"] is False
+    assert cell["nodes"][0]["criterion_1_inherited"] is True
+    assert cell["passed"] is True
+
+
 def test_a_legacy_plan_that_loses_the_segment_id_pruning_reddens() -> None:
     """tasks.md 1.4's "reddens if that pruning is lost", on the legacy shape."""
     cell = _legacy(
