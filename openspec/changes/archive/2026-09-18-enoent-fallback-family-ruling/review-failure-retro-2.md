@@ -1,6 +1,6 @@
 # Review Failure Retro #2（post-gate 预算耗尽）
 
-PR: #2456, head SHA: c9fb8128（第一份 retro 见 `review-failure-retro.md`）
+PR: #2456，第 4 轮所审 head SHA: c9fb8128（历史锚，非现时 head）（第一份 retro 见 `review-failure-retro.md`）
 Issue: #1627（本 issue 的第一个 PR；`ceilingPrs` 为空，`issueEscalated` 未置位）
 
 Failure classes: unverified-claim, duplicate-prose-drift, dangling-pointer, evidence-gap
