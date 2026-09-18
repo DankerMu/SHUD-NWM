@@ -123,6 +123,10 @@ def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
                 "MemoryCurrent",
                 "-p",
                 "NRestarts",
+                "-p",
+                "LoadState",
+                "-p",
+                "UnitFileState",
             ]
         )
         parsed: dict[str, str] = {}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -359,6 +360,90 @@ def test_evidence_14_observation_failure_is_fail_closed_and_redacted(
     assert _verdict_lines(captured.out)
 
 
+def _driver_error(kind: str) -> BaseException:
+    """Real SQLAlchemy-wrapped psycopg2 errors, built the way SQLAlchemy builds
+    them (`DBAPIError(statement, params, orig)`), with the driver messages
+    measured on node-27 (2026-09-18) — never a hand-made reason string."""
+
+    import psycopg2
+    import psycopg2.errors
+    import sqlalchemy.exc
+
+    if kind == "refused":
+        return sqlalchemy.exc.OperationalError(
+            "SET statement_timeout = 30000",
+            {},
+            psycopg2.OperationalError(
+                'connection to server at "127.0.0.1", port 1 failed: Connection refused\n'
+                "\tIs the server running on that host and accepting TCP/IP connections?\n"
+            ),
+        )
+    return sqlalchemy.exc.ProgrammingError(
+        alerter.READY_FRONTIER_QUERY,
+        {},
+        psycopg2.errors.UndefinedTable('relation "hydro.hydro_run" does not exist\nLINE 4: FROM hydro.hydro_run h\n'),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "prefix"),
+    [
+        ("refused", "OperationalError: (psycopg2.OperationalError) "),
+        ("wrong-database", "ProgrammingError: (psycopg2.errors.UndefinedTable) "),
+    ],
+)
+def test_observation_failure_reason_carries_the_class_and_driver_class_the_runbook_routes_on(
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    prefix: str,
+) -> None:
+    """Characterization pin (#2473) — the code already behaves so.
+
+    Runbook §11.2 routes `COVERAGE_FRESHNESS_OBSERVATION_FAILED` on the reason's
+    `<SQLAlchemy class>: (<driver class>) …` shape: the SQLAlchemy class alone
+    cannot route (`OperationalError` is both "unreachable" and "statement
+    timeout"; `ProgrammingError` is both "permission denied" and "database
+    without the lane's relations"). If the reason format drifts, the runbook's
+    routing reads a line the mail no longer carries.
+    """
+
+    observe = RecordingObserve(error=_driver_error(kind))
+
+    rc, out, err = _run(capsys, env=_env(), observe=observe)
+
+    assert rc == alerter.EXIT_OBSERVATION == 3
+    payload = json.loads(err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"].startswith(prefix)
+    assert _verdict_lines(out)[0].startswith(f"VERDICT: FAIL observation failed: {prefix}")
+
+
+def test_unparsable_dsn_never_reaches_the_driver(capsys: pytest.CaptureFixture[str]) -> None:
+    """Characterization pin (#2473) for the routing leg WITHOUT `(psycopg2.`.
+
+    Runs the REAL `default_observe` (no injected provider): SQLAlchemy rejects
+    the DSN while building the engine, before any connection, so no database is
+    needed. The reason is exactly the one measured on node-27 for the same DSN
+    shape — a bare `ValueError:` with no driver class — which is why the runbook
+    sends this leg to the probe instead of to the database.
+    """
+
+    env = {"DATABASE_URL": f"postgresql://nhms_display_ro:{DSN_PASSWORD}@127.0.0.1:notaport/nhms"}
+
+    rc = alerter.main([], now=T0, env=env)
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    payload = json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["code"] == "COVERAGE_FRESHNESS_OBSERVATION_FAILED"
+    assert payload["reason"] == "ValueError: invalid literal for int() with base 10: 'notaport'"
+    assert "(psycopg2." not in payload["reason"]
+    assert _verdict_lines(captured.out)[0] == (
+        "VERDICT: FAIL observation failed: ValueError: invalid literal for int() with base 10: 'notaport'"
+    )
+    assert DSN_PASSWORD not in captured.out + captured.err
+
+
 # ---------------------------------------------------------------------------
 # Evidence 15 — journal budget (design D3).
 # ---------------------------------------------------------------------------
@@ -639,3 +724,36 @@ def test_lazy_display_import_keeps_the_module_import_light() -> None:
     assert not any("services.tiles" in line for line in module_scope)
     assert not any("sqlalchemy" in line for line in module_scope)
     assert alerter.build_parser().description
+
+
+# ---------------------------------------------------------------------------
+# #2473 — every structured failure code has a documented destination.
+# ---------------------------------------------------------------------------
+
+_RUNBOOK_PATH = Path(__file__).resolve().parents[1] / "docs/runbooks/current-production-ops.md"
+
+
+def _runbook_section_11(text: str) -> str:
+    """Runbook §11, delimited by its own `## 11.` and `## 12.` headings."""
+
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("## 11."))
+    end = next(index for index, line in enumerate(lines) if index > start and line.startswith("## 12."))
+    return "\n".join(lines[start:end])
+
+
+def test_every_structured_failure_code_is_named_in_runbook_section_11() -> None:
+    """Spec scenario "Every structured failure code has a documented destination".
+
+    The codes are read from the script's own executable string literals, never
+    restated here, so a code added to the script without a runbook destination
+    turns this red.
+    """
+
+    literals = _non_docstring_literals(Path(alerter.__file__).read_text(encoding="utf-8"))
+    codes = sorted({literal for literal in literals if re.fullmatch(r"COVERAGE_FRESHNESS_[A-Z_]+", literal)})
+    assert codes, "no COVERAGE_FRESHNESS_* code found in the script — the scan itself is broken"
+
+    section = _runbook_section_11(_RUNBOOK_PATH.read_text(encoding="utf-8"))
+    missing = [code for code in codes if code not in section]
+    assert not missing, f"codes the script emits but runbook §11 never names: {missing}"

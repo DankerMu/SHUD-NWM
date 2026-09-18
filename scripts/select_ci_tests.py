@@ -2862,12 +2862,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # real `build_receipt` call, the receipt root, and the probe timer's own
     # steady-state row. Same lane caveat: selected when the backend lane runs
     # and this runbook is in the diff.
+    # #2473 widened it by one more: the coverage freshness alert suite reads
+    # this runbook's §11 (between the `## 11.` and `## 12.` headings) and fails
+    # when a `COVERAGE_FRESHNESS_*` code the script emits is not named there.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
         (
             SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
             "tests/test_env_templates.py",
             "tests/test_node22_refresh_timer_health.py",
+            "tests/test_node27_coverage_freshness_alert.py",
         ),
     ),
     PathTestRule(

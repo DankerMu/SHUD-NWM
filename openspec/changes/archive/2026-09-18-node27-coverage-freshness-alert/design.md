@@ -321,3 +321,30 @@ table row is what was wrong, and it routed an operator with a broken `PYTHONPATH
 threshold knob. The live operator surface (`docs/runbooks/current-production-ops.md` §11.2)
 is corrected in place and the behaviour is now pinned by
 `tests/test_node27_coverage_freshness_alert.py::test_import_time_display_failure_is_a_config_error`.
+
+## 修正 2026-09-18（#2472）
+
+Appended, not rewritten: the two original lines named below are the record of what was decided
+and stay in place above, so the drift stays visible.
+
+- D3's journal-budget bullet says systemd contributes 「roughly four framing lines」. Measured
+  on node-27 it is **five** on the exit-1 (alert) path — `Starting…`, `Main process exited…`,
+  `Failed with result…`, `Failed to start…`, `Triggering OnFailure= dependencies.` — and this
+  lane adds **no** structured stderr line on that path (the alert path calls `_emit` without
+  `structured=`), so the budget is `24 + 5 = 29 ≤ 30`. The shipped `MAX_REPORT_LINES` comment
+  and runbook §11.2 already carry the measured count; `MAX_REPORT_LINES` does not move.
+- The regression-row test list's 「breaching sources kept」 (the 25-source report row) reads as
+  absolute. It is **bounded**: breaching sources are ordered first, so healthy rows are
+  dropped first, but the truncated table's capacity is fixed (one of its rows goes to the omission
+  line), and once breaching sources alone exceed it, breaching rows are dropped from the table
+  too. Nothing is dropped silently — the header carries the true breaching count, the omission
+  line the exact number of dropped rows, and the verdict names a bounded number of sources plus
+  the count of the rest. `build_report`'s docstring and
+  `tests/test_node27_coverage_freshness_alert.py::test_more_breaching_sources_than_the_table_holds_is_reported_honestly`
+  have always said so.
+
+The corrected contract lives in the live spec, `openspec/specs/display-coverage-freshness/spec.md`
+(the observer requirement's "The verdict survives the mailed journal tail" scenario, as modified by
+`fix-coverage-freshness-spec-and-routing`). This archive's own spec delta
+(`specs/display-coverage-freshness/spec.md` here) is deliberately left as it is: it is the snapshot
+of what #2080 shipped, and nothing in the repo reads an archived delta as current contract.

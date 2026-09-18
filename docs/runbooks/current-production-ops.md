@@ -4934,7 +4934,7 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
 | `nhms-raw-retention` | `scripts/node27_raw_retention.py`（raw-retention timer；只做 watermark 只读查询）|
 | `psql` | 人工会话 |
 | `TimescaleDB Background Worker Scheduler` | TimescaleDB 后台 worker，不要动 |
-| 空串 | 未在册的连接面（`services/*`、qhh 系脚本、`workers/grid_registry` 等）；先查清来源再处置。**`nhms-display-api.service` 自 #1728 起七个连接面全部具名**，所以空串一定不是 display API |
+| 空串 | 未在册的连接面（`services/*`、qhh 系脚本、`workers/grid_registry` 等）；先查清来源再处置。三条只读监控 lane——`scripts/node27_frontier_stall_alert.py`、`scripts/node27_coverage_freshness_alert.py`、`scripts/node27_resource_governance.py`（都以 `nhms_display_ro` 连库）——代码里也没设名字，DSN 上不带 `?application_name=` 时同样是空串。**`nhms-display-api.service` 自 #1728 起七个连接面全部具名**，所以空串一定不是 display API |
 
 在册组件**委托给共享 helper 打开的连接**同样带自己的名字：
 `packages/common/display_watermark.py` 的 watermark 只读查询（retention /
@@ -5281,8 +5281,11 @@ stalled；投递验证必须三重——shim exit 0 + receipt/JSONL 里 `emails[
 `SMTP-ACCEPTED ... code=250`（250 来自 smtp.163.com 提交服务器，同步；`evidence`
 为 `null` 说明根本没走这个 shim）+ 收件箱人工确认，**不得只看 exit 0**
 （用本机 sendmail 时 exit 0 什么都不证明，见 §10.7）。unit 已注册进 `scripts/node27_resource_governance.py`
-`DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态（timer 被人 disable
-掉时，靠治理面发现，而不是靠"怎么没收到邮件"）。
+`DEFAULT_SERVICES`，治理审计 receipt 里能看到它的 systemd 状态，含 `LoadState` /
+`UnitFileState`（逐状态读法见 §11.5；本车道的 service 同样没有 `[Install]` 段，读 `static`
+是常态）：timer 被人 disable 掉时，**按周期读 receipt** 能认出来，而不必从"怎么没收到邮件"去猜。
+但这**不是自动发现**：治理审计不对 receipt 的 `systemd` 段产任何建议、不因此非零退出、也不发
+邮件——没人读 receipt，就没人知道 timer 停了。
 
 **env 文件单读者 + 双语法警示**：systemd 路径下 env 由 service 的
 `EnvironmentFile=` 读**一次**，同时 service 注入 lane 专属哨兵
@@ -5349,13 +5352,54 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 |---|---|---|
 | `0` | 所有已评估 source 都在阈值内（表照常打印） | 无需处置 |
 | `1` | 至少一个已评估 source `gap-exceeded` 或 `no-covered-cycle` | 走 §11.3 三个分支 |
-| `2` | 配置错误（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、或 venv 里没有展示栈），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason`：`ImportError:` / `ModuleNotFoundError:` 开头就是导入期，按 §11.5 的 `Environment=PYTHONPATH=` 与安装块修，**不是** §11.4 的阈值旋钮；其余（缺 DSN、阈值非法）才去 §11.4 改 env 文件 |
-| `3` | 观测失败（DB 不可达 / statement 超时 / 权限拒绝 / **观测期**展示模块报错），**或 ready 前沿查询一个 source key 都没返回** | 见 §11.3 最后一条 |
+| `2` | 配置错误，`code` 为 `COVERAGE_FRESHNESS_CONFIG_INVALID`（`DATABASE_URL` 缺失、阈值非法、**导入期**展示模块报错——unit 的 `PYTHONPATH` 缺失、或 venv 里没有展示栈），**观测前**就退出 | 先看 stderr 那行结构化 JSON 的 `reason`：`ImportError:` / `ModuleNotFoundError:` 开头就是导入期，按 §11.5 的「导入期失败」那段先做导入检查（venv 缺展示栈、unit 缺 `PYTHONPATH=` 各有一步），**不是** §11.4 的阈值旋钮；其余（缺 DSN、阈值非法）才去 §11.4 改 env 文件 |
+| `3` | 观测失败，两个 `code`：`COVERAGE_FRESHNESS_OBSERVATION_FAILED`（DB 不可达 / statement 超时 / 权限拒绝 / 连上的库里没有本车道的表 / **观测期**展示模块报错）与 `COVERAGE_FRESHNESS_NO_SOURCES`（ready 前沿查询一个 source key 都没返回） | 先看 stderr 那行结构化 JSON 的 `code`：`COVERAGE_FRESHNESS_NO_SOURCES` → §11.3 最后一条（「什么都观测不到」）；`COVERAGE_FRESHNESS_OBSERVATION_FAILED` → 按下面的「退 3 路由」读 `reason` |
+
+**退 3 路由（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`）**：`reason` 的形状是
+`<SQLAlchemy 异常类>: (<驱动异常类>) <驱动原文>`，驱动没参与时没有括号那一段。只看冒号前的
+SQLAlchemy 类**分不开**原因——`OperationalError` 既是连不上也是 statement 超时，
+`ProgrammingError` 既是权限拒绝也是连错了库。所以先看 `reason` 里有没有 `(psycopg2.`，有就按
+括号里的驱动类分。下表**自上而下、第一条命中即停**：具名驱动类优先于兜底行。`VERDICT: FAIL`
+那行带的是同一段 `reason`（拍平成一行、超长截断），邮件尾巴里只剩它时照样按它分。
+
+| `reason` 开头 | 含义 | 第一步 | 依据 |
+|---|---|---|---|
+| `OperationalError: (psycopg2.errors.QueryCanceled)` | statement 超时（车道自设 `statement_timeout` 30 s） | §11.3「库侧观测失败」第 3 步（`pg_stat_activity`） | 推导：`QueryCanceled` 是 `psycopg2.OperationalError` 的子类 |
+| `ProgrammingError: (psycopg2.errors.InsufficientPrivilege)` | 只读角色缺 grant | §11.3「库侧观测失败」第 4 步（grant） | 推导：`InsufficientPrivilege` 是 `psycopg2.ProgrammingError` 的子类 |
+| `ProgrammingError: (psycopg2.errors.Undefined`…（`UndefinedTable`、`UndefinedSchema`…） | 连上的库里没有本车道的表（DSN 指错了库），或 schema 漂移 | §11.3「库侧观测失败」第 2 步（探针报出连到哪个库、`hydro.hydro_run` 在不在） | `UndefinedTable` 实测 |
+| 其余任何带 `(psycopg2.` 的 | 基类 `psycopg2.OperationalError`（三种原文见下）、`psycopg2.errors.AdminShutdown`（观测中途容器重启）、`InterfaceError`、死锁 / 锁等待类错误… | §11.3「库侧观测失败」，从第 1 步（容器状态）做起 | 基类三种原文实测；其余推导 |
+| 不带 `(psycopg2.` | 根本没走到驱动，或不是数据库错误 | 按下面「不带驱动类」三条分 | 见各条 |
+
+基类 `(psycopg2.OperationalError)` 后面的原文分三种，2026-09-18 在 node-27 上逐一实测：
+`Connection refused`（库没在听：容器停了 / 端口不对）、`password authentication failed`（口令错）、
+`database "…" does not exist`（DSN 里的库名错）。一封真实的（已脱敏）`reason`：
+
+```text
+OperationalError: (psycopg2.OperationalError) connection to server at "127.0.0.1", port 55432 failed: FATAL:  password authentication failed for user "***"
+```
+
+角色名是 `***`：车道会把与 DSN 用户名相同的角色名脱敏，别指望从邮件里看出是哪个角色——看
+§11.4 那份 env 文件里 `DATABASE_URL` 的用户段。
+
+不带驱动类时，看 `VERDICT: FAIL` 之后的引导词：
+
+- `observation failed:` 且类是 `ValueError` / `ArgumentError`（URL scheme 不认识时是其子类
+  `NoSuchModuleError`）→ **先跑 §11.3「库侧观测失败」第 2 步的探针**，别凭异常类直接去改 env
+  文件：观测期的展示模块同样可能抛 `ValueError`。探针以**同一个**异常失败 → env 文件里的
+  `DATABASE_URL` 解析不了，改 §11.4 那份 env 文件；探针成功 → 异常来自观测期，走 §11.3
+  「非驱动观测失败」。`ValueError` 这条实测过：DSN 端口写成 `notaport` 时车道报
+  `ValueError: invalid literal for int() with base 10: 'notaport'`，探针原样复现同一行、`rc=1`；
+  `ArgumentError` / `NoSuchModuleError` 是按 SQLAlchemy 解析 URL 的行为推导的。
+- `observation failed:` 且是其它类 → 观测期展示模块（`national_discharge_cycles`）抛的 → §11.3
+  「非驱动观测失败」。推导。
+- `observation unusable:` → 观测拿到了，但 `evaluate()` 拒收（例如 `default_cycle` 解析不了）→
+  §11.3「非驱动观测失败」。推导。
 
 展示模块报错分**导入期**与**观测期**两种，落在哪个退出码取决于它发生在哪一期：`config_from_env` 先读
 `DATABASE_URL`、再调 `lookback_days()` 去 import `services.tiles.mvt`，所以**导入期**
 的失败在任何数据库动作之前就发生，按配置错误退 2；**观测期**（已连上库、正在调
-`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 修解释器路径，退 3 查库。
+`national_discharge_cycles`）才是退 3。两者第一步不同：退 2 修解释器路径（§11.5「导入期失败」），
+退 3 不查库，按上面的路由走 §11.3「非驱动观测失败」。
 
 邮件正文就是 `journalctl -n 30` 的尾巴。报告刻意**表在前、`VERDICT:` 块在最后**，
 且总行数 ≤ 24 —— verdict 必须活在尾窗里。尾窗预算要**分两类算，不能合成一个数**：
@@ -5377,7 +5421,7 @@ DSN 口令在任何面（stdout、stderr、异常文本）都被脱敏。
 本车道**无状态**：没有 state 文件、没有 lock、没有 receipt、没有自己的日志文件。因此
 也**没有 dedup**——故障不消除就每天一封。沉默来自消除故障，不是压制告警。
 
-### 11.3 处置：三个真分支 + 一个"看不见"分支
+### 11.3 处置：退 1 的三个真分支 + 退 3 的三条
 
 收到 `VERDICT: FAIL ... behind ingest ...` 时，先用 `VERDICT: breaching=` 那行拿到
 出问题的 source，再分支：
@@ -5512,7 +5556,7 @@ echo "rc=$?"
 ```
 
 新扫描算出非空时会直接覆盖旧的窗口列，**不需要** `--force`。只有新扫描算成空时
-（#1446 拒绝守卫退 **3** 并打一行 `DISPLAY_COVERAGE_REFRESH_REFUSED`，见 §2）才谈得上
+（#1446 拒绝守卫退 **3** 并打一行 `DISPLAY_COVERAGE_REFRESH_REFUSED`，见 §3.1）才谈得上
 `--force`，而且必须运维逐条确认后再加：`--force` 的动作是把行**归零**，对一个正被全国
 图层使用的 run 用它就是直接熄灯，别拿它当默认手段。
 
@@ -5533,17 +5577,112 @@ dedup、也不发"恢复"邮件（口径见 §11.2 末尾那两行），此后�
 `/home/nwm/autopipe-logs/*.log`（分支 A 用的同一批日志）里该 `run_id` 的 ingest / parse
 行留成证据，对 parse/output 侧开 issue。
 
-**退出 3 —— "什么都观测不到"（fail-closed，不是健康）**
+**退出 3 —— 库侧观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 带 `(psycopg2.`）**
+
+先诊断、别急着重建：下面四步都只读。重建 `nhms-db` 容器是再往后一跳的事（§5.1 有指针），
+不是收到这封信的第一步。按 §11.2「退 3 路由」查到是哪一步就从哪一步做起。
+
+**第 1 步 —— 容器在不在、端口映射对不对**
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+docker ps -a --filter name=^nhms-db$ --format '{{.Names}} {{.Status}} {{.Ports}}'
+```
+
+正常读 `nhms-db Up <时长> … 127.0.0.1:55432->5432/tcp`。状态不是 `Up`、或没有
+`127.0.0.1:55432->5432/tcp` → 是库本身的事故，不是本车道的，按 §5.1（容器事实与重建指针）
+处理。`Up` 的时长很短而告警是 `AdminShutdown` → 观测中途容器重启过。本车道无状态，库恢复后
+下一 tick 自然转绿；要立刻确认就用 §11.4 那条 `systemctl --user start` 手跑一次看退出码。
+
+**第 2 步 —— 探针**：走本车道**自己的** venv、env 文件与只读角色，用与车道同一个 SQLAlchemy
+URL 解析，并报出连到了哪个库、本车道的表在不在：
+
+```bash
+cd /home/nwm/NWM
+set -a; . infra/env/node27-frontier-alert.env; set +a
+PYTHONPATH=/home/nwm/NWM .venv/bin/python -c '
+import os, sqlalchemy
+engine = sqlalchemy.create_engine(os.environ["DATABASE_URL"], connect_args={"connect_timeout": 10})
+with engine.connect() as conn:
+    print(conn.execute(sqlalchemy.text("select current_database(), current_user, to_regclass(:rel) is not null"), {"rel": "hydro.hydro_run"}).one())
+'; echo "rc=$?"
+```
+
+健康读 `('nhms', 'nhms_display_ro', True)` 加 `rc=0`（2026-09-18 node-27 实测）。库名不是
+`nhms`、或第三列是 `False` → DSN 指错了库：先用
+`systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service`
+确认 unit 读的是 `…/infra/env/node27-frontier-alert.env`（§11.5 验投递时没删干净的 scratch
+drop-in 会把它指走），再改 env 文件里的 `DATABASE_URL`。探针自己也以基类
+`psycopg2.OperationalError` 失败 → 按 §11.2 的三种原文分：拒连回第 1 步，口令错 / 库不存在改
+env 文件。探针一切正常、而告警是拒连 / `AdminShutdown` 一类 → 是已经过去的瞬时故障，手跑一次
+unit 看到退 0 即闭环。探针的报错只落在你自己的终端，但驱动报错可能回显 DSN，别原样贴进 issue。
+
+**第 3 步 —— statement 超时（`QueryCanceled`）**：车道每条语句限 30 s，看是谁在跟它抢：
+
+```bash
+docker exec nhms-db psql -X -U nhms -d nhms -P pager=off -c "
+select pid, usename, application_name, state, wait_event_type,
+       now() - query_start as dur, left(query, 80)
+from pg_stat_activity
+where datname = 'nhms'
+order by query_start;"
+```
+
+用超级用户 `nhms` 走 `docker exec`，是因为只读角色看不到别的角色会话的语句文本。
+2026-09-18 实测的一次常态：一行 `nhms_ingest_rw`、`active`、`IO` 的
+`SELECT compress_chunk(...)`（压缩 timer 的正常后台工作）。本车道自己的连接读空串
+`application_name`、`usename` 是 `nhms_display_ro`（代码里没设名字，见 §9.2 表里「空串」那行）。
+归因与取消纪律一律按 §9.2——生产 tick 不得随手取消；争用过去后手跑一次 unit 确认。天天超时属于
+容量 / 计划问题，按 §9.2 走 issue。
+
+**第 4 步 —— 权限拒绝（`InsufficientPrivilege`）**：`nhms_display_ro` 需要 `hydro.hydro_run`、
+`hydro.run_display_coverage`、`core.model_instance` 三张表的 SELECT。逐张核对：
+
+```bash
+docker exec nhms-db psql -X -U nhms -d nhms -P pager=off -Atc "
+select rel, has_table_privilege('nhms_display_ro', rel, 'SELECT')
+from unnest(array['hydro.hydro_run', 'hydro.run_display_coverage', 'core.model_instance']) as rel;"
+```
+
+读 `f` 的那张就是缺的 grant。补 grant 是一次权限变更，由关系 owner `nhms_ingest_rw` 或超级
+用户 `nhms` 执行（角色见 §5.1 角色表）。先想清楚它是怎么丢的：display API 也以
+`nhms_display_ro` 读这三张表（`national_discharge_cycles` 就是它发布的目录），它若同时在报错，
+这是一次波及展示面的权限回退，不只是本车道的事。
+
+**退出 3 —— 非驱动观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 不带 `(psycopg2.`）**
+
+`ValueError` / `ArgumentError` / `NoSuchModuleError` 先按 §11.2「退 3 路由」跑上一条第 2 步的
+探针排除 DSN；探针成功的、别的异常类的、以及引导词是 `observation unusable:` 的，才到这里。
+这是展示模块（`services/tiles/mvt.py`）或本车道与它之间契约的**代码缺陷**，不是运维旋钮：
+
+1. 用 §11.5 那段手工调用复现：同一份 env 文件，所以会回来同一行。
+2. 看展示模块最近动过什么：`cd /home/nwm/NWM && git log -5 --oneline -- services/tiles/mvt.py`。
+3. 按代码缺陷开 issue，附上 stderr 那行结构化 JSON 里完整的 `reason`（`VERDICT:` 行是拍平、
+   截断过的）。本车道无状态、无 dedup，修好之前每天 06:00 一封。
+
+**退出 3 —— "什么都观测不到"（`COVERAGE_FRESHNESS_NO_SOURCES`，fail-closed，不是健康）**
+
+本条只管 `COVERAGE_FRESHNESS_NO_SOURCES`。另一个退 3 的 code
+`COVERAGE_FRESHNESS_OBSERVATION_FAILED` 的所有原因按 §11.2「退 3 路由」去上面两条（库侧 /
+非驱动）。
 
 ready 前沿查询返回**零个 source key** 时本车道**退 3**，不是退 0。那条语句 JOIN 了
 `core.model_instance`，所以一次批量 `active_flag` 翻转或 `river_network_version_id`
 漂移就能把它清空，而 `hydro.hydro_run` 照常前进——§10 的车道不 JOIN 那张表，看得见
 "进展"因而继续沉默，同时 `national_discharge_cycles` 已经在返回 `default_cycle = null`，
-图层已经黑了。这正是本 issue 要消除的构造性沉默。收到这封先查
-`core.model_instance` 的 `active_flag` / `river_network_version_id`，再查只读角色权限
-（`nhms_display_ro` 需要 `hydro.hydro_run`、`hydro.run_display_coverage`、
-`core.model_instance` 的 SELECT）。**注意区分**：有 source key 但全部老出回看窗，是
-另一个状态，退 0 并全记 `not-evaluated`，归 §10 管。
+图层已经黑了。这正是本 issue 要消除的构造性沉默。收到这封：
+
+1. 先查 `core.model_instance` 的 `active_flag` / `river_network_version_id`。
+2. 确认车道读的是哪个库：
+   `systemctl --user show -p EnvironmentFiles nhms-node27-coverage-freshness-alert.service`
+   应指向 `…/infra/env/node27-frontier-alert.env`——§11.5 验投递时留下的 scratch drop-in 会把
+   它指到一个有表、没数据的库，在那里查就是零行；再跑上面「库侧观测失败」第 2 步的探针看
+   `current_database()`。
+
+缺 grant **不会**走到这里：权限不足抛 `InsufficientPrivilege`，是
+`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，不会静默返回零行（`db/` 下没有行级安全策略）。
+**注意区分**：有 source key 但全部老出回看窗，是另一个状态，退 0 并全记 `not-evaluated`，
+归 §10 管。
 
 ### 11.4 阈值旋钮 `NHMS_COVERAGE_GAP_DAYS`（改之前先读这段）
 
@@ -5572,13 +5711,23 @@ systemctl --user list-timers 'nhms-node27-coverage-freshness-alert.timer' --no-p
 ```
 
 service 与 timer 都已注册进 `scripts/node27_resource_governance.py`
-`DEFAULT_SERVICES`（#2466）：治理审计 receipt 因此带上它们的 `ActiveState` / `SubState`，
-以及 `systemctl --user list-timers --all` 那张表里对应的行——**装了但被 disable** 的
-timer 在表里仍然出现、只是没有 NEXT，**从没装过**的 unit 整行缺席，两者靠这张表才分得开
-（只看 per-service 那块分不开）。**但这不是自动告警**：治理审计不对 receipt 的 `systemd`
-段产任何建议、不因此非零、也不发邮件，timer 被人 disable 掉不会自己冒出来。定期看治理
-receipt 里的 unit 状态就是为了这个——与 §10.8 的 frontier 车道同一口径，同样是靠人按周期
-读。本车道无状态、无自有 receipt、无自有日志：它自己的痕迹只在 journal 里
+`DEFAULT_SERVICES`（#2466）：治理审计 receipt 的 `systemd.services.<unit>.properties` 带
+它们的 `ActiveState` / `SubState`，以及（#2473 起）`LoadState` / `UnitFileState`。
+**分辨"被 disable"和"从没装过"只能靠后两个**——2026-09-18 在 node-27 上用一次性 unit 实测：
+
+| 状态 | `LoadState` | `UnitFileState` | `ActiveState` / `SubState` |
+|---|---|---|---|
+| timer 正常 | `loaded` | `enabled` | `active` / `waiting` |
+| timer 被 `disable --now` | `loaded` | `disabled` | `inactive` / `dead` |
+| 从没装过 | `not-found` | （空） | `inactive` / `dead` |
+
+service 读 `loaded` + **`static`**，这是常态、不是故障：它没有 `[Install]` 段，由 timer 拉起，
+本来就不 enable。`systemctl --user list-timers --all` **分不开**这两种情况：被 disable 的
+timer 和从没装过的一样，表里一行都没有（同日实测），所以 receipt 里那张 `list-timers` 表也不能
+当判据。#2473 之前生成的 receipt 没有 `LoadState` / `UnitFileState` 两个键。**这些都不是告警**：
+治理审计不对 receipt 的 `systemd` 段产任何建议、不因此非零、也不发邮件，timer 被人 disable
+掉不会自己冒出来。定期看治理 receipt 里的 unit 状态就是为了这个——与 §10.8 的 frontier 车道
+同一口径，同样是靠人按周期读。本车道无状态、无自有 receipt、无自有日志：它自己的痕迹只在 journal 里
 （`journalctl --user -u nhms-node27-coverage-freshness-alert.service`），而 journal 只能告诉你
 **跑过的那些 tick** 怎么样了——timer 被 disable 之后它就不再有新行，而「没有新行」与「一切
 正常、只是没告警」在那里长得一模一样。治理 receipt 是这两个 unit 出现在**清单**上的唯一地方，
@@ -5593,6 +5742,31 @@ cd /home/nwm/NWM
 set -a; . infra/env/node27-frontier-alert.env; set +a
 PYTHONPATH=/home/nwm/NWM .venv/bin/python scripts/node27_coverage_freshness_alert.py; echo "rc=$?"
 ```
+
+**导入期失败（退 2，`reason` 以 `ImportError:` / `ModuleNotFoundError:` 开头）**：先做导入检查，
+它用的就是 unit 的那个解释器：
+
+```bash
+cd /home/nwm/NWM
+PYTHONPATH=/home/nwm/NWM .venv/bin/python -c 'import services.tiles.mvt'; echo "rc=$?"
+```
+
+- **失败** → venv 里没有展示栈，同步依赖：
+
+  ```bash
+  export PATH=$HOME/.local/bin:$PATH
+  uv sync --all-extras --dev --dry-run   # 先看它要装 / 卸什么
+  uv sync --all-extras --dev
+  ```
+
+  这**不是**默认动作：node-27 的 `.venv` 是生产共享的（display API、autopipe、本车道都跑在它
+  上面），`uv sync` 就地改它，而且默认是精确同步、锁文件之外的包会被卸掉。2026-09-18 实测
+  `--dry-run` 报 `Would install 3 packages`（`mapbox-vector-tile`、`pyclipper`、`shapely`），
+  本车道却照样 import 得了——所以只在导入检查失败时才 sync。
+- **通过** → 这条检查自己带了 `PYTHONPATH`，看不见 unit 缺它。查 unit：
+  `systemctl --user show -p Environment nhms-node27-coverage-freshness-alert.service`，应读
+  `Environment=PYTHONPATH=/home/nwm/NWM`。没有 `PYTHONPATH=` → 装进去的 unit 文件是旧的或被
+  改过，重跑本节开头安装块里的两条 `install` 与 `daemon-reload`。
 
 要验证真实投递链路，用 systemd drop-in 把这一次调用指到 scratch 库（**必须先用空的
 `EnvironmentFile=` 清空已有列表**，`Environment=` 赢不了后读的 `EnvironmentFile=`）：

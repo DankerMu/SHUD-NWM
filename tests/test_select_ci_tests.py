@@ -2786,9 +2786,12 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # #2146 round 2 widened it by one more: the probe suite reads this runbook's
     # probe section and pins every verdict name, each threshold's default AND
     # ceiling, the receipt field set and the probe timer's steady-state row.
+    # #2473 widened it by one more: the coverage freshness alert suite reads this
+    # runbook's §11 and pins that every `COVERAGE_FRESHNESS_*` code is named there.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
         "tests/test_node22_refresh_timer_health.py",
+        "tests/test_node27_coverage_freshness_alert.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
 
@@ -5631,6 +5634,8 @@ def test_select_tests_ignores_docs_only_changes() -> None:
         "tests/test_env_templates.py",
         # #2146 round 2: third literal reader -- the node-22 probe suite.
         "tests/test_node22_refresh_timer_health.py",
+        # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
+        "tests/test_node27_coverage_freshness_alert.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
     assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
@@ -6080,10 +6085,12 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
         # owner selecting focused suites — still non-collapsed. #2075 added a
         # second reader (`tests/test_env_templates.py` asserts the pinned
-        # terminal stage appears in this runbook) and #2146 round 2 a third
+        # terminal stage appears in this runbook), #2146 round 2 a third
         # (`tests/test_node22_refresh_timer_health.py` pins the probe section's
-        # verdicts, thresholds and receipt fields), so the count is 3.
-        ("docs/runbooks/current-production-ops.md", "3"),
+        # verdicts, thresholds and receipt fields) and #2473 a fourth
+        # (`tests/test_node27_coverage_freshness_alert.py` pins that runbook §11
+        # names every `COVERAGE_FRESHNESS_*` code), so the count is 4.
+        ("docs/runbooks/current-production-ops.md", "4"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
