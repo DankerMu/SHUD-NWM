@@ -41,8 +41,8 @@ test.describe('M11 mocked discharge routes', () => {
 
     // spec frontend-mvt-layer-consumption「序列化三翻」：默认源已是 `gfs`，序列化不再写入
     // `source=gfs`（旧断言写于默认源为 `best` 的年代）；非默认 basemap 仍必须保留。
-    await expect(page).toHaveURL(/basemap=terrain/)
-    await expect(page).toHaveURL(/source=/) // DELIBERATELY INVERTED: red-leg proof for #2105
+    await expect(page).toHaveURL(/basemap=satellite/) // DELIBERATELY WRONG: red-leg proof for #2105
+    await expect(page).not.toHaveURL(/source=/)
     await expect(page.locator('[data-testid="m11-fullscreen-map"]')).toBeVisible()
     await expect(page.locator('[data-testid="m11-floating-layer-switcher"]')).toBeVisible()
   })
