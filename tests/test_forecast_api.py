@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.display_coverage import _refresh_statement_timeout_ms
+from packages.common.forcing_ts_render import FORCING_TABLE_LEGACY
 from packages.common.forecast_store import (
     QHH_LATEST_CONTEXT_LIMIT,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
@@ -30,6 +32,21 @@ from packages.common.forecast_store import (
 )
 
 QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
+
+#: Every schema-qualified spelling of the forcing fact table in a statement,
+#: WHOLE, so a pin can assert equality instead of containment (#1990 M1b).
+#:
+#: `"FROM met.forcing_station_timeseries" in statement` is true of
+#: `FROM met.forcing_station_timeseries_legacy` as well, so a pin written that way
+#: survives task 7.3's rename in silence — it can only ever go red if the table
+#: stops being read at all. Matching the optional `_legacy` suffix and comparing
+#: the RESULT to the renderer's constant is what makes the rename the event these
+#: pins notice.
+_FORCING_FACT_TABLE_SPELLING = re.compile(r"\bmet\.forcing_station_timeseries(?:_legacy)?\b")
+
+
+def _forcing_fact_table_names(statement: str) -> list[str]:
+    return _FORCING_FACT_TABLE_SPELLING.findall(statement)
 
 
 @pytest.mark.parametrize(
@@ -1295,7 +1312,11 @@ def test_station_series_explicit_forcing_version_groups_rows_and_truncates_per_v
     assert series_by_variable["TEMP"]["native_resolution"] == "3h"
     assert series_by_variable["TEMP"]["truncated"] is False
     membership_statement, membership_parameters = store.cursor.executions[2]
-    assert "FROM met.forcing_station_timeseries" in membership_statement
+    # #1990 M1b: EQUALITY on the rendered table name, not `"FROM met.forcing_
+    # station_timeseries" in …`. The substring form prefix-matched
+    # `…_legacy` too, so it could never have gone red at task 7.3's rename —
+    # which is the single event it exists to notice.
+    assert _forcing_fact_table_names(membership_statement) == [FORCING_TABLE_LEGACY]
     assert "LIMIT 1" in membership_statement
     assert membership_parameters == (
         "forc_qhh_gfs_2026050700",
@@ -1304,11 +1325,21 @@ def test_station_series_explicit_forcing_version_groups_rows_and_truncates_per_v
         _dt("2026-05-14T00:00:00Z"),
     )
     statement, parameters = store.cursor.executions[3]
+    assert _forcing_fact_table_names(statement) == [FORCING_TABLE_LEGACY]
     assert "fst.forcing_version_id = %s" in statement
     assert "fst.station_id = %s" in statement
     assert "fst.variable = requested.variable" in statement
     assert "fst.valid_time >= %s" in statement
     assert "fst.valid_time <= %s" in statement
+    # #1990 M1a, re-pointed DELIBERATELY. The station-series helper was an
+    # f-string over a Python `clauses` list before task 7.2, so its text AND its
+    # tuple varied with the request; it is now a registered template whose two
+    # optional bounds are always bound and folded away by `(%s IS NULL OR …)`.
+    # Each optional bound therefore appears TWICE — the guard names it on both
+    # sides of the `OR` — and the tuple is a fixed ten. The pin is not loosened:
+    # the response payload asserted above is unchanged, which is what M1a asks
+    # for, and `tests/test_forcing_read_path_store_routing.py` pins the fold-away
+    # itself.
     assert parameters == (
         ["PRCP", "TEMP"],
         "forc_qhh_gfs_2026050700",
@@ -1316,6 +1347,8 @@ def test_station_series_explicit_forcing_version_groups_rows_and_truncates_per_v
         from_time,
         _dt("2026-05-14T00:00:00Z"),
         from_time,
+        from_time,
+        to_time,
         to_time,
         3,
     )

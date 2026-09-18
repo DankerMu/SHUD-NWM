@@ -20,19 +20,32 @@ deliberate divergences:
   between two texts instead of transforming one, so the pair is what a reader
   hands it.
 
-CUT (a) REGISTERS NOTHING
--------------------------
+THE NINE READERS ARE WIRED (cut (b) = task 7.2)
+-----------------------------------------------
 
-``tasks.md`` splits #1990 in two. This file lands with **cut (a) = task 7.2a**:
-the renderer, this register and the discovery-set census, with zero production
-callers. :data:`FORCING_REGISTRY` is therefore EMPTY, and that is the delivered
-state of cut (a), not an unfinished stub — **cut (b) = task 7.2** wires the nine
-readers and populates it.
+``tasks.md`` splits #1990 in two. Cut (a) landed the renderer, this register and
+the discovery-set census with zero production callers and an EMPTY
+:data:`FORCING_REGISTRY`; cut (b) — this state — wires all nine readers and
+populates it, which is what makes the census's closure assertion
+``registered + exempt == mentions`` non-vacuous for the first time.
 
-The consequence has to be stated rather than discovered: the closure assertion
-``registered + exempt == mentions`` is **vacuous in its ``registered`` term**
-here. The live pins in cut (a) are the discovery sweep and the per-file mention
-counts. See ``tests/test_forcing_ts_template_census.py``.
+Every wired reader contributes ``mentions=0``. That is not an omission: the
+templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
+and the renderer substitutes the constant, so the five reader FILES stopped
+containing a schema-qualified spelling of the fact table at all and dropped out
+of the discovery sweep. The closure assertion's weight moved onto
+``packages/common/forcing_ts_render.py``'s own two constants and onto the exempt
+files. See the execution split in ``fixtures/I11-1990.md``.
+
+AND THAT IS WHY THERE IS A SECOND SWEEP. ``mentions=0`` everywhere makes
+``registered + exempt == mentions`` degenerate to ``exempt == mentions``: the
+closure keeps every grip it had on a new SPELLING and loses the one river still
+has on a new TEMPLATE (river's entries carry ``mentions=1``, so a tenth
+statement in a registered file moves that file's count and must be registered to
+close). :func:`discover_forcing_template_pairs` and
+:func:`registered_template_pairs` are what replaces it — a structural walk over
+the same files insisting that every ``ForcingTemplatePair`` constructed under
+the discovery roots is one this register names.
 
 The census counter
 ------------------
@@ -49,10 +62,15 @@ from __future__ import annotations
 import ast
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from packages.common import best_available, display_coverage, forecast_store
+from scripts import reset_qhh_smoke_db
+from workers.model_registry import qhh_production_bootstrap
 
 if TYPE_CHECKING:
     from packages.common.forcing_ts_render import ForcingTemplatePair
@@ -75,6 +93,12 @@ class TemplateEntry:
 
     ``kind``
         ``statement`` is a raw renderer input, never composed executed SQL.
+        ``dml`` is the same, for a template that writes rather than projects —
+        the QHH smoke reset's forcing ``DELETE``. It is carried as a kind rather
+        than left to the oracle to sniff from the text, because the projection
+        invariant (I5, same column names in the same order across the pair) is
+        meaningless for it and "this one has no SELECT list" must be a declared
+        property, not an inferred one.
     ``params``
         ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``). Pinned
         per entry because no deletion computes it: the two variants of a pair are
@@ -101,10 +125,98 @@ class TemplateEntry:
     source: Callable[[str], ForcingTemplatePair]
 
 
-#: Cut (a) registers no reader. Cut (b) (``tasks.md`` 7.2) appends one block per
-#: reader module, in stable path-sorted order, mirroring the river register's
-#: layout so several PRs can touch this file without colliding on one tuple.
-FORCING_REGISTRY: tuple[TemplateEntry, ...] = ()
+#: The nine readers ``tasks.md`` 7.2 wires, one block per reader module, in
+#: stable path-sorted order, mirroring the river register's layout so several
+#: PRs can touch this file without colliding on one tuple.
+#:
+#: ``source`` takes the store even though every pair here is store-independent:
+#: the argument is the seam a reader that composes caller-owned store-specific
+#: literals around its pair would use (river's ``_segment_rows_source_template``
+#: has that shape), and dropping it would make such a reader unregisterable.
+#:
+#: The seam is necessary but NOT sufficient for river's exact shape. River builds
+#: the pair inside a function body, and :func:`discover_forcing_template_pairs`
+#: rejects that outright: a construction with no module-level binding raises and
+#: aborts the whole sweep, by design (see its docstring and the guard at the end
+#: of its loop). So registering a function-body-construction reader takes a
+#: deliberate edit to ``discover_forcing_template_pairs`` in the SAME change —
+#: and to :func:`registered_template_pairs`, whose identity join against
+#: ``vars(module)`` cannot see a pair built fresh on every call either. Writing
+#: the ``source`` callable alone will turn the census red, not green.
+FORCING_REGISTRY: tuple[TemplateEntry, ...] = (
+    TemplateEntry(
+        key="best_available.forcing_inputs",
+        path="packages/common/best_available.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: best_available._FORCING_INPUTS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="display_coverage.station_sample_rows",
+        path="packages/common/display_coverage.py",
+        kind="statement",
+        params="named",
+        mentions=0,
+        source=lambda _store: display_coverage._STATION_SAMPLE_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.forcing_readiness_overall",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._FORCING_READINESS_OVERALL_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.forcing_readiness_variable_rows",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._FORCING_READINESS_VARIABLE_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.latest_product_station_source",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="named",
+        mentions=0,
+        source=lambda _store: forecast_store._LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.station_forcing_membership",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._STATION_FORCING_MEMBERSHIP_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="forecast_store.station_series_rows",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: forecast_store._STATION_SERIES_ROWS_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="reset_qhh_smoke_db.forcing_timeseries_delete",
+        path="scripts/reset_qhh_smoke_db.py",
+        kind="dml",
+        params="positional",
+        mentions=0,
+        source=lambda _store: reset_qhh_smoke_db._FORCING_TIMESERIES_DELETE_TEMPLATES,
+    ),
+    TemplateEntry(
+        key="qhh_production_bootstrap.dynamic_forcing_count",
+        path="workers/model_registry/qhh_production_bootstrap.py",
+        kind="statement",
+        params="positional",
+        mentions=0,
+        source=lambda _store: qhh_production_bootstrap._DYNAMIC_FORCING_COUNT_TEMPLATES,
+    ),
+)
 
 
 def entry_by_key(key: str) -> TemplateEntry:
@@ -137,51 +249,19 @@ class ExemptMentions:
     note: str
 
 
-#: The nine reader sites, which are exempt ONLY because cut (a) has not wired
-#: them yet. Cut (b) deletes these five rows as it registers each reader, and the
-#: files' mention counts go to zero with them (the templates carry the token, not
-#: the name), so closure for these files becomes ``0 + 0 == 0``. That is the
-#: designed end state, not an omission.
-UNWIRED_READERS: tuple[ExemptMentions, ...] = (
-    ExemptMentions(
-        path="packages/common/best_available.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="best-available forcing-inputs listing; already joins met.forcing_version",
-    ),
-    ExemptMentions(
-        path="packages/common/display_coverage.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="_COVERAGE_CTES station leg; legacy-variant render only (C4 — the CTE is an import-time constant)",
-    ),
-    ExemptMentions(
-        path="packages/common/forecast_store.py",
-        count=5,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note=(
-            "QHH latest-product fallback CTE, station-series rows helper (an f-string today, not a template), "
-            "station-forcing membership validation, forcing-readiness overall and per-variable rows"
-        ),
-    ),
-    ExemptMentions(
-        path="scripts/reset_qhh_smoke_db.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="one _delete; river's two-group split needs a routing column forcing does not have until 7.3",
-    ),
-    ExemptMentions(
-        path="workers/model_registry/qhh_production_bootstrap.py",
-        count=1,
-        shape="reader, unwired",
-        owner="7.2 cut (b)",
-        note="_dynamic_forcing_counts forcing-state count; does not join met.forcing_version at all",
-    ),
-)
+#: NOTHING. Cut (a) carried five ``reader, unwired`` rows here — one per reader
+#: FILE, nine mentions in total — because the readers still spelled the table
+#: name themselves. Cut (b) wired all nine through the renderer, so those files
+#: now carry the token instead of the name, score **0** in the sweep and leave the
+#: discovery set entirely. The rows are deleted rather than zeroed:
+#: :func:`test_every_exemption_row_names_a_shape_and_an_owner` refuses a
+#: zero-count row, and a zero-count row would in any case claim an exemption for
+#: a file that has nothing left to exempt.
+#:
+#: The name survives as an empty tuple so the census can assert the transition
+#: HAPPENED rather than merely that the numbers add up — see
+#: ``test_the_nine_readers_left_the_exemption_ledger``.
+UNWIRED_READERS: tuple[ExemptMentions, ...] = ()
 
 #: The 38 mentions that are not reads at all and are not this transition's to
 #: convert. Measured, not estimated: the issue text's "the two write-side
@@ -465,12 +545,33 @@ def discover_forcing_mentions(
     and a file that does not parse, or that is not UTF-8, now fails the sweep
     closed rather than being silently skipped. Both failures NAME THE FILE: the
     parse one through the ``filename`` handed to :func:`forcing_table_mentions`,
-    the decode one through the re-raise below, because it fires in ``read_text``
-    before the counter is entered. Fail-closed over a few hundred files is only
-    usable if the diagnostic points at one of them.
+    the decode one through the re-raise in :func:`_iter_python_sources`, because
+    it fires in ``read_text`` before the counter is entered. Fail-closed over a
+    few hundred files is only usable if the diagnostic points at one of them.
+
+    This is the census's TEXT half. :func:`discover_forcing_template_pairs` is
+    the structural half over the same walk, and since D1 it is the one that can
+    see a new template at all — the token means a wired reader spells the table
+    name nowhere, so it contributes nothing here.
     """
-    base = REPO_ROOT if root is None else root
     found: dict[str, int] = {}
+    for path, relative, source in _iter_python_sources(REPO_ROOT if root is None else root, roots):
+        count = forcing_table_mentions(source, filename=str(path))
+        if count:
+            found[relative] = count
+    return found
+
+
+def _iter_python_sources(base: Path, roots: tuple[str, ...]) -> Iterator[tuple[Path, str, str]]:
+    """Every ``.py`` file under ``roots``, as ``(absolute path, base-relative path, source)``.
+
+    The ONE walk both sweeps below are defined over, factored out rather than
+    copied so "the exhaustiveness guard looks where the census looks" is true by
+    construction: same roots, same :data:`_PRUNED_DIRECTORIES`, same sorted
+    order, same fail-closed contract on a file that cannot be decoded. A second
+    walk with its own prune list would let a directory be added to one and not
+    the other, which is precisely the escape both sweeps exist to close.
+    """
     for name in roots:
         for directory, subdirectories, filenames in os.walk(base / name):
             subdirectories[:] = [entry for entry in sorted(subdirectories) if entry not in _PRUNED_DIRECTORIES]
@@ -482,7 +583,145 @@ def discover_forcing_mentions(
                     source = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError as error:
                     raise ValueError(f"{path}: not valid UTF-8, so the census cannot count it ({error})") from error
-                count = forcing_table_mentions(source, filename=str(path))
-                if count:
-                    found[path.relative_to(base).as_posix()] = count
+                yield path, path.relative_to(base).as_posix(), source
+
+
+# ---------------------------------------------------------------------------
+# The exhaustiveness guard
+#
+# The closure check above is the census's grip on "a new SPELLING of the table
+# name must be registered or exempt". Since D1 it has no grip at all on "a new
+# TEMPLATE must be registered": every wired reader carries
+# `FORCING_TABLE_TOKEN` and therefore `mentions=0`, so `registered + exempt ==
+# mentions` degenerates to `exempt == mentions` and the `registered` term
+# constrains nothing. River does not have this hole — its entries carry
+# `mentions=1`, so a new statement in a registered file moves its count and the
+# closure forces a registration. D1 bought a one-line 7.3 flip and paid for it
+# with exactly that grip.
+#
+# This is what replaces it, in river's own shape ("counter permissive, walk
+# strict"): the counter stays blind to the token, and a STRUCTURAL walk over the
+# same files insists that every `ForcingTemplatePair` constructed under the
+# discovery roots is one the register names. A tenth pair added beside the nine
+# then gets `test_i1_i2_*`, `test_i5_*`, the byte-identity pins and the `params`
+# claim — or it gets a red census. It is also what covers
+# `test_forcing_read_path_store_routing.WIRED_READER_PATHS`, which is DERIVED
+# from the register and therefore cannot see an unregistered sixth file on its
+# own.
+#
+# `tasks.md` 7.3 is where this stops being theoretical: the write-side row-count
+# payloads (`forcing_ts_render.py:266-272`) become templates then, in files the
+# register does not cover today.
+# ---------------------------------------------------------------------------
+
+#: The pair class's name as written at a construction site. Matched on the NAME
+#: rather than resolved through an import graph, so a construction site is found
+#: in a file the sweep has never imported and never will.
+TEMPLATE_PAIR_CLASS = "ForcingTemplatePair"
+
+
+def _template_pair_names(tree: ast.AST) -> frozenset[str]:
+    """Local names bound to :data:`TEMPLATE_PAIR_CLASS` in one module.
+
+    The bare class name is ALWAYS in the set, whether or not the module imports
+    it: a file that defines its own unrelated ``ForcingTemplatePair`` and
+    instantiates it would be flagged, which is the fail-closed direction. The
+    import walk on top of that is what catches
+    ``from … import ForcingTemplatePair as Pair``, which would otherwise be a
+    one-word escape from the whole guard.
+    """
+    names = {TEMPLATE_PAIR_CLASS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            for alias in node.names:
+                if alias.name.rsplit(".", 1)[-1] == TEMPLATE_PAIR_CLASS:
+                    names.add(alias.asname or alias.name)
+    return frozenset(names)
+
+
+def _is_template_pair_construction(node: ast.AST, names: frozenset[str]) -> bool:
+    """``ForcingTemplatePair(...)``, however the class was named at the call site.
+
+    Both callee forms, for the same reason the M6 store sweep accepts both: an
+    ``ast.Name``-only check makes
+    ``forcing_ts_render.ForcingTemplatePair(...)`` invisible, and a guard with a
+    published one-token bypass is not a guard.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in names
+    return isinstance(node.func, ast.Attribute) and node.func.attr == TEMPLATE_PAIR_CLASS
+
+
+def _module_level_pair_bindings(tree: ast.Module, names: frozenset[str]) -> list[str]:
+    """Names a module binds AT MODULE SCOPE to a freshly constructed pair."""
+    bound: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: tuple[ast.expr, ...] = tuple(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+            value = node.value
+        else:
+            continue
+        if value is None or not _is_template_pair_construction(value, names):
+            continue
+        bound.extend(target.id for target in targets if isinstance(target, ast.Name))
+    return bound
+
+
+def discover_forcing_template_pairs(
+    root: Path | None = None,
+    roots: tuple[str, ...] = DISCOVERY_ROOTS,
+) -> dict[str, tuple[str, ...]]:
+    """Every module-level ``ForcingTemplatePair`` under ``roots``, path-keyed and name-sorted.
+
+    FAILS CLOSED, naming the file, on a pair the register could not name even if
+    its author wanted to: one constructed inside a function, in a comprehension,
+    inside a container literal or bound by unpacking. Such a pair has no
+    module-level identity for :func:`registered_template_pairs` to resolve, so
+    silently ignoring it would reopen the whole escape — the counter would say
+    "no sites here" about a file with a live template in it. The registered nine
+    are all plain module-level assignments; a reader that needs another shape has
+    to make that a deliberate edit here.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for path, relative, source in _iter_python_sources(REPO_ROOT if root is None else root, roots):
+        tree = ast.parse(source, filename=str(path))
+        names = _template_pair_names(tree)
+        constructions = sum(1 for node in ast.walk(tree) if _is_template_pair_construction(node, names))
+        if not constructions:
+            continue
+        bound = _module_level_pair_bindings(tree, names)
+        if constructions > len(bound):
+            raise ValueError(
+                f"{path}: {constructions} {TEMPLATE_PAIR_CLASS} construction(s) but only {len(bound)} bound at "
+                "module scope. A pair the register cannot name is a pair no shape oracle covers; bind it to a "
+                "module-level name and register it in FORCING_REGISTRY."
+            )
+        found[relative] = tuple(sorted(bound))
     return found
+
+
+def registered_template_pairs() -> dict[str, tuple[str, ...]]:
+    """What :data:`FORCING_REGISTRY` resolves to, in the discovered sweep's shape.
+
+    Resolved by IDENTITY against the production module's namespace and then
+    reported as a NAME, which is the only way the two sides can be compared: the
+    sweep never imports the files it walks (it must work on a file that does not
+    import), and the register never spells a variable name (its ``source`` is a
+    callable). ``vars(module)`` is the join.
+    """
+    resolved: dict[str, set[str]] = {}
+    for entry in FORCING_REGISTRY:
+        module = import_module(entry.path.removesuffix(".py").replace("/", "."))
+        pair = entry.source("legacy")
+        bound = {name for name, value in vars(module).items() if value is pair}
+        if not bound:
+            raise ValueError(
+                f"{entry.key}: source() returns a pair {entry.path} does not hold under any module-level name"
+            )
+        resolved.setdefault(entry.path, set()).update(bound)
+    return {path: tuple(sorted(names)) for path, names in resolved.items()}

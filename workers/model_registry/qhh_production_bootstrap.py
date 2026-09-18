@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from packages.common.forcing_ts_render import (
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -1903,17 +1908,46 @@ def _fetch_model_identity(cursor: Any, model_id: str) -> dict[str, Any]:
     return row
 
 
-def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
-    cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
-    forcing_versions = int(cursor.fetchone()["count"])
-    cursor.execute(
-        """
+# Reader #8 (#1990 task 7.2). This reader does NOT join `met.forcing_version` at
+# all — it counts fact rows by MODEL across every forcing version, so "look the
+# store up by forcing version" does not map onto it even once task 7.3 adds the
+# routing column. Its narrow variant is the legacy one with the station join
+# moved onto `station_key`.
+#
+# THE CROSS-STORE SHAPE IS 7.3's (invariant I7), and it is not written as dead
+# code here. When both tables exist this becomes ONE aggregate over the two
+# rendered fact-row subrelations composed inside this function — not two counts
+# summed by Python, which is the shape the invariant forbids. In this task store
+# is the constant `legacy` and there is nothing to compose: a narrow branch would
+# emit `station_key` against a table that has no such column, and
+# `_dynamic_forcing_counts` executes against node-27 (must-preserve M6).
+_DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
         SELECT COUNT(*) AS count
-        FROM met.forcing_station_timeseries fst
+        FROM {FORCING_TABLE_TOKEN} fst
         JOIN met.met_station ms
           ON ms.station_id = fst.station_id
         WHERE ms.properties_json->>'model_id' = %s
         """,
+    narrow=f"""
+        SELECT COUNT(*) AS count
+        FROM {FORCING_TABLE_TOKEN} fst
+        JOIN met.met_station ms
+          ON ms.station_key = fst.station_key
+        WHERE ms.properties_json->>'model_id' = %s
+        """,
+)
+
+
+def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
+    cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
+    forcing_versions = int(cursor.fetchone()["count"])
+    cursor.execute(
+        render_forcing_ts_sql(
+            _DYNAMIC_FORCING_COUNT_TEMPLATES,
+            "legacy",
+            entry="qhh_production_bootstrap.dynamic_forcing_count",
+        ).sql,
         (model_id,),
     )
     timeseries_rows = int(cursor.fetchone()["count"])

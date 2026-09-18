@@ -47,6 +47,7 @@ from scripts.select_ci_tests import (
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
+    FORCING_SQL_SHAPE_ORACLE_TESTS,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
@@ -1049,6 +1050,11 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_river_ts_render_reference_lexer.py",
             "tests/test_river_ts_template_golden.py",
             "tests/test_sql_shape_helpers.py",
+            # I11 #1990 task 7.2: five of the nine registered FORCING read
+            # templates live in this file, and it is the only wired reader file
+            # still in the forcing census (its two index/catalog metadata
+            # payloads). Nothing ran the forcing oracle on this path before.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             # #1728 merged the connection-attribution guards into this rule:
             # the module carries the application_name injection seam for both
             # nhms-api-forecast and nhms-api-data-sources.
@@ -1363,6 +1369,58 @@ def test_select_tests_maps_every_registered_cleanup_source_to_the_zero_text_orac
         assert oracle in selected, source
 
 
+def test_select_tests_maps_every_forcing_census_and_reader_path_to_the_forcing_oracle() -> None:
+    """I11 #1990 task 7.2's half of the rule above, for the FORCING census.
+
+    The census in ``tests/test_forcing_ts_template_census.py`` pins a mention
+    count per production file and refuses any mention that is neither a
+    registered read template nor an exempt row with a named owner. That is only
+    worth anything if a diff to one of those files actually runs it — and when
+    cut (a) landed, none of the sixteen paths routed the census at all: adding a
+    ``met.forcing_station_timeseries`` mention to
+    ``workers/forcing_producer/store.py`` went red on the post-merge master run
+    and nowhere else. River solved the identical problem with a per-site rider
+    plus this meta-test; forcing had neither until cut (b).
+
+    The expectation is DERIVED from the census and the register — the same two
+    objects the oracle judges the tree with — so a file entering either without a
+    routing rule is red HERE, which a frozen second copy of the path list could
+    never catch.
+
+    All three members of the group are asserted, not just the census: the
+    register is the parametrisation source of the byte-identity / M6 / narrow
+    shape suite, and the renderer's own unit oracle is what a template refusal
+    fails in. Routing one and not the others would leave the other two as
+    post-merge discoveries.
+    """
+    from tests.forcing_ts_template_registry import FORCING_REGISTRY
+    from tests.test_forcing_ts_template_census import FORCING_TABLE_CENSUS
+
+    guarded = sorted(set(FORCING_TABLE_CENSUS) | {entry.path for entry in FORCING_REGISTRY})
+    assert guarded, "the forcing census declares no path; the sweep or the register is broken"
+
+    for source in guarded:
+        selected = select_tests([source], repo_root=Path("."))
+        for oracle in FORCING_SQL_SHAPE_ORACLE_TESTS:
+            assert oracle in selected, f"{source} does not select {oracle}"
+
+
+def test_the_forcing_oracle_group_is_not_folded_into_the_river_one() -> None:
+    """Two groups, on purpose — and the reason is a scheduled deletion.
+
+    ``tasks.md`` 6.3 removes the river renderer's legacy path and collapses its
+    oracles while the forcing transition is still open (``tasks.md`` 8.3 retires
+    the forcing set, much later). A merged tuple would make the river contract
+    migration edit the forcing routing, and would route every river reader diff
+    at three forcing suites that assert nothing about it.
+    """
+    from scripts.select_ci_tests import SQL_SHAPE_ORACLE_TESTS
+
+    assert not set(FORCING_SQL_SHAPE_ORACLE_TESTS) & set(SQL_SHAPE_ORACLE_TESTS)
+    for suite in FORCING_SQL_SHAPE_ORACLE_TESTS:
+        assert Path(suite).is_file(), suite
+
+
 def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:
     # scripts/node27_autopipeline.py has no same-name tests/test_node27_autopipeline.py,
     # so before its explicit rule it dropped into the core-smoke fallback and none
@@ -1374,6 +1432,12 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
 
     assert selected == [
         "tests/test_display_publish_status_only.py",
+        # I11 #1990 task 7.2: this script is in the forcing discovery-set census
+        # (one `row_counts` lookup key), and nothing routed the census here, so a
+        # new forcing table mention was red only on the post-merge master run.
+        "tests/test_forcing_read_path_store_routing.py",
+        "tests/test_forcing_ts_render.py",
+        "tests/test_forcing_ts_template_census.py",
         # #1647: the `_connect` bounds + stats-guard flag parser suite, added to
         # the same rule for the same reason (no same-name fallback finds it).
         "tests/test_node27_autopipeline_connection_bounds.py",
@@ -9202,6 +9266,22 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_baseline_cutover_cli.py"): "edge-consumer",
+    # -- edge-consumer: the forcing read-path suite's package drag-in (#1990) -
+    # tests/test_forcing_read_path_store_routing.py belongs to the FORCING read
+    # surface: FORCING_SQL_SHAPE_ORACLE_TESTS is ridden by every registered
+    # forcing reader path, INCLUDING
+    # workers/model_registry/qhh_production_bootstrap.py, which is the module
+    # this suite actually contracts (reader #8). The gap is only the PACKAGE
+    # BASE: `from workers.model_registry import qhh_production_bootstrap`
+    # contributes `workers.model_registry` to the importer index as well as the
+    # submodule, exactly as the slurm array-job `__init__.py` entries above do.
+    # Copying the suite into `workers/model_registry/**` would make every
+    # model-registry PR — list-basins, bootstrap CLI, registry writes — pay for
+    # nine forcing template oracles it cannot break.
+    (
+        "workers/model_registry/__init__.py",
+        "tests/test_forcing_read_path_store_routing.py",
+    ): "edge-consumer",
 }
 
 

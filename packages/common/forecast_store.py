@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from packages.common.forcing_ts_render import (
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
 from packages.common.river_ts_render import render_river_ts_sql
 
 MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
@@ -242,6 +247,348 @@ def _latest_product_river_source_template(store: str) -> str:
     if store == "narrow":
         return _LATEST_PRODUCT_RIVER_SOURCE_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
     raise ValueError(f"Invalid river timeseries store: {store!r}")
+
+
+# ---------------------------------------------------------------------------
+# Forcing fact-table read templates (#1990 task 7.2, fixture `I11-1990.md`).
+#
+# Five of the nine registered forcing readers live in this module. Each is a
+# `ForcingTemplatePair`: the `legacy` variant is today's text, verbatim, with the
+# schema-qualified table name replaced by `FORCING_TABLE_TOKEN`; the `narrow`
+# variant is INDEPENDENTLY AUTHORED against 7.3's key/enum table and joins
+# `met.forcing_version` for `source_id` / `forcing_version_id` and
+# `met.met_station` for `basin_version_id` / `station_id`. There is no marker
+# mechanism and no line deletion between them — the legacy forcing table has no
+# key columns, so neither text is derivable from the other (`design.md` D9).
+#
+# EVERY CALL SITE BELOW PASSES THE LITERAL `"legacy"`. That is not a default to
+# be tidied into a variable: `met.forcing_version.timeseries_store` does not
+# exist until task 7.3, so there is nothing to look up, and a narrow render
+# reaching an executed statement would name `forcing_version_key` /
+# `variable_e` against a table that has neither (must-preserve M6). In
+# particular, `_fetch_latest_qhh_display_candidates` has a `store` local IN
+# SCOPE at the forcing call site — it is the RIVER route read off
+# `hydro.hydro_run.timeseries_store`, and passing it here would render narrow
+# forcing SQL for any narrow-routed run. `tests/test_forcing_read_path_store_
+# routing.py` asserts the literal by AST over every wired reader.
+#
+# While the two D1 constants agree the legacy render is byte-identical to the
+# text it replaced, which is what makes this wiring a provable no-op; the
+# equality pins in that same suite are the proof.
+# ---------------------------------------------------------------------------
+
+_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""                SELECT
+                    cr.run_id,
+                    cr.model_id,
+                    cr.display_start_time,
+                    cr.display_end_time,
+                    fst.forcing_version_id,
+                    fst.basin_version_id,
+                    LOWER(fst.source_id) AS station_source_id,
+                    fst.station_id,
+                    fst.variable,
+                    cr.expected_station_count,
+                    fst.valid_time,
+                    fst.unit,
+                    fst.quality_flag
+                FROM {FORCING_TABLE_TOKEN} fst
+                JOIN candidate_runs cr
+                  ON cr.forcing_version_id = fst.forcing_version_id
+                 AND fst.basin_version_id = cr.basin_version_id
+                 AND LOWER(fst.source_id) = LOWER(cr.source_id)
+                WHERE fst.variable = ANY(%(variables)s)
+                  AND fst.valid_time >= cr.display_start_time
+                  AND fst.valid_time <= cr.display_end_time
+                  AND (%(scan_forcing_version_id)s IS NULL
+                       OR fst.forcing_version_id = %(scan_forcing_version_id)s)
+                  AND (%(scan_basin_version_id)s IS NULL
+                       OR fst.basin_version_id = %(scan_basin_version_id)s)
+                  AND (%(scan_source_id_lower)s IS NULL
+                       OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
+                  AND (%(scan_display_start)s IS NULL
+                       OR fst.valid_time >= %(scan_display_start)s)
+                  AND (%(scan_display_end)s IS NULL
+                       OR fst.valid_time <= %(scan_display_end)s)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM met.interp_weight iw
+                      WHERE iw.model_id = cr.model_id
+                        AND iw.station_id = fst.station_id
+                        AND iw.variable = fst.variable
+                        AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                  )
+""",
+    narrow=f"""                SELECT
+                    cr.run_id,
+                    cr.model_id,
+                    cr.display_start_time,
+                    cr.display_end_time,
+                    fv.forcing_version_id,
+                    ms.basin_version_id,
+                    LOWER(fv.source_id) AS station_source_id,
+                    ms.station_id,
+                    fst.variable_e::text AS variable,
+                    cr.expected_station_count,
+                    fst.valid_time,
+                    fst.unit_e::text AS unit,
+                    fst.quality_flag_e::text AS quality_flag
+                FROM {FORCING_TABLE_TOKEN} fst
+                JOIN met.forcing_version fv
+                  ON fv.forcing_version_key = fst.forcing_version_key
+                JOIN met.met_station ms
+                  ON ms.station_key = fst.station_key
+                JOIN candidate_runs cr
+                  ON cr.forcing_version_id = fv.forcing_version_id
+                 AND ms.basin_version_id = cr.basin_version_id
+                 AND LOWER(fv.source_id) = LOWER(cr.source_id)
+                WHERE fst.variable_e = ANY(%(variables)s::met.forcing_variable[])
+                  AND fst.valid_time >= cr.display_start_time
+                  AND fst.valid_time <= cr.display_end_time
+                  AND (%(scan_forcing_version_id)s IS NULL
+                       OR fv.forcing_version_id = %(scan_forcing_version_id)s)
+                  AND (%(scan_basin_version_id)s IS NULL
+                       OR ms.basin_version_id = %(scan_basin_version_id)s)
+                  AND (%(scan_source_id_lower)s IS NULL
+                       OR LOWER(fv.source_id) = %(scan_source_id_lower)s)
+                  AND (%(scan_display_start)s IS NULL
+                       OR fst.valid_time >= %(scan_display_start)s)
+                  AND (%(scan_display_end)s IS NULL
+                       OR fst.valid_time <= %(scan_display_end)s)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM met.interp_weight iw
+                      WHERE iw.model_id = cr.model_id
+                        AND iw.station_id = ms.station_id
+                        AND iw.variable = fst.variable_e::text
+                        AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                  )
+""",
+)
+
+# Reader #3. UNLIKE the other eight this one was NOT a template before this task:
+# `clauses` was a Python list joined with " AND " and spliced into an f-string,
+# so its SQL text and its positional parameter tuple both varied with the two
+# optional bounds. A per-store pair cannot be registered over a text that the
+# caller rebuilds, so the two optional conjuncts become NULL-GUARDED binds —
+# `(%s IS NULL OR fst.valid_time >= %s)` — exactly the fold-away shape the QHH
+# fallback's `scan_*` guards already use in this file. The statement is now
+# constant and the tuple is a fixed ten.
+#
+# This is the ONE reader whose executed text and parameter tuple change, and it
+# is expected (fixture M1a): its pin is the `station_series()` RESPONSE payload,
+# which is unchanged, plus the re-pointed tuple pin in
+# `tests/test_forecast_api.py`. With both bounds bound, `NULL IS NULL` folds to
+# TRUE at plan time and a bound timestamp folds to the same range predicate the
+# old conditional clause emitted, so the row set is identical either way.
+_STATION_SERIES_ROWS_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
+            WITH requested(variable, ordinal) AS (
+                SELECT variable, ordinal
+                FROM unnest(%s::text[]) WITH ORDINALITY AS variables(variable, ordinal)
+            )
+            SELECT
+                limited.forcing_version_id,
+                limited.station_id,
+                limited.variable,
+                limited.valid_time,
+                limited.value,
+                limited.unit,
+                limited.native_resolution,
+                limited.quality_flag,
+                limited.source_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY limited.variable
+                    ORDER BY limited.valid_time
+                ) AS row_number
+            FROM requested
+            CROSS JOIN LATERAL (
+                SELECT
+                    fst.forcing_version_id,
+                    fst.station_id,
+                    fst.variable,
+                    fst.valid_time,
+                    fst.value,
+                    fst.unit,
+                    fst.native_resolution,
+                    fst.quality_flag,
+                    fst.source_id
+                FROM {FORCING_TABLE_TOKEN} fst
+                WHERE fst.forcing_version_id = %s
+                  AND fst.station_id = %s
+                  AND fst.variable = requested.variable
+                  AND fst.valid_time >= %s
+                  AND fst.valid_time <= %s
+                  AND (%s IS NULL OR fst.valid_time >= %s)
+                  AND (%s IS NULL OR fst.valid_time <= %s)
+                ORDER BY fst.valid_time
+                LIMIT %s
+            ) limited
+            ORDER BY requested.ordinal, limited.valid_time
+            """,
+    narrow=f"""
+            WITH requested(variable, ordinal) AS (
+                SELECT variable, ordinal
+                FROM unnest(%s::text[]) WITH ORDINALITY AS variables(variable, ordinal)
+            )
+            SELECT
+                limited.forcing_version_id,
+                limited.station_id,
+                limited.variable,
+                limited.valid_time,
+                limited.value,
+                limited.unit,
+                limited.native_resolution,
+                limited.quality_flag,
+                limited.source_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY limited.variable
+                    ORDER BY limited.valid_time
+                ) AS row_number
+            FROM requested
+            CROSS JOIN LATERAL (
+                SELECT
+                    fv.forcing_version_id,
+                    ms.station_id,
+                    fst.variable_e::text AS variable,
+                    fst.valid_time,
+                    fst.value,
+                    fst.unit_e::text AS unit,
+                    fst.native_resolution,
+                    fst.quality_flag_e::text AS quality_flag,
+                    fv.source_id
+                FROM {FORCING_TABLE_TOKEN} fst
+                JOIN met.forcing_version fv
+                  ON fv.forcing_version_key = fst.forcing_version_key
+                JOIN met.met_station ms
+                  ON ms.station_key = fst.station_key
+                WHERE fv.forcing_version_id = %s
+                  AND ms.station_id = %s
+                  AND fst.variable_e::text = requested.variable
+                  AND fst.valid_time >= %s
+                  AND fst.valid_time <= %s
+                  AND (%s IS NULL OR fst.valid_time >= %s)
+                  AND (%s IS NULL OR fst.valid_time <= %s)
+                ORDER BY fst.valid_time
+                LIMIT %s
+            ) limited
+            ORDER BY requested.ordinal, limited.valid_time
+            """,
+)
+
+_STATION_FORCING_MEMBERSHIP_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
+            SELECT 1 AS present
+            FROM {FORCING_TABLE_TOKEN}
+            WHERE forcing_version_id = %s
+              AND station_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+            LIMIT 1
+            """,
+    narrow=f"""
+            SELECT 1 AS present
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_key = fst.forcing_version_key
+            JOIN met.met_station ms
+              ON ms.station_key = fst.station_key
+            WHERE fv.forcing_version_id = %s
+              AND ms.station_id = %s
+              AND fst.valid_time >= %s
+              AND fst.valid_time <= %s
+            LIMIT 1
+            """,
+)
+
+_FORCING_READINESS_OVERALL_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
+            SELECT
+                COUNT(DISTINCT station_id) AS actual_station_count,
+                COUNT(*) AS sample_count,
+                MIN(valid_time) AS valid_time_start,
+                MAX(valid_time) AS valid_time_end
+            FROM {FORCING_TABLE_TOKEN}
+            WHERE forcing_version_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+              AND variable = ANY(%s)
+            """,
+    narrow=f"""
+            SELECT
+                COUNT(DISTINCT fst.station_key) AS actual_station_count,
+                COUNT(*) AS sample_count,
+                MIN(fst.valid_time) AS valid_time_start,
+                MAX(fst.valid_time) AS valid_time_end
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_key = fst.forcing_version_key
+            WHERE fv.forcing_version_id = %s
+              AND fst.valid_time >= %s
+              AND fst.valid_time <= %s
+              AND fst.variable_e = ANY(%s::met.forcing_variable[])
+            """,
+)
+
+# Reader #6, and the one the Invariant Matrix calls the BTRIM trap (I5): `unit`
+# and `quality_flag` become ENUMS on the narrow side, and `BTRIM(unit_e)` does
+# not compile. Every text function over an enum column below therefore carries an
+# explicit `::text`, including the two `ORDER BY` / projection sites — an enum
+# sorts by DECLARATION order, so `ORDER BY variable_e` would reorder the response
+# array relative to legacy's alphabetical `ORDER BY variable`.
+#
+# The `IS NULL` halves are kept verbatim from legacy even though `unit_e` and
+# `quality_flag_e` are `NOT NULL` on the narrow table: they are dead on BOTH
+# stores today (legacy's `unit` / `quality_flag` are already `NOT NULL`,
+# `000005_met.sql:107,109`), so dropping them on one side only would be a gratuitous
+# text divergence in a task whose whole claim is that the two variants agree
+# (fixture C5, which raised a NOT-NULL divergence here and withdrew it on
+# evidence).
+_FORCING_READINESS_VARIABLE_ROWS_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
+            SELECT
+                variable,
+                COUNT(DISTINCT station_id) AS station_count,
+                COUNT(*) AS sample_count,
+                COUNT(DISTINCT NULLIF(BTRIM(unit), '')) AS unit_count,
+                SUM(CASE WHEN unit IS NULL OR BTRIM(unit) = '' THEN 1 ELSE 0 END) AS missing_unit_samples,
+                COUNT(DISTINCT NULLIF(BTRIM(quality_flag), '')) AS quality_flag_count,
+                SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
+                    AS missing_quality_flag_samples,
+                MIN(valid_time) AS valid_time_start,
+                MAX(valid_time) AS valid_time_end
+            FROM {FORCING_TABLE_TOKEN}
+            WHERE forcing_version_id = %s
+              AND valid_time >= %s
+              AND valid_time <= %s
+              AND variable = ANY(%s)
+            GROUP BY variable
+            ORDER BY variable
+            """,
+    narrow=f"""
+            SELECT
+                fst.variable_e::text AS variable,
+                COUNT(DISTINCT fst.station_key) AS station_count,
+                COUNT(*) AS sample_count,
+                COUNT(DISTINCT NULLIF(BTRIM(fst.unit_e::text), '')) AS unit_count,
+                SUM(CASE WHEN fst.unit_e IS NULL OR BTRIM(fst.unit_e::text) = '' THEN 1 ELSE 0 END)
+                    AS missing_unit_samples,
+                COUNT(DISTINCT NULLIF(BTRIM(fst.quality_flag_e::text), '')) AS quality_flag_count,
+                SUM(CASE WHEN fst.quality_flag_e IS NULL OR BTRIM(fst.quality_flag_e::text) = '' THEN 1 ELSE 0 END)
+                    AS missing_quality_flag_samples,
+                MIN(fst.valid_time) AS valid_time_start,
+                MAX(fst.valid_time) AS valid_time_end
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_key = fst.forcing_version_key
+            WHERE fv.forcing_version_id = %s
+              AND fst.valid_time >= %s
+              AND fst.valid_time <= %s
+              AND fst.variable_e = ANY(%s::met.forcing_variable[])
+            GROUP BY fst.variable_e
+            ORDER BY fst.variable_e::text
+            """,
+)
 
 
 def _qhh_latest_timeseries_store(header: Mapping[str, Any]) -> str:
@@ -1749,52 +2096,22 @@ class PsycopgForecastStore:
             pin_scan_run_id=True,
         )
         river_source_sql = render_river_ts_sql(_latest_product_river_source_template(store), store).sql
+        # `store` above is the RIVER route (`hydro.hydro_run.timeseries_store`).
+        # The forcing leg takes the literal `"legacy"` — forcing has no routing
+        # column until task 7.3, and rendering it narrow because the RUN happens
+        # to be narrow-routed would emit `forcing_version_key` / `variable_e`
+        # against a table that has neither (must-preserve M6).
+        station_source_sql = render_forcing_ts_sql(
+            _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
+            "legacy",
+            entry="forecast_store.latest_product_station_source",
+        ).sql
         return self._fetch_all(
             cursor,
             f"""
             WITH candidate_runs AS ({pinned_candidate_runs_sql}            ),
             station_sample_rows AS (
-                SELECT
-                    cr.run_id,
-                    cr.model_id,
-                    cr.display_start_time,
-                    cr.display_end_time,
-                    fst.forcing_version_id,
-                    fst.basin_version_id,
-                    LOWER(fst.source_id) AS station_source_id,
-                    fst.station_id,
-                    fst.variable,
-                    cr.expected_station_count,
-                    fst.valid_time,
-                    fst.unit,
-                    fst.quality_flag
-                FROM met.forcing_station_timeseries fst
-                JOIN candidate_runs cr
-                  ON cr.forcing_version_id = fst.forcing_version_id
-                 AND fst.basin_version_id = cr.basin_version_id
-                 AND LOWER(fst.source_id) = LOWER(cr.source_id)
-                WHERE fst.variable = ANY(%(variables)s)
-                  AND fst.valid_time >= cr.display_start_time
-                  AND fst.valid_time <= cr.display_end_time
-                  AND (%(scan_forcing_version_id)s IS NULL
-                       OR fst.forcing_version_id = %(scan_forcing_version_id)s)
-                  AND (%(scan_basin_version_id)s IS NULL
-                       OR fst.basin_version_id = %(scan_basin_version_id)s)
-                  AND (%(scan_source_id_lower)s IS NULL
-                       OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
-                  AND (%(scan_display_start)s IS NULL
-                       OR fst.valid_time >= %(scan_display_start)s)
-                  AND (%(scan_display_end)s IS NULL
-                       OR fst.valid_time <= %(scan_display_end)s)
-                  AND EXISTS (
-                      SELECT 1
-                      FROM met.interp_weight iw
-                      WHERE iw.model_id = cr.model_id
-                        AND iw.station_id = fst.station_id
-                        AND iw.variable = fst.variable
-                        AND LOWER(iw.source_id) = LOWER(cr.source_id)
-                  )
-            ),
+{station_source_sql}            ),
             station_identity_coverage AS (
                 SELECT
                     run_id,
@@ -2650,15 +2967,11 @@ class PsycopgForecastStore:
         forcing_version_id = str(forcing_version["forcing_version_id"])
         row = self._fetch_optional(
             cursor,
-            """
-            SELECT 1 AS present
-            FROM met.forcing_station_timeseries
-            WHERE forcing_version_id = %s
-              AND station_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-            LIMIT 1
-            """,
+            render_forcing_ts_sql(
+                _STATION_FORCING_MEMBERSHIP_TEMPLATES,
+                "legacy",
+                entry="forecast_store.station_forcing_membership",
+            ).sql,
             (forcing_version_id, station_id, valid_time_start, valid_time_end),
         )
         if row is None:
@@ -2687,62 +3000,29 @@ class PsycopgForecastStore:
         to_time: datetime | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        clauses = [
-            "fst.forcing_version_id = %s",
-            "fst.station_id = %s",
-            "fst.variable = requested.variable",
-            "fst.valid_time >= %s",
-            "fst.valid_time <= %s",
-        ]
-        params: list[Any] = [forcing_version_id, station_id, valid_time_start, valid_time_end]
-        if from_time is not None:
-            clauses.append("fst.valid_time >= %s")
-            params.append(from_time)
-        if to_time is not None:
-            clauses.append("fst.valid_time <= %s")
-            params.append(to_time)
-        where = " AND ".join(clauses)
+        # Fixed-shape tuple (M1a): the two optional bounds are ALWAYS bound, and
+        # the template's `(%s IS NULL OR …)` guards fold them away when they are
+        # `None`. Each bound appears twice because psycopg2 interpolates
+        # positionally and the guard names it on both sides of the `OR`.
         return self._fetch_all(
             cursor,
-            f"""
-            WITH requested(variable, ordinal) AS (
-                SELECT variable, ordinal
-                FROM unnest(%s::text[]) WITH ORDINALITY AS variables(variable, ordinal)
-            )
-            SELECT
-                limited.forcing_version_id,
-                limited.station_id,
-                limited.variable,
-                limited.valid_time,
-                limited.value,
-                limited.unit,
-                limited.native_resolution,
-                limited.quality_flag,
-                limited.source_id,
-                ROW_NUMBER() OVER (
-                    PARTITION BY limited.variable
-                    ORDER BY limited.valid_time
-                ) AS row_number
-            FROM requested
-            CROSS JOIN LATERAL (
-                SELECT
-                    fst.forcing_version_id,
-                    fst.station_id,
-                    fst.variable,
-                    fst.valid_time,
-                    fst.value,
-                    fst.unit,
-                    fst.native_resolution,
-                    fst.quality_flag,
-                    fst.source_id
-                FROM met.forcing_station_timeseries fst
-                WHERE {where}
-                ORDER BY fst.valid_time
-                LIMIT %s
-            ) limited
-            ORDER BY requested.ordinal, limited.valid_time
-            """,
-            (list(variables), *params, limit + 1),
+            render_forcing_ts_sql(
+                _STATION_SERIES_ROWS_TEMPLATES,
+                "legacy",
+                entry="forecast_store.station_series_rows",
+            ).sql,
+            (
+                list(variables),
+                forcing_version_id,
+                station_id,
+                valid_time_start,
+                valid_time_end,
+                from_time,
+                from_time,
+                to_time,
+                to_time,
+                limit + 1,
+            ),
         )
 
     def _fetch_forcing_readiness_overall(
@@ -2756,18 +3036,11 @@ class PsycopgForecastStore:
     ) -> dict[str, Any]:
         row = self._fetch_optional(
             cursor,
-            """
-            SELECT
-                COUNT(DISTINCT station_id) AS actual_station_count,
-                COUNT(*) AS sample_count,
-                MIN(valid_time) AS valid_time_start,
-                MAX(valid_time) AS valid_time_end
-            FROM met.forcing_station_timeseries
-            WHERE forcing_version_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-              AND variable = ANY(%s)
-            """,
+            render_forcing_ts_sql(
+                _FORCING_READINESS_OVERALL_TEMPLATES,
+                "legacy",
+                entry="forecast_store.forcing_readiness_overall",
+            ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
         )
         return row or {
@@ -2788,26 +3061,11 @@ class PsycopgForecastStore:
     ) -> list[dict[str, Any]]:
         return self._fetch_all(
             cursor,
-            """
-            SELECT
-                variable,
-                COUNT(DISTINCT station_id) AS station_count,
-                COUNT(*) AS sample_count,
-                COUNT(DISTINCT NULLIF(BTRIM(unit), '')) AS unit_count,
-                SUM(CASE WHEN unit IS NULL OR BTRIM(unit) = '' THEN 1 ELSE 0 END) AS missing_unit_samples,
-                COUNT(DISTINCT NULLIF(BTRIM(quality_flag), '')) AS quality_flag_count,
-                SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
-                    AS missing_quality_flag_samples,
-                MIN(valid_time) AS valid_time_start,
-                MAX(valid_time) AS valid_time_end
-            FROM met.forcing_station_timeseries
-            WHERE forcing_version_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-              AND variable = ANY(%s)
-            GROUP BY variable
-            ORDER BY variable
-            """,
+            render_forcing_ts_sql(
+                _FORCING_READINESS_VARIABLE_ROWS_TEMPLATES,
+                "legacy",
+                entry="forecast_store.forcing_readiness_variable_rows",
+            ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
         )
 

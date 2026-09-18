@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,36 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # Run directly (`python scripts/reset_qhh_smoke_db.py`) as well as imported
+    # as `scripts.reset_qhh_smoke_db`, so the `packages.common` import below
+    # resolves either way.
+    sys.path.insert(0, str(ROOT))
+
+from packages.common.forcing_ts_render import (  # noqa: E402
+    FORCING_TABLE_LEGACY,
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
+
+# Reader #9 (#1990 task 7.2). ONE `_delete`, not river's two-group split at
+# `_river_run_groups`: that split reads `hydro.hydro_run.timeseries_store` to
+# decide which runs live in which table, and forcing has no such column until
+# task 7.3 creates `met.forcing_version.timeseries_store`. The split lands with
+# the column; here store is the constant `legacy`.
+_FORCING_TIMESERIES_DELETE_TEMPLATES = ForcingTemplatePair(
+    legacy=f"DELETE FROM {FORCING_TABLE_TOKEN} WHERE forcing_version_id = ANY(%s)",
+    # `AS fst` is not decoration: it makes the fact-table reference carry the same
+    # alias the other eight narrow variants use, which is what the shape oracle
+    # scans for. An unaliased `DELETE FROM … WHERE forcing_version_key = …` reads
+    # identically to Postgres and is invisible to that oracle.
+    narrow=(
+        f"DELETE FROM {FORCING_TABLE_TOKEN} AS fst WHERE fst.forcing_version_key IN ("
+        "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = ANY(%s))"
+    ),
+)
+
 RUN_ROOT = Path(os.getenv("QHH_RUN_ROOT", ROOT / ".nhms-runs" / "qhh-smoke")).resolve()
 MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 BASIN_ID = os.getenv("QHH_BASIN_ID", "basins_qhh")
@@ -80,7 +111,17 @@ def main() -> int:
         )
         _delete(cur, deleted, "hydro.hydro_run", "run_id = ANY(%s)", (run_ids,))
 
-        _delete(cur, deleted, "met.forcing_station_timeseries", "forcing_version_id = ANY(%s)", (forcing_ids,))
+        _delete_rendered(
+            cur,
+            deleted,
+            FORCING_TABLE_LEGACY,
+            render_forcing_ts_sql(
+                _FORCING_TIMESERIES_DELETE_TEMPLATES,
+                "legacy",
+                entry="reset_qhh_smoke_db.forcing_timeseries_delete",
+            ).sql,
+            (forcing_ids,),
+        )
         _delete(cur, deleted, "met.forcing_version_component", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(cur, deleted, "met.forcing_version", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(
@@ -211,6 +252,36 @@ def _qc_where() -> str:
 
 def _delete(cur: Any, deleted: dict[str, int], table: str, where: str, params: tuple[Any, ...]) -> None:
     cur.execute(f"DELETE FROM {table} WHERE {where}", params)
+    deleted[table] = cur.rowcount
+
+
+def _delete_rendered(
+    cur: Any,
+    deleted: dict[str, int],
+    table: str,
+    statement: str,
+    params: tuple[Any, ...],
+) -> None:
+    """:func:`_delete` for a statement a renderer already composed.
+
+    :func:`_delete` builds ``DELETE FROM {table} WHERE {where}`` itself, so it
+    cannot take renderer output — and the forcing fact table's name must come
+    from ``forcing_ts_render``'s constants rather than from this file (the
+    discovery-set census counts a literal spelling here as an unregistered read).
+    ``table`` survives only as the ``deleted`` payload key, which is therefore
+    the *physical* relation the statement touched and follows task 7.3's rename
+    for free.
+
+    SO THE RECEIPT KEY CHANGES AT 7.3, AND THAT IS INTENDED. The forcing entry
+    reads ``met.forcing_station_timeseries`` today and will read
+    ``met.forcing_station_timeseries_legacy`` the moment
+    ``forcing_ts_render.FORCING_TABLE_LEGACY`` is flipped in the migration's own
+    commit, because a receipt that names the relation the DELETE did not touch is
+    worse than no receipt. No consumer pins either spelling — the smoke receipt is
+    read by a human — so 7.3 has nothing to migrate here and should not treat the
+    changed key as a regression.
+    """
+    cur.execute(statement, params)
     deleted[table] = cur.rowcount
 
 

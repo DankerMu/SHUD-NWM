@@ -527,9 +527,23 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         )
     ]
     # I2 moved only the river scan into its authored raw-source template.
-    from packages.common.forecast_store import _latest_product_river_source_template
+    # I11 #1990 task 7.2 moved the STATION scan out of the method body the same
+    # way, into a per-store `ForcingTemplatePair` rendered through
+    # `packages/common/forcing_ts_render.py`. Both legs are appended for the same
+    # reason: this test's subject is the whole executed statement, and a slice of
+    # the `def` alone no longer contains either scan.
+    from packages.common.forcing_ts_render import render_forcing_ts_sql
+    from packages.common.forecast_store import (
+        _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
+        _latest_product_river_source_template,
+    )
 
-    query_source = candidate_source + fallback_source + _latest_product_river_source_template("legacy")
+    query_source = (
+        candidate_source
+        + fallback_source
+        + render_forcing_ts_sql(_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES, "legacy").sql
+        + _latest_product_river_source_template("legacy")
+    )
     context_source = store_source[
         store_source.index("def _fetch_latest_qhh_display_unavailable_context") : store_source.index(
             "def _fetch_station_for_series"

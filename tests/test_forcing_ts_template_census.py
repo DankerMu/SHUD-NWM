@@ -20,20 +20,42 @@ a named owner? Anything that is neither is red.
 WHAT IS AND IS NOT PROVEN HERE — READ BEFORE TRUSTING A GREEN RUN
 ------------------------------------------------------------------
 
-This module lands with **cut (a) = task 7.2a**, which adds the renderer, the
-register and this census and wires NO production reader. So:
+Cut (a) (task 7.2a) landed this census with an EMPTY register, which made its
+closure assertion vacuous in the ``registered`` term. **Cut (b) (task 7.2) wired
+all nine readers**, so:
 
-* **the closure assertion is VACUOUS in its ``registered`` term.**
-  ``FORCING_REGISTRY`` is empty, so ``registered`` is 0 for every file and
-  ``registered + exempt == mentions`` reduces to ``exempt == mentions``. A green
-  run here does NOT mean "every forcing read renders per store"; it means every
-  mention is currently accounted for, and the nine reader mentions are accounted
-  for as *unwired*. Cut (b) (task 7.2) registers the nine and makes the closure
-  real.
-* **the live pins in cut (a) are the discovery sweep and the per-file counts.**
-  Those are not vacuous: a new file with a qualified mention, or a new mention in
-  a listed file, reddens
-  :func:`test_the_sweep_finds_exactly_the_declared_files` today.
+* **the closure assertion bites on every SPELLING, and on nothing else.** Every
+  mention the sweep finds must be either a registered template's own or an
+  exempt row's, and ``set(discovered) == set(FORCING_TABLE_CENSUS)`` is what
+  catches a wired reader that goes back to spelling the table name: its file
+  re-enters the discovered set and the equality fails. What it does NOT catch,
+  and a green run must not be read as catching, is a new TEMPLATE: D1's token
+  means every registered entry carries ``mentions=0``, so ``registered + exempt
+  == mentions`` is really ``exempt == mentions`` and the ``registered`` term
+  constrains nothing. River keeps that grip because its entries carry
+  ``mentions=1``; the forcing side buys it back structurally instead —
+  :func:`test_every_forcing_template_pair_in_the_tree_is_registered` walks the
+  same files for ``ForcingTemplatePair`` construction sites and demands the
+  register name every one of them. A tenth pair beside the nine is red there,
+  which is also what stops it from silently skipping ``test_i1_i2_*``,
+  ``test_i5_*``, the byte-identity pins and the ``params`` claim.
+* **the five wired reader files are GONE from the census, by design.** Their
+  templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
+  rather than the name, so ``packages/common/display_coverage.py``,
+  ``packages/common/best_available.py``,
+  ``workers/model_registry/qhh_production_bootstrap.py`` and
+  ``scripts/reset_qhh_smoke_db.py`` score 0 and drop out, and
+  ``packages/common/forecast_store.py`` falls 7 → 2 (its two surviving mentions
+  are the index/catalog metadata payloads, which are not SQL). Closure for the
+  four departed files is ``0 + 0 == 0`` — trivially true, and the reason the
+  weight of the assertion moved onto the renderer's own two constants and onto
+  the exempt files. This is the execution split in ``fixtures/I11-1990.md``
+  playing out exactly as recorded, not a census that quietly went blind.
+* **what a green run still does NOT prove.** Invariant I7 — that a cross-store
+  reader composes both rendered fact-row subrelations inside itself before any
+  outer aggregate — is unprovable until task 7.3's migration exists. The narrow
+  variants here are registered, text-pinned and **never executed**. Nothing in
+  this suite or its siblings executes SQL.
 
 Two known limits of the counter, both measured, both recorded rather than fixed
 (the river census records the second one for itself at
@@ -69,6 +91,8 @@ a counter that reads folded constant values
 
 from __future__ import annotations
 
+from importlib import import_module
+
 import pytest
 
 from packages.common.forcing_ts_render import FORCING_STORES, render_forcing_ts_sql
@@ -81,49 +105,82 @@ from tests.forcing_ts_template_registry import (
     REPO_ROOT,
     UNWIRED_READERS,
     discover_forcing_mentions,
+    discover_forcing_template_pairs,
     exempt_by_path,
     forcing_table_mentions,
     registered_by_path,
+    registered_template_pairs,
 )
 
 # ---------------------------------------------------------------------------
-# The measured discovery set.
+# The measured discovery set, RE-MEASURED after the nine readers were wired.
 #
-# Baseline from `fixtures/I11-1990.md` C3: 15 production files, 47 qualified
-# mentions, 9 of them reader sites. Re-derived here and identical file for file.
+# Cut (a) declared sixteen files and 49 mentions: `fixtures/I11-1990.md` C3's
+# measured 15 files / 47 mentions (9 of them reader sites) plus the renderer
+# module D1 introduces, which contributes exactly two (`FORCING_TABLE` and
+# `FORCING_TABLE_LEGACY`).
 #
-# The sixteenth file and the two mentions above 47 are this change's own
-# `packages/common/forcing_ts_render.py`: D1 puts the table name in two module
-# constants, so the renderer contributes exactly two and every reader it wires in
-# cut (b) then contributes zero. Cut (b) rewrites these numbers downwards for the
-# five reader files (see the execution split in the fixture) — that drop is by
-# design and must be declared as such, not discovered as a mystery.
+# Wiring moved the table name out of the readers and into those two constants,
+# so the nine reader mentions are gone and four files left the discovery set
+# altogether. 49 − 9 = 40 across 12 files. The five reader files went to
+# 0 / 0 / 0 / 0 / 2 BY DESIGN — see the module docstring and the execution split
+# in the fixture. `packages/common/forecast_store.py` keeps 2 because its two
+# index/catalog metadata payloads name the table as DATA, not as SQL, and are
+# exempt with `7.3 (I12) index pins` as their owner.
 # ---------------------------------------------------------------------------
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
-    "packages/common/best_available.py": 1,
-    "packages/common/display_coverage.py": 1,
     "packages/common/forcing_domain_handoff.py": 3,
     "packages/common/forcing_domain_handoff_apply.py": 16,
     "packages/common/forcing_ts_render.py": 2,
-    "packages/common/forecast_store.py": 7,
+    "packages/common/forecast_store.py": 2,
     "packages/common/node27_container_contract.py": 1,
     "scripts/node27_autopipeline.py": 1,
     "scripts/node27_timeseries_compression_capture.py": 2,
     "scripts/node27_timeseries_compression_live_evidence.py": 1,
-    "scripts/reset_qhh_smoke_db.py": 1,
     "services/production_closure/two_node_e2e_readonly_db_lane.py": 2,
     "workers/forcing_producer/file_store.py": 2,
     "workers/forcing_producer/store.py": 5,
-    "workers/model_registry/qhh_production_bootstrap.py": 1,
 }
 
-#: C3's measured pre-change totals, pinned separately from the census dict so the
-#: two cannot be "reconciled" by editing one of them.
+#: C3's measured PRE-WIRING totals, pinned separately from the census dict so the
+#: two cannot be "reconciled" by editing one of them. They are the fixture's
+#: numbers and do not move; what moves is the arithmetic that has to reproduce
+#: them from the post-wiring state (see
+#: :func:`test_the_declared_census_reproduces_the_fixture_baseline`).
 FIXTURE_BASELINE_FILES = 15
 FIXTURE_BASELINE_MENTIONS = 47
 FIXTURE_BASELINE_READER_MENTIONS = 9
 FIXTURE_BASELINE_EXEMPT_MENTIONS = 38
+
+#: The five files whose forcing readers this task wired. Four of them left the
+#: discovery set outright; `forecast_store.py` stayed for its two non-SQL index
+#: payloads. Named explicitly so the "went vacuous by design" claim is a pin and
+#: not a sentence in a PR body.
+WIRED_READER_FILES: tuple[str, ...] = (
+    "packages/common/best_available.py",
+    "packages/common/display_coverage.py",
+    "packages/common/forecast_store.py",
+    "scripts/reset_qhh_smoke_db.py",
+    "workers/model_registry/qhh_production_bootstrap.py",
+)
+
+#: The nine registered reader keys, path-sorted exactly as the register lists
+#: them. A frozen list beside a derived one is usually waste; here it is the
+#: only thing that can catch a reader being dropped from the register and its
+#: exemption row never being restored, which the closure equality alone cannot
+#: see (both terms fall together).
+REGISTERED_READER_KEYS: tuple[str, ...] = (
+    "best_available.forcing_inputs",
+    "display_coverage.station_sample_rows",
+    "forecast_store.forcing_readiness_overall",
+    "forecast_store.forcing_readiness_variable_rows",
+    "forecast_store.latest_product_station_source",
+    "forecast_store.station_forcing_membership",
+    "forecast_store.station_series_rows",
+    "reset_qhh_smoke_db.forcing_timeseries_delete",
+    "qhh_production_bootstrap.dynamic_forcing_count",
+)
 
 
 def _assert_census_closes(discovered: dict[str, int]) -> None:
@@ -152,59 +209,241 @@ def _assert_census_closes(discovered: dict[str, int]) -> None:
         )
 
 
+def _assert_every_pair_is_registered(discovered: dict[str, tuple[str, ...]]) -> None:
+    """Every ``ForcingTemplatePair`` under the discovery roots is a registered one.
+
+    Factored out for the same reason :func:`_assert_census_closes` is: the live
+    tree is green by construction, so the only way to show this guard BITES is to
+    hand it a planted offender.
+    """
+    registered = registered_template_pairs()
+    found = {(path, name) for path, names in discovered.items() for name in names}
+    declared = {(path, name) for path, names in registered.items() for name in names}
+    assert found == declared, (
+        "every ForcingTemplatePair constructed under the discovery roots must be in FORCING_REGISTRY; "
+        f"unregistered: {sorted(found - declared)}; "
+        f"registered but not found in the tree: {sorted(declared - found)}"
+    )
+
+
+def test_every_forcing_template_pair_in_the_tree_is_registered() -> None:
+    """The exhaustiveness guard D1 owes the census.
+
+    ``registered + exempt == mentions`` cannot see a new template any more —
+    every entry carries ``mentions=0`` — so this is the assertion that forces a
+    tenth pair into the register, and through it into the shape oracles
+    (``test_i1_i2_*``, ``test_i3_i4_*``, ``test_i5_*``, ``params``) and the M6
+    AST sweep, whose ``WIRED_READER_PATHS`` is itself DERIVED from the register
+    and therefore blind to a sixth file on its own.
+
+    Task 7.3 is where this stops being hypothetical: the write-side row-count
+    payloads (``forcing_ts_render.py`` docstring, "become templates in task
+    7.3") land in ``workers/forcing_producer/store.py`` and
+    ``packages/common/forcing_domain_handoff_apply.py``, neither of which the
+    register covers today.
+    """
+    _assert_every_pair_is_registered(discover_forcing_template_pairs())
+
+
+def test_the_registered_nine_are_exactly_the_pairs_the_tree_holds() -> None:
+    """The per-file shape of the same equality, which the set form flattens away.
+
+    Nine pairs across five files, five of them in ``forecast_store.py``. Pinned
+    per file because "the register names nine things" and "the tree holds nine
+    pairs in the files the register names" are different claims, and only the
+    second one is what the guard above rests on.
+    """
+    assert discover_forcing_template_pairs() == {
+        "packages/common/best_available.py": ("_FORCING_INPUTS_TEMPLATES",),
+        "packages/common/display_coverage.py": ("_STATION_SAMPLE_ROWS_TEMPLATES",),
+        "packages/common/forecast_store.py": (
+            "_FORCING_READINESS_OVERALL_TEMPLATES",
+            "_FORCING_READINESS_VARIABLE_ROWS_TEMPLATES",
+            "_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES",
+            "_STATION_FORCING_MEMBERSHIP_TEMPLATES",
+            "_STATION_SERIES_ROWS_TEMPLATES",
+        ),
+        "scripts/reset_qhh_smoke_db.py": ("_FORCING_TIMESERIES_DELETE_TEMPLATES",),
+        "workers/model_registry/qhh_production_bootstrap.py": ("_DYNAMIC_FORCING_COUNT_TEMPLATES",),
+    }
+    assert registered_template_pairs() == discover_forcing_template_pairs()
+
+
+def test_an_unregistered_template_pair_is_red() -> None:
+    """The guard against a planted offender, in both directions that matter.
+
+    A tenth pair in an ALREADY REGISTERED file is the case D1 made invisible to
+    the closure check (``forecast_store.py`` scores 0 registered mentions, so a
+    tenth entry would not move a single number there), and a pair in a BRAND NEW
+    file is the case ``WIRED_READER_PATHS`` cannot see because it is derived from
+    the register. Both must name the offender.
+    """
+    tenth_in_a_registered_file = dict(discover_forcing_template_pairs())
+    tenth_in_a_registered_file["packages/common/forecast_store.py"] += ("_FORCING_QUANTILE_ROWS_TEMPLATES",)
+    with pytest.raises(AssertionError, match="_FORCING_QUANTILE_ROWS_TEMPLATES"):
+        _assert_every_pair_is_registered(tenth_in_a_registered_file)
+
+    brand_new_file = dict(discover_forcing_template_pairs())
+    brand_new_file["workers/forcing_producer/store.py"] = ("_FORCING_ROW_COUNT_TEMPLATES",)
+    with pytest.raises(AssertionError, match="workers/forcing_producer/store.py"):
+        _assert_every_pair_is_registered(brand_new_file)
+
+    deregistered = dict(discover_forcing_template_pairs())
+    del deregistered["packages/common/best_available.py"]
+    with pytest.raises(AssertionError, match="registered but not found in the tree"):
+        _assert_every_pair_is_registered(deregistered)
+
+
+def test_the_pair_sweep_sees_every_callee_form_and_refuses_an_unnameable_pair(tmp_path) -> None:
+    """The sweep's own contract, on a synthetic tree.
+
+    Three escapes a ``ast.Name``-only, module-level-only walk would hand an
+    author for free, all closed: the ``Attribute`` callee form, the aliased
+    import, and — fail-closed rather than ignored — a pair built where no
+    module-level name can hold it, which
+    :func:`registered_template_pairs` could never resolve and which would
+    therefore read as "no template here".
+    """
+    (tmp_path / "packages").mkdir(parents=True)
+    (tmp_path / "packages" / "attribute_form.py").write_text(
+        "from packages.common import forcing_ts_render\n"
+        'PAIR = forcing_ts_render.ForcingTemplatePair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "aliased.py").write_text(
+        "from packages.common.forcing_ts_render import ForcingTemplatePair as Pair\n"
+        'ALIASED: Pair = Pair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "no_pairs.py").write_text("X = 1\n", encoding="utf-8")
+
+    assert discover_forcing_template_pairs(tmp_path, ("packages",)) == {
+        "packages/aliased.py": ("ALIASED",),
+        "packages/attribute_form.py": ("PAIR",),
+    }
+
+    (tmp_path / "packages" / "built_in_a_function.py").write_text(
+        "from packages.common.forcing_ts_render import ForcingTemplatePair\n"
+        "def templates():\n"
+        '    return ForcingTemplatePair(legacy="a", narrow="b")\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="built_in_a_function.py"):
+        discover_forcing_template_pairs(tmp_path, ("packages",))
+
+
 def test_the_sweep_finds_exactly_the_declared_files() -> None:
-    """The live pin of cut (a): the tree itself, not a list checked against itself."""
+    """The live pin: the tree itself, not a list checked against itself."""
     _assert_census_closes(discover_forcing_mentions())
 
 
 def test_the_census_closes_over_registered_and_exempt_mentions() -> None:
-    """``registered + exempt == mentions``, per file.
+    """``registered + exempt == mentions``, per file — non-vacuous since cut (b).
 
-    VACUOUS IN ITS ``registered`` TERM IN CUT (a) — see the module docstring.
-    ``FORCING_REGISTRY`` is empty, so this currently asserts ``exempt ==
-    mentions``. It is kept as the full equality because cut (b) populates the
-    register one reader at a time, and this is the assertion that then forces
-    each wiring to move an ``UNWIRED_READERS`` row rather than simply drop it.
-
-    Deliberately carries no "the register is empty" assertion of its own: that
-    tripwire is :func:`test_cut_a_registers_no_forcing_template_yet`, and keeping
-    it in exactly one place means cut (b) visits one test rather than finding
-    this one red for a reason that has nothing to do with closure.
+    Every wired reader contributes ``0`` registered mentions because its
+    templates carry the renderer's token instead of the table's name, so this
+    reads as ``exempt == mentions`` over the twelve surviving files. That is NOT
+    the vacuity cut (a) had: the file-set equality inside
+    :func:`_assert_census_closes` is what now carries the weight, and a wired
+    reader that reverts to spelling the name re-enters the discovered set and
+    fails it. :func:`test_a_wired_reader_that_respells_the_table_name_is_red`
+    exercises exactly that, against a planted offender.
     """
     _assert_census_closes(discover_forcing_mentions())
 
 
-def test_cut_a_registers_no_forcing_template_yet() -> None:
-    """The register is empty ON PURPOSE, and this says so where it is checkable.
+def test_the_nine_readers_are_registered_and_render_from_their_own_modules() -> None:
+    """Cut (b)'s headline, where it is checkable.
 
-    Task 7.2 (cut b) deletes this test as it appends the first reader block. Its
-    value is that until then nobody can read a green suite as evidence that a
-    forcing read renders per store: this is the one assertion that states the
-    opposite out loud.
+    Cut (a) carried the opposite assertion (`FORCING_REGISTRY == ()`), whose
+    whole value was that nobody could read a green suite as evidence that a
+    forcing read rendered per store. This replaces it rather than deleting it:
+    the register is now the nine, keyed and path-sorted, and every entry's
+    ``source`` really reaches into the production module (a registry that
+    returned locally authored text would render perfectly and prove nothing).
     """
-    assert FORCING_REGISTRY == ()
+    assert tuple(entry.key for entry in FORCING_REGISTRY) == REGISTERED_READER_KEYS
+    assert {entry.path for entry in FORCING_REGISTRY} == set(WIRED_READER_FILES)
+    for entry in FORCING_REGISTRY:
+        module = import_module(entry.path.removesuffix(".py").replace("/", "."))
+        pair = entry.source("legacy")
+        assert any(value is pair for value in vars(module).values()), (
+            f"{entry.key}: source() must return the pair the production module holds, not a copy"
+        )
+
+
+def test_the_nine_readers_left_the_exemption_ledger() -> None:
+    """The ``reader, unwired`` rows are GONE, not zeroed and not still claimed.
+
+    Deleting an exemption row and registering the reader are two edits, and the
+    closure equality cannot tell "both happened" from "neither did" — both terms
+    move together. This is the assertion that pins the direction.
+    """
+    assert UNWIRED_READERS == ()
+    still_exempt = {row.path for row in EXEMPT_MENTIONS} & set(WIRED_READER_FILES)
+    assert still_exempt == {"packages/common/forecast_store.py"}, (
+        "only forecast_store.py may keep an exemption row among the wired reader files, "
+        "and only for its two non-SQL index/catalog metadata payloads"
+    )
 
 
 def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
-    """C3's 15/47/9/38, plus this change's own renderer constants and nothing else.
+    """C3's 15/47/9/38 must still be reconstructible from the post-wiring state.
 
-    Asserted as arithmetic against the declared rows so the two sides of the
-    fixture cannot be silently "agreed" by editing one number: the reader rows
-    and the non-read rows must still sum to C3's measured split, and the only
-    admitted difference from C3's totals is the renderer module D1 introduces.
+    Asserted as arithmetic rather than as a second copy of the numbers, so the
+    two sides cannot be silently "agreed" by editing one of them. The
+    reconstruction is: the pre-wiring total is what survives today, plus the nine
+    reader mentions the wiring removed, minus the renderer module D1 introduced.
     """
-    reader_mentions = sum(row.count for row in UNWIRED_READERS)
     non_read_mentions = sum(row.count for row in NON_READ_MENTIONS)
     renderer_mentions = sum(row.count for row in RENDERER_CONSTANTS)
+    declared = sum(FORCING_TABLE_CENSUS.values())
 
-    assert reader_mentions == FIXTURE_BASELINE_READER_MENTIONS
+    assert UNWIRED_READERS == ()
+    assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
     assert non_read_mentions == FIXTURE_BASELINE_EXEMPT_MENTIONS
-    assert reader_mentions + non_read_mentions == FIXTURE_BASELINE_MENTIONS
-    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES + 1
-    assert sum(FORCING_TABLE_CENSUS.values()) == FIXTURE_BASELINE_MENTIONS + renderer_mentions
+    assert declared == non_read_mentions + renderer_mentions
+    # C3's 47 = the 38 that are not reads + the 9 that were.
+    assert declared - renderer_mentions + len(FORCING_REGISTRY) == FIXTURE_BASELINE_MENTIONS
+    # Four of the five reader files left the set outright; forecast_store.py
+    # stayed for its two index payloads, and the renderer module joined.
+    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 4 + 1
     assert set(RENDERER_CONSTANTS) == {
         row for row in EXEMPT_MENTIONS if row.path == "packages/common/forcing_ts_render.py"
     }
+
+
+def test_the_wired_reader_files_dropped_out_of_the_census_by_design() -> None:
+    """The execution split's predicted drop, measured rather than asserted in prose.
+
+    ``fixtures/I11-1990.md`` predicts `display_coverage.py` 1→0,
+    `forecast_store.py` 7→2, `best_available.py` 1→0,
+    `qhh_production_bootstrap.py` 1→0, `reset_qhh_smoke_db.py` 1→0. Four files
+    going to zero is indistinguishable, from the closure equality alone, from
+    four files nobody ever swept — so the drop is pinned against the LIVE counter
+    over each file's current source.
+    """
+    discovered = discover_forcing_mentions()
+    for path in WIRED_READER_FILES:
+        source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
+        counted = forcing_table_mentions(source, filename=path)
+        expected = 2 if path == "packages/common/forecast_store.py" else 0
+        assert counted == expected, f"{path}: {counted} qualified mentions, expected {expected}"
+        assert discovered.get(path, 0) == expected
+
+
+def test_a_wired_reader_that_respells_the_table_name_is_red() -> None:
+    """The regression the drop above would otherwise hide.
+
+    Once a reader file is out of the census, its absence is normal — so a
+    reviewer needs to know that a NEW literal spelling in it is still caught. It
+    is, by the file-set equality, and this exercises that against a planted
+    offender rather than trusting the reading.
+    """
+    respelled = dict(discover_forcing_mentions())
+    respelled["packages/common/display_coverage.py"] = 1
+    with pytest.raises(AssertionError, match="must list the same files"):
+        _assert_census_closes(respelled)
 
 
 def test_every_exemption_row_names_a_shape_and_an_owner() -> None:
@@ -400,7 +639,7 @@ def test_the_census_rejects_an_unregistered_unexempted_site() -> None:
         _assert_census_closes(new_file)
 
     new_statement = dict(discover_forcing_mentions())
-    new_statement["packages/common/best_available.py"] += 1
+    new_statement["workers/forcing_producer/store.py"] += 1
     with pytest.raises(AssertionError, match="census says"):
         _assert_census_closes(new_statement)
 
@@ -408,9 +647,10 @@ def test_the_census_rejects_an_unregistered_unexempted_site() -> None:
 # ---------------------------------------------------------------------------
 # Shape oracle: every registered template renders for BOTH stores.
 #
-# Empty in cut (a) by construction — pytest reports the parametrisation as a
-# single skipped case, which is the honest signal. Cut (b)'s first reader block
-# turns it into nine live renders.
+# Nine live renders since cut (b). The narrow half is DEAD TEXT until task 7.3 —
+# it names columns no deployed table has — so this is the only thing that
+# exercises it at all, and the reason the fixture insists the narrow variants be
+# text-pinned rather than sketched.
 # ---------------------------------------------------------------------------
 
 

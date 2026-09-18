@@ -3,7 +3,8 @@
 Unit oracle for ``packages/common/forcing_ts_render.py``: variant selection,
 table-name binding through the D1 constants, and the four refusals. The
 discovery-set census is ``tests/test_forcing_ts_template_census.py``; the shape
-oracle over registered templates lives there too and is empty until cut (b).
+oracle over the nine registered templates — byte identity, store routing, and
+I1–I5 — is ``tests/test_forcing_read_path_store_routing.py`` (cut (b), 7.2).
 """
 
 from __future__ import annotations
