@@ -839,8 +839,13 @@ def _maybe_advertise_verified_log(
     if job.get("run_id") != identity["run_id"] or job.get("model_id") != identity["model_id"]:
         return exported, False
     task_id = job.get("array_task_id")
-    parent_job_id = job.get("slurm_job_id")
-    if not isinstance(task_id, int) or not isinstance(parent_job_id, str) or not parent_job_id.isdigit():
+    slurm_job_id = job.get("slurm_job_id")
+    if not isinstance(task_id, int) or not isinstance(slurm_job_id, str):
+        return exported, False
+    parent_job_id, separator, child_task_id = slurm_job_id.partition("_")
+    if not parent_job_id.isdigit():
+        return exported, False
+    if separator and (not child_task_id.isdigit() or int(child_task_id) != task_id):
         return exported, False
     try:
         response = log_cache.fetch(parent_job_id)

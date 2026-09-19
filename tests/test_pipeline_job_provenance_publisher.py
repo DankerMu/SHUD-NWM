@@ -740,3 +740,45 @@ def test_publisher_updates_logs_for_newer_source_version(tmp_path: Path) -> None
     )
     assert sidecar["jobs"][0]["updated_at"] == "2026-09-16T12:50:00Z"
     assert sidecar["jobs"][0]["log_stderr_bytes"] == len(b"new diagnostic\n")
+
+
+def test_publisher_reads_parent_logs_for_reconciled_child_slurm_id(tmp_path: Path) -> None:
+    job = _forecast_job()
+    job["slurm_job_id"] = "49999_23"
+    requested: list[str] = []
+
+    def fetch_logs(parent: str) -> dict[str, Any]:
+        requested.append(parent)
+        return _parent_array_response(include_sibling=False)
+
+    summary, _, object_root, published_root = _publish(tmp_path, jobs=[job], fetch_logs=fetch_logs)
+
+    assert requested == ["49999"]
+    assert summary["advertised_logs"] == 1
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_bytes()
+    )
+    assert sidecar["jobs"][0]["slurm_job_id"] == "49999_23"
+    assert sidecar["jobs"][0]["array_task_id"] == 23
+    assert sidecar["jobs"][0]["log_uri"] == _expected_log_uri()
+    assert (
+        published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID / f"{IFS_JOB_ID}.out"
+    ).read_bytes() == IFS_STDOUT.encode("utf-8")
+
+
+@pytest.mark.parametrize("slurm_job_id", ["49999_0", "49999_23_1", "49999_"])
+def test_publisher_rejects_child_slurm_id_not_bound_to_array_task(tmp_path: Path, slurm_job_id: str) -> None:
+    job = _forecast_job()
+    job["slurm_job_id"] = slurm_job_id
+
+    def fetch_logs(_parent: str) -> dict[str, Any]:
+        pytest.fail("An unbound child job must not request another task's logs.")
+
+    summary, _, object_root, published_root = _publish(tmp_path, jobs=[job], fetch_logs=fetch_logs)
+
+    assert summary["advertised_logs"] == 0
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_bytes()
+    )
+    assert sidecar["jobs"][0]["log_uri"] is None
+    assert not (published_root / "logs").exists()
