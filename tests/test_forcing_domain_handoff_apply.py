@@ -21,6 +21,12 @@ from packages.common.forcing_domain_handoff import (
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "forcing_domain_handoff"
 COMPLETE_RUN_ID = "fcst_gfs_2026062012_basins_qhh_shud"
+#: #1991 (task 7.3): the bases the fake's IDENTITY columns count from. Offsets
+#: rather than 0 so a surrogate key is never falsy and never collides with a row
+#: a test seeded by hand.
+FORCING_VERSION_KEY_BASE = 500
+STATION_KEY_BASE = 900
+
 EXPECTED_COUNTS = {
     "met.forcing_version": 1,
     "met.met_station": 2,
@@ -147,15 +153,20 @@ def test_timeseries_delete_is_time_bounded_and_guard_covers_existing_rows() -> N
     existing rows of the same forcing_version_id outside the incoming batch."""
     envelope = _parse_complete()
     batch_rows = envelope["parsed"]["met.forcing_station_timeseries"]
-    forcing_version_id = batch_rows[0]["forcing_version_id"]
     batch_min = min(
         datetime.fromisoformat(str(row["valid_time"]).replace("Z", "+00:00"))
         for row in batch_rows
     )
     old_time = (batch_min - timedelta(days=45)).astimezone(UTC)
     connection = _FakeConnection()
+    # #1991 (task 7.3): the pre-existing row is seeded under the version's
+    # SURROGATE KEY, because that is the only version reference the narrow fact
+    # table carries. The key is the first one `met.forcing_version`'s IDENTITY
+    # hands out, which is what the apply's own `_upsert_forcing_version` takes for
+    # this envelope's version a moment later -- no version row is seeded here, so
+    # that upsert is still the one that creates it.
     connection.tables["met.forcing_station_timeseries"].append(
-        {"forcing_version_id": forcing_version_id, "valid_time": old_time}
+        {"forcing_version_key": FORCING_VERSION_KEY_BASE, "valid_time": old_time}
     )
 
     report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
@@ -169,7 +180,8 @@ def test_timeseries_delete_is_time_bounded_and_guard_covers_existing_rows() -> N
     assert delete_calls, "timeseries DELETE must run"
     statement, params = delete_calls[0]
     assert "valid_time >=" in statement and "valid_time <=" in statement
-    assert params[0] == forcing_version_id
+    # Bounded by the surrogate key since task 7.3, not by the text id.
+    assert params[0] == FORCING_VERSION_KEY_BASE
     assert params[1] == old_time
     guard_lookups = [
         params
@@ -237,6 +249,62 @@ def test_existing_seed_forcing_version_with_same_checksum_allows_handoff_time_wi
     assert len(connection.tables["met.forcing_station_timeseries"]) == EXPECTED_COUNTS[
         "met.forcing_station_timeseries"
     ]
+
+
+@pytest.mark.parametrize("regenerated_package", [False, True])
+def test_legacy_routed_forcing_version_is_refused_before_the_parent_upsert(regenerated_package: bool) -> None:
+    """#1991 M5: the apply layer's raise -> reported-reason link, on BOTH replay shapes.
+
+    The refusal has to sit above ``_upsert_forcing_version``, not only inside
+    ``_replace_forcing_station_timeseries``. That upsert's
+    ``ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)``
+    returns no row when the incoming checksum differs and raises
+    ``HANDOFF_APPLY_FORCING_VERSION_CONFLICT`` — so if node-22 REGENERATES the
+    package for a legacy-routed version, the conflict fires first and the tick
+    gets a reason code ``scripts/node27_autopipeline.py``'s skip branch does not
+    recognise: ``outcome="failed"``, ``rc=1``, on every tick, for ever. The
+    ``regenerated_package`` leg is exactly that shape.
+
+    Both legs must report the SAME permanent, recognised code, because "this
+    version's rows are in the other table" is the true and unchanging reason in
+    both, and only that code routes to a non-failing outcome.
+    """
+    envelope = _parse_complete()
+    seeded = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
+    seeded["source_id"] = "gfs"
+    # 000061's routing column, set on a version that had rows in the renamed
+    # legacy table. `_stamp_identity_keys` only fills a DEFAULT, so this survives.
+    seeded["timeseries_store"] = apply_module.FORCING_STORE_LEGACY
+    if regenerated_package:
+        seeded["checksum"] = "0" * 64
+        assert seeded["checksum"] != envelope["parsed"]["met.forcing_version"][0]["checksum"]
+    connection = _FakeConnection()
+    connection.tables["met.forcing_version"].append(seeded)
+    checksum_before = seeded["checksum"]
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "failed"
+    assert report["available"] is False
+    assert report["writes_performed"] is False
+    assert len(report["unavailable_reasons"]) == 1
+    reason = report["unavailable_reasons"][0]
+    assert reason["code"] == apply_module.REASON_APPLY_LEGACY_STORE_REFUSED
+    assert reason["code"] == "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
+    assert reason["timeseries_store"] == apply_module.FORCING_STORE_LEGACY
+    assert reason["forcing_version_id"] == seeded["forcing_version_id"]
+
+    # Nothing was written, and — the point of hoisting — the parent upsert was
+    # never even ATTEMPTED, so its conflict could not pre-empt this code.
+    statements = [statement.lower() for _mode, statement, _params in connection.executions]
+    assert not any("insert into met.forcing_version" in statement for statement in statements)
+    assert not any("insert into met.met_station" in statement for statement in statements)
+    assert not any("delete from met.forcing_station_timeseries" in statement for statement in statements)
+    assert "timeseries_store" in statements[0], "the routing read is the transaction's first statement"
+    assert connection.tables["met.forcing_version"][0]["checksum"] == checksum_before
+    assert connection.tables["met.forcing_station_timeseries"] == []
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
 
 
 @pytest.mark.parametrize(
@@ -834,7 +902,25 @@ class _FakeConnection:
 
     def cursor(self) -> "_FakeCursor":
         self._transaction_tables = copy.deepcopy(self.tables)
+        self._stamp_identity_keys()
         return _FakeCursor(self)
+
+    def _stamp_identity_keys(self) -> None:
+        """Give every authority row the IDENTITY value 000061 guarantees it has.
+
+        ``station_key`` and ``forcing_version_key`` are
+        ``GENERATED ALWAYS AS IDENTITY``, so in the deployed schema a row CANNOT
+        exist without one. Tests that seed an authority row by hand (a
+        placeholder forcing version, a pre-existing station) write only the
+        columns they care about, and leaving those rows keyless would model a
+        state the database cannot be in -- the narrow writer would then look
+        "broken" against a fixture, not against the schema.
+        """
+        for index, row in enumerate(self._transaction_tables["met.forcing_version"] or []):
+            row.setdefault("forcing_version_key", FORCING_VERSION_KEY_BASE + index)
+            row.setdefault("timeseries_store", apply_module.FORCING_STORE_DEFAULT)
+        for index, row in enumerate(self._transaction_tables["met.met_station"] or []):
+            row.setdefault("station_key", STATION_KEY_BASE + index)
 
     def commit(self) -> None:
         assert self._transaction_tables is not None
@@ -856,6 +942,15 @@ class _FakeConnection:
     def maybe_fail(self, stage: str) -> None:
         if self.fail_after_stage == stage:
             raise RuntimeError(self.failure_message)
+
+    def next_forcing_version_key(self) -> int:
+        """000061's ``GENERATED ALWAYS AS IDENTITY`` on ``met.forcing_version``.
+
+        Counted over the TRANSACTION's rows and offset, so a key is never 0 (a
+        falsy key would make ``if forcing_version_key:`` in any future caller
+        look like "no version") and never collides with a row seeded by hand.
+        """
+        return FORCING_VERSION_KEY_BASE + len(self.state["met.forcing_version"])
 
 
 class _FakeCursor:
@@ -900,6 +995,28 @@ class _FakeCursor:
         if normalized.startswith("select pg_advisory_xact_lock"):
             self._fetchone = {"pg_advisory_xact_lock": None}
             return
+        if normalized.startswith("select forcing_version_key, timeseries_store from met.forcing_version"):
+            # #1991 (task 7.3): the narrow writer's FIRST statement. Answering it
+            # from the fake's own state rather than from a constant is what lets
+            # a test route a version to `legacy` and observe the refusal.
+            row = _find_row(self.connection.state["met.forcing_version"], "forcing_version_id", parameters[0])
+            self._fetchone = (
+                None
+                if row is None
+                else {
+                    "forcing_version_key": row["forcing_version_key"],
+                    "timeseries_store": row.get("timeseries_store", apply_module.FORCING_STORE_DEFAULT),
+                }
+            )
+            return
+        if normalized.startswith("select station_id, station_key from met.met_station"):
+            station_ids = set(parameters[0])
+            self._fetchall = [
+                {"station_id": row["station_id"], "station_key": row["station_key"]}
+                for row in self.connection.state["met.met_station"]
+                if row["station_id"] in station_ids and "station_key" in row
+            ]
+            return
         if normalized.startswith("select station_id") and "from met.met_station" in normalized:
             station_ids = set(parameters[0])
             self._fetchall = [
@@ -918,11 +1035,11 @@ class _FakeCursor:
             self.connection.maybe_fail("forcing_version")
             return
         if normalized.startswith("delete from met.forcing_station_timeseries"):
-            forcing_version_id = parameters[0]
+            forcing_version_key = parameters[0]
             self.connection.state["met.forcing_station_timeseries"] = [
                 row
                 for row in self.connection.state["met.forcing_station_timeseries"]
-                if row["forcing_version_id"] != forcing_version_id
+                if row["forcing_version_key"] != forcing_version_key
             ]
             return
         if normalized.startswith("delete from met.interp_weight"):
@@ -952,9 +1069,9 @@ class _FakeCursor:
             }
             return
         if normalized.startswith("select 1 from met.forcing_station_timeseries"):
-            forcing_version_id = parameters[0]
+            forcing_version_key = parameters[0]
             exists = any(
-                row["forcing_version_id"] == forcing_version_id
+                row["forcing_version_key"] == forcing_version_key
                 for row in self.connection.state["met.forcing_station_timeseries"]
             )
             self._fetchone = (1,) if exists else None
@@ -962,21 +1079,25 @@ class _FakeCursor:
         if normalized.startswith(
             "with existing as materialized ( select valid_time from met.forcing_station_timeseries"
         ):
-            forcing_version_id = parameters[0]
+            forcing_version_key = parameters[0]
             valid_times = [
                 row["valid_time"]
                 for row in self.connection.state["met.forcing_station_timeseries"]
-                if row["forcing_version_id"] == forcing_version_id
+                if row["forcing_version_key"] == forcing_version_key
             ]
             self._fetchone = (min(valid_times, default=None), max(valid_times, default=None))
             return
         if normalized.startswith("select count(*) as rows from met.forcing_station_timeseries"):
-            forcing_version_id = parameters[0]
+            # #1991 (task 7.3): counted by `forcing_version_key`, resolved through
+            # the scalar sub-select the production statement carries (invariant
+            # I4). The fake resolves the same way, from the text id it is bound.
+            version = _find_row(self.connection.state["met.forcing_version"], "forcing_version_id", parameters[0])
+            forcing_version_key = None if version is None else version["forcing_version_key"]
             self._fetchone = {
                 "rows": sum(
                     1
                     for row in self.connection.state["met.forcing_station_timeseries"]
-                    if row["forcing_version_id"] == forcing_version_id
+                    if row["forcing_version_key"] == forcing_version_key
                 )
             }
             return
@@ -1019,6 +1140,12 @@ class _FakeCursor:
             record["forcing_version_id"],
         )
         if existing is None:
+            # #1991 (task 7.3): 000061's IDENTITY key and routing column. A row
+            # inserted after the expand takes the column's own `narrow` default,
+            # which is what makes "the writers write only the narrow table" true
+            # for every new version with no extra write.
+            record["forcing_version_key"] = self.connection.next_forcing_version_key()
+            record.setdefault("timeseries_store", apply_module.FORCING_STORE_DEFAULT)
             self.connection.state["met.forcing_version"].append(record)
             self._fetchone = {"forcing_version_id": record["forcing_version_id"]}
             return
@@ -1063,7 +1190,12 @@ def _fake_execute_values(
         cursor.connection.maybe_fail("met_station")
         return returned if kwargs.get("fetch") else None
     if "insert into met.forcing_station_timeseries" in normalized:
-        keys = apply_module.FORCING_STATION_TIMESERIES_COLUMNS
+        # #1991 (task 7.3): the NARROW column list. The handoff PAYLOAD keeps its
+        # ten-column shape (`FORCING_STATION_TIMESERIES_COLUMNS`, the node-22 ->
+        # node-27 wire protocol); only the INSERT narrows, and `basin_version_id`
+        # / `source_id` are derived by joining the two authority tables rather
+        # than stored per row.
+        keys = apply_module.NARROW_INSERT_COLUMNS
         cursor.connection.state["met.forcing_station_timeseries"].extend(
             dict(zip(keys, row, strict=True)) for row in row_list
         )
@@ -1075,6 +1207,11 @@ def _fake_execute_values(
         cursor.connection.maybe_fail("interp_weight")
         return None
     raise AssertionError(f"unhandled execute_values SQL: {statement}")
+
+
+def _next_station_key(table: list[dict[str, Any]]) -> int:
+    """000061's ``GENERATED ALWAYS AS IDENTITY`` on ``met.met_station``."""
+    return STATION_KEY_BASE + len(table)
 
 
 def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...]]) -> list[tuple[str]]:
@@ -1105,6 +1242,8 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
         }
         existing = _find_row(table, "station_id", record["station_id"])
         if existing is None:
+            # #1991 (task 7.3): 000061's IDENTITY key on met.met_station.
+            record["station_key"] = _next_station_key(table)
             table.append(record)
             returned.append((record["station_id"],))
             continue

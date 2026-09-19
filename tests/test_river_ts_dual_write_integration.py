@@ -22,7 +22,7 @@ from psycopg2.extras import RealDictCursor
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.timescale_write_guard import CompressedChunkWriteError
-from tests.integration_helpers import apply_migrations_from_zero
+from tests.integration_helpers import FORCING_PLANE_MIGRATIONS, apply_migrations_from_zero
 from tests.test_river_ts_text_identity_cleanup import (
     _parser_river_statements,
 )
@@ -874,7 +874,11 @@ def test_seed_database_roundtrips_exact_river_authorities_postexpand(throwaway_d
     from db.seeds import seed_demo
     from tests.test_seed import _expected_river_seed_samples
 
-    apply_migrations_from_zero(throwaway_database_url, through="000059")
+    # The 000059 pin is a RIVER statement (`h.timeseries_store` below is 000060
+    # bait). `seed_demo` writes the FORCING plane too, and #1991 moved that write
+    # onto the narrow table's surrogate keys, so 000061 has to be applied as well
+    # or the seed fails on `met.forcing_version.forcing_version_key`.
+    apply_migrations_from_zero(throwaway_database_url, through="000059", also=FORCING_PLANE_MIGRATIONS)
     connection = psycopg2.connect(throwaway_database_url)
     try:
         # Distinct identity domains make even cross-column key swaps visible.

@@ -65,6 +65,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.forcing_domain_handoff_apply import (
     REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+    REASON_APPLY_LEGACY_STORE_REFUSED,
     apply_forcing_domain_handoff_path,
 )
 from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
@@ -2156,6 +2157,28 @@ def _process_run(
         # the guard's own catalog SELECT timing out, a transient -- now carries
         # HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED and never reaches here.
         forcing_reasons = forcing_stage or {}
+        # #1991 (task 7.3), and it must be answered BEFORE the decline branch
+        # below. A forcing version routed to the LEGACY store is refused by both
+        # narrow-only writers before any DELETE. That refusal is not a fault and
+        # has no remedy: the version's rows live in
+        # `met.forcing_station_timeseries_legacy` and stay there until task 8.2
+        # drops that table. `packages/common/forcing_domain_handoff_apply.py`
+        # runs under this pipeline on EVERY tick, so letting the refusal
+        # propagate as `outcome == "failed"` would turn the production pipeline
+        # red continuously for as long as a legacy version is in scope --
+        # `rc = 0 if (not seed_failed and not by("failed")) else 1`.
+        #
+        # It becomes "skipped", NOT "declined": `_decline_blocked_recompute`
+        # writes an `ops.ingest_recompute_decline` row, and forcing deliberately
+        # has none (fixture `I12-1991.md` R2.2). The permanent record is
+        # `met.forcing_version.timeseries_store = 'legacy'` itself, which 000061
+        # sets once and no writer flips back, so re-reading it next tick is
+        # idempotent and a decline row would only be a second, drifting copy of
+        # the same fact. The run still names its reason in `skipped_runs`.
+        if REASON_APPLY_LEGACY_STORE_REFUSED in (forcing_reasons.get("reason_codes") or []):
+            result["outcome"] = "skipped"
+            result["reason"] = REASON_APPLY_LEGACY_STORE_REFUSED
+            return result
         if REASON_APPLY_COMPRESSED_CHUNK_BLOCKED in (forcing_reasons.get("reason_codes") or []):
             result["outcome"] = _decline_blocked_recompute(
                 run_id,

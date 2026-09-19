@@ -1363,10 +1363,17 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_forcing_ts_template_census.py",
             # Cut (b)'s second importer: the register is now the parametrisation
-            # source of the byte-identity / M6 / narrow-shape oracle too, so an
-            # entry added or dropped here changes what that suite asserts
+            # source of the byte-identity / routing / narrow-shape oracle too, so
+            # an entry added or dropped here changes what that suite asserts
             # without touching it.
             "tests/test_forcing_read_path_store_routing.py",
+            # #1991 task 7.3's third importer: the renderer suite takes this
+            # module's REPO_ROOT to read
+            # `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`
+            # and hold the flipped FORCING_TABLE_LEGACY constant against the
+            # `ALTER TABLE … RENAME TO` that made it true. A one-name import, but
+            # the closure check is over edges and not over how much is imported.
+            "tests/test_forcing_ts_render.py",
         ),
     ),
     PathTestRule(
@@ -2618,6 +2625,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forcing_domain_handoff_contract.py",
+            # #1991 task 7.3: this module is one of the two narrow-only writers,
+            # and the refusal-BEFORE-any-DELETE ordering (must-preserve M3, the
+            # one data-loss property in that task's surface) is asserted there.
+            # Its own same-name suite covers the apply report; the ordering does
+            # not live in it.
+            "tests/test_timescale_write_guard_wired.py",
         ),
     ),
     PathTestRule(
@@ -2625,6 +2638,23 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forcing_producer.py",
+        ),
+    ),
+    PathTestRule(
+        # #1991 task 7.3: the per-version store routing both writers, all nine
+        # readers, the seed and the autopipeline's non-failing tick outcome now
+        # depend on. No pattern matched it before -- `packages/common/**` is not
+        # a broad rule (#1744 path B) and it has no same-name suite -- so a diff
+        # to the store names, the refusal code or the narrow INSERT template
+        # would have been red only on the post-merge master run.
+        "packages/common/forcing_store_routing.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_timescale_write_guard_wired.py",
+            "tests/test_forcing_domain_handoff_apply.py",
+            "tests/test_forcing_producer.py",
+            "tests/test_node27_autopipeline_handoff.py",
+            "tests/test_seed.py",
         ),
     ),
     PathTestRule(

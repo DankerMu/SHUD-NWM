@@ -645,6 +645,10 @@ class SqlCaptureCursor:
             {
                 "run_id": row.get("run_id"),
                 "timeseries_store": row.get("timeseries_store"),
+                # Task 7.3: the scan header carries the FORCING store too — the
+                # heavy statement's station leg is rendered from it, so dropping
+                # it here would silently route every fixture to the default.
+                "forcing_timeseries_store": row.get("forcing_timeseries_store"),
                 "forcing_version_id": row.get("forcing_version_id"),
                 "basin_version_id": row.get("basin_version_id"),
                 "river_network_version_id": row.get("river_network_version_id"),
@@ -2859,7 +2863,12 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "h.cycle_time IS NOT NULL" in candidate_cte
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
     assert "LIMIT %(candidate_limit)s" in candidate_cte
-    assert "FROM met.forcing_station_timeseries" not in candidate_cte
+    # #1990 M1b / task 7.3 M9: the bound is "no forcing fact table AT ALL in the
+    # discovery CTE", so assert on the rendered NAMES, not on the `FROM ` prefix.
+    # `"FROM met.forcing_station_timeseries" not in …` also missed a JOIN onto
+    # the fact table, and after the rename it would have been satisfied by a
+    # statement that reads `…_legacy` under an alias.
+    assert _forcing_fact_table_names(candidate_cte) == []
     assert "FROM hydro.river_timeseries" not in candidate_cte
     station_cte = statement[statement.index("station_sample_rows AS") : statement.index("river_sample_rows AS")]
     hydro_cte = statement[
@@ -2990,10 +2999,12 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
     context_statement, context_parameters = store.cursor.executions[0]
     assert len(store.cursor.executions) == 1
     assert "h.status IN ('succeeded', 'parsed', 'published')" in ready_statement
-    assert "FROM met.forcing_station_timeseries" not in ready_statement
+    # Same conversion as the discovery CTE above: name equality, so the scan
+    # header and the context query stay provably free of EITHER forcing store.
+    assert _forcing_fact_table_names(ready_statement) == []
     assert "FROM hydro.river_timeseries" not in ready_statement
     assert "h.status NOT IN ('succeeded', 'parsed', 'published')" in context_statement
-    assert "FROM met.forcing_station_timeseries" not in context_statement
+    assert _forcing_fact_table_names(context_statement) == []
     assert "FROM hydro.river_timeseries" not in context_statement
     assert ready_parameters == {
         "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
@@ -3476,6 +3487,11 @@ def _forcing_version_row(
 ) -> dict[str, Any]:
     return {
         "forcing_version_id": forcing_version_id,
+        # Task 7.3: `met.forcing_version.timeseries_store` routes every
+        # per-version reader. Naming it here (rather than letting
+        # `forcing_store_or_default` fall back to 'narrow') is what keeps the
+        # `…_legacy` equalities below pins on the rename.
+        "timeseries_store": "legacy",
         "model_id": "qhh_shud_v1",
         "source_id": "gfs",
         "cycle_time": _dt("2026-05-07T00:00:00Z"),
@@ -3611,6 +3627,13 @@ def _qhh_candidate_row(
     return {
         "run_id": run_id,
         "timeseries_store": "legacy",
+        # Task 7.3: the candidate CTE now also projects the FORCING version's
+        # store, and the station leg renders against whichever one this row
+        # names. Pinning it to 'legacy' here is what keeps every `…_legacy`
+        # equality below a statement about the rename rather than about the
+        # default — the narrow direction is covered, per store, in
+        # tests/test_forcing_read_path_store_routing.py.
+        "forcing_timeseries_store": "legacy",
         "run_type": run_type,
         "scenario_id": scenario_id,
         "model_id": model_id,

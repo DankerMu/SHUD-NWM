@@ -54,6 +54,13 @@ EXPECTED_TYPES = {
     "hydro.river_variable",
     "hydro.river_unit",
     "hydro.river_quality_flag",
+    # 000061 (issue #1991): the same three-enum shape for the forcing fact
+    # table. Separate types, not shared with river's: the vocabularies do not
+    # coincide (`met.forcing_quality_flag` excludes river's `qc_warning`) and a
+    # shared type would make one plane's widening the other's problem.
+    "met.forcing_variable",
+    "met.forcing_unit",
+    "met.forcing_quality_flag",
 }
 
 

@@ -71,6 +71,7 @@ from services.tiles.mvt import (
     national_river_network_source_version,
 )
 from tests.integration_helpers import (
+    FORCING_PLANE_MIGRATIONS,
     apply_migrations_from_zero,
     insert_river_timeseries_dual_written,
     set_integration_env,
@@ -546,7 +547,11 @@ def national_tile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Any:
-    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    # 000058 pins RIVER's pre-identity catalog. The display coverage refresh
+    # this fixture's tests drive also reads the FORCING plane, whose readers
+    # name `met.forcing_station_timeseries_legacy` unconditionally after
+    # #1991, so the forcing expand applies on top of the river pin.
+    apply_migrations_from_zero(throwaway_database_url, through="000058", also=FORCING_PLANE_MIGRATIONS)
     _seed(throwaway_database_url)
     object_root = tmp_path / "object-store"
     set_integration_env(throwaway_database_url, object_root, monkeypatch)

@@ -131,9 +131,14 @@ def _assert_executed_narrow_river_cte(sql: str, params: dict[str, Any]) -> None:
     assert sql.count("        ),\n        river_identity_coverage AS (") == 1
     _before, river = sql.split("        river_sample_rows AS (\n")
     body, _after = river.split("        ),\n        river_identity_coverage AS (", 1)
-    assert "timeseries_store" not in sql
+    # Scoped to the RIVER CTE body, not to the whole statement. #1991 task 7.3
+    # gives the FORCING station CTE a routing column and a two-store
+    # ``UNION ALL`` in the same composed statement, and river's contract claim
+    # is "river has neither", not "the statement has neither". The unscoped form
+    # asserted the forcing plane's shape by accident.
+    assert "timeseries_store" not in body
     assert AID_MARKER_TAG not in sql
-    assert "UNION ALL" not in sql
+    assert "UNION ALL" not in body
     assert sql.count("INSERT INTO hydro.run_display_coverage") == 1
     assert sql.count("ON CONFLICT") == sql.count("RETURNING run_id") == 1
     assert set(re.findall(r"%\(([^)]*)\)s", sql)) == set(params)

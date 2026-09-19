@@ -16,18 +16,25 @@ if str(ROOT) not in sys.path:
     # resolves either way.
     sys.path.insert(0, str(ROOT))
 
+from packages.common.forcing_store_routing import (  # noqa: E402
+    FORCING_STORE_LEGACY,
+    FORCING_STORE_NARROW,
+)
 from packages.common.forcing_ts_render import (  # noqa: E402
+    FORCING_TABLE,
     FORCING_TABLE_LEGACY,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
 )
 
-# Reader #9 (#1990 task 7.2). ONE `_delete`, and river now has one too: river's
-# two-group split read its routing column to decide which physical table a run's
-# rows lived in, and #1342's contract (task 6.3) dropped both. Forcing's own
-# routing column `met.forcing_version.timeseries_store` arrives with task 7.3 and
-# the split lands with it; here store is the constant `legacy`.
+# Reader #9 (#1990 task 7.2, split by #1991 task 7.3). TWO `_delete_rendered`
+# calls, one per physical table, each bounded to the forcing versions
+# `met.forcing_version.timeseries_store` routes to it — the shape river had
+# before #1342's contract (task 6.3) dropped its routing column and its legacy
+# table. Both forcing tables hold live rows until task 8.2, so a smoke reset that
+# cleared only one would leave the other's rows behind and the next smoke run
+# would trip the primary key it thought it had cleared.
 _FORCING_TIMESERIES_DELETE_TEMPLATES = ForcingTemplatePair(
     legacy=f"DELETE FROM {FORCING_TABLE_TOKEN} WHERE forcing_version_id = ANY(%s)",
     # `AS fst` is not decoration: it makes the fact-table reference carry the same
@@ -99,17 +106,32 @@ def main() -> int:
         )
         _delete(cur, deleted, "hydro.hydro_run", "run_id = ANY(%s)", (run_ids,))
 
-        _delete_rendered(
-            cur,
-            deleted,
-            FORCING_TABLE_LEGACY,
-            render_forcing_ts_sql(
-                _FORCING_TIMESERIES_DELETE_TEMPLATES,
-                "legacy",
-                entry="reset_qhh_smoke_db.forcing_timeseries_delete",
-            ).sql,
-            (forcing_ids,),
-        )
+        # #1991 (task 7.3): the TWO-GROUP SPLIT, now that
+        # `met.forcing_version.timeseries_store` exists. One DELETE per physical
+        # table, each bounded to the versions routed to it, and each recorded
+        # under the relation it actually touched — a single rendered DELETE would
+        # leave the other table's rows behind and report a count for a table it
+        # never opened.
+        #
+        # Groups are computed from the ids already loaded, so a version with no
+        # rows in either table still appears in exactly one group and the two
+        # groups partition `forcing_ids`.
+        for store, physical_table in (
+            (FORCING_STORE_LEGACY, FORCING_TABLE_LEGACY),
+            (FORCING_STORE_NARROW, FORCING_TABLE),
+        ):
+            group = _forcing_ids_for_store(cur, forcing_ids, store)
+            _delete_rendered(
+                cur,
+                deleted,
+                physical_table,
+                render_forcing_ts_sql(
+                    _FORCING_TIMESERIES_DELETE_TEMPLATES,
+                    store,
+                    entry="reset_qhh_smoke_db.forcing_timeseries_delete",
+                ).sql,
+                (group,),
+            )
         _delete(cur, deleted, "met.forcing_version_component", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(cur, deleted, "met.forcing_version", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(
@@ -198,6 +220,28 @@ def _load_ids(cur: Any) -> dict[str, str]:
     }
 
 
+def _forcing_ids_for_store(cur: Any, forcing_ids: list[str], store: str) -> list[str]:
+    """The subset of ``forcing_ids`` routed to ``store``.
+
+    Read from the database rather than partitioned in Python from a store column
+    this script never selected: the routing column is the authority, and the ids
+    were listed by model/name pattern, not by store.
+    """
+    if not forcing_ids:
+        return []
+    return _list_values(
+        cur,
+        """
+        SELECT forcing_version_id
+        FROM met.forcing_version
+        WHERE forcing_version_id = ANY(%s)
+          AND timeseries_store = %s
+        """,
+        (forcing_ids, store),
+        "forcing_version_id",
+    )
+
+
 def _list_values(cur: Any, sql: str, params: tuple[Any, ...], column: str) -> list[str]:
     cur.execute(sql, params)
     return [str(row[column]) for row in cur.fetchall()]
@@ -234,14 +278,13 @@ def _delete_rendered(
     the *physical* relation the statement touched and follows task 7.3's rename
     for free.
 
-    SO THE RECEIPT KEY CHANGES AT 7.3, AND THAT IS INTENDED. The forcing entry
-    reads ``met.forcing_station_timeseries`` today and will read
-    ``met.forcing_station_timeseries_legacy`` the moment
-    ``forcing_ts_render.FORCING_TABLE_LEGACY`` is flipped in the migration's own
-    commit, because a receipt that names the relation the DELETE did not touch is
-    worse than no receipt. No consumer pins either spelling — the smoke receipt is
-    read by a human — so 7.3 has nothing to migrate here and should not treat the
-    changed key as a regression.
+    THE FORCING RECEIPT IS NOW TWO ENTRIES, AND THAT IS INTENDED. Task 7.3's
+    two-group split calls this once per physical table, so the payload carries
+    both ``met.forcing_station_timeseries`` and
+    ``met.forcing_station_timeseries_legacy`` with their own row counts, because
+    a single receipt line naming one relation would silently claim the other's
+    rows were cleared too. No consumer pins either spelling — the smoke receipt is
+    read by a human — so the changed shape is not a regression.
     """
     cur.execute(statement, params)
     deleted[table] = cur.rowcount

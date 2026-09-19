@@ -14,6 +14,76 @@ def test_seed_module_importable() -> None:
     assert callable(main)
 
 
+def _migration_enum_values(type_name: str) -> set[str]:
+    """The value set 000061 declares for one ``met.forcing_*`` enum.
+
+    Parsed out of the migration rather than restated, so this test reads the DDL
+    that will actually run. Comments after each value carry the P/S/L source
+    annotation and are stripped by taking only quoted literals from the body.
+    """
+    migration = (
+        Path(seed_demo.__file__).resolve().parents[2]
+        / "db/migrations/000061_forcing_station_timeseries_narrow_expand.sql"
+    ).read_text(encoding="utf-8")
+    match = re.search(rf"CREATE TYPE {re.escape(type_name)} AS ENUM \((.*?)\);", migration, re.S)
+    assert match is not None, type_name
+    return set(re.findall(r"'([^']*)'", match.group(1)))
+
+
+def test_seed_forcing_vocabulary_is_the_production_writer_s() -> None:
+    """R1 (#1991, task 7.3): the seed writes values 000061's enums admit.
+
+    The seed's vocabulary used to be ``t2m/rh2m/wind_u/wind_v/precip/srad`` and
+    was DISJOINT from what the production writer emits and from every live row
+    the I10 receipt measured. ``met.forcing_variable`` / ``met.forcing_unit`` are
+    the production vocabulary, and after 000061 the seed writes the NARROW table,
+    so the old literals would fail on every ``variable_e`` / ``unit_e`` cast.
+
+    Asserted against ``workers/forcing_producer/producer.py`` rather than against
+    a second copy of the list: the producer is where the vocabulary comes from,
+    and two hand-maintained copies is exactly how they drifted apart before. The
+    migration is read as a third, independent side — a test that only compared
+    the seed to the producer would stay green if the enum were written from
+    something else.
+    """
+    from workers.forcing_producer import producer
+
+    assert seed_demo.FORCING_VARIABLES == producer.FORCING_VARIABLES
+    assert {variable: seed_demo.forcing_unit(variable) for variable in seed_demo.FORCING_VARIABLES} == (
+        producer.OUTPUT_UNITS
+    )
+
+    assert _migration_enum_values("met.forcing_variable") == set(seed_demo.FORCING_VARIABLES)
+    assert _migration_enum_values("met.forcing_unit") == {
+        seed_demo.forcing_unit(variable) for variable in seed_demo.FORCING_VARIABLES
+    }
+    # And every literal the migration deliberately EXCLUDED is unreachable from
+    # the seed, asserted on behaviour rather than on the source text: the
+    # migration header and this module both name those literals in prose, which a
+    # text search cannot tell apart from a live one.
+    from datetime import UTC, datetime
+
+    for retired in ("t2m", "rh2m", "wind_u", "wind_v", "precip", "srad"):
+        assert retired not in seed_demo.FORCING_VARIABLES, retired
+        with pytest.raises(KeyError):
+            seed_demo.forcing_unit(retired)
+        with pytest.raises(ValueError):
+            seed_demo.forcing_value(random.Random(0), retired, datetime(2026, 5, 1, tzinfo=UTC))
+
+
+def test_seed_narrow_insert_template_matches_the_production_writers() -> None:
+    """The seed's local copy of the enum-cast template must not drift.
+
+    ``db/seeds/seed_demo.py`` imports nothing from the repository on purpose (it
+    runs as a bare script), so it spells the ``execute_values`` template itself.
+    That is a licensed duplication, not an unnoticed one, and this is where the
+    two copies are held equal.
+    """
+    from packages.common.forcing_store_routing import FORCING_NARROW_INSERT_TEMPLATE
+
+    assert seed_demo.FORCING_NARROW_INSERT_TEMPLATE == FORCING_NARROW_INSERT_TEMPLATE
+
+
 def test_seed_sql_strings_contain_expected_tables() -> None:
     source = Path(seed_demo.__file__).read_text(encoding="utf-8")
     expected_tables = {
@@ -204,13 +274,16 @@ def _expected_river_seed_samples(*, after_met: bool) -> dict[tuple[Any, ...], tu
 
     rng = random.Random(42)
     if after_met:
-        # Five stations, six forcing variables, 168 hours. Precip alone draws
-        # a second variate when wet; all other forcing fields draw exactly one.
+        # Five stations, six forcing variables, 168 hours. Precipitation alone
+        # draws a second variate when wet; all other forcing fields draw exactly
+        # one. #1991 (task 7.3) renamed the seed's vocabulary to the production
+        # one, so the wet variable is `PRCP` — the DRAW COUNTS are unchanged,
+        # only the name it is keyed on.
         for _station in range(5):
             for variable in seed_demo.FORCING_VARIABLES:
                 for _hour in range(168):
                     draw = rng.random()
-                    if variable == "precip" and draw >= 0.7:
+                    if variable == "PRCP" and draw >= 0.7:
                         rng.random()
     expected = {}
     for run, hour, horizon, offset in (
