@@ -2087,6 +2087,26 @@ class FileOrchestrationJournalRepository:
         except FileOrchestrationJournalError as error:
             return [_blocked_query_job(error, cycle_id=cycle_id)]
 
+    def iter_publication_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        """Source-owned publication view: allowlisted fields, unsanitized URIs.
+
+        Public ``query_pipeline_jobs_by_cycle`` sanitizes object URIs to
+        ``[object-uri]``. Publication must not treat those sentinels as
+        provenance, so this view yields durable allowlisted columns from
+        cycle-scoped replay without public redaction. It never takes a write
+        lock, mkdir, or mutates journal state.
+        """
+
+        cycle_scope = _cycle_scope_from_cycle_id(cycle_id)
+        jobs = [
+            _publication_scheduler_row(job)
+            for job in self._iter_pipeline_job_records_scoped(cycle_scope)
+            if str(job.get("cycle_id") or "") == cycle_id
+        ]
+        jobs.sort(key=_db_compatible_pipeline_job_order_key)
+        return jobs
+
+
     def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
         cycle_scope = _cycle_scope_from_file_run_id(run_id)
         try:
@@ -13534,6 +13554,35 @@ def _stable_sha256(value: str) -> str:
 
 def _public_scheduler_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return _public_evidence(row)
+
+_PUBLICATION_JOB_FIELDS = (
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "job_type",
+    "slurm_job_id",
+    "array_task_id",
+    "model_id",
+    "status",
+    "stage",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "retry_count",
+    "error_code",
+    "error_message",
+    "log_uri",
+    "created_at",
+    "updated_at",
+)
+
+
+def _publication_scheduler_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Closed allowlist of durable job fields for display provenance publication."""
+
+    return {field: row.get(field) for field in _PUBLICATION_JOB_FIELDS}
+
 
 
 _PERSISTED_REDACTION_PLACEHOLDERS = frozenset({"[object-uri]", "[uri]"})

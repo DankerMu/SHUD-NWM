@@ -1324,6 +1324,10 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.
@@ -1339,6 +1343,27 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
+
+
+
+def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> None:
+    all_provenance_tests = {
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
+    }
+    for source in (
+        "services/orchestrator/pipeline_job_provenance.py",
+        "services/orchestrator/chain_forecast_execution.py",
+    ):
+        assert all_provenance_tests <= set(select_tests([source], repo_root=Path("."))), source
+
+    backfill_selected = set(select_tests(["scripts/backfill_pipeline_job_provenance.py"], repo_root=Path(".")))
+    assert {
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+    } <= backfill_selected
 
 def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None:
     # #1774 round 4. The stored-expression sweep's last leg is an ALLOW-list of

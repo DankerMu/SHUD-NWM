@@ -809,6 +809,7 @@ def _patch_pipeline_openapi(schema: dict) -> None:
     components = schema.setdefault("components", {})
     schemas = components.setdefault("schemas", {})
     schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["OpsStrictIdentity"] = _ops_strict_identity_schema()
     schemas["ErrorResponse"] = _error_response_schema()
     schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
     schemas["JobStatusCounts"] = _job_status_counts_schema()
@@ -878,6 +879,7 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"$ref": "#/components/schemas/PipelineStatus"},
         description="Pipeline status",
+        strict_identity=True,
     )
     _patch_pipeline_operation(
         schema,
@@ -894,6 +896,7 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
         description="Pipeline stage list",
+        strict_identity=True,
     )
     _patch_pipeline_operation(
         schema,
@@ -938,6 +941,7 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"$ref": "#/components/schemas/PipelineJobPage"},
         description="Pipeline job list",
+        strict_identity=True,
     )
     _patch_pipeline_operation(
         schema,
@@ -955,6 +959,8 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"$ref": "#/components/schemas/JobLogs"},
         description="Pipeline job logs",
+        strict_identity=True,
+        job_identity=True,
         extra_responses={
             "400": {"$ref": "#/components/responses/JobLogError"},
             "403": {"$ref": "#/components/responses/JobLogError"},
@@ -1114,6 +1120,8 @@ def _patch_pipeline_operation(
     parameters: list[dict[str, Any]],
     data_schema: dict[str, Any],
     description: str,
+    strict_identity: bool = False,
+    job_identity: bool = False,
     extra_responses: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     operation = schema.get("paths", {}).get(path, {}).get(method)
@@ -1123,10 +1131,15 @@ def _patch_pipeline_operation(
     operation["summary"] = summary
     operation["tags"] = tags
     operation["parameters"] = parameters
+    response_schema = (
+        _ops_success_response_schema(data_schema, job_identity=job_identity)
+        if strict_identity
+        else _success_response_schema(data_schema)
+    )
     operation["responses"] = {
         "200": {
             "description": description,
-            "content": {"application/json": {"schema": _success_response_schema(data_schema)}},
+            "content": {"application/json": {"schema": response_schema}},
         },
         **(extra_responses or {}),
         "4XX": {"$ref": "#/components/responses/Error"},
@@ -1265,6 +1278,34 @@ def _success_response_schema(data_schema: dict) -> dict:
     }
 
 
+def _ops_success_response_schema(data_schema: dict, *, job_identity: bool) -> dict:
+    identity_schema: dict[str, Any] = {"$ref": "#/components/schemas/OpsStrictIdentity"}
+    if job_identity:
+        identity_schema = {
+            "allOf": [
+                identity_schema,
+                {
+                    "type": "object",
+                    "required": ["job_id"],
+                    "properties": {"job_id": {"type": "string"}},
+                },
+            ]
+        }
+    return {
+        "allOf": [
+            {"$ref": "#/components/schemas/SuccessEnvelope"},
+            {
+                "type": "object",
+                "required": ["data", "identity"],
+                "properties": {
+                    "data": data_schema,
+                    "identity": identity_schema,
+                },
+            },
+        ]
+    }
+
+
 def _station_series_error_response(description: str, examples: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {
         "description": description,
@@ -1324,6 +1365,25 @@ def _success_envelope_schema() -> dict:
             "request_id": {"type": "string", "example": "req_01J0NHMS"},
             "status": {"type": "string", "enum": ["ok"], "example": "ok"},
         },
+    }
+
+
+def _ops_strict_identity_schema() -> dict:
+    return {
+        "type": "object",
+        "description": (
+            "Resolved strict Ops identity returned as a top-level sibling of data "
+            "on successful status, stages, jobs, and job-log responses."
+        ),
+        "required": ["source", "cycle_time", "run_id", "model_id"],
+        "properties": {
+            "source": {"type": "string"},
+            "cycle_time": {"type": "string", "format": "date-time"},
+            "run_id": {"type": "string"},
+            "model_id": {"type": "string"},
+            "job_id": {"type": "string"},
+        },
+        "additionalProperties": False,
     }
 
 

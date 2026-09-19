@@ -1504,9 +1504,12 @@ paths:
                 - type: object
                   required:
                   - data
+                  - identity
                   properties:
                     data:
                       $ref: '#/components/schemas/PipelineStatus'
+                    identity:
+                      $ref: '#/components/schemas/OpsStrictIdentity'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1552,11 +1555,14 @@ paths:
                 - type: object
                   required:
                   - data
+                  - identity
                   properties:
                     data:
                       type: array
                       items:
                         $ref: '#/components/schemas/PipelineStage'
+                    identity:
+                      $ref: '#/components/schemas/OpsStrictIdentity'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1655,9 +1661,12 @@ paths:
                 - type: object
                   required:
                   - data
+                  - identity
                   properties:
                     data:
                       $ref: '#/components/schemas/PipelineJobPage'
+                    identity:
+                      $ref: '#/components/schemas/OpsStrictIdentity'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1708,9 +1717,19 @@ paths:
                 - type: object
                   required:
                   - data
+                  - identity
                   properties:
                     data:
                       $ref: '#/components/schemas/JobLogs'
+                    identity:
+                      allOf:
+                      - $ref: '#/components/schemas/OpsStrictIdentity'
+                      - type: object
+                        required:
+                        - job_id
+                        properties:
+                          job_id:
+                            type: string
         '400':
           $ref: '#/components/responses/JobLogError'
         '403':
@@ -3687,6 +3706,27 @@ components:
           enum:
           - ok
           example: ok
+    OpsStrictIdentity:
+      type: object
+      description: Resolved strict Ops identity returned as a top-level sibling of data on successful status, stages, jobs, and job-log responses.
+      required:
+      - source
+      - cycle_time
+      - run_id
+      - model_id
+      properties:
+        source:
+          type: string
+        cycle_time:
+          type: string
+          format: date-time
+        run_id:
+          type: string
+        model_id:
+          type: string
+        job_id:
+          type: string
+      additionalProperties: false
     ErrorResponse:
       type: object
       required:

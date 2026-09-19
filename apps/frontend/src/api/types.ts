@@ -1224,6 +1224,15 @@ export interface components {
              */
             status: "ok";
         };
+        /** @description Resolved strict Ops identity returned as a top-level sibling of data on successful status, stages, jobs, and job-log responses. */
+        OpsStrictIdentity: {
+            source: string;
+            /** Format: date-time */
+            cycle_time: string;
+            run_id: string;
+            model_id: string;
+            job_id?: string;
+        };
         ErrorResponse: {
             /** @example req_01J0NHMS */
             request_id: string;
@@ -3113,6 +3122,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineStatus"];
+                        identity: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3142,6 +3152,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineStage"][];
+                        identity: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3179,6 +3190,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineJobPage"];
+                        identity: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3210,6 +3222,9 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["JobLogs"];
+                        identity: components["schemas"]["OpsStrictIdentity"] & {
+                            job_id: string;
+                        };
                     };
                 };
             };

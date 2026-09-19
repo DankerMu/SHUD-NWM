@@ -174,6 +174,87 @@ production terminal stage, because it writes forecast outputs but stops before
 publishing canonical warm-start checkpoints into the file state index. Node-27
 remains the owner of parse/QC/ingest/display.
 
+#### 3.1.1 Pipeline-job provenance sidecar and recovery (#2420)
+
+The DB-free node-22 terminal copyback hook publishes diagnostic provenance
+*before* its existing `copyback_run_trees` call.  It reads only the
+source-owned file journal at `NHMS_SCHEDULER_JOURNAL_ROOT`, validates each
+selected run's immutable manifest, and writes
+`runs/<run_id>/input/pipeline_jobs.json` into the object-store run tree.
+It has no `DATABASE_URL` path and never starts, retries, cancels, or changes
+Slurm work.  A failed provenance publication is recorded per run but does not
+block the scientific run-tree copyback.
+
+Only an exact, complete parent-array task entry may add a display log:
+`identity_complete=true`, the requested task id, and the task entry's
+run/model must all agree with the journal row.  The hook then writes the
+actual returned bytes to the canonical
+`published://logs/<source>/<cycle>/<run_id>/<job_id>.out` (and `.err` when
+present) path before advertising that URI.  A missing, incomplete, ambiguous,
+or mismatched task entry remains unadvertised; no parent-envelope or local
+log is substituted.
+
+`scripts/node27_autopipeline.py` performs the matching node-27 import phase
+after the already-ingested skip.  It imports the selected sidecars into the
+derived `ops.pipeline_job` read model using the node-27 ingest writer
+credential, including runs that are already parsed or published.  It does not
+rerun register/forcing/parse, update hydro readiness, or refresh coverage.
+The autopipe JSON summary reports this as `job_provenance`; a missing sidecar
+is an `unavailable` provenance result, not a scientific-ingest failure.
+
+Configuration ownership is strict:
+
+- node-22's `infra/env/compute.scheduler-dbfree.env` supplies
+  `NHMS_SCHEDULER_JOURNAL_ROOT`, `OBJECT_STORE_ROOT`,
+  `OBJECT_STORE_PREFIX`, `NHMS_OBJECT_STORE_COPYBACK_ROOT`, and, when log
+  publication is expected, `NHMS_PUBLISHED_ARTIFACT_ROOT` plus the local
+  `SLURM_GATEWAY_URL`;
+- node-27's `infra/env/node27-ingest.env` supplies `DATABASE_URL`,
+  `OBJECT_STORE_ROOT`, and `OBJECT_STORE_PREFIX`.  It must not receive the
+  node-22 journal root, Slurm gateway, or any compute-control credential.
+
+For a selected-run recovery, use the same code path in two separate commands;
+the CLI intentionally refuses a mixed publish/import invocation.
+
+```bash
+# node-22: publish source-authoritative sidecar and any verified task logs.
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-dbfree.env
+set +a
+.venv/bin/python scripts/backfill_pipeline_job_provenance.py \
+  --publish-only \
+  --run-id '<run_id>' \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --object-store-root "$OBJECT_STORE_ROOT" \
+  --object-store-prefix "${OBJECT_STORE_PREFIX:-}" \
+  --published-artifact-root "$NHMS_PUBLISHED_ARTIFACT_ROOT"
+
+# node-27: project the already-published sidecar only.
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+set -a
+. infra/env/node27-ingest.env
+set +a
+uv run --no-sync python scripts/backfill_pipeline_job_provenance.py \
+  --import-only \
+  --run-id '<run_id>' \
+  --object-store-root "$OBJECT_STORE_ROOT" \
+  --object-store-prefix "${OBJECT_STORE_PREFIX:-}"
+```
+
+Normal activation is the checked-in hook plus the existing node-22 scheduler
+and node-27 autopipe timers; do not add a second provenance daemon.  Before a
+code rollback, fence new passes by stopping those two timers and let any
+already-started pass finish.  Restore the paired node-22/node-27 release and
+their prior role-specific env files, then resume the existing timers.  Never
+delete or rewrite the source journal, scientific run tree, sidecar, or
+published logs as rollback.  `ops.pipeline_job` is a derived node-27 read
+model: if a database rollback is needed, restore only the explicitly captured
+rows with the ingest writer role and leave `hydro.hydro_run` readiness and
+scientific products untouched.
+
 node-22 scheduler 的模型清单来自 DB-free file registry。当前 canonical registry
 是 direct-grid authority；新增或移动 Basins 后，禁止把 Basins publisher 生成的
 legacy/IDW 行直接写到 canonical 路径。先发布 baseline staging，再在 node-27 生成

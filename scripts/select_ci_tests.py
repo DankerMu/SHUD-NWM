@@ -1777,6 +1777,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_orchestrator.py",
             "tests/test_orchestration_chain.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_copyback.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
@@ -2860,6 +2864,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1647: the `_connect` bounds and the stats-guard flag parser live
             # in their own suite, which the same-name fallback cannot find.
             "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_copyback.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),
@@ -2871,6 +2879,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: the stats-guard ANALYZE legs are what force the writer
             # role to OWN the relations, so the write-role guards must run.
             "tests/test_node27_write_roles.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/backfill_pipeline_job_provenance.py",
+        (
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
         ),
     ),
     PathTestRule(

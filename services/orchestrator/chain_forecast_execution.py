@@ -21,6 +21,10 @@ from services.orchestrator.accepted_submit_identity import (
 from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_identity_is_valid as _forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.pipeline_job_provenance import (
+    PipelineJobProvenanceError,
+    publish_runs_pipeline_job_provenance,
+)
 from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from services.orchestrator.scheduler_timing import (
@@ -966,6 +970,7 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
     run_ids = [run_id for run_id in run_ids if run_id]
     if not run_ids:
         return
+    _publish_pipeline_job_provenance_before_copyback(self, context, run_ids=run_ids, stage=stage)
     try:
         summary = copyback_run_trees(
             object_store_root=self.config.object_store_root,
@@ -1004,6 +1009,72 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
         message=f"Run-tree object-store copyback completed after {stage}.",
         details=_safe_pipeline_event_details({"stage": stage, **summary}),
     )
+
+
+
+def _publish_pipeline_job_provenance_before_copyback(
+    self,
+    context: CycleOrchestrationContext,
+    *,
+    run_ids: list[str],
+    stage: str,
+) -> None:
+    """Publish per-run job provenance immediately before copyback.
+
+    Publication is diagnostic display evidence. Failures are recorded and
+    never raise into copyback or change hydro/scheduler truth.
+    """
+
+    journal_root = os.getenv("NHMS_SCHEDULER_JOURNAL_ROOT", "").strip()
+    if not journal_root:
+        return
+    object_store_root = getattr(self.config, "object_store_root", None)
+    if not object_store_root:
+        return
+    try:
+        publication = publish_runs_pipeline_job_provenance(
+            run_ids=run_ids,
+            journal_root=journal_root,
+            object_store_root=object_store_root,
+            object_store_prefix=getattr(self.config, "object_store_prefix", "") or "",
+            published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip() or None,
+            slurm_client=getattr(self, "slurm_client", None),
+        )
+        summaries = list(publication["runs"])
+    except PipelineJobProvenanceError as error:
+        summaries = [
+            {
+                "run_id": run_id,
+                "status": "failed",
+                "reason": error.code,
+                "job_count": 0,
+                "advertised_logs": 0,
+            }
+            for run_id in run_ids
+        ]
+    except Exception as error:  # noqa: BLE001 - publication must never abort copyback
+        summaries = [
+            {
+                "run_id": run_id,
+                "status": "failed",
+                "reason": type(error).__name__,
+                "job_count": 0,
+                "advertised_logs": 0,
+            }
+            for run_id in run_ids
+        ]
+    try:
+        self.repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=context.cycle_id,
+            event_type="pipeline_job_provenance",
+            status_from=None,
+            status_to="failed" if any(item.get("status") != "published" for item in summaries) else "published",
+            message=f"Published pipeline job provenance before copyback after {stage}.",
+            details=_safe_pipeline_event_details({"stage": stage, "runs": summaries}),
+        )
+    except Exception:  # noqa: BLE001 - provenance receipt must not abort copyback
+        return
 
 
 def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
