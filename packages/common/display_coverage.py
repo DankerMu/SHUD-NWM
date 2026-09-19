@@ -39,6 +39,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from packages.common.forcing_ts_render import (
+    FORCING_STORES,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -278,28 +279,58 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
 """,
 )
 
-# C4 — a SINGLE render, and the forcing leg is still on the LEGACY store.
+# C4, delivered in 7.3 (#1991): the STATIC TWO-STORE composition.
 #
 # `_COVERAGE_CTES` and `_REFRESH_SQL` are module-level constants built at IMPORT
 # time, in every process that imports this module — including the display API on
-# node-27. A narrow branch would have to reference
-# `met.forcing_version.timeseries_store` and the narrow key/enum columns, none of
-# which exist until task 7.3, so an import-time union would put unrunnable SQL on
-# master. Store is the constant `legacy` for every forcing reader in this task
-# anyway (there is no routing column to read), so the union would also be pure
-# dead text.
+# node-27 — so this reader cannot route per call the way the single-version
+# readers do. Per-version routing therefore happens IN THE DATA: both variants
+# are rendered once here and composed into one relation, and each leg selects
+# only the versions `met.forcing_version.timeseries_store` assigns to it.
 #
-# THE UNION LANDS IN 7.3, with the routing column. River's own two-store union is
-# gone — #1342's contract (task 6.3) dropped river's routing column and the legacy
-# river table, leaving `_RIVER_SAMPLE_ROWS_NARROW_SQL` as one leg — so forcing's
-# 7.3 union has no river twin left to mirror; author it from `ForcingTemplatePair`
-# directly. The narrow variant is registered and text-pinned here so that change
-# is a join, not an authoring exercise.
-_STATION_SAMPLE_ROWS_LEGACY_SQL = render_forcing_ts_sql(
-    _STATION_SAMPLE_ROWS_TEMPLATES,
-    "legacy",
-    entry="display_coverage.station_sample_rows",
-).sql
+# There is no river twin left to mirror: #1342's contract (task 6.3) dropped
+# river's routing column and its legacy table, so `grep -c "UNION ALL"` on this
+# module was 0 and this composition is authored from `ForcingTemplatePair`
+# directly, as C4 said it would have to be.
+#
+# WHY EACH LEG IS FILTERED, rather than relying on the two tables being
+# disjoint. In production they are: 000061 classified every version by row
+# existence and the writers are narrow-only, so no version has rows in both.
+# But the invariant the spec states is per-version routing ("with the store of
+# the forcing version in scope", spec :33), and its own acceptance scenario
+# (:36) materialises ONE forcing version in BOTH tables. Unfiltered, that
+# scenario double-counts every station sample and the coverage-equality check it
+# exists to make would compare a number against twice itself.
+#
+# The filter is applied OUTSIDE each rendered variant, over the projected
+# `forcing_version_id` that both variants carry (invariant I5: same column names
+# in the same order). It is deliberately not pushed into the templates: the
+# legacy variant would need a join the census and the shape oracle both pin, and
+# the point of the pair is that neither variant is derived from the other.
+#
+# The composition is INSIDE this reader and ahead of every outer aggregate
+# (`station_identity_coverage` groups the result below), which is invariant I7 —
+# there is no shared text-level union combinator between the two renders.
+def _store_routed_leg(store: str) -> str:
+    """One rendered variant, restricted to the versions routed to ``store``."""
+    rendered = render_forcing_ts_sql(
+        _STATION_SAMPLE_ROWS_TEMPLATES,
+        store,
+        entry="display_coverage.station_sample_rows",
+    ).sql
+    alias = f"{store}_store_rows"
+    return (
+        "            SELECT * FROM (\n"
+        f"{rendered}"
+        f"            ) AS {alias}\n"
+        f"            WHERE {alias}.forcing_version_id IN (\n"
+        "                SELECT forcing_version_id FROM met.forcing_version\n"
+        f"                WHERE timeseries_store = '{store}'\n"
+        "            )\n"
+    )
+
+
+_STATION_SAMPLE_ROWS_UNION_SQL = "            UNION ALL\n".join(_store_routed_leg(store) for store in FORCING_STORES)
 
 
 _COVERAGE_CTES = (
@@ -309,7 +340,7 @@ _COVERAGE_CTES = (
     + """        ),
         station_sample_rows AS (
 """
-    + _STATION_SAMPLE_ROWS_LEGACY_SQL
+    + _STATION_SAMPLE_ROWS_UNION_SQL
     + """        ),
         station_identity_coverage AS (
             SELECT

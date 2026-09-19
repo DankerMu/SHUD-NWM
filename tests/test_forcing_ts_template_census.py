@@ -131,7 +131,7 @@ from tests.forcing_ts_template_registry import (
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
     "packages/common/forcing_domain_handoff.py": 3,
-    "packages/common/forcing_domain_handoff_apply.py": 16,
+    "packages/common/forcing_domain_handoff_apply.py": 17,
     "packages/common/forcing_ts_render.py": 2,
     "packages/common/forecast_store.py": 2,
     "packages/common/node27_container_contract.py": 1,
@@ -152,6 +152,20 @@ FIXTURE_BASELINE_FILES = 15
 FIXTURE_BASELINE_MENTIONS = 47
 FIXTURE_BASELINE_READER_MENTIONS = 9
 FIXTURE_BASELINE_EXEMPT_MENTIONS = 38
+
+#: Mentions #1991 (task 7.3) ADDED, declared so the baseline arithmetic above
+#: keeps reproducing C3's measured numbers instead of being quietly re-agreed.
+#: Exactly one: the narrow writer in
+#: ``packages/common/forcing_domain_handoff_apply.py`` resolves station surrogate
+#: keys in Python, and the shape-conflict reason it raises when a station has no
+#: ``met.met_station`` row names the fact table as the ``table`` field of that
+#: reason payload. It is a name, not SQL, and it joins the file's
+#: "handoff protocol table-name key" exemption row.
+#:
+#: The twelve write-side mentions did NOT move: task 7.3 converted those
+#: statements to narrow, key-predicated SQL in place, so the counts are unchanged
+#: and only the exemption rows' notes are.
+TASK_73_ADDED_MENTIONS = 1
 
 #: The five files whose forcing readers this task wired. Four of them left the
 #: discovery set outright; `forecast_store.py` stayed for its two non-SQL index
@@ -401,10 +415,15 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
 
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
-    assert non_read_mentions == FIXTURE_BASELINE_EXEMPT_MENTIONS
+    assert non_read_mentions - TASK_73_ADDED_MENTIONS == FIXTURE_BASELINE_EXEMPT_MENTIONS
     assert declared == non_read_mentions + renderer_mentions
-    # C3's 47 = the 38 that are not reads + the 9 that were.
-    assert declared - renderer_mentions + len(FORCING_REGISTRY) == FIXTURE_BASELINE_MENTIONS
+    # C3's 47 = the 38 that are not reads + the 9 that were, and task 7.3's own
+    # addition is subtracted rather than folded in, so the historical measurement
+    # stays a fixed point.
+    assert (
+        declared - renderer_mentions - TASK_73_ADDED_MENTIONS + len(FORCING_REGISTRY)
+        == FIXTURE_BASELINE_MENTIONS
+    )
     # Four of the five reader files left the set outright; forecast_store.py
     # stayed for its two index payloads, and the renderer module joined.
     assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 4 + 1

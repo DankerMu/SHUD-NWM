@@ -37,7 +37,7 @@ The table name is NOT literal text inside a template. Templates carry
 :data:`FORCING_TABLE_TOKEN` and this module substitutes the constant for the
 requested store. Two consequences, and both are the point:
 
-* 7.3's flip of the legacy name is ONE line in this file, landing in the same
+* 7.3's flip of the legacy name was ONE line in this file, landing in the same
   commit as the migration that makes it true — so master is never carrying a read
   path that names a relation which does not exist. River's equivalent wiring
   (``e8b30893c``) sat three days ahead of its migration (``8a61f5347``)
@@ -72,24 +72,24 @@ from dataclasses import dataclass
 # D1 — transitional table-name constants
 # ---------------------------------------------------------------------------
 #
-# BOTH CONSTANTS SPELL THE SAME NAME TODAY, ON PURPOSE. This is not duplication
-# to be tidied away: it is what keeps every commit between this one and
-# **tasks.md 7.3 (I12)** deployable to node-27.
+# FLIPPED BY TASK 7.3 (I12, #1991), in the same commit as
+# `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql` — the
+# migration that makes the second name true by renaming the table. That
+# same-commit rule is D1's whole point: master is never carrying a read path
+# that names a relation which does not exist. River's equivalent wiring
+# (`e8b30893c`) sat three days ahead of its migration (`8a61f5347`) fail-closed
+# on HTTP 500, and node-27 is the active primary behind `test.nwm.ac.cn`.
 #
-# `met.forcing_station_timeseries_legacy` does not exist yet — 7.3's expand
-# migration creates it by renaming the table below. Until then the legacy store
-# must name the table that IS deployed, which is the canonical name, and the
-# narrow store is never rendered into an executed statement (store is the
-# constant `legacy` for every reader; `met.forcing_version.timeseries_store`
-# arrives in 7.3 too).
+# The two names are now DIFFERENT, which is what makes the per-store render a
+# real choice: `legacy` reads the renamed table that 000061 left holding every
+# forcing version written before the expand, `narrow` reads the key/enum table
+# 000061 created under the canonical name. Both are live until task 8.2 drops
+# the legacy one; 8.3 then deletes the legacy templates and this constant with
+# them.
 #
-# TASK 7.3 (I12), IN THE MIGRATION'S OWN COMMIT, flips exactly this line:
-#
-#     FORCING_TABLE_LEGACY = "met.forcing_station_timeseries_legacy"
-#
-# Do not flip it earlier, and do not collapse the two constants into one.
+# Do not collapse the two constants into one before 8.3.
 FORCING_TABLE = "met.forcing_station_timeseries"
-FORCING_TABLE_LEGACY = "met.forcing_station_timeseries"
+FORCING_TABLE_LEGACY = "met.forcing_station_timeseries_legacy"
 
 #: The two timeseries stores, spelled locally rather than imported from
 #: ``river_ts_render``: ``tasks.md`` 6.3 removes the river renderer's legacy path
@@ -227,11 +227,11 @@ def render_forcing_ts_sql(
 
     ``legacy`` renders the text-column variant against
     :data:`FORCING_TABLE_LEGACY`; ``narrow`` renders the key/enum variant against
-    :data:`FORCING_TABLE`. UNTIL 7.3 those constants are the same string (D1), so
-    the two renders of a body that is otherwise identical are byte-identical —
-    which is exactly what makes the reader wiring in ``tasks.md`` 7.2 a provable
-    zero-behaviour-change refactor. After 7.3's flip they differ by the ``_legacy``
-    suffix, which is the point of the flip and not a regression.
+    :data:`FORCING_TABLE`. Those two constants differed for the first time at
+    task 7.3 (#1991), whose migration renamed the deployed table — so a render is
+    now a real choice of relation, not only of column vocabulary. Before that
+    flip they were the same string, which is what made the reader wiring in
+    ``tasks.md`` 7.2 a provable zero-behaviour-change refactor.
 
     Raises :class:`ForcingTemplateError`, naming ``entry``, rather than returning
     SQL when:

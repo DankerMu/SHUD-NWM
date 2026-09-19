@@ -43,6 +43,11 @@ _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
 _HEADER_ROW = {
     "run_id": "qhh_gfs_2026050700",
     "forcing_version_id": "forc_qhh_gfs_2026050700",
+    # #1991 (task 7.3): the header now projects the candidate's forcing store and
+    # the heavy statement renders the matching variant. Pinned to `legacy` here so
+    # this suite keeps asserting the text-column shape it was written against;
+    # `tests/test_forcing_read_path_store_routing.py` covers both stores.
+    "forcing_timeseries_store": "legacy",
     "basin_version_id": "basins_qhh_vbasins",
     "river_network_version_id": "basins_qhh_rivnet_vbasins",
     "source_id_lower": "gfs",

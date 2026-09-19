@@ -84,7 +84,42 @@ IFS_06Z_FORCING_PACKAGE_URI = (
 IFS_06Z_RUN_MANIFEST_URI = f"s3://nhms/runs/{IFS_06Z_RUN_ID}/input/manifest.json"
 IFS_06Z_RUN_OUTPUT_URI = f"s3://nhms/runs/{IFS_06Z_RUN_ID}/output/"
 
-FORCING_VARIABLES = ("t2m", "rh2m", "wind_u", "wind_v", "precip", "srad")
+#: ``execute_values`` per-row template for the narrow forcing INSERT (#1991).
+#: The three enum columns need an explicit cast -- psycopg2 sends a Python
+#: ``str`` as ``text`` and Postgres has no implicit ``text -> enum`` coercion in
+#: an INSERT source list -- and the casts double as the vocabulary gate.
+#:
+#: SPELLED HERE rather than imported from
+#: ``packages.common.forcing_store_routing.FORCING_NARROW_INSERT_TEMPLATE``,
+#: which holds the identical string for the two production writers. This module
+#: imports nothing from the repository on purpose (see the module docstring and
+#: ``tests/test_timescale_write_guard_wired.test_seed_demo_does_not_import_guard``)
+#: and runs as a bare script, where ``packages`` is not importable. The two
+#: copies are pinned equal by ``tests/test_seed.py``.
+FORCING_NARROW_INSERT_TEMPLATE = (
+    "(%s, %s, %s, %s::met.forcing_variable, %s, %s::met.forcing_unit, %s::met.forcing_quality_flag, %s)"
+)
+
+# #1991 (task 7.3, fixture `I12-1991.md` R1): THE PRODUCTION VOCABULARY.
+#
+# This tuple used to be ("t2m","rh2m","wind_u","wind_v","precip","srad") with
+# units degC/%/m/s/m/s/mm/h/W/m2, and it was DISJOINT from what the production
+# writer emits and from every one of the 259 255 326 live rows measured in the
+# I10 receipt. `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`
+# turns `variable` and `unit` into enums whose domain is the production
+# vocabulary, and after that migration a seed writing the old literals fails on
+# every `variable_e` / `unit_e` cast -- the seed writes the NARROW table, because
+# the writers are narrow-only from 7.3 on.
+#
+# Changing the seed rather than widening the enum is river's own recorded
+# precedent (`000050:119-122` excluded a literal that existed only in a test and
+# corrected the test in the same change). Folding six fictional variable names
+# into a production type would weld them in permanently: an enum value can be
+# added later but not removed.
+#
+# Kept in the same order as `workers/forcing_producer/producer.py:81`, which is
+# where the vocabulary comes from.
+FORCING_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 RIVER_VARIABLES = ("q_down", "y_stage")
 
 
@@ -252,26 +287,43 @@ def hourly_times(start_time: datetime = START_TIME, forecast_hours: int = FORECA
 
 
 def forcing_unit(variable: str) -> str:
+    """The production unit of ``variable`` (#1991 R1).
+
+    Byte-identical to ``workers/forcing_producer/producer.py``'s ``OUTPUT_UNITS``
+    (:82-89), and it has to stay that way: `met.forcing_unit` admits exactly
+    these six values, and the I10 receipt measured `variable` and `unit` in
+    strict 1:1 across every live row.
+    """
     return {
-        "t2m": "degC",
-        "rh2m": "%",
-        "wind_u": "m/s",
-        "wind_v": "m/s",
-        "precip": "mm/h",
-        "srad": "W/m2",
+        "PRCP": "mm/day",
+        "TEMP": "degC",
+        "RH": "0-1",
+        "wind": "m/s",
+        "Rn": "W/m2",
+        "Press": "Pa",
     }[variable]
 
 
 def forcing_value(rng: random.Random, variable: str, valid_time: datetime) -> float:
-    if variable == "t2m":
+    """A plausible value in ``variable``'s PRODUCTION unit (#1991 R1).
+
+    The ranges moved with the vocabulary and are not arbitrary re-scalings of
+    the old ones: `RH` is now a 0-1 fraction rather than a percentage, `PRCP` is
+    mm/day rather than mm/h, and `wind` is a scalar speed rather than the two
+    signed `wind_u` / `wind_v` components, so a seeded row is in range for the
+    unit the fact row now declares.
+    """
+    if variable == "TEMP":
         return round(rng.uniform(15.0, 30.0), 3)
-    if variable == "rh2m":
-        return round(rng.uniform(40.0, 90.0), 3)
-    if variable in {"wind_u", "wind_v"}:
-        return round(rng.uniform(-5.0, 5.0), 3)
-    if variable == "precip":
-        return round(0.0 if rng.random() < 0.7 else rng.uniform(0.1, 5.0), 3)
-    if variable == "srad":
+    if variable == "RH":
+        return round(rng.uniform(0.4, 0.9), 3)
+    if variable == "wind":
+        return round(rng.uniform(0.0, 8.0), 3)
+    if variable == "Press":
+        return round(rng.uniform(98000.0, 103000.0), 3)
+    if variable == "PRCP":
+        return round(0.0 if rng.random() < 0.7 else rng.uniform(2.4, 120.0), 3)
+    if variable == "Rn":
         daylight = max(0.0, math.sin(math.pi * ((valid_time.hour % 24) - 6) / 12))
         return round(daylight * rng.uniform(450.0, 800.0), 3)
     raise ValueError(f"Unsupported forcing variable: {variable}")
@@ -571,18 +623,31 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
         page_size=1000,
     )
 
+    # #1991 (task 7.3): the NARROW fact table. `met.forcing_station_timeseries`
+    # is the key/enum table after
+    # `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`; the
+    # text-column table it renamed is `…_legacy` and the seed must not write it
+    # (spec :21's narrow-only writers, and 8.2 drops it).
+    #
+    # `basin_version_id` and `source_id` are gone from the row, not dropped by
+    # accident: the narrow table derives them by joining `met.met_station` and
+    # `met.forcing_version` (spec :5).
+    forcing_version_key = _scalar(
+        cursor,
+        "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s",
+        (FORCING_VERSION_ID,),
+    )
+    station_keys = _station_keys(cursor, [station.station_id for station in build_met_stations()])
     forcing_rows = [
         (
-            FORCING_VERSION_ID,
-            BASIN_VERSION_ID,
-            station.station_id,
+            forcing_version_key,
+            station_keys[station.station_id],
             valid_time,
-            SOURCE_ID,
             variable,
             forcing_value(rng, variable, valid_time),
             forcing_unit(variable),
-            "1h",
             "ok",
+            "1h",
         )
         for station in build_met_stations()
         for variable in FORCING_VARIABLES
@@ -592,23 +657,56 @@ def seed_met(cursor: Any, json_adapter: Any, execute_values: Any, rng: random.Ra
         cursor,
         """
         INSERT INTO met.forcing_station_timeseries (
-            forcing_version_id,
-            basin_version_id,
-            station_id,
+            forcing_version_key,
+            station_key,
             valid_time,
-            source_id,
-            variable,
+            variable_e,
             value,
-            unit,
-            native_resolution,
-            quality_flag
+            unit_e,
+            quality_flag_e,
+            native_resolution
         )
         VALUES %s
         ON CONFLICT DO NOTHING
         """,
         forcing_rows,
         page_size=1000,
+        # The enum casts are the vocabulary gate — see FORCING_VARIABLES.
+        template=FORCING_NARROW_INSERT_TEMPLATE,
     )
+
+
+def _scalar(cursor: Any, statement: str, parameters: tuple[Any, ...]) -> Any:
+    """One value from a one-row lookup, failing loudly when there is no row."""
+    cursor.execute(statement, parameters)
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError(f"Seed lookup returned no row: {statement.strip()} {parameters!r}")
+    return row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+
+
+def _station_keys(cursor: Any, station_ids: list[str]) -> dict[str, Any]:
+    """``station_id -> station_key`` for every seeded station, or raise.
+
+    Raising on a miss rather than letting a join drop the row: the narrow fact
+    table has no `station_id`, so a station that never got a key would silently
+    contribute zero rows and the seed's own verification count would be the only
+    thing that noticed, one failure later.
+    """
+    cursor.execute(
+        "SELECT station_id, station_key FROM met.met_station WHERE station_id = ANY(%s)",
+        (station_ids,),
+    )
+    keys = {}
+    for row in cursor.fetchall():
+        if isinstance(row, Mapping):
+            keys[str(row["station_id"])] = row["station_key"]
+        else:
+            keys[str(row[0])] = row[1]
+    missing = [station_id for station_id in station_ids if station_id not in keys]
+    if missing:
+        raise RuntimeError(f"Seeded met stations have no met.met_station row: {', '.join(missing)}")
+    return keys
 
 
 def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
@@ -1017,9 +1115,15 @@ def collect_counts(cursor: Any) -> dict[str, int]:
             "SELECT COUNT(*) FROM met.forcing_version WHERE forcing_version_id = ANY(%s)",
             ([IFS_FORCING_VERSION_ID, IFS_06Z_FORCING_VERSION_ID],),
         ),
+        # #1991 (task 7.3): verified through the surrogate key, like the river
+        # entry below. This is also the stronger check — a seeded row that failed
+        # to resolve its `forcing_version_key` is a verification failure instead
+        # of a silent pass.
         (
             "met.forcing_station_timeseries",
-            "SELECT COUNT(*) FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
+            "SELECT COUNT(*) FROM met.forcing_station_timeseries fst "
+            "WHERE fst.forcing_version_key = ("
+            "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s)",
             (FORCING_VERSION_ID,),
         ),
         ("hydro.hydro_run", "SELECT COUNT(*) FROM hydro.hydro_run WHERE run_id = %s", (RUN_ID,)),

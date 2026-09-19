@@ -13,6 +13,15 @@ from packages.common.forcing_domain_handoff import (
     FORCING_PACKAGE_MANIFEST_CHECKSUM_FIELD,
     parse_forcing_domain_handoff_path,
 )
+from packages.common.forcing_store_routing import (
+    FORCING_NARROW_INSERT_COLUMNS,
+    FORCING_NARROW_INSERT_TEMPLATE,
+    FORCING_STORE_DEFAULT,
+    FORCING_STORE_LEGACY,
+    FORCING_VERSION_ROUTING_SQL,
+    legacy_store_refusal_message,
+    row_value,
+)
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import (
@@ -41,6 +50,19 @@ REASON_APPLY_COMPRESSED_CHUNK_BLOCKED = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
 # terminal-states the BLOCKED code permanently, and a DB contention blip must
 # stay retryable.
 REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+# #1991 (task 7.3): the forcing version is routed to the LEGACY store, so this
+# narrow-only writer must not touch it. Distinct from both compressed-chunk
+# codes above, and distinct from HANDOFF_APPLY_SQL_FAILURE: those are
+# "unappliable until an operator acts" and "possibly transient" respectively,
+# while this one has no remedy at all until task 8.2 drops the legacy table. It
+# is PERMANENT for the version by construction — `timeseries_store` is set once
+# by 000061 and no writer flips it back — so unlike river there is no
+# `ops.ingest_recompute_decline` row (that table has zero forcing-side uses;
+# fixture `I12-1991.md` R2.2). The node-27 ingest pipeline routes this code to a
+# NON-FAILING tick outcome -- it applies a handoff on EVERY tick, so a legacy
+# version in scope must not redden production continuously. That routing lives
+# with the pipeline; this module only has to make the code distinguishable.
+REASON_APPLY_LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
 
 TARGET_TABLES = (
     "met.forcing_version",
@@ -80,6 +102,15 @@ MET_STATION_SELECT_COLUMNS = (
     "active_flag",
     "properties_json",
 )
+#: The columns the NARROW fact table's INSERT binds, in bind order (#1991).
+#: Re-exported from ``packages.common.forcing_store_routing`` so the handoff
+#: payload's own column tuple below and the physical column list cannot be
+#: confused for each other -- they are different lengths and different things.
+NARROW_INSERT_COLUMNS = FORCING_NARROW_INSERT_COLUMNS
+
+#: The handoff PAYLOAD's column tuple: the node-22 -> node-27 wire protocol,
+#: unchanged by 7.3. `basin_version_id` and `source_id` still travel; they are
+#: simply not stored per fact row any more.
 FORCING_STATION_TIMESERIES_COLUMNS = (
     "forcing_version_id",
     "basin_version_id",
@@ -779,6 +810,63 @@ def _replace_forcing_station_timeseries(
     forcing_version_id: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
+    # ROUTING REFUSAL FIRST — the first statement of this function, before the
+    # existence probe, before the compressed-chunk guard and before the DELETE
+    # (spec `forcing-narrow-store` :21, :29; must-preserve M3). This is a
+    # DELETE-then-INSERT replace window, so a store check placed anywhere after
+    # the window opens destroys the legacy rows and only then refuses. The read
+    # is on the SAME cursor, inside the caller's transaction/savepoint, so the
+    # value the refusal is based on is the value the write would have raced
+    # against.
+    cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
+    version_row = cursor.fetchone()
+    if version_row is None:
+        raise ForcingDomainHandoffApplyError(
+            _reason(
+                REASON_APPLY_FORCING_VERSION_CONFLICT,
+                field="met.forcing_version.forcing_version_id",
+                forcing_version_id=forcing_version_id,
+            )
+        )
+    forcing_version_key = row_value(version_row, "forcing_version_key", 0)
+    timeseries_store = str(row_value(version_row, "timeseries_store", 1) or FORCING_STORE_DEFAULT)
+    if timeseries_store == FORCING_STORE_LEGACY:
+        raise ForcingDomainHandoffApplyError(
+            _reason(
+                REASON_APPLY_LEGACY_STORE_REFUSED,
+                field="met.forcing_version.timeseries_store",
+                forcing_version_id=forcing_version_id,
+                timeseries_store=timeseries_store,
+                detail=legacy_store_refusal_message(forcing_version_id),
+            )
+        )
+
+    # Surrogate keys resolved in Python, not by an `INSERT … SELECT … JOIN
+    # met.met_station`: a join DROPS a row whose station has no authority entry,
+    # and `execute_values` only reports the last page's rowcount, so the loss
+    # would be silent. The legacy table's station FK used to raise on exactly
+    # that case; this keeps the failure loud. `_upsert_met_stations` has already
+    # run for this envelope, so a miss here is a real shape conflict.
+    station_ids = sorted({str(row["station_id"]) for row in rows})
+    station_keys: dict[str, Any] = {}
+    if station_ids:
+        cursor.execute(
+            "SELECT station_id, station_key FROM met.met_station WHERE station_id = ANY(%s)",
+            (station_ids,),
+        )
+        for station_row in cursor.fetchall():
+            station_keys[str(row_value(station_row, "station_id", 0))] = row_value(station_row, "station_key", 1)
+        missing = [station_id for station_id in station_ids if station_id not in station_keys]
+        if missing:
+            raise ForcingDomainHandoffApplyError(
+                _reason(
+                    REASON_APPLY_SHAPE_CONFLICT,
+                    field="met.met_station.station_key",
+                    table="met.forcing_station_timeseries",
+                    missing_station_ids=missing,
+                )
+            )
+
     # The DELETE must carry a valid_time window so the planner can exclude
     # compressed chunks: TimescaleDB rejects an unbounded DELETE on a
     # hypertable with ANY compressed chunk, even when no row matches. Mirror
@@ -795,8 +883,8 @@ def _replace_forcing_station_timeseries(
     # prefix and touches only this version's rows.
     cursor.execute(
         "SELECT 1 FROM met.forcing_station_timeseries "
-        "WHERE forcing_version_id = %s LIMIT 1",
-        (forcing_version_id,),
+        "WHERE forcing_version_key = %s LIMIT 1",
+        (forcing_version_key,),
     )
     if cursor.fetchone() is None:
         existing = (None, None)
@@ -804,9 +892,9 @@ def _replace_forcing_station_timeseries(
         cursor.execute(
             "WITH existing AS MATERIALIZED ("
             "    SELECT valid_time FROM met.forcing_station_timeseries"
-            "    WHERE forcing_version_id = %s"
+            "    WHERE forcing_version_key = %s"
             ") SELECT min(valid_time), max(valid_time) FROM existing",
-            (forcing_version_id,),
+            (forcing_version_key,),
         )
         existing = cursor.fetchone() or (None, None)
     existing_min = _coerce_valid_time(existing[0])
@@ -825,30 +913,52 @@ def _replace_forcing_station_timeseries(
     if valid_time_min is not None:
         cursor.execute(
             "DELETE FROM met.forcing_station_timeseries "
-            "WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s",
-            (forcing_version_id, valid_time_min, valid_time_max),
+            "WHERE forcing_version_key = %s AND valid_time >= %s AND valid_time <= %s",
+            (forcing_version_key, valid_time_min, valid_time_max),
         )
-    tuples = [tuple(row[column] for column in FORCING_STATION_TIMESERIES_COLUMNS) for row in rows]
+    # The handoff PAYLOAD keeps its ten-column shape
+    # (FORCING_STATION_TIMESERIES_COLUMNS, the node-22 -> node-27 wire protocol);
+    # only the INSERT narrows. `basin_version_id` and `source_id` are dropped
+    # here on purpose: after 000061 they are derived by joining
+    # `met.met_station` and `met.forcing_version`, and the narrow fact row
+    # stores neither (spec :5).
+    tuples = [
+        (
+            forcing_version_key,
+            station_keys[str(row["station_id"])],
+            row["valid_time"],
+            row["variable"],
+            row["value"],
+            row["unit"],
+            row["quality_flag"],
+            row["native_resolution"],
+        )
+        for row in rows
+    ]
     if tuples:
         execute_values(
             cursor,
             """
             INSERT INTO met.forcing_station_timeseries (
-                forcing_version_id,
-                basin_version_id,
-                station_id,
+                forcing_version_key,
+                station_key,
                 valid_time,
-                source_id,
-                variable,
+                variable_e,
                 value,
-                unit,
-                native_resolution,
-                quality_flag
+                unit_e,
+                quality_flag_e,
+                native_resolution
             )
             VALUES %s
             """,
             tuples,
             page_size=5000,
+            # The casts are the vocabulary gate: a variable/unit/quality_flag
+            # literal outside 000061's enums fails the batch here rather than
+            # landing as free text nobody ever notices. Without an explicit
+            # template psycopg2 sends `text` and Postgres has no implicit
+            # text -> enum coercion in an INSERT source list.
+            template=FORCING_NARROW_INSERT_TEMPLATE,
         )
 
 
@@ -921,9 +1031,23 @@ def _verify_apply_row_counts(cursor: Any, prepared: Mapping[str, Any]) -> dict[s
             "SELECT count(*) AS rows FROM met.met_station WHERE station_id = ANY(%s)",
             (station_ids,),
         ),
+        # Post-write verification, narrow, BY `forcing_version_key` (#1991
+        # invariant I4). NOT a renderer template: `render_forcing_ts_sql` takes a
+        # PAIR, and after task 7.3 this writer is narrow-only, so a legacy
+        # variant could never be rendered — registering it would mean authoring
+        # dead SQL. It is a NAMED census exemption instead (fixture
+        # `I12-1991.md` R3), cleared with the legacy templates in task 8.3. The
+        # scalar sub-select rather than a join keeps the predicate on
+        # `forcing_version_key`, which leads the narrow primary key.
+        #
+        # The row_counts KEY stays `met.forcing_station_timeseries`: it is
+        # compared against the payload's `expected_row_counts`, which the
+        # node-22 side writes and which names the logical table.
         "met.forcing_station_timeseries": _select_count(
             cursor,
-            "SELECT count(*) AS rows FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
+            "SELECT count(*) AS rows FROM met.forcing_station_timeseries fst "
+            "WHERE fst.forcing_version_key = ("
+            "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s)",
             (forcing_version_id,),
         ),
         "met.interp_weight": sum(_select_interp_weight_scope_count(cursor, scope) for scope in scopes),

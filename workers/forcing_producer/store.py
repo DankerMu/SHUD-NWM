@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from packages.common.forcing_store_routing import (
+    FORCING_NARROW_INSERT_TEMPLATE,
+    FORCING_STORE_DEFAULT,
+    FORCING_STORE_LEGACY,
+    FORCING_VERSION_ROUTING_SQL,
+    LegacyForcingStoreRefusedError,
+    legacy_store_refusal_message,
+    row_value,
+)
 from packages.common.met_store import MetStoreError, default_database_url
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import check_batch_targets_uncompressed
@@ -26,6 +35,7 @@ from .producer import (
 )
 
 DIRECT_GRID_CACHE_STATION_ROLE = "direct_grid_cache"
+
 
 
 def _coerce_valid_time(value: Any) -> datetime | None:
@@ -667,13 +677,26 @@ class PsycopgForcingRepository:
             )
             for row in component_rows
         )
+        # Post-write verification, narrow, BY `forcing_version_key` (#1991
+        # invariant I4). NOT a renderer template: `render_forcing_ts_sql` takes a
+        # PAIR, and after 7.3 the writers are narrow-only, so a legacy variant of
+        # this statement could never be rendered — registering it would mean
+        # authoring dead SQL. It is a NAMED census exemption instead (fixture
+        # `I12-1991.md` R3), cleared with the legacy templates in task 8.3.
+        #
+        # The scalar sub-select rather than a join to `met.forcing_version`: the
+        # predicate must sit on `forcing_version_key` itself so it leads the
+        # narrow primary key.
         timeseries_rows = self._fetch_all(
             """
-            SELECT station_id,
-                   valid_time,
-                   variable
-            FROM met.forcing_station_timeseries
-            WHERE forcing_version_id = %s
+            SELECT ms.station_id AS station_id,
+                   fst.valid_time AS valid_time,
+                   fst.variable_e::text AS variable
+            FROM met.forcing_station_timeseries fst
+            JOIN met.met_station ms ON ms.station_key = fst.station_key
+            WHERE fst.forcing_version_key = (
+                SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s
+            )
             """,
             (forcing_version_id,),
         )
@@ -743,21 +766,13 @@ class PsycopgForcingRepository:
         forcing_version_id: str,
         rows: Sequence[ForcingTimeseriesRow],
     ) -> None:
-        value_rows = [
-            (
-                row.forcing_version_id,
-                row.basin_version_id,
-                row.station_id,
-                row.valid_time,
-                row.source_id,
-                row.variable,
-                row.value,
-                row.unit,
-                row.native_resolution,
-                row.quality_flag,
-            )
-            for row in rows
-        ]
+        # NARROW-ONLY since #1991 (task 7.3). Content is authored by `_guard`,
+        # which runs INSIDE the write transaction and before any DELETE, because
+        # `forcing_version_key` / `station_key` are only knowable from the
+        # cursor. Sized here so `_replace_values`'s `if rows:` and its page_size
+        # see the real batch; if the guard raises, `execute_values` is never
+        # reached and this list is never read.
+        value_rows: list[tuple[Any, ...]] = [() for _ in rows]
         # The DELETE must carry a valid_time window so the planner can exclude
         # compressed chunks: TimescaleDB rejects an unbounded DELETE on a
         # hypertable with ANY compressed chunk, even when no row matches. Mirror
@@ -773,6 +788,63 @@ class PsycopgForcingRepository:
         delete_parameters_cell: list[tuple[Any, ...] | None] = [None]
 
         def _guard(cursor: Any) -> None:
+            # ROUTING REFUSAL FIRST, before the existence probe, before the
+            # compressed-chunk guard and — the property that matters — before
+            # the DELETE (spec `forcing-narrow-store` :21, :29; must-preserve
+            # M3). This replace window is DELETE-then-INSERT, so a store check
+            # placed anywhere after the window opens destroys the legacy rows
+            # and THEN refuses. It reads `timeseries_store` on the WRITE cursor,
+            # in the write transaction, so the value the refusal is based on is
+            # the value the write would have raced against.
+            cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
+            version_row = cursor.fetchone()
+            if version_row is None:
+                raise MetStoreError(
+                    f"Forcing version {forcing_version_id!r} has no met.forcing_version row; "
+                    "its timeseries cannot be replaced."
+                )
+            forcing_version_key = row_value(version_row, "forcing_version_key", 0)
+            timeseries_store = str(row_value(version_row, "timeseries_store", 1) or FORCING_STORE_DEFAULT)
+            if timeseries_store == FORCING_STORE_LEGACY:
+                raise LegacyForcingStoreRefusedError(legacy_store_refusal_message(forcing_version_id))
+
+            station_ids = sorted({str(row.station_id) for row in rows})
+            station_keys: dict[str, Any] = {}
+            if station_ids:
+                # Resolved in Python rather than by an `INSERT … SELECT … JOIN
+                # met.met_station`: a join DROPS a row whose station has no
+                # authority entry, and `execute_values` only reports the last
+                # page's rowcount, so the loss would be silent. The legacy
+                # table's station FK used to raise on exactly that case; this
+                # keeps the failure loud.
+                cursor.execute(
+                    "SELECT station_id, station_key FROM met.met_station WHERE station_id = ANY(%s)",
+                    (station_ids,),
+                )
+                for station_row in cursor.fetchall():
+                    station_keys[str(row_value(station_row, "station_id", 0))] = row_value(
+                        station_row, "station_key", 1
+                    )
+                missing = [station_id for station_id in station_ids if station_id not in station_keys]
+                if missing:
+                    raise MetStoreError(
+                        "Forcing timeseries reference met stations with no met.met_station row: "
+                        f"{', '.join(missing)}"
+                    )
+            value_rows[:] = [
+                (
+                    forcing_version_key,
+                    station_keys[str(row.station_id)],
+                    row.valid_time,
+                    row.variable,
+                    row.value,
+                    row.unit,
+                    row.quality_flag,
+                    row.native_resolution,
+                )
+                for row in rows
+            ]
+
             valid_time_min = batch_min
             valid_time_max = batch_max
             # Existence probe first (pkey prefix descent). A bare min/max with
@@ -783,8 +855,8 @@ class PsycopgForcingRepository:
             # transform so the window read stays on the pkey prefix and touches
             # only this version's rows.
             cursor.execute(
-                "SELECT 1 FROM met.forcing_station_timeseries WHERE forcing_version_id = %s LIMIT 1",
-                (forcing_version_id,),
+                "SELECT 1 FROM met.forcing_station_timeseries WHERE forcing_version_key = %s LIMIT 1",
+                (forcing_version_key,),
             )
             if cursor.fetchone() is None:
                 existing = (None, None)
@@ -792,9 +864,9 @@ class PsycopgForcingRepository:
                 cursor.execute(
                     "WITH existing AS MATERIALIZED ("
                     "    SELECT valid_time FROM met.forcing_station_timeseries"
-                    "    WHERE forcing_version_id = %s"
+                    "    WHERE forcing_version_key = %s"
                     ") SELECT min(valid_time), max(valid_time) FROM existing",
-                    (forcing_version_id,),
+                    (forcing_version_key,),
                 )
                 existing = cursor.fetchone() or (None, None)
             existing_min = _coerce_valid_time(existing[0])
@@ -811,7 +883,7 @@ class PsycopgForcingRepository:
                 valid_time_max=valid_time_max,
             )
             if valid_time_min is not None:
-                delete_parameters_cell[0] = (forcing_version_id, valid_time_min, valid_time_max)
+                delete_parameters_cell[0] = (forcing_version_key, valid_time_min, valid_time_max)
 
         def _delete_parameters() -> tuple[Any, ...] | None:
             # ``None`` when neither existing rows nor an incoming batch produced
@@ -823,24 +895,26 @@ class PsycopgForcingRepository:
             None,
             (),
             "DELETE FROM met.forcing_station_timeseries "
-            "WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s",
+            "WHERE forcing_version_key = %s AND valid_time >= %s AND valid_time <= %s",
             (),
             """
             INSERT INTO met.forcing_station_timeseries (
-                forcing_version_id,
-                basin_version_id,
-                station_id,
+                forcing_version_key,
+                station_key,
                 valid_time,
-                source_id,
-                variable,
+                variable_e,
                 value,
-                unit,
-                native_resolution,
-                quality_flag
+                unit_e,
+                quality_flag_e,
+                native_resolution
             )
             VALUES %s
             """,
             value_rows,
+            # The casts are the vocabulary gate: a variable/unit/quality_flag
+            # literal outside 000061's enums fails the batch here rather than
+            # landing as free text nobody ever notices.
+            template=FORCING_NARROW_INSERT_TEMPLATE,
             pre_write_cursor_hook=_guard,
             delete_parameters_factory=_delete_parameters,
         )

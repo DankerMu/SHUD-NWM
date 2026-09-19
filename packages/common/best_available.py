@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from packages.common.forcing_store_routing import (
+    FORCING_VERSION_STORE_SQL,
+    forcing_store_or_default,
+)
 from packages.common.forcing_ts_render import (
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
@@ -219,10 +223,16 @@ class PsycopgBestAvailableRepository:
         return tuple(str(row["source_id"]).upper() for row in rows)
 
     def list_forcing_inputs(self, forcing_version_id: str) -> list[ForcingInputSelection]:
+        # #1991 (task 7.3): one forcing version is in scope and it is in exactly
+        # one of the two fact tables, so this routes rather than composes. The
+        # store lookup is its own statement because this repository opens a
+        # connection per call (`_fetch_all`) and has no version row in hand; it
+        # is a primary-key read of one row on `met.forcing_version`.
+        store = forcing_store_or_default(self._fetch_forcing_timeseries_store(forcing_version_id))
         rows = self._fetch_all(
             render_forcing_ts_sql(
                 _FORCING_INPUTS_TEMPLATES,
-                "legacy",
+                store,
                 entry="best_available.forcing_inputs",
             ).sql,
             (forcing_version_id,),
@@ -236,6 +246,16 @@ class PsycopgBestAvailableRepository:
             )
             for row in rows
         ]
+
+    def _fetch_forcing_timeseries_store(self, forcing_version_id: str) -> str | None:
+        """``met.forcing_version.timeseries_store`` for one version, or ``None``.
+
+        ``None`` means no such version row — the caller then renders the default
+        store and gets an empty list, which is what an unknown forcing version
+        produced before task 7.3 as well.
+        """
+        rows = self._fetch_all(FORCING_VERSION_STORE_SQL, (forcing_version_id,))
+        return str(rows[0]["timeseries_store"]) if rows else None
 
     def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]:
         valid_time = _ensure_utc(selection.valid_time)

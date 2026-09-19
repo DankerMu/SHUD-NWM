@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AbstractSet, Any, Protocol
 
+from packages.common.forcing_store_routing import LegacyForcingStoreRefusedError
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     verify_download_bbox_matches_registry,
@@ -837,6 +838,30 @@ class ForcingProducer:
                 error,
                 error_code="FORCING_COMPRESSED_CHUNK_GUARD_FAILED",
             )
+            raise
+        except LegacyForcingStoreRefusedError:
+            # #1991 R2, and it MUST stay above the generic arm below — otherwise
+            # this is wrapped/marked and the branch becomes dead code.
+            #
+            # NO TERMINAL-STATE REWRITE. A routing refusal means "this forcing
+            # version's rows live in the legacy store", not "this cycle failed".
+            # `_mark_failed` writes `met.forecast_cycle`, so marking it would make
+            # every transition-period replay of a historical version look like a
+            # real fault in monitoring and would pollute that table irreversibly.
+            #
+            # NO DECLINE ROW EITHER, and that is a deliberate divergence from
+            # river's `ops.ingest_recompute_decline` record: river needs a row
+            # because its recompute is reopened by a newer `product_mtime`, while
+            # this refusal is keyed on `met.forcing_version.timeseries_store`,
+            # which 000061 sets once and no writer flips back. Re-reading it on
+            # the next attempt is idempotent, so the column IS the permanent
+            # record (spec `forcing-narrow-store` :21 states the property and
+            # leaves the mechanism open). `ops.ingest_recompute_decline` has zero
+            # forcing-side uses and gains none here.
+            #
+            # It still propagates: the caller decides. On the autopipeline side
+            # that decision is `scripts/node27_autopipeline.py`'s non-failing
+            # outcome, so a legacy version in scope does not redden every tick.
             raise
         except Exception as error:
             self._mark_failed(resolved_source_id, parsed_cycle_time, error)

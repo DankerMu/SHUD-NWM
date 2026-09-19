@@ -1,55 +1,40 @@
-"""The nine wired forcing readers: byte identity, store constancy, narrow shape (#1990, task 7.2).
+"""The nine wired forcing readers: per-store routing, composition, narrow shape.
 
-Three contracts live here, because they are three halves of one claim — that
-wiring every forcing fact-table reader through
-``packages.common.forcing_ts_render`` changed nothing that runs, and prepared
-something that will:
+Written for #1990 task 7.2 (wiring) and **rewritten for #1991 task 7.3**
+(routing), which is where its central claim inverts. Nothing in this module
+executes SQL against a database; it drives the readers with recording cursors and
+reads what they hand them.
 
-1. **M1 — byte identity.** Eight of the nine readers emit SQL byte-identical to
-   the text they emitted before the wiring. Asserted as STRING EQUALITY against
-   ``tests/fixtures/forcing_read_path_pre_wiring_0c92093e7.json``, a snapshot
+1. **Routing, not a store literal.** I11's must-preserve M6 was "no narrow render
+   ever reaches an executed statement", because the narrow table did not exist.
+   ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`` creates
+   it, and the property becomes its own inverse: no reader may be PINNED to
+   either store. A reader left on ``"legacy"`` never sees a version written after
+   the expand; a reader hardcoded to ``"narrow"`` goes dark for every version
+   000061 classified as legacy. Both are must-preserve M2 failures and both are
+   invisible in CI, because either statement runs and returns rows — just not all
+   of them. Asserted structurally (by AST, over every registered reader's file)
+   and on the executed text, per store.
+
+2. **What survives of M1 — byte identity.**
+   ``tests/fixtures/forcing_read_path_pre_wiring_0c92093e7.json`` is a snapshot
    captured by executing the readers in a worktree checked out at the PRE-WIRING
-   commit — an independent source of truth, not a golden regenerated from the
-   code it certifies. Fixture decision D1 is what makes this reachable: both
-   table-name constants spell the deployed name today, so the legacy render
-   cannot differ by so much as the ``_legacy`` suffix.
+   commit: an independent source of truth, not a golden regenerated from the code
+   it certifies. Five readers must still match it exactly when the version in
+   scope is legacy-routed, modulo ONE substitution — the relation 000061 renamed.
+   Three carry declared task 7.3 deltas and are re-pinned structurally instead:
+   display-coverage (now a two-store composition), the QHH fallback (its embedded
+   candidate CTE gained the store projection) and the bootstrap count (its
+   registered pair changed shape so the aggregate could move outside the
+   composition).
 
-   TWO of the eight carry a declared delta (``delta_from`` in the fixture, task
-   6.3 / #1988): ``display_coverage.refresh_statement`` and
-   ``forecast_store.latest_product_statement`` embed a RIVER leg, and #1342's
-   contract deleted that leg's second store, its routing predicate and its
-   transitional aids. Their forcing legs are byte-unchanged. This is the
-   deliberate coupling working, not a failure — and the pins keep their
-   WHOLE-STATEMENT scope rather than being narrowed to the station leg, because
-   narrowing them to accommodate a legal river change is how forcing's own M1
-   would stop meaning anything.
+3. **I1–I5 — the narrow variants' shape.** Unchanged from I11 and still a text
+   oracle over the registered pairs.
 
-   The ninth (``forecast_store.station_series_rows``) is excluded ON PURPOSE and
-   is the reason M1a exists — it was not a template before this task, so its text
-   and its positional tuple both change. Its pin is the ``station_series()``
-   response payload in ``tests/test_forecast_api.py``, plus the tuple assertion
-   there, plus the fold-away equivalence pinned below.
-
-2. **M6 — no narrow render reaches an executed statement.** THE PROPERTY THAT
-   KEEPS NODE-27 SAFE, and the one the fixture says must not be weakened for
-   convenience. ``met.forcing_version.timeseries_store`` does not exist until
-   task 7.3, so there is nothing to route on and a narrow render would name
-   ``forcing_version_key`` / ``variable_e`` against a table that has neither.
-   Import-time scope alone is NOT sufficient: two readers compose at CALL time,
-   so an import-clean module can still execute narrow SQL. Both halves are
-   asserted — structurally (every ``render_forcing_ts_sql`` call site passes the
-   literal ``"legacy"``, by AST) and on the executed text (no narrow-only
-   identifier appears in what any reader actually hands a cursor).
-
-3. **I1–I5 — the narrow variants' shape.** The narrow half of every pair is DEAD
-   TEXT until task 7.3 creates the table, so a text oracle is the only thing
-   standing between "authored carefully" and "authored plausibly". Without these
-   assertions task 7.3 inherits nine unpinned templates that have never been
-   parsed by anything.
-
-I7 (cross-store composition) is NOT covered here and is not coverable here: it
-needs a narrow branch that can run. It is task 7.3's acceptance item. Nothing in
-this module executes SQL.
+4. **I7 — cross-store composition**, which I11 could write but not prove. The two
+   readers that span versions of both stores compose the two rendered fact-row
+   subrelations inside the owning reader, ahead of any outer aggregate, with no
+   shared text-level union combinator.
 """
 
 from __future__ import annotations
@@ -63,6 +48,10 @@ from typing import Any
 import pytest
 
 from packages.common import best_available, display_coverage, forecast_store
+from packages.common.forcing_store_routing import (
+    FORCING_STORE_LEGACY,
+    FORCING_STORE_NARROW,
+)
 from packages.common.forcing_ts_render import (
     FORCING_STORES,
     FORCING_TABLE,
@@ -173,26 +162,30 @@ class RecordingCursor:
         return []
 
 
-def _executed_membership() -> tuple[str, Any]:
+def _executed_membership(store: str = FORCING_STORE_LEGACY) -> tuple[str, Any]:
     cursor = RecordingCursor()
-    store = forecast_store.PsycopgForecastStore("postgresql://test")
+    forecast = forecast_store.PsycopgForecastStore("postgresql://test")
     with pytest.raises(forecast_store.ForecastStoreError):
-        store._validate_station_forcing_membership(
+        forecast._validate_station_forcing_membership(
             cursor,
             station_id="qhh_stn_001",
-            forcing_version={"forcing_version_id": "forc_qhh_gfs_2026050700"},
+            forcing_version={
+                "forcing_version_id": "forc_qhh_gfs_2026050700",
+                "timeseries_store": store,
+            },
             valid_time_start=_dt("2026-05-07T00:00:00Z"),
             valid_time_end=_dt("2026-05-08T00:00:00Z"),
         )
     return cursor.statements[-1]
 
 
-def _executed_readiness_overall() -> tuple[str, Any]:
+def _executed_readiness_overall(store: str = FORCING_STORE_LEGACY) -> tuple[str, Any]:
     cursor = RecordingCursor()
-    store = forecast_store.PsycopgForecastStore("postgresql://test")
-    store._fetch_forcing_readiness_overall(
+    forecast = forecast_store.PsycopgForecastStore("postgresql://test")
+    forecast._fetch_forcing_readiness_overall(
         cursor,
         forcing_version_id="forc_qhh_gfs_2026050700",
+        store=store,
         valid_time_start=_dt("2026-05-07T00:00:00Z"),
         valid_time_end=_dt("2026-05-08T00:00:00Z"),
         variables=["PRCP"],
@@ -200,12 +193,13 @@ def _executed_readiness_overall() -> tuple[str, Any]:
     return cursor.statements[-1]
 
 
-def _executed_readiness_variable_rows() -> tuple[str, Any]:
+def _executed_readiness_variable_rows(store: str = FORCING_STORE_LEGACY) -> tuple[str, Any]:
     cursor = RecordingCursor()
-    store = forecast_store.PsycopgForecastStore("postgresql://test")
-    store._fetch_forcing_readiness_variable_rows(
+    forecast = forecast_store.PsycopgForecastStore("postgresql://test")
+    forecast._fetch_forcing_readiness_variable_rows(
         cursor,
         forcing_version_id="forc_qhh_gfs_2026050700",
+        store=store,
         valid_time_start=_dt("2026-05-07T00:00:00Z"),
         valid_time_end=_dt("2026-05-08T00:00:00Z"),
         variables=["PRCP"],
@@ -213,13 +207,19 @@ def _executed_readiness_variable_rows() -> tuple[str, Any]:
     return cursor.statements[-1]
 
 
-def _executed_station_series(*, from_time: datetime | None, to_time: datetime | None) -> tuple[str, Any]:
+def _executed_station_series(
+    *,
+    from_time: datetime | None,
+    to_time: datetime | None,
+    store: str = FORCING_STORE_LEGACY,
+) -> tuple[str, Any]:
     cursor = RecordingCursor()
-    store = forecast_store.PsycopgForecastStore("postgresql://test")
-    store._fetch_station_series_rows(
+    forecast = forecast_store.PsycopgForecastStore("postgresql://test")
+    forecast._fetch_station_series_rows(
         cursor,
         station_id="qhh_stn_001",
         forcing_version_id="forc_qhh_gfs_2026050700",
+        store=store,
         valid_time_start=_dt("2026-05-07T00:00:00Z"),
         valid_time_end=_dt("2026-05-08T00:00:00Z"),
         variables=["PRCP", "TEMP"],
@@ -236,26 +236,27 @@ def _executed_dynamic_forcing_count() -> tuple[str, Any]:
     return cursor.statements[-1]
 
 
-def _executed_forcing_delete() -> tuple[str, Any]:
+def _executed_forcing_delete(store: str = FORCING_STORE_LEGACY) -> tuple[str, Any]:
+    physical = FORCING_TABLE_LEGACY if store == FORCING_STORE_LEGACY else FORCING_TABLE
     cursor = RecordingCursor()
     deleted: dict[str, int] = {}
     reset_qhh_smoke_db._delete_rendered(
         cursor,
         deleted,
-        FORCING_TABLE_LEGACY,
+        physical,
         render_forcing_ts_sql(
             reset_qhh_smoke_db._FORCING_TIMESERIES_DELETE_TEMPLATES,
-            "legacy",
+            store,
             entry="reset_qhh_smoke_db.forcing_timeseries_delete",
         ).sql,
         (["forc_qhh_gfs_2026050700"],),
     )
-    assert deleted == {"met.forcing_station_timeseries": 0}
+    assert deleted == {physical: 0}
     return cursor.statements[-1]
 
 
-def _executed_latest_product() -> str:
-    cursor = BindingCheckedCursor(header_rows=[dict(_HEADER_ROW)])
+def _executed_latest_product(store: str = FORCING_STORE_LEGACY) -> str:
+    cursor = BindingCheckedCursor(header_rows=[{**_HEADER_ROW, "forcing_timeseries_store": store}])
     _run_fallback(cursor)
     _header_sql, heavy_sql = _fallback_statements(cursor)
     return heavy_sql
@@ -287,29 +288,16 @@ def test_the_snapshot_covers_the_eight_byte_identical_readers() -> None:
     assert "forecast_store.station_series_rows" not in FROZEN
 
 
-def test_display_coverage_refresh_statement_is_byte_identical() -> None:
-    """Reader #1, pinned on the WHOLE import-time statement, not just the leg.
+def _renamed_to_legacy(frozen_sql: str) -> str:
+    """The pre-wiring text with the fact table under the name 000061 left it.
 
-    The leg is spliced back into a concatenation chain, so an equality on the leg
-    alone would pass while the surrounding indentation or the trailing ``),`` had
-    drifted. This is also the strongest available evidence for C4: a single
-    legacy render, no union, and the statement every process that imports this
-    module builds at import time is the statement node-27 has been running. Its
-    river half is one of the two declared deltas — see
-    ``DELTA_RECORDED_STATEMENTS`` and the module docstring.
+    The ONE licensed difference between the snapshot and what a legacy-routed
+    reader emits after task 7.3. It is a whole-string substitution, so a reader
+    that changed anything else — a predicate, a join, the indentation — still
+    fails the equality. The snapshot carries no ``…_legacy`` spelling of its own,
+    so this cannot double-apply.
     """
-    assert display_coverage._REFRESH_SQL == FROZEN["display_coverage.refresh_statement"]
-
-
-def test_latest_product_fallback_statement_is_byte_identical() -> None:
-    """Reader #2, pinned on the whole composed statement.
-
-    This one composes at CALL time and interleaves a RIVER render with the
-    forcing leg, so the splice is the risk and whole-statement equality is the
-    only thing that sees it. Its river half is one of the two declared deltas —
-    see ``DELTA_RECORDED_STATEMENTS`` and the module docstring.
-    """
-    assert _executed_latest_product() == FROZEN["forecast_store.latest_product_statement"]
+    return frozen_sql.replace(FORCING_TABLE, FORCING_TABLE_LEGACY)
 
 
 @pytest.mark.parametrize(
@@ -321,47 +309,135 @@ def test_latest_product_fallback_statement_is_byte_identical() -> None:
             "forecast_store.forcing_readiness_variable_rows",
             lambda: _executed_readiness_variable_rows()[0],
         ),
-        ("qhh_production_bootstrap.dynamic_forcing_count", lambda: _executed_dynamic_forcing_count()[0]),
         ("reset_qhh_smoke_db.forcing_timeseries_delete", lambda: _executed_forcing_delete()[0]),
+        (
+            "best_available.forcing_inputs",
+            lambda: render_forcing_ts_sql(
+                best_available._FORCING_INPUTS_TEMPLATES,
+                FORCING_STORE_LEGACY,
+                entry="best_available.forcing_inputs",
+            ).sql,
+        ),
     ],
 )
-def test_executed_statements_are_byte_identical(key: str, executed) -> None:
-    """The five readers whose whole executed statement is the render.
+def test_legacy_routed_statements_differ_from_the_snapshot_only_by_the_rename(key: str, executed) -> None:
+    """M1, as much of it as task 7.3 leaves standing — and it is the useful part.
 
-    Driven through the reader rather than compared against the template constant:
-    a template that renders correctly and a call site that ignores it are
-    indistinguishable at the constant.
+    These five readers now ROUTE instead of passing the literal ``"legacy"``, and
+    when the version in scope is legacy-routed their statement must be the text
+    they emitted before any of this started, with one substitution: the relation
+    000061 renamed. Anything else that moved in these statements between the
+    pre-wiring commit and now shows up here as an inequality.
+
+    Driven through the reader rather than compared against the template constant,
+    for the pre-existing reason: a template that renders correctly and a call site
+    that ignores it are indistinguishable at the constant.
     """
-    assert executed() == FROZEN[key]
+    assert executed() == _renamed_to_legacy(FROZEN[key])
 
 
-def test_best_available_forcing_inputs_render_is_byte_identical() -> None:
-    """Reader #7. Its call site builds its own connection, so the render is compared directly.
+def test_display_coverage_composes_both_stores_and_filters_each_leg() -> None:
+    """Reader #1, C4 delivered: the static two-store composition (I7).
 
-    The call-site half is covered by the AST sweep below (the literal store) and
-    by the census (the module no longer spells the table name at all), so the
-    only thing left for this to check is the text.
+    This is a DECLARED task 7.3 delta against the snapshot and not a byte pin any
+    more — the statement is now two rendered variants composed at import time,
+    which is exactly the change C4 deferred to this task. What is asserted
+    instead is the property the composition exists for:
+
+    * both physical relations appear, so no forcing version written on either
+      side of 000061 is dark (must-preserve M2);
+    * each leg is restricted to the versions ``timeseries_store`` routes to it,
+      so materialising one version in both tables counts it once — the spec's own
+      acceptance scenario (:36) does exactly that, and an unfiltered
+      ``UNION ALL`` would double every coverage count it produces;
+    * the composition sits INSIDE ``station_sample_rows``, ahead of the
+      ``station_identity_coverage`` aggregate that consumes it (I7).
     """
-    rendered = render_forcing_ts_sql(
-        best_available._FORCING_INPUTS_TEMPLATES,
-        "legacy",
-        entry="best_available.forcing_inputs",
-    ).sql
-    assert rendered == FROZEN["best_available.forcing_inputs"]
+    sql = display_coverage._REFRESH_SQL
+    assert sql != FROZEN["display_coverage.refresh_statement"], "7.3 changes this statement by design"
+    assert FORCING_TABLE_LEGACY in sql
+    assert f"FROM {FORCING_TABLE} fst" in sql
+    for store in (FORCING_STORE_LEGACY, FORCING_STORE_NARROW):
+        assert (
+            f"SELECT forcing_version_id FROM met.forcing_version\n                WHERE timeseries_store = '{store}'"
+            in sql
+        ), store
+    union_at = sql.index("UNION ALL")
+    assert sql.index("station_identity_coverage") > union_at, "composition must precede the aggregate (I7)"
 
 
-def test_the_delete_payload_key_follows_the_renderer_constant() -> None:
-    """Reader #9's ``deleted`` key is the PHYSICAL relation, not a literal.
+@pytest.mark.parametrize("store", list(FORCING_STORES))
+def test_latest_product_fallback_follows_the_candidate_store(store: str) -> None:
+    """Reader #2: one candidate, one store, one rendered variant — no composition.
 
-    ``_delete_rendered`` takes the table name only for the receipt payload. If it
-    were a literal in the script the census would count it as an unregistered
-    read; taking it from the constant also makes the key follow task 7.3's rename
-    for free, which is the behaviour the smoke receipt should have.
+    ``QHH_LATEST_SEARCH_LIMIT`` is 1, so the header pins exactly one candidate and
+    therefore exactly one forcing version, which lives in exactly one table. That
+    makes this a routing site, and composing here would scan both tables on every
+    request for an answer that can only come from one.
 
-    ``next(...)`` would take the FIRST call and pin only that one. There is
-    exactly one today and the count is asserted rather than assumed: task 7.3
-    adds the narrow table's delete, and that PR should have to edit this pin
-    deliberately rather than inherit a silent pass on its new call site.
+    The legacy branch is still checked against the snapshot (modulo the rename),
+    so routing did not quietly rewrite the statement it used to emit.
+    """
+    heavy_sql = _executed_latest_product(store)
+    if store == FORCING_STORE_LEGACY:
+        # Not whole-statement equality any more, and the reason is declared: the
+        # candidate_runs CTE this statement embeds gained ONE projection,
+        # `fv.timeseries_store AS forcing_timeseries_store`, which is how the
+        # header learns which variant to ask for. Asserted as a line-level DELTA
+        # rather than by narrowing the pin to the station leg, so the statement is
+        # still checked end to end -- a dropped predicate anywhere in it shows up
+        # as a removed line.
+        frozen = _renamed_to_legacy(FROZEN["forecast_store.latest_product_statement"])
+        added = [line.strip() for line in heavy_sql.splitlines() if line not in frozen.splitlines()]
+        removed = [line.strip() for line in frozen.splitlines() if line not in heavy_sql.splitlines()]
+        assert removed == [], removed
+        assert added == [
+            "-- #1991 (task 7.3): the candidate's forcing store. This CTE",
+            "-- already LEFT JOINs met.forcing_version, so routing the",
+            "-- fallback's station leg costs no round trip and no extra",
+            "-- join -- the header statement projects it and the heavy",
+            "-- statement renders the matching variant.",
+            "fv.timeseries_store AS forcing_timeseries_store,",
+        ], added
+        assert "fst.forcing_version_key" not in heavy_sql
+        return
+    assert FORCING_TABLE_LEGACY not in heavy_sql
+    assert f"FROM {FORCING_TABLE} fst" in heavy_sql
+    assert "fst.forcing_version_key" in heavy_sql
+    assert "fst.variable_e" in heavy_sql
+
+
+def test_dynamic_forcing_count_aggregates_over_both_stores_once() -> None:
+    """Reader #8, invariant I7 — and the only registered pair whose SHAPE changed.
+
+    Both variants used to be ``SELECT COUNT(*)``. Two counts can only be combined
+    by adding two answers in Python, which is the shape I7 forbids ("compose the
+    two rendered fact-row subrelations inside the owning reader, before any outer
+    aggregate"). They now project rows and this reader wraps ONE ``COUNT(*)``
+    around the composition.
+
+    That is a declared task 7.3 delta against the snapshot: the registered text
+    changed, deliberately, and is re-pinned here.
+    """
+    statement, parameters = _executed_dynamic_forcing_count()
+    assert statement != FROZEN["qhh_production_bootstrap.dynamic_forcing_count"]
+    assert statement.count("SELECT COUNT(*)") == 1
+    assert statement.count("SELECT 1 AS present") == 2
+    assert statement.count("UNION ALL") == 1
+    assert FORCING_TABLE_LEGACY in statement
+    assert f"FROM {FORCING_TABLE} fst" in statement
+    # One bind per leg, in FORCING_STORES order.
+    assert statement.count("%s") == len(parameters) == 2
+    assert parameters == ("basins_qhh_shud", "basins_qhh_shud")
+
+
+def test_the_smoke_reset_deletes_from_both_stores_under_their_own_keys() -> None:
+    """Reader #9's two-group split, and the receipt that follows it.
+
+    One rendered ``DELETE`` per physical table, each recorded under the relation
+    it touched. A single ``DELETE`` would leave the other table's rows behind and
+    report a count for a table it never opened; both tables hold live rows until
+    task 8.2 drops the legacy one.
     """
     source = (REPO_ROOT / "scripts/reset_qhh_smoke_db.py").read_text(encoding="utf-8")
     calls = [
@@ -371,10 +447,13 @@ def test_the_delete_payload_key_follows_the_renderer_constant() -> None:
         and isinstance(node.func, ast.Name)
         and node.func.id == "_delete_rendered"
     ]
-    assert len(calls) == 1, f"expected exactly one _delete_rendered call site, found {len(calls)}"
-    table = calls[0].args[2]
-    assert isinstance(table, ast.Name)
-    assert table.id == "FORCING_TABLE_LEGACY"
+    assert len(calls) == 1, "the split is a loop over the two stores, so there is one call site"
+
+    legacy_statement, _ = _executed_forcing_delete(FORCING_STORE_LEGACY)
+    narrow_statement, _ = _executed_forcing_delete(FORCING_STORE_NARROW)
+    assert legacy_statement == f"DELETE FROM {FORCING_TABLE_LEGACY} WHERE forcing_version_id = ANY(%s)"
+    assert narrow_statement.startswith(f"DELETE FROM {FORCING_TABLE} AS fst")
+    assert "fst.forcing_version_key IN (" in narrow_statement
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +537,14 @@ def test_station_series_predicates_survived_the_templating() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M6 — no narrow render reaches an executed statement
+# Routing — every reader's store comes from the data, none is pinned to a literal
+#
+# M6 ("no narrow render reaches an executed statement") was I11's property and it
+# RETIRES here: 000061 creates the narrow table, so a narrow render is now the
+# correct statement for every version 000061 did not classify as legacy. Its
+# successor is the opposite claim, and it is the one must-preserve M2 rests on —
+# a reader still pinned to `"legacy"` after this task reads a table that stops
+# receiving rows, silently, for the fourteen days task 8.2's entry gate requires.
 # ---------------------------------------------------------------------------
 
 
@@ -512,26 +598,32 @@ def _render_call_stores(source: str) -> list[ast.expr]:
 
 
 @pytest.mark.parametrize("path", WIRED_READER_PATHS)
-def test_every_render_call_site_passes_the_literal_legacy(path: str) -> None:
-    """M6, structural half. The store is a CONSTANT, provably, not by convention.
+def test_no_render_call_site_is_pinned_to_a_store_literal(path: str) -> None:
+    """The successor to M6's structural half, and the inverse claim (#1991).
 
-    ``met.forcing_version.timeseries_store`` does not exist until task 7.3, so a
-    store EXPRESSION here could only be reading something else — and in
-    ``packages/common/forecast_store.py`` there is something else in scope at the
-    forcing call site: ``store``, the RIVER route off
-    ``hydro.hydro_run.timeseries_store``. Passing it would render narrow forcing
-    SQL for every narrow-routed run, against a table with no
-    ``forcing_version_key``. An AST check is what distinguishes "passes legacy"
-    from "passes a name that currently happens to hold legacy".
+    Every ``render_forcing_ts_sql`` call site must take its store from something
+    that can vary per forcing version. A hardcoded ``"legacy"`` after task 7.3 is
+    a reader that will never see a version written after the expand; a hardcoded
+    ``"narrow"`` is a reader that goes dark for every version 000061 classified as
+    legacy. Both are must-preserve M2 failures and both are invisible in CI,
+    because either statement runs and returns rows — just not all of them.
+
+    A store the sweep cannot resolve statically yields the whole ``ast.Call`` and
+    is ACCEPTED here, unlike under M6: routing is exactly the case where the store
+    is an expression. What is refused is the shape that cannot route.
+
+    The one licensed literal is a loop over ``FORCING_STORES``, which is how the
+    two cross-store readers compose — an ``ast.Name`` at the call site, so it
+    needs no exception.
     """
     source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
     stores = _render_call_stores(source)
     assert stores, f"{path}: registered as a wired reader but calls no renderer"
     for node in stores:
-        assert isinstance(node, ast.Constant) and node.value == "legacy", (
-            f"{path}: render_forcing_ts_sql must be called with the literal 'legacy' in this task "
-            f"(got {ast.dump(node)}; a whole Call node here means the store could not be determined "
-            "statically, which is refused rather than skipped)"
+        assert not isinstance(node, ast.Constant), (
+            f"{path}: render_forcing_ts_sql is called with the store literal {node.value!r}. "
+            "After task 7.3 the store must come from met.forcing_version.timeseries_store for the "
+            "version in scope, or from an iteration over FORCING_STORES for a cross-store reader."
         )
 
 
@@ -617,54 +709,107 @@ def test_the_render_call_sweep_still_accepts_the_compliant_form(call: str) -> No
 NARROW_ONLY_TOKENS = ("forcing_version_key", "station_key", "fst.variable_e", "fst.unit_e", "fst.quality_flag_e")
 
 
+#: The legacy table's TEXT IDENTITY columns, on the forcing fact alias. A narrow
+#: statement that still carries one of these is reading a column 000061's narrow
+#: table does not have (invariant I1).
+#: Matched with a trailing word boundary, which is load bearing: ``fst.unit``
+#: is a prefix of the narrow column ``fst.unit_e`` and a plain substring test
+#: would report every narrow readiness statement as carrying a legacy column.
+LEGACY_ONLY_TOKENS = (
+    "forcing_version_id",
+    "station_id",
+    "basin_version_id",
+    "source_id",
+    "variable",
+    "unit",
+    "quality_flag",
+)
+
+
+def _fact_alias_legacy_columns(sql: str) -> set[str]:
+    """Legacy text identity columns read off the forcing fact alias in ``sql``."""
+    return {column for column in _fact_alias_columns(sql) if column in LEGACY_ONLY_TOKENS}
+
+
 @pytest.mark.parametrize(
     ("label", "statement"),
     [
-        ("display_coverage.refresh", lambda: display_coverage._REFRESH_SQL),
-        ("display_coverage.scan_header", lambda: display_coverage._SCAN_HEADER_SQL),
-        ("forecast_store.latest_product", _executed_latest_product),
-        ("forecast_store.station_forcing_membership", lambda: _executed_membership()[0]),
-        ("forecast_store.station_series_rows", lambda: _executed_station_series(from_time=None, to_time=None)[0]),
-        ("forecast_store.forcing_readiness_overall", lambda: _executed_readiness_overall()[0]),
-        ("forecast_store.forcing_readiness_variable_rows", lambda: _executed_readiness_variable_rows()[0]),
-        ("qhh_production_bootstrap.dynamic_forcing_count", lambda: _executed_dynamic_forcing_count()[0]),
-        ("reset_qhh_smoke_db.forcing_timeseries_delete", lambda: _executed_forcing_delete()[0]),
+        ("forecast_store.latest_product", lambda store: _executed_latest_product(store)),
+        ("forecast_store.station_forcing_membership", lambda store: _executed_membership(store)[0]),
+        (
+            "forecast_store.station_series_rows",
+            lambda store: _executed_station_series(from_time=None, to_time=None, store=store)[0],
+        ),
+        ("forecast_store.forcing_readiness_overall", lambda store: _executed_readiness_overall(store)[0]),
+        (
+            "forecast_store.forcing_readiness_variable_rows",
+            lambda store: _executed_readiness_variable_rows(store)[0],
+        ),
+        ("reset_qhh_smoke_db.forcing_timeseries_delete", lambda store: _executed_forcing_delete(store)[0]),
         (
             "best_available.forcing_inputs",
-            lambda: render_forcing_ts_sql(best_available._FORCING_INPUTS_TEMPLATES, "legacy").sql,
+            lambda store: render_forcing_ts_sql(best_available._FORCING_INPUTS_TEMPLATES, store).sql,
         ),
     ],
 )
-def test_no_executed_statement_carries_a_narrow_only_identifier(label: str, statement) -> None:
-    """M6, executed half — the one import-cleanliness cannot buy.
+@pytest.mark.parametrize("store", list(FORCING_STORES))
+def test_a_routed_statement_names_its_own_store_and_only_its_own_columns(label, statement, store) -> None:
+    """The successor to M6's executed half: routing reaches the CURSOR, per store.
 
-    Readers #2 and #8 compose at CALL time, so a module that imports cleanly can
-    still hand a cursor narrow SQL. Every statement any wired reader executes is
-    checked here against the identifiers only the narrow table has, plus the
-    table name it must name.
+    Driven through the reader for each store in turn, so this sees what a caller
+    actually hands a cursor rather than what a template says. Two directions,
+    because each catches a different mis-wiring:
 
-    ``display_coverage._SCAN_HEADER_SQL`` is in the list although it is not a
-    registered reader: it is built from the same import-time chain and is the
-    prefetch that runs immediately before the refresh, so if the chain ever grew
-    a narrow branch this is where it would show up second.
+    * a ``narrow`` route that still emits a text identity column is reading a
+      column the narrow table does not have — the statement fails at run time and
+      only at run time;
+    * a ``legacy`` route that emits a key column is the mirror, and it is the
+      failure mode that used to be impossible only because the store was a
+      literal.
+
+    Each statement must also name the relation its store resolves to, which is
+    what makes the two constants' divergence observable at the call site rather
+    than only at the renderer.
     """
-    sql = statement()
-    for token in NARROW_ONLY_TOKENS:
-        assert token not in sql, f"{label}: narrow-only identifier {token!r} in an executed statement"
-    if "forcing_station_timeseries" in sql:
+    sql = statement(store)
+    if store == FORCING_STORE_NARROW:
+        leaked = _fact_alias_legacy_columns(sql)
+        assert not leaked, f"{label}/narrow: text identity column(s) {sorted(leaked)} on the fact alias"
+    else:
+        for token in NARROW_ONLY_TOKENS:
+            assert token not in sql, f"{label}/legacy: {token!r} has no place in a legacy statement"
+    assert "forcing_station_timeseries" in sql
+    if store == FORCING_STORE_LEGACY:
         assert FORCING_TABLE_LEGACY in sql
+    else:
+        assert FORCING_TABLE_LEGACY not in sql
 
 
-def test_the_two_table_constants_still_agree_which_is_why_the_above_is_provable() -> None:
-    """D1, restated where this suite's byte-identity claim depends on it.
+def test_the_two_table_constants_diverged_at_the_migration_that_made_it_true() -> None:
+    """D1 discharged (#1991, must-preserve M1).
 
-    Every equality above holds because the legacy store names the relation that
-    is actually deployed. Task 7.3 flips ``FORCING_TABLE_LEGACY`` in the
-    migration's own commit and re-captures the snapshot; until then a flip here
-    alone would leave master naming a relation that does not exist, which is the
-    single failure D1 exists to prevent.
+    The flip and ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql``
+    are in the same commit, so master never carries a read path naming a relation
+    that does not exist. Pinned as an EQUALITY on both names rather than as
+    ``!=``: the failure this guards is not "they are the same", it is "one of them
+    is something else", and the legacy name must be exactly the canonical name
+    plus the suffix ``ALTER TABLE … RENAME TO`` produced.
     """
-    assert FORCING_TABLE == FORCING_TABLE_LEGACY == "met.forcing_station_timeseries"
+    assert FORCING_TABLE == "met.forcing_station_timeseries"
+    assert FORCING_TABLE_LEGACY == "met.forcing_station_timeseries_legacy"
+    assert FORCING_TABLE_LEGACY == f"{FORCING_TABLE}_legacy"
+
+
+def test_the_import_time_scan_header_still_names_no_fact_table() -> None:
+    """``display_coverage._SCAN_HEADER_SQL`` is the prefetch, not a fact read.
+
+    Carried over from M6's executed half, where it was in the sweep because it is
+    built from the same import-time chain as the refresh statement. It survives
+    task 7.3 unchanged and must: it exists to bind the scan scalars cheaply, so a
+    composition leaking into it would put both hypertables in the prefetch.
+    """
+    assert "forcing_station_timeseries" not in display_coverage._SCAN_HEADER_SQL
+    assert "river_timeseries" not in display_coverage._SCAN_HEADER_SQL
 
 
 # ---------------------------------------------------------------------------

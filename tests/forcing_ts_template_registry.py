@@ -263,62 +263,78 @@ class ExemptMentions:
 #: ``test_the_nine_readers_left_the_exemption_ledger``.
 UNWIRED_READERS: tuple[ExemptMentions, ...] = ()
 
-#: The 38 mentions that are not reads at all and are not this transition's to
-#: convert. Measured, not estimated: the issue text's "the two write-side
-#: verification queries" was six sites short by an order of magnitude.
+#: The 39 mentions that are not reads at all. Measured, not estimated: the issue
+#: text's "the two write-side verification queries" was six sites short by an
+#: order of magnitude.
+#:
+#: The twelve write-side rows below CONVERTED WITH THE WRITERS in task 7.3 and
+#: are now narrow, key-predicated statements. They stay EXEMPTIONS rather than
+#: becoming registered templates, which is fixture `I12-1991.md` R3's ruling:
+#: `render_forcing_ts_sql` takes a PAIR, and the writers are narrow-only from
+#: 7.3 on, so registering them would mean authoring legacy variants that can
+#: never be rendered. Task 8.3 clears these rows together with the legacy
+#: templates.
 NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
-    # -- write side: converts with the writers, in 7.3 ----------------------
+    # -- write side: NARROW since 7.3, still exempt (R3) ---------------------
     ExemptMentions(
         path="workers/forcing_producer/store.py",
         count=2,
         shape="write-side pre-write probe and window read",
         owner="7.3 (I12) writers",
-        note="existence probe and valid_time window read before the replace chain (:786, :794)",
+        note="existence probe and valid_time window read, both by forcing_version_key (:858, :865)",
     ),
     ExemptMentions(
         path="workers/forcing_producer/store.py",
         count=2,
         shape="write-side DML",
         owner="7.3 (I12) writers",
-        note="the replace chain's DELETE and INSERT (:825, :829)",
+        note="the replace chain's narrow DELETE and INSERT (:897, :900)",
     ),
     ExemptMentions(
         path="workers/forcing_producer/store.py",
         count=1,
         shape="write-side post-write row-count verification",
         owner="7.3 (I12) writers",
-        note="verify_forcing_version_children's count (:675) — one of the issue's two named sites",
+        note=(
+            "verify_forcing_version_children's narrow read by forcing_version_key (:691) — "
+            "one of the issue's two named sites, and invariant I4"
+        ),
     ),
     ExemptMentions(
         path="packages/common/forcing_domain_handoff_apply.py",
         count=2,
         shape="write-side pre-write probe and window read",
         owner="7.3 (I12) writers",
-        note="existence probe and valid_time window read (:797, :806)",
+        note="existence probe and valid_time window read, both by forcing_version_key (:874, :882)",
     ),
     ExemptMentions(
         path="packages/common/forcing_domain_handoff_apply.py",
         count=2,
         shape="write-side DML",
         owner="7.3 (I12) writers",
-        note="the apply path's DELETE and INSERT (:827, :836)",
+        note="the apply path's narrow DELETE and INSERT (:904, :930)",
     ),
     ExemptMentions(
         path="packages/common/forcing_domain_handoff_apply.py",
         count=1,
         shape="write-side post-write row-count verification",
         owner="7.3 (I12) writers",
-        note="_verify_apply_row_counts (:926) — the issue's other named site",
+        note=(
+            "_verify_apply_row_counts's narrow count by forcing_version_key (:1037) — "
+            "the issue's other named site, and invariant I4"
+        ),
     ),
     # -- handoff protocol: the table name as a KEY, never as SQL ------------
     ExemptMentions(
         path="packages/common/forcing_domain_handoff_apply.py",
-        count=11,
+        count=12,
         shape="handoff protocol table-name key",
         owner="name-only, no SQL",
         note=(
             "payload dict keys, reason codes and table lists "
-            "(:48, :341, :347, :369, :468, :471, :480, :494, :504, :511, :924)"
+            "(:68, :361, :367, :389, :488, :491, :500, :514, :524, :531, :854, :1035). "
+            "Twelve since 7.3: the narrow writer's station-key resolution names the table "
+            "in its own shape-conflict reason (:854)"
         ),
     ),
     ExemptMentions(
@@ -362,7 +378,11 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
         count=3,
         shape="demo seed write path and its row-count check",
         owner="7.3 (I12) seeds",
-        note="the demo INSERT (:594), its verification SELECT (:1022) and that check's table-name key (:1021)",
+        note=(
+            "the demo INSERT, its verification SELECT and that check's table-name key. "
+            "All three are NARROW since 7.3, and the seed's own vocabulary moved to the "
+            "production one in the same change (fixture `I12-1991.md` R1)"
+        ),
     ),
     # -- lifecycle, capture and closure tooling ----------------------------
     ExemptMentions(
@@ -406,7 +426,12 @@ RENDERER_CONSTANTS: tuple[ExemptMentions, ...] = (
         count=2,
         shape="renderer table-name constant",
         owner="renderer constants (D1)",
-        note="FORCING_TABLE and FORCING_TABLE_LEGACY; 7.3's migration commit flips the second one",
+        note=(
+            "FORCING_TABLE and FORCING_TABLE_LEGACY. Still two after 7.3 flipped the second "
+            "one to `…_legacy`: the counter's spelling class has no trailing word boundary, "
+            "so it matches that literal as a prefix (the river register records the identical "
+            "fact for `river_ts_render.py`)"
+        ),
     ),
 )
 
