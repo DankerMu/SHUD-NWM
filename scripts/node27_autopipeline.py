@@ -929,6 +929,7 @@ def _connect(database_url: str, **kwargs: Any) -> Any:
     other connect parameters pass through untouched, and an explicit
     `connect_timeout=` / `options=` from a Python caller still wins.
     """
+    kwargs.pop("fallback_application_name", None)
     if "connect_timeout" not in kwargs and not _dsn_sets_connect_timeout(database_url):
         kwargs["connect_timeout"] = _CONNECT_TIMEOUT_SECONDS
     if "options" not in kwargs:
@@ -939,6 +940,18 @@ def _connect(database_url: str, **kwargs: Any) -> Any:
     return psycopg2.connect(
         database_url, fallback_application_name=_APPLICATION_NAME, **kwargs
     )
+
+
+def _attributed_connect(database_url: str, **kwargs: Any) -> Any:
+    """Injected into helpers that open their own connection on this runner's behalf.
+
+    Provenance import supplies `fallback_application_name=` and `cursor_factory=`;
+    this wrapper reuses `_connect` so the component identity and #1647 bounds
+    stay on one path. `_connect` owns `fallback_application_name` so a helper
+    cannot stamp a second name. libpq still treats an operator
+    `?application_name=` in DATABASE_URL as final.
+    """
+    return _connect(database_url, **kwargs)
 
 
 def _basin_seeded(database_url: str, basin_id: str) -> bool:
@@ -2559,6 +2572,7 @@ def main(argv: list[str] | None = None) -> int:
                     object_store_root=object_store_root,
                     run_ids=provenance_run_ids,
                     object_store_prefix=object_store_prefix,
+                    connect=_attributed_connect,
                 )
             except Exception as error:  # noqa: BLE001 - isolate provenance from hydro ingest
                 job_provenance = {

@@ -410,8 +410,17 @@ def import_run_pipeline_job_provenance(
     _require_sidecar_matches_manifest(sidecar, identity)
     jobs = [_validate_imported_job(job, sidecar_identity=sidecar["identity"]) for job in sidecar["jobs"]]
 
-    connector = connect or _psycopg2_connect
-    connection = connector(database_url, fallback_application_name="nhms-pipeline-job-provenance")
+    if connect is None:
+        import psycopg2
+
+        connector = psycopg2.connect
+    else:
+        connector = connect
+    connection = connector(
+        database_url,
+        cursor_factory=_real_dict_cursor(),
+        fallback_application_name="nhms-pipeline-job-provenance",
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -1885,15 +1894,10 @@ def _format_utc(value: datetime) -> str:
     return utc.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _psycopg2_connect(database_url: str, *, fallback_application_name: str) -> Any:
-    import psycopg2
+def _real_dict_cursor() -> Any:
     from psycopg2.extras import RealDictCursor
 
-    return psycopg2.connect(
-        database_url,
-        cursor_factory=RealDictCursor,
-        fallback_application_name=fallback_application_name,
-    )
+    return RealDictCursor
 
 
 def sidecar_digest(payload: Mapping[str, Any]) -> str:

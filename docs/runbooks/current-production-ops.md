@@ -223,7 +223,7 @@ cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-dbfree.env
 set +a
-.venv/bin/python scripts/backfill_pipeline_job_provenance.py \
+/scratch/frd_muziyao/NWM/.venv/bin/python scripts/backfill_pipeline_job_provenance.py \
   --publish-only \
   --run-id '<run_id>' \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
@@ -237,7 +237,7 @@ cd /home/nwm/NWM
 set -a
 . infra/env/node27-ingest.env
 set +a
-uv run --no-sync python scripts/backfill_pipeline_job_provenance.py \
+uv run --no-sync python /home/nwm/NWM/scripts/backfill_pipeline_job_provenance.py \
   --import-only \
   --run-id '<run_id>' \
   --object-store-root "$OBJECT_STORE_ROOT" \

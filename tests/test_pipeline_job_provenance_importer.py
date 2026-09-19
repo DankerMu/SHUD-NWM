@@ -10,6 +10,7 @@ import pytest
 
 import scripts.backfill_pipeline_job_provenance as provenance_backfill
 from packages.common.object_store import LocalObjectStore
+from scripts import node27_autopipeline
 from services.orchestrator.pipeline_job_provenance import (
     PROVENANCE_SCHEMA_VERSION,
     PipelineJobProvenanceError,
@@ -144,8 +145,8 @@ def _new_db() -> sqlite3.Connection:
 
 
 def _connect_factory(connection: sqlite3.Connection) -> Any:
-    def connect(_database_url: str, *, fallback_application_name: str) -> _KeepAliveConnection:
-        del fallback_application_name
+    def connect(_database_url: str, **kwargs: Any) -> _KeepAliveConnection:
+        del kwargs
         return _KeepAliveConnection(connection)
 
     return connect
@@ -697,3 +698,54 @@ def test_backfill_cli_reports_invalid_symlink_journal_root_as_bounded_json(
     assert str(alias) not in captured.err
     assert "FILE_JOURNAL_INVALID_ROOT:" in captured.err
 
+
+
+def test_importer_component_connector_keeps_mapping_rows_writer_dsn_and_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg2
+    import psycopg2.extensions
+    from psycopg2.extras import RealDictCursor
+
+    object_root = tmp_path / "object-store"
+    object_root.mkdir()
+    _seed_object_store(
+        object_root,
+        _sidecar(jobs=[_forecast_job(), _convert_job()], source_version=NEWER_SOURCE_VERSION),
+    )
+    connection = _new_db()
+    dsn = "postgresql://writer:secret@127.0.0.1:55432/nhms?application_name=operator-override"
+    captured: dict[str, Any] = {}
+
+    def fake_connect(database_url: str, **kwargs: Any) -> _KeepAliveConnection:
+        captured["database_url"] = database_url
+        captured["kwargs"] = dict(kwargs)
+        return _KeepAliveConnection(connection)
+
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+
+    result = import_run_pipeline_job_provenance(
+        database_url=dsn,
+        object_store_root=object_root,
+        run_id=IFS_RUN_ID,
+        connect=node27_autopipeline._attributed_connect,
+    )
+
+    assert result["status"] == "imported"
+    assert result["inserted"] == 2
+    assert captured["database_url"] == dsn
+    assert captured["kwargs"]["fallback_application_name"] == node27_autopipeline._APPLICATION_NAME
+    assert captured["kwargs"]["cursor_factory"] is RealDictCursor
+    assert captured["kwargs"]["connect_timeout"] == 10
+    assert captured["kwargs"]["options"] == "-c statement_timeout=600000"
+    jobs = {row["job_id"]: row for row in _jobs(connection)}
+    assert jobs[IFS_JOB_ID]["status"] == "succeeded"
+    assert jobs[IFS_CONVERT_JOB_ID]["model_id"] is None
+    conninfo = psycopg2.extensions.make_dsn(
+        captured["database_url"],
+        fallback_application_name=captured["kwargs"]["fallback_application_name"],
+    )
+    parsed = psycopg2.extensions.parse_dsn(conninfo)
+    assert parsed["application_name"] == "operator-override"
+    assert parsed["fallback_application_name"] == "nhms-autopipe"
+    connection.close()

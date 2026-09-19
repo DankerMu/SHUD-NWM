@@ -882,6 +882,13 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "static-only: imported function-locally at workers/forcing_producer/producer.py:485, inside "
         "ForcingProducer.from_env(), which no display-unit route calls; absent from the unit's runtime sys.modules",
     ),
+    (
+        "services/orchestrator/pipeline_job_provenance.py",
+        UNREACHABLE,
+        "import-only through services/orchestrator/chain_forecast_execution.py, itself behind the deferred "
+        "chain import in services/orchestrator/__init__.py:53; display routes never call the node-27 importer "
+        "and the node-22 publisher path opens no database connection",
+    ),
 )
 
 # Store factories called from the unit's route layer. ``attributed`` rows must
