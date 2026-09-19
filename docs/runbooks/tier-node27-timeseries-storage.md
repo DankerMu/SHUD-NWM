@@ -3540,6 +3540,20 @@ The two constraints:
 full 3941 s systemd wall (05:30:41Z) ends before the 06:36Z retention timer,
 so `RETENTION_CONCURRENT_INVOCATION` needs a wall overrun, not a normal tick.
 
+**Concurrent sessions eat the wall budget (2026-09-19).** The 55 s/GB figure
+assumes a quiet database. The first Stage B run hit `rc=124`: one 23 GB
+chunk took 47 min while #1988 read-only sessions were open, and it committed
+15 s after the longest of them closed. The rerun with no operator sessions
+did `_hyper_9_143` (23.04 GB) at ≈50 s/GB with `pg_blocking_pids` always
+empty (receipt
+`docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/`
+Stage B). A lock wait was not established (`log_lock_waits` is off).
+Operator rule: keep long-open transactions and full scans of the river
+hypertables out of 04:25Z–05:30Z, and out of any manual compression run. An
+open transaction holding `ACCESS SHARE` on a chunk can hold up the lock
+`compress_chunk` takes to finish. Chunks now measure ~23 GB:
+`2 × 23 × 55 ≈ 2530 s`, still inside the wall.
+
 **Timer cadence.** No change. Chunk count is set by the time dimension (one
 day), not by ingest volume, and 2 slots/day already exceed the 1/day
 arrival.

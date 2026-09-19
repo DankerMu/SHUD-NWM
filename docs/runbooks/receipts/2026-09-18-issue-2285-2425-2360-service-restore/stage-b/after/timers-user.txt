@@ -1,0 +1,12 @@
+NEXT                        LEFT          LAST                        PASSED       UNIT                                       ACTIVATES
+Sat 2026-09-19 09:30:00 CST 5min left     Sat 2026-09-19 09:00:00 CST 24min ago    nhms-node27-frontier-alert.timer           nhms-node27-frontier-alert.service
+Sat 2026-09-19 09:31:41 CST 7min left     Sat 2026-09-19 09:21:41 CST 2min 55s ago nhms-node27-autopipe.timer                 nhms-node27-autopipe.service
+Sat 2026-09-19 09:44:40 CST 20min left    Sat 2026-09-19 09:14:40 CST 9min ago     nhms-node27-download.timer                 nhms-node27-download.service
+Sat 2026-09-19 11:35:00 CST 2h 10min left Fri 2026-09-18 11:35:32 CST 21h ago      nhms-node27-raw-retention.timer            nhms-node27-raw-retention.service
+Sat 2026-09-19 12:05:00 CST 2h 40min left Fri 2026-09-18 12:05:32 CST 21h ago      nhms-node27-mvt-cache-retention.timer      nhms-node27-mvt-cache-retention.service
+Sat 2026-09-19 12:10:00 CST 2h 45min left Fri 2026-09-18 12:10:32 CST 21h ago      nhms-node27-resource-governance.timer      nhms-node27-resource-governance.service
+Sat 2026-09-19 12:25:00 CST 3h 0min left  Fri 2026-09-18 12:25:32 CST 20h ago      nhms-node27-timeseries-compression.timer   nhms-node27-timeseries-compression.service
+Sat 2026-09-19 14:36:00 CST 5h 11min left Fri 2026-09-18 21:57:24 CST 11h ago      nhms-node27-timeseries-retention.timer     nhms-node27-timeseries-retention.service
+Sun 2026-09-20 06:00:00 CST 20h left      Sat 2026-09-19 06:00:32 CST 3h 24min ago nhms-node27-coverage-freshness-alert.timer nhms-node27-coverage-freshness-alert.service
+
+9 timers listed.

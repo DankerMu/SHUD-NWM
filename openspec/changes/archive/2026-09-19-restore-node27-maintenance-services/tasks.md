@@ -95,7 +95,8 @@ validate), frontend/API (untouched).
 - [x] 3.4 `current-production-ops.md` canonical identity section: split
       deployment, operator sudo step, rollback, check commands.
 - [x] 3.5 `select_ci_tests.py` rules for new files if its path rules require.
-- [ ] 4.1 Stage B live deployment (design D8) + receipts.
+- [x] 4.1 Stage B live deployment (design D8) + receipts (2026-09-19, receipt
+      README "Stage B"; E6/E7 are post-merge postings to #2425).
 
 ## Required evidence
 
