@@ -76,6 +76,7 @@
     "tests/test_node27_autopipeline_preflight.py",
     "tests/test_river_identity_normalization_integration.py",
     ".review-gate-issues.json",
+    "docs/adr/0002-node27-timeseries-hot-cold-tiering.md",
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
     "tests/test_real_database_integration.py",
