@@ -1,0 +1,155 @@
+=== [2026-09-19T23:55:14+08:00] Gate A 开始 ===
+Preparing worktree (detached HEAD 40153e05)
+Updating files:  99% (4760/4790)Updating files: 100% (4790/4790)Updating files: 100% (4790/4790), done.
+HEAD is now at 40153e05 fix(#1991): 000061 step 11 改标量子查询——被实测的查询和被交付的查询不是同一条 (#2512)
+worktree HEAD=40153e05
+=== oracle 版本 ===
+PostgreSQL 15.2 (Ubuntu 15.2-1.pgdg22.04+1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.3.0-1ubuntu1~22.04) 11.3.0, 64-bit
+2.10.2
+=== uv sync ===
+Using CPython 3.11.15
+Creating virtual environment at: .venv
+Resolved 113 packages in 1ms
+   Building nhms @ file:///home/nwm/tmp/wt-i13-40153e051
+      Built nhms @ file:///home/nwm/tmp/wt-i13-40153e051
+Prepared 1 package in 1.63s
+Installed 110 packages in 81ms
+ + aiohappyeyeballs==2.6.1
+ + aiohttp==3.13.5
+ + aiosignal==1.4.0
+ + alembic==1.18.4
+ + annotated-doc==0.0.4
+ + annotated-types==0.7.0
+ + anyio==4.13.0
+ + asyncpg==0.31.0
+ + attrs==26.1.0
+ + boto3==1.43.6
+ + botocore==1.43.6
+ + cdsapi==0.7.7
+ + certifi==2026.4.22
+ + cffi==2.0.0
+ + cfgrib==0.9.15.1
+ + cftime==1.6.5
+ + charset-normalizer==3.4.7
+ + check-jsonschema==0.37.4
+ + click==8.3.3
+ + cryptography==48.0.0
+ + decorator==5.2.1
+ + donfig==0.8.1.post1
+ + eccodes==2.47.0
+ + ecmwf-datastores-client==0.5.1
+ + ecmwf-opendata==0.3.29
+ + fastapi==0.136.1
+ + findlibs==0.1.2
+ + frozenlist==1.8.0
+ + fsspec==2026.3.0
+ + gcsfs==2026.5.0
+ + google-api-core==2.30.3
+ + google-auth==2.52.0
+ + google-auth-oauthlib==1.4.0
+ + google-cloud-core==2.6.0
+ + google-cloud-storage==3.10.1
+ + google-cloud-storage-control==1.11.0
+ + google-crc32c==1.8.0
+ + google-resumable-media==2.9.0
+ + googleapis-common-protos==1.75.0
+ + greenlet==3.5.0
+ + grpc-google-iam-v1==0.14.4
+ + grpcio==1.80.0
+ + grpcio-status==1.80.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httptools==0.7.1
+ + httpx==0.28.1
+ + idna==3.13
+ + iniconfig==2.3.0
+ + jinja2==3.1.6
+ + jmespath==1.1.0
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + mako==1.3.12
+ + mapbox-vector-tile==2.2.0
+ + markupsafe==3.0.3
+ + multidict==6.7.1
+ + multiurl==0.3.7
+ + netcdf4==1.7.4
+ + nhms==0.1.0 (from file:///home/nwm/tmp/wt-i13-40153e051)
+ + numcodecs==0.16.5
+ + numpy==2.4.4
+ + oauthlib==3.3.1
+ + packaging==26.2
+ + pandas==3.0.2
+ + pluggy==1.6.0
+ + propcache==0.4.1
+ + proto-plus==1.28.0
+ + protobuf==6.33.6
+ + psycopg2-binary==2.9.12
+ + pyasn1==0.6.3
+ + pyasn1-modules==0.4.2
+ + pyclipper==1.4.0
+ + pycparser==3.0
+ + pydantic==2.13.4
+ + pydantic-core==2.46.4
+ + pydantic-settings==2.14.0
+ + pygments==2.20.0
+ + pyproj==3.7.2
+ + pyshp==3.0.3
+ + pytest==9.0.3
+ + pytest-asyncio==1.3.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.2
+ + pytz==2026.2
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + regress==2025.10.1
+ + requests==2.33.1
+ + requests-oauthlib==2.0.0
+ + rpds-py==2026.6.3
+ + ruamel-yaml==0.19.1
+ + ruff==0.15.12
+ + s3transfer==0.17.0
+ + scipy==1.17.1
+ + shapely==2.1.2
+ + six==1.17.0
+ + sqlalchemy==2.0.49
+ + starlette==1.0.0
+ + tqdm==4.67.3
+ + typing-extensions==4.15.0
+ + typing-inspection==0.4.2
+ + urllib3==2.7.0
+ + uvicorn==0.46.0
+ + uvloop==0.22.1
+ + watchfiles==1.1.1
+ + websockets==16.0
+ + xarray==2026.4.0
+ + yarl==1.23.0
+ + zarr==3.1.6
+Python 3.11.15
+=== 静默 skip 陷阱检查：先 collect，断言数量 > 0 ===
+tests/test_river_ts_read_path_surrogate_keys_integration.py::test_actual_publisher_and_copyback_discover_the_narrow_facts
+
+271/19698 tests collected (19427 deselected) in 90.30s (0:01:30)
+collected(integration) = 271
+collected(timescaledb_210) = 31
+=== 跑全量集成 lane（含 timescaledb_210，本机是其唯一 oracle）===
+..........s............................................................. [ 26%]
+...................................................................sssss [ 53%]
+ssssssssssssssssss...................................................... [ 79%]
+.......................................................                  [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_loop_log_audit_attribution.py:37: tracked skill asset absent: /home/nwm/tmp/wt-i13-40153e051/.agents/skills/subagent-workflow/scripts/loop_log_audit.py
+SKIPPED [1] tests/test_basins_registry_import_db.py:302: real Basins import smoke is opt-in and requires data/Basins
+SKIPPED [8] tests/test_node27_pgdata_migrate_oracle.py: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+SKIPPED [3] tests/test_node27_pgdata_migrate_oracle.py:464: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+SKIPPED [2] tests/test_node27_pgdata_migrate_oracle.py:495: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+SKIPPED [3] tests/test_node27_pgdata_migrate_oracle.py:545: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+SKIPPED [5] tests/test_node27_pgdata_migrate_oracle.py:601: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+SKIPPED [2] tests/test_node27_pgdata_migrate_oracle.py:633: node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; run only on the node-27 disposable Docker oracle, never against nhms-db
+247 passed, 25 skipped, 19427 deselected in 1727.09s (0:28:47)
+pytest rc=0
+=== 残留 scratch 库检查（必须为空）===
+(上面无输出即干净)
+=== 生产库未被触碰的旁证：000061 仍未在账本中 ===
+0
+worktree 已移除
+=== [2026-09-20T00:26:55+08:00] Gate A 结束 rc=0 ===
