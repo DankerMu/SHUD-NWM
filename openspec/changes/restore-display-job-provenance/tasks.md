@@ -1,24 +1,24 @@
 ## 1. Fixture and contracts
 
-- [ ] 1.1 Keep the expanded fixture, three specs and design coherent; run `openspec validate restore-display-job-provenance --strict --no-interactive` before implementation.
-- [ ] 1.2 Preserve the current node-27 production rollback state for PR #2450; #2121-A and #2346 remain held until this issue closes.
+- [x] 1.1 Keep the expanded fixture, three specs and design coherent; run `openspec validate restore-display-job-provenance --strict --no-interactive` before implementation.
+- [x] 1.2 Preserve the current node-27 production rollback state for PR #2450; #2121-A and #2346 remain held until this issue closes.
 
 ## 2. Producer publication on node-22
 
-- [ ] 2.1 Implement the bounded source-owned provenance publisher that reads the DB-free journal without write locks, mkdir-on-read, or private path export, validates the selected run's manifest, and writes the per-run sidecar plus any verified canonical log artifacts.
-- [ ] 2.2 Wire the publisher into the existing run-tree copyback lifecycle and expose the same publisher through a bounded backfill CLI; make the hook side-effect-safe and failure-explicit without changing scheduler submit/reconcile semantics.
-- [ ] 2.3 Cover publisher regressions for identical replay, stale/conflicting evidence, journal redaction, ambiguous task logs, missing log metadata, private-path/symlink/traversal rejection, and unchanged copyback ordering.
+- [x] 2.1 Implement the bounded source-owned provenance publisher that reads the DB-free journal without write locks, mkdir-on-read, or private path export, validates the selected run's manifest, and writes the per-run sidecar plus any verified canonical log artifacts.
+- [x] 2.2 Wire the publisher into the existing run-tree copyback lifecycle and expose the same publisher through a bounded backfill CLI; make the hook side-effect-safe and failure-explicit without changing scheduler submit/reconcile semantics.
+- [x] 2.3 Cover publisher regressions for identical replay, stale/conflicting evidence, journal redaction, ambiguous task logs, missing log metadata, private-path/symlink/traversal rejection, and unchanged copyback ordering.
 
 ## 3. Node-27 projection
 
-- [ ] 3.1 Add the validated importer for `runs/<run_id>/input/pipeline_jobs.json` that binds source/cycle/run/model/job identity, preserves lifecycle fields, inserts missing rows idempotently, refuses conflicting job IDs, and can enrich a previously null verified log URI monotonically.
-- [ ] 3.2 Integrate the importer into the node-27 autopipeline as a lightweight catch-up phase that also covers already-ingested runs without re-running register/forcing/parse or touching hydro readiness.
+- [x] 3.1 Add the validated importer for `runs/<run_id>/input/pipeline_jobs.json` that binds source/cycle/run/model/job identity, preserves lifecycle fields, inserts missing rows idempotently, refuses conflicting job IDs, and can enrich a previously null verified log URI monotonically.
+- [x] 3.2 Integrate the importer into the node-27 autopipeline as a lightweight catch-up phase that also covers already-ingested runs without re-running register/forcing/parse or touching hydro readiness.
 - [ ] 3.3 Prove ingest owner/write-role discipline on the real DB: `nhms_ingest_rw` can insert/update the job rows, `nhms_display_ro` cannot, and the existing readonly denial matrix still passes.
 
 ## 4. Display contract and consumers
 
-- [ ] 4.1 Return one coherent top-level `identity` object on all four strict Ops routes, including `job_id` on logs, without changing existing data containers, request-id behavior, 404/409/422 errors, or non-strict browsing.
-- [ ] 4.2 Update OpenAPI/runtime schema, generated frontend types, and any consumers that need the resolved identity; keep validator/C4 expectations honest and do not weaken them.
+- [x] 4.1 Return one coherent top-level `identity` object on all four strict Ops routes, including `job_id` on logs, without changing existing data containers, request-id behavior, 404/409/422 errors, or non-strict browsing.
+- [x] 4.2 Update OpenAPI/runtime schema, generated frontend types, and any consumers that need the resolved identity; keep validator/C4 expectations honest and do not weaken them.
 
 ## 5. Verification, deployment, and evidence
 
@@ -50,3 +50,9 @@ Minimal mergeable slice: one PR covering publisher + importer + four-route ident
 - Node-27: real-DB importer/role tests; `scripts/validate_readonly_db_boundary.py` dual-source; formal public C4 on the reviewed SHA.
 - Node-22: publication rehearsal with the active 3.12 interpreter only; journal and gateway reads; no scheduler mutation, no archived DB, no `uv sync`.
 
+
+## Verification progress
+
+Node-27 candidate `43be275dc`: 969 targeted tests passed, including three disposable-PostgreSQL importer tests. Candidate `bef96d73f`: publisher plus PostgreSQL suites passed (22 tests); the new stderr enrichment regression fails against the preceding publisher source with `PUBLISHED_LOG_MISSING`, while the newer-version overwrite control passes. Both tests pass with the repaired publisher. These are isolated-checkout results, not deployment receipts.
+
+Task 3.3 remains open for the complete live readonly denial matrix. Task 5.1 remains open for the complete retained base-red evidence set and final-head verification. Tasks 5.2–5.4 remain unrun. The production rollback and PR #2450 hold are unchanged; source review, current-master integration, CI, and live gates still govern completion.
