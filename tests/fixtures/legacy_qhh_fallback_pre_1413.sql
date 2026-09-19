@@ -63,6 +63,16 @@
 --       rows being invisible to key filtering is a sanctioned, time-bounded
 --       exclusion, not data loss.
 --
+-- Renamed relation (#1991, NOT a re-sync): 000061 renamed the forcing fact
+-- table to met.forcing_station_timeseries_legacy and gave the canonical name to
+-- the narrow key/enum table. The single `FROM met.forcing_station_timeseries
+-- fst` below became `FROM met.forcing_station_timeseries_legacy fst`. That is
+-- the SAME physical rows under the SAME columns; no predicate, join, projection
+-- or placeholder changed, and the statement's semantics are untouched. The
+-- alternative -- leaving the old name -- would have pointed this oracle at the
+-- narrow table, where none of the columns it reads exist. Recorded here because
+-- the FROZEN rule above forbids silent edits, not renames of the object.
+--
 -- Re-freeze / retire rule (#1342): the text identity columns this statement
 -- joins on (rt.run_id, rt.basin_version_id, rt.river_network_version_id) are
 -- scheduled for retirement. When they go, this statement stops executing at
@@ -147,7 +157,7 @@
                     fst.valid_time,
                     fst.unit,
                     fst.quality_flag
-                FROM met.forcing_station_timeseries fst
+                FROM met.forcing_station_timeseries_legacy fst
                 JOIN candidate_runs cr
                   ON cr.forcing_version_id = fst.forcing_version_id
                  AND fst.basin_version_id = cr.basin_version_id

@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from packages.common.forcing_store_routing import (
+    forcing_store_or_default,
+    forcing_version_store,
+)
 from packages.common.forcing_ts_render import (
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
@@ -710,6 +714,12 @@ _QHH_LATEST_CANDIDATE_RUNS_SQL = """
                         rnv.segment_count
                     ) AS expected_segment_count,
                     fv.forcing_version_id AS fv_forcing_version_id,
+                    -- #1991 (task 7.3): the candidate's forcing store. This CTE
+                    -- already LEFT JOINs met.forcing_version, so routing the
+                    -- fallback's station leg costs no round trip and no extra
+                    -- join -- the header statement projects it and the heavy
+                    -- statement renders the matching variant.
+                    fv.timeseries_store AS forcing_timeseries_store,
                     fv.model_id AS forcing_model_id,
                     fv.source_id AS forcing_source_id,
                     fv.cycle_time AS forcing_cycle_time,
@@ -1732,6 +1742,7 @@ class PsycopgForecastStore:
                 cursor,
                 station_id=station_id,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
+                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=requested_variables,
@@ -1780,6 +1791,7 @@ class PsycopgForecastStore:
             overall = self._fetch_forcing_readiness_overall(
                 cursor,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
+                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=variables,
@@ -1787,6 +1799,7 @@ class PsycopgForecastStore:
             coverage_rows = self._fetch_forcing_readiness_variable_rows(
                 cursor,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
+                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=variables,
@@ -2033,6 +2046,7 @@ class PsycopgForecastStore:
             SELECT
                 run_id,
                 forcing_version_id,
+                forcing_timeseries_store,
                 basin_version_id,
                 river_network_version_id,
                 LOWER(source_id) AS source_id_lower,
@@ -2059,13 +2073,19 @@ class PsycopgForecastStore:
             pin_scan_run_id=True,
         )
         river_source_sql = render_river_ts_sql(_latest_product_river_source_template("narrow"), "narrow").sql
-        # River is narrow-only since #1342's contract (task 6.3); the forcing leg
-        # takes the literal `"legacy"` because forcing has no routing column until
-        # task 7.3, and rendering it narrow would emit `forcing_version_key` /
-        # `variable_e` against a table that has neither (must-preserve M6).
+        # River is narrow-only since #1342's contract (task 6.3). The forcing leg
+        # is ROUTED since #1991 (task 7.3): the header above pinned exactly ONE
+        # candidate (QHH_LATEST_SEARCH_LIMIT), so exactly one forcing version is
+        # in scope and it is in exactly one of the two tables. That makes this a
+        # routing question and not a composition one — there is nothing to
+        # compose, and composing anyway would scan both tables for every request.
+        #
+        # A candidate whose `met.forcing_version` row is missing (the CTE's LEFT
+        # JOIN) projects NULL here; `forcing_store_or_default` resolves that to
+        # the canonical narrow table, which is the one that survives task 8.2.
         station_source_sql = render_forcing_ts_sql(
             _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
-            "legacy",
+            forcing_store_or_default(header.get("forcing_timeseries_store")),
             entry="forecast_store.latest_product_station_source",
         ).sql
         return self._fetch_all(
@@ -2845,7 +2865,8 @@ class PsycopgForecastStore:
                 forcing_package_uri,
                 checksum,
                 lineage_json,
-                created_at
+                created_at,
+                timeseries_store
             FROM met.forcing_version
             WHERE model_id = %s
               AND LOWER(source_id) = %s
@@ -2902,7 +2923,13 @@ class PsycopgForecastStore:
                 forcing_package_uri,
                 checksum,
                 lineage_json,
-                created_at
+                created_at,
+                -- #1991 (task 7.3): which of the two forcing fact tables this
+                -- version's rows are in. Projected on the version row rather
+                -- than looked up per reader, because every single-version
+                -- forcing reader below is handed this mapping already and a
+                -- second round trip would answer a question this row can.
+                timeseries_store
             FROM met.forcing_version
             WHERE forcing_version_id = %s
             """,
@@ -2931,7 +2958,11 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _STATION_FORCING_MEMBERSHIP_TEMPLATES,
-                "legacy",
+                # #1991 (task 7.3): the store of the forcing version IN SCOPE
+                # (spec :33), read off the version row this method is already
+                # handed. A single-version reader needs no cross-store
+                # composition -- one version is in exactly one table.
+                forcing_version_store(forcing_version),
                 entry="forecast_store.station_forcing_membership",
             ).sql,
             (forcing_version_id, station_id, valid_time_start, valid_time_end),
@@ -2955,6 +2986,7 @@ class PsycopgForecastStore:
         *,
         station_id: str,
         forcing_version_id: str,
+        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -2970,7 +3002,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _STATION_SERIES_ROWS_TEMPLATES,
-                "legacy",
+                store,
                 entry="forecast_store.station_series_rows",
             ).sql,
             (
@@ -2992,6 +3024,7 @@ class PsycopgForecastStore:
         cursor: Any,
         *,
         forcing_version_id: str,
+        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -3000,7 +3033,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _FORCING_READINESS_OVERALL_TEMPLATES,
-                "legacy",
+                store,
                 entry="forecast_store.forcing_readiness_overall",
             ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
@@ -3017,6 +3050,7 @@ class PsycopgForecastStore:
         cursor: Any,
         *,
         forcing_version_id: str,
+        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -3025,7 +3059,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _FORCING_READINESS_VARIABLE_ROWS_TEMPLATES,
-                "legacy",
+                store,
                 entry="forecast_store.forcing_readiness_variable_rows",
             ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),

@@ -29,6 +29,11 @@ from typing import Any
 import pytest
 
 from packages.common import forcing_domain_handoff_apply as apply_module
+from packages.common.forcing_store_routing import (
+    LEGACY_STORE_REFUSED_CODE,
+    LegacyForcingStoreRefusedError,
+)
+from packages.common.met_store import MetStoreError
 from packages.common.timescale_write_guard import (
     CompressedChunkWriteError,
 )
@@ -42,6 +47,12 @@ from workers.output_parser.parser import (
 
 _CHUNKS_QUERY_MARKER = "timescaledb_information.chunks"
 _SET_LOCAL_TIMEOUT_MARKER = "set local statement_timeout"
+
+#: #1991 (task 7.3): the surrogate keys the fake authority tables hand back.
+#: `met.forcing_version.forcing_version_key` for the single seeded version, and a
+#: base for `met.met_station.station_key` so `station_2` is 2 above `station_0`.
+FORCING_VERSION_KEY = 41
+STATION_KEY_BASE = 700
 
 
 def _t(hour: int) -> datetime:
@@ -66,6 +77,7 @@ class _RecordingCursor:
     def __init__(self, connection: "_RecordingConnection") -> None:
         self.connection = connection
         self._last_fetchone: Any = None
+        self._fetchall_rows: list[Any] = []
         self._execute_values_recorder: list[tuple[str, list[tuple[Any, ...]]]] = []
 
     def __enter__(self) -> "_RecordingCursor":
@@ -86,10 +98,32 @@ class _RecordingCursor:
         if _CHUNKS_QUERY_MARKER in normalized:
             self._last_fetchone = self._compressed_chunk_answer(tuple(parameters))
             return
+        if "select forcing_version_key, timeseries_store from met.forcing_version" in " ".join(normalized.split()):
+            # #1991 (task 7.3): the narrow writers' FIRST statement -- the routing
+            # read that decides whether to refuse, and the surrogate key every
+            # narrow statement after it predicates on.
+            self._last_fetchone = (
+                self.connection.forcing_version_key,
+                self.connection.forcing_timeseries_store,
+            )
+            return
+        if "select station_id, station_key from met.met_station" in " ".join(normalized.split()):
+            # Station surrogate keys, resolved in Python by both writers. The
+            # fixture answers for every station it was asked about unless a test
+            # deliberately withholds one.
+            requested = [str(value) for value in (parameters[0] if parameters else [])]
+            withheld = self.connection.stations_without_keys
+            self._fetchall_rows = [
+                (station_id, self.connection.station_key_for(station_id))
+                for station_id in requested
+                if station_id not in withheld
+            ]
+            self._last_fetchone = self._fetchall_rows[0] if self._fetchall_rows else None
+            return
         if "select 1 from met.forcing_station_timeseries" in " ".join(normalized.split()):
             # Existence probe before the window read (met side), mirroring the
             # hydro pair below: report a row only when the fixture models
-            # pre-existing rows for this forcing_version_id.
+            # pre-existing rows for this forcing version.
             window = self.connection.existing_forcing_window
             self._last_fetchone = (1,) if window and window[0] is not None else None
             return
@@ -134,7 +168,7 @@ class _RecordingCursor:
         return self._last_fetchone
 
     def fetchall(self) -> list[Any]:
-        return []
+        return self._fetchall_rows
 
     @property
     def description(self) -> Any:
@@ -170,6 +204,9 @@ class _RecordingConnection:
         compressed_chunk_range: tuple[datetime, datetime] | None = None,
         existing_river_window: tuple[datetime, datetime] | None = None,
         existing_forcing_window: tuple[datetime, datetime] | None = None,
+        forcing_version_key: int | None = FORCING_VERSION_KEY,
+        forcing_timeseries_store: str = "narrow",
+        stations_without_keys: frozenset[str] = frozenset(),
     ) -> None:
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_values_calls: list[tuple[str, list[tuple[Any, ...]]]] = []
@@ -177,11 +214,22 @@ class _RecordingConnection:
         self.compressed_chunk_range = compressed_chunk_range
         self.existing_river_window = existing_river_window
         self.existing_forcing_window = existing_forcing_window
+        # #1991 (task 7.3): the routing read's answer.
+        # `forcing_version_key is None` models a forcing version with no
+        # `met.forcing_version` row at all, which both writers refuse.
+        self.forcing_version_key = forcing_version_key
+        self.forcing_timeseries_store = forcing_timeseries_store
+        self.stations_without_keys = stations_without_keys
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
         self._pending = False
         self.autocommit = False
+
+    @staticmethod
+    def station_key_for(station_id: str) -> int:
+        """A stable surrogate key per station, derived so assertions can name it."""
+        return STATION_KEY_BASE + int(station_id.rsplit("_", 1)[-1])
 
     def cursor(self) -> _RecordingCursor:
         self._pending = True
@@ -533,7 +581,8 @@ def test_forcing_producer_uncompressed_passes_batch_unchanged(
     assert len(delete_calls) == 1
     # No stored rows, so the union window is the incoming batch's own range and
     # the DELETE is bounded to it (it used to be the unbounded ``("fv_a",)``).
-    assert delete_calls[0][1] == ("fv_a", _t(0), _t(2))
+    # #1991: bounded by the surrogate KEY since task 7.3, not by the text id.
+    assert delete_calls[0][1] == (FORCING_VERSION_KEY, _t(0), _t(2))
     assert "valid_time >= %s" in delete_calls[0][0]
     assert "valid_time <= %s" in delete_calls[0][0]
     assert len(execute_values_calls) == 1
@@ -584,7 +633,7 @@ def test_forcing_producer_replacement_window_includes_existing_rows_before_guard
     assert guard_call[1][-2:] == (existing_max, existing_min)
     delete_calls = _forcing_delete_calls(connection)
     assert len(delete_calls) == 1
-    assert delete_calls[0][1] == ("fv_a", existing_min, existing_max)
+    assert delete_calls[0][1] == (FORCING_VERSION_KEY, existing_min, existing_max)
     assert len(execute_values_calls) == 1
     assert len(execute_values_calls[0][1]) == len(rows)
 
@@ -608,7 +657,7 @@ def test_forcing_producer_empty_batch_with_existing_rows_still_purges_bounded(
     assert guard_call[1][-2:] == (existing_max, existing_min)
     delete_calls = _forcing_delete_calls(connection)
     assert len(delete_calls) == 1
-    assert delete_calls[0][1] == ("fv_a", existing_min, existing_max)
+    assert delete_calls[0][1] == (FORCING_VERSION_KEY, existing_min, existing_max)
     assert execute_values_calls == [], "INSERT MUST NOT fire for an empty batch"
     assert connection.commits == 1
 
@@ -777,6 +826,171 @@ def test_handoff_apply_empty_rows_no_existing_skips_guard_and_delete(
         "DELETE FROM met.forcing_station_timeseries",
     )
     assert delete_idx == -1
+
+
+# ---------------------------------------------------------------------------
+# #1991 (task 7.3), must-preserve M3: a replace targeting a LEGACY-routed forcing
+# version is refused BEFORE any DELETE.
+#
+# THE ORDERING IS THE TEST. Both write paths are DELETE-then-INSERT replace
+# windows, so a store check placed anywhere after the window opens destroys the
+# legacy rows and only then declines to replace them — the one data-loss break in
+# this task's surface. A test that asserts only the error code passes against
+# exactly that implementation, which is why each of these also asserts that no
+# DELETE was issued and that the rows the fixture models are still there.
+# ---------------------------------------------------------------------------
+
+
+def test_forcing_producer_refuses_a_legacy_routed_version_before_any_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing_min = datetime(2026, 5, 31, 21, tzinfo=UTC)
+    existing_max = datetime(2026, 6, 1, 9, tzinfo=UTC)
+    connection = _RecordingConnection(
+        forcing_timeseries_store="legacy",
+        # Rows already stored for this version: if the refusal came after the
+        # window opened, these are what the DELETE would have taken.
+        existing_forcing_window=(existing_min, existing_max),
+    )
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+
+    with pytest.raises(LegacyForcingStoreRefusedError) as exc_info:
+        repository.replace_forcing_timeseries("fv_a", _forcing_rows())
+
+    assert LEGACY_STORE_REFUSED_CODE in str(exc_info.value)
+    assert "fv_a" in str(exc_info.value)
+    assert _forcing_delete_calls(connection) == [], "DELETE MUST NOT fire for a legacy-routed version"
+    assert execute_values_calls == [], "INSERT MUST NOT fire for a legacy-routed version"
+    assert connection.commits == 0
+    assert connection.rollbacks >= 1, "the write transaction MUST roll back"
+
+    # The refusal is the FIRST statement: nothing else — not the existence probe,
+    # not the compressed-chunk guard, not the station-key resolution — runs before
+    # the routing read, so no work at all is done on a version that cannot be
+    # written.
+    assert len(connection.executions) == 1
+    assert "timeseries_store" in connection.executions[0][0]
+    assert connection.executions[0][1] == ("fv_a",)
+
+
+def test_forcing_producer_refusal_is_distinct_from_both_guard_codes() -> None:
+    """M4: the code must route differently from the compressed-chunk codes.
+
+    A compressed chunk is unappliable UNTIL AN OPERATOR DECOMPRESSES, and the
+    guard's base class is often transient. This refusal has neither remedy: the
+    version's rows are in the other table and stay there until task 8.2. Sharing
+    a code with either would put a permanent condition in a retry bucket or a
+    retryable one in a terminal bucket.
+    """
+    assert not issubclass(LegacyForcingStoreRefusedError, CompressedChunkWriteError)
+    assert LEGACY_STORE_REFUSED_CODE not in (
+        "FORCING_COMPRESSED_CHUNK_BLOCKED",
+        "FORCING_COMPRESSED_CHUNK_GUARD_FAILED",
+    )
+    assert LegacyForcingStoreRefusedError.error_code == LEGACY_STORE_REFUSED_CODE
+
+
+def test_forcing_producer_writes_a_narrow_routed_version_under_its_surrogate_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of M3: `narrow` stays in the same transaction and writes.
+
+    Pinned alongside the refusal because "refuse everything" would satisfy the
+    test above on its own. The INSERT's row tuples are checked, not just its
+    statement: the keys are resolved on the write cursor and a writer that bound
+    the text ids instead would still produce a plausible-looking statement.
+    """
+    connection = _RecordingConnection()
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+    rows = _forcing_rows()
+
+    repository.replace_forcing_timeseries("fv_a", rows)
+
+    assert len(execute_values_calls) == 1
+    statement, inserted = execute_values_calls[0]
+    assert "forcing_version_key" in statement and "station_key" in statement
+    assert "basin_version_id" not in statement and "source_id" not in statement
+    assert inserted == [
+        (
+            FORCING_VERSION_KEY,
+            _RecordingConnection.station_key_for(row.station_id),
+            row.valid_time,
+            row.variable,
+            row.value,
+            row.unit,
+            row.quality_flag,
+            row.native_resolution,
+        )
+        for row in rows
+    ]
+    assert connection.commits == 1
+
+
+def test_forcing_producer_refuses_a_station_without_a_surrogate_key_before_any_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A station with no authority row fails the batch LOUDLY, and before the DELETE.
+
+    The narrow fact table has no `station_id`, so an `INSERT … SELECT … JOIN
+    met.met_station` would silently DROP such a row — and `execute_values` only
+    reports the last page's rowcount, so the loss would never surface. The legacy
+    table's station foreign key used to raise on exactly this case; resolving the
+    keys in Python is what keeps that behaviour.
+    """
+    connection = _RecordingConnection(
+        stations_without_keys=frozenset({"station_1"}),
+        existing_forcing_window=(datetime(2026, 5, 31, 21, tzinfo=UTC), datetime(2026, 6, 1, 9, tzinfo=UTC)),
+    )
+    execute_values_calls = _install_fake_psycopg2(monkeypatch, connection)
+    repository = PsycopgForcingRepository(database_url="postgres://unused")
+
+    with pytest.raises(MetStoreError) as exc_info:
+        repository.replace_forcing_timeseries("fv_a", _forcing_rows())
+
+    assert "station_1" in str(exc_info.value)
+    assert not isinstance(exc_info.value, LegacyForcingStoreRefusedError)
+    assert _forcing_delete_calls(connection) == [], "DELETE MUST NOT fire on an unresolvable station"
+    assert execute_values_calls == []
+
+
+def test_handoff_apply_refuses_a_legacy_routed_version_before_any_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _RecordingConnection(
+        forcing_timeseries_store="legacy",
+        existing_forcing_window=(datetime(2026, 5, 31, 21, tzinfo=UTC), datetime(2026, 6, 1, 9, tzinfo=UTC)),
+    )
+    executed_values: list[tuple[str, list[Any]]] = []
+
+    def _fake_execute_values(cursor: Any, statement: str, rows: Any, **_kwargs: Any) -> None:
+        executed_values.append((statement, list(rows)))
+
+    monkeypatch.setattr(apply_module, "execute_values", _fake_execute_values)
+
+    cursor = connection.cursor()
+    with pytest.raises(apply_module.ForcingDomainHandoffApplyError) as exc_info:
+        apply_module._replace_forcing_station_timeseries(cursor, "fv_a", _handoff_rows())
+
+    assert exc_info.value.reason["code"] == apply_module.REASON_APPLY_LEGACY_STORE_REFUSED
+    assert _index_of_first(connection.executions, "DELETE FROM met.forcing_station_timeseries") == -1
+    assert executed_values == [], "INSERT MUST NOT fire for a legacy-routed version"
+    # First statement, same as the producer's: no probe, no guard, no key
+    # resolution ahead of the routing read.
+    assert len(connection.executions) == 1
+    assert "timeseries_store" in connection.executions[0][0]
+
+
+def test_handoff_apply_refusal_code_is_distinct_from_the_other_terminal_codes() -> None:
+    """M4 on the handoff side, where the codes are strings rather than classes."""
+    codes = {
+        apply_module.REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+        apply_module.REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED,
+        apply_module.REASON_APPLY_SQL_FAILURE,
+        apply_module.REASON_APPLY_SHAPE_CONFLICT,
+    }
+    assert apply_module.REASON_APPLY_LEGACY_STORE_REFUSED not in codes
 
 
 def test_output_parser_empty_batch_shortcircuits_guard() -> None:

@@ -307,7 +307,13 @@ def test_latest_product_reads_one_narrow_river_cte_and_preserves_public_response
     assert response["status"] == "ready"
     assert "timeseries_store" not in repr(response)
     header, _header_params = store.cursor.header_executions[0]
-    assert "timeseries_store" not in header
+    # Scoped to RIVER's routing column, which #1342's contract deleted. #1991
+    # task 7.3 gives the candidate CTE the FORCING version's store, because the
+    # station leg is rendered from it — so the bare word is no longer a
+    # river statement, and asserting on it would pin the forcing plane by
+    # accident. Both halves are named, so neither can drift unnoticed.
+    assert "h.timeseries_store" not in header
+    assert "fv.timeseries_store AS forcing_timeseries_store" in header
     sql, params = next((sql, params) for sql, params in store.cursor.executions if "river_sample_rows AS" in sql)
     river = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]
     assert re.findall(r"FROM (hydro\.river_timeseries(?:_legacy)?) rt", river) == ["hydro.river_timeseries"]

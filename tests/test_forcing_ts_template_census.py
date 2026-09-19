@@ -51,11 +51,17 @@ all nine readers**, so:
   weight of the assertion moved onto the renderer's own two constants and onto
   the exempt files. This is the execution split in ``fixtures/I11-1990.md``
   playing out exactly as recorded, not a census that quietly went blind.
-* **what a green run still does NOT prove.** Invariant I7 — that a cross-store
-  reader composes both rendered fact-row subrelations inside itself before any
-  outer aggregate — is unprovable until task 7.3's migration exists. The narrow
-  variants here are registered, text-pinned and **never executed**. Nothing in
-  this suite or its siblings executes SQL.
+* **what a green run here still does NOT prove — and who proves it now.**
+  Invariant I7 (a cross-store reader composes both rendered fact-row
+  subrelations inside itself, before any outer aggregate) is a claim about
+  EXECUTION, and nothing in this suite or its siblings executes SQL: the narrow
+  variants are registered and text-pinned here and never run here. Task 7.3
+  landed the migration that makes the narrow table real, so I7 is no longer
+  unprovable — it is proved at row level against a live database by
+  ``tests/test_forcing_narrow_store_expand_integration.py`` (see :676, one
+  version materialised in BOTH tables and counted exactly once). Read a green
+  run of THIS module as "every mention is accounted for and every registered
+  text has the right shape", not as "the composition returns the right rows".
 
 Two known limits of the counter, both measured, both recorded rather than fixed
 (the river census records the second one for itself at
@@ -131,7 +137,7 @@ from tests.forcing_ts_template_registry import (
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
     "packages/common/forcing_domain_handoff.py": 3,
-    "packages/common/forcing_domain_handoff_apply.py": 16,
+    "packages/common/forcing_domain_handoff_apply.py": 17,
     "packages/common/forcing_ts_render.py": 2,
     "packages/common/forecast_store.py": 2,
     "packages/common/node27_container_contract.py": 1,
@@ -152,6 +158,20 @@ FIXTURE_BASELINE_FILES = 15
 FIXTURE_BASELINE_MENTIONS = 47
 FIXTURE_BASELINE_READER_MENTIONS = 9
 FIXTURE_BASELINE_EXEMPT_MENTIONS = 38
+
+#: Mentions #1991 (task 7.3) ADDED, declared so the baseline arithmetic above
+#: keeps reproducing C3's measured numbers instead of being quietly re-agreed.
+#: Exactly one: the narrow writer in
+#: ``packages/common/forcing_domain_handoff_apply.py`` resolves station surrogate
+#: keys in Python, and the shape-conflict reason it raises when a station has no
+#: ``met.met_station`` row names the fact table as the ``table`` field of that
+#: reason payload. It is a name, not SQL, and it joins the file's
+#: "handoff protocol table-name key" exemption row.
+#:
+#: The twelve write-side mentions did NOT move: task 7.3 converted those
+#: statements to narrow, key-predicated SQL in place, so the counts are unchanged
+#: and only the exemption rows' notes are.
+TASK_73_ADDED_MENTIONS = 1
 
 #: The five files whose forcing readers this task wired. Four of them left the
 #: discovery set outright; `forecast_store.py` stayed for its two non-SQL index
@@ -236,11 +256,16 @@ def test_every_forcing_template_pair_in_the_tree_is_registered() -> None:
     AST sweep, whose ``WIRED_READER_PATHS`` is itself DERIVED from the register
     and therefore blind to a sixth file on its own.
 
-    Task 7.3 is where this stops being hypothetical: the write-side row-count
-    payloads (``forcing_ts_render.py`` docstring, "become templates in task
-    7.3") land in ``workers/forcing_producer/store.py`` and
-    ``packages/common/forcing_domain_handoff_apply.py``, neither of which the
-    register covers today.
+    Task 7.3 did NOT add a tenth pair, and the earlier prediction that it would
+    — the write-side row-count payloads in ``workers/forcing_producer/store.py``
+    and ``packages/common/forcing_domain_handoff_apply.py`` "become templates in
+    task 7.3" — was decided the other way (fixture ``I12-1991.md`` R3, and
+    ``tests/forcing_ts_template_registry.py``'s ``NON_READ_MENTIONS`` note):
+    ``render_forcing_ts_sql`` takes a PAIR, and those statements are narrow-only
+    from 7.3 on, so registering them would mean authoring a legacy variant that
+    can never be rendered. They converted in place and stay NAMED EXEMPTIONS,
+    cleared with the legacy templates in task 8.3. This guard is what would have
+    caught the other decision, which is why it still matters.
     """
     _assert_every_pair_is_registered(discover_forcing_template_pairs())
 
@@ -401,10 +426,15 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
 
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
-    assert non_read_mentions == FIXTURE_BASELINE_EXEMPT_MENTIONS
+    assert non_read_mentions - TASK_73_ADDED_MENTIONS == FIXTURE_BASELINE_EXEMPT_MENTIONS
     assert declared == non_read_mentions + renderer_mentions
-    # C3's 47 = the 38 that are not reads + the 9 that were.
-    assert declared - renderer_mentions + len(FORCING_REGISTRY) == FIXTURE_BASELINE_MENTIONS
+    # C3's 47 = the 38 that are not reads + the 9 that were, and task 7.3's own
+    # addition is subtracted rather than folded in, so the historical measurement
+    # stays a fixed point.
+    assert (
+        declared - renderer_mentions - TASK_73_ADDED_MENTIONS + len(FORCING_REGISTRY)
+        == FIXTURE_BASELINE_MENTIONS
+    )
     # Four of the five reader files left the set outright; forecast_store.py
     # stayed for its two index payloads, and the renderer module joined.
     assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 4 + 1
@@ -647,10 +677,14 @@ def test_the_census_rejects_an_unregistered_unexempted_site() -> None:
 # ---------------------------------------------------------------------------
 # Shape oracle: every registered template renders for BOTH stores.
 #
-# Nine live renders since cut (b). The narrow half is DEAD TEXT until task 7.3 —
-# it names columns no deployed table has — so this is the only thing that
-# exercises it at all, and the reason the fixture insists the narrow variants be
-# text-pinned rather than sketched.
+# Nine live renders since cut (b). The narrow half named columns no deployed
+# table had until task 7.3's 000061 created them; it is REAL SQL now, executed
+# against a live database by
+# `tests/test_forcing_narrow_store_expand_integration.py`. What this parametrize
+# still uniquely covers is that EVERY registered pair renders for BOTH stores —
+# including the legacy variants, which the integration suite exercises only
+# where it seeds legacy rows. It is the cheap total-coverage sweep, not the
+# only thing that touches the narrow text any more.
 # ---------------------------------------------------------------------------
 
 

@@ -50,6 +50,7 @@ from tests.integration_helpers import (
     BASIN_ID,
     BASIN_VERSION_ID,
     CYCLE_TIME,
+    FORCING_PLANE_MIGRATIONS,
     FORCING_VERSION_ID,
     FORECAST_RUN_ID,
     HINDCAST_RUN_ID,
@@ -156,7 +157,11 @@ def _connect(database_url: str) -> Any:
 
 
 def _prepared_database(database_url: str) -> None:
-    apply_migrations_from_zero(database_url, through="000058")
+    # 000058 pins RIVER's pre-identity catalog. The coverage refresh these tests
+    # drive also reads the FORCING plane, whose readers name
+    # `met.forcing_station_timeseries_legacy` unconditionally after #1991, so
+    # the forcing expand has to be applied on top of the river pin.
+    apply_migrations_from_zero(database_url, through="000058", also=FORCING_PLANE_MIGRATIONS)
     seed_issue_126_data(database_url)
 
 
@@ -662,10 +667,16 @@ def _seed_station_coverage(connection: Any) -> None:
                 for variable in variables
             ],
         )
+        # #1991 renamed this relation: the LEGACY materialisation now lives in
+        # `met.forcing_station_timeseries_legacy` and the canonical name is the
+        # narrow key/enum table. The frozen #1414 oracle is a legacy-shaped
+        # statement, so these rows belong in the legacy store and the version is
+        # routed there below -- otherwise production would render its narrow leg
+        # and the parity comparison would be against an empty set.
         execute_values(
             cursor,
             """
-            INSERT INTO met.forcing_station_timeseries (
+            INSERT INTO met.forcing_station_timeseries_legacy (
                 forcing_version_id, basin_version_id, station_id, valid_time,
                 source_id, variable, value, unit, quality_flag
             )
@@ -686,6 +697,10 @@ def _seed_station_coverage(connection: Any) -> None:
                 for index, variable in enumerate(variables)
                 for hour_offset, valid_time in enumerate((VALID_TIME_1, VALID_TIME_2))
             ],
+        )
+        cursor.execute(
+            "UPDATE met.forcing_version SET timeseries_store = 'legacy' WHERE forcing_version_id = %s",
+            (FORCING_VERSION_ID,),
         )
 
 

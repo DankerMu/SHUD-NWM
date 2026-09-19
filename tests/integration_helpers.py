@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -40,23 +41,64 @@ VALID_TIME_2 = datetime(2026, 5, 3, 2, tzinfo=UTC)
 # clock — publish only asks whether it is NULL (#1779).
 PARSED_AT = datetime(2026, 5, 3, 3, tzinfo=UTC)
 
+#: A migration that hands a relation to the deployment's runtime owner. Matched
+#: on the MIGRATION'S OWN TEXT rather than on its filename (#1991, fixture
+#: `I12-1991.md` E2): this branch used to read
+#: `migration_file.name.startswith("000059_")`, and the next migration to end in
+#: `OWNER TO nhms_ingest_rw` — 000061, the forcing expand — would have failed
+#: closed on every isolated catalog and in CI's "SQL Migration Dry Run" with a
+#: diagnostic naming the role, not the missing branch. A filename literal has to
+#: be remembered; the statement it stands in for cannot be forgotten, because
+#: without it the migration does not apply at all.
+RUNTIME_OWNER_HANDOVER = re.compile(r"\bOWNER\s+TO\s+nhms_ingest_rw\b", re.IGNORECASE)
 
-def apply_migrations_from_zero(database_url: str, *, through: str | None = None) -> None:
+#: Schemas whose relations those migrations hand over. `met` joined `hydro, core`
+#: with 000061's narrow forcing table; USAGE is granted on all three at the first
+#: handover because the grant is idempotent and a per-migration schema parse
+#: would be a second thing to keep in step with the SQL.
+OWNED_SCHEMAS: tuple[str, ...] = ("hydro", "core", "met")
+
+#: The FORCING-plane migrations a RIVER-plane pin must still apply (`also=`).
+#: Named once so the next forcing migration is added here rather than hunted for
+#: across every suite that pins the ledger for river's sake.
+FORCING_PLANE_MIGRATIONS: tuple[str, ...] = ("000061",)
+
+
+def apply_migrations_from_zero(
+    database_url: str, *, through: str | None = None, also: tuple[str, ...] = ()
+) -> None:
+    """Replay the ledger, optionally pinned at ``through`` plus ``also``.
+
+    ``through`` pins ONE plane's history — every existing pin is about river
+    (000058 pre-identity, 000059 pre-contract, 000060 post-contract). ``also``
+    names migrations past that pin that must be applied anyway because they
+    belong to a DIFFERENT plane, in ledger order.
+
+    #1991 made that distinction load-bearing. 000061 renames the forcing fact
+    table and every forcing reader now spells the renamed relation
+    unconditionally (must-preserve M1), so a catalog pinned at 000059 for
+    river's sake has no `met.forcing_station_timeseries_legacy` and each of
+    those readers fails with `UndefinedTable`. Making the reader probe
+    `to_regclass` instead would be the wrong repair: it would make production
+    SQL depend on catalog state and let a missing migration deploy silently.
+    """
     connection = psycopg2.connect(database_url)
     connection.autocommit = True
     try:
         ensure_schema_migrations_table(connection)
         for migration_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            if through is not None and migration_file.name[:6] > through:
-                break
+            if through is not None and migration_file.name[:6] > through and migration_file.name[:6] not in also:
+                # `continue`, not `break`: `also` entries live past the pin and
+                # must still be applied in ledger order.
+                continue
             if not migration_has_been_applied(connection, migration_file.name):
-                if migration_file.name.startswith("000059_"):
+                if RUNTIME_OWNER_HANDOVER.search(migration_file.read_text(encoding="utf-8")):
                     # Isolated catalogs need the same role shape as deployment.
                     roles_sql = (MIGRATIONS_DIR.parent / "roles" / "node27_write_roles.sql").read_text()
                     role_block = "DO $roles$" + roles_sql.split("DO $roles$", 1)[1].split("$roles$;", 1)[0] + "$roles$;"
                     with connection.cursor() as cursor:
                         cursor.execute(role_block)
-                        cursor.execute("GRANT USAGE ON SCHEMA hydro, core TO nhms_ingest_rw")
+                        cursor.execute(f"GRANT USAGE ON SCHEMA {', '.join(OWNED_SCHEMAS)} TO nhms_ingest_rw")
                 apply_migration(connection, migration_file)
     finally:
         connection.close()
@@ -77,7 +119,11 @@ def post_expand_forecast_database(
         # throw away. Callers that apply migrations themselves before invoking
         # `prepare` must pin to the same version, or the ledger will already be
         # past 000060 and this call becomes a no-op over a contracted catalog.
-        apply_migrations_from_zero(throwaway_database_url, through="000059")
+        # `also=FORCING_PLANE_MIGRATIONS` because the pin is a RIVER statement:
+        # the forcing readers this fixture's tests execute (display coverage,
+        # the national tile) spell `met.forcing_station_timeseries_legacy`
+        # unconditionally after #1991, so 000061 has to be applied regardless.
+        apply_migrations_from_zero(throwaway_database_url, through="000059", also=FORCING_PLANE_MIGRATIONS)
         with psycopg_connection(throwaway_database_url) as connection:
             with connection.cursor() as cursor:
                 # The pin above is only effective if THIS call is the first
@@ -528,6 +574,44 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
             )
 
 
+#: The narrow fact table's version predicate. A scalar sub-select rather than a
+#: join so the predicate leads the narrow primary key, exactly as the production
+#: writers' own statements do.
+_NARROW_FORCING_VERSION_PREDICATE = (
+    "forcing_version_key IN (SELECT forcing_version_key FROM met.forcing_version "
+    "WHERE forcing_version_id LIKE %s)"
+)
+
+_LEGACY_FORCING_VERSION_PREDICATE = "forcing_version_id LIKE %s"
+
+
+def _forcing_fact_cleanup_targets(cursor: Any) -> list[tuple[str, str]]:
+    """``(relation, version predicate)`` for every forcing fact table that exists.
+
+    Before 000061 there is one table under the canonical name and it has
+    ``forcing_version_id``; after it there are two, and the canonical one is
+    narrow. Deciding by the COLUMN and not by the migration ledger keeps this
+    correct for every ``through=`` pin the suites use, including a future one.
+    """
+    targets: list[tuple[str, str]] = []
+    cursor.execute(
+        """
+        SELECT table_name, bool_or(column_name = 'forcing_version_id') AS has_text_version
+        FROM information_schema.columns
+        WHERE table_schema = 'met'
+          AND table_name IN ('forcing_station_timeseries', 'forcing_station_timeseries_legacy')
+        GROUP BY table_name
+        ORDER BY table_name
+        """
+    )
+    for row in cursor.fetchall():
+        name = row["table_name"] if isinstance(row, Mapping) else row[0]
+        has_text_version = row["has_text_version"] if isinstance(row, Mapping) else row[1]
+        predicate = _LEGACY_FORCING_VERSION_PREDICATE if has_text_version else _NARROW_FORCING_VERSION_PREDICATE
+        targets.append((f"met.{name}", predicate))
+    return targets
+
+
 def _clear_issue_126_rows(connection: Any) -> None:
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM ops.pipeline_job WHERE job_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
@@ -577,16 +661,25 @@ def _clear_issue_126_rows(connection: Any) -> None:
         )
         # Same bound, same reason (#1640). Here the skip path is the COMMON
         # case: the session-scoped integration database never seeds this table.
-        cursor.execute(
-            "SELECT min(valid_time) AS valid_time_min, max(valid_time) AS valid_time_max "
-            "FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s",
-            (f"{ISSUE_126_PREFIX}%",),
-        )
-        forcing_window = cursor.fetchone() or {}
-        if forcing_window.get("valid_time_min") is not None:
+        #
+        # #1991 (task 7.3): BOTH forcing fact tables, because from 000061 on
+        # there are two and a forcing version's rows are in exactly one of them.
+        # Which tables exist depends on how far the caller migrated -- several
+        # suites pin at `through="000058"` or `"000059"` on purpose -- so each
+        # relation is probed rather than assumed, and the narrow table is
+        # recognised by its COLUMNS rather than by its name: before 000061 the
+        # canonical name IS the text-column table.
+        for table, predicate in _forcing_fact_cleanup_targets(cursor):
             cursor.execute(
-                "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s "
-                "AND valid_time >= %s AND valid_time <= %s",
+                f"SELECT min(valid_time) AS valid_time_min, max(valid_time) AS valid_time_max "
+                f"FROM {table} WHERE {predicate}",
+                (f"{ISSUE_126_PREFIX}%",),
+            )
+            forcing_window = cursor.fetchone() or {}
+            if forcing_window.get("valid_time_min") is None:
+                continue
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {predicate} AND valid_time >= %s AND valid_time <= %s",
                 (
                     f"{ISSUE_126_PREFIX}%",
                     forcing_window["valid_time_min"],

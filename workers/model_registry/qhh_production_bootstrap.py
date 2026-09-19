@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packages.common.forcing_ts_render import (
+    FORCING_STORES,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -1908,29 +1909,35 @@ def _fetch_model_identity(cursor: Any, model_id: str) -> dict[str, Any]:
     return row
 
 
-# Reader #8 (#1990 task 7.2). This reader does NOT join `met.forcing_version` at
-# all — it counts fact rows by MODEL across every forcing version, so "look the
-# store up by forcing version" does not map onto it even once task 7.3 adds the
-# routing column. Its narrow variant is the legacy one with the station join
-# moved onto `station_key`.
+# Reader #8 (#1990 task 7.2, routed by #1991 task 7.3). This reader does NOT
+# join `met.forcing_version` at all — it counts fact rows by MODEL across every
+# forcing version, so "look the store up by forcing version" does not map onto
+# it. It is one of the two readers that SPAN both stores, and the only one whose
+# templates had to change shape at 7.3.
 #
-# THE CROSS-STORE SHAPE IS 7.3's (invariant I7), and it is not written as dead
-# code here. When both tables exist this becomes ONE aggregate over the two
-# rendered fact-row subrelations composed inside this function — not two counts
-# summed by Python, which is the shape the invariant forbids. In this task store
-# is the constant `legacy` and there is nothing to compose: a narrow branch would
-# emit `station_key` against a table that has no such column, and
-# `_dynamic_forcing_counts` executes against node-27 (must-preserve M6).
+# THE VARIANTS PROJECT ROWS, NOT A COUNT. Invariant I7 requires the two rendered
+# fact-row subrelations to be composed inside the owning reader BEFORE any outer
+# aggregate; a pair of `SELECT COUNT(*)` texts can only be combined by summing
+# two answers in Python, which is exactly the shape the invariant forbids. So
+# each variant emits one row per fact row (`SELECT 1 AS present`), the reader
+# composes them, and ONE `COUNT(*)` runs over the composition. The projection is
+# the same single column in the same order on both sides (I5).
+#
+# There is no store filter on either leg, and that is the difference from the
+# display-coverage composition: this reader counts rows, not versions, and the
+# two tables are disjoint per version by construction (000061 classified by row
+# existence; the writers are narrow-only). A filter here would add a
+# `met.forcing_version` join this reader deliberately does not have.
 _DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
     legacy=f"""
-        SELECT COUNT(*) AS count
+        SELECT 1 AS present
         FROM {FORCING_TABLE_TOKEN} fst
         JOIN met.met_station ms
           ON ms.station_id = fst.station_id
         WHERE ms.properties_json->>'model_id' = %s
         """,
     narrow=f"""
-        SELECT COUNT(*) AS count
+        SELECT 1 AS present
         FROM {FORCING_TABLE_TOKEN} fst
         JOIN met.met_station ms
           ON ms.station_key = fst.station_key
@@ -1939,17 +1946,24 @@ _DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
 )
 
 
+def _dynamic_forcing_count_sql() -> str:
+    """One count over both stores' fact rows, composed inside this reader (I7)."""
+    legs = [
+        render_forcing_ts_sql(
+            _DYNAMIC_FORCING_COUNT_TEMPLATES,
+            store,
+            entry="qhh_production_bootstrap.dynamic_forcing_count",
+        ).sql
+        for store in FORCING_STORES
+    ]
+    return "SELECT COUNT(*) AS count FROM (" + " UNION ALL ".join(legs) + ") AS forcing_rows"
+
+
 def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
     cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
     forcing_versions = int(cursor.fetchone()["count"])
-    cursor.execute(
-        render_forcing_ts_sql(
-            _DYNAMIC_FORCING_COUNT_TEMPLATES,
-            "legacy",
-            entry="qhh_production_bootstrap.dynamic_forcing_count",
-        ).sql,
-        (model_id,),
-    )
+    # Both legs bind the same `model_id`, in the order `FORCING_STORES` spells.
+    cursor.execute(_dynamic_forcing_count_sql(), (model_id, model_id))
     timeseries_rows = int(cursor.fetchone()["count"])
     return {
         "forcing_version_count": forcing_versions,

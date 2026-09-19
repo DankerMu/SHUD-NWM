@@ -24,6 +24,7 @@ from packages.common.forcing_ts_render import (
     RenderedForcingSql,
     render_forcing_ts_sql,
 )
+from tests.forcing_ts_template_registry import REPO_ROOT
 
 LEGACY_BODY = f"""
 SELECT fst.station_id, fst.variable, fst.valid_time, fst.value, fst.unit, fst.quality_flag,
@@ -52,41 +53,50 @@ PAIR = ForcingTemplatePair(legacy=LEGACY_BODY, narrow=NARROW_BODY)
 # ---------------------------------------------------------------------------
 
 
-def test_both_table_constants_spell_the_deployed_name_today() -> None:
-    """The pin that keeps master deployable to node-27 until the migration lands.
+def test_both_table_constants_spell_the_relation_the_migration_left(monkeypatch) -> None:
+    """The pin that keeps master deployable to node-27 (#1991, must-preserve M1).
 
-    ``met.forcing_station_timeseries_legacy`` is created by task 7.3's expand
-    migration and DOES NOT EXIST YET, so the legacy store must name the relation
-    that is actually deployed. River's equivalent wiring shipped three days ahead
-    of its migration and left master fail-closed on HTTP 500 in between; this
-    assertion is what refuses to repeat that.
+    FLIPPED WITH THE MIGRATION, in its own commit.
+    ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`` renames
+    the deployed table to ``…_legacy`` and creates the narrow one under the
+    canonical name, so from that commit on each constant names a relation that
+    exists — and before it, neither did. River's equivalent wiring shipped three
+    days ahead of its migration and left master fail-closed on HTTP 500 in
+    between; flipping either the constant or the migration alone is the bug both
+    of them exist to catch.
 
-    TASK 7.3 FLIPS ``FORCING_TABLE_LEGACY`` AND THIS TEST IN THE SAME COMMIT AS
-    THE RENAME. Flipping either one alone is the bug both of them exist to catch.
+    The migration file is read here rather than trusted: this test's whole value
+    is that the constant and the DDL agree, and asserting the constant against a
+    second copy of the same string would only prove the string was typed twice.
     """
     assert FORCING_TABLE == "met.forcing_station_timeseries"
-    assert FORCING_TABLE_LEGACY == "met.forcing_station_timeseries"
+    assert FORCING_TABLE_LEGACY == "met.forcing_station_timeseries_legacy"
+
+    migration = (
+        REPO_ROOT / "db/migrations/000061_forcing_station_timeseries_narrow_expand.sql"
+    ).read_text(encoding="utf-8")
+    assert "ALTER TABLE met.forcing_station_timeseries RENAME TO forcing_station_timeseries_legacy" in migration
+    assert f"CREATE TABLE IF NOT EXISTS {FORCING_TABLE} (" in migration
+    assert f"to_regclass('{FORCING_TABLE_LEGACY}')" in migration
 
 
-def test_the_two_variants_render_byte_identically_while_the_constants_agree() -> None:
-    """D1's payoff: with the constants equal, store routing is a provable no-op.
+def test_the_two_variants_now_bind_different_relations() -> None:
+    """The successor to I11's byte-identity pin, inverted by the 7.3 flip.
 
-    This is what upgrades the reader wiring in task 7.2 from "semantically
-    identical" to byte-identical rendered SQL — the strongest pin available WHILE
-    THE CONSTANTS AGREE, and one only D1 makes reachable. Asserted on a pair whose
-    two bodies are the same text, so the ONLY thing that could differ is the bound
-    table name.
+    While both constants spelled the deployed name, rendering the SAME body for
+    the two stores produced the same string, and that is what made task 7.2 a
+    provable no-op. After 000061 the two stores are two relations, so the same
+    body must render DIFFERENTLY and differ by exactly the ``_legacy`` suffix.
 
-    TASK 7.3 DELETES THIS TEST, in the same commit as the rename. It goes red
-    there by construction — legacy then binds ``…_legacy`` and narrow binds the
-    canonical name, so the two renders are supposed to differ. DO NOT "fix" it by
-    aligning the constants again: that would undo the flip and leave the legacy
-    reader pointed at the narrow table, which is the precise failure D1 exists to
-    prevent. The pin that SURVIVES 7.3 is
-    :func:`test_the_seven_three_flip_is_the_one_line_it_claims_to_be`.
+    Asserted on a pair whose two bodies are identical text, so the only thing
+    that CAN differ is the bound table name — which is what makes this a pin on
+    the binding rather than on whatever the registered templates happen to say.
     """
     same = ForcingTemplatePair(legacy=LEGACY_BODY, narrow=LEGACY_BODY)
-    assert render_forcing_ts_sql(same, "legacy").sql == render_forcing_ts_sql(same, "narrow").sql
+    legacy_sql = render_forcing_ts_sql(same, "legacy").sql
+    narrow_sql = render_forcing_ts_sql(same, "narrow").sql
+    assert legacy_sql != narrow_sql
+    assert legacy_sql == narrow_sql.replace(FORCING_TABLE, FORCING_TABLE_LEGACY)
 
 
 def test_the_seven_three_flip_is_the_one_line_it_claims_to_be(monkeypatch) -> None:
