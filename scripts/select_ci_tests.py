@@ -344,7 +344,9 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_openapi_drift.py",
     "tests/test_openapi_response_conformance.py",
     "tests/test_slurm_gateway_openapi_security.py",
+    "tests/test_pipeline_ops_identity_envelope.py",
 )
+
 
 # #1646: the pytest warning-policy suite proves the SHIPPING config semantically
 # (subprocess + removed-filter mutant + unrelated-warning control) and parses
@@ -827,6 +829,9 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # bytes anywhere the lane could have written — a claim only this module's
     # write paths can break. DB-free, 76 tests in 0.70s.
     "tests/test_journal_root_lane_adoption.py",
+    # #2420: the provenance publisher reads the source-owned publication view
+    # and fail-closes on blocked journal rows, so a journal-only PR must run it.
+    "tests/test_pipeline_job_provenance_publisher.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -1450,9 +1455,9 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
     "apps/api/routes/best_available.py",
     "apps/api/routes/data_sources.py",
     "apps/api/routes/models.py",
-    "apps/api/routes/pipeline.py",
     "apps/api/routes/state_snapshots.py",
 )
+
 # The packages/common stores that carry the #1728 injection seam
 # (`application_name=` through `from_env` down to the connect call). Two more —
 # forecast_store.py and state_manager.py — already have exact rules, so the
@@ -1496,7 +1501,7 @@ PRECIP_SURFACE_TESTS: tuple[str, ...] = (
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
-        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_pipeline_job_provenance_publisher.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1743,10 +1748,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # / CycleDiscovery); those stay with the rules that own them (#1455
         # `edge-consumer` routings). The archive contract independently rebuilds
         # cycle identity through cycle_id_for, so its focused suite belongs here.
+        # #2420: the provenance publisher/importer and Ops identity envelope mint
+        # cycle ids through cycle_id_for, so a helper-only PR must run them.
         "workers/data_adapters/base.py",
         (
             "tests/test_state_clone_cutover_hook.py",
             "tests/test_scheduler_journal_retention_archive.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(
@@ -1937,6 +1947,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_orchestrator.py",
             "tests/test_orchestration_chain.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_copyback.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
+            # The delegated attribution suite now top-level-imports
+            # services.orchestrator (package __init__) and
+            # pipeline_job_provenance.py so the provenance importer seam is
+            # classified. Those importer gaps close on this directory rule,
+            # the same disposition display_coverage / hydro_display already use.
+            *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
@@ -2948,6 +2968,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
             "tests/test_slurm_gateway_openapi_security.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(
@@ -3226,6 +3247,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1647: the `_connect` bounds and the stats-guard flag parser live
             # in their own suite, which the same-name fallback cannot find.
             "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_copyback.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
+            # Autopipeline now injects _attributed_connect into the provenance
+            # importer; the delegated attribution suite is the classification
+            # oracle for that seam.
+            *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),
@@ -3237,6 +3266,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: the stats-guard ANALYZE legs are what force the writer
             # role to OWN the relations, so the write-role guards must run.
             "tests/test_node27_write_roles.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/backfill_pipeline_job_provenance.py",
+        (
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_job_provenance_importer.py",
         ),
     ),
     PathTestRule(
@@ -4147,10 +4183,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "services/orchestrator/scheduler_gateway.py",
         (SLURM_AUTH_DEPLOYMENT_TEST,),
     ),
+    PathTestRule(
+        "apps/api/routes/pipeline.py",
+        (
+            *CONNECTION_ATTRIBUTION_TESTS,
+            "tests/test_pipeline_ops_identity_envelope.py",
+        ),
+    ),
     *(
         PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
         for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
     ),
+
     PathTestRule(
         "apps/api/errors.py",
         (API_ERROR_LOGGING_TEST,),

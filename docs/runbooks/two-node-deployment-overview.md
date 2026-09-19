@@ -22,6 +22,17 @@
 > 物理 host 分配以 `CLAUDE.md` 服务器拓扑段 + `docs/governance/ROLE_BOUNDARY.md` 顶部
 > "Current physical deployment" 段为准。下文 §3.4 权限矩阵、§4 共享表、§5.2 22 compute
 > 启动段都是设计意图描述，**不反映当前生产 host 分配**。
+>
+> **#2420 implementation contract, not a live-deployment receipt:** the
+> DB-free node-22 lane writes only the source-authoritative
+> `runs/<run_id>/input/pipeline_jobs.json` sidecar and verified published log
+> artifacts before normal run-tree copyback.  The physical node-27 ingest lane
+> (using `nhms_ingest_rw`) later projects that sidecar into the derived
+> `ops.pipeline_job` read model; `nhms_display_ro` remains unable to write it.
+> This is a metadata-only catch-up and does not give node-27 Slurm control or
+> node-22 a live database connection.  The concrete rollout, recovery, and
+> rollback commands are maintained in
+> [`current-production-ops.md`](current-production-ops.md#311-pipeline-job-provenance-sidecar-and-recovery-2420).
 
 ## 1. M22 设计结论（历史）
 

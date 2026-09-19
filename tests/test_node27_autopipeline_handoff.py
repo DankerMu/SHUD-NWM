@@ -2833,3 +2833,109 @@ def test_the_decline_read_no_longer_selects_or_filters_on_a_reason_code(tmp_path
     )
     for absent in ("reason_code", "legacy_store_refused", "LEFT JOIN", "timeseries_store", "hydro.hydro_run"):
         assert absent not in statement, absent
+
+
+def test_job_provenance_catch_up_covers_already_ingested_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True, RUN_B: True}
+    )
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
+    imported: list[str] = []
+
+    def fake_import(**kwargs: Any) -> dict[str, Any]:
+        imported.extend(list(kwargs["run_ids"]))
+        return {
+            "status": "imported",
+            "imported": len(kwargs["run_ids"]),
+            "unavailable": 0,
+            "failed": 0,
+            "runs": [{"run_id": run_id, "status": "imported"} for run_id in kwargs["run_ids"]],
+        }
+
+    monkeypatch.setattr(autopipe, "import_discovered_pipeline_job_provenance", fake_import)
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert imported == [RUN_A, RUN_B]
+    assert summary["runs"]["already_ingested"] == 1
+    assert summary["runs"]["job_provenance"]["imported"] == 2
+    assert "node27_ingest_run.py" not in " ".join(" ".join(call) for call in calls if RUN_A in " ".join(call))
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
+def test_job_provenance_catch_up_chunks_more_than_256_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    batch_sizes: list[int] = []
+
+    def fake_requested(**kwargs: Any) -> dict[str, Any]:
+        run_ids = list(kwargs["run_ids"])
+        batch_sizes.append(len(run_ids))
+        assert len(run_ids) <= 256
+        return {
+            "status": "imported",
+            "imported": len(run_ids),
+            "unavailable": 0,
+            "failed": 0,
+            "runs": [{"run_id": run_id, "status": "imported"} for run_id in run_ids],
+        }
+
+    monkeypatch.setattr(
+        "services.orchestrator.pipeline_job_provenance._import_requested_pipeline_job_provenance",
+        fake_requested,
+    )
+    from services.orchestrator.pipeline_job_provenance import import_discovered_pipeline_job_provenance
+
+    run_ids = [f"fcst_gfs_2026091612_dg_{index:032d}" for index in range(257)]
+    summary = import_discovered_pipeline_job_provenance(
+        database_url=NODE27_DATABASE_URL,
+        object_store_root=tmp_path,
+        run_ids=run_ids,
+    )
+
+    assert batch_sizes == [256, 1]
+    assert summary["imported"] == 257
+    assert summary["failed"] == 0
+    assert len(summary["runs"]) == 257
+
+
+def test_job_provenance_importer_exception_does_not_fail_the_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, _calls, _published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+
+    def boom(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("importer exploded")
+
+    monkeypatch.setattr(autopipe, "import_discovered_pipeline_job_provenance", boom)
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["job_provenance"]["failed"] == 1
+    assert summary["runs"]["job_provenance"]["runs"][0]["reason"] == "RuntimeError"
+
+
+def test_seed_only_tick_skips_job_provenance_catch_up(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    object_store_root, calls, published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+
+    def boom(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("seed-only ticks must not import provenance")
+
+    monkeypatch.setattr(autopipe, "import_discovered_pipeline_job_provenance", boom)
+    rc, summary = _run_main(capsys, object_store_root, "--seed-only")
+
+    assert rc == 0
+    assert summary["runs"]["job_provenance"] == {"imported": 0, "unavailable": 0, "failed": 0, "runs": []}
+    assert calls == []
+    assert published_calls == []
