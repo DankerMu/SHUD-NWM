@@ -1,0 +1,134 @@
+===== WINDOW OPEN 2026-09-20T00:27:36+08:00
+== pre: HEAD=40593a99 porcelain=0
+== yd MainPID before: 3163766
+===== 0. 证明 user-systemd 在这个 detached 上下文里可达
+-- XDG_RUNTIME_DIR=/run/user/1005 DBUS=unix:path=/run/user/1005/bus
+-- user-systemd OK
+
+===== 0b. 窗口前基线探针（API 还活着时取，之后用于逐字节比对）
+-- forcing 基线 sha=bb690c7fec6c9fcd len=4342（前置实测值 1524c97ec9418671）
+!! forcing 基线已漂移（很可能是又落了一个 cycle）。
+!! 采用本次现取的值作为比对基线，并记进 receipt。
+
+===== 1. 停 NHMS 定时器（yd 的 4 个绝不动）
+
+0 timers listed.
+Pass --all to see loaded but inactive timers, too.
+
+===== 2. 停 API，并等待在跑的 oneshot 自己结束
+-- nhms-node27-autopipe.service: inactive
+-- nhms-node27-download.service: inactive
+-- nhms-node27-timeseries-compression.service: inactive
+-- nhms-node27-timeseries-retention.service: inactive
+-- API state: inactive
+-- API 应当拒绝: root=000（000=已停，符合预期）
+-- 静默窗口开始 2026-09-20T00:27:39+08:00
+
+===== 3. git pull --ff-only
+ create mode 100644 openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I12-1991.md
+ create mode 100644 openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
+ create mode 100644 packages/common/forcing_store_routing.py
+ create mode 100644 tests/test_forcing_narrow_store_expand_integration.py
+-- HEAD now: 40153e05
+-- 000061 sha256: b2c32c8fd5ddc2e8ebc0d07dbff627b016f92fc2eb95fc187187efbd26b93991
+-- sha 与被测产物一致
+
+===== 4. 锁卫生闸门（只读通道）
+   目标表持锁后端 = []
+   idle in transaction = []
+   autovacuum = []
+   闸门开启
+
+===== 5. migrate（不可逆步骤）—— 超级用户通道
+   migrate 通道: user=nhms superuser=True db=nhms
+   前置状态: 无 _legacy 表=True 无枚举=True 无路由列=True
+   账本行数 = 61  磁盘 = 55  待施加 = ['000061_forcing_station_timeseries_narrow_expand.sql']
+   窗口前: forcing_version=8881 行  事实表≈226312720 行
+   preflight OK
+-- migrate 开始 2026-09-20T00:27:42+08:00
+Skipped migration: 000048_river_segment_stream_type.sql
+Skipped migration: 000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql
+Skipped migration: 000050_river_identity_normalization.sql
+Skipped migration: 000051_river_ts_surrogate_key_read_index.sql
+Skipped migration: 000052_authority_stats_hygiene_trgm_expression_index.sql
+Skipped migration: 000053_state_snapshot_clone_gate_kind.sql
+Skipped migration: 000054_met_station_trgm_expression_index.sql
+Skipped migration: 000055_ops_ingest_recompute_decline.sql
+Skipped migration: 000056_hydro_run_parsed_at.sql
+Skipped migration: 000057_river_network_version_geometry_generation.sql
+Skipped migration: 000058_hot_timeseries_chunk_interval_3d.sql
+Skipped migration: 000059_river_timeseries_narrow_expand.sql
+Skipped migration: 000060_river_timeseries_contract.sql
+Applied migration: 000061_forcing_station_timeseries_narrow_expand.sql
+Migrations complete: 1 applied, 54 skipped, 55 total.
+-- migrate 结束 2026-09-20T00:27:46+08:00 rc=0
+-- migrate exit: 0
+
+===== 6. provision write roles（runbook 9.6 / #1774 —— 任何 migrate 之后都必须跑）
+
+## audit: CREATE on any schema for the write roles (CREATE is an object-authoring surface)
+     rolname      | create_on_schemas 
+------------------+-------------------
+ nhms_download_rw | (none)
+ nhms_ingest_rw   | (none)
+(2 rows)
+
+## audit: OK -- no owner drift
+node27-write-roles: full provision complete; audit clean
+-- roles exit: 0
+
+===== 7. 后置校验（超级用户通道，仍是 READ ONLY 会话）
+   账本尾: ['000061_forcing_station_timeseries_narrow_expand.sql', '000060_river_timeseries_contract.sql', '000059_river_timeseries_narrow_expand.sql']
+   窄表存在 / legacy 存在: (True, True)
+   窄表列（顺序即 spec:5，native_resolution 必须在且可空）:
+      ('forcing_version_key', 'integer', 'NO')
+      ('station_key', 'integer', 'NO')
+      ('valid_time', 'timestamp with time zone', 'NO')
+      ('variable_e', 'USER-DEFINED', 'NO')
+      ('value', 'double precision', 'NO')
+      ('unit_e', 'USER-DEFINED', 'NO')
+      ('quality_flag_e', 'USER-DEFINED', 'NO')
+      ('native_resolution', 'text', 'YES')
+   enum met.forcing_variable = {PRCP,TEMP,RH,wind,Rn,Press}
+   enum met.forcing_unit = {mm/day,degC,0-1,m/s,W/m2,Pa}
+   enum met.forcing_quality_flag = {ok}
+   路由分类（预期 legacy 4289 / narrow 4592，退保移动则会变）: [('legacy', 4289), ('narrow', 4592)]
+   压缩设置（须与 supervisor.py:1748-1757 一致）: [('forcing_version_key', 1, None), ('station_key', 2, None), ('valid_time', None, 2), ('variable_e', None, 1)]
+   chunk 间隔（窄表 1 day / legacy 3 days）: [('best_available_selection', 'valid_time', datetime.timedelta(days=7)), ('forcing_station_timeseries_legacy', 'valid_time', datetime.timedelta(days=3)), ('forcing_station_timeseries', 'valid_time', datetime.timedelta(days=1))]
+   外键（两个，强制）: [('forcing_station_timeseries_forcing_version_key_fkey', 'FOREIGN KEY (forcing_version_key) REFERENCES met.forcing_version(forcing_version_key)'), ('forcing_station_timeseries_station_key_fkey', 'FOREIGN KEY (station_key) REFERENCES met.met_station(station_key)')]
+   窄表索引（恰好 pkey + forcing_ts_version_variable_time_key_idx）: [('forcing_station_timeseries_narrow_pkey',), ('forcing_ts_version_variable_time_key_idx',)]
+   owner / relacl: ('nhms_ingest_rw', '{nhms_ingest_rw=arwdDxt/nhms_ingest_rw,nhms_display_ro=r/nhms_ingest_rw,nhms_download_rw=arwd/nhms_ingest_rw}')
+
+===== 7b. display_ro 可读性（API 重启之前做 —— 读不到就会 500）
+   窄表: OK
+   legacy 表: OK
+   路由列: OK
+   枚举 USAGE: OK
+
+===== 8. 磁盘
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   47G   47G  51% /
+/dev/mapper/ubuntu--vg-home        1.7T  518G  1.1T  33% /home
+/dev/md0                            15T  1.2T   13T   9% /data/GHDC
+
+===== 9. 恢复（trap 也保证这一步）
+== RESTORE（trap 或正常路径）：先起 API，再起定时器
+-- display api: active
+SubState=running
+ActiveEnterTimestamp=Sun 2026-09-20 00:27:48 CST
+-- 探针:
+   root=200
+   ops=200
+   forcing(qhh latest-product) sha=bb690c7fec6c9fcd len=4342  (基线 bb690c7fec6c9fcd)
+   >>> forcing 读路径与基线字节相同（M2 成立）
+   river forecast-series=200 bytes=6075
+   river sha=a48605688b2e09c4  (基线 a48605688b2e09c4)
+   >>> 河道读路径字节相同（M8）
+-- 定时器恢复数: 9
+-- yd 未被触碰:
+MainPID=3163766
+SubState=running
+-- 静默窗口 2026-09-20T00:27:39+08:00 .. 2026-09-20T00:27:54+08:00
+-- yd MainPID before=3163766 after=3163766
+-- yd 全程未被重启（yd的不停）
+===== WINDOW CLOSED 2026-09-20T00:27:54+08:00
