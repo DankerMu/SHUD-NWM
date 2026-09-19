@@ -185,6 +185,19 @@ even if the host date is later.
 
 ## Three-day chunk geometry (#2210; requires migration rollout)
 
+**River half superseded 2026-09-19; forcing half still live.** `000058`'s
+3-day interval was set on the *then-canonical, text-identity*
+`hydro.river_timeseries` — the table `000059` renamed to
+`hydro.river_timeseries_legacy` and `000060` dropped on 2026-09-19 (receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+The live river store is the narrow table created by `000059` with
+`chunk_time_interval => interval '1 day'` (`000059:28-30`), measured after the
+contract window at **1 day**, 30 chunks, oldest `range_start`
+`2026-08-27T00:00Z`, newest `range_end` `2026-09-26T00:00Z`, 10 compressed.
+**Do not read 3 days (or 7) as current river geometry.**
+`met.forcing_station_timeseries` was never renamed or recreated; everything
+below still describes it, and its narrow expand is the deferred I12 work.
+
 Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
 **new** chunks of `hydro.river_timeseries` and `met.forcing_station_timeseries`
 to 3 days. It does not change `met.best_available_selection`, existing chunk
@@ -3560,52 +3573,46 @@ arrival.
 
 **Selection order (#2425).** Within one hypertable the runner walks eligible
 chunks newest `range_end` first; the hypertable order stays
-`(schema, name)`: `hydro.river_timeseries` → `hydro.river_timeseries_legacy`
-→ `met.*`. Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
+`(schema, name)`, which since 2026-09-19 is `hydro.river_timeseries` →
+`met.*` — `hydro.river_timeseries_legacy` was a member of that walk until
+`000060` dropped it. Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
 the same display watermark W, so retention's drop set is always the OLDEST
 prefix of compression's eligible set; oldest-first spent the slots on chunks
 retention dropped the same day (2026-09-16: 4 of 4; 2026-09-17: 3 of 4).
 Newest-first compresses chunks with ~19 days of life left.
 
-**Known risk: the legacy giant chunk (#1988), dated.** Once
-`hydro.river_timeseries` has fewer than 2 eligible uncompressed chunks, the
-free slot goes to `hydro.river_timeseries_legacy`. Its uncompressed 558 GB
-chunk `_hyper_3_110_chunk` (range 2026-09-10 → 2026-09-17) is
-compression-eligible from ~2026-09-19 and is dropped by retention ~2026-10-08.
-Between the river drain date (~2026-09-25) and ~2026-10-08, slot 2 can select
-it and every tick ends `rc=124`, seen only by the daily check or
-`systemctl --user show -p Result nhms-node27-timeseries-compression.service`
-(the unit has no `OnFailure=`). This trajectory is the same
-under oldest-first. Check before ~2026-09-25 and daily until the chunk is gone:
+**Retired risk: the legacy giant chunk (#1988).** This block described a
+`rc=124` trajectory in which slot 2 selected the uncompressed 558 GB chunk
+`_hyper_3_110_chunk` of `hydro.river_timeseries_legacy` once the river table ran
+out of eligible chunks, with a bound-1 override as the remedy. It became
+structurally impossible on 2026-09-19, when `000060` dropped the legacy table
+(receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md));
+the compression lane now walks only `hydro.river_timeseries` and `met.*`. Its
+detection SQL named `river_timeseries_legacy` in an `IN`-list, which is now
+simply a row that never matches, and its bound-1 remedy has nothing to protect
+against. Do not run either; the block's history is in git.
 
-```sql
-SELECT hypertable_name, chunk_name, range_end, is_compressed
-FROM timescaledb_information.chunks
-WHERE hypertable_schema = 'hydro'
-  AND hypertable_name IN ('river_timeseries', 'river_timeseries_legacy')
-  AND NOT is_compressed
-ORDER BY hypertable_name, range_end;
-```
-
-If `river_timeseries` shows fewer than 2 rows older than `W − 2 d` while
-`_hyper_3_110_chunk` is still listed, **set
-`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` in the live env** (with one
-river arrival per day, bound 1 never reaches the legacy table), and return to
-`2` once retention has dropped that chunk or #1988 has dropped the legacy
-table. The live env is the fence env
+The live env identification it relied on is still useful and is kept here: the
+live compression env is the fence env
 `~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
 before the D7 rebind and `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
 after it; `systemctl --user show -p Environment,ExecStart nhms-node27-timeseries-compression.service`
 tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
 `ExecStart` = before; an `/home/nwm/NWM` `ExecStart` with an empty
-`Environment=` = after. Record both env changes with the receipt of the next
+`Environment=` = after. Record any env change with the receipt of the next
 tick.
 
 **Invalidation conditions for this derivation.** Re-derive when the chunk
 interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
 wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
 changes (including a §4.5 override window), the retention window or timer
-changes, or a hypertable joins or leaves the lane.
+changes, or a hypertable joins or leaves the lane. **That last condition fired
+on 2026-09-19**: `hydro.river_timeseries_legacy` left the lane when `000060`
+dropped it. The bound-2 arithmetic above is not recomputed here — it was
+derived from the narrow one-day chunks, which are unchanged; what the drop
+removes is the legacy sibling that the retired risk block above guarded
+against.
 
 ---
 
@@ -5419,7 +5426,38 @@ in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
 forensic evidence run. This section governs incident catch-up on a lane that is
 already live. The two do not overlap and neither relaxes the other.
 
-### 4.6 River identity normalization: backfill + cutover (`#1339`)
+### 4.6 River identity normalization: backfill + cutover (`#1339`) — historical, never executed
+
+Archive status:
+- status: superseded
+- current_authority: db/migrations/000059_river_timeseries_narrow_expand.sql; db/migrations/000060_river_timeseries_contract.sql
+- superseded_by: docs/adr/0002-node27-timeseries-hot-cold-tiering.md, section "Amendment (2026-09-19)"
+- status_since: 2026-09-19
+- archive_scope: section, §4.6 through the paragraph before §4.7
+- retained_for: the 2.10.2 engine measurements and the #1339/#1476 fail-closed taxonomy, which are still the record of why the narrow store has the shape it has
+
+**This whole section is dead procedure. Do not execute any of it.** The
+identity switch it describes — an in-place cutover of the text-identity
+`hydro.river_timeseries` via `hydro.verify_river_identity_normalization()` and
+`hydro.cutover_river_identity_normalization()` — was written but **never ran**.
+No migration ever called either function; `000060_river_timeseries_contract.sql`
+dropped both (`:100-101`) on node-27 on 2026-09-19 alongside the table they
+would have operated on. The runner `scripts/node27_river_identity_backfill.py`
+that §4.6.2 drives was deleted by `timeseries-narrow-store-expand-contract`
+task 6.3 (`bd06c6dd`) and is no longer in the tree.
+
+What shipped instead is expand–contract, recorded in §4.10 (itself now history —
+its window has executed):
+`000059_river_timeseries_narrow_expand.sql` renamed the old table to
+`hydro.river_timeseries_legacy` and created a new key-only, one-day
+`hydro.river_timeseries` beside it; `000060` dropped the legacy table, both
+functions and `hydro.hydro_run.timeseries_store`. Window receipt:
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+
+Read on only for the engine facts: the 2.10.2 DDL refusals under
+`timescaledb.compress = true`, the measured `VALIDATE`/`SET NOT NULL` costs, and
+the fail-closed backfill taxonomy are real measurements and they are why the
+delivered design creates a new table rather than mutating one.
 
 Migration `000050_river_identity_normalization.sql` adds integer surrogate keys
 to the four authority tables, three native enums, and seven **nullable** columns
@@ -5580,7 +5618,18 @@ distinguished in `stop.stage`:
   committed before the refusal are kept, counted, and resumable — the receipt's
   `cursor` points at the batch that was refused.
 
-#### 4.6.3 Cutover (one-shot maintenance window)
+#### 4.6.3 Cutover (one-shot maintenance window) — dead procedure, never executed
+
+**Unrunnable as of 2026-09-19.** Step 3's
+`hydro.verify_river_identity_normalization()` and step 5's
+`hydro.cutover_river_identity_normalization()` were dropped by
+`000060_river_timeseries_contract.sql:100-101`; both calls now raise
+`function does not exist`. The table the sequence operates on was dropped in the
+same statement. This is not an annotation problem — the sequence has no valid
+execution path and is retained only as the record of the design that
+expand–contract replaced (§4.10; receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+The measured costs below are still true of TimescaleDB 2.10.2.
 
 There is **no work that can be done ahead of the window.** With
 `timescaledb.compress = true` in force, TimescaleDB 2.10.2 rejects
@@ -5670,15 +5719,24 @@ state and no compensating action to write.
 - [ ] Compression timer masked.
 - [ ] Low-peak window, display-read blocking announced.
 
-**Retiring the text foreign key early is a real, accepted loss.** TimescaleDB
-2.10.2 requires foreign-key columns to be covered by segmentby, and the target
-segmentby is integer-only, so
-`river_timeseries_river_segment_id_river_network_version_id_fkey` cannot
-survive the cutover (measured:
-`ERROR: column "river_segment_id" must be used for segmenting`). Between this
-cutover and the text-column-retirement issue, the fact table has no
-database-enforced referential link to `core.river_segment`. Recorded in the
-ADR 0002 amendment.
+**The foreign-key loss never happened.** This paragraph used to record, as an
+accepted cost, that the cutover would leave the fact table with no
+database-enforced referential link to `core.river_segment`. The cutover never
+ran, so the loss was never taken. The engine fact behind it is real —
+TimescaleDB 2.10.2 requires foreign-key columns to be covered by segmentby, and
+the cutover's target segmentby was integer-only, so
+`river_timeseries_river_segment_id_river_network_version_id_fkey` could not have
+survived it (measured:
+`ERROR: column "river_segment_id" must be used for segmenting`).
+
+The delivered narrow table sidesteps the rule instead of paying it: `000059`
+creates it key-only with both foreign keys inline (`:13`, `:16`) and a segmentby
+list (`run_key, river_segment_key`, `:62`) that **is** the foreign-key column
+set. Measured live on node-27 after `000060`, both are present and enforced:
+`river_timeseries_run_key_fkey` → `hydro.hydro_run(run_key)` and
+`river_timeseries_river_segment_key_fkey` → `core.river_segment(river_segment_key)`.
+`basin_version_key` and `river_network_version_key` carry no FK. Current
+authority: ADR 0002 "Amendment (2026-09-19)" and `pg_constraint` itself.
 
 ### 4.7 ingest 前沿 chunk 统计漂移 (`#1378`)
 
@@ -6292,7 +6350,27 @@ code/schema/read checks. Then restore only the originally active, authorized
 timers **last**, preserving enablement/mask/hold states. Persistent timers can
 fire immediately; never `enable --now` the whole family by default.
 
-#### 4.10.3 D12 reverse, before contract only
+#### 4.10.3 D12 reverse — historical; the contract executed 2026-09-19, this rollback option is gone
+
+Archive status:
+- status: historical baseline
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
+- superseded_by: none
+- status_since: 2026-09-19
+- archive_scope: section, §4.10.3 only
+- retained_for: the record of the rollback option that existed between expand and contract, and of the post-D12 re-forward that was actually exercised on 2026-09-15
+
+**Not executable.** Every object this procedure renames, updates or preserves is
+gone: `000060_river_timeseries_contract.sql` dropped
+`hydro.river_timeseries_legacy` (`:97`) and `hydro.hydro_run.timeseries_store`
+(`:106`) on node-27 on 2026-09-19, 16:06:50–16:07:35 CST, rc=0, ledger 60 → 61
+(receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+post-state `to_regclass('hydro.river_timeseries_legacy') -> None`). The rename
+pair below has nothing to rename back to, and the `UPDATE … SET
+timeseries_store = 'legacy'` targets a dropped column. The section's own closing
+sentence, "Contract removes this rollback option", is now past tense. **No
+successor rollback procedure exists in this runbook.**
 
 Repeat the same stop/drain and ingress fence. Preserve the narrow run identity
 list, fact values/keys/windows, original SHUD artifact digests and both OIDs.
@@ -6351,7 +6429,8 @@ new `narrow-routes-before-reverse.json`; cite the original D12 state as
 provenance again (nothing was written before reattach, so it still verifies).
 The DROP path above remains the only alternative, and is required before any
 from-scratch expand. No automatic ledger deletion, implicit reclassification
-or unreviewed recovery shortcut. Contract removes this rollback option.
+or unreviewed recovery shortcut. Contract removes this rollback option — and
+did, on 2026-09-19; see this subsection's archive block.
 
 **Transitional cold tier does not cover `_legacy`.** The canonical-only cold
 allowlist is unchanged; discovery by compression/retention is not cold-move
