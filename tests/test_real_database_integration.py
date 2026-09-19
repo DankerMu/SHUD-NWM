@@ -223,7 +223,11 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    apply_migrations_from_zero(throwaway_database_url)
+    # Pinned to match `post_expand_forecast_database`, which stops at 000059:
+    # that fixture needs `hydro.river_timeseries_legacy`, and an unpinned apply
+    # here would run 000060 first and leave the fixture's own (ledger-gated,
+    # hence no-op) apply staring at a contracted catalog.
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     object_root = tmp_path / "object-store"
     seed_issue_126_data(throwaway_database_url, object_root=object_root)
     post_expand_forecast_database({})
@@ -1273,7 +1277,11 @@ def _delete_shared_prefix_family(cursor: Any) -> None:
     cursor.execute("DELETE FROM hydro.river_timeseries rt USING core.river_segment rs "
                    "WHERE rs.river_segment_key = rt.river_segment_key "
                    "AND rs.river_network_version_id = 'it1468_rnv_v1'")
-    cursor.execute("DELETE FROM hydro.river_timeseries_legacy WHERE river_network_version_id = 'it1468_rnv_v1'")
+    # The matching `hydro.river_timeseries_legacy` delete is gone with the table
+    # (#1988 task 6.2, migration 000060). Its callers run on a fully migrated
+    # catalog, where the statement is an `UndefinedTable` inside a `finally`.
+    # Nothing is lost: `_seed_shared_prefix_family` seeds authority rows only,
+    # never fact rows, so both fact deletes always matched zero rows.
     cursor.execute("DELETE FROM core.river_segment WHERE river_network_version_id = 'it1468_rnv_v1'")
     cursor.execute("DELETE FROM core.river_network_version WHERE river_network_version_id = 'it1468_rnv_v1'")
     cursor.execute("DELETE FROM core.basin_version WHERE basin_version_id = 'it1468_basin_v1'")

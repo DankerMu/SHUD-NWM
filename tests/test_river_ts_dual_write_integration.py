@@ -1,4 +1,13 @@
-"""Disposable-database coverage of narrow writes and compressed-key access."""
+"""Disposable-database coverage of narrow writes and compressed-key access.
+
+Migration pins here are load-bearing. Cases that read or write
+``hydro.river_timeseries_legacy`` / ``hydro_run.timeseries_store``, or that
+replay 000059's own SQL, stop at ``through="000059"``: 000060 (the #1988
+contract) drops both objects, and an unpinned ``apply_migrations_from_zero``
+would carry the catalog past the transitional world those cases are about.
+Cases that only exercise the post-contract surface stay unpinned on purpose, so
+they keep running against the final schema.
+"""
 
 from __future__ import annotations
 
@@ -180,7 +189,7 @@ def _parse(database_url: str, root: Path) -> Any:
 @pytest.fixture()
 def parsed_run(throwaway_database_url: str, tmp_path: Path) -> Any:
     """A migrated database with authority rows and one parsed run."""
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = _connect(throwaway_database_url)
     _seed_authority(connection, output_uri=f"{_OBJECT_STORE_PREFIX}/runs/{_RUN_ID}/output/")
     result = _parse(throwaway_database_url, tmp_path / "object-store")
@@ -427,7 +436,7 @@ def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
 
 @pytest.fixture()
 def compressed_history(throwaway_database_url: str) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = _connect(throwaway_database_url)
     try:
         yield connection, _seed_compressed_history_and_new_run(connection)
@@ -609,7 +618,7 @@ def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
         assert _scalar(connection, "SELECT count(*) FROM information_schema.columns "
                        "WHERE table_schema='hydro' AND table_name='hydro_run' "
                        "AND column_name='timeseries_store'") == 0
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         _parse(throwaway_database_url, tmp_path)
         facts = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time")
         assert len(facts) == _SEGMENTS * _HOURS
@@ -638,7 +647,7 @@ def test_a_historical_legacy_decline_is_governed_by_its_key_not_by_the_column(
     """
     from scripts.node27_autopipeline import _decline_key, _declined_runs
 
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     # NOT `_connect`: `_declined_runs` reads its rows positionally (`row[0]`),
     # which is how the production cursor behaves and what a `RealDictRow` would
     # turn into `KeyError: 0`. `_scalar` handles both row shapes.
@@ -693,7 +702,7 @@ def test_expand_classifies_preexisting_authority_without_overrides(throwaway_dat
             {"run_id": "run_dual_write", "timeseries_store": "legacy"},
             {"run_id": "running_only", "timeseries_store": "narrow"},
         ]
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         for _ in range(2):
             assert _rows(connection, "SELECT run_id, timeseries_store FROM hydro.hydro_run ORDER BY run_id") == expected
             with connection.cursor() as cursor:
@@ -739,7 +748,7 @@ def test_expand_preserves_preexisting_compressed_legacy_catalog(throwaway_databa
 
         before = snapshot("river_timeseries")
         assert before["chunks"] and all(row["is_compressed"] for row in before["chunks"])
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         assert snapshot("river_timeseries_legacy") == before
         assert _scalar(
             connection, "SELECT pg_get_userbyid(relowner) FROM pg_class "
@@ -865,7 +874,7 @@ def test_seed_database_roundtrips_exact_river_authorities_postexpand(throwaway_d
     from db.seeds import seed_demo
     from tests.test_seed import _expected_river_seed_samples
 
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = psycopg2.connect(throwaway_database_url)
     try:
         # Distinct identity domains make even cross-column key swaps visible.

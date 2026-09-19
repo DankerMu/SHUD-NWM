@@ -197,7 +197,12 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
-    "tests/integration_helpers.py": 9,
+    # 9 until #1988's contract coverage added the fixture's own pre-contract
+    # guard: a `to_regclass` catalog probe and the message it fails with, both
+    # of which spell `hydro.river_timeseries_legacy` and so count here. Neither
+    # reads the fact table; both are pinned by
+    # `test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums`.
+    "tests/integration_helpers.py": 11,
     # river_ts_render.py 1 = RIVER_TABLE. It was two until #1342's contract
     # (task 6.3) deleted `RIVER_TABLE_LEGACY`; `_river_table_mentions` matches a
     # PREFIX of the name (the `_legacy` literal opened with the canonical one),
@@ -1615,8 +1620,17 @@ def test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums() ->
         function="post_expand_forecast_database",
         needle="hydro.river_timeseries",
     )
-    assert len(statements) == 3
-    narrow_copy, copy, decoys = statements
+    assert len(statements) == 5
+    pin_probe, pin_message, narrow_copy, copy, decoys = statements
+    # The first two arrived with #1988's contract coverage and are NOT fact
+    # reads: a catalog probe that fails the fixture closed when its caller
+    # skipped the `through="000059"` pin, plus the message it raises. They are
+    # registered here because the census counts every mention of the fact
+    # table's name, a message included. Pinning the probe's shape is what keeps
+    # it a catalog lookup: `to_regclass` takes the name as a VALUE, so no
+    # rewrite of it can grow a text-identity predicate on the fact table.
+    assert pin_probe == "SELECT to_regclass('hydro.river_timeseries_legacy') AS legacy"
+    assert 'through="000059"' in pin_message
     assert "FROM hydro.river_timeseries_legacy" in narrow_copy
     assert "INSERT INTO hydro.river_timeseries_legacy" in copy
     assert "FROM hydro.river_timeseries rt" in copy

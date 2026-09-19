@@ -69,9 +69,33 @@ def post_expand_forecast_database(
     """Route mixed facts; historical goldens may first stop at migration 000058."""
 
     def prepare(store_overrides: Mapping[str, str]) -> None:
-        apply_migrations_from_zero(throwaway_database_url)
+        # Pinned at 000059 on purpose. This fixture models the world BETWEEN
+        # expand (000059) and contract (000060): it reads and writes
+        # `hydro.river_timeseries_legacy` and `hydro_run.timeseries_store`,
+        # which 000060 drops. That transitional state still exists inside every
+        # from-zero rebuild, so pinning keeps the semantics a rewrite would
+        # throw away. Callers that apply migrations themselves before invoking
+        # `prepare` must pin to the same version, or the ledger will already be
+        # past 000060 and this call becomes a no-op over a contracted catalog.
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         with psycopg_connection(throwaway_database_url) as connection:
             with connection.cursor() as cursor:
+                # The pin above is only effective if THIS call is the first
+                # apply. When the caller already ran an unpinned
+                # `apply_migrations_from_zero`, the ledger is past 000060, the
+                # apply above executes nothing, and the transitional surface is
+                # gone. Without this assertion the next statement fails as
+                # `UndefinedTable` on an INSERT, which names neither the pin
+                # nor the fixture.
+                cursor.execute("SELECT to_regclass('hydro.river_timeseries_legacy') AS legacy")
+                legacy = cursor.fetchone()
+                assert legacy is not None and next(iter(legacy.values())) is not None, (
+                    "post_expand_forecast_database needs the pre-contract catalog, but "
+                    "hydro.river_timeseries_legacy is already gone: 000060 has been applied. "
+                    "A caller that applies migrations itself must pin the same version this "
+                    'fixture does — apply_migrations_from_zero(url, through="000059") — '
+                    "before calling prepare()."
+                )
                 cursor.execute(
                     """
                     INSERT INTO hydro.river_timeseries (
