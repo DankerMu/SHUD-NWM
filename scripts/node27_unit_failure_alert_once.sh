@@ -11,6 +11,12 @@
 # not a problem worth a state machine (that complexity belongs to the frontier
 # stall lane, which alerts on a continuous condition).
 #
+# Journal scope (#2360): the SYSTEM unit nhms-node27-canonical-retention.service
+# alerts through infra/systemd/system/nhms-node27-system-unit-failure-alert@.service,
+# which runs this same handler as nwm (+systemd-journal) with
+# NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system, so the quoted lines come from
+# `journalctl -u`. Any other value, or unset, keeps `journalctl --user -u`.
+#
 # The mail channel is the frontier lane's, verbatim: `$NHMS_FRONTIER_SENDMAIL
 # -t -i` with NHMS_ALERT_EMAIL_TO / NHMS_ALERT_EMAIL_FROM, proven live by a
 # tick every 30 min. No second channel is introduced, and NONE of the three is
@@ -93,7 +99,11 @@ fi
 # Journal context is best effort: on a host without journalctl (or with the
 # unit's journal already rotated away) the alert must still go out naming the
 # failed unit.
-JOURNAL=$(journalctl --user -u "$FAILED_UNIT" -n "$JOURNAL_LINES" --no-pager 2>&1 || true)
+if [ "${NHMS_UNIT_FAILURE_JOURNAL_SCOPE:-}" = "system" ]; then
+  JOURNAL=$(journalctl -u "$FAILED_UNIT" -n "$JOURNAL_LINES" --no-pager 2>&1 || true)
+else
+  JOURNAL=$(journalctl --user -u "$FAILED_UNIT" -n "$JOURNAL_LINES" --no-pager 2>&1 || true)
+fi
 if [ -z "$JOURNAL" ]; then
   JOURNAL="(no journal context available for $SAFE_UNIT)"
 fi

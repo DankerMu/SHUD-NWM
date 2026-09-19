@@ -1,0 +1,32 @@
+created throwaway database throwaway_1989_20260918052608_1033844
+Timing is on.
+CREATE EXTENSION
+Time: 698.584 ms
+CREATE TABLE
+Time: 174.440 ms
+CREATE TABLE
+Time: 124.974 ms
+Timing is on.
+INSERT 0 42029
+Time: 2814.674 ms (00:02.815)
+INSERT 0 8653
+Time: 300.069 ms
+=== seeded footprint (target: met_station 325 MB heap / 343 MB total; forcing_version 15 MB / 16 MB) ===
+forcing_version heap=17 MB idx=336 kB total=17 MB
+met_station heap=11 MB idx=2072 kB total=13 MB
+
+=== ALTER ... ADD COLUMN ... IDENTITY UNIQUE: wall time and lock ===
+Timing is on.
+LOCKS AccessExclusiveLock,ShareLock
+ALTER TABLE
+Time: 734.292 ms
+Timing is on.
+LOCKS AccessExclusiveLock,ShareLock
+ALTER TABLE
+Time: 625.557 ms
+
+=== footprint after the adds ===
+forcing_version heap=17 MB idx=416 kB total=17 MB
+met_station heap=11 MB idx=2152 kB total=13 MB
+=== IDENTITY DONE ===
+dropped throwaway_1989_20260918052608_1033844

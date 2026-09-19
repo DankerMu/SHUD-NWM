@@ -29,6 +29,11 @@ execute-only behaviour: ``NODE27_RAW_RETENTION_ENABLED`` (default true) and
 ``NODE27_RAW_RETENTION_PLAN_ONLY`` (default false). The cutoff anchor is the
 display watermark, not the pipeline frontier; every summary discloses that
 choice and its residual risk in its ``anchor`` block (issue #1407).
+
+``NODE27_RAW_RETENTION_LANES`` (issue #2360) selects a subset of
+``raw,canonical,precip-cache``; unset means all three. node-27 runs the
+canonical lane in a system unit as the copyback root's owner and the other two
+in the ``nwm`` user unit, both on the same cutoff rule.
 """
 
 from __future__ import annotations
@@ -71,6 +76,10 @@ CANONICAL_LANE_KEY = "canonical"
 CANONICAL_LANE_REASON = "canonical_cycle_aged_out"
 PRECIP_CACHE_LANE_KEY = "precip-cache"
 PRECIP_CACHE_LANE_REASON = "precip_cache_aged_out"
+# `NODE27_RAW_RETENTION_LANES` vocabulary (#2360): the lane key prefixes above.
+# Unset selects all three, which is the pre-#2360 run byte for byte.
+ALL_LANES = frozenset({RAW_LANE_KEY, CANONICAL_LANE_KEY, PRECIP_CACHE_LANE_KEY})
+LANE_NOT_SELECTED_REASON = "lane_not_selected"
 # The one directory name under `canonical/<S>/` that is never a cycle: grid
 # definitions are not reproducible from node-27, so they are pinned out of the
 # target set explicitly instead of relying on `_parse_cycle_name` alone.
@@ -126,6 +135,11 @@ class RawRetentionConfig:
     # blocker, so the first production tick after deploy still prunes raw and
     # canonical instead of returning zero deletions.
     precip_cache_root: Path | None = None
+    # Lane selection (#2360, env-only like the gates above). On node-27 the
+    # canonical lane runs in its own system unit as the copyback root's owner
+    # and the nwm user unit runs raw + precip-cache; an unselected lane is one
+    # `lane_not_selected` skip and is never probed, listed or locked.
+    lanes: frozenset[str] = ALL_LANES
 
 
 @dataclass(frozen=True)
@@ -160,6 +174,25 @@ def _split_sources(raw: str | None) -> frozenset[str]:
     values = raw if raw not in (None, "") else ",".join(DEFAULT_SOURCES)
     sources = {item.strip().lower() for item in str(values).split(",") if item.strip()}
     return frozenset(sources or DEFAULT_SOURCES)
+
+
+def _split_lanes(raw: str | None) -> tuple[frozenset[str] | None, dict[str, Any] | None]:
+    """The selected lanes, or the `lanes` preflight blocker.
+
+    Unset is all three lanes. A set value is fail-closed: exact names only, and
+    a value that trims to nothing is refused rather than read as "all" -- a
+    blank line in the env file must not silently widen a canonical-only unit.
+    """
+    if raw is None:
+        return ALL_LANES, None
+    names = [item.strip() for item in raw.split(",")]
+    lanes = frozenset(name for name in names if name)
+    if not lanes:
+        return None, {"field": "lanes", "reason": "empty"}
+    unknown = sorted(lanes - ALL_LANES)
+    if unknown:
+        return None, {"field": "lanes", "reason": "unknown_lane", "value": unknown}
+    return lanes, None
 
 
 def _parse_cycle_name(name: str) -> datetime | None:
@@ -241,7 +274,11 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
     cache_value = (os.getenv(FILE_CACHE_DIR_ENV) or "").strip()
     precip_cache_root = Path(cache_value).expanduser() if cache_value else None
 
-    if blockers or resolved_root is None:
+    lanes, lanes_blocker = _split_lanes(os.getenv("NODE27_RAW_RETENTION_LANES"))
+    if lanes_blocker is not None:
+        blockers.append(lanes_blocker)
+
+    if blockers or resolved_root is None or lanes is None:
         return None, blockers
     return (
         RawRetentionConfig(
@@ -256,6 +293,7 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
             # name any such leftover line is inert.
             dry_run=_env_flag("NODE27_RAW_RETENTION_PLAN_ONLY", default=False),
             precip_cache_root=precip_cache_root,
+            lanes=lanes,
         ),
         [],
     )
@@ -519,14 +557,22 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
 
     Raw, canonical and PNG-cache targets are collected together so a cycle's
     mirror directory and its rendered PNGs are removed by the same tick.
+    With `NODE27_RAW_RETENTION_LANES` two units split the lanes (#2360); both
+    keep this one cutoff rule, so the pair still ages out on the same date.
+    A lane outside `config.lanes` is recorded in its usual position and its
+    root is never touched.
     """
     cutoff = now.astimezone(UTC) - timedelta(days=config.retention_days)
     skipped: list[dict[str, Any]] = []
     targets: list[RetentionTarget] = []
 
-    raw_root, raw_blocker = _resolve_lane_root(
-        config.object_store_root / "raw", key=RAW_LANE_KEY, prefix="raw"
-    )
+    if RAW_LANE_KEY not in config.lanes:
+        skipped.append({"key": RAW_LANE_KEY, "reason": LANE_NOT_SELECTED_REASON})
+        raw_root, raw_blocker = None, None
+    else:
+        raw_root, raw_blocker = _resolve_lane_root(
+            config.object_store_root / "raw", key=RAW_LANE_KEY, prefix="raw"
+        )
     if raw_blocker is not None:
         skipped.append(raw_blocker)
     elif raw_root is not None:
@@ -534,9 +580,13 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
         targets.extend(lane_targets)
         skipped.extend(lane_skipped)
 
-    canonical_root, canonical_blocker = _resolve_lane_root(
-        config.object_store_root / "canonical", key=CANONICAL_LANE_KEY, prefix="canonical"
-    )
+    if CANONICAL_LANE_KEY not in config.lanes:
+        skipped.append({"key": CANONICAL_LANE_KEY, "reason": LANE_NOT_SELECTED_REASON})
+        canonical_root, canonical_blocker = None, None
+    else:
+        canonical_root, canonical_blocker = _resolve_lane_root(
+            config.object_store_root / "canonical", key=CANONICAL_LANE_KEY, prefix="canonical"
+        )
     if canonical_blocker is not None:
         skipped.append(canonical_blocker)
     elif canonical_root is not None:
@@ -551,6 +601,11 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
         targets.extend(lane_targets)
         skipped.extend(lane_skipped)
 
+    if PRECIP_CACHE_LANE_KEY not in config.lanes:
+        # Checked before the unconfigured-root branch: an unselected lane says
+        # so, whatever its root setting.
+        skipped.append({"key": PRECIP_CACHE_LANE_KEY, "reason": LANE_NOT_SELECTED_REASON})
+        return targets, skipped
     if config.precip_cache_root is None:
         skipped.append({"key": PRECIP_CACHE_LANE_KEY, "reason": "precip_cache_root_unconfigured"})
         return targets, skipped
@@ -670,6 +725,9 @@ def run_retention(
             None if config.precip_cache_root is None else str(config.precip_cache_root)
         ),
         "sources": sorted(config.sources),
+        # Which lanes this run owns (#2360): on node-27 two units write
+        # summaries, and this field says which one wrote it.
+        "lanes": sorted(config.lanes),
         "retention_days": config.retention_days,
         "cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "enabled": config.enabled,
@@ -712,9 +770,10 @@ def run_retention(
                     shutil.rmtree(target.path)
             except CopybackLockError as error:
                 # Timeout, unsafe/unopenable lock file, or a spent pass budget:
-                # the tree is kept for the next tick. `lock_unsafe` is the
-                # steady state while this unit does not run as the copyback
-                # root's owner, because the lock file is `0600` owned by it.
+                # the tree is kept for the next tick. `lock_unsafe` is what a
+                # canonical lane run by anyone but the copyback root's owner
+                # gets, because the lock file is `0600` owned by it; on node-27
+                # that lane runs in its own unit as that owner (#2360).
                 failed.append(
                     {
                         **payload,

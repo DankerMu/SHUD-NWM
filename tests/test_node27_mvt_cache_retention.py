@@ -10,6 +10,7 @@ level deeper than `<root>/<hh>/`.
 from __future__ import annotations
 
 import ast
+import errno
 import fcntl
 import json
 import os
@@ -437,6 +438,141 @@ def test_already_gone_keeps_the_exit_code_at_zero(
 
 
 # ---------------------------------------------------------------------------
+# Scenario: every system call after the lock open is classified (#2160)
+# ---------------------------------------------------------------------------
+def test_a_failing_fstat_on_a_lock_target_is_failed_and_the_summary_is_still_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An NFS `ESTALE` from the `fstat` right after the open must not escape
+    `run_retention`: an escape skips `_emit`, so no summary is written and the
+    health check reads yesterday's receipt as today's."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    aged_pbf = _touch(root / "ab" / f"{_SHA_B}.pbf", mtime=_AGED)
+    summary = tmp_path / "receipts" / "summary.json"
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open_lock_fd = runner._open_lock_fd
+    real_fstat = os.fstat
+    real_close = os.close
+
+    def recording_open(path: Path) -> int:
+        fd = real_open_lock_fd(path)
+        opened.append(fd)
+        return fd
+
+    def stale_fstat(fd: int) -> os.stat_result:
+        if fd in opened:
+            raise OSError(errno.ESTALE, os.strerror(errno.ESTALE))
+        return real_fstat(fd)
+
+    def recording_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "_open_lock_fd", recording_open)
+        patch.setattr(os, "fstat", stale_fstat)
+        patch.setattr(os, "close", recording_close)
+        exit_code = runner.main(
+            ["--reference-time", "2026-09-08T12:00:00Z", "--summary-path", str(summary)]
+        )
+    capsys.readouterr()
+
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert payload["status"] == "completed"
+    assert payload["counts"]["failed"] == 1
+    assert payload["failed"] == [
+        {
+            "path": str(lock_path),
+            "kind": "lock",
+            "error": payload["failed"][0]["error"],
+            "error_type": "OSError",
+        }
+    ]
+    assert f"[Errno {errno.ESTALE}]" in payload["failed"][0]["error"]
+    # The descriptor is closed on this path too, and the lock file survives.
+    assert len(opened) == 1
+    assert opened[0] in closed
+    assert lock_path.exists()
+    # The other targets are still processed.
+    assert _paths(payload["deleted"]) == [str(aged_pbf)]
+    assert not aged_pbf.exists()
+
+
+def test_a_post_lock_identity_check_error_is_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `lstat` recheck runs only after the `flock` succeeded; an `OSError`
+    other than ENOENT there is `failed`, and nothing is unlinked."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    calls: list[str] = []
+    real_flock = fcntl.flock
+    real_lstat = os.lstat
+
+    def recording_flock(fd: int, operation: int) -> None:
+        calls.append("flock")
+        real_flock(fd, operation)
+
+    def failing_lstat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if str(path) == str(lock_path):
+            calls.append("lstat")
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fcntl, "flock", recording_flock)
+        patch.setattr(os, "lstat", failing_lstat)
+        payload = runner.run_retention(_config(root), now=_NOW)
+
+    assert calls == ["flock", "lstat"]
+    assert payload["failed"] == [
+        {
+            "path": str(lock_path),
+            "kind": "lock",
+            "error": payload["failed"][0]["error"],
+            "error_type": "OSError",
+        }
+    ]
+    assert f"[Errno {errno.EIO}]" in payload["failed"][0]["error"]
+    assert payload["deleted"] == []
+    assert payload["skipped"] == []
+    assert lock_path.exists()
+
+
+def test_a_lock_file_removed_while_the_runner_holds_it_is_already_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external `rm` between the identity recheck and the unlink: the final
+    `unlink` gets ENOENT, which is `already_gone`, never `failed`."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    real_unlink = os.unlink
+    raced: list[str] = []
+
+    def raced_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if str(path) == str(lock_path):
+            raced.append(str(path))
+            real_unlink(path)
+        real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", raced_unlink)
+        payload = runner.run_retention(_config(root), now=_NOW)
+
+    assert raced == [str(lock_path)]
+    assert payload["skipped"] == [
+        {"path": str(lock_path), "kind": "lock", "reason": "already_gone"}
+    ]
+    assert payload["failed"] == []
+    assert payload["deleted"] == []
+    assert not lock_path.exists()
+
+
+# ---------------------------------------------------------------------------
 # Scenario: a symlinked / missing `.locks` retires only the lock lane
 # ---------------------------------------------------------------------------
 def test_a_symlinked_locks_directory_retires_only_the_lock_lane(tmp_path: Path) -> None:
@@ -611,6 +747,187 @@ def test_an_unreadable_cache_root_is_a_failure_not_a_clean_zero(
         }
     ]
     assert survivor.exists()
+
+
+def _replace_directory(directory: Path, replacement: str) -> None:
+    """Really remove `directory`, or really swap a regular file in for it, so
+    the `os.scandir` that follows raises the kernel's own errno."""
+    shutil.rmtree(directory)
+    if replacement == "file":
+        directory.write_bytes(b"not a directory any more")
+
+
+_REPLACEMENT_ERRORS = {"removed": FileNotFoundError, "file": NotADirectoryError}
+
+
+def _racing_scandir(vanishing: Path, replacement: str) -> Any:
+    """An `os.scandir` that lets the parent list `vanishing` and then removes
+    it right before its own listing -- the interleaving of an operator's
+    `rm -rf` landing mid-tick. Only the timing is injected; the error is real."""
+    real_scandir = os.scandir
+
+    def racing_scandir(path: Any = ".") -> Any:
+        if str(path) == str(vanishing) and vanishing.is_dir():
+            _replace_directory(vanishing, replacement)
+        return real_scandir(path)
+
+    return racing_scandir
+
+
+@pytest.mark.parametrize("replacement", ["removed", "file"])
+@pytest.mark.parametrize("lane", ["tile", "lock"])
+def test_a_hex_directory_removed_mid_run_is_the_race_not_a_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    lane: str,
+    replacement: str,
+) -> None:
+    """The same race as a single entry vanishing mid-scan, one level up: a
+    `<hh>` that is gone holds no aged files, so it is neither a target source
+    nor a failure. rc stays 0 and the siblings still prune."""
+    root = tmp_path / "cache"
+    tile_in_ab = _touch(root / "ab" / f"{_SHA_A}.pbf", mtime=_AGED)
+    lock_in_ab = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    sibling_pbf = _touch(root / "cd" / f"{_SHA_B}.pbf", mtime=_AGED)
+    sibling_lock = _touch(root / ".locks" / "cd" / f"{_SHA_B}.lock", mtime=_AGED, content=b"")
+    vanishing = root / "ab" if lane == "tile" else root / ".locks" / "ab"
+    untouched = lock_in_ab if lane == "tile" else tile_in_ab
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", _racing_scandir(vanishing, replacement))
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert (vanishing.is_file() if replacement == "file" else not vanishing.exists())
+    assert exit_code == 0
+    assert payload["failed"] == []
+    assert payload["counts"]["failed"] == 0
+    assert sorted(_paths(payload["deleted"])) == sorted(
+        [str(sibling_pbf), str(sibling_lock), str(untouched)]
+    )
+    assert not sibling_pbf.exists()
+    assert not sibling_lock.exists()
+
+
+@pytest.mark.parametrize("replacement", ["removed", "file"])
+@pytest.mark.parametrize("which", ["cache_root", "locks_root"])
+def test_the_cache_root_and_locks_directory_themselves_are_never_exempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    which: str,
+    replacement: str,
+) -> None:
+    """The `<hh>` exemption must not reach the two directories above it. No
+    display worker ever removes the cache root or `.locks`, so either one
+    vanishing after preflight / after `_locks_root_skip` is not the
+    concurrent-miss race; it stays `enumeration_unavailable` and rc 1."""
+    root = tmp_path / "cache"
+    _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    sibling_pbf = _touch(root / "cd" / f"{_SHA_B}.pbf", mtime=_AGED)
+    vanishing = root if which == "cache_root" else root / ".locks"
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", _racing_scandir(vanishing, replacement))
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["status"] == "completed"
+    assert payload["failed"] == [
+        {
+            "path": str(vanishing),
+            "kind": None,
+            "reason": "enumeration_unavailable",
+            "error": payload["failed"][0]["error"],
+            "error_type": _REPLACEMENT_ERRORS[replacement].__name__,
+        }
+    ]
+    if which == "locks_root":
+        # The tile lane had already run; only the lock lane lost its listing.
+        assert _paths(payload["deleted"]) == [str(sibling_pbf)]
+        assert payload["skipped"] == []
+    else:
+        assert payload["deleted"] == []
+
+
+@pytest.mark.parametrize("lane", ["tile", "lock"])
+def test_a_stale_hex_directory_is_still_an_enumeration_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    lane: str,
+) -> None:
+    """Only ENOENT / ENOTDIR are exempt on a `<hh>`; an NFS `ESTALE` there
+    still hides an unknown number of aged files."""
+    root = tmp_path / "cache"
+    _touch(root / "ab" / f"{_SHA_A}.pbf", mtime=_AGED)
+    _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    stale = root / "ab" if lane == "tile" else root / ".locks" / "ab"
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    real_scandir = os.scandir
+
+    def stale_scandir(path: Any = ".") -> Any:
+        if str(path) == str(stale):
+            raise OSError(errno.ESTALE, os.strerror(errno.ESTALE), str(path))
+        return real_scandir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", stale_scandir)
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["failed"] == [
+        {
+            "path": str(stale),
+            "kind": None,
+            "reason": "enumeration_unavailable",
+            "error": payload["failed"][0]["error"],
+            "error_type": "OSError",
+        }
+    ]
+    assert f"[Errno {errno.ESTALE}]" in payload["failed"][0]["error"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory anyway")
+def test_an_unreadable_locks_directory_fails_the_run_and_the_tile_lane_still_prunes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`.locks` itself `lstat`s fine (its parent is readable), so
+    `_locks_root_skip` lets the lane run and the `scandir` gets `EACCES`. That
+    is a failure, not the `locks_root_unsafe` lane skip, and not silence."""
+    root = tmp_path / "cache"
+    locks_root = root / ".locks"
+    hidden_lock = _touch(locks_root / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    sibling_pbf = _touch(root / "cd" / f"{_SHA_B}.pbf", mtime=_AGED)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    locks_root.chmod(0o000)
+    try:
+        assert stat.S_ISDIR(os.lstat(locks_root).st_mode)
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        locks_root.chmod(0o755)
+
+    assert exit_code == 1
+    assert payload["failed"] == [
+        {
+            "path": str(locks_root),
+            "kind": None,
+            "reason": "enumeration_unavailable",
+            "error": payload["failed"][0]["error"],
+            "error_type": "PermissionError",
+        }
+    ]
+    assert set(payload["failed"][0]) == _ENUMERATION_FAILURE_KEYS
+    assert payload["skipped"] == []
+    assert _paths(payload["deleted"]) == [str(sibling_pbf)]
+    assert not sibling_pbf.exists()
+    assert hidden_lock.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1179,10 +1496,11 @@ def _flock_shim(tmp_path: Path, *, exit_code: int) -> Path:
     return bin_dir
 
 
-def _run_wrapper(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_wrapper(env: dict[str, str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["/bin/bash", str(_WRAPPER_PATH)],
         env=env,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -1330,6 +1648,54 @@ def test_wrapper_sources_the_env_file_and_creates_the_log_root(tmp_path: Path) -
     log_text = (sourced / "mvt-cache-retention.log").read_text(encoding="utf-8")
     assert "RUNNER_INVOKED args=" in log_text
     assert f"--summary-path {sourced}/mvt-cache-retention-" in log_text
+
+
+def _porcelain(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+@pytest.mark.parametrize(
+    ("variable", "relative", "reason"),
+    [
+        ("NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH", "summary.json", "SUMMARY_PATH_NOT_ABSOLUTE"),
+        ("NODE27_MVT_CACHE_RETENTION_LOG_FILE", "wrapper.log", "LOG_FILE_NOT_ABSOLUTE"),
+        ("NODE27_MVT_CACHE_RETENTION_LOCK_PATH", "wrapper.lock", "LOCK_PATH_NOT_ABSOLUTE"),
+    ],
+)
+def test_wrapper_refuses_a_relative_summary_log_or_lock_path(
+    tmp_path: Path, variable: str, relative: str, reason: str
+) -> None:
+    """The wrapper `cd`s into the repository before the runner, and `exec 9>`
+    plus the first log line resolve against the caller's cwd before that; a
+    relative value would drop a file into the git work tree every tick. The
+    subprocess runs FROM the stand-in repo so both resolutions land there, and
+    that repo's own `git status --porcelain` is the oracle."""
+    repo = _wrapper_repo(tmp_path)
+    subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, check=True)
+    env_file = tmp_path / "runner.env"
+    env_file.write_text("", encoding="utf-8")
+    env_file.chmod(0o600)
+    bin_dir = _flock_shim(tmp_path, exit_code=0)
+    env = _wrapper_env(tmp_path, repo, env_file, bin_dir=bin_dir)
+    env[variable] = relative
+    before = _porcelain(repo)
+
+    result = _run_wrapper(env, cwd=repo)
+
+    assert result.returncode == 2
+    combined = _wrapper_output(tmp_path, result)
+    assert f"BLOCKED rc=2 reason={reason}" in combined
+    assert "RUNNER_INVOKED" not in combined
+    assert _porcelain(repo) == before
+    assert not (repo / relative).exists()
+    # Refused before the lock is taken and before any log line is written.
+    assert not (tmp_path / "wrapper.lock").exists()
+    assert not (tmp_path / "logs" / "wrapper.log").exists()
 
 
 def test_wrapper_never_opens_the_lock_file_with_o_creat_in_the_runner() -> None:

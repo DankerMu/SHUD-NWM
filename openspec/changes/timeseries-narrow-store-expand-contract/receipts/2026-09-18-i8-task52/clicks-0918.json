@@ -1,0 +1,89 @@
+[
+  {
+    "label": "large-shj-nj",
+    "network": "basins_shj_nj_rivnet_vbasins",
+    "segments": 32018,
+    "zoom": 11,
+    "rendered_features_in_view": 244,
+    "clicked": {
+      "segment_id": "basins_shj_nj_shud_shud_riv_007727",
+      "river_segment_id": "basins_shj_nj_shud_shud_riv_007727",
+      "river_network_version_id": "basins_shj_nj_rivnet_vbasins",
+      "basin_version_id": "basins_shj_nj_vbasins",
+      "Type": 1
+    },
+    "click_to_settled_ms": 5704,
+    "forecast_series_calls": 2,
+    "statuses": [
+      200,
+      200
+    ],
+    "runs": [
+      "fcst_gfs_2026091700_dg_6f9ed9377bd5e52240d3ebfc17291e28",
+      "fcst_ifs_2026091700_dg_cb042bbe7af7a3ad4fd0b2448ad6fb49"
+    ],
+    "sources_seen": [
+      "gfs",
+      "ifs"
+    ],
+    "non_2xx": []
+  },
+  {
+    "label": "medium-qhh",
+    "network": "basins_qhh_rivnet_vbasins",
+    "segments": 3266,
+    "zoom": 11,
+    "rendered_features_in_view": 230,
+    "clicked": {
+      "segment_id": "basins_qhh_shud_shud_riv_000950",
+      "river_segment_id": "basins_qhh_shud_shud_riv_000950",
+      "river_network_version_id": "basins_qhh_rivnet_vbasins",
+      "basin_version_id": "basins_qhh_vbasins",
+      "Type": 2
+    },
+    "click_to_settled_ms": 4769,
+    "forecast_series_calls": 2,
+    "statuses": [
+      200,
+      200
+    ],
+    "runs": [
+      "fcst_gfs_2026091700_dg_0883c7e9c1006c6fd347df500315e9df",
+      "fcst_ifs_2026091700_dg_9ccb261a39d51c24f4de9173fb4461b6"
+    ],
+    "sources_seen": [
+      "gfs",
+      "ifs"
+    ],
+    "non_2xx": []
+  },
+  {
+    "label": "small-tailanhe",
+    "network": "basins_tailanhe_rivnet_vbasins",
+    "segments": 126,
+    "zoom": 11,
+    "rendered_features_in_view": 68,
+    "clicked": {
+      "segment_id": "basins_tailanhe_shud_shud_riv_000001",
+      "river_segment_id": "basins_tailanhe_shud_shud_riv_000001",
+      "river_network_version_id": "basins_tailanhe_rivnet_vbasins",
+      "basin_version_id": "basins_tailanhe_vbasins",
+      "Type": 2
+    },
+    "click_to_settled_ms": 4570,
+    "forecast_series_calls": 2,
+    "statuses": [
+      200,
+      200
+    ],
+    "runs": [
+      "fcst_gfs_2026091700_dg_510fbd39433e9cd2ee948980efd523e1",
+      "fcst_ifs_2026091700_dg_7e247591d8fae09dc8db71482c73efee"
+    ],
+    "sources_seen": [
+      "gfs",
+      "ifs"
+    ],
+    "non_2xx": []
+  }
+]

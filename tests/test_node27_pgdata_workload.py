@@ -133,6 +133,12 @@ def _named_sql(
     segment_key: str = "river_segment_id",
     network_key: str = "river_network_version_id",
 ) -> str:
+    # The segment/network identity binds through the AUTHORITY sub-selects the
+    # fact table's surrogate keys resolve against. It used to bind on two
+    # transitional text conjuncts (`rt.river_segment_id` /
+    # `rt.river_network_version_id`) as well, which #1342's contract (task 6.3)
+    # deleted; this stand-in tracks the production spelling so a validator that
+    # accepted it would accept the shipped statement too.
     return f"""
         SELECT rt.valid_time
         FROM hydro.river_timeseries rt
@@ -143,8 +149,15 @@ def _named_sql(
           AND rt.valid_time <= %(end_time)s
           AND h.run_id = %({run_key})s
           AND h.model_id = %({model_key})s
-          AND rt.river_segment_id = %({segment_key})s
-          AND rt.river_network_version_id = %({network_key})s
+          AND rt.river_segment_key = (
+              SELECT river_segment_key FROM core.river_segment
+              WHERE river_segment_id = %({segment_key})s
+                AND river_network_version_id = %({network_key})s
+          )
+          AND rt.river_network_version_key IS NOT DISTINCT FROM (
+              SELECT river_network_version_key FROM core.river_network_version
+              WHERE river_network_version_id = %({network_key})s
+          )
           AND rt.basin_version_key = (
               SELECT basin_version_key FROM core.basin_version
               WHERE basin_version_id = %(basin_version_id)s
@@ -396,9 +409,15 @@ def test_d11_capture_keeps_the_bound_run_pushdown_self_contained() -> None:
     sql = recorded["sql"]
 
     # Exactly one primary statement, and the push is inside it — no resolve call.
-    assert sql.count("UNION ALL") == 1
+    # The `UNION ALL` was the two-store routing and `rt.run_id` its text twin;
+    # #1342's contract (task 6.3) deleted both, so the capture is now a single
+    # narrow branch. What this case is actually about — the push staying an
+    # in-SQL scalar sub-select rather than a resolve-then-bind array — is
+    # unchanged and is the next three assertions.
+    assert sql.count("UNION ALL") == 0
+    assert "hydro.river_timeseries_legacy" not in sql
     assert "AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)" in sql
-    assert "AND rt.run_id = %(run_id)s" in sql
+    assert "rt.run_id" not in sql
     assert "pushdown_run_keys" not in sql
     assert "resolve_cycle_times" not in sql
     # The run set is bound by the caller's own identity, not by a resolved array,

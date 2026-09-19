@@ -263,7 +263,8 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 )
 
 # #2185: the river-segment write-surface scan. It AST-parses every Python file
-# under the five directories it walks and pins that exactly one in-place
+# under the six directories it walks (plus, since #2154, every `db/**/*.sql`
+# statement) and pins that exactly one in-place
 # `UPDATE core.river_segment` exists in production code, that it lives in
 # workers/model_registry/basins_registry_import.py, and that it bumps
 # core.river_network_version.geometry_generation in the same transaction. A
@@ -273,11 +274,12 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 # `matched`, no stop rules, no effect on the unknown-backend fallback.
 RIVER_SEGMENT_WRITE_SURFACE_TEST = "tests/test_river_segment_write_surface_scan.py"
 
-# #2185: the five roots the write-surface scan walks, mirroring its own
-# module-level PRODUCTION_DIRS binding (tests/test_river_segment_write_surface_scan.py:48)
+# #2185: the roots the write-surface scan walks, mirroring its own
+# module-level PRODUCTION_DIRS binding (tests/test_river_segment_write_surface_scan.py)
 # mapped to `<dir>/**` globs. A selector meta-guard parses that binding out of
-# the scan's source and asserts it equals this set, so adding a sixth directory
-# to the scan without wiring it here reddens that meta-guard by name.
+# the scan's source and asserts it equals this set, so adding a directory
+# to the scan without wiring it here reddens that meta-guard by name. #2154
+# added `db/**` (the scan now reads db/seeds and every migration).
 # `apps/**` and `packages/**` are deliberately at full width — the scan walks
 # both directories whole. TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS above is not a
 # precedent for narrowing them: only ITS packages root is `packages/common/**`,
@@ -288,6 +290,45 @@ RIVER_SEGMENT_WRITE_SURFACE_ROOTS: tuple[str, ...] = (
     "workers/**",
     "packages/**",
     "scripts/**",
+    "db/**",
+)
+
+# #2154: the roots whose `*.sql` files the write-surface scan reads as statement
+# text, mirroring its module-level SQL_DIRS binding the same way (a meta-guard
+# parses it). Only `.sql` under these roots routes to the scan: the scan does
+# not read `.sql` anywhere else, so a `tests/fixtures/*.sql` or an
+# `openspec/**/*.sql` receipt stays out.
+RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS: tuple[str, ...] = ("db/**",)
+
+# #1627 / ADR 0009 (docs/adr/0009-path-canonicalization-dereference-doctrine.md):
+# the path-canonicalisation family guard. It AST-scans every Python file under
+# the four published trees for `(module, qualified function)` pairs that call
+# `os.path.realpath` and pins that each such member resolves strictly at least
+# once, unless it is a named exemption. A NEW canonicalisation site added
+# anywhere under those roots with only the non-strict call must red the MERGE
+# GATE, not the post-merge master run, so every path the scan reads must route
+# to it. Routed SUPPLEMENTALLY (set union only) in the shape #1656 established
+# and #2185 repeated: it does not set `matched`, does not participate in stop
+# rules, and cannot shadow the unknown-backend fallback or any other rule's
+# targets.
+PATH_CANONICALIZATION_FAMILY_GUARD_TEST = "tests/test_path_canonicalization_family_guard.py"
+
+# #1627: the four roots the family guard scans, mirroring its own module-level
+# `_SCAN_ROOTS` binding in tests/test_path_canonicalization_family_guard.py
+# mapped to `<root>/**` globs. A selector meta-guard parses that binding out of
+# the guard's source and asserts it equals this set, so adding a fifth root to
+# the scan without wiring it here reddens that meta-guard by name.
+# `apps/**` and `packages/**` are deliberately at full width — the guard's
+# `_iter_python_sources` walks both directories whole, exactly as
+# RIVER_SEGMENT_WRITE_SURFACE_ROOTS above does.
+# TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS is not a precedent for narrowing them:
+# only ITS packages root is `packages/common/**`, because that is the width of
+# the scan it routes.
+PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
+    "services/**",
+    "workers/**",
+    "packages/**",
+    "apps/**",
 )
 
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
@@ -428,6 +469,19 @@ CALIBRATION_OVERRIDES_PATH = "config/calibration_overrides.yaml"
 CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     "tests/test_basins_package.py",
     "tests/test_publish_scheduler_file_registry.py",
+    SELECTOR_META_GUARD_TEST,
+)
+
+# #2261: the committed review-gate round-ceiling memory. It is hand-edited when
+# sessions conflict (that is how two bare top-level keys got in), and its only
+# assertion-level consumer is the structural guard below — a JSON data file has
+# no import closure, so the route must be explicit. The meta-guard rides along
+# because `select_tests` only adds it for changed `tests/` paths, and this path
+# is a root JSON file; it also holds this route's own pins.
+REVIEW_GATE_ISSUE_MEMORY_PATH = ".review-gate-issues.json"
+REVIEW_GATE_ISSUE_MEMORY_TEST = "tests/test_review_gate_issue_memory.py"
+REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS: tuple[str, ...] = (
+    REVIEW_GATE_ISSUE_MEMORY_TEST,
     SELECTOR_META_GUARD_TEST,
 )
 
@@ -835,6 +889,43 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 )
 
 
+# I11 #1990 task 7.2 — the FORCING counterpart of the group above, and
+# deliberately a SEPARATE tuple rather than three more members of it.
+#
+# The two sets have different subjects and different lifetimes: `tasks.md` 6.3
+# deletes the river renderer's legacy path and collapses its oracles while the
+# forcing transition is still open (`tasks.md` 8.3 is what finally retires this
+# one). Folding them together would route every river reader diff at three
+# forcing suites for nothing.
+#
+# Separate does NOT mean uncoupled, and the coupling that exists is deliberately
+# visible here: `tests/test_forcing_read_path_store_routing.py` imports four
+# private helpers of `tests/test_qhh_latest_fallback_pushdown.py` — a member of
+# the river group above — at MODULE scope, so `_build_suite_importer_index`
+# carries the edge. A 6.3 PR that touches those helpers therefore selects the
+# forcing suite and goes red on that PR, which is the correct outcome: the
+# dependency is real, and the PR that breaks it is the one that should see it
+# rather than the post-merge master run.
+#
+# WHAT THIS RIDER IS FOR. The forcing discovery-set census pins a mention count
+# for sixteen production files, but none of their own rules routed the census
+# suite — so a new `met.forcing_station_timeseries` mention in, say,
+# `workers/forcing_producer/store.py` was red only on the POST-MERGE master run,
+# not on the PR that introduced it. River carries the identical rider on every
+# registered path plus a wiring meta-test; this is the forcing half of both.
+# `tests/test_select_ci_tests.py` derives the path set from the census and the
+# register, so a file entering either is routed or red.
+FORCING_SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
+    "tests/test_forcing_ts_render.py",
+    "tests/test_forcing_ts_template_census.py",
+    # Task 7.2's own oracle: byte identity against the pre-wiring snapshot, the
+    # "store is the literal legacy" AST sweep (must-preserve M6) and the narrow
+    # variants' shape invariants. It reads every wired reader module, so a diff
+    # to one of them must run it.
+    "tests/test_forcing_read_path_store_routing.py",
+)
+
+
 # Canonical readonly-boundary corpus. The three partitions import the generic
 # validator directly; retired selective-cold acceptance wrappers are not
 # consumers of this surviving contract.
@@ -980,13 +1071,6 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_production_slurm_validation.py",
             "tests/test_slurm_array_contract.py",
-        ),
-    ),
-    PathTestRule(
-        "tests/river_identity_backfill_fakes.py",
-        (
-            "tests/test_node27_river_identity_backfill.py",
-            "tests/test_node27_river_identity_backfill_receipt.py",
         ),
     ),
     PathTestRule(
@@ -1254,6 +1338,70 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # I11 #1990 forcing_ts_render (cut a): the forcing counterpart of the
+        # river register above — the non-collectible module that owns the
+        # discovery roots, the exemption/unwired-reader ledgers, the renderer
+        # constant declarations and the mention counter the forcing
+        # discovery-set census judges the tree with. Everything that census
+        # asserts (which files may name `met.forcing_station_timeseries`, how
+        # many times each does, which mentions are registered reads) is DERIVED
+        # from this module, so an edit here rewrites the verdict without
+        # touching the suite that renders it.
+        # Its non-gated importer closure is exactly one suite,
+        # tests/test_forcing_ts_template_census.py, derived over both edge kinds
+        # (module-scope import + literal-path consumption). Nothing is
+        # deliberately excluded here: unlike tests/river_ts_template_registry.py
+        # (#2208) this module has no integration-gated importer at all, so no
+        # `database:` entry in ci.yml is owed for it.
+        # Cut (a) landed the register EMPTY of reader entries; cut (b) (task
+        # 7.2) populated it with the nine and brought a SECOND importer,
+        # tests/test_forcing_read_path_store_routing.py, which parametrises its
+        # byte-identity / M6 / narrow-shape assertions over this register — so
+        # an entry added or dropped here rewrites what that suite asserts too.
+        # Both importers are listed; both are non-gated.
+        "tests/forcing_ts_template_registry.py",
+        (
+            "tests/test_forcing_ts_template_census.py",
+            # Cut (b)'s second importer: the register is now the parametrisation
+            # source of the byte-identity / M6 / narrow-shape oracle too, so an
+            # entry added or dropped here changes what that suite asserts
+            # without touching it.
+            "tests/test_forcing_read_path_store_routing.py",
+        ),
+    ),
+    PathTestRule(
+        # #2451: the segment-index measurement bench's pass criteria. This module
+        # owns the three `design.md` criteria a measured plan must satisfy, the
+        # branch identity columns and the shared-hit floors — so an edit here
+        # moves what every cell of the cross product is judged against without
+        # touching a line of the suites that judge. Its two non-gated importers
+        # (the synthetic-plan proof, which is also the same-name owner, and the
+        # offline capture/digest suite) import it at module scope.
+        # The integration bench (tests/test_river_timeseries_stats_index_choice_
+        # integration.py) is a third module-scope importer and is deliberately
+        # ABSENT: its file-level `pytestmark = pytest.mark.integration` would skip
+        # it in the PR lane, so routing it buys constant skips (#1447, and the
+        # same call #2208 made for tests/river_ts_template_registry.py). This
+        # table cannot open the `database:` lane for it either; that is ci.yml's.
+        # 52 passed in 0.50 s for both routed suites together.
+        "tests/river_ts_plan_criteria.py",
+        (
+            "tests/test_river_ts_plan_criteria.py",
+            "tests/test_river_ts_stats_harness_offline.py",
+        ),
+    ),
+    PathTestRule(
+        # #2451: the bench's condition seed — the scenario table, the step count
+        # and the array-literal parser the recorded fact rows are digested
+        # through. The offline suite is its only non-gated module-scope importer
+        # and asserts exactly those shapes against the real producer, so a seed
+        # edit that the suite does not run is an unjudged change to the measured
+        # input. The integration bench imports it too and is excluded for the
+        # file-level gating reason recorded on the rule above.
+        "tests/river_ts_stats_matrix_seed.py",
+        ("tests/test_river_ts_stats_harness_offline.py",),
+    ),
+    PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support
         # functions, `_FakeRiverSegmentCursor` and the four private constants. Its eight
         # direct collectible importers are the seven registry suites plus
@@ -1309,8 +1457,13 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # suites are MERGED into those instead of listed here: a duplicate pattern
 # splits a module's ownership across two rules
 # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+# #1990 removed best_available.py from this tuple and gave it an exact rule (see
+# the forcing-census block in PATH_TEST_RULES): it holds a registered forcing
+# read template, so it needs the forcing oracle rider, and a duplicate pattern
+# would split its ownership across two rules. CONNECTION_ATTRIBUTION_TESTS is
+# MERGED into that entry — the same disposition forecast_store.py and
+# state_manager.py already have, for the same reason.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
-    "packages/common/best_available.py",
     "packages/common/model_registry.py",
     "packages/common/object_store_forcing.py",
 )
@@ -2109,6 +2262,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sorted, so it is INTERPOSED among them by position only and the
             # #1597 census stays true.
             "tests/test_node27_mvt_prewarm.py",
+            # #2156 (D-2): guard-derived, not hand-curated — the run/river-
+            # network geometry-identity suite imports TileInput, cache_key and
+            # display_ready_run from services.tiles.mvt at file level, so it is
+            # a DIRECT non-gated importer here. Unlike the #2032 pair above it
+            # ALSO imports apps.api.routes.hydro_display at file level (the
+            # _river_network_source_version / _run_row / _run_source_version
+            # SQL and the route cache keys), so it sits on that rule too. Its
+            # own entry, so the #1597 "eight below" census stays true.
+            "tests/test_mvt_run_and_river_network_geometry_identity.py",
             # #2017: the coordinate-budget harness imports
             # postgis_tile_sql / collection_coordinate_limit / MVT_MAX_COORDINATES
             # from services.tiles.mvt at module level, so its suite is a DIRECT
@@ -2178,6 +2340,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_display_publish_status_only.py",
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            # #2156 (D-2): guard-derived — the run/river-network geometry-
+            # identity suite imports this module at file level and runs the real
+            # SQL of _river_network_source_version / _run_row /
+            # _run_source_version plus the route cache keys, so it is a DIRECT
+            # non-gated importer (and on the services/tiles/mvt.py rule too).
+            "tests/test_mvt_run_and_river_network_geometry_identity.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             # #2017: the checked-in 2.4/2.5 coordinate-budget harness imports
@@ -2398,6 +2566,99 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
+        # I11 #1990 forcing_ts_render: the forcing per-store renderer, and the
+        # same gap as the river rule above one layer up from the register.
+        # No pattern matched this path before — `packages/common/**` is not a
+        # broad rule, it only re-adds the core-smoke baseline (#1744 path B) —
+        # so a renderer diff selected its same-name suite and nothing else.
+        # It is a registered source of the forcing discovery-set census
+        # (FORCING_TABLE_CENSUS pins it at 2: `FORCING_TABLE` and
+        # `FORCING_TABLE_LEGACY`, the same two-constant shape river_ts_render.py
+        # carries), so a third table-name mention here, or a mention deleted,
+        # reds a suite this path did not run — post-merge, exactly the failure
+        # river's wiring meta-test exists to prevent. The census also imports
+        # FORCING_STORES and render_forcing_ts_sql at module scope and renders
+        # every registered template through them.
+        # The same-name suite is named explicitly rather than left to same-name
+        # derivation, as the river rule does through SQL_SHAPE_ORACLE_TESTS: the
+        # rule should read as the renderer's full unit closure, not as the half
+        # that derivation misses. Both targets are non-gated.
+        "packages/common/forcing_ts_render.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
+    ),
+    # I11 #1990 task 7.2 — the forcing census's remaining unrouted files.
+    #
+    # Each of these carries mentions the census pins a NUMBER for, and none of
+    # them reached a rule that runs it: `packages/common/**`,
+    # `workers/**` and `services/**` are not broad backend rules (they only
+    # re-add the core-smoke baseline, #1744 path B), and four of the seven have no
+    # same-name suite to fall back to either. So a forcing table mention added or
+    # removed in any of them was red on the post-merge master run and nowhere
+    # else — exactly the failure river's per-site rider exists to prevent.
+    #
+    # Each rule pairs the rider with the file's own owning suites where those
+    # were also unrouted, so the rule reads as the path's real closure rather
+    # than as a census appendage.
+    PathTestRule(
+        "packages/common/forcing_domain_handoff.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_domain_handoff_contract.py",
+            "tests/test_forcing_domain_handoff_apply.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/forcing_domain_handoff_apply.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_domain_handoff_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "workers/forcing_producer/store.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_producer.py",
+        ),
+    ),
+    PathTestRule(
+        "workers/forcing_producer/file_store.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forcing_producer.py",
+        ),
+    ),
+    PathTestRule(
+        # A wired reader (the QHH bootstrap forcing-state count) with no rule of
+        # its own: its templates live here, so the byte-identity and M6 pins have
+        # to run on a diff to it.
+        "workers/model_registry/qhh_production_bootstrap.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_qhh_scripts_static.py",
+        ),
+    ),
+    PathTestRule(
+        # A wired reader (the forcing-inputs listing) AND a #1728
+        # connection-attribution store. Both sets live on this one rule rather
+        # than on two rows with the same pattern — see
+        # CONNECTION_ATTRIBUTION_STORE_PATHS, which this path was removed from.
+        "packages/common/best_available.py",
+        (
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            *CONNECTION_ATTRIBUTION_TESTS,
+            "tests/test_best_available.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_live_evidence.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        "services/production_closure/two_node_e2e_readonly_db_lane.py",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
         # I1 #1980 river_ts_render: the captured golden of every registered read
         # template — the ONE artefact that can void #1980's whole equivalence
         # argument. It is data, not Python, so the `tests/**.py` branch above
@@ -2410,21 +2671,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
-        # #2208: these are the non-gated frozen-coverage owners. The national
-        # integration consumer runs through this fixture's database edge in ci.yml.
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        (
-            "tests/test_display_coverage_refresh.py",
-            "tests/test_river_ts_template_golden.py",
-        ),
-    ),
-    PathTestRule(
-        "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
-        ("tests/test_hydro_display_mvt_scaling.py",),
-    ),
-    PathTestRule(
-        "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql",
-        ("tests/test_hydro_display_mvt_scaling.py",),
+        # I11 #1990 task 7.2's forcing counterpart of the rule above, for the
+        # identical reason (review #1996, C10). This is the PRE-WIRING snapshot
+        # the byte-identity pins compare against — captured by executing the nine
+        # readers in a worktree at the cut-(a) merge, which is the whole reason
+        # those pins are evidence rather than a golden certifying its own source.
+        # It is data, not Python, so the `tests/**.py` branch never sees it and it
+        # reached no rule at all: a PR that re-captured it after editing a
+        # template would select zero backend tests. Globbed on the capture SHA so
+        # a re-capture at a new base routes the same way.
+        "tests/fixtures/forcing_read_path_pre_wiring_*.json",
+        FORCING_SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
         # #2183: the #1913 registry-partition additions ledger is a hand-edited
@@ -2436,6 +2693,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/forecast_store.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
             "tests/test_node27_pgdata_workload.py",
@@ -2495,6 +2757,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
         "packages/common/display_coverage.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_display_coverage_refresh.py",
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",
@@ -2587,6 +2854,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_container_contract.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_node27_external_contract_snapshot.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_capture.py",
@@ -2619,10 +2891,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # security metadata, so a patch-owner PR must reach the drift + 3.1
         # contract suites in addition to the broad API consumers it already
         # carried.
+        # #2211 quantified this module's 13 `_patch_*_openapi` implementations
+        # against the six targets above. Only ONE capability suite was both
+        # unreached and able to observe the module:
+        # tests/test_hydro_display_mvt_scaling.py, which asserts the PATCHED
+        # runtime document directly (`main.create_app().openapi()` in
+        # `test_runtime_openapi_documents_the_national_identity_tile_route` and
+        # `test_runtime_openapi_documents_both_424_codes_on_the_canonical_
+        # national_route_only`). Measured: no-op'ing `_patch_mvt_tile_openapi`
+        # reds exactly those two, and the suite was not selected before.
+        # Cost +22.6s.
+        #
+        # The rest of the #2211 candidates were REJECTED on measured evidence,
+        # not on cost. This module's only observable output is the OpenAPI
+        # document (its sole production importer is apps/api/main.py's schema
+        # hook), so a suite that never reads that document cannot be an oracle
+        # for it however public its routes are: no-op mutants of
+        # `_patch_precip_openapi`, `_patch_runtime_openapi` and the combined
+        # layer-metadata / forecast-series / station-series trio red only
+        # tests/test_openapi_drift.py and tests/test_openapi_31_contract.py —
+        # tests/test_precip_overlay.py (reads the STATIC openapi/nhms.v1.yaml),
+        # tests/test_forecast_api.py and
+        # tests/test_forecast_api_met_station_series.py (never read the schema)
+        # and tests/test_runtime_mode.py (reads /openapi.json but asserts route
+        # PRESENCE, which registration decides) all stay green. Routing them
+        # would buy assertions that run but cannot observe the change — a cousin
+        # of the #1447 ruling on constant skips. The runtime-vs-static
+        # comparison the drift target already carries is the residual oracle
+        # for the other twelve implementations.
+        #
+        # Per-capability literals, never a directory pattern: every rule here is
+        # an explicit tuple so the exact-set anchor in
+        # tests/test_select_ci_tests.py can pin it.
         "apps/api/openapi_patching.py",
         (
             "tests/test_api.py",
             "tests/test_api_contract.py",
+            "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -2673,6 +2978,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # in the register.
         "db/seeds/seed_demo.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_river_ts_text_identity_cleanup.py",
             "tests/test_seed.py",
             "tests/test_river_ts_dual_write_integration.py",
@@ -2768,12 +3078,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # real `build_receipt` call, the receipt root, and the probe timer's own
     # steady-state row. Same lane caveat: selected when the backend lane runs
     # and this runbook is in the diff.
+    # #2473 widened it by one more: the coverage freshness alert suite reads
+    # this runbook's §11 (between the `## 11.` and `## 12.` headings) and fails
+    # when a `COVERAGE_FRESHNESS_*` code the script emits is not named there.
+    # #2472/#2473 round 1 added the three content readers the row had been
+    # missing: the node-22 entrypoint invariant suite scans every `uv run` /
+    # `uv sync` line of this runbook for a node-27 marker (a bare `uv sync`
+    # added here reddens it), the Python environment truth suite pins the
+    # `df -h / /home /data/GHDC` capacity check in it, and the role boundary
+    # static suite pins its node-27/node-22 topology sentences.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
         (
             SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
             "tests/test_env_templates.py",
             "tests/test_node22_refresh_timer_health.py",
+            "tests/test_node27_coverage_freshness_alert.py",
+            NODE22_ENTRYPOINT_INVARIANT_TEST,
+            PYTHON_ENVIRONMENT_TRUTH_TEST,
+            "tests/test_role_boundary_static.py",
         ),
     ),
     PathTestRule(
@@ -2862,7 +3185,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/reset_qhh_smoke_db.py",
-        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
+        (
+            "tests/test_river_ts_text_identity_cleanup.py",
+            "tests/test_qhh_scripts_static.py",
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+        ),
     ),
     PathTestRule(
         # No same-name tests/test_node27_autopipeline.py exists, so without this
@@ -2870,6 +3201,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # none of its own suites run.
         "scripts/node27_autopipeline.py",
         (
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
             # #1647: the `_connect` bounds and the stats-guard flag parser live
@@ -2962,6 +3298,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
         ("tests/test_node22_refresh_timer_health.py",),
+    ),
+    # #1627 / ADR 0009: the loop-spelling measurement is the backing the
+    # array-runner spec names for admitting path_modes.py's db-free
+    # `_safe_preserve_final_component` arm — it measures, with real symlinks and
+    # a real `os.lstat`, that the <=3.12 and 3.13+ spellings of a parent-chain
+    # loop are NEUTRAL at the dereference. That claim is a property of THIS
+    # module's function, so an edit to it must re-measure rather than wait for
+    # the post-merge master run. A per-file row, not a widening of the broad
+    # `services/orchestrator/**` list: the suite's subject is one function in
+    # this one module, so routing it from the directory list would make every
+    # orchestrator PR pay for a measurement of an unrelated PR class.
+    # DB-free, 2 tests in 0.25s.
+    PathTestRule(
+        "services/orchestrator/scheduler_config/path_modes.py",
+        ("tests/test_preserve_final_component_loop_spelling.py",),
     ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;
@@ -3072,7 +3423,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/node27_timeseries_compression_capture.py",
-        ("tests/test_node27_timeseries_discovery.py",),
+        (
+            "tests/test_node27_timeseries_discovery.py",
+            # #1990 task 7.2: this path is in the forcing discovery-set
+            # census (or holds a registered forcing read template), so a new
+            # met.forcing_station_timeseries mention here must redden the
+            # census on THIS PR rather than on the post-merge master run.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node27-timeseries-compression.service",
@@ -3191,7 +3549,53 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # bootstrap and the lane pin cannot see it). Pin suite comes from the
         # glob row by accumulation, not repeated here.
         "infra/systemd/nhms-node27-raw-retention.service",
-        ("tests/test_node27_raw_retention.py",),
+        (
+            "tests/test_node27_raw_retention.py",
+            # #2360: asserts this unit's `OnFailure=` line.
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        ),
+    ),
+    PathTestRule(
+        # #2360: the canonical system unit's timer must tick with this one (one
+        # cutoff date for a mirror and its PNGs); the deployment suite compares
+        # the two `OnCalendar=` lines. No other suite reads this timer.
+        "infra/systemd/nhms-node27-raw-retention.timer",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: the system alert template must run the SAME handler; the
+        # deployment suite compares its `ExecStart=` with this template's. The
+        # retention suite (its other reader) arrives from the `#2173` glob row.
+        "infra/systemd/nhms-node27-unit-failure-alert@.service",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: node-27 SYSTEM units (canonical retention + its timer + the
+        # system alert template). Outside the `#2173` glob on purpose: they are
+        # not nwm user units and carry no `systemd.err` lane. The deployment
+        # suite reads every file here and pins the directory's exact file set,
+        # so the row is a directory glob, not per-file.
+        "infra/systemd/system/*",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: root installer for the canonical system unit. `scripts/**.sh`
+        # only arms core smoke; the deployment suite drives its refusal path and
+        # its env rendering.
+        "scripts/node27_canonical_retention_install.sh",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: the unit-failure alert handler (user + system journal scope).
+        # Before this row a handler-only diff fell to core smoke: its real
+        # readers are the retention suite's alert-wrapper rows (incl. the
+        # journal-scope switch) and the working-set suite's governance run.
+        "scripts/node27_unit_failure_alert_once.sh",
+        (
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_node27_working_set.py",
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        ),
     ),
     PathTestRule(
         # #2180: two suites read this unit by path.
@@ -3557,6 +3961,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # fallback or a zero-assertion collect-only run.
         CALIBRATION_OVERRIDES_PATH,
         CALIBRATION_OVERRIDES_CONSUMER_TESTS,
+    ),
+    PathTestRule(
+        # #2261: the review-gate issue memory's structural guard. The exact
+        # ci.yml backend filter entry starts the targeted gate for an
+        # accounting-only PR; this rule turns that lane into real assertions
+        # instead of the zero-assertion collect-only collapse.
+        REVIEW_GATE_ISSUE_MEMORY_PATH,
+        REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS,
     ),
     PathTestRule(
         # #1646: a pytest-config change must re-prove the thread-exception
@@ -3956,16 +4368,33 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             selected.add(TIMESCALE_WRITE_GUARD_INVARIANT_TEST)
 
     # #2185: supplemental river-segment write-surface routing, same shape as the
-    # #1656 loop above. Every Python path under the five roots the write-surface
+    # #1656 loop above. Every Python path under the roots the write-surface
     # scan walks selects that scan IN ADDITION to its ordinary selection. Purely
     # additive: no `matched`, no stop-rule participation, no effect on whether a
     # path counts as known for the unknown-backend fallback. The root match is
     # the only gate — the scan parses `*.py` under these roots regardless of the
     # backend-prefix classification, so `apps/` outside `apps/api/` (not a
-    # backend prefix) is covered exactly as the scan reads it.
+    # backend prefix) is covered exactly as the scan reads it. #2154: `*.sql`
+    # under the SQL roots routes the same way, because the scan reads those
+    # statements too.
     for path in changed:
-        if path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS):
+        if (path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS)) or (
+            path.endswith(".sql") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS)
+        ):
             selected.add(RIVER_SEGMENT_WRITE_SURFACE_TEST)
+
+    # #1627 / ADR 0009: supplemental path-canonicalisation family routing, same
+    # shape as the two loops above. Every Python path under the four roots the
+    # family guard scans selects that guard IN ADDITION to its ordinary
+    # selection. Purely additive: no `matched`, no stop-rule participation, no
+    # effect on whether a path counts as known for the unknown-backend
+    # fallback. The root match is the only gate — the guard parses `*.py` under
+    # these roots regardless of the backend-prefix classification, so `apps/`
+    # outside `apps/api/` (not a backend prefix) is covered exactly as the
+    # guard reads it.
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS):
+            selected.add(PATH_CANONICALIZATION_FAMILY_GUARD_TEST)
 
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish

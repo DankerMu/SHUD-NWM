@@ -1,0 +1,2829 @@
+{
+  "execution_mode": "read_only_audit",
+  "filesystem": {
+    "filesystems": {
+      "cold": {
+        "device_identity": "9:0:7539273700150526131",
+        "free_bytes": 12935214493696,
+        "free_pretty": "11.8 TiB",
+        "path": "/data/GHDC",
+        "reserved_bytes": 800054939648,
+        "status": "ok",
+        "total_bytes": 15873497141248,
+        "total_pretty": "14.4 TiB",
+        "used_bytes": 2138227707904,
+        "used_pct": 13.47,
+        "used_pretty": "1.9 TiB"
+      },
+      "home": {
+        "device_identity": "253:1:11491905541504749415",
+        "free_bytes": 1152077619200,
+        "free_pretty": "1.0 TiB",
+        "path": "/home",
+        "reserved_bytes": 90503221248,
+        "status": "ok",
+        "total_bytes": 1780170539008,
+        "total_pretty": "1.6 TiB",
+        "used_bytes": 537589698560,
+        "used_pct": 30.199,
+        "used_pretty": "500.7 GiB"
+      },
+      "object_store_fs": {
+        "device_identity": "253:1:11491905541504749415",
+        "free_bytes": 1152077619200,
+        "free_pretty": "1.0 TiB",
+        "path": "/home/ghdc/nwm/object-store",
+        "reserved_bytes": 90503221248,
+        "status": "ok",
+        "total_bytes": 1780170539008,
+        "total_pretty": "1.6 TiB",
+        "used_bytes": 537589698560,
+        "used_pct": 30.199,
+        "used_pretty": "500.7 GiB"
+      },
+      "pgdata_root_fs": {
+        "device_identity": "9:0:7539273700150526131",
+        "free_bytes": 12935214493696,
+        "free_pretty": "11.8 TiB",
+        "path": "/data/GHDC/nhms-primary/pgdata",
+        "reserved_bytes": 800054939648,
+        "status": "ok",
+        "total_bytes": 15873497141248,
+        "total_pretty": "14.4 TiB",
+        "used_bytes": 2138227707904,
+        "used_pct": 13.47,
+        "used_pretty": "1.9 TiB"
+      },
+      "repo_root_fs": {
+        "device_identity": "253:1:11491905541504749415",
+        "free_bytes": 1152077619200,
+        "free_pretty": "1.0 TiB",
+        "path": "/home/nwm/NWM",
+        "reserved_bytes": 90503221248,
+        "status": "ok",
+        "total_bytes": 1780170539008,
+        "total_pretty": "1.6 TiB",
+        "used_bytes": 537589698560,
+        "used_pct": 30.199,
+        "used_pretty": "500.7 GiB"
+      },
+      "root": {
+        "device_identity": "253:0:2843952057122256058",
+        "free_bytes": 18995355648,
+        "free_pretty": "17.7 GiB",
+        "path": "/",
+        "reserved_bytes": 5385486336,
+        "status": "ok",
+        "total_bytes": 105089261568,
+        "total_pretty": "97.9 GiB",
+        "used_bytes": 80708419584,
+        "used_pct": 76.8,
+        "used_pretty": "75.2 GiB"
+      }
+    },
+    "inode_usage": {
+      "args": [
+        "df",
+        "-ih",
+        "/",
+        "/home"
+      ],
+      "return_code": 0,
+      "status": "ok",
+      "stderr": "",
+      "stdout": "Filesystem                        Inodes IUsed IFree IUse% Mounted on\n/dev/mapper/ubuntu--vg-ubuntu--lv   6.3M  700K  5.6M   11% /\n/dev/mapper/ubuntu--vg-home         106M  2.6M  103M    3% /home"
+    },
+    "journal_disk_usage": {
+      "args": [
+        "journalctl",
+        "--disk-usage"
+      ],
+      "return_code": 0,
+      "status": "ok",
+      "stderr": "Hint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n      Pass -q to turn off this notice.",
+      "stdout": "Archived and active journals take up 376.1M in the file system."
+    },
+    "path_sizes": {
+      "autopipe_logs": {
+        "bytes": 155131904,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/autopipe-logs",
+        "pretty": "147.9 MiB",
+        "status": "ok"
+      },
+      "autopipe_work": {
+        "bytes": 327098368,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/autopipe-work",
+        "pretty": "311.9 MiB",
+        "status": "ok"
+      },
+      "download_logs": {
+        "bytes": 23625728,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/node27-download-logs",
+        "pretty": "22.5 MiB",
+        "status": "ok"
+      },
+      "object-store/.reset-quarantine": {
+        "bytes": 4096,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/.reset-quarantine",
+        "pretty": "4.0 KiB",
+        "status": "ok"
+      },
+      "object-store/.reset-receipts": {
+        "bytes": 6709248,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/.reset-receipts",
+        "pretty": "6.4 MiB",
+        "status": "ok"
+      },
+      "object-store/forcing": {
+        "bytes": 152369078272,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/forcing",
+        "pretty": "141.9 GiB",
+        "status": "ok"
+      },
+      "object-store/raw": {
+        "bytes": 3044196352,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/raw",
+        "pretty": "2.8 GiB",
+        "status": "ok"
+      },
+      "object-store/runs": {
+        "bytes": 120581857280,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/runs",
+        "pretty": "112.3 GiB",
+        "status": "ok"
+      },
+      "object-store/scheduler": {
+        "bytes": 72298496,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/scheduler",
+        "pretty": "68.9 MiB",
+        "status": "ok"
+      },
+      "object-store/states": {
+        "bytes": 3792347136,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store/states",
+        "pretty": "3.5 GiB",
+        "status": "ok"
+      },
+      "object_store_root": {
+        "bytes": 289035169792,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/ghdc/nwm/object-store",
+        "pretty": "269.2 GiB",
+        "status": "ok"
+      },
+      "pg_wal": {
+        "bytes": 16274153472,
+        "device_identity": "9:0:7539273700150526131",
+        "path": "/data/GHDC/nhms-primary/pgdata/pg_wal",
+        "pretty": "15.2 GiB",
+        "status": "ok"
+      },
+      "pgdata_root": {
+        "bytes": 1430048837632,
+        "device_identity": "9:0:7539273700150526131",
+        "path": "/data/GHDC/nhms-primary/pgdata",
+        "pretty": "1.3 TiB",
+        "status": "ok"
+      },
+      "raw_retention_logs": {
+        "bytes": 1708032,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/node27-raw-retention-logs",
+        "pretty": "1.6 MiB",
+        "status": "ok"
+      },
+      "repo/.conda-pkgs": {
+        "path": "/home/nwm/NWM/.conda-pkgs",
+        "status": "missing"
+      },
+      "repo/.nhms-runs": {
+        "path": "/home/nwm/NWM/.nhms-runs",
+        "status": "missing"
+      },
+      "repo/.nhms-work": {
+        "path": "/home/nwm/NWM/.nhms-work",
+        "status": "missing"
+      },
+      "repo/.pgdata": {
+        "path": "/home/nwm/NWM/.pgdata",
+        "status": "missing"
+      },
+      "repo/.venv": {
+        "bytes": 593117184,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/NWM/.venv",
+        "pretty": "565.6 MiB",
+        "status": "ok"
+      },
+      "repo/apps/frontend/dist.bak-20260615-234427": {
+        "path": "/home/nwm/NWM/apps/frontend/dist.bak-20260615-234427",
+        "status": "missing"
+      },
+      "repo/apps/frontend/dist.bak-20260615-235046": {
+        "path": "/home/nwm/NWM/apps/frontend/dist.bak-20260615-235046",
+        "status": "missing"
+      },
+      "repo/artifacts": {
+        "bytes": 881557504,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/NWM/artifacts",
+        "pretty": "840.7 MiB",
+        "status": "ok"
+      },
+      "repo/data": {
+        "path": "/home/nwm/NWM/data",
+        "status": "missing"
+      },
+      "repo_root": {
+        "bytes": 3925622784,
+        "device_identity": "253:1:11491905541504749415",
+        "path": "/home/nwm/NWM",
+        "pretty": "3.7 GiB",
+        "status": "ok"
+      },
+      "tmp": {
+        "error": "du_failed",
+        "path": "/tmp",
+        "status": "unavailable"
+      }
+    }
+  },
+  "finished_at": "2026-09-18T04:10:42Z",
+  "paths": {
+    "object_store_root": "/home/ghdc/nwm/object-store",
+    "pgdata_root": "/data/GHDC/nhms-primary/pgdata",
+    "repo_root": "/home/nwm/NWM"
+  },
+  "postgres": {
+    "connections_by_state": [
+      {
+        "count": 18,
+        "max_state_age": "1:47:19.069105",
+        "state": "idle",
+        "usename": "nhms_display_ro"
+      },
+      {
+        "count": 4,
+        "max_state_age": null,
+        "state": null,
+        "usename": "nhms"
+      },
+      {
+        "count": 4,
+        "max_state_age": null,
+        "state": null,
+        "usename": null
+      },
+      {
+        "count": 1,
+        "max_state_age": "-1 day, 23:59:59.999999",
+        "state": "active",
+        "usename": "nhms_display_ro"
+      }
+    ],
+    "database_sizes": [
+      {
+        "bytes": 1413735023407,
+        "datname": "nhms",
+        "pretty": "1317 GB"
+      },
+      {
+        "bytes": 10945327,
+        "datname": "postgres",
+        "pretty": "10 MB"
+      },
+      {
+        "bytes": 10445315,
+        "datname": "template1",
+        "pretty": "10201 kB"
+      },
+      {
+        "bytes": 7471619,
+        "datname": "template0",
+        "pretty": "7297 kB"
+      }
+    ],
+    "dead_tuple_hotspots": [
+      {
+        "autovacuum_count": 19,
+        "dead_pct": 42.59,
+        "last_autovacuum": "2026-09-15T02:36:01.763980+00:00",
+        "n_dead_tup": 513072,
+        "n_live_tup": 691464,
+        "relname": "interp_weight",
+        "schemaname": "met",
+        "total_bytes": 557719552,
+        "total_pretty": "532 MB"
+      },
+      {
+        "autovacuum_count": 5,
+        "dead_pct": 0.39,
+        "last_autovacuum": "2026-09-15T06:10:57.892361+00:00",
+        "n_dead_tup": 253432,
+        "n_live_tup": 65252178,
+        "relname": "_hyper_1_109_chunk",
+        "schemaname": "_timescaledb_internal",
+        "total_bytes": 46436868096,
+        "total_pretty": "43 GB"
+      },
+      {
+        "autovacuum_count": 38,
+        "dead_pct": 0.01,
+        "last_autovacuum": "2026-09-12T16:50:50.383405+00:00",
+        "n_dead_tup": 153505,
+        "n_live_tup": 1058467855,
+        "relname": "_hyper_3_107_chunk",
+        "schemaname": "_timescaledb_internal",
+        "total_bytes": 49152,
+        "total_pretty": "48 kB"
+      },
+      {
+        "autovacuum_count": 35,
+        "dead_pct": 0.2,
+        "last_autovacuum": "2026-09-12T06:30:04.317776+00:00",
+        "n_dead_tup": 129003,
+        "n_live_tup": 65247814,
+        "relname": "_hyper_1_106_chunk",
+        "schemaname": "_timescaledb_internal",
+        "total_bytes": 32768,
+        "total_pretty": "32 kB"
+      }
+    ],
+    "hypertable_size_breakdown": [
+      {
+        "chunks": 5,
+        "hypertable_name": "river_timeseries_legacy",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 388128137216.0,
+        "indexes_pretty": "361 GB",
+        "max_range_end": "2026-09-24T00:00:00+00:00",
+        "min_range_start": "2026-08-20T00:00:00+00:00",
+        "table_bytes": 326652411904.0,
+        "table_pretty": "304 GB",
+        "total_bytes": 714870923264.0,
+        "total_pretty": "666 GB"
+      },
+      {
+        "chunks": 29,
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 244487970816.0,
+        "indexes_pretty": "228 GB",
+        "max_range_end": "2026-09-24T00:00:00+00:00",
+        "min_range_start": "2026-08-26T00:00:00+00:00",
+        "table_bytes": 303458893824.0,
+        "table_pretty": "283 GB",
+        "total_bytes": 548029571072.0,
+        "total_pretty": "510 GB"
+      },
+      {
+        "chunks": 6,
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "indexes_bytes": 50672484352.0,
+        "indexes_pretty": "47 GB",
+        "max_range_end": "2026-09-25T00:00:00+00:00",
+        "min_range_start": "2026-08-20T00:00:00+00:00",
+        "table_bytes": 19973398528.0,
+        "table_pretty": "19 GB",
+        "total_bytes": 70651355136.0,
+        "total_pretty": "66 GB"
+      }
+    ],
+    "hypertables": [
+      {
+        "compression_config": null,
+        "compression_enabled": false,
+        "compression_job_id": null,
+        "hypertable_name": "return_period_result",
+        "hypertable_schema": "flood",
+        "num_chunks": 0,
+        "retention_config": null,
+        "retention_job_id": null
+      },
+      {
+        "compression_config": null,
+        "compression_enabled": true,
+        "compression_job_id": null,
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "num_chunks": 29,
+        "retention_config": null,
+        "retention_job_id": null
+      },
+      {
+        "compression_config": null,
+        "compression_enabled": true,
+        "compression_job_id": null,
+        "hypertable_name": "river_timeseries_legacy",
+        "hypertable_schema": "hydro",
+        "num_chunks": 5,
+        "retention_config": null,
+        "retention_job_id": null
+      },
+      {
+        "compression_config": null,
+        "compression_enabled": false,
+        "compression_job_id": null,
+        "hypertable_name": "best_available_selection",
+        "hypertable_schema": "met",
+        "num_chunks": 0,
+        "retention_config": null,
+        "retention_job_id": null
+      },
+      {
+        "compression_config": null,
+        "compression_enabled": true,
+        "compression_job_id": null,
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "num_chunks": 6,
+        "retention_config": null,
+        "retention_job_id": null
+      }
+    ],
+    "largest_chunks": [
+      {
+        "chunk_name": "_hyper_3_110_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries_legacy",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 326617972736,
+        "range_end": "2026-09-17T00:00:00+00:00",
+        "range_start": "2026-09-10T00:00:00+00:00",
+        "table_bytes": 272458694656,
+        "total_bytes": 599152009216,
+        "total_pretty": "558 GB"
+      },
+      {
+        "chunk_name": "_hyper_3_113_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries_legacy",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 61510041600,
+        "range_end": "2026-09-24T00:00:00+00:00",
+        "range_start": "2026-09-17T00:00:00+00:00",
+        "table_bytes": 54193717248,
+        "total_bytes": 115718766592,
+        "total_pretty": "108 GB"
+      },
+      {
+        "chunk_name": "_hyper_1_109_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "indexes_bytes": 33316651008,
+        "range_end": "2026-09-17T00:00:00+00:00",
+        "range_start": "2026-09-10T00:00:00+00:00",
+        "table_bytes": 13116588032,
+        "total_bytes": 46436868096,
+        "total_pretty": "43 GB"
+      },
+      {
+        "chunk_name": "_hyper_1_112_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "forcing_station_timeseries",
+        "hypertable_schema": "met",
+        "indexes_bytes": 17332690944,
+        "range_end": "2026-09-24T00:00:00+00:00",
+        "range_start": "2026-09-17T00:00:00+00:00",
+        "table_bytes": 6848208896,
+        "total_bytes": 24182685696,
+        "total_pretty": "23 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_164_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10276233216,
+        "range_end": "2026-09-11T00:00:00+00:00",
+        "range_start": "2026-09-10T00:00:00+00:00",
+        "table_bytes": 12772564992,
+        "total_bytes": 23052312576,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_165_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10275831808,
+        "range_end": "2026-09-12T00:00:00+00:00",
+        "range_start": "2026-09-11T00:00:00+00:00",
+        "table_bytes": 12772392960,
+        "total_bytes": 23051763712,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_160_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10272219136,
+        "range_end": "2026-09-07T00:00:00+00:00",
+        "range_start": "2026-09-06T00:00:00+00:00",
+        "table_bytes": 12772605952,
+        "total_bytes": 23048372224,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_159_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10272006144,
+        "range_end": "2026-09-06T00:00:00+00:00",
+        "range_start": "2026-09-05T00:00:00+00:00",
+        "table_bytes": 12772458496,
+        "total_bytes": 23047987200,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_163_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10271801344,
+        "range_end": "2026-09-10T00:00:00+00:00",
+        "range_start": "2026-09-09T00:00:00+00:00",
+        "table_bytes": 12772491264,
+        "total_bytes": 23047806976,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_141_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10268622848,
+        "range_end": "2026-09-14T00:00:00+00:00",
+        "range_start": "2026-09-13T00:00:00+00:00",
+        "table_bytes": 12772433920,
+        "total_bytes": 23044587520,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_157_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10267262976,
+        "range_end": "2026-09-04T00:00:00+00:00",
+        "range_start": "2026-09-03T00:00:00+00:00",
+        "table_bytes": 12772507648,
+        "total_bytes": 23043284992,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_161_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10266312704,
+        "range_end": "2026-09-08T00:00:00+00:00",
+        "range_start": "2026-09-07T00:00:00+00:00",
+        "table_bytes": 12772605952,
+        "total_bytes": 23042408448,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_162_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10265526272,
+        "range_end": "2026-09-09T00:00:00+00:00",
+        "range_start": "2026-09-08T00:00:00+00:00",
+        "table_bytes": 12772540416,
+        "total_bytes": 23041572864,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_143_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10262142976,
+        "range_end": "2026-09-13T00:00:00+00:00",
+        "range_start": "2026-09-12T00:00:00+00:00",
+        "table_bytes": 12772687872,
+        "total_bytes": 23038312448,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_158_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10259808256,
+        "range_end": "2026-09-05T00:00:00+00:00",
+        "range_start": "2026-09-04T00:00:00+00:00",
+        "table_bytes": 12772376576,
+        "total_bytes": 23035723776,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_130_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10254139392,
+        "range_end": "2026-09-15T00:00:00+00:00",
+        "range_start": "2026-09-14T00:00:00+00:00",
+        "table_bytes": 12772532224,
+        "total_bytes": 23030185984,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_131_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10249109504,
+        "range_end": "2026-09-16T00:00:00+00:00",
+        "range_start": "2026-09-15T00:00:00+00:00",
+        "table_bytes": 12772646912,
+        "total_bytes": 23025213440,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_132_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10245414912,
+        "range_end": "2026-09-17T00:00:00+00:00",
+        "range_start": "2026-09-16T00:00:00+00:00",
+        "table_bytes": 12772802560,
+        "total_bytes": 23021625344,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_156_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 10185285632,
+        "range_end": "2026-09-03T00:00:00+00:00",
+        "range_start": "2026-09-02T00:00:00+00:00",
+        "table_bytes": 12642287616,
+        "total_bytes": 22831079424,
+        "total_pretty": "21 GB"
+      },
+      {
+        "chunk_name": "_hyper_9_133_chunk",
+        "chunk_schema": "_timescaledb_internal",
+        "hypertable_name": "river_timeseries",
+        "hypertable_schema": "hydro",
+        "indexes_bytes": 9902653440,
+        "range_end": "2026-09-18T00:00:00+00:00",
+        "range_start": "2026-09-17T00:00:00+00:00",
+        "table_bytes": 12316614656,
+        "total_bytes": 22222512128,
+        "total_pretty": "21 GB"
+      }
+    ],
+    "largest_indexes": [
+      {
+        "index_name": "110_236_river_timeseries_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 290638397440,
+        "size_pretty": "271 GB",
+        "table_name": "_hyper_3_110_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "113_243_river_timeseries_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 52815962112,
+        "size_pretty": "49 GB",
+        "table_name": "_hyper_3_113_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_1_109_chunk_forcing_station_timeseries_qhh_latest_window",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 19852910592,
+        "size_pretty": "18 GB",
+        "table_name": "_hyper_1_109_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "109_234_forcing_station_timeseries_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 13014278144,
+        "size_pretty": "12 GB",
+        "table_name": "_hyper_1_109_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_3_110_chunk_river_ts_segment_time_idx",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 11606949888,
+        "size_pretty": "11 GB",
+        "table_name": "_hyper_3_110_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_1_112_chunk_forcing_station_timeseries_qhh_latest_window",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 10402127872,
+        "size_pretty": "9920 MB",
+        "table_name": "_hyper_1_112_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_3_110_chunk_river_timeseries_mvt_selected_identity_valid",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 9232793600,
+        "size_pretty": "8805 MB",
+        "table_name": "_hyper_3_110_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_3_110_chunk_river_ts_selected_identity_key_valid_time_id",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7922499584,
+        "size_pretty": "7555 MB",
+        "table_name": "_hyper_3_110_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "132_290_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7440695296,
+        "size_pretty": "7096 MB",
+        "table_name": "_hyper_9_132_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "131_287_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7422672896,
+        "size_pretty": "7079 MB",
+        "table_name": "_hyper_9_131_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "164_382_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7414333440,
+        "size_pretty": "7071 MB",
+        "table_name": "_hyper_9_164_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "165_385_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7414292480,
+        "size_pretty": "7071 MB",
+        "table_name": "_hyper_9_165_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "159_367_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7412342784,
+        "size_pretty": "7069 MB",
+        "table_name": "_hyper_9_159_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "163_379_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7411671040,
+        "size_pretty": "7068 MB",
+        "table_name": "_hyper_9_163_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "141_313_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7411605504,
+        "size_pretty": "7068 MB",
+        "table_name": "_hyper_9_141_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "160_370_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7407894528,
+        "size_pretty": "7065 MB",
+        "table_name": "_hyper_9_160_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "130_284_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7407296512,
+        "size_pretty": "7064 MB",
+        "table_name": "_hyper_9_130_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "157_361_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7405117440,
+        "size_pretty": "7062 MB",
+        "table_name": "_hyper_9_157_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "143_319_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7404535808,
+        "size_pretty": "7062 MB",
+        "table_name": "_hyper_9_143_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "161_373_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7404060672,
+        "size_pretty": "7061 MB",
+        "table_name": "_hyper_9_161_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "162_376_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7404011520,
+        "size_pretty": "7061 MB",
+        "table_name": "_hyper_9_162_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "158_364_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7397851136,
+        "size_pretty": "7055 MB",
+        "table_name": "_hyper_9_158_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "156_358_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7338205184,
+        "size_pretty": "6998 MB",
+        "table_name": "_hyper_9_156_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "_hyper_3_110_chunk_river_timeseries_valid_time_idx",
+        "indisprimary": false,
+        "indisunique": false,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7217332224,
+        "size_pretty": "6883 MB",
+        "table_name": "_hyper_3_110_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "133_293_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7175749632,
+        "size_pretty": "6843 MB",
+        "table_name": "_hyper_9_133_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "155_355_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 7032094720,
+        "size_pretty": "6706 MB",
+        "table_name": "_hyper_9_155_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "154_352_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 6742114304,
+        "size_pretty": "6430 MB",
+        "table_name": "_hyper_9_154_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "112_241_forcing_station_timeseries_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 6708494336,
+        "size_pretty": "6398 MB",
+        "table_name": "_hyper_1_112_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "153_349_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 6485934080,
+        "size_pretty": "6185 MB",
+        "table_name": "_hyper_9_153_chunk",
+        "table_schema": "_timescaledb_internal"
+      },
+      {
+        "index_name": "152_346_river_timeseries_narrow_pkey",
+        "indisprimary": true,
+        "indisunique": true,
+        "schema": "_timescaledb_internal",
+        "size_bytes": 6161440768,
+        "size_pretty": "5876 MB",
+        "table_name": "_hyper_9_152_chunk",
+        "table_schema": "_timescaledb_internal"
+      }
+    ],
+    "largest_relations": [
+      {
+        "autovacuum_count": 2,
+        "indexes_bytes": 326617972736,
+        "last_autoanalyze": "2026-09-15T03:48:02.514448+00:00",
+        "last_autovacuum": "2026-09-15T03:43:12.928124+00:00",
+        "n_dead_tup": 77383,
+        "n_live_tup": 977640687,
+        "relation": "_hyper_3_110_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 272458694656,
+        "total_bytes": 599152009216,
+        "total_pretty": "558 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 61510041600,
+        "last_autoanalyze": "2026-09-15T03:21:35.759460+00:00",
+        "last_autovacuum": "2026-09-15T03:17:40.795447+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 194429707,
+        "relation": "_hyper_3_113_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 54193717248,
+        "total_bytes": 115718766592,
+        "total_pretty": "108 GB"
+      },
+      {
+        "autovacuum_count": 5,
+        "indexes_bytes": 33316651008,
+        "last_autoanalyze": "2026-09-12T14:31:14.096028+00:00",
+        "last_autovacuum": "2026-09-15T06:10:57.892361+00:00",
+        "n_dead_tup": 253432,
+        "n_live_tup": 65252178,
+        "relation": "_hyper_1_109_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 13116588032,
+        "total_bytes": 46436868096,
+        "total_pretty": "43 GB"
+      },
+      {
+        "autovacuum_count": 1,
+        "indexes_bytes": 2102501376,
+        "last_autoanalyze": "2026-09-15T03:09:27.199573+00:00",
+        "last_autovacuum": "2026-09-15T03:07:00.930836+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 12150155,
+        "relation": "compress_hyper_7_118_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 17181515776,
+        "total_bytes": 29960388608,
+        "total_pretty": "28 GB"
+      },
+      {
+        "autovacuum_count": 1,
+        "indexes_bytes": 1744650240,
+        "last_autoanalyze": "2026-09-12T07:38:31.072746+00:00",
+        "last_autovacuum": "2026-09-12T07:25:13.620985+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 10127760,
+        "relation": "compress_hyper_7_108_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 13913661440,
+        "total_bytes": 25549602816,
+        "total_pretty": "24 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 17332690944,
+        "last_autoanalyze": "2026-09-15T06:08:14.707182+00:00",
+        "last_autovacuum": "2026-09-15T02:39:35.844475+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 34202547,
+        "relation": "_hyper_1_112_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 6848208896,
+        "total_bytes": 24182685696,
+        "total_pretty": "23 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 10276233216,
+        "last_autoanalyze": "2026-09-15T12:12:19.537011+00:00",
+        "last_autovacuum": "2026-09-15T12:11:04.829826+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151229706,
+        "relation": "_hyper_9_164_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772564992,
+        "total_bytes": 23052312576,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 10275831808,
+        "last_autoanalyze": "2026-09-15T11:58:31.872576+00:00",
+        "last_autovacuum": "2026-09-15T11:56:54.119034+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151186449,
+        "relation": "_hyper_9_165_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772392960,
+        "total_bytes": 23051763712,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 10272219136,
+        "last_autoanalyze": "2026-09-15T15:12:51.637292+00:00",
+        "last_autovacuum": "2026-09-15T15:11:18.384540+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151236490,
+        "relation": "_hyper_9_160_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772605952,
+        "total_bytes": 23048372224,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 28,
+        "indexes_bytes": 10272006144,
+        "last_autoanalyze": "2026-09-15T15:16:29.975459+00:00",
+        "last_autovacuum": "2026-09-15T15:15:21.928998+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151234889,
+        "relation": "_hyper_9_159_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772458496,
+        "total_bytes": 23047987200,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 10271801344,
+        "last_autoanalyze": "2026-09-15T13:18:01.577110+00:00",
+        "last_autovacuum": "2026-09-15T12:44:11.249513+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151052813,
+        "relation": "_hyper_9_163_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772491264,
+        "total_bytes": 23047806976,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 32,
+        "indexes_bytes": 10268622848,
+        "last_autoanalyze": "2026-09-15T10:37:03.192179+00:00",
+        "last_autovacuum": "2026-09-15T10:35:40.900272+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151142888,
+        "relation": "_hyper_9_141_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772433920,
+        "total_bytes": 23044587520,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 32,
+        "indexes_bytes": 10267262976,
+        "last_autoanalyze": "2026-09-15T16:28:56.686693+00:00",
+        "last_autovacuum": "2026-09-15T16:27:36.720332+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151236064,
+        "relation": "_hyper_9_157_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772507648,
+        "total_bytes": 23043284992,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 10266312704,
+        "last_autoanalyze": "2026-09-15T14:08:17.069435+00:00",
+        "last_autovacuum": "2026-09-15T13:44:16.127842+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 150979877,
+        "relation": "_hyper_9_161_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772605952,
+        "total_bytes": 23042408448,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 29,
+        "indexes_bytes": 10265526272,
+        "last_autoanalyze": "2026-09-15T13:32:27.499455+00:00",
+        "last_autovacuum": "2026-09-15T13:21:11.843492+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151080170,
+        "relation": "_hyper_9_162_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772540416,
+        "total_bytes": 23041572864,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 29,
+        "indexes_bytes": 10262142976,
+        "last_autoanalyze": "2026-09-15T11:04:37.188774+00:00",
+        "last_autovacuum": "2026-09-15T10:41:41.568967+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151233104,
+        "relation": "_hyper_9_143_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772687872,
+        "total_bytes": 23038312448,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 10259808256,
+        "last_autoanalyze": "2026-09-15T16:06:25.328332+00:00",
+        "last_autovacuum": "2026-09-15T16:05:12.696373+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151089343,
+        "relation": "_hyper_9_158_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772376576,
+        "total_bytes": 23035723776,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 27,
+        "indexes_bytes": 10254139392,
+        "last_autoanalyze": "2026-09-15T09:56:18.806741+00:00",
+        "last_autovacuum": "2026-09-15T09:54:24.704628+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151232592,
+        "relation": "_hyper_9_130_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772532224,
+        "total_bytes": 23030185984,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 25,
+        "indexes_bytes": 10249109504,
+        "last_autoanalyze": "2026-09-15T09:19:51.207961+00:00",
+        "last_autovacuum": "2026-09-15T09:11:29.508340+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151235314,
+        "relation": "_hyper_9_131_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772646912,
+        "total_bytes": 23025213440,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 24,
+        "indexes_bytes": 10245414912,
+        "last_autoanalyze": "2026-09-15T09:03:24.857263+00:00",
+        "last_autovacuum": "2026-09-15T08:39:21.737325+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 151231951,
+        "relation": "_hyper_9_132_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12772802560,
+        "total_bytes": 23021625344,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 10185285632,
+        "last_autoanalyze": "2026-09-15T17:09:08.880951+00:00",
+        "last_autovacuum": "2026-09-15T17:24:32.249030+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 145863022,
+        "relation": "_hyper_9_156_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12642287616,
+        "total_bytes": 22831079424,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 23,
+        "indexes_bytes": 9902653440,
+        "last_autoanalyze": "2026-09-15T08:33:47.178927+00:00",
+        "last_autovacuum": "2026-09-15T08:04:52.791319+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 145832061,
+        "relation": "_hyper_9_133_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12316614656,
+        "total_bytes": 22222512128,
+        "total_pretty": "21 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 9770360832,
+        "last_autoanalyze": "2026-09-15T17:29:57.092308+00:00",
+        "last_autovacuum": "2026-09-15T17:06:50.133869+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 143528389,
+        "relation": "_hyper_9_155_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 12121972736,
+        "total_bytes": 21895634944,
+        "total_pretty": "20 GB"
+      },
+      {
+        "autovacuum_count": 31,
+        "indexes_bytes": 9347932160,
+        "last_autoanalyze": "2026-09-15T17:52:45.376280+00:00",
+        "last_autovacuum": "2026-09-15T18:19:08.712236+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 137568407,
+        "relation": "_hyper_9_154_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 11618148352,
+        "total_bytes": 20969316352,
+        "total_pretty": "20 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 8992219136,
+        "last_autoanalyze": "2026-09-15T18:32:48.428829+00:00",
+        "last_autovacuum": "2026-09-15T18:09:50.210632+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 132029758,
+        "relation": "_hyper_9_153_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 11165532160,
+        "total_bytes": 20160806912,
+        "total_pretty": "19 GB"
+      },
+      {
+        "autovacuum_count": 28,
+        "indexes_bytes": 8597995520,
+        "last_autoanalyze": "2026-09-15T19:05:29.001077+00:00",
+        "last_autovacuum": "2026-09-15T19:04:14.631990+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 125594380,
+        "relation": "_hyper_9_152_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 10607042560,
+        "total_bytes": 19207995392,
+        "total_pretty": "18 GB"
+      },
+      {
+        "autovacuum_count": 22,
+        "indexes_bytes": 8616583168,
+        "last_autoanalyze": "2026-09-15T07:47:58.530881+00:00",
+        "last_autovacuum": "2026-09-15T07:46:43.114470+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 124229582,
+        "relation": "_hyper_9_134_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 10491879424,
+        "total_bytes": 19111223296,
+        "total_pretty": "18 GB"
+      },
+      {
+        "autovacuum_count": 29,
+        "indexes_bytes": 7873478656,
+        "last_autoanalyze": "2026-09-15T19:18:22.923299+00:00",
+        "last_autovacuum": "2026-09-15T18:57:45.723632+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 115086614,
+        "relation": "_hyper_9_151_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 9732489216,
+        "total_bytes": 17608638464,
+        "total_pretty": "16 GB"
+      },
+      {
+        "autovacuum_count": 30,
+        "indexes_bytes": 7190962176,
+        "last_autoanalyze": "2026-09-15T19:21:14.317827+00:00",
+        "last_autovacuum": "2026-09-15T19:28:53.363004+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 100612774,
+        "relation": "_hyper_9_150_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 8857747456,
+        "total_bytes": 16051159040,
+        "total_pretty": "15 GB"
+      },
+      {
+        "autovacuum_count": 1,
+        "indexes_bytes": 1104691200,
+        "last_autoanalyze": "2026-08-28T21:54:00.765352+00:00",
+        "last_autovacuum": "2026-08-28T21:53:37.558949+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 6543146,
+        "relation": "compress_hyper_7_104_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 9550897152,
+        "total_bytes": 15653937152,
+        "total_pretty": "15 GB"
+      },
+      {
+        "autovacuum_count": 19,
+        "indexes_bytes": 6754738176,
+        "last_autoanalyze": "2026-09-15T06:50:54.988327+00:00",
+        "last_autovacuum": "2026-09-15T06:50:30.615766+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 102625429,
+        "relation": "_hyper_9_135_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 8667267072,
+        "total_bytes": 15424266240,
+        "total_pretty": "14 GB"
+      },
+      {
+        "autovacuum_count": 17,
+        "indexes_bytes": 5447835648,
+        "last_autoanalyze": "2026-09-15T06:04:54.196411+00:00",
+        "last_autovacuum": "2026-09-15T06:09:26.679118+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 81017334,
+        "relation": "_hyper_9_136_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 6842597376,
+        "total_bytes": 12292194304,
+        "total_pretty": "11 GB"
+      },
+      {
+        "autovacuum_count": 16,
+        "indexes_bytes": 4176650240,
+        "last_autoanalyze": "2026-09-15T06:10:51.052623+00:00",
+        "last_autovacuum": "2026-09-15T06:09:09.824472+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 59413729,
+        "relation": "_hyper_9_142_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 5017886720,
+        "total_bytes": 9195798528,
+        "total_pretty": "8770 MB"
+      },
+      {
+        "autovacuum_count": 0,
+        "indexes_bytes": 2603704320,
+        "last_autoanalyze": null,
+        "last_autovacuum": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 37808687,
+        "relation": "_hyper_9_170_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 3193266176,
+        "total_bytes": 5797773312,
+        "total_pretty": "5529 MB"
+      },
+      {
+        "autovacuum_count": 0,
+        "indexes_bytes": 132923392,
+        "last_autoanalyze": null,
+        "last_autovacuum": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 4219397,
+        "relation": "compress_hyper_10_174_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 3721330688,
+        "total_bytes": 3855196160,
+        "total_pretty": "3677 MB"
+      },
+      {
+        "autovacuum_count": 0,
+        "indexes_bytes": 1321115648,
+        "last_autoanalyze": null,
+        "last_autovacuum": null,
+        "n_dead_tup": 0,
+        "n_live_tup": 16203754,
+        "relation": "_hyper_9_175_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 1368514560,
+        "total_bytes": 2689990656,
+        "total_pretty": "2565 MB"
+      },
+      {
+        "autovacuum_count": 3,
+        "indexes_bytes": 439443456,
+        "last_autoanalyze": "2026-09-12T05:45:39.197203+00:00",
+        "last_autovacuum": "2026-09-12T05:44:22.109567+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 555096,
+        "relation": "river_segment",
+        "relkind": "r",
+        "schema": "core",
+        "table_bytes": 1046790144,
+        "total_bytes": 1486553088,
+        "total_pretty": "1418 MB"
+      },
+      {
+        "autovacuum_count": 1,
+        "indexes_bytes": 51978240,
+        "last_autoanalyze": "2026-09-15T02:38:18.229899+00:00",
+        "last_autovacuum": "2026-09-15T02:36:48.290844+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 391930,
+        "relation": "compress_hyper_8_115_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 422985728,
+        "total_bytes": 946823168,
+        "total_pretty": "903 MB"
+      },
+      {
+        "autovacuum_count": 1,
+        "indexes_bytes": 44089344,
+        "last_autoanalyze": "2026-09-12T05:43:07.678553+00:00",
+        "last_autovacuum": "2026-09-12T05:41:17.855197+00:00",
+        "n_dead_tup": 0,
+        "n_live_tup": 332511,
+        "relation": "compress_hyper_8_111_chunk",
+        "relkind": "r",
+        "schema": "_timescaledb_internal",
+        "table_bytes": 354091008,
+        "total_bytes": 818659328,
+        "total_pretty": "781 MB"
+      },
+      {
+        "autovacuum_count": 19,
+        "indexes_bytes": 268877824,
+        "last_autoanalyze": "2026-09-15T06:07:34.930934+00:00",
+        "last_autovacuum": "2026-09-15T02:36:01.763980+00:00",
+        "n_dead_tup": 513072,
+        "n_live_tup": 691464,
+        "relation": "interp_weight",
+        "relkind": "r",
+        "schema": "met",
+        "table_bytes": 288727040,
+        "total_bytes": 557719552,
+        "total_pretty": "532 MB"
+      }
+    ],
+    "maintenance_output": {
+      "rows": [
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 42756,
+          "n_mod_since_analyze": 42756,
+          "relation": "_hyper_1_176_chunk",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 4252.900000000001,
+          "last_analyze_age_seconds": 2245235.994659,
+          "last_autoanalyze_age_seconds": 252508.345941,
+          "last_autovacuum_age_seconds": 264825.833028,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 68674,
+          "n_live_tup": 42029,
+          "n_mod_since_analyze": 81118,
+          "relation": "met_station",
+          "relpages": 41614,
+          "reltuples": 42029.0,
+          "schema": "met",
+          "vacuum_threshold": 8455.800000000001
+        },
+        {
+          "analyze_threshold": 50.2,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": 174176.083441,
+          "last_autovacuum_age_seconds": 264846.911401,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 39,
+          "n_live_tup": 2,
+          "n_mod_since_analyze": 695,
+          "relation": "data_source",
+          "relpages": 10,
+          "reltuples": 2.0,
+          "schema": "met",
+          "vacuum_threshold": 50.4
+        },
+        {
+          "analyze_threshold": 69196.40000000001,
+          "last_analyze_age_seconds": 2247171.829482,
+          "last_autoanalyze_age_seconds": 252186.914092,
+          "last_autovacuum_age_seconds": 264880.081046,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 513072,
+          "n_live_tup": 691464,
+          "n_mod_since_analyze": 953724,
+          "relation": "interp_weight",
+          "relpages": 35245,
+          "reltuples": 691464.0,
+          "schema": "met",
+          "vacuum_threshold": 138342.80000000002
+        },
+        {
+          "analyze_threshold": 421989.7,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 4219397,
+          "n_mod_since_analyze": 4219397,
+          "relation": "compress_hyper_10_174_chunk",
+          "relpages": 454264,
+          "reltuples": 4219397.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 843929.4
+        },
+        {
+          "analyze_threshold": 83.80000000000001,
+          "last_analyze_age_seconds": 2239615.891277,
+          "last_autoanalyze_age_seconds": 155130.796341,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 18,
+          "n_live_tup": 344,
+          "n_mod_since_analyze": 390,
+          "relation": "forecast_cycle",
+          "relpages": 7,
+          "reltuples": 338.0,
+          "schema": "met",
+          "vacuum_threshold": 117.60000000000001
+        },
+        {
+          "analyze_threshold": 2526704.4000000004,
+          "last_analyze_age_seconds": 100447.838868,
+          "last_autoanalyze_age_seconds": 252147.137844,
+          "last_autovacuum_age_seconds": 264666.000551,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 34202547,
+          "n_mod_since_analyze": 8936004,
+          "relation": "_hyper_1_112_chunk",
+          "relpages": 617568,
+          "reltuples": 25266544.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 5053358.800000001
+        },
+        {
+          "analyze_threshold": 2812329.2,
+          "last_analyze_age_seconds": 34457.064597,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 37808687,
+          "n_mod_since_analyze": 9685896,
+          "relation": "_hyper_9_170_chunk",
+          "relpages": 289942,
+          "reltuples": 28122792.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 5624608.4
+        },
+        {
+          "analyze_threshold": 871.5,
+          "last_analyze_age_seconds": 1799025.981825,
+          "last_autoanalyze_age_seconds": 206198.707658,
+          "last_autovacuum_age_seconds": 218397.973869,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 2280,
+          "n_live_tup": 8633,
+          "n_mod_since_analyze": 2498,
+          "relation": "hydro_run",
+          "relpages": 1299,
+          "reltuples": 8215.0,
+          "schema": "hydro",
+          "vacuum_threshold": 1693.0
+        },
+        {
+          "analyze_threshold": 4861178.0,
+          "last_analyze_age_seconds": 75944.256124,
+          "last_autoanalyze_age_seconds": 251990.792403,
+          "last_autovacuum_age_seconds": 252092.020554,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 59413729,
+          "n_mod_since_analyze": 10802448,
+          "relation": "_hyper_9_142_chunk",
+          "relpages": 501165,
+          "reltuples": 48611280.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 9722306.0
+        },
+        {
+          "analyze_threshold": 7021538.800000001,
+          "last_analyze_age_seconds": 75961.432881,
+          "last_autoanalyze_age_seconds": 252347.648615,
+          "last_autovacuum_age_seconds": 252075.165908,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 81017334,
+          "n_mod_since_analyze": 10802448,
+          "relation": "_hyper_9_136_chunk",
+          "relpages": 723906,
+          "reltuples": 70214888.0,
+          "schema": "_timescaledb_internal",
+          "vacuum_threshold": 14043027.600000001
+        },
+        {
+          "analyze_threshold": 53.6,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": 258216.277145,
+          "last_autovacuum_age_seconds": 1724100.850042,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 54,
+          "n_live_tup": 47,
+          "n_mod_since_analyze": 67,
+          "relation": "chunk",
+          "relpages": 1,
+          "reltuples": 36.0,
+          "schema": "_timescaledb_catalog",
+          "vacuum_threshold": 57.2
+        },
+        {
+          "analyze_threshold": 67.5,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": 248352.544465,
+          "last_autovacuum_age_seconds": 255328.513217,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 48,
+          "n_live_tup": 155,
+          "n_mod_since_analyze": 76,
+          "relation": "chunk_constraint",
+          "relpages": 5,
+          "reltuples": 175.0,
+          "schema": "_timescaledb_catalog",
+          "vacuum_threshold": 85.0
+        },
+        {
+          "analyze_threshold": 849.2,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": 206409.489863,
+          "last_autovacuum_age_seconds": 206416.264379,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 467,
+          "n_live_tup": 8410,
+          "n_mod_since_analyze": 852,
+          "relation": "qc_result",
+          "relpages": 1144,
+          "reltuples": 7992.0,
+          "schema": "ops",
+          "vacuum_threshold": 1648.4
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 18,
+          "n_mod_since_analyze": 19,
+          "relation": "basin",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "core",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 1,
+          "n_live_tup": 18,
+          "n_mod_since_analyze": 19,
+          "relation": "mesh_version",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "core",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 4,
+          "n_live_tup": 2,
+          "n_mod_since_analyze": 8,
+          "relation": "hypertable",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "_timescaledb_catalog",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 8,
+          "n_mod_since_analyze": 8,
+          "relation": "audit_log",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "ops",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 0,
+          "n_live_tup": 5,
+          "n_mod_since_analyze": 5,
+          "relation": "schema_migrations",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "public",
+          "vacuum_threshold": 50.0
+        },
+        {
+          "analyze_threshold": 50.0,
+          "last_analyze_age_seconds": null,
+          "last_autoanalyze_age_seconds": null,
+          "last_autovacuum_age_seconds": null,
+          "last_vacuum_age_seconds": null,
+          "n_dead_tup": 2,
+          "n_live_tup": 1,
+          "n_mod_since_analyze": 3,
+          "relation": "dimension",
+          "relpages": 0,
+          "reltuples": -1.0,
+          "schema": "_timescaledb_catalog",
+          "vacuum_threshold": 50.0
+        }
+      ],
+      "status": "ok",
+      "summary": {
+        "max_last_autoanalyze_age_seconds": 155130.803649,
+        "max_last_autovacuum_age_seconds": 168892.570375,
+        "over_analyze_threshold_count": 14,
+        "over_vacuum_threshold_count": 3,
+        "relation_count": 108
+      }
+    },
+    "settings": [
+      {
+        "name": "autovacuum",
+        "setting": "on",
+        "unit": null
+      },
+      {
+        "name": "autovacuum_analyze_scale_factor",
+        "setting": "0.1",
+        "unit": null
+      },
+      {
+        "name": "autovacuum_max_workers",
+        "setting": "10",
+        "unit": null
+      },
+      {
+        "name": "autovacuum_naptime",
+        "setting": "10",
+        "unit": "s"
+      },
+      {
+        "name": "autovacuum_vacuum_scale_factor",
+        "setting": "0.2",
+        "unit": null
+      },
+      {
+        "name": "checkpoint_timeout",
+        "setting": "900",
+        "unit": "s"
+      },
+      {
+        "name": "effective_cache_size",
+        "setting": "12363648",
+        "unit": "8kB"
+      },
+      {
+        "name": "log_temp_files",
+        "setting": "262144",
+        "unit": "kB"
+      },
+      {
+        "name": "maintenance_work_mem",
+        "setting": "2096128",
+        "unit": "kB"
+      },
+      {
+        "name": "max_connections",
+        "setting": "100",
+        "unit": null
+      },
+      {
+        "name": "max_wal_size",
+        "setting": "16384",
+        "unit": "MB"
+      },
+      {
+        "name": "min_wal_size",
+        "setting": "2048",
+        "unit": "MB"
+      },
+      {
+        "name": "shared_buffers",
+        "setting": "4121216",
+        "unit": "8kB"
+      },
+      {
+        "name": "temp_buffers",
+        "setting": "1024",
+        "unit": "8kB"
+      },
+      {
+        "name": "track_counts",
+        "setting": "on",
+        "unit": null
+      },
+      {
+        "name": "wal_buffers",
+        "setting": "2048",
+        "unit": "8kB"
+      },
+      {
+        "name": "wal_keep_size",
+        "setting": "0",
+        "unit": "MB"
+      },
+      {
+        "name": "work_mem",
+        "setting": "65536",
+        "unit": "kB"
+      }
+    ],
+    "stat_database": [
+      {
+        "conflicts": 0,
+        "datname": "nhms",
+        "deadlocks": 6,
+        "numbackends": 20,
+        "temp_bytes": 1870039836796,
+        "temp_bytes_pretty": "1742 GB",
+        "temp_files": 9586,
+        "xact_commit": 1565932,
+        "xact_rollback": 761285
+      },
+      {
+        "conflicts": 0,
+        "datname": null,
+        "deadlocks": 0,
+        "numbackends": 0,
+        "temp_bytes": 0,
+        "temp_bytes_pretty": "0 bytes",
+        "temp_files": 0,
+        "xact_commit": 1765880,
+        "xact_rollback": 479
+      },
+      {
+        "conflicts": 0,
+        "datname": "postgres",
+        "deadlocks": 0,
+        "numbackends": 1,
+        "temp_bytes": 0,
+        "temp_bytes_pretty": "0 bytes",
+        "temp_files": 0,
+        "xact_commit": 169502,
+        "xact_rollback": 12
+      },
+      {
+        "conflicts": 0,
+        "datname": "template1",
+        "deadlocks": 0,
+        "numbackends": 0,
+        "temp_bytes": 0,
+        "temp_bytes_pretty": "0 bytes",
+        "temp_files": 0,
+        "xact_commit": 0,
+        "xact_rollback": 0
+      },
+      {
+        "conflicts": 0,
+        "datname": "template0",
+        "deadlocks": 0,
+        "numbackends": 0,
+        "temp_bytes": 0,
+        "temp_bytes_pretty": "0 bytes",
+        "temp_files": 0,
+        "xact_commit": 0,
+        "xact_rollback": 0
+      }
+    ],
+    "status": "ok"
+  },
+  "recommendations": [
+    {
+      "action": "Review the uncompressed working set and compression cadence.",
+      "area": "postgres",
+      "code": "WORKING_SET_ABOVE_WARNING",
+      "evidence": {
+        "daily_ingest_bytes": 42342158921.14286,
+        "next_compressible_at": "2026-08-30T00:00:00+00:00",
+        "projected_peak_bytes": 1333551579136.0,
+        "projection_status": "ok",
+        "uncompressed_bytes": 1333551579136,
+        "watermark": "2026-09-17T00:00:00+00:00",
+        "working_set_filesystem": {
+          "blockers": [],
+          "device_identity": "9:0:7539273700150526131",
+          "path": "/data/GHDC/nhms-primary/pgdata",
+          "status": "ok"
+        },
+        "working_set_free_bytes": 12935214493696
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Clean root-owned logs/tmp or expand root filesystem.",
+      "area": "filesystem",
+      "code": "ROOT_FREE_BELOW_WARNING",
+      "evidence": {
+        "free_bytes": 18995355648,
+        "free_pretty": "17.7 GiB"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Add Timescale retention/compression after validating display cold-read path.",
+      "area": "postgres",
+      "code": "DATABASE_SIZE_ABOVE_CRITICAL",
+      "evidence": {
+        "bytes": 1413735023407,
+        "database": "nhms",
+        "pretty": "1.3 TiB"
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Define retention policy after verifying object-store replay evidence.",
+      "area": "postgres",
+      "code": "TIMESCALE_RETENTION_POLICY_MISSING",
+      "evidence": {
+        "hypertable": "hydro.river_timeseries",
+        "num_chunks": 29
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Dry-run compression settings and query plans before enabling.",
+      "area": "postgres",
+      "code": "TIMESCALE_COMPRESSION_POLICY_MISSING",
+      "evidence": {
+        "compression_enabled": true,
+        "compression_job_id": null,
+        "hypertable": "hydro.river_timeseries"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Define retention policy after verifying object-store replay evidence.",
+      "area": "postgres",
+      "code": "TIMESCALE_RETENTION_POLICY_MISSING",
+      "evidence": {
+        "hypertable": "met.forcing_station_timeseries",
+        "num_chunks": 6
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Dry-run compression settings and query plans before enabling.",
+      "area": "postgres",
+      "code": "TIMESCALE_COMPRESSION_POLICY_MISSING",
+      "evidence": {
+        "compression_enabled": true,
+        "compression_job_id": null,
+        "hypertable": "met.forcing_station_timeseries"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Audit overlapping display/MVT indexes with EXPLAIN before adding more indexes.",
+      "area": "postgres",
+      "code": "HYPERTABLE_INDEX_RATIO_HIGH",
+      "evidence": {
+        "hypertable": "met.forcing_station_timeseries",
+        "index_to_table_ratio": 2.537,
+        "indexes_bytes": 50672484352,
+        "table_bytes": 19973398528
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Let autovacuum finish or schedule manual VACUUM during a quiet window.",
+      "area": "postgres",
+      "code": "DEAD_TUPLE_HOTSPOT",
+      "evidence": {
+        "dead_pct": 42.59,
+        "n_dead_tup": 513072,
+        "relation": "met.interp_weight",
+        "total_pretty": "532 MB"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Autoanalyze is not keeping up with this relation; check autovacuum workers and counters.",
+      "area": "postgres",
+      "code": "TABLE_STATISTICS_STALE",
+      "evidence": {
+        "analyze_threshold": 50.0,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": null,
+        "n_mod_since_analyze": 42756,
+        "ratio": 855.1,
+        "relation": "_timescaledb_internal._hyper_1_176_chunk"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Autoanalyze is not keeping up with this relation; check autovacuum workers and counters.",
+      "area": "postgres",
+      "code": "TABLE_STATISTICS_STALE",
+      "evidence": {
+        "analyze_threshold": 4252.900000000001,
+        "last_analyze_age_seconds": 2245235.994659,
+        "last_autoanalyze_age_seconds": 252508.345941,
+        "n_mod_since_analyze": 81118,
+        "ratio": 19.1,
+        "relation": "met.met_station"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Autoanalyze is not keeping up with this relation; check autovacuum workers and counters.",
+      "area": "postgres",
+      "code": "TABLE_STATISTICS_STALE",
+      "evidence": {
+        "analyze_threshold": 50.2,
+        "last_analyze_age_seconds": null,
+        "last_autoanalyze_age_seconds": 174176.083441,
+        "n_mod_since_analyze": 695,
+        "ratio": 13.8,
+        "relation": "met.data_source"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Autoanalyze is not keeping up with this relation; check autovacuum workers and counters.",
+      "area": "postgres",
+      "code": "TABLE_STATISTICS_STALE",
+      "evidence": {
+        "analyze_threshold": 69196.40000000001,
+        "last_analyze_age_seconds": 2247171.829482,
+        "last_autoanalyze_age_seconds": 252186.914092,
+        "n_mod_since_analyze": 953724,
+        "ratio": 13.8,
+        "relation": "met.interp_weight"
+      },
+      "severity": "warning"
+    },
+    {
+      "action": "Database-wide autovacuum output is silent while tables demand it: check the launcher, track_counts, and whether a crash restart wiped the statistics counters.",
+      "area": "postgres",
+      "code": "AUTOVACUUM_OUTPUT_STALLED",
+      "evidence": {
+        "max_last_autoanalyze_age_seconds": 155130.803649,
+        "max_last_autovacuum_age_seconds": 168892.570375,
+        "stale_age_seconds": 86400.0,
+        "stalled_outputs": [
+          "autoanalyze"
+        ],
+        "statistics_stale_relations": 4,
+        "vacuum_debt_stale_relations": 0
+      },
+      "severity": "critical"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 42756,
+        "n_mod_since_analyze": 42756,
+        "relation": "_timescaledb_internal._hyper_1_176_chunk",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "core.basin",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 18,
+        "n_mod_since_analyze": 19,
+        "relation": "core.mesh_version",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 2,
+        "n_mod_since_analyze": 8,
+        "relation": "_timescaledb_catalog.hypertable",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 8,
+        "n_mod_since_analyze": 8,
+        "relation": "ops.audit_log",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 5,
+        "n_mod_since_analyze": 5,
+        "relation": "public.schema_migrations",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    },
+    {
+      "action": "Planner has no statistics yet; autoanalyze runs once modifications pass the threshold.",
+      "area": "postgres",
+      "code": "TABLE_ZERO_STATISTICS",
+      "evidence": {
+        "n_live_tup": 1,
+        "n_mod_since_analyze": 3,
+        "relation": "_timescaledb_catalog.dimension",
+        "relpages": 0,
+        "reltuples": -1.0
+      },
+      "severity": "info"
+    }
+  ],
+  "safety": {
+    "database_url_redacted": true,
+    "destructive_actions_enabled": false,
+    "notes": [
+      "This receipt is read-only.",
+      "It does not drop chunks, vacuum full, delete object-store artifacts, or modify systemd units."
+    ]
+  },
+  "schema_version": "nhms.node27_resource_governance.audit.v1",
+  "started_at": "2026-09-18T04:10:32Z",
+  "status": "completed",
+  "systemd": {
+    "services": {
+      "nhms-display-api.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-display-api.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=729042944\nId=nhms-display-api.service\nActiveState=active\nSubState=running"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "ExecMainStatus": "0",
+          "Id": "nhms-display-api.service",
+          "MemoryCurrent": "729042944",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "running"
+        }
+      },
+      "nhms-node27-autopipe.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-autopipe.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=[not set]\nId=nhms-node27-autopipe.service\nActiveState=inactive\nSubState=dead"
+        },
+        "properties": {
+          "ActiveState": "inactive",
+          "ExecMainStatus": "0",
+          "Id": "nhms-node27-autopipe.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "dead"
+        }
+      },
+      "nhms-node27-autopipe.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-autopipe.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-autopipe.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-autopipe.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      },
+      "nhms-node27-download.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-download.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=[not set]\nId=nhms-node27-download.service\nActiveState=inactive\nSubState=dead"
+        },
+        "properties": {
+          "ActiveState": "inactive",
+          "ExecMainStatus": "0",
+          "Id": "nhms-node27-download.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "dead"
+        }
+      },
+      "nhms-node27-download.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-download.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-download.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-download.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      },
+      "nhms-node27-frontier-alert.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-frontier-alert.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=[not set]\nId=nhms-node27-frontier-alert.service\nActiveState=inactive\nSubState=dead"
+        },
+        "properties": {
+          "ActiveState": "inactive",
+          "ExecMainStatus": "0",
+          "Id": "nhms-node27-frontier-alert.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "dead"
+        }
+      },
+      "nhms-node27-frontier-alert.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-frontier-alert.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-frontier-alert.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-frontier-alert.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      },
+      "nhms-node27-raw-retention.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-raw-retention.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=exit-code\nNRestarts=0\nExecMainStatus=1\nMemoryCurrent=[not set]\nId=nhms-node27-raw-retention.service\nActiveState=failed\nSubState=failed"
+        },
+        "properties": {
+          "ActiveState": "failed",
+          "ExecMainStatus": "1",
+          "Id": "nhms-node27-raw-retention.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "exit-code",
+          "SubState": "failed"
+        }
+      },
+      "nhms-node27-raw-retention.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-raw-retention.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-raw-retention.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-raw-retention.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      },
+      "nhms-node27-timeseries-compression.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-timeseries-compression.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=[not set]\nId=nhms-node27-timeseries-compression.service\nActiveState=inactive\nSubState=dead"
+        },
+        "properties": {
+          "ActiveState": "inactive",
+          "ExecMainStatus": "0",
+          "Id": "nhms-node27-timeseries-compression.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "dead"
+        }
+      },
+      "nhms-node27-timeseries-compression.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-timeseries-compression.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-timeseries-compression.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-timeseries-compression.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      },
+      "nhms-node27-timeseries-retention.service": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-timeseries-retention.service",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nNRestarts=0\nExecMainStatus=0\nMemoryCurrent=[not set]\nId=nhms-node27-timeseries-retention.service\nActiveState=inactive\nSubState=dead"
+        },
+        "properties": {
+          "ActiveState": "inactive",
+          "ExecMainStatus": "0",
+          "Id": "nhms-node27-timeseries-retention.service",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "Result": "success",
+          "SubState": "dead"
+        }
+      },
+      "nhms-node27-timeseries-retention.timer": {
+        "command": {
+          "args": [
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--plain",
+            "show",
+            "nhms-node27-timeseries-retention.timer",
+            "-p",
+            "Id",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "Result",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "NRestarts"
+          ],
+          "return_code": 0,
+          "status": "ok",
+          "stderr": "",
+          "stdout": "Result=success\nId=nhms-node27-timeseries-retention.timer\nActiveState=active\nSubState=waiting"
+        },
+        "properties": {
+          "ActiveState": "active",
+          "Id": "nhms-node27-timeseries-retention.timer",
+          "Result": "success",
+          "SubState": "waiting"
+        }
+      }
+    },
+    "timers": {
+      "args": [
+        "systemctl",
+        "--user",
+        "list-timers",
+        "--all",
+        "--no-pager"
+      ],
+      "return_code": 0,
+      "status": "ok",
+      "stderr": "",
+      "stdout": "NEXT                        LEFT          LAST                        PASSED       UNIT                                       ACTIVATES\nFri 2026-09-18 12:12:40 CST 1min 58s left Fri 2026-09-18 12:02:40 CST 8min ago     yd-node27-autopipe.timer                   yd-node27-autopipe.service\nFri 2026-09-18 12:16:42 CST 6min left     Fri 2026-09-18 12:06:42 CST 3min 59s ago nhms-node27-autopipe.timer                 nhms-node27-autopipe.service\nFri 2026-09-18 12:17:40 CST 6min left     Fri 2026-09-18 11:47:40 CST 23min ago    nhms-node27-download.timer                 nhms-node27-download.service\nFri 2026-09-18 12:17:40 CST 6min left     Fri 2026-09-18 11:47:40 CST 23min ago    yd-node27-download.timer                   yd-node27-download.service\nFri 2026-09-18 12:25:00 CST 14min left    Thu 2026-09-17 12:25:32 CST 23h ago      nhms-node27-timeseries-compression.timer   nhms-node27-timeseries-compression.service\nFri 2026-09-18 12:30:00 CST 19min left    Fri 2026-09-18 12:00:32 CST 10min ago    nhms-node27-frontier-alert.timer           nhms-node27-frontier-alert.service\nFri 2026-09-18 13:15:00 CST 1h 4min left  Thu 2026-09-17 13:15:32 CST 22h ago      nhms-node27-timeseries-retention.timer     nhms-node27-timeseries-retention.service\nFri 2026-09-18 13:45:00 CST 1h 34min left Thu 2026-09-17 13:45:32 CST 22h ago      yd-node27-timeseries-retention.timer       yd-node27-timeseries-retention.service\nSat 2026-09-19 06:00:00 CST 17h left      n/a                         n/a          nhms-node27-coverage-freshness-alert.timer nhms-node27-coverage-freshness-alert.service\nSat 2026-09-19 11:35:00 CST 23h left      Fri 2026-09-18 11:35:32 CST 35min ago    nhms-node27-raw-retention.timer            nhms-node27-raw-retention.service\nSat 2026-09-19 12:05:00 CST 23h left      Fri 2026-09-18 12:05:32 CST 5min ago     nhms-node27-mvt-cache-retention.timer      nhms-node27-mvt-cache-retention.service\nSat 2026-09-19 12:05:00 CST 23h left      Fri 2026-09-18 12:05:32 CST 5min ago     yd-node27-raw-retention.timer              yd-node27-raw-retention.service\nn/a                         n/a           Fri 2026-09-18 12:10:32 CST 9s ago       nhms-node27-resource-governance.timer      nhms-node27-resource-governance.service\n\n13 timers listed."
+    }
+  },
+  "working_set": {
+    "daily_ingest_bytes": 42342158921.14286,
+    "next_compressible_at": "2026-08-30T00:00:00+00:00",
+    "projected_peak_bytes": 1333551579136.0,
+    "projection_status": "ok",
+    "uncompressed_bytes": 1333551579136,
+    "watermark": "2026-09-17T00:00:00+00:00",
+    "working_set_filesystem": {
+      "blockers": [],
+      "device_identity": "9:0:7539273700150526131",
+      "path": "/data/GHDC/nhms-primary/pgdata",
+      "status": "ok"
+    },
+    "working_set_free_bytes": 12935214493696
+  }
+}

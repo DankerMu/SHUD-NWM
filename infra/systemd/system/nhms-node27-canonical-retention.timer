@@ -1,0 +1,12 @@
+[Unit]
+Description=Run NHMS node-27 canonical mirror retention daily
+
+[Timer]
+# Same tick as nhms-node27-raw-retention.timer: both units age one cycle's
+# canonical mirror and its PNG cache out on the same date.
+OnCalendar=*-*-* 03:35:00 UTC
+Persistent=true
+Unit=nhms-node27-canonical-retention.service
+
+[Install]
+WantedBy=timers.target

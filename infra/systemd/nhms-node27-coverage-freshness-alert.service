@@ -1,0 +1,38 @@
+[Unit]
+Description=NHMS node-27 coverage freshness alert
+# #2080 (design D3): the ALERT IS the non-zero exit. This lane has no in-process
+# mail path of its own — it routes into the already-live handler, whose template
+# documents that "Adding the next consumer stays one `OnFailure=` line". `%n`
+# expands to the FULL unit name (including `.service`), which is the argument
+# the handler's wrapper expects. Installing the units into
+# ~/.config/systemd/user/ + `daemon-reload` is a MANUAL step on node-27 —
+# `git pull` updates only the ExecStart payload.
+OnFailure=nhms-node27-unit-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+# Reuses the frontier lane's env file (read-only `nhms_display_ro` DSN). That
+# file's 0600/symlink contract is enforced by the frontier lane's wrapper on the
+# same file every 30 minutes; this lane adds no second copy of it. The optional
+# NHMS_COVERAGE_GAP_DAYS knob (design D2) may be added to the same file.
+EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env
+# The lane imports `services.tiles.mvt` (design D0: the covered frontier is the
+# display catalog's own `default_cycle`, never re-derived), so the repo root
+# must be importable when the script is run as a FILE. A manual shell
+# invocation needs the same export.
+Environment=PYTHONPATH=/home/nwm/NWM
+# No wrapper shell (design D5): there is no mutex contract, no `--once`
+# hand-off and no in-process mail path to guard, so `ExecStart` is the venv
+# interpreter directly.
+ExecStart=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_coverage_freshness_alert.py
+# NO `StandardOutput=append:` (design D3): the JOURNAL is the mail body. The
+# handler mails `journalctl -n 30`, and the report is capped at 24 stdout lines
+# with the `VERDICT:` block LAST so it survives that tail after systemd's own
+# framing lines. Redirecting stdout to a file would mail an empty report.
+# Bounded execution deadline. For Type=oneshot the ENTIRE execution is the start
+# phase, so TimeoutStartSec is the only deadline that applies. Budget: connect
+# 10 s + a 30 s statement bound per source; 300 s is two orders of margin. A
+# monitoring lane that hangs must become a visible failed unit rather than
+# sitting in `activating` forever — the 2026-08-12 geometry.
+TimeoutStartSec=300

@@ -4796,3 +4796,193 @@ integration+security-perf。当一个 PR 的失败类是**同一条不变量反�
 
 记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
 现行 **keep**、座位上限不变。
+
+## Revisit — PR #2455 (issue #2087), 2026-09-17
+
+审计在更大样本上再次 DECIDABLE：**226 个多轮 merged PR，later-round catches
+core=332 / rotated=270 / phase=66（skipped 15）**。
+
+比值继续朝 core 移动（早期样本 core=2 / rotated=57，即 96% 来自轮换；现在轮换占
+270/602 ≈ **45%**）。但这不是 cut 的信号：审计自己的判据是「几乎全部来自 pinned-core
+才说明轮换没买到东西」，45% 远不是「几乎全部」。**现行 keep 不变，座位上限不变。**
+
+本 PR 是一个极端样本，值得单独记，因为它把上一节点出的缺口推到了尽头：
+
+- **代码面在 round 1 之后再没有被挑出任何问题。** `correctness` 席位自始 0 findings；
+  三方（Phase 7 pass 3、round 3 的 `invariant-state` 席、Phase 7 pass 4）各自独立用
+  AST-minus-docstrings + sha256 核验，`9344e37e..d1ab2240` 区间内三个源文件**零可执行改动**。
+  三家绝对摘要不同（strip/unparse 实现不同），被测命题「跨区间相等」三家一致。
+- **此后全部 19 条 gate 净捕获里，round 1 之后的 11 条全部落在编排者为流程写下的叙述里。**
+  该 change 的 `tasks.md` 失败类账本枚举了 **16 例**同一个类：把一条听起来确凿、实则代码
+  否定的事实断言写进产物。其中 **4 例是在修上一例的同一次改动里写下的**；另有 2 例在落笔前
+  被实现者拦下（一次拒绝照抄编排者给的错误措辞，一次坚持自己对 pre-swap 树重推而非照抄矩阵）。
+- **上一节的结论在本 PR 上不成立，需要扩大。** 上一节建议「fixture 冻结后、实现启动前，
+  规格增量需要一次独立只读复核」。本 PR **有**这道复核，且它抓到了账本第 1、2 例（两轮 revise
+  才 approve）。但剩下 14 例是在**循环进行中**由编排者对产物的后续编辑引入的，那些编辑没有任何
+  独立复核点——它们靠 Phase 7 gap sweep 事后发现，代价是两次 `local-repair` 额度、一次
+  `semantic` 路由和一整轮 round 3。所以缺口不是「fixture 冻结那一刻缺复核」，而是
+  **编排者在循环中对产物的每一次编辑都没有复核者**，而这类编辑的错误率经实测与代码改动相当或更高。
+- 座位轮换管不到这条：它是 reviewer 组合问题，而这是**谁审编排者**的问题。本 PR 里有效的
+  机制恰好不是席位，是两处**实现者拒绝照抄**——即"下游拒绝执行一条它无法自行验证的断言"。
+
+记录 deferral：keep/cut 仍待维护者决策；**merge 预授权不含审核策略调整**。本次仅记录证据，
+不改任何规则。若要动，最小且有实测支撑的一条是：**编排者对 OpenSpec 产物的每次编辑，在其
+被后续阶段引用之前，需要一次只读复核**——本 PR 的数据是它会拦下 14 例中的大部分，成本远低于
+它实际消耗的一轮 round 3 加两次 local-repair。
+
+## Revisit — PR #2456 (issue #1627), 2026-09-18 —— keep；一个「谁审编排者」的极端样本
+
+audit 再次 DECIDABLE：227 个多轮已合并 PR，later-round catches core=358 / rotated=271 /
+phase=66 / skipped=15。rotated 占 271/629 ≈ 43%，与上一节点的 45% 同量级，**方向未反转，
+现行 keep 不变，座位上限不变**。
+
+本 PR 的本行数据对轮换本身几乎没有贡献，但它把上一节（PR #2455）点出的那条缺口推到了尽头。
+
+**本行的分摊**：round 1 席位 `invariant-state` + `spec-compliance`；rounds 2/4/5 同一对（core），
+round 3 换入 `test-evidence`。逐条记录支持的 27 条 later-round catches 里，
+**rotated 只买到 1 条**（round 3 `test-evidence` 实测证伪了「PR 定向 CI 抓不到那条回归」）。
+又一个 no-rotation datum。
+
+**它为什么值得单独记**：五轮 38 条 gate 净捕获里，**绝大多数落在编排者为流程写下的叙述里**，
+而不是落在裁定内容上。被证伪的自述至少六条：两个数不出来的总数、「符号锚已全部转换」、
+「PR 定向 CI 抓不到」、「TOCTOU 段已整块移除」、「全仓只剩一份」、「留行号的只有两类」。
+其中**后四条是在修前几条的同一次改动里写下的**——两份 Review Failure Retro 的纠正动作
+各自又引入了同一类缺陷。这正是 #2455 那节的结论：缺口不在 fixture 冻结那一刻，
+而在**编排者对产物的每一次编辑都没有复核者**，且这类编辑的错误率经实测与代码改动相当或更高。
+
+**本 PR 新增一个 #2455 没有的数据点：有效的不是多一个席位，是多一条机械判据。**
+- 席位面：代码面自 round 3 起连续三轮零 P1；round 5 的 `invariant-state` 席直接 Approve。
+  再加席位买不到东西——五轮里人读**三次**漏掉同一条裁定级矛盾
+  （`_optional_config_path` 在 ADR 三处的从句号不一致，从 round 1 活到 round 4）。
+- 判据面：本 PR 因一条 P2（「旧引用回执没有生成器，归档后无法复核」）被迫写出
+  `scripts/cite_check.py`。它随即抓到了两处人读五轮都没抓到的腐烂锚，并且在**合并 master 之后**
+  抓到第三处——上游改动把被引文件整体下移，而 ADR 已知限制 1(b) 原文只覆盖「你自己这次 diff」。
+  一条能跑的判据覆盖了它作者没想到的场景；一条写得更好的散文规则做不到这件事，
+  本 PR 第 5 轮的两条 P2 就是「用新写的规则替换旧叙述、新规则同样漂」的直接证据。
+
+**留下的空洞要说准**：仓内对「过程散文」这一整类内容**没有任何机械判据**——
+`cite_check` 管引用、家族守卫管站点、`openspec validate` 管结构，而「我说我删了」没有东西管。
+这是本 PR 第二份 retro 里 `Missing regression evidence` 判 yes 的原因，也是这个 loop
+只能靠人读跑满五轮、最终在 round ceiling 由用户裁决终结的结构性原因。
+
+记录 deferral：keep/cut 仍待维护者决策；**merge 预授权不含审核策略调整**，本次只记证据、不改规则。
+若要动，本 PR 支持的最小改动与 #2455 提的那条**不同**且更窄：不是「给编排者的每次编辑加一个只读
+复核者」（那是再买人力），而是**每当一条断言被写进被评审件，先问它能不能变成一条会跑的判据；
+不能，就别把它写成断言**。本 PR 的实测是：判据抓到 3 条人读漏掉的，而人读五轮抓到的 38 条里
+有约 30 条是散文——把散文换成判据比再加一席便宜得多。
+
+## Revisit 2026-09-18 (post PR #2462 / issue #2080)
+
+审计在更大样本上再次 DECIDABLE：**227 个多轮已合并 PR，later-round catches core=358 /
+rotated=271 / phase=66**（另有 15 条因缺 `round` 或 `lens` 不可归属，已被审计排除）。
+
+方向仍是 keep，但比例已和早期revisit不同：rotated 份额从 2026-08-07 的 97.5% 回落到
+**43%**（271/629）。这不是轮换变差了，而是样本从 32 个 PR 长到 227 个之后，pinned-core
+在 fix 触及面上的回归召回被记全了——两边都在真出货，而判据问的是「later-round catches 是否
+集中在 rotated-in lenses」，43% 谈不上「集中」。**因此这是第一次，keep 的理由不再是判据本身
+给出的，而是 workflow 的 default-keep（correctness over cost）。** 如实记下来，别把 43% 说成
+仍然满足原判据。
+
+本 PR 对这个样本**零贡献**：Round 1 即 clean（四席零 P0/P1，三条 P2 按 P2-note 规则记录不修），
+没有 later round，故 `round_lenses` 只有一项。它能提供的是另一面的数据点——真正抓住设计缺陷的
+是**实现之前**的 fixture review：16 条 catches 里 12 条来自 `fixture-review` 席，其中一条直接
+推翻了初稿的 covered 侧谓词（会在图层已黑时报 gap=0）。审计的 `NOTE per-lens yield` 不统计
+phase lens，所以这类价值在现有指标里不可见。
+
+沿用上一条 revisit 的处置：**记录 deferral，不改规则**——keep/cut 仍是维护者的人工决策，
+merge 预授权不含审核策略调整。若维护者要动，本 PR 支持的窄改动是：让审计把 `fixture-review`
+纳入 per-lens yield，否则「实现前一次读」与「实现后一轮席位」的成本效益无法比较。
+
+## Revisit 2026-09-18 (post PR #2468 / issues #2465, #2466)
+
+审计第三次在同一天给出 DECIDABLE：**228 个多轮已合并 PR，later-round catches core=367 /
+rotated=274 / phase=68**（15 条不可归属已排除）。rotated 份额 **42.7%**（274/641），与上一条
+revisit 的 43% 基本持平——判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠
+default-keep。本 PR 的增量是 core +9 / rotated +3 / phase +2。
+
+数量上微不足道，但本 PR 是一个很干净的对照样本，值得记下它**是哪一种** rotated 价值：
+
+- round 1、2 的 pinned core（correctness + spec-compliance）各自尽职：round 1 抓到只读 DSN 跑写脚本的
+  P1（两席独立撞上），round 2 抓到 fix pass 遗留的契约文本陈旧。
+- round 3 轮换进来的 **integration** 席位从没在这个 PR 上坐过，它不再逐条核对断言，而是沿着运维从
+  邮件出发的路径**走到终态**，于是抓到两条 core 三轮都没看见的**组合缺陷**：本 PR 自己的 #2466
+  交付句把治理 receipt 说成自动存活信号（`_recommendations` 根本不读 `systemd` 段，fixture 自己就
+  写着这个事实），以及新写的分支 C 没有收尾步骤。每一条单独的句子都「对」，拼起来才错——这恰好是
+  逐条核对的 lens 结构上看不到的。
+- 本 PR 分量最重的一条发现却不来自任何席位：「缺覆盖行 = 整行 NULL」是把 runbook 里的 SQL 逐字放到
+  生产库上只读执行（E8）才测出来的假话；correctness 席位靠静态推导也得出了同样结论，但只把它当 Note。
+  这与 2026-09-17 那条 revisit 的结论同向：**判据/执行比再加一席便宜**。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2468 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定。若要动，本 PR 支持的窄改动是：rotated 席位的价值在「沿路径组合」而非「多一双眼睛
+逐条核对」，所以后续轮换候选优先选**与 core 检查方式不同**的 lens（integration / invariant-state），
+而不是与 core 同类的 lens。
+
+## Revisit 2026-09-18 (post PR #2469 / issues #2261, #2211, #2107, #2105, #1827, #1829, #1897)
+
+审计第四次在同一天给出 DECIDABLE：**229 个多轮已合并 PR，later-round catches core=375 /
+rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.3%**（275/650），与上一条的
+42.7% 持平，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。
+本 PR 增量：core +8 / rotated +1 / phase +2。
+
+- round 2 的 pinned core（test-evidence + spec-compliance）产出 8 条，**全部**是关于 PR 自身的陈述
+  （归因、陈旧数字、无出处的计时、两处口径不一致），没有一条是代码缺陷。
+- 唯一的代码缺陷来自轮换进来的 **correctness**（换下 invariant-state）：新守卫对不可哈希的 outcome
+  抛 `TypeError`，违反它自己 docstring 的 never-raises。core 席位读过同一个函数，核对的是「它拦不拦词表外的值」，
+  而不是「它在什么输入上会自己崩」——又一次是检查方式不同，而不是多一双眼睛。
+- phase +2 都来自 Phase 7：GitHub 上的正文仍是旧版，以及一行表格缺实测出处。
+
+**本次审计数字的可信度须打折**：#2477 查实，`loop_log_audit.py` 的装载副本（`.claude/skills/...`，277 行）
+缺 #2036 的归因修复——对它跑 `tests/test_loop_log_audit_attribution.py` 是 28 failed / 32，而那个测试自
+`002ba4b59` 起在每个 checkout 里都 module-level skip，所以没人看见。上面三个计数是修复前的算法算出来的；
+在 #2477 落地并重算之前，本 ADR 近期各条 revisit 引用的 core/rotated 数字都不应被当作已校准的判据输入。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2469 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定。若要动，先落 #2477，再用修复后的审计重算这组比例——在归因算法本身未经验证的情况下
+做 keep/cut 决定，等于用一把没校准过的尺子量。
+
+## Revisit 2026-09-18 (post PR #2489 / issues #2156, #2154, #2157, #2166, #2165, #2160)
+
+审计第五次在同一天给出 DECIDABLE：**230 个多轮已合并 PR，later-round catches core=377 /
+rotated=275 / phase=70**（15 条不可归属已排除）。rotated 份额 **42.2%**（275/652），与上一条的 42.3%
+持平，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。
+本 PR 增量：core +2 / rotated +0 / phase +0。
+
+- round 1 是 high fixture 的 4 席，round 2 按 pinned-core 规则只开 2 席（correctness+invariant-state 全量、
+  test-evidence+spec-compliance 聚焦修复增量），没有轮换位——上一轮无 P1、无失败类重复，规则不给 free slot。
+- round 2 的两条 P2 都是陈述类：PR 正文证据行与实跑不符；另一个未归档 change 的 delta 仍钉旧版本号
+  （本 PR 自己的 v6 轮转造成）。全量席对代码零发现，Phase 7 CLEAN。
+- round 1 唯一有运行时后果的缺陷（JSON-null `Type` 判据分叉）被 correctness / invariant-state / security-perf
+  三席独立撞到：round-1 的席位广度在这里是冗余而不是互补，这条证据不支持也不反对轮换。
+
+本次数字仍由缺 #2036 修复的装载副本算出（#2477 未落地），可信度折扣同上一条。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2489 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定，且应在 #2477 落地、用修复后的审计重算之后再做。
+
+## Revisit 2026-09-18 (post PR #2482 / issues #2472, #2473)
+
+审计第六次在同一天给出 DECIDABLE：**231 个多轮已合并 PR，later-round catches core=388 /
+rotated=275 / phase=74**（15 条不可归属已排除）。rotated 份额 **41.5%**（275/663），比上一条的 42.2%
+略降，判据「集中在 rotated-in lenses」依旧不成立，keep 依旧只靠 default-keep。本 PR 增量：
+core +11 / rotated +0 / phase +4——三轮都是同一组三席（correctness、test-evidence+spec-compliance、
+integration），没有发生轮换，所以本 PR 对 rotated 这一侧不提供任何证据。
+
+- later-round 的 11 条 core catch 几乎全是**路由文档的叶子缺口与虚假陈述**（运维 runbook 里一种原因
+  落不到可收口的一步、一个「实测」标签没有 receipt 支撑）；Phase 7 的 4 条同类。代码缺陷只有一条
+  模板端口（既存）。
+- 收敛靠的不是换席位，而是**给 reviewer 一张实测形状表让它逐叶 trace**，以及在 brief 里写死阻断定义；
+  前几次 final review 的阻断项都在上一轮修复新写的文字里，面越修越大——与 lens 组合无关。
+- 本条同样受 #2477 的保留意见约束：归因算法未经校准，这组数字不是已校准的判据输入。
+
+处置同前：**记录 deferral，不改规则**。本 PR 的合并授权只针对 #2482 本身，不含审核策略调整；keep/cut
+仍由维护者人工决定，且应在 #2477 落地、重算比例之后再做。
+
+## Revisit 2026-09-18 (post PR #2496 / issue #2024)
+
+审计第七次给出 DECIDABLE，数字与上一条**完全相同**：231 个多轮已合并 PR，later-round catches
+core=388 / rotated=275 / phase=74（15 条不可归属已排除），rotated 份额仍是 41.5%。本 PR 是
+fixture `none` 的 spec-only 改动，0 轮审查、没有派席位，对 core、rotated、phase 三侧都不提供证据。
+
+处置同前：**记录 deferral，不改规则**。合并授权只覆盖 #2024 本身，不含审核策略调整；keep/cut 仍由
+维护者人工决定，并且应在 #2477 落地、重算比例之后再做。

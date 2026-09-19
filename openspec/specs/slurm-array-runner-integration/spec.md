@@ -105,11 +105,27 @@ THEN configuration construction on CPython 3.11/3.12 produces the same
 canonical form and the same subsequent verdict as 3.13+ instead of raising an
 errno-less RuntimeError. The db-free preserve-final arm
 (`_safe_preserve_final_component`) is outside this requirement: on 3.11/3.12
-it still swallows the loop and returns the raw path — that residue belongs to
-issue #1627, which adjudicates this surviving-`Path.resolve` sub-family
-alongside — and explicitly distinguished from — the ENOENT non-strict fallback
-family (#1400 tracked it previously; the PR that closes #1400 leaves this arm
-untouched and re-points it here)
+it still swallows the loop and returns the raw path. That sub-family has since
+been adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md`,
+which admits this arm under clause 1: the products of its call sites reach a
+kernel dereference — the preflight `lstat` — before any verdict derived from them
+is committed. The product does differ between CPython 3.12 and 3.13+ where the
+loop sits behind a symlinked parent, but that difference is neutral at the
+dereference: the condition that makes the two spellings differ is precisely a
+loop surviving in the parent chain, so `lstat` reports `ELOOP` for both. The
+neutrality is backed by `tests/test_preserve_final_component_loop_spelling.py`,
+which builds both spellings and asserts `ELOOP` for each on the pinned
+interpreter; the 3.13 spelling it builds is synthesized from the folding rule
+rather than produced by a 3.13 runtime, so the 3.13 half of this claim rests on
+that construction and is tracked with the rest of the cross-interpreter question
+by issue #2453. The neutrality claim SHALL NOT be widened beyond a parent-chain
+loop: for a `<missing>/../<loop>` input the two spellings do not agree at the
+dereference — the raw spelling faults `ENOENT` and the folded one `ELOOP` — and
+the same test pins that boundary so the wording cannot drift outward. A cross-interpreter
+difference in the refusal's blocker code and in the emitted evidence payload
+does exist on this preflight leg; a counterfactual probe attributes it to that
+leg's own `Path.resolve(strict=False)` rather than to this arm, and it is
+tracked by issue #2453
 
 #### Scenario: ENOENT and non-loop containment semantics are unchanged
 

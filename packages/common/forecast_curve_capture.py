@@ -39,13 +39,14 @@ class CurveCaptureError(RuntimeError):
 
 
 #: Exact placeholder set of the production curve statement. `pushdown_run_keys`
-#: and `pushdown_run_ids` arrived with #2417's run-identity convergence; the
-#: check is an exact equality, so additive bindings must be declared here.
+#: arrived with #2417's run-identity convergence; its `pushdown_run_ids` twin
+#: bound the legacy table's text segmentby aid and went with #1342's contract
+#: (task 6.3). The check is an exact equality, so additive bindings must be
+#: declared here.
 CURVE_PLACEHOLDER_NAMES = {
     "basin_version_id",
     "end_time",
     "issue_time",
-    "pushdown_run_ids",
     "pushdown_run_keys",
     "river_network_version_id",
     "river_segment_id",
@@ -128,7 +129,12 @@ def empty_resolve_cursor():  # type: ignore[no-untyped-def]
 
 
 def seeded_resolve_cursor(rows: Sequence[Mapping[str, Any]]) -> Callable[[], Any]:
-    """A resolve-cursor factory replaying ``rows`` (``run_key``/``run_id`` maps)."""
+    """A resolve-cursor factory replaying ``rows`` (``run_key`` maps).
+
+    ``run_id`` was part of the replayed row until #1342's contract (task 6.3)
+    removed the text pushdown it fed; the resolve now reads ``run_key`` alone and
+    an extra key in a replayed row is simply ignored.
+    """
 
     @contextmanager
     def acquire():  # type: ignore[no-untyped-def]

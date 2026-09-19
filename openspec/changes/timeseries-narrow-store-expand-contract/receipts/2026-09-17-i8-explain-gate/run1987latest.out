@@ -1,0 +1,10 @@
+shj_nj/latest: run=fcst_gfs_2026091612_dg_6f9ed9377bd5e5224 fact_stmts=3 total_hit=639179 err=None
+   hit=631496 p95=2735.303ms rows=1 digest=9c906f72b21d9bd1 custom_scans=6 rels=['_hyper_3_107_chunk', '_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_3_62_chunk', '_hyper_3_91_chunk', '_hyper_9_126_chunk']
+   hit=318 p95=1.077ms rows=38 digest=604d8f4d01e9f867 custom_scans=0 rels=['hydro_run']
+   hit=7365 p95=79.501ms rows=168 digest=3e5b320d680975fc custom_scans=2 rels=['_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_9_132_chunk', '_hyper_9_133_chunk', '_hyper_9_134_chunk', '_hyper_9_135_chunk']
+small_tailanhe/latest: run=fcst_gfs_2026091612_dg_510fbd39433e9cd2e fact_stmts=3 total_hit=634855 err=None
+   hit=631709 p95=2569.535ms rows=1 digest=9c906f72b21d9bd1 custom_scans=6 rels=['_hyper_3_107_chunk', '_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_3_62_chunk', '_hyper_3_91_chunk', '_hyper_9_126_chunk']
+   hit=318 p95=1.046ms rows=38 digest=604d8f4d01e9f867 custom_scans=0 rels=['hydro_run']
+   hit=2828 p95=4.128ms rows=168 digest=062d2e994eb5c48f custom_scans=2 rels=['_hyper_3_110_chunk', '_hyper_3_113_chunk', '_hyper_9_132_chunk', '_hyper_9_133_chunk', '_hyper_9_134_chunk', '_hyper_9_135_chunk']
+written /home/nwm/tmp/2425/explain-1987-latest.json
+probe_rc=0

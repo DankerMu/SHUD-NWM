@@ -1,5 +1,15 @@
 {
   "base_sha": "51f9d273e41ea129e4e3feef1c71b168657587c9",
+  "delta_from": {
+    "base_sha": "51f9d273e41ea129e4e3feef1c71b168657587c9",
+    "commit": "271e0d8bfec350e9f5d7f7f92f15133401427d01",
+    "issue": "#1988",
+    "task": "timeseries-narrow-store-expand-contract 6.3",
+    "entries": [
+      "hydro_display:mvt_source_identity_probe"
+    ],
+    "reason": "Declared behavioural delta, NOT a re-capture. Task 6.3 deletes the river legacy read path and with it every transitional compressed-chunk pushdown aid, so apps/api/routes/hydro_display.py's identity probe lost exactly three aid conjuncts from its first chain: river_network_version_id = :river_network_version_id, run_id = :run_id and variable = :variable. Each was the text half of a key/enum pair whose surviving half is still recorded in the same chain (river_network_version_key = (...), run_key = (...), variable_e = (...)), so the delta removes three JSON lines and adds none. The other 19 entries are byte-identical to the 51f9d273 capture and base_sha is therefore left alone; they are either record-only history or composed statements whose live owners are covered by ROUTED_SOURCE_KEYS. Regenerating this file from the post-6.3 tree remains forbidden."
+  },
   "note": "Golden capture of every registered river read template, taken from a working tree whose reader sources were VERIFIED CLEAN at base_sha, BEFORE #1980's layout normalisation. Each entry records the template's AND-chains as produced by packages.common.river_ts_render.sql_chains: comments removed, whitespace collapsed and bracket padding normalised, split on top-level AND per chain, conjuncts sorted within a chain, chains in document order. The equivalence oracle asserts that render(entry, 'legacy') with hydro.river_timeseries_legacy substituted back to hydro.river_timeseries reproduces this exactly, which is the machine-checkable form of 'equal modulo whitespace, marker placement and conjunct order within one AND-chain'. Regenerate ONLY from a clean base tree: a capture taken after the edit would certify the edit against itself.",
   "entries": {
     "hydro_display:mvt_source_identity_probe": {
@@ -10,12 +20,9 @@
       "chains": [
         [
           "basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = :basin_version_id)",
-          "river_network_version_id = :river_network_version_id",
           "river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = :river_network_version_id)",
-          "run_id = :run_id",
           "run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)",
           "valid_time = :valid_time",
-          "variable = :variable",
           "variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
         ],
         [

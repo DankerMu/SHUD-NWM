@@ -2509,8 +2509,8 @@ def _plan_binds_selected_decompress(plan: Any, *, selected_relation_names: set[s
     return False
 
 
-#: `pushdown_run_keys` / `pushdown_run_ids` (#2417) are the only curve bindings an
-#: offline verifier cannot recompute — they are a production fact. They can still
+#: `pushdown_run_keys` (#2417) is the only curve binding an offline verifier
+#: cannot recompute — it is a production fact. It can still
 #: be reconciled against evidence the bundle ALREADY carries: psycopg2 interpolates
 #: client-side, so the literal array reaches the server inside the statement text,
 #: PostgreSQL constant-folds it, and the retained `EXPLAIN (ANALYZE, BUFFERS,
@@ -2524,7 +2524,6 @@ def _plan_binds_selected_decompress(plan: Any, *, selected_relation_names: set[s
 #: one-element array that is still a ScalarArrayOp and still a quoted array
 #: literal with an explicit element-type cast.
 _PLAN_RUN_KEY_ANY_RE = re.compile(r"(?<![A-Za-z0-9_])run_key\s*=\s*ANY\s*\(\s*'(\{[^']*\})'::[A-Za-z0-9_ ]+\[\]\s*\)")
-_PLAN_RUN_ID_ANY_RE = re.compile(r"(?<![A-Za-z0-9_])run_id\s*=\s*ANY\s*\(\s*'(\{[^']*\})'::[A-Za-z0-9_ ]+\[\]\s*\)")
 
 
 def _parse_pg_array_literal(body: str, label: str) -> list[str]:
@@ -2596,21 +2595,20 @@ def _assert_plan_pushes_recorded_runs(
     plan: Any,
     *,
     run_keys: Sequence[Any],
-    run_ids: Sequence[Any],
     label: str,
 ) -> None:
     """Reconcile the recorded curve run set against the plan that measured it.
 
-    `run_key` is REQUIRED to appear: both UNION branches of the production curve
-    carry the `rt.run_key = ANY(...)` aid, so a plan of this statement that does
-    not mention it is not a plan of this statement.
+    `run_key` is REQUIRED to appear: the production curve carries the
+    `rt.run_key = ANY(...)` pushdown, so a plan of this statement that does not
+    mention it is not a plan of this statement.
 
-    `run_id` is checked exact-when-present and is deliberately NOT required: the
-    `rt.run_id` aid is legacy-only (`packages/common/forecast_store.py`,
-    `_RESOLVED_RUN_PUSHDOWN_SQL`), so a narrow-store rendering legitimately omits
-    it. Both comparisons are ordered, not set-wise — psycopg2 preserves list
-    order, constant folding preserves array order, and `_resolve_run_identity`
-    sorts by `run_key`, so the recorded sequence is the rendered sequence.
+    The companion `rt.run_id` check this function used to run went with #1342's
+    contract (task 6.3): that predicate was a transitional aid for the retired
+    routing target, and the binding that fed it no longer exists. The comparison
+    is ordered, not set-wise — psycopg2 preserves list order, constant folding
+    preserves array order, and `_resolve_run_identity` sorts by `run_key`, so the
+    recorded sequence is the rendered sequence.
     """
 
     texts = _plan_string_values(plan)
@@ -2621,11 +2619,6 @@ def _assert_plan_pushes_recorded_runs(
     for body in key_arrays:
         if _parse_pg_array_literal(body, f"{label} plan run_key array") != expected_keys:
             raise EvidenceError(f"{label} plan pushes a run-key set the recorded binding does not carry")
-    expected_ids = [str(run_id) for run_id in run_ids]
-    for text in texts:
-        for match in _PLAN_RUN_ID_ANY_RE.finditer(text):
-            if _parse_pg_array_literal(match.group(1), f"{label} plan run_id array") != expected_ids:
-                raise EvidenceError(f"{label} plan pushes a run-id set the recorded binding does not carry")
 
 
 def _stats(samples_value: Any, label: str) -> tuple[list[float], float, float]:
@@ -2878,10 +2871,16 @@ def _validate_phase(
     }
 
 
-def _curve_required_query_tokens(store: str = "legacy") -> set[str]:
-    if store not in ("legacy", "narrow"):
-        raise EvidenceError("unsupported timeseries store")
-    tokens = {
+def _curve_required_query_tokens() -> set[str]:
+    """Tokens the recorded curve statement must contain to be that statement.
+
+    The `store` parameter and its legacy token branch (`rt.river_segment_id`,
+    `rt.river_network_version_id`, `rt.variable = 'q_down'`) went with #1342's
+    contract (task 6.3): those were the transitional text aids, and there is one
+    rendering left.
+    """
+
+    return {
         "FROM hydro.river_timeseries",
         "JOIN hydro.hydro_run",
         "rt.basin_version_key",
@@ -2892,9 +2891,6 @@ def _curve_required_query_tokens(store: str = "legacy") -> set[str]:
         "h.cycle_time",
         "rt.valid_time",
     }
-    if store == "legacy":
-        tokens.update({"rt.river_segment_id", "rt.river_network_version_id", "rt.variable = 'q_down'"})
-    return tokens
 
 
 def _validate_benchmarks(
@@ -2913,7 +2909,7 @@ def _validate_benchmarks(
         raise EvidenceError("benchmarks must contain curve then mvt")
     output: list[dict[str, Any]] = []
     for query_value in queries:
-        curve_recorded_runs: tuple[list[Any], list[Any]] | None = None
+        curve_recorded_runs: list[Any] | None = None
         query = _require_mapping(query_value, "benchmark query")
         _require_exact_keys(
             query,
@@ -2940,19 +2936,16 @@ def _validate_benchmarks(
                 "scenario_ids",
                 "scenario_tokens",
                 # #2417: the run identity the owner converged before reading the
-                # fact table, pushed down on both the text and the key column.
-                "pushdown_run_ids",
+                # fact table. Its `pushdown_run_ids` twin pushed the same set on
+                # the text column and went with #1342's contract (task 6.3).
                 "pushdown_run_keys",
             }
             # The curve query filters on the surrogate keys and the enum since
             # #1442; the bindings stay text (required_parameter_names above), the
             # query resolves them through the authority tables. The transitional
             # river_segment_id / river_network_version_id / variable text aids
-            # survive as pushdown conjuncts until #1342 drops the text columns,
-            # so they are still required here — a benchmark that stopped seeing
-            # them would be measuring a different (collapsed) plan than
-            # production runs, which is exactly what design D10.7's node-27
-            # EXPLAIN receipts measured when the segment aid went missing.
+            # were required here until #1342 dropped the text columns; the token
+            # set is now the key/enum shape alone.
             required_query_tokens = _curve_required_query_tokens()
         else:
             source_paths = ["services/tiles/mvt.py", "apps/api/routes/hydro_display.py"]
@@ -3034,24 +3027,19 @@ def _validate_benchmarks(
             ):
                 raise EvidenceError("benchmark curve named binding coverage differs from the query")
             # Since #2417 the curve owner converges run identity against the
-            # database before it reads the fact table, so two of the bindings
-            # are production facts this offline verifier cannot recompute. It
-            # replays the RECORDED pair back into the owner instead of relaxing
-            # the comparison: the statement text, the parameter order and every
-            # other bound value stay re-derived exactly, and the recorded pair
-            # is still required to be a well-formed, non-empty, aligned run set
-            # that the owner itself places in those slots.
+            # database before it reads the fact table, so one of the bindings is
+            # a production fact this offline verifier cannot recompute. It
+            # replays the RECORDED key set back into the owner instead of
+            # relaxing the comparison: the statement text, the parameter order
+            # and every other bound value stay re-derived exactly, and the
+            # recorded set is still required to be a well-formed, non-empty run
+            # set that the owner itself places in that slot. Its
+            # `pushdown_run_ids` twin went with #1342's contract (task 6.3).
             recorded = dict(zip(parameter_names, bound_parameters, strict=True))
             recorded_keys = _require_list(recorded["pushdown_run_keys"], "benchmark curve pushdown_run_keys")
-            recorded_ids = _require_list(recorded["pushdown_run_ids"], "benchmark curve pushdown_run_ids")
-            if (
-                not recorded_keys
-                or len(recorded_keys) != len(recorded_ids)
-                or any(not isinstance(key, int) or isinstance(key, bool) for key in recorded_keys)
-                or any(not isinstance(run_id, str) or not run_id for run_id in recorded_ids)
-            ):
+            if not recorded_keys or any(not isinstance(key, int) or isinstance(key, bool) for key in recorded_keys):
                 raise EvidenceError("benchmark curve did not record a resolved production run set")
-            curve_recorded_runs = (list(recorded_keys), list(recorded_ids))
+            curve_recorded_runs = list(recorded_keys)
             expected_query, expected_names, expected_parameters = curve_query_and_binding(
                 basin_version_id=str(request["basin_version_id"]),
                 river_segment_id=str(request["river_segment_id"]),
@@ -3059,12 +3047,7 @@ def _validate_benchmarks(
                 issue_time=_parse_utc(request["issue_time"], "curve request issue_time"),
                 end_time=_parse_utc(request["end_time"], "curve request end_time"),
                 scenario=str(request["scenario"]),
-                resolve_cursor=seeded_resolve_cursor(
-                    [
-                        {"run_key": key, "run_id": run_id}
-                        for key, run_id in zip(recorded_keys, recorded_ids, strict=True)
-                    ]
-                ),
+                resolve_cursor=seeded_resolve_cursor([{"run_key": key} for key in recorded_keys]),
             )
             if (
                 query["query_text"] != expected_query
@@ -3179,7 +3162,6 @@ def _validate_benchmarks(
             # nothing. Every retained plan of the phase is checked: they are all
             # the same statement over the same data, so a plan missing the literal
             # is a plan of some other statement.
-            recorded_run_keys, recorded_run_ids = curve_recorded_runs
             for phase_name, phase in (("before", before), ("after", after)):
                 retained = [("cold", phase["cold"])]
                 retained += [(f"warmups[{index}]", item) for index, item in enumerate(phase["warmups"])]
@@ -3187,8 +3169,7 @@ def _validate_benchmarks(
                 for plan_label, measurement in retained:
                     _assert_plan_pushes_recorded_runs(
                         measurement["plan"],
-                        run_keys=recorded_run_keys,
-                        run_ids=recorded_run_ids,
+                        run_keys=curve_recorded_runs,
                         label=f"benchmark curve {phase_name}.{plan_label}",
                     )
         for field in ("result_sha256", "rows", "bytes"):

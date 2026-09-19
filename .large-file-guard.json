@@ -30,7 +30,6 @@
     "scripts/node27_timeseries_compression_live_evidence.py",
     "scripts/node27_timeseries_compression_supervisor.py",
     "tests/test_node27_timeseries_compression.py",
-    "scripts/node27_river_identity_backfill.py",
     "tests/test_node27_timeseries_compression_live_evidence.py",
     "tests/test_node27_timeseries_compression_supervisor.py",
     "schemas/examples/timeseries_compression_live_evidence.example.json",
@@ -77,6 +76,7 @@
     "tests/test_node27_autopipeline_preflight.py",
     "tests/test_river_identity_normalization_integration.py",
     ".review-gate-issues.json",
+    "docs/adr/0002-node27-timeseries-hot-cold-tiering.md",
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
     "tests/test_real_database_integration.py",
@@ -100,6 +100,7 @@
     "tests/test_forecast_api.py",
     "tests/test_node27_pgdata_workload.py",
     "tests/test_river_ts_render.py",
-    "tests/test_river_ts_text_identity_cleanup.py"
+    "tests/test_river_ts_text_identity_cleanup.py",
+    "workers/model_registry/basins_discovery.py"
   ]
 }

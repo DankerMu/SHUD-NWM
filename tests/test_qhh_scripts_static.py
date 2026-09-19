@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common.forcing_ts_render import FORCING_TABLE_LEGACY
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_BASENAME,
@@ -953,9 +954,8 @@ def test_qhh_backend_smoke_tests_never_write_tracked_sources() -> None:
 class _QhhCatalogCursor:
     """DB-API boundary capture: catalog and run rows, never mocked script helpers."""
 
-    def __init__(self, stores, *, expanded):
-        self.stores = stores
-        self.expanded = expanded
+    def __init__(self, run_ids):
+        self.run_ids = tuple(run_ids)
         self.statements = []
         self.rows = []
         self.rowcount = 0
@@ -972,14 +972,8 @@ class _QhhCatalogCursor:
     def execute(self, sql, params=()):
         self.statements.append((sql, params))
         self.rows = []
-        if "information_schema.columns" in sql:
-            self.rows = [{"has_store": self.expanded}]
-        elif "SELECT run_id, timeseries_store" in sql:
-            self.rows = [{"run_id": run, "timeseries_store": store} for run, store in self.stores.items()]
-        elif "SELECT timeseries_store" in sql:
-            self.rows = [{"timeseries_store": self.stores[params[0]]}]
-        elif "SELECT run_id FROM hydro.hydro_run" in sql:
-            self.rows = [{"run_id": run} for run in self.stores]
+        if "SELECT run_id FROM hydro.hydro_run" in sql:
+            self.rows = [{"run_id": run} for run in self.run_ids]
         elif "SELECT run_id, status" in sql:
             self.rows = [{"run_id": params[0], "status": "succeeded"}]
         elif "count(DISTINCT river_segment_key)" in sql:
@@ -992,69 +986,74 @@ class _QhhCatalogCursor:
         return self.rows
 
 
-@pytest.mark.parametrize(
-    ("expanded", "stores", "expected"),
-    [
-        (False, {"old": None}, {"hydro.river_timeseries": ["old"]}),
-        (True, {"old": "legacy"}, {"hydro.river_timeseries": [], "hydro.river_timeseries_legacy": ["old"]}),
-        (True, {"new": "narrow"}, {"hydro.river_timeseries": ["new"]}),
-        (True, {"old": "legacy", "new": "narrow"},
-         {"hydro.river_timeseries": ["new"], "hydro.river_timeseries_legacy": ["old"]}),
-        (True, {"old": "legacy", "bad": None}, None),
-        (True, {"bad": "unknown"}, None),
-    ],
-)
-def test_qhh_reset_routes_catalog_runs(monkeypatch, tmp_path, capsys, expanded, stores, expected):
+def test_qhh_reset_deletes_river_rows_from_the_one_fact_table(monkeypatch, tmp_path, capsys):
+    """One river DELETE, located by run_key, against one table.
+
+    This was `test_qhh_reset_routes_catalog_runs`, parametrized over a catalog
+    probe (`information_schema` -> does `hydro_run.timeseries_store` exist?) and
+    a per-run store that picked `hydro.river_timeseries` or
+    `hydro.river_timeseries_legacy`. #1342's contract (task 6.3) deleted the
+    column, the probe and the second table, so the routing cases have no
+    subject; what remains -- and is what a smoke reset can actually get wrong --
+    is the predicate and the fact that exactly one river DELETE is issued.
+    """
     from scripts import reset_qhh_smoke_db as reset
 
-    cursor = _QhhCatalogCursor(stores, expanded=expanded)
+    cursor = _QhhCatalogCursor(("old", "new"))
     monkeypatch.setenv("DATABASE_URL", "secret-do-not-print")
     monkeypatch.setattr(reset.psycopg2, "connect", lambda _: cursor)
     monkeypatch.setattr(reset, "RUN_ROOT", tmp_path)
-    assert reset.main() == (1 if expected is None else 0)
-    deletes = {
-        sql.split()[2]: params[0] for sql, params in cursor.statements
+    assert reset.main() == 0
+    river_deletes = [
+        (sql, params) for sql, params in cursor.statements
         if sql.startswith("DELETE FROM hydro.river_timeseries")
-    }
-    assert deletes == (expected or {})
-    for sql, _ in cursor.statements:
-        if sql.startswith("DELETE FROM hydro.river_timeseries"):
-            assert sql.split(" WHERE ", 1)[1] == (
-                "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
-            )
-    if expected is not None:
-        assert any(sql.startswith("DELETE FROM met.forcing_station_timeseries ") for sql, _ in cursor.statements)
+    ]
+    assert len(river_deletes) == 1
+    sql, params = river_deletes[0]
+    assert sql == (
+        "DELETE FROM hydro.river_timeseries WHERE "
+        "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
+    )
+    assert params[0] == ["old", "new"]
+    # Non-vacuity for the collapse: the dropped table must not be named at all.
+    assert not any("river_timeseries_legacy" in sql for sql, _ in cursor.statements)
+    assert not any("timeseries_store" in sql for sql, _ in cursor.statements)
+
+    # #1990 M1b: EQUALITY on the whole rendered DELETE, not a prefix match.
+    # The forcing leg is a SINGLE `_delete` rendered `legacy` -- and now river
+    # has one too. A `startswith` pin cannot tell "still one legacy DELETE" from
+    # "the table was renamed and the predicate rewritten"; this can.
+    forcing_deletes = [
+        sql for sql, _ in cursor.statements if sql.startswith(f"DELETE FROM {FORCING_TABLE_LEGACY}")
+    ]
+    assert forcing_deletes == [
+        f"DELETE FROM {FORCING_TABLE_LEGACY} WHERE forcing_version_id = ANY(%s)"
+    ]
     assert "secret-do-not-print" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    ("expanded", "store", "table"),
-    [(False, None, "hydro.river_timeseries"), (True, "legacy", "hydro.river_timeseries_legacy"),
-     (True, "narrow", "hydro.river_timeseries"), (True, None, None), (True, "unknown", None)],
-)
-def test_qhh_summary_routes_catalog_run(monkeypatch, tmp_path, capsys, expanded, store, table):
+def test_qhh_summary_reads_the_one_fact_table_by_run_key(monkeypatch, tmp_path, capsys):
+    """Was `test_qhh_summary_routes_catalog_run`; same collapse as the reset."""
     from scripts import summarize_qhh_smoke_results as summary
 
-    cursor = _QhhCatalogCursor({"run": store}, expanded=expanded)
+    cursor = _QhhCatalogCursor(("run",))
     monkeypatch.setenv("DATABASE_URL", "secret-do-not-print")
     monkeypatch.setenv("QHH_RUN_ID", "run")
     monkeypatch.setattr(summary.psycopg2, "connect", lambda _: cursor)
     monkeypatch.setattr(summary, "RUN_ROOT", tmp_path)
-    assert summary.main() == (0 if table else 1)
+    assert summary.main() == 0
     reads = [(sql, params) for sql, params in cursor.statements if "FROM hydro.river_timeseries" in sql]
-    if table is None:
-        assert reads == []
-        assert not (tmp_path / "qhh-result-summary.json").exists()
-    else:
-        assert len(reads) == 1
-        sql, params = reads[0]
-        assert f"FROM {table}\n" in sql
-        assert params == ("run",)
-        assert "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)" in sql
-        assert "variable" not in sql
-        assert "count(DISTINCT river_segment_key)" in sql
-        payload = json.loads((tmp_path / "qhh-result-summary.json").read_text())
-        assert payload["river_timeseries"] == {
-            "rows": 4, "segment_count": 2, "min_m3s": 1, "max_m3s": 3, "avg_m3s": 2,
-        }
+    assert len(reads) == 1
+    sql, params = reads[0]
+    assert "FROM hydro.river_timeseries\n" in sql
+    assert params == ("run",)
+    assert "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)" in sql
+    assert "variable" not in sql
+    assert "count(DISTINCT river_segment_key)" in sql
+    assert not any("river_timeseries_legacy" in sql for sql, _ in cursor.statements)
+    assert not any("timeseries_store" in sql for sql, _ in cursor.statements)
+    payload = json.loads((tmp_path / "qhh-result-summary.json").read_text())
+    assert payload["river_timeseries"] == {
+        "rows": 4, "segment_count": 2, "min_m3s": 1, "max_m3s": 3, "avg_m3s": 2,
+    }
     assert "secret-do-not-print" not in capsys.readouterr().out

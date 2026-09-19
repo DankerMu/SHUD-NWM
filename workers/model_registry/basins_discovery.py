@@ -870,6 +870,9 @@ def _safe_resolve_under_root(
     weaken the fail-closed outside-root refusal (cand-r1-01/security-perf).
     """
 
+    # ADR 0009 clause 1: the product is only carried into the containment check below
+    # (resolved.relative_to(resolved_root)) and on to callers that open what they
+    # accepted, so an ENOENT-admitted phantom faults at that dereference.
     try:
         resolved = Path(os.path.realpath(path, strict=True))
         strict_errno = None

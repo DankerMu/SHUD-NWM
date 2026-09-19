@@ -36,17 +36,21 @@ from services.tiles.mvt import postgis_tile_sql
 
 
 def test_curve_store_token_contract() -> None:
-    common = {
+    """One rendering, one token set — #1342's contract (task 6.3).
+
+    The ``store`` parameter and the three text tokens it used to add
+    (``rt.river_segment_id``, ``rt.river_network_version_id``,
+    ``rt.variable = 'q_down'``) were the transitional aids. Their ABSENCE is
+    asserted, not merely the presence of the key/enum tokens: a token set that
+    still required them would refuse every bundle recorded after the contract.
+    """
+    tokens = evidence._curve_required_query_tokens()
+    assert tokens == {
         "FROM hydro.river_timeseries", "JOIN hydro.hydro_run", "rt.basin_version_key",
         "rt.river_segment_key", "rt.river_network_version_key", "rt.variable_e",
         "h.run_type = 'forecast'", "h.cycle_time", "rt.valid_time",
     }
-    assert evidence._curve_required_query_tokens("narrow") == common
-    assert evidence._curve_required_query_tokens() == common | {
-        "rt.river_segment_id", "rt.river_network_version_id", "rt.variable = 'q_down'",
-    }
-    with pytest.raises(evidence.EvidenceError):
-        evidence._curve_required_query_tokens("unknown")
+    assert not tokens & {"rt.river_segment_id", "rt.river_network_version_id", "rt.variable = 'q_down'"}
 
 ROOT = Path(__file__).resolve().parents[1]
 # Captured before the autouse `_descriptor_bound_git_blobs` fixture replaces the
@@ -60,14 +64,15 @@ _DEFAULT_VERIFIER_REPO_ROOT = evidence.VERIFIER_REPO_ROOT
 # it reads the fact table. These fixtures never touch one, so they replay a fixed
 # resolved run set — the same seam the offline verifier uses to re-derive a
 # recorded bundle's curve statement exactly.
-_CURVE_RESOLVED_RUNS = ({"run_key": 4242, "run_id": "fcst_gfs_2026052800_basins_heihe_shud"},)
+_CURVE_RESOLVED_RUNS = ({"run_key": 4242},)
 _CURVE_RESOLVE = curve_capture.seeded_resolve_cursor(_CURVE_RESOLVED_RUNS)
 # ... and the verifier now reconciles that recorded run set against the plan text,
-# so a synthetic curve plan must render the pushed arrays the way PostgreSQL does:
+# so a synthetic curve plan must render the pushed array the way PostgreSQL does:
 # a folded array constant printed by the array type's output function. Built from
-# `_CURVE_RESOLVED_RUNS` so the two cannot drift apart.
-_CURVE_PLAN_FILTER = "((run_id = ANY ('{{{ids}}}'::text[])) AND (run_key = ANY ('{{{keys}}}'::integer[])))".format(
-    ids=",".join(str(row["run_id"]) for row in _CURVE_RESOLVED_RUNS),
+# `_CURVE_RESOLVED_RUNS` so the two cannot drift apart. The `run_id` half of this
+# literal went with #1342's contract (task 6.3): the text pushdown it rendered no
+# longer exists.
+_CURVE_PLAN_FILTER = "(run_key = ANY ('{{{keys}}}'::integer[]))".format(
     keys=",".join(str(row["run_key"]) for row in _CURVE_RESOLVED_RUNS),
 )
 RECEIPT_SCHEMA = json.loads((ROOT / "schemas/timeseries_compression_receipt.schema.json").read_text(encoding="utf-8"))
@@ -3795,26 +3800,26 @@ def test_curve_window_starting_at_selected_exclusive_end_is_rejected(
 
 
 @pytest.mark.parametrize(
-    ("keys", "ids"),
+    "keys",
     [
-        pytest.param([], [], id="no-run-resolved"),
-        pytest.param([4242, 4243], ["fcst_gfs_2026052800_basins_heihe_shud"], id="misaligned"),
-        pytest.param(["4242"], ["fcst_gfs_2026052800_basins_heihe_shud"], id="key-is-not-a-surrogate"),
-        pytest.param([4242], [""], id="empty-run-id"),
+        pytest.param([], id="no-run-resolved"),
+        pytest.param(["4242"], id="key-is-not-a-surrogate"),
+        pytest.param([True], id="key-is-a-bool"),
     ],
 )
 def test_a_curve_whose_recorded_run_identity_is_not_a_production_run_set_is_rejected(
     tmp_path: Path,
     keys: list[Any],
-    ids: list[Any],
 ) -> None:
-    """#2417: the two resolved bindings are production facts, so they fail closed.
+    """#2417: the resolved binding is a production fact, so it fails closed.
 
     The offline verifier cannot recompute a run set — it replays the recorded
     one back through the public owner so everything else stays exactly
-    re-derived. That replay is only sound while the recorded pair is a
-    well-formed, non-empty, aligned run set; ``= ANY('{}')`` in particular would
-    be a benchmark that measured zero rows and a phantom improvement.
+    re-derived. That replay is only sound while the recorded set is a
+    well-formed, non-empty surrogate-key set; ``= ANY('{}')`` in particular would
+    be a benchmark that measured zero rows and a phantom improvement. The
+    ``pushdown_run_ids`` half of this pin — and with it the misalignment case —
+    went with #1342's contract (task 6.3).
     """
     bundle = _bundle(tmp_path)
     document = _read_ref(bundle["benchmarks"]["evidence"])
@@ -3822,7 +3827,6 @@ def test_a_curve_whose_recorded_run_identity_is_not_a_production_run_set_is_reje
     names = list(query["binding"]["parameter_names"])
     bound = list(query["binding"]["bound_parameters"])
     bound[names.index("pushdown_run_keys")] = keys
-    bound[names.index("pushdown_run_ids")] = ids
     query["binding"]["bound_parameters"] = bound
     bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "unresolved-curve.json", document)
     with pytest.raises(evidence.EvidenceError, match="resolved production run set"):
@@ -3841,7 +3845,7 @@ def test_a_curve_that_dropped_the_run_identity_pushdown_is_rejected(tmp_path: Pa
     query = document["queries"][0]
     names = list(query["binding"]["parameter_names"])
     bound = list(query["binding"]["bound_parameters"])
-    for name in ("pushdown_run_ids", "pushdown_run_keys"):
+    for name in ("pushdown_run_keys",):
         index = names.index(name)
         del names[index]
         del bound[index]
@@ -3874,11 +3878,6 @@ def test_a_curve_that_dropped_the_run_identity_pushdown_is_rejected(tmp_path: Pa
             "not a one-dimensional array literal",
             id="unparseable-array-body",
         ),
-        pytest.param(
-            "((run_id = ANY ('{someone_elses_run}'::text[])) AND (run_key = ANY ('{4242}'::integer[])))",
-            "run-id set the recorded binding does not carry",
-            id="different-run-id",
-        ),
     ],
 )
 def test_a_curve_plan_that_does_not_carry_the_recorded_run_set_is_rejected(
@@ -3888,12 +3887,12 @@ def test_a_curve_plan_that_does_not_carry_the_recorded_run_set_is_rejected(
 ) -> None:
     """#2417 fix pass 1: the recorded run set must reconcile against its own plan.
 
-    `pushdown_run_keys`/`pushdown_run_ids` are production facts, so the shape
-    check above cannot recompute them — it accepts any well-formed set. The
-    retained `EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` plan does carry
-    them: psycopg2 interpolates client-side, PostgreSQL folds the array and prints
-    it back as `= ANY ('{…}'::<type>[])`. Absent, wrong, or unreadable, the bundle
-    refuses; it never silently passes.
+    `pushdown_run_keys` is a production fact, so the shape check above cannot
+    recompute it — it accepts any well-formed set. The retained `EXPLAIN
+    (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)` plan does carry it: psycopg2
+    interpolates client-side, PostgreSQL folds the array and prints it back as
+    `= ANY ('{…}'::<type>[])`. Absent, wrong, or unreadable, the bundle refuses;
+    it never silently passes.
     """
     bundle = _bundle(tmp_path)
     document = _read_ref(bundle["benchmarks"]["evidence"])

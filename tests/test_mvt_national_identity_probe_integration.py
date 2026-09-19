@@ -54,22 +54,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import mapbox_vector_tile
 import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 from psycopg2.extras import RealDictCursor
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from apps.api.main import app
 from apps.api.routes import hydro_display
+from packages.common import display_coverage
 from packages.common.forecast_store import MVP_STATION_VARIABLES, QHH_LATEST_EXPECTED_HORIZON_HOURS
 from services.tiles.mvt import (
     MVT_MEDIA_TYPE,
+    display_ready_run,
     national_discharge_source_version,
     national_river_network_source_version,
-    postgis_tile_sql,
 )
 from tests.integration_helpers import (
     apply_migrations_from_zero,
@@ -80,7 +79,6 @@ from tests.integration_helpers import (
 from tests.integration_helpers import (
     post_expand_forecast_database as post_expand_forecast_database,
 )
-from tests.river_ts_template_registry import historical_display_coverage_sql
 from workers.model_registry.basins_registry_import import _backfill_output_segment_geometry
 
 pytestmark = pytest.mark.integration
@@ -496,12 +494,20 @@ def _seed_rival_display_ready_run(
 
 
 def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
-    """Historical fixture preparation before each test selects its store mapping."""
+    """Fixture preparation: seed a coverage row with the PRODUCTION refresh DML.
+
+    It ran the frozen pre-store snapshot until #1342's contract (task 6.3)
+    deleted it together with the store mapping each test used to select. Running
+    the live statement is strictly better for a fixture: this file is not the
+    refresh DML's oracle (``tests/test_display_coverage_refresh.py`` is), and a
+    seed built from a frozen copy would drift silently away from the rows the
+    probe under test actually reads.
+    """
     connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                historical_display_coverage_sql(),
+                display_coverage._REFRESH_SQL,
                 {
                     "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
                     "basin_id": None,
@@ -595,9 +601,8 @@ def _assert_probe_said_no_data(response: Any) -> None:
     assert "required_env" not in details
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_tile_is_424_when_no_display_ready_run_covers_the_instant(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """The zero branch with no coverage row at all.
 
@@ -615,14 +620,13 @@ def test_national_tile_is_424_when_no_display_ready_run_covers_the_instant(
         (_WINDOW_START,),
     )
     assert rows_at_instant[0]["n"] == len(_SEGMENT_IDS), "seed must have rows here, or the case proves nothing"
-    post_expand_forecast_database({_RUN_ID: store})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     _assert_probe_said_no_data(_request_tile(client, _WINDOW_START))
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_tile_is_424_on_an_interior_coverage_window_gap(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """The case that rejects answering existence from the coverage window.
 
@@ -656,14 +660,13 @@ def test_national_tile_is_424_on_an_interior_coverage_window_gap(
         (_GAP_TIME,),
     )
     assert gap_rows[0]["n"] == 0
-    post_expand_forecast_database({_RUN_ID: store})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     _assert_probe_said_no_data(_request_tile(client, _GAP_TIME))
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_tile_is_200_with_a_non_empty_mvt_when_the_instant_has_data(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """The one branch of the probe: covered window, rows at that exact instant."""
     database_url, client = national_tile
@@ -674,7 +677,7 @@ def test_national_tile_is_200_with_a_non_empty_mvt_when_the_instant_has_data(
         "SELECT COUNT(*) AS n FROM hydro.river_timeseries WHERE run_id = %s AND valid_time = %s",
         (_RUN_ID, _WINDOW_END),
     ) == [{"n": len(_SEGMENT_IDS)}]
-    post_expand_forecast_database({_RUN_ID: store})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     response = _request_tile(client, _WINDOW_END)
 
@@ -688,9 +691,8 @@ def test_national_tile_is_200_with_a_non_empty_mvt_when_the_instant_has_data(
     assert _NETWORK_ID.encode() in response.content
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_identity_tile_is_424_for_the_source_without_a_run_at_that_cycle(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """#2007's fail-closed case, and the only oracle that can see a half-bound query.
 
@@ -713,7 +715,7 @@ def test_national_identity_tile_is_424_for_the_source_without_a_run_at_that_cycl
         "SELECT COUNT(*) AS n FROM hydro.river_timeseries WHERE run_id = %s AND valid_time = %s",
         (_RUN_ID, _WINDOW_END),
     ) == [{"n": len(_SEGMENT_IDS)}]
-    post_expand_forecast_database({_RUN_ID: store})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     _assert_tile_carries_the_seeded_features(
         _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
@@ -721,9 +723,8 @@ def test_national_identity_tile_is_424_for_the_source_without_a_run_at_that_cycl
     _assert_probe_said_no_data(_request_identity_tile(client, "ifs", _CYCLE_TIME, _WINDOW_END))
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_path(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Path segment `ifs` must find a run stored as `source_id = 'IFS'`.
 
@@ -745,9 +746,7 @@ def test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_
         "SELECT COUNT(*) AS n FROM hydro.river_timeseries WHERE run_id = %s AND valid_time = %s",
         (_IFS_RUN_ID, _IFS_WINDOW_END),
     ) == [{"n": len(_SEGMENT_IDS)}]
-    post_expand_forecast_database({
-        _IFS_RUN_ID: store, _RUN_ID: "narrow" if store == "legacy" else "legacy",
-    })
+    post_expand_forecast_database({_IFS_RUN_ID: "narrow", _RUN_ID: "narrow"})
 
     _assert_tile_carries_the_seeded_features(
         _request_identity_tile(client, "ifs", _IFS_CYCLE_TIME, _IFS_WINDOW_END)
@@ -832,9 +831,8 @@ def _assert_tile_was_painted_by(response: Any, expected_run_id: str, rejected_ru
     assert rejected_run_id.encode() not in response.content, rejected_run_id
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Same source, two seeded cycles plus a third with no run: each answer is its own.
 
@@ -881,9 +879,7 @@ def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(
     assert same_source_runs == [{"run_id": _RUN_ID}, {"run_id": _LATE_GFS_RUN_ID}], (
         "both rivals must be the SAME source, or :cycle is not what is under test"
     )
-    post_expand_forecast_database({
-        _RUN_ID: store, _LATE_GFS_RUN_ID: "narrow" if store == "legacy" else "legacy",
-    })
+    post_expand_forecast_database({_RUN_ID: "narrow", _LATE_GFS_RUN_ID: "narrow"})
 
     _assert_tile_was_painted_by(
         _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END), _RUN_ID, _LATE_GFS_RUN_ID
@@ -982,9 +978,8 @@ def test_national_digest_narrows_the_ranked_runs_to_the_bound_identity(national_
     assert len({unbound, early, pruned}) == 3
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at_that_cycle(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Same cycle, two sources: neither request may be painted by the other source's run.
 
@@ -1022,9 +1017,7 @@ def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at
         {"run_id": _RUN_ID, "source_id": _SOURCE_ID},
         {"run_id": _SAME_CYCLE_IFS_RUN_ID, "source_id": _IFS_SOURCE_ID},
     ], "both rivals must share the cycle, or :source is not what is under test"
-    post_expand_forecast_database({
-        _RUN_ID: store, _SAME_CYCLE_IFS_RUN_ID: "narrow" if store == "legacy" else "legacy",
-    })
+    post_expand_forecast_database({_RUN_ID: "narrow", _SAME_CYCLE_IFS_RUN_ID: "narrow"})
 
     _assert_tile_was_painted_by(
         _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END), _RUN_ID, _SAME_CYCLE_IFS_RUN_ID
@@ -1843,13 +1836,13 @@ def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_n
     # comparison of two empty digests.
     assert baseline_at_window_end.endswith(":1"), baseline_at_window_end
     assert baseline_unbound.endswith(":1"), baseline_unbound
-    # Explicit pre-transition reference for this one request only. The rival
-    # still arrives through the original coverage writer before catalog opt-in.
-    with monkeypatch.context() as historical:
-        historical.setattr(hydro_display, "postgis_tile_sql", lambda layer: (
-            _frozen_national_sql() if layer == "hydro-national" else postgis_tile_sql(layer)
-        ))
-        baseline_tile = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
+    # Baseline taken through the production statement. It used to be taken
+    # through a frozen pre-store snapshot of the national tile SQL; #1342's
+    # contract (task 6.3) deleted that snapshot together with the routing it
+    # existed to be compared against (fixture deletion D2), and the baseline was
+    # never about the snapshot — it is "what this request returned BEFORE the
+    # rival run was seeded", which the live statement answers directly.
+    baseline_tile = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
     _assert_tile_was_painted_by(baseline_tile, _RUN_ID, _RIVAL_RUN_ID)
 
     _seed_rival_display_ready_run(
@@ -1911,7 +1904,7 @@ def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_n
         "the baseline tile request must have written the DB tile tier, "
         "or clearing it proves nothing about the request that follows"
     )
-    post_expand_forecast_database({_RUN_ID: "legacy", _RIVAL_RUN_ID: "narrow"})
+    post_expand_forecast_database({_RUN_ID: "narrow", _RIVAL_RUN_ID: "narrow"})
     after_tile = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
     assert after_tile.headers["X-Tile-Cache"] == "miss", (
         "this tile must be REGENERATED, not replayed: on a cache hit the run identity "
@@ -2072,16 +2065,7 @@ def test_geometry_backfill_rotates_both_national_digests_exactly_once(national_t
     assert unchanged == after
 
 
-# Captured verbatim at c21bacf9b9d8c29699dffca56bb9776c1f49db61, never regenerated.
-_FROZEN_NATIONAL_SQL = Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"
-_FROZEN_NATIONAL_SHA256 = "d18c89af633838df8be0d84e3bff02df3e01d35ef21935f9bb59de0dc1f8e8b4"
 _MIXED_RUN_ID = "it2206_second_network_run"
-
-
-def _frozen_national_sql() -> str:
-    frozen = _FROZEN_NATIONAL_SQL.read_bytes()
-    assert hashlib.sha256(frozen).hexdigest() == _FROZEN_NATIONAL_SHA256
-    return frozen.decode()
 
 
 def _seed_mixed_national_networks(database_url: str) -> None:
@@ -2117,112 +2101,6 @@ def _seed_mixed_national_networks(database_url: str) -> None:
         {"river_network_version_id": network, "n": 2}
         for network in sorted((_NETWORK_ID, _SECOND_NETWORK_ID))
     ]
-
-
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-@pytest.mark.parametrize("zoom", (5, 9))
-def test_national_mixed_stores_preserve_one_result_statistics_and_decoded_tile(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
-    store: str, zoom: int,
-) -> None:
-    database_url, _client = national_tile
-    _seed_mixed_national_networks(database_url)
-    x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, zoom)
-    params = {"source": "gfs", "cycle": _CYCLE_TIME, "variable": _VARIABLE, "valid_time": _WINDOW_END}
-    bind = hydro_display._postgis_tile_params(params, z=zoom, x=x, y=y, layer="hydro-national")
-    engine = sqlalchemy_engine(database_url)
-    try:
-        with Session(engine) as session:
-            baseline = [dict(row) for row in session.execute(text(_frozen_national_sql()), bind).mappings().all()]
-        assert len(baseline) == 1
-        decoded = mapbox_vector_tile.decode(bytes(baseline[0]["tile"]))
-        features = decoded["hydro"]["features"]
-        assert {feature["properties"]["river_network_version_id"] for feature in features} == {
-            _NETWORK_ID, _SECOND_NETWORK_ID,
-        }
-        assert len(features) == (2 if zoom == 5 else 4)
-        opposite = "narrow" if store == "legacy" else "legacy"
-        post_expand_forecast_database({_RUN_ID: store, _MIXED_RUN_ID: opposite})
-        with Session(engine) as session:
-            # Restore decoy TIMES only here; retain their +10000 values.
-            for table, authority in (("river_timeseries", "legacy"), ("river_timeseries_legacy", "narrow")):
-                session.execute(text(
-                    f"UPDATE hydro.{table} ts SET valid_time = ts.valid_time - INTERVAL '30 minutes' "
-                    "FROM hydro.hydro_run h WHERE h.run_key = ts.run_key AND h.timeseries_store = :store"
-                ), {"store": authority})
-            session.commit()
-            for run_id, authority in ((_RUN_ID, store), (_MIXED_RUN_ID, opposite)):
-                values = {}
-                for physical, table in (("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries")):
-                    values[physical] = list(session.execute(text(
-                        f"SELECT ts.value FROM hydro.{table} ts JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
-                        "WHERE h.run_id = :run_id AND ts.valid_time = :valid_time ORDER BY ts.value"
-                    ), {"run_id": run_id, "valid_time": _WINDOW_END}).scalars())
-                assert len(values[authority]) == 2
-                other = "narrow" if authority == "legacy" else "legacy"
-                assert values[other] == [value + 10000 for value in values[authority]]
-            result = [dict(row) for row in session.execute(
-                text(postgis_tile_sql("hydro-national")), bind,
-            ).mappings().all()]
-            assert len(result) == 1
-            assert {key: value for key, value in result[0].items() if key != "tile"} == {
-                key: value for key, value in baseline[0].items() if key != "tile"
-            }
-            actual = mapbox_vector_tile.decode(bytes(result[0]["tile"]))
-            assert actual == decoded
-            assert {feature["properties"]["river_network_version_id"] for feature in actual["hydro"]["features"]} == {
-                _NETWORK_ID, _SECOND_NETWORK_ID,
-            }
-            consumed = hydro_display._fetch_postgis_tile_bytes(
-                session, "hydro-national", params, z=zoom, x=x, y=y,
-            )
-            assert consumed == bytes(result[0]["tile"])
-            assert mapbox_vector_tile.decode(consumed) == decoded
-    finally:
-        engine.dispose()
-
-
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_national_identity_rejects_opposite_store_only_half_hour_facts(
-    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
-) -> None:
-    database_url, client = national_tile
-    _seed_mixed_national_networks(database_url)
-    instant = _WINDOW_START + timedelta(minutes=30)
-    assert _WINDOW_START < instant < _WINDOW_END
-    assert _query(
-        database_url,
-        "SELECT COUNT(*) AS n FROM hydro.river_timeseries WHERE valid_time = %s",
-        (instant,),
-    ) == [{"n": 0}]
-    opposite = "narrow" if store == "legacy" else "legacy"
-    post_expand_forecast_database({_RUN_ID: store, _MIXED_RUN_ID: opposite})
-    for run_id, authority in ((_RUN_ID, store), (_MIXED_RUN_ID, opposite)):
-        for physical, table in (("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries")):
-            facts = _query(
-                database_url,
-                f"SELECT ts.value FROM hydro.{table} ts JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
-                "WHERE h.run_id = %s AND ts.valid_time = %s ORDER BY ts.value",
-                (run_id, instant),
-            )
-            if physical == authority:
-                assert facts == []
-            else:
-                assert len(facts) == 2
-                assert all(row["value"] >= 10000 for row in facts)
-    x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, _ZOOM)
-    params = {"source": "gfs", "cycle": _CYCLE_TIME, "variable": _VARIABLE, "valid_time": instant}
-    engine = sqlalchemy_engine(database_url)
-    try:
-        with Session(engine) as session:
-            rows = session.execute(text(postgis_tile_sql("hydro-national")), hydro_display._postgis_tile_params(
-                params, z=_ZOOM, x=x, y=y, layer="hydro-national",
-            )).mappings().all()
-            assert len(rows) == 1
-            assert rows[0]["source_identity_count"] == 0
-    finally:
-        engine.dispose()
-    _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _CYCLE_TIME, instant))
 
 
 # ---------------------------------------------------------------------------
@@ -2269,7 +2147,7 @@ def test_national_identity_tile_is_refused_when_one_of_two_active_networks_has_n
         "SELECT count(*) AS n FROM hydro.hydro_run WHERE basin_version_id = %s",
         (_SECOND_BASIN_VERSION_ID,),
     ) == [{"n": 0}]
-    post_expand_forecast_database({_RUN_ID: "legacy"})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     response = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
 
@@ -2298,7 +2176,7 @@ def test_national_identity_tile_ignores_an_inactive_network_without_a_run(
         "SELECT count(DISTINCT river_network_version_id) AS n FROM core.model_instance WHERE active_flag",
         (),
     ) == [{"n": 1}]
-    post_expand_forecast_database({_RUN_ID: "legacy"})
+    post_expand_forecast_database({_RUN_ID: "narrow"})
 
     _assert_tile_carries_the_seeded_features(_request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END))
 
@@ -2309,7 +2187,7 @@ def test_national_identity_tile_serves_a_fully_covered_identity(
     """E11(c): both active networks cover `(gfs, A)` -> 200 painting both, bytes recorded for comparison."""
     database_url, client = national_tile
     _seed_mixed_national_networks(database_url)
-    post_expand_forecast_database({_RUN_ID: "legacy", _MIXED_RUN_ID: "legacy"})
+    post_expand_forecast_database({_RUN_ID: "narrow", _MIXED_RUN_ID: "narrow"})
 
     response = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
 
@@ -2321,3 +2199,163 @@ def test_national_identity_tile_serves_a_fully_covered_identity(
         f"E11(c) gfs {_stamp(_CYCLE_TIME)} {_stamp(_WINDOW_END)} z={_ZOOM} "
         f"sha256={hashlib.sha256(response.content).hexdigest()} etag={response.headers['etag']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2156: the per-basin `river-network` tile and the run-scoped `hydro` tile read
+# the same `core.river_segment` geometry the national layers do, but their
+# digests (`_river_network_source_version`, `_run_source_version`) could not see
+# `_backfill_output_segment_geometry` rewriting it in place: the cache key stayed
+# put and every cached tile kept serving the pre-backfill geometry forever (the
+# per-basin layer has no run identity to rotate it at all). Appended at the end
+# so every line citation above keeps its number.
+#
+# Real routes, real PostGIS, real backfill: the fake-session and sqlite tests
+# cannot show that a key rotation actually reaches the tile bytes.
+# ---------------------------------------------------------------------------
+
+_OUTPUT_SEGMENT_VALUE = 300.0
+
+
+def _seed_output_segment_fact(database_url: str) -> None:
+    """One `q_down` fact for the output row at `_WINDOW_END`, on the base run.
+
+    The run-scoped `hydro` tile paints `river_timeseries x river_segment`, so
+    without a fact on the backfilled row its bytes could not change whatever the
+    geometry did. Seeded BEFORE `post_expand_forecast_database`, like `_seed`'s
+    facts, so the run's authoritative store receives a copy instead of a
+    poisoned decoy.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        _RUN_ID,
+                        _BASIN_VERSION_ID,
+                        _NETWORK_ID,
+                        _OUTPUT_SEGMENT_ID,
+                        _WINDOW_END,
+                        1,
+                        _VARIABLE,
+                        _OUTPUT_SEGMENT_VALUE,
+                        "m3/s",
+                        "ok",
+                    )
+                ],
+            )
+    finally:
+        connection.close()
+
+
+def _run_backfill(database_url: str, *, only_missing: bool) -> int:
+    """One committed backfill transaction, the shape a bootstrap tick runs."""
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = False
+    try:
+        with connection.cursor() as cursor:
+            updated = _backfill_output_segment_geometry(cursor, _NETWORK_ID, only_missing=only_missing)
+        connection.commit()
+    finally:
+        connection.close()
+    return updated
+
+
+def _request_per_basin_and_run_tiles(client: TestClient) -> dict[str, Any]:
+    x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, _ZOOM)
+    return {
+        "river-network": client.get(f"/api/v1/tiles/river-network/{_BASIN_VERSION_ID}/{_ZOOM}/{x}/{y}.pbf"),
+        "hydro": client.get(
+            f"/api/v1/tiles/hydro/{_RUN_ID}/{_VARIABLE}/{_stamp(_WINDOW_END)}/{_ZOOM}/{x}/{y}.pbf"
+        ),
+    }
+
+
+def _catalog_and_tile_run_versions(database_url: str) -> tuple[str, str, Any]:
+    """`_run_source_version` of the same run read by both run readers."""
+    engine = sqlalchemy_engine(database_url)
+    try:
+        with Session(engine) as session:
+            catalog_row = display_ready_run(session)
+            tile_row = hydro_display._run_row(session, _RUN_ID)
+    finally:
+        engine.dispose()
+    assert catalog_row is not None and catalog_row["run_id"] == _RUN_ID
+    return (
+        hydro_display._run_source_version(catalog_row),
+        hydro_display._run_source_version(tile_row),
+        tile_row.get("geometry_generation"),
+    )
+
+
+def test_geometry_backfill_rotates_the_per_basin_and_run_scoped_tiles(
+    national_tile: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
+    """#2156: a backfill that rewrites rows moves both tiles' keys AND bytes; a no-op moves neither.
+
+    Before the backfill the output row has NULL geometry, so neither tile can
+    carry it. The backfill copies the reach geometry and `Type` onto it and bumps
+    `geometry_generation`; both routes must then compute a new
+    `X-Tile-Cache-Key`, miss the cache, and regenerate bytes that DO carry the
+    row. Without the counter in their digests the key is unchanged, the second
+    request is a cache hit, and it replays the pre-backfill bytes -- the stale
+    tile this issue is about.
+
+    The `only_missing=True` pass that follows is what every bootstrap tick runs
+    on a complete network: it updates nothing, so both keys and both byte
+    strings must stay exactly as they were (a cache hit).
+    """
+    database_url, client = national_tile
+    _seed_output_and_reach_rows(database_url)
+    _seed_output_segment_fact(database_url)
+    post_expand_forecast_database({_RUN_ID: "narrow"})
+    assert _geometry_generation(database_url, _NETWORK_ID) == 0
+
+    before = _request_per_basin_and_run_tiles(client)
+    for layer, response in before.items():
+        assert response.status_code == 200, (layer, response.text)
+        assert response.headers["content-type"].startswith(MVT_MEDIA_TYPE), layer
+        assert response.headers["X-Tile-Cache"] == "miss", layer
+        # Non-vacuity: the tiles really are painted, just not with the NULL-geom row.
+        assert _SEGMENT_IDS[0].encode() in response.content, layer
+        assert _OUTPUT_SEGMENT_ID.encode() not in response.content, layer
+    assert _REACH_SEGMENT_ID.encode() in before["river-network"].content
+
+    assert _run_backfill(database_url, only_missing=True) == 1, "the backfill must rewrite the seeded output row"
+    assert _geometry_generation(database_url, _NETWORK_ID) == 1
+
+    after = _request_per_basin_and_run_tiles(client)
+    for layer, response in after.items():
+        assert response.status_code == 200, (layer, response.text)
+    rotated = {
+        layer: after[layer].headers["X-Tile-Cache-Key"] != before[layer].headers["X-Tile-Cache-Key"]
+        for layer in before
+    }
+    assert rotated == {"river-network": True, "hydro": True}, (
+        "an in-place geometry rewrite must rotate the per-basin and run-scoped tile cache keys"
+    )
+    for layer, response in after.items():
+        assert response.headers["X-Tile-Cache"] == "miss", layer
+        assert response.content != before[layer].content, layer
+        assert _OUTPUT_SEGMENT_ID.encode() in response.content, (
+            f"{layer}: the regenerated tile must carry the backfilled row's new geometry"
+        )
+
+    # The catalog (`display_ready_run`) and the tile route (`_run_row`) read the
+    # same generation and so advertise the same run identity.
+    catalog_version, tile_version, generation = _catalog_and_tile_run_versions(database_url)
+    assert generation == 1
+    assert catalog_version == tile_version
+
+    assert _run_backfill(database_url, only_missing=True) == 0
+    assert _geometry_generation(database_url, _NETWORK_ID) == 1, "a zero-row backfill must not bump"
+
+    unchanged = _request_per_basin_and_run_tiles(client)
+    for layer, response in unchanged.items():
+        assert response.status_code == 200, (layer, response.text)
+        assert response.headers["X-Tile-Cache-Key"] == after[layer].headers["X-Tile-Cache-Key"], layer
+        assert response.headers["X-Tile-Cache"] == "hit", layer
+        assert response.content == after[layer].content, layer

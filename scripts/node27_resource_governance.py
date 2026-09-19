@@ -38,6 +38,8 @@ DEFAULT_SERVICES = (
     "nhms-display-api.service",
     "nhms-node27-autopipe.service",
     "nhms-node27-autopipe.timer",
+    "nhms-node27-coverage-freshness-alert.service",
+    "nhms-node27-coverage-freshness-alert.timer",
     "nhms-node27-download.service",
     "nhms-node27-download.timer",
     "nhms-node27-frontier-alert.service",
@@ -121,6 +123,10 @@ def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
                 "MemoryCurrent",
                 "-p",
                 "NRestarts",
+                "-p",
+                "LoadState",
+                "-p",
+                "UnitFileState",
             ]
         )
         parsed: dict[str, str] = {}

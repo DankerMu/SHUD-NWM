@@ -1,23 +1,24 @@
 """Unit contract for ``packages/common/river_ts_render.py`` (#1980, task 1.2).
 
-The renderer is the seam every later issue of epic #1979 depends on (I2–I5 wire
-the readers to it, I7 flips the store, I9 deletes the legacy half), and it works
-by DELETING LINES from production SQL. Two failure modes matter and neither is
-visible downstream:
+The renderer was the seam every later issue of epic #1979 depended on (I2–I5
+wired the readers to it, I7 flipped the store, I9 — #1342's contract, task 6.3
+— deleted the legacy half). With the legacy table, the routing column and the
+transitional compressed-chunk pushdown aids gone, what is left is a VALIDATOR:
+it returns its input unchanged or refuses it by name. The line-deletion
+machinery, its marker grammar and its fail-closed layout checks are gone with
+the aids, so the tests that owned them are gone too.
 
-* it deletes one line too many — a key predicate goes, the narrow statement
-  silently returns more rows than the legacy one;
-* it deletes one line too few — a text predicate survives onto a table that has
-  no such column, and the read fails at runtime, in the migration window.
+The failure mode that remains is the one this module was always really about:
+the module's picture of WHERE the fact table is read must equal PostgreSQL's.
+A text-identity column the scanner cannot see is a column that reaches a narrow
+table which has no such column, and the read fails at runtime. So the bulk of
+this file is the attribution/lexer contract, written against synthetic
+statements that isolate one shape each, and the refusals are as load-bearing as
+the acceptances.
 
-So the tests here are written against synthetic templates that isolate one shape
-each, and the fail-closed cases are as load-bearing as the happy ones: a renderer
-that quietly does its best with a mis-shaped marker is worse than one that
-refuses, because #1980's whole argument is that the layout is 1:1 and mechanical.
-
-The registered production templates are rendered in both variants by the shape
-oracles (``tests/test_sql_shape_helpers.py``), not here: this file owns the
-contract, that one owns the coverage.
+The registered production templates are validated by the shape oracles
+(``tests/test_sql_shape_helpers.py``), not here: this file owns the contract,
+that one owns the coverage.
 """
 
 from __future__ import annotations
@@ -30,21 +31,15 @@ import pytest
 from packages.common.river_ts_render import (
     _SUBQUERY_START,
     _WHITESPACE,
-    PUSHDOWN_AID_MARKER,
-    RIVER_TABLE,
-    RIVER_TABLE_LEGACY,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+    STORES,
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
     RiverTemplateError,
-    _assert_key_predicates_retained,
-    _assert_no_fact_text_identity,
     _blank_non_code,
     _in_comparison_value_position,
     _lexical_subset_violation,
     _scan_quoted,
-    _strip_aids,
-    aid_conjunct,
     assert_structurally_intact,
     fact_table_attribution,
     fact_table_name_occurrences,
@@ -60,335 +55,73 @@ from packages.common.river_ts_render import (
 )
 from tests.river_ts_template_registry import REGISTRY
 
-MARKER = PUSHDOWN_AID_MARKER
-
-NAMED_TEMPLATE = f"""
+NAMED_TEMPLATE = """
     SELECT ts.value
     FROM hydro.river_timeseries ts
     WHERE ts.run_key = (
               SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
           )
-      {MARKER}
-      AND ts.run_id = :run_id
       AND ts.valid_time = :valid_time
 """
 
-POSITIONAL_TEMPLATE = f"""
+POSITIONAL_TEMPLATE = """
     SELECT rt.value
     FROM hydro.river_timeseries rt
     WHERE rt.run_key = %s
-      {MARKER}
-      AND rt.run_id = %s
       AND rt.river_network_version_key = %s
-      {MARKER}
-      AND rt.river_network_version_id = %s
       AND rt.valid_time >= %s
 """
 
 
 # ---------------------------------------------------------------------------
-# legacy: the table name and nothing else
+# the validator returns its input, and refuses every store that is not narrow
 # ---------------------------------------------------------------------------
 
 
-def test_the_legacy_variant_renames_the_table_and_changes_nothing_else() -> None:
-    rendered = render_river_ts_sql(NAMED_TEMPLATE, "legacy", entry="named")
+@pytest.mark.parametrize(
+    "template", [NAMED_TEMPLATE, POSITIONAL_TEMPLATE], ids=["named", "positional"]
+)
+def test_a_valid_template_renders_as_itself(template: str) -> None:
+    """``spec.md:66``: the renderer accepts the narrow store and rewrites nothing.
 
-    assert rendered.sql == NAMED_TEMPLATE.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert rendered.removed_placeholders == ()
-
-
-def test_the_legacy_variant_keeps_every_aid_and_every_marker() -> None:
-    """The legacy table still carries 000047's text-column compression layout.
-
-    Dropping an aid from the legacy branch is not a cleanup, it is the measured
-    compressed-chunk collapse (#1341's 598,280-cost full decompression) applied
-    to exactly the rows that are still in the old table.
+    Before the contract this returned a DIFFERENT string per store — a renamed
+    table for legacy, a line-deleted body for narrow. Identity is now the whole
+    happy path, so it is pinned on both placeholder dialects rather than assumed.
     """
-    rendered = render_river_ts_sql(POSITIONAL_TEMPLATE, "legacy", entry="positional")
-
-    assert rendered.sql.count(MARKER) == 2
-    assert "AND rt.run_id = %s" in rendered.sql
-    assert "AND rt.river_network_version_id = %s" in rendered.sql
-
-
-def test_rendering_legacy_is_idempotent_on_an_already_legacy_name() -> None:
-    """``\\b`` after the canonical name refuses to match before ``_legacy``.
-
-    Without it a double render produces ``hydro.river_timeseries_legacy_legacy``,
-    a table that does not exist, and only at execute time.
-    """
-    once = render_river_ts_sql(NAMED_TEMPLATE, "legacy", entry="named").sql
-    twice = render_river_ts_sql(once, "legacy", entry="named").sql
-
-    assert twice == once
-    assert "_legacy_legacy" not in twice
-
-
-@pytest.mark.parametrize("spelling", ["HYDRO.RIVER_TIMESERIES", "Hydro.River_Timeseries"])
-def test_the_legacy_rename_reads_the_table_name_case_insensitively(spelling: str) -> None:
-    """SQL identifiers are case-insensitive unquoted, and the rename must be too.
-
-    Every other fact-name pattern in the module carries ``re.IGNORECASE``, so an
-    upper-cased read passed both counters and the equality guard, and then the
-    LEGACY variant came back naming the CANONICAL table — the narrow table,
-    which holds none of the legacy rows (#2018 round-2 F2). One case policy per
-    module is the point: a pattern that disagrees with its siblings about what
-    the table's name is, is a hole by construction.
-    """
-    template = f"SELECT rt.value FROM {spelling} rt WHERE rt.run_key = :run_key"
-
-    rendered = render_river_ts_sql(template, "legacy", entry="upper-case")
-
-    assert RIVER_TABLE_LEGACY in rendered.sql
-    assert spelling not in rendered.sql
-
-
-def test_the_case_insensitive_rename_is_still_idempotent_on_an_upper_cased_legacy_name() -> None:
-    """The ``\\b`` control for the widened case policy: no ``_legacy_legacy``.
-
-    ``re.IGNORECASE`` widens what the rename can reach, so the guard that keeps
-    a second render from producing ``hydro.river_timeseries_legacy_legacy`` is
-    asserted on the upper-cased spelling too.
-    """
-    template = "SELECT rt.value FROM hydro.RIVER_TIMESERIES_LEGACY rt WHERE rt.run_key = :run_key"
-
-    rendered = render_river_ts_sql(template, "legacy", entry="upper-case legacy")
+    rendered = render_river_ts_sql(template, "narrow", entry="identity")
 
     assert rendered.sql == template
-    assert rendered.sql.lower().count("_legacy") == 1
+    assert rendered.sql is template
 
 
-def test_a_fragment_has_no_table_name_so_the_rename_is_a_no_op() -> None:
-    fragment = f"rt.river_segment_key = %s\n  {MARKER}\n  AND rt.river_segment_id = %s"
+def test_a_fragment_without_a_table_name_is_validated_and_returned() -> None:
+    fragment = "rt.river_segment_key = %s\n  AND rt.valid_time >= %s"
 
-    assert render_river_ts_sql(fragment, "legacy", entry="fragment").sql == fragment
-
-
-# ---------------------------------------------------------------------------
-# narrow: the marker line and the single conjunct beneath it
-# ---------------------------------------------------------------------------
+    assert render_river_ts_sql(fragment, "narrow", entry="fragment").sql == fragment
 
 
-def test_the_narrow_variant_removes_the_marker_line_and_its_aid_line() -> None:
-    rendered = render_river_ts_sql(NAMED_TEMPLATE, "narrow", entry="named")
+@pytest.mark.parametrize("store", ["legacy", "sharded", "NARROW", "", "narrow "])
+def test_a_store_that_is_not_narrow_is_refused_by_name(store: str) -> None:
+    """``"legacy"`` is in this list on purpose, and is the reason ``store`` survives.
 
-    assert RIVER_TABLE in rendered.sql
-    assert RIVER_TABLE_LEGACY not in rendered.sql
-    assert MARKER not in rendered.sql
-    assert "ts.run_id" not in rendered.sql.replace("WHERE run_id = :run_id", "")
-    # The key predicate the aid was redundant to, and every unrelated conjunct.
-    assert "ts.run_key = (" in rendered.sql
-    assert "AND ts.valid_time = :valid_time" in rendered.sql
-
-
-def test_the_narrow_variant_removes_consecutive_marker_aid_blocks() -> None:
-    """mvt's ``:661`` / ``:793`` / ``:840`` runs are three and four aids back to back.
-
-    A loop that advanced by one line after a deletion would treat the second
-    marker's aid as the first marker's aid; a loop that resynchronised on blank
-    lines would stop at the first run. Both shipped statements with text
-    predicates left over, so the run is pinned explicitly.
+    The contract deleted ``hydro.river_timeseries_legacy``; a caller that still
+    believes in routing must be refused HERE, by name, rather than reaching a
+    database with a table that does not exist. The exact-membership spellings
+    (case, whitespace, empty) pin that the check is ``in STORES`` and not a
+    normalising comparison.
     """
-    template = "\n".join(
-        [
-            "    SELECT 1",
-            "    FROM hydro.river_timeseries ts",
-            "    WHERE ts.run_key = lr.run_key",
-            f"      {MARKER}",
-            "      AND ts.run_id = lr.run_id",
-            f"      {MARKER}",
-            "      AND ts.river_network_version_id = lr.river_network_version_id",
-            f"      {MARKER}",
-            "      AND ts.river_segment_id = seg.river_segment_id",
-            f"      {MARKER}",
-            "      AND ts.variable = :variable",
-            "      AND ts.variable_e = :variable_e",
-        ]
-    )
-
-    rendered = render_river_ts_sql(template, "narrow", entry="lateral probe")
-
-    assert MARKER not in rendered.sql
-    assert fact_table_text_identity_columns(rendered.sql) == set()
-    assert "WHERE ts.run_key = lr.run_key" in rendered.sql
-    assert "AND ts.variable_e = :variable_e" in rendered.sql
-
-
-def test_a_zero_marker_template_renders_narrow_as_itself() -> None:
-    template = "SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = %s"
-
-    rendered = render_river_ts_sql(template, "narrow", entry="aid-free")
-
-    assert rendered.sql == template
-    assert rendered.removed_placeholders == ()
-
-
-def test_an_on_chain_aid_is_removed_like_any_other() -> None:
-    """publisher's ``:2665`` aid lives in a ``JOIN … ON`` chain, not a ``WHERE``.
-
-    The rule is per line, not per keyword, so an ON-chain aid must come out with
-    the join intact — and the structural check must not read the shortened ON
-    chain as a broken one.
-    """
-    template = f"""
-        SELECT h.run_id
-        FROM hydro.hydro_run h
-        JOIN hydro.river_timeseries r
-          ON r.run_key = h.run_key
-         {MARKER}
-         AND r.variable = 'q_down'
-         AND r.variable_e = 'q_down'
-        WHERE h.status = 'published'
-    """
-
-    rendered = render_river_ts_sql(template, "narrow", entry="publisher")
-
-    assert "ON r.run_key = h.run_key" in rendered.sql
-    assert "AND r.variable_e = 'q_down'" in rendered.sql
-    assert "r.variable = 'q_down'" not in rendered.sql
-    assert "WHERE h.status = 'published'" in rendered.sql
-
-
-def test_an_aid_ending_in_a_trailing_and_inside_an_or_disjunct_is_removed() -> None:
-    """The rewritten guard shape (design D5): ``OR (`` / marker / aid ``AND`` / key.
-
-    The aid line carries the ``AND``, so deleting it leaves the disjunct holding
-    only its key predicate — no dangling operator, same truth table.
-    """
-    template = (
-        "SELECT 1 FROM hydro.river_timeseries rt\n"
-        "WHERE (%(scan_run_id)s IS NULL\n"
-        "       OR (\n"
-        f"           {MARKER}\n"
-        "           rt.run_id = %(scan_run_id)s AND\n"
-        "           rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)))\n"
-    )
-
-    rendered = render_river_ts_sql(template, "narrow", entry="scan guard")
-
-    assert "rt.run_id = %(scan_run_id)s" not in rendered.sql
-    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)" in rendered.sql
-    assert "OR (\n" in rendered.sql
-
-
-# ---------------------------------------------------------------------------
-# fail-closed
-# ---------------------------------------------------------------------------
-
-
-def test_a_marker_above_a_keyword_line_is_refused_by_name() -> None:
-    """The pre-#1980 shape at ``hydro_display:773`` and ``mvt:511/1496/1524``.
-
-    The aid was the first conjunct ON the ``WHERE`` line, so deleting the line
-    under the marker would delete the ``WHERE`` itself. This refusal is what
-    forces task 1.1's normalisation to actually happen rather than being assumed.
-    """
-    template = f"""
-        SELECT 1
-        FROM hydro.river_timeseries
-        {MARKER}
-        WHERE run_id = :run_id
-          AND run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)
-    """
-
     with pytest.raises(RiverTemplateError) as excinfo:
-        render_river_ts_sql(template, "narrow", entry="mvt:valid_times_named_identity")
+        render_river_ts_sql(NAMED_TEMPLATE, store, entry="named")
 
-    assert "mvt:valid_times_named_identity" in str(excinfo.value)
-    assert "not exactly one aid conjunct" in str(excinfo.value)
-
-
-def test_a_marker_above_a_two_conjunct_line_is_refused() -> None:
-    template = f"""
-        SELECT 1 FROM hydro.river_timeseries rt
-        WHERE rt.run_key = %s
-          {MARKER}
-          AND rt.run_id = %s AND rt.variable = 'q_down'
-    """
-
-    with pytest.raises(RiverTemplateError, match="not exactly one aid conjunct"):
-        render_river_ts_sql(template, "narrow", entry="two conjuncts")
+    message = str(excinfo.value)
+    assert "named" in message
+    assert "unknown timeseries store" in message
+    assert repr(store) in message
+    assert "['narrow']" in message
 
 
-def test_a_marker_above_a_non_aid_predicate_is_refused() -> None:
-    """A marker over the KEY predicate would delete the row-selection authority."""
-    template = f"""
-        SELECT 1 FROM hydro.river_timeseries rt
-        WHERE rt.valid_time = %s
-          {MARKER}
-          AND rt.run_key = %s
-    """
-
-    with pytest.raises(RiverTemplateError, match="not exactly one aid conjunct"):
-        render_river_ts_sql(template, "narrow", entry="key predicate under marker")
-
-
-def test_a_marker_on_the_last_line_is_refused() -> None:
-    template = f"SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = %s\n  {MARKER}"
-
-    with pytest.raises(RiverTemplateError, match="last line"):
-        render_river_ts_sql(template, "narrow", entry="trailing marker")
-
-
-def test_a_non_verbatim_marker_is_refused_by_name() -> None:
-    """mvt's pre-#1980 ``-- aids, remove with #1342`` covered FOUR conjuncts.
-
-    Matching on the issue tag rather than only on the verbatim string is what
-    makes this red instead of invisible: a renderer that only recognised the
-    verbatim marker would skip the block and leave four text predicates in a
-    narrow statement.
-    """
-    template = """
-        SELECT 1 FROM hydro.river_timeseries ts
-        WHERE ts.run_key = lr.run_key
-          -- transitional compressed-chunk pushdown aids, remove with #1342
-          AND ts.run_id = lr.run_id
-          AND ts.river_network_version_id = lr.river_network_version_id
-    """
-
-    with pytest.raises(RiverTemplateError) as excinfo:
-        render_river_ts_sql(template, "narrow", entry="mvt:national")
-
-    assert "NON-VERBATIM" in str(excinfo.value)
-    assert "mvt:national" in str(excinfo.value)
-
-
-def test_a_marker_sharing_a_line_with_its_aid_is_refused() -> None:
-    """Inline markers were accepted before #1980 and are not deletable by line."""
-    template = f"""
-        SELECT 1 FROM hydro.river_timeseries rt
-        WHERE rt.run_key = %s
-          AND rt.run_id = %s {MARKER}
-    """
-
-    with pytest.raises(RiverTemplateError, match="NON-VERBATIM"):
-        render_river_ts_sql(template, "narrow", entry="inline marker")
-
-
-def test_an_unknown_store_is_refused() -> None:
-    with pytest.raises(RiverTemplateError, match="unknown timeseries store"):
-        render_river_ts_sql(NAMED_TEMPLATE, "sharded", entry="named")
-
-
-def test_a_deletion_that_would_orphan_a_key_predicate_is_refused() -> None:
-    """The renderer's own safety net, independent of the marker grammar.
-
-    Constructed so the aid line's removal also takes the conjunct the statement
-    selects rows by: the ``AND`` belongs to the NEXT line, so removing the aid
-    line leaves ``WHERE`` immediately followed by ``AND``. A renderer that only
-    checked "did I remove a text column" would ship it.
-    """
-    template = f"""
-        SELECT 1 FROM hydro.river_timeseries rt
-        WHERE
-          {MARKER}
-          rt.run_id = %s
-          AND rt.run_key = %s
-    """
-
-    with pytest.raises(RiverTemplateError, match="WHERE with no predicate"):
-        render_river_ts_sql(template, "narrow", entry="orphaned WHERE")
+def test_the_only_store_the_renderer_admits_is_narrow() -> None:
+    assert STORES == ("narrow",)
 
 
 # ---------------------------------------------------------------------------
@@ -423,14 +156,6 @@ def test_the_structural_check_accepts_a_real_statement() -> None:
         "AND (rt.valid_time IS NULL OR rt.valid_time >= %s)",
         "well formed",
     )
-
-
-def test_the_structural_check_refuses_a_surviving_marker_but_not_on_the_legacy_variant() -> None:
-    sql = f"SELECT 1 FROM hydro.river_timeseries rt\n{MARKER}\nWHERE rt.run_key = %s AND rt.run_id = %s"
-
-    assert_structurally_intact(sql, "legacy", allow_markers=True)
-    with pytest.raises(RiverTemplateError, match="marker survived"):
-        assert_structurally_intact(sql, "narrow")
 
 
 def test_a_parenthesis_inside_a_string_literal_does_not_unbalance_the_check() -> None:
@@ -541,7 +266,7 @@ def test_a_double_quoted_fact_alias_is_refused_instead_of_reported_clean(label: 
     """
     sql = f'SELECT "r".value FROM {reference} WHERE "r".run_id = :run_id'
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
@@ -579,22 +304,16 @@ def test_an_unquoted_as_alias_is_the_alias_and_not_the_word_as() -> None:
     assert fact_table_text_identity_columns(sql) == {"run_id"}
 
 
-def test_an_unquoted_alias_still_renders_for_both_stores() -> None:
+def test_an_unquoted_alias_still_renders() -> None:
     """Non-vacuity: the refusal must not have swallowed the ordinary aliased form."""
-    template = f"""
+    template = """
         SELECT r.value
         FROM hydro.river_timeseries AS r
         WHERE r.run_key = :run_key
-          {MARKER}
-          AND r.run_id = :run_id
+          AND r.valid_time >= :valid_time
     """
 
-    legacy = render_river_ts_sql(template, "legacy", entry="bare-alias")
-    narrow = render_river_ts_sql(template, "narrow", entry="bare-alias")
-
-    assert "FROM hydro.river_timeseries_legacy AS r" in legacy.sql
-    assert "AND r.run_id = :run_id" in legacy.sql
-    assert "run_id" not in narrow.sql
+    assert render_river_ts_sql(template, "narrow", entry="bare-alias").sql == template
 
 
 @pytest.mark.parametrize(
@@ -736,7 +455,7 @@ def test_a_reference_the_from_join_walk_cannot_count_is_refused(label: str, sql:
     guard existed.
     """
     assert fact_table_name_occurrences(sql) == occurrences
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
@@ -780,7 +499,7 @@ def test_a_column_qualified_by_the_table_name_is_refused_so_the_qualifier_is_nev
 
     assert fact_table_name_occurrences(sql) == occurrences
     assert fact_table_attribution(sql).reference_count == 1
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
@@ -788,17 +507,17 @@ def test_a_column_qualified_by_the_table_name_is_refused_so_the_qualifier_is_nev
 
 
 def test_qualifying_the_same_columns_through_a_bare_alias_still_renders() -> None:
-    """Non-vacuity for the deletion: the ALIASED spelling is what the walk models.
+    """Non-vacuity for the refusal above: the ALIASED spelling is what the walk models.
 
-    The deletion is only allowed to move the table-name qualifier; an ordinary
-    aliased read of either physical table must render for both stores, and the
-    legacy rename must stay idempotent on the ``_legacy`` name.
+    ``_FACT_NAME_TOKEN`` still matches the retired ``_legacy`` name — the token
+    is what makes a leftover reference to the dropped table VISIBLE to the
+    counter instead of silently uncounted — so an ordinary aliased read of it is
+    still attributed, and still carries no text identity column.
     """
     sql = "SELECT rt.value FROM hydro.river_timeseries_legacy rt WHERE rt.run_key = :run_key"
 
     assert fact_table_name_occurrences(sql) == fact_table_attribution(sql).reference_count == 1
     assert fact_table_text_identity_columns(sql, entry="aliased-qualifier") == set()
-    assert render_river_ts_sql(sql, "legacy", entry="aliased-qualifier").sql == sql
     assert render_river_ts_sql(sql, "narrow", entry="aliased-qualifier").sql == sql
 
 
@@ -844,11 +563,10 @@ def test_text_fact_columns_answers_about_the_alias_it_is_given_without_the_form_
 # PostgreSQL unquoted identifier case folding (#2053)
 # ---------------------------------------------------------------------------
 
-_CASE_FOLDING_TEMPLATE = f"""\
+_CASE_FOLDING_TEMPLATE = """\
 SELECT RT.value
 FROM hydro.river_timeseries RT
 WHERE RT.run_key = %(run_key)s
-  {MARKER}
   AND RT.run_id = %(run_id)s
   AND rt.variable = 'q_down'
 """
@@ -886,7 +604,7 @@ def test_a_mixed_case_unmarked_text_predicate_is_refused_in_narrow_render() -> N
         render_river_ts_sql(_CASE_FOLDING_TEMPLATE, "narrow", entry="mixed-case")
 
     assert "mixed-case" in str(raised.value)
-    assert "text identity column(s) ['variable']" in str(raised.value)
+    assert "text identity column(s) ['run_id', 'variable']" in str(raised.value)
     assert "unmodelled" not in str(raised.value)
 
 
@@ -1306,28 +1024,32 @@ def test_quoted_reference_bytes_in_non_code_remain_unattributed(label: str, sql:
 def test_case_folding_does_not_change_the_quoted_fact_alias_refusal(alias: str, reference: str) -> None:
     sql = f'SELECT "{alias}".value FROM {reference} WHERE "{alias}".variable = :variable'
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry="quoted-fact-alias")
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
         fact_table_text_identity_columns(sql, entry="quoted-fact-alias")
 
 
-def test_an_uppercase_marked_aid_remains_a_fail_closed_mis_shape() -> None:
-    template = f"""\
+def test_an_uppercase_text_identity_predicate_is_still_refused() -> None:
+    """Case folding is the ATTRIBUTION's job, so the refusal must survive it.
+
+    ``RT.RUN_ID`` is the same column as ``rt.run_id`` to PostgreSQL. A scanner
+    that only recognised the lower-case spelling would let it onto a narrow
+    table that has no such column.
+    """
+    template = """\
 SELECT RT.value
 FROM hydro.river_timeseries RT
 WHERE RT.run_key = :run_key
-  {MARKER}
   AND RT.RUN_ID = :run_id
 """
 
-    assert aid_conjunct("AND RT.RUN_ID = :run_id") is None
     with pytest.raises(RiverTemplateError) as raised:
-        render_river_ts_sql(template, "narrow", entry="uppercase-marked-aid")
+        render_river_ts_sql(template, "narrow", entry="uppercase-text-identity")
 
-    assert "uppercase-marked-aid" in str(raised.value)
-    assert "not exactly one aid conjunct" in str(raised.value)
+    assert "uppercase-text-identity" in str(raised.value)
+    assert "text identity column(s) ['run_id']" in str(raised.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1517,7 +1239,7 @@ def test_a_spaced_table_name_qualifier_remains_fail_closed() -> None:
     assert text_fact_columns(sql, "rt") == set()
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
         fact_table_text_identity_columns(sql, entry=entry)
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry=entry)
 
@@ -1541,7 +1263,6 @@ def _assert_whole_row_star_output(sql: str) -> None:
     assert text_fact_columns(sql, "rt") == expected
     assert text_fact_columns(sql, "RT") == expected
     assert fact_table_text_identity_columns(sql, entry=entry) == expected
-    assert render_river_ts_sql(sql, "legacy", entry=entry).sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
     with pytest.raises(RiverTemplateError) as raised:
         render_river_ts_sql(sql, "narrow", entry=entry)
     message = str(raised.value)
@@ -1598,7 +1319,7 @@ def test_whole_row_star_scanner_separators(projection: str) -> None:
     ],
     ids=["nested", "cast", "function", "row", "multipart", "group-multipart", "argument", "order", "mixed"],
 )
-@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+@pytest.mark.parametrize("door", ["helper", "narrow"])
 def test_whole_row_star_unsupported_refused(sql: str, door: str) -> None:
     entry = "whole-row-unsupported"
     # The unguarded public seam stays a matcher, including mixed exact/unsupported input.
@@ -1635,11 +1356,10 @@ def test_whole_row_star_nonfact_controls(projection: str, relation: str) -> None
     sql = f"SELECT {projection} FROM hydro.river_timeseries rt JOIN hydro.hydro_run {relation} ON true"
     assert text_fact_columns(sql, "rt") == set()
     assert fact_table_text_identity_columns(sql, entry="star-control") == set()
-    assert render_river_ts_sql(sql, "legacy", entry="star-control").sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
     assert render_river_ts_sql(sql, "narrow", entry="star-control").sql == sql
 
 
-@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+@pytest.mark.parametrize("door", ["helper", "narrow"])
 def test_whole_row_star_quoted_declaration_precedence(door: str) -> None:
     sql = 'SELECT "rt".* FROM hydro.river_timeseries AS "rt"'
     with pytest.raises(RiverTemplateError, match="double-quoted alias"):
@@ -1686,9 +1406,6 @@ def _assert_parenthesized_exact_sql(sql: str, *, entry: str, column: str) -> Non
     ) == ({column}, {column}, {column}, True)
     _assert_exact_quoted_text_identity_refusal(message, entry=entry, column=column)
 
-    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
-    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert legacy.removed_placeholders == ()
 
 
 def _assert_parenthesized_exact_text_identity(reference: str, *, entry: str, column: str) -> None:
@@ -1701,11 +1418,7 @@ def _assert_parenthesized_clean_sql(sql: str, *, entry: str) -> None:
     assert text_fact_columns(sql, "RT") == set()
     assert text_fact_columns(sql, "rt") == set()
 
-    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
-    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
-    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert narrow.sql == sql
-    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
 
 
 def _assert_parenthesized_alias_operand_refusal(reference: str, *, entry: str) -> None:
@@ -1714,7 +1427,7 @@ def _assert_parenthesized_alias_operand_refusal(reference: str, *, entry: str) -
 
     assert text_fact_columns(sql, "RT") == set()
     assert text_fact_columns(sql, "rt") == set()
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -2032,7 +1745,7 @@ def test_parenthesized_alias_field_selection_inside_operand_containers_is_attrib
     _assert_parenthesized_exact_sql(sql, entry=f"parenthesized-container-{label}", column=column)
 
 
-@pytest.mark.parametrize("door", ["guarded", "legacy", "narrow"])
+@pytest.mark.parametrize("door", ["guarded", "narrow"])
 @pytest.mark.parametrize(
     ("label", "reference"),
     [
@@ -2065,7 +1778,7 @@ def test_unsupported_parenthesized_fact_alias_field_selections_fail_closed(
     )
 
 
-@pytest.mark.parametrize("door", ["guarded", "legacy", "narrow"])
+@pytest.mark.parametrize("door", ["guarded", "narrow"])
 def test_every_balanced_group_is_inspected_after_an_irrelevant_selection(door: str) -> None:
     """An earlier other-relation group cannot hide a later alias-rooted unsupported one."""
     _assert_parenthesized_unsupported_selection(
@@ -2195,7 +1908,7 @@ def test_parenthesized_extension_preserves_the_quoted_fact_alias_declaration_ref
     entry = "parenthesized-quoted-declaration"
     sql = 'SELECT "rt".value FROM hydro.river_timeseries AS "rt" WHERE ("rt").variable = :value'
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError) as rendered:
             render_river_ts_sql(sql, store, entry=entry)
         message = str(rendered.value)
@@ -2257,9 +1970,6 @@ def _assert_functional_field_exact_sql(sql: str, *, entry: str, column: str) -> 
     ) == ({column}, {column}, {column}, True)
     _assert_exact_quoted_text_identity_refusal(message, entry=entry, column=column)
 
-    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
-    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert legacy.removed_placeholders == ()
 
 
 def _assert_functional_field_exact(reference: str, *, entry: str, column: str) -> None:
@@ -2272,11 +1982,7 @@ def _assert_functional_field_clean_sql(sql: str, *, entry: str) -> None:
     assert text_fact_columns(sql, "RT") == set()
     assert text_fact_columns(sql, "rt") == set()
 
-    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
-    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
-    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert narrow.sql == sql
-    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
 
 
 def _assert_functional_field_clean(reference: str, *, entry: str) -> None:
@@ -2289,7 +1995,7 @@ def _assert_functional_field_unsupported(sql: str, *, entry: str) -> None:
     assert text_fact_columns(sql, "RT") == set()
     assert text_fact_columns(sql, "rt") == set()
 
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -2588,7 +2294,7 @@ def test_functional_field_extension_leaves_direct_separator_and_parenthesized_co
     sql = _functional_field_sql("f(rt).variable")
     entry = "functional-field-parenthesized-unsupported-control"
     assert text_fact_columns(sql, "rt") == set()
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -2611,7 +2317,7 @@ def test_functional_field_inner_fact_reread_keeps_count_delta_precedence() -> No
     )
 
     assert text_fact_columns(sql, "rt") == set()
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -2706,7 +2412,7 @@ def _assert_correlated_scalar_refusal(sql: str, *, entry: str) -> None:
     assert text_fact_columns(sql, "rt") == set()
     assert text_fact_columns(sql, "RT") == set()
 
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -2727,11 +2433,7 @@ def _assert_correlated_scalar_clean(sql: str, *, entry: str) -> None:
     assert fact_table_text_identity_columns(sql, entry=entry) == set()
     assert text_fact_columns(sql, "rt") == set()
     assert text_fact_columns(sql, "RT") == set()
-    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
-    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
-    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert narrow.sql == sql
-    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
 
 
 def test_correlated_scalar_member_enumeration_matches_the_shared_identity_contract() -> None:
@@ -2911,7 +2613,7 @@ def test_an_authority_clean_unclosed_scalar_stays_empty_and_renders_unbalanced()
     assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
     assert text_fact_columns(sql, "rt") == set()
     assert fact_table_text_identity_columns(sql, entry=entry) == set()
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError) as raised:
             render_river_ts_sql(sql, store, entry=entry)
         message = str(raised.value)
@@ -2966,7 +2668,7 @@ def test_correlated_scalar_inner_fact_reread_keeps_count_delta_precedence() -> N
     )
 
     assert text_fact_columns(sql, "rt") == set()
-    for door in ("guarded", "legacy", "narrow"):
+    for door in ("guarded", "narrow"):
         with pytest.raises(RiverTemplateError) as raised:
             if door == "guarded":
                 fact_table_text_identity_columns(sql, entry=entry)
@@ -3067,7 +2769,7 @@ def test_unaliased_scalar_previously_routed_names_fail_closed(
     attribution = fact_table_attribution(sql)
     assert attribution.aliases == frozenset()
     assert attribution.has_unaliased_reference is True
-    for door in ("helper", "legacy", "narrow"):
+    for door in ("helper", "narrow"):
         _assert_unaliased_scalar_refusal(sql, entry=entry, door=door)
 
 
@@ -3125,7 +2827,7 @@ def test_a_unicode_escaped_identifier_is_refused_because_the_counter_cannot_see_
     """
     sql = f'SELECT r.value FROM hydro.{prefix}{quoted} r WHERE r.run_id = :run_id'
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled .*Unicode-escaped"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="Unicode-escaped"):
@@ -3162,7 +2864,7 @@ def test_a_fact_read_inside_a_comparison_position_sub_select_is_refused(label: s
     sub-select is exactly this shape. The statement is refused instead — the
     counts before and after stripping must agree.
     """
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match="comparison-position sub-select"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="comparison-position sub-select"):
@@ -3170,22 +2872,20 @@ def test_a_fact_read_inside_a_comparison_position_sub_select_is_refused(label: s
 
 
 def test_an_authority_sub_select_in_the_same_position_still_renders() -> None:
-    """Non-vacuity for the sub-select guard: the AUTHORITY table's resolution is the registry's own shape."""
-    template = f"""
+    """Non-vacuity for the sub-select guard: the AUTHORITY table's resolution is the registry's own shape.
+
+    ``WHERE run_id = %(run_id)s`` inside the sub-select belongs to
+    ``hydro.hydro_run``, not to the fact table, so it must NOT be attributed —
+    the registry's own run-identity shape would otherwise be unrenderable.
+    """
+    template = """
         SELECT rt.value
         FROM hydro.river_timeseries rt
         WHERE rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)
-          {MARKER}
-          AND rt.run_id = %(run_id)s
     """
 
-    legacy = render_river_ts_sql(template, "legacy", entry="authority")
-    narrow = render_river_ts_sql(template, "narrow", entry="authority")
-
-    assert "FROM hydro.river_timeseries_legacy rt" in legacy.sql
-    assert "AND rt.run_id = %(run_id)s" in legacy.sql
-    assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)" in narrow.sql
-    assert "rt.run_id" not in narrow.sql
+    assert fact_table_text_identity_columns(template, entry="authority") == set()
+    assert render_river_ts_sql(template, "narrow", entry="authority").sql == template
 
 
 def test_the_reference_count_guard_does_not_fire_on_a_plainly_aliased_read() -> None:
@@ -3199,7 +2899,6 @@ def test_the_reference_count_guard_does_not_fire_on_a_plainly_aliased_read() -> 
 
     assert fact_table_name_occurrences(sql) == fact_table_attribution(sql).reference_count == 1
     assert fact_table_text_identity_columns(sql, entry="counted") == {"run_id"}
-    assert "FROM hydro.river_timeseries_legacy r" in render_river_ts_sql(sql, "legacy", entry="counted").sql
     with pytest.raises(RiverTemplateError) as excinfo:
         render_river_ts_sql(sql, "narrow", entry="counted")
     assert "text identity column(s) ['run_id']" in str(excinfo.value)
@@ -3262,7 +2961,6 @@ def test_an_escape_string_literal_does_not_swallow_the_statement_after_it(prefix
     assert fact_table_name_occurrences(sql) == 1
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
         render_river_ts_sql(sql, "narrow", entry="escape-literal")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="escape-literal").sql
 
 
 def test_a_plain_literal_ending_in_a_backslash_ends_at_its_own_quote() -> None:
@@ -3286,7 +2984,6 @@ def test_a_plain_literal_ending_in_a_backslash_ends_at_its_own_quote() -> None:
     assert fact_table_name_occurrences(sql) == 1
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
         render_river_ts_sql(sql, "narrow", entry="plain-backslash")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="plain-backslash").sql
 
 
 def test_a_keyword_ending_in_e_does_not_turn_the_next_literal_into_an_escape_string() -> None:
@@ -3334,7 +3031,6 @@ def test_an_escape_string_with_no_backslash_and_a_doubled_quote_still_render() -
     for sql, literal in ((prefixed, "E'abc' AS note"), (doubled, "'a''b' AS note")):
         assert fact_table_attribution(sql).aliases == frozenset({"rt"})
         assert literal in render_river_ts_sql(sql, "narrow", entry="e-control").sql
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="e-control").sql
 
 
 # ---------------------------------------------------------------------------
@@ -3380,7 +3076,6 @@ def test_a_nested_block_comment_does_not_blank_the_statements_own_from_clause() 
     assert fact_table_attribution(sql).aliases == frozenset({"rt"})
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
         render_river_ts_sql(sql, "narrow", entry="nested-comment")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="nested-comment").sql
 
 
 def test_a_nested_block_comment_is_exactly_one_span() -> None:
@@ -3414,7 +3109,6 @@ def test_a_non_nested_block_comment_with_an_apostrophe_keeps_todays_answer() -> 
     assert fact_table_name_occurrences(sql) == 1
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
         render_river_ts_sql(sql, "narrow", entry="plain-comment")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="plain-comment").sql
 
 
 def test_a_phantom_literal_that_closes_on_a_later_escape_string_still_loses_the_read() -> None:
@@ -3440,7 +3134,6 @@ def test_a_phantom_literal_that_closes_on_a_later_escape_string_still_loses_the_
     assert fact_table_attribution(sql).aliases == frozenset({"rt"})
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
         render_river_ts_sql(sql, "narrow", entry="resync")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="resync").sql
 
 
 @pytest.mark.parametrize(("label", "newline"), [("carriage_return", "\r"), ("line_feed", "\n")])
@@ -3463,7 +3156,6 @@ def test_a_line_comment_ends_at_a_carriage_return_as_well_as_a_line_feed(label: 
     assert fact_table_attribution(sql).aliases == frozenset({"rt"})
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
         render_river_ts_sql(sql, "narrow", entry=label)
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 def test_a_carriage_return_ends_a_line_comment_for_the_sub_select_stripper_too() -> None:
@@ -3523,7 +3215,6 @@ def test_an_apostrophe_inside_a_quoted_identifier_does_not_desynchronise_the_sca
     assert fact_table_text_identity_columns(sql, entry="quoted-apostrophe") == {"variable"}
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
         render_river_ts_sql(sql, "narrow", entry="quoted-apostrophe")
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="quoted-apostrophe").sql
 
 
 def test_a_unicode_escaped_string_constant_is_refused_like_the_identifier_form() -> None:
@@ -3542,7 +3233,7 @@ def test_a_unicode_escaped_string_constant_is_refused_like_the_identifier_form()
     """
     sql = "SELECT r.value FROM hydro.river_timeseries r WHERE r.tag = U&'abc' AND r.run_key = %(k)s"
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
             render_river_ts_sql(sql, store, entry="unicode-escaped-string")
     with pytest.raises(RiverTemplateError, match="Unicode-escaped"):
@@ -3570,7 +3261,7 @@ def test_a_dollar_before_an_escape_prefix_is_refused_as_outside_the_lexical_subs
     """
     sql = r"SELECT rt.value FROM hydro.river_timeseries rt WHERE x$e'C:\' AND rt.run_id = :run_id"
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match="outside the modelled lexical subset"):
             render_river_ts_sql(sql, store, entry="dollar-e")
     with pytest.raises(RiverTemplateError, match="outside the modelled lexical subset"):
@@ -3597,7 +3288,7 @@ def test_a_statement_that_ends_inside_an_unterminated_span_is_refused(label: str
     """
     sql = f"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :k {tail}"
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=f"{label}: .*unterminated literal or comment"):
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="unterminated literal or comment"):
@@ -3619,7 +3310,6 @@ def test_a_span_that_ends_at_the_end_of_the_text_is_not_the_same_as_an_untermina
     ):
         assert non_code_spans(sql)[-1][1] == len(sql)
         assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 @pytest.mark.parametrize(("label", "literal"), [("bit", "B'1010'"), ("hex", "X'FF'")])
@@ -3710,7 +3400,7 @@ def _assert_refused_as_outside_the_subset(
         assert locus in message
         assert "river_timeseries" not in message
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
             render_river_ts_sql(sql, store, entry=entry)
         _assert_public_door(raised)
@@ -3810,7 +3500,7 @@ def test_a_dollar_body_hiding_a_comment_or_paren_is_refused_before_any_traversal
     """
     sql = f"SELECT {body} AS note, rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s"
 
-    for store in ("legacy", "narrow"):
+    for store in ("narrow",):
         with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
             render_river_ts_sql(sql, store, entry=label)
         assert "unbalanced parentheses" not in str(raised.value)
@@ -3842,7 +3532,6 @@ def test_a_dollar_sign_inside_a_literal_or_comment_stays_inside_the_subset() -> 
         assert fact_table_attribution(sql).aliases == frozenset({"rt"})
         assert fact_table_text_identity_columns(sql, entry=label) == set()
         assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 @pytest.mark.parametrize(
@@ -3897,7 +3586,6 @@ def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() ->
         assert fact_table_name_occurrences(sql) == 1
         assert fact_table_text_identity_columns(sql, entry=label) == set()
         assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 @pytest.mark.parametrize(
@@ -4087,7 +3775,6 @@ def test_a_digit_before_an_escape_prefix_inside_a_literal_or_comment_stays_insid
         assert fact_table_name_occurrences(sql) == 1
         assert fact_table_text_identity_columns(sql, entry=label) == set()
         assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 @pytest.mark.parametrize(
@@ -4125,7 +3812,6 @@ def test_an_identifier_character_before_the_digit_keeps_todays_answer(
         assert fact_table_name_occurrences(sql) == 1
         assert fact_table_attribution(sql).reference_count == 1
         assert fact_table_text_identity_columns(sql, entry=label) == {"variable"}
-        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
         with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]") as raised:
             render_river_ts_sql(sql, "narrow", entry=label)
     else:
@@ -4154,7 +3840,6 @@ def test_a_digit_glued_to_a_double_quoted_identifier_stays_inside_the_subset() -
     assert non_code_spans(sql) == ()
     assert fact_table_name_occurrences(sql) == 1
     assert fact_table_text_identity_columns(sql, entry="double_quoted") == {"variable"}
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="double_quoted").sql
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]") as raised:
         render_river_ts_sql(sql, "narrow", entry="double_quoted")
     assert _SUBSET_REFUSAL not in str(raised.value)
@@ -4192,7 +3877,6 @@ def test_a_quoted_identifier_holding_numeric_escape_bytes_stays_inside_the_subse
     assert fact_table_attribution(sql).reference_count == 1
     assert fact_table_text_identity_columns(sql, entry=label) == set()
     assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 # ---------------------------------------------------------------------------
@@ -4447,34 +4131,32 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
     ``sql_chains`` are compared as OUTCOMES against the pre-blanked text, which
     is what their own private paren loop has to agree with.
 
-    Corpus: all current registered templates, both raw and rendered variants for
-    each store, and the adversarial list above. Samples outside the declared subset are excluded by
-    the module's own :func:`_lexical_subset_violation`, so this test says nothing
-    about statements decision 18 refuses — and the count of exclusions is
-    asserted to be 0 for the registry, which is the measurement decision 18 rests
-    on.
+    Corpus: all current registered templates — one narrow variant each now that
+    the contract (#1342 task 6.3) left one store and the renderer returns its
+    input — plus the adversarial list above. Samples outside the declared subset
+    are excluded by the module's own :func:`_lexical_subset_violation`, so this
+    test says nothing about statements decision 18 refuses — and the count of
+    exclusions is asserted to be 0 for the registry, which is the measurement
+    decision 18 rests on.
     """
     corpus: list[tuple[str, str]] = []
     registry_excluded = 0
     for entry in REGISTRY:
-        variants = []
-        for store in ("legacy", "narrow"):
-            source = entry.source(store)
-            variants.append((f"{entry.key}:{store}:raw", source))
-            try:
-                variants.append((f"{entry.key}:{store}", render_river_ts_sql(source, store, entry=entry.key).sql))
-            except RiverTemplateError as error:  # pragma: no cover - a registry entry that refuses is a red elsewhere
-                raise AssertionError(f"{entry.key} does not render for {store}: {error}") from error
-        for label, sql in variants:
-            if _lexical_subset_violation(sql) is not None:
-                registry_excluded += 1
-                continue
-            corpus.append((label, sql))
+        source = entry.source("narrow")
+        try:
+            rendered = render_river_ts_sql(source, "narrow", entry=entry.key).sql
+        except RiverTemplateError as error:  # pragma: no cover - a registry entry that refuses is a red elsewhere
+            raise AssertionError(f"{entry.key} does not render: {error}") from error
+        assert rendered == source, entry.key
+        if _lexical_subset_violation(source) is not None:
+            registry_excluded += 1
+            continue
+        corpus.append((f"{entry.key}:narrow", source))
 
     assert registry_excluded == 0, (
         "all current registered templates must remain inside the declared lexical subset"
     )
-    assert len(corpus) == 4 * len(REGISTRY)
+    assert len(corpus) == len(REGISTRY)
 
     adversarial_excluded = [label for label, sql in _ADVERSARIAL_CORPUS if _lexical_subset_violation(sql) is not None]
     assert adversarial_excluded == [], f"the adversarial corpus must stay inside the subset, got {adversarial_excluded}"
@@ -4508,8 +4190,8 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
         # fifth member and re-lexes too. Against the pre-blanked text there is
         # nothing left for it to mis-lex, so the two must agree.
         blanked = _blank_non_code(sql, keep_literal_quotes=True)
-        assert _outcome(lambda: assert_structurally_intact(sql, label, allow_markers=True)) == _outcome(
-            lambda: assert_structurally_intact(blanked, label, allow_markers=True)
+        assert _outcome(lambda: assert_structurally_intact(sql, label)) == _outcome(
+            lambda: assert_structurally_intact(blanked, label)
         ), f"assert_structurally_intact disagrees with itself on blanked text for {label}"
 
         blanked_chains = tuple(
@@ -4532,69 +4214,6 @@ def test_the_text_identity_vocabulary_is_total_and_disjoint() -> None:
 
 
 # ---------------------------------------------------------------------------
-# positional placeholder arithmetic
-# ---------------------------------------------------------------------------
-
-
-def test_removed_positional_placeholders_are_reported_in_template_order() -> None:
-    """Deleting an aid changes the caller's tuple arity, and psycopg2 says so only at execute time."""
-    rendered = render_river_ts_sql(POSITIONAL_TEMPLATE, "narrow", entry="positional")
-
-    assert rendered.removed_placeholders == (1, 3)
-    assert rendered.sql.count("%s") == 3
-
-
-def test_a_named_template_reports_no_removed_placeholders() -> None:
-    assert render_river_ts_sql(NAMED_TEMPLATE, "narrow", entry="named").removed_placeholders == ()
-
-
-def test_a_named_placeholder_is_not_mistaken_for_a_positional_one() -> None:
-    """``%(scan_run_id)s`` contains no ``%s`` substring — pinned, not assumed."""
-    template = (
-        f"SELECT 1 FROM hydro.river_timeseries rt\nWHERE rt.run_key = %(run_key)s\n  {MARKER}\n"
-        "  AND rt.run_id = %(scan_run_id)s"
-    )
-
-    assert render_river_ts_sql(template, "narrow", entry="named psycopg").removed_placeholders == ()
-
-
-# ---------------------------------------------------------------------------
-# aid-line grammar
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "  AND rt.run_id = %s",
-        "  rt.run_id = %(scan_run_id)s AND",
-        "  AND ts.river_segment_id = seg.river_segment_id",
-        "  AND ts.variable = :variable",
-        "  AND rt.variable = 'q_down'",
-        "  AND run_id = %s",
-    ],
-)
-def test_the_normalised_aid_shapes_are_recognised(line: str) -> None:
-    assert aid_conjunct(line) is not None
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "  WHERE run_id = :run_id",
-        "  AND rt.run_id = %s AND rt.variable = 'q_down'",
-        "  AND rt.run_key = %s",
-        "  AND rt.variable_e = 'q_down'::hydro.river_variable",
-        "  OR (rt.run_id = %(scan_run_id)s",
-        "  AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)",
-        "",
-    ],
-)
-def test_a_line_that_is_not_exactly_one_aid_conjunct_is_rejected(line: str) -> None:
-    assert aid_conjunct(line) is None
-
-
-# ---------------------------------------------------------------------------
 # Round-1 review (#1996): structural faults a clause keyword used to hide
 # ---------------------------------------------------------------------------
 
@@ -4604,96 +4223,80 @@ def test_a_line_that_is_not_exactly_one_aid_conjunct_is_rejected(line: str) -> N
     [
         (
             "clause keyword after the connective",
-            f"""
+            """
                 SELECT rt.value
                 FROM hydro.river_timeseries rt
                 WHERE rt.run_key = %s AND
-                {MARKER}
-                rt.run_id = %s
                 LIMIT 1
             """,
         ),
         (
-            "aid last in an ON chain, JOIN next",
-            f"""
+            "connective last in an ON chain, JOIN next",
+            """
                 SELECT h.run_id
                 FROM hydro.hydro_run h
                 JOIN hydro.river_timeseries r
                   ON r.run_key = h.run_key AND
-                  {MARKER}
-                  r.variable = 'q_down'
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_key = r.river_network_version_key
                 WHERE h.status = %s
             """,
         ),
         (
-            "aid the only ON conjunct, JOIN next",
-            f"""
+            "ON chain emptied entirely, JOIN next",
+            """
                 SELECT h.run_id
                 FROM hydro.hydro_run h
                 JOIN hydro.river_timeseries r
                   ON
-                  {MARKER}
-                  r.variable = 'q_down'
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_key = r.river_network_version_key
                 WHERE h.status = %s
             """,
         ),
         (
-            "aid last in an ON chain, LEFT JOIN next",
-            f"""
+            "connective last in an ON chain, LEFT JOIN next",
+            """
                 SELECT h.run_id
                 FROM hydro.hydro_run h
                 JOIN hydro.river_timeseries r
                   ON r.run_key = h.run_key AND
-                  {MARKER}
-                  r.variable = 'q_down'
                 LEFT JOIN core.basin_version bv
                   ON bv.basin_version_key = r.basin_version_key
                 WHERE h.status = %s
             """,
         ),
         (
-            "aid last in an ON chain, WHERE next",
-            f"""
+            "connective last in an ON chain, WHERE next",
+            """
                 SELECT h.run_id
                 FROM hydro.hydro_run h
                 JOIN hydro.river_timeseries r
                   ON r.run_key = h.run_key AND
-                  {MARKER}
-                  r.variable = 'q_down'
                 WHERE h.status = %s
             """,
         ),
         (
             "another connective after the connective",
-            f"""
+            """
                 SELECT rt.value
                 FROM hydro.river_timeseries rt
                 WHERE rt.run_key = %s AND
-                {MARKER}
-                rt.run_id = %s
                 AND rt.valid_time = %s
             """,
         ),
     ],
 )
-def test_an_aid_whose_connective_sits_on_the_line_above_is_refused(label: str, template: str) -> None:
-    """``AND`` left stranded by the deletion, with neither ``)`` nor end of text after it.
+def test_a_connective_stranded_before_a_clause_keyword_is_refused(label: str, template: str) -> None:
+    """``AND`` with neither a predicate, a ``)`` nor end of text after it.
 
-    ``aid_conjunct`` accepts a bare aid line whose ``AND`` sits on the PREVIOUS
-    line, so the deletion can leave ``WHERE x = %s AND LIMIT 1`` or ``… AND AND
-    …``. Both are syntax errors, and the original fault list — dangling ``AND``
-    before a bracket or at the end of the text — matched neither (review #1996,
-    C4).
-
-    The ON-chain shapes are the round-2 half (H6): an aid that was the last, or
-    the only, conjunct of a ``JOIN … ON`` leaves ``AND JOIN`` / ``ON JOIN`` /
-    ``AND LEFT JOIN`` / ``AND WHERE``, none of which the clause-keyword-only
-    enumeration named. One keyword family, shared with the region-stop regex,
-    covers all of them.
+    These six shapes are what the expand window's aid deletion used to produce
+    when the aid's ``AND`` sat on the PREVIOUS line: ``WHERE x = %s AND LIMIT
+    1``, ``… AND AND …``, ``AND JOIN`` / ``ON JOIN`` / ``AND LEFT JOIN`` / ``AND
+    WHERE``. The deletion is gone with the aids (#1342 contract, task 6.3); the
+    fault list is not, because a hand-edited template can be left in exactly
+    these states and every one of them is a syntax error PostgreSQL only reports
+    at execute time (review #1996 C4, round-2 H6).
     """
     with pytest.raises(RiverTemplateError, match="before a keyword|doubled connective"):
         render_river_ts_sql(template, "narrow", entry=label)
@@ -4730,124 +4333,6 @@ def test_the_structural_check_still_accepts_the_shapes_that_are_legal() -> None:
         "SELECT RIGHT(a, 2) AS tail FROM t WHERE x = 1 AND LEFT(b, 1) = 'q'",
     ):
         assert_structurally_intact(sql, "legal")
-
-
-# ---------------------------------------------------------------------------
-# Round-1 review (#1996): the retention check no longer exempts by containment
-# ---------------------------------------------------------------------------
-
-
-def test_losing_the_authority_key_predicate_is_reported() -> None:
-    """The aid ``run_id = :run_id`` is a SUBSTRING of the predicate it must not exempt.
-
-    An unaliased statement spells its aid exactly as the authority sub-select's
-    own required predicate, so the containment exemption let ``run_key = (SELECT
-    run_key FROM hydro.hydro_run WHERE run_id = :run_id)`` exempt itself: the
-    whole predicate could be deleted and every assert still passed (review #1996,
-    C8). The other two checks are asserted to pass FIRST, so this test cannot be
-    green for the wrong reason — the mutation is structurally clean and carries no
-    text identity column, and only the retention check can see it.
-    """
-    template = f"""
-        SELECT 1
-        FROM hydro.river_timeseries
-        WHERE run_key = (
-                  SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-              )
-          {MARKER}
-          AND run_id = :run_id
-          AND valid_time = :valid_time
-        LIMIT 1
-    """
-    narrow = render_river_ts_sql(template, "narrow", entry="probe").sql
-    mutated = narrow.replace(
-        """WHERE run_key = (
-                  SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-              )
-          AND valid_time""",
-        "WHERE valid_time",
-        1,
-    )
-    assert mutated != narrow
-    _sql, _placeholders, removed_aids = _strip_aids(template, "probe")
-
-    assert_structurally_intact(mutated, "probe")
-    _assert_no_fact_text_identity(mutated, "probe")
-
-    with pytest.raises(RiverTemplateError, match="lost the predicate"):
-        _assert_key_predicates_retained(template, mutated, removed_aids, "probe")
-
-
-def test_a_conjunct_that_merely_holds_an_aid_is_still_accounted_for() -> None:
-    """``EXISTS (… AND aid AND …)`` changes text when its aid goes — and must still balance.
-
-    Exempting it wholesale is what the containment rule did; the check instead
-    computes what it should look like WITHOUT the aid and requires that form to
-    be present, so the guard's other conjuncts stay protected.
-    """
-    template = f"""
-        SELECT h.run_id
-        FROM hydro.hydro_run h
-        WHERE EXISTS (
-                  SELECT 1
-                  FROM hydro.river_timeseries rt
-                  WHERE rt.run_key = h.run_key
-                    {MARKER}
-                    AND rt.variable = 'q_down'
-                    AND rt.variable_e = 'q_down'
-                    AND rt.value IS NOT NULL
-              )
-    """
-    rendered = render_river_ts_sql(template, "narrow", entry="exists-holder")
-
-    assert "rt.variable = 'q_down'" not in rendered.sql
-    assert "rt.variable_e = 'q_down'" in rendered.sql
-    assert "rt.value IS NOT NULL" in rendered.sql
-
-    stripped = rendered.sql.replace("AND rt.value IS NOT NULL", "")
-    _sql, _placeholders, removed_aids = _strip_aids(template, "exists-holder")
-    with pytest.raises(RiverTemplateError, match="lost the predicate"):
-        _assert_key_predicates_retained(template, stripped, removed_aids, "exists-holder")
-
-
-def test_an_aid_whose_value_is_a_grouped_expression_renders_and_still_protects_its_counterpart() -> None:
-    """``AND rt.run_id = ANY(%(ids)s)`` is a legal aid: its NESTED conjunct leaves with it.
-
-    ``_collect_conjuncts`` walks into every bracket, so an aid whose compared
-    value is grouped contributes ``%(ids)s`` to the legacy census as a conjunct
-    in its own right. That nested conjunct is deleted together with the aid
-    line, and before #2417 the retention check reported it as a lost key
-    predicate — ``the narrow variant lost the predicate '%(ids)s' that is not a
-    transitional aid`` — which made the shape unrenderable.
-
-    The exemption is computed from each aid's OWN text, so it is still exact:
-    the counterpart ``rt.run_key = ANY(%(keys)s)`` shares the ``ANY(...)`` shape
-    but NOT the text, and deleting it is still reported. Without that second
-    half this test would pass for a renderer that exempted every grouped value.
-    """
-    template = f"""
-        SELECT rt.value
-        FROM hydro.river_timeseries rt
-        WHERE rt.river_segment_key = %(segment_key)s
-          {MARKER}
-          AND rt.run_id = ANY(%(ids)s)
-          AND rt.run_key = ANY(%(keys)s)
-          AND rt.valid_time >= %(window_start)s
-    """
-    rendered = render_river_ts_sql(template, "narrow", entry="grouped-aid")
-
-    assert "rt.run_id" not in rendered.sql
-    assert "%(ids)s" not in rendered.sql
-    assert "AND rt.run_key = ANY(%(keys)s)" in rendered.sql
-    assert "AND rt.valid_time >= %(window_start)s" in rendered.sql
-
-    _sql, _placeholders, removed_aids = _strip_aids(template, "grouped-aid")
-    _assert_key_predicates_retained(template, rendered.sql, removed_aids, "grouped-aid")
-
-    mutated = rendered.sql.replace("AND rt.run_key = ANY(%(keys)s)", "", 1)
-    assert mutated != rendered.sql
-    with pytest.raises(RiverTemplateError, match="lost the predicate"):
-        _assert_key_predicates_retained(template, mutated, removed_aids, "grouped-aid")
 
 
 # ---------------------------------------------------------------------------
@@ -4911,10 +4396,9 @@ def test_the_token_counter_keeps_its_trailing_boundary() -> None:
 
     assert fact_table_name_occurrences(sql) == 1
     assert fact_table_name_occurrences("SELECT 1 WHERE i = river_timeseries_valid_time_idx") == 0
-    # Only the fact table is renamed; the sibling keeps its own name.
-    legacy = render_river_ts_sql(sql, "legacy", entry="trailing-boundary").sql
-    assert "hydro.river_timeseries_legacy rt" in legacy
-    assert "hydro.river_timeseries_audit a" in legacy
+    # The sibling table is not a mention, so the two counters agree and the
+    # statement renders instead of being refused for a phantom second read.
+    assert fact_table_attribution(sql).reference_count == 1
     assert render_river_ts_sql(sql, "narrow", entry="trailing-boundary").sql == sql
 
 
@@ -4935,9 +4419,7 @@ def test_the_token_counter_keeps_its_leading_boundary() -> None:
     )
 
     assert fact_table_name_occurrences(sql) == 1
-    legacy = render_river_ts_sql(sql, "legacy", entry="leading-boundary").sql
-    assert "hydro.river_timeseries_legacy rt" in legacy
-    assert "hydro.forcing_river_timeseries x" in legacy
+    assert fact_table_attribution(sql).reference_count == 1
     assert render_river_ts_sql(sql, "narrow", entry="leading-boundary").sql == sql
 
 
@@ -4953,13 +4435,13 @@ def test_the_token_counter_keeps_its_leading_boundary() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_probe_f_the_table_name_inside_a_string_literal_is_left_verbatim() -> None:
+def test_probe_f_the_table_name_inside_a_string_literal_is_not_a_second_read() -> None:
     """Fixture probe F / decision 14: a name inside a literal is DATA.
 
-    ``_rename_table`` substituted every occurrence, so the legacy branch shipped
-    ``'reads hydro.river_timeseries_legacy'`` as a VALUE — a changed statement
-    output — while the occurrence counter, which already ignored literals, saw
-    nothing (round-3 L2-3).
+    The statement-level door, not the helper: the counter ignores literals and
+    the ``FROM`` / ``JOIN`` walk cannot see one either, so the two agree at 1 and
+    the statement renders. A counter that read literals would disagree with the
+    walk and refuse a legal read (round-3 L2-3).
     """
     template = """
         SELECT 'reads hydro.river_timeseries' AS note, rt.value
@@ -4967,26 +4449,21 @@ def test_probe_f_the_table_name_inside_a_string_literal_is_left_verbatim() -> No
         WHERE rt.valid_time = :valid_time
     """
 
-    rendered = render_river_ts_sql(template, "legacy", entry="literal")
-
-    assert "'reads hydro.river_timeseries' AS note" in rendered.sql
-    assert "FROM hydro.river_timeseries_legacy rt" in rendered.sql
-    assert rendered.sql.count(RIVER_TABLE_LEGACY) == 1
+    assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count == 1
+    assert render_river_ts_sql(template, "narrow", entry="literal").sql == template
 
 
-def test_probe_f_the_table_name_inside_a_comment_is_left_verbatim() -> None:
+def test_probe_f_the_table_name_inside_a_comment_is_not_a_second_read() -> None:
     """The other half of decision 14: comments name the canonical table on purpose."""
     template = """
         SELECT rt.value
         FROM hydro.river_timeseries rt
-        -- #1342 renames hydro.river_timeseries; this comment is not SQL.
+        -- #1342's contract retired hydro.river_timeseries_legacy; not SQL.
         WHERE rt.valid_time = :valid_time
     """
 
-    rendered = render_river_ts_sql(template, "legacy", entry="comment")
-
-    assert "-- #1342 renames hydro.river_timeseries; this comment is not SQL." in rendered.sql
-    assert rendered.sql.count(RIVER_TABLE_LEGACY) == 1
+    assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count == 1
+    assert render_river_ts_sql(template, "narrow", entry="comment").sql == template
 
 
 
@@ -5089,7 +4566,7 @@ def _assert_unaliased_scalar_refusal(sql: str, *, entry: str, door: str) -> None
     assert "scalar-scope" in str(caught.value)
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize("spelling", ("lower", "upper", "quoted"))
 @pytest.mark.parametrize("member", _UNALIASED_SCALAR_MEMBERS)
 def test_unaliased_scalar_members_refuse(member: str, spelling: str, door: str) -> None:
@@ -5101,7 +4578,7 @@ def test_unaliased_scalar_members_refuse(member: str, spelling: str, door: str) 
     _assert_unaliased_scalar_refusal(sql, entry=f"unaliased-{member}-{spelling}", door=door)
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize("label", tuple(_UNALIASED_SCALAR_BODIES) + ("later-independent",))
 def test_unaliased_scalar_namespace_and_authority_changes_refuse(label: str, door: str) -> None:
     sql = (
@@ -5112,7 +4589,7 @@ def test_unaliased_scalar_namespace_and_authority_changes_refuse(label: str, doo
     _assert_unaliased_scalar_refusal(sql, entry=f"unaliased-{label}", door=door)
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize("operator", ("=", "<>", "!=", "<=", ">=", "<", ">"))
 def test_unaliased_scalar_comparison_and_scanner_forms_refuse(operator: str, door: str) -> None:
     sql = (
@@ -5123,7 +4600,7 @@ def test_unaliased_scalar_comparison_and_scanner_forms_refuse(operator: str, doo
     _assert_unaliased_scalar_refusal(sql, entry="unaliased-operator", door=door)
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize("bind", ("%s", "%(run_id)s", ":variable"))
 @pytest.mark.parametrize("spelling", ("lower", "upper", "quoted", "comments"))
 @pytest.mark.parametrize(
@@ -5147,13 +4624,11 @@ def test_unaliased_scalar_exact_authority_remains_clean(
     if spelling == "comments":
         body = body.replace(" ", " /* gap */\r\n").replace(".", " /* dot */ . ")
     sql = _UNALIASED_SCALAR_PREFIX + "(" + body + ")"
-    expected = set() if door == "helper" else sql.replace(
-        "hydro.river_timeseries", "hydro.river_timeseries_legacy" if door == "legacy" else "hydro.river_timeseries",
-    )
+    expected = set() if door == "helper" else sql
     assert _unaliased_scalar_door(sql, "unaliased-authority", door) == expected
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize(
     "expression",
     (
@@ -5169,13 +4644,11 @@ def test_unaliased_scalar_qualified_data_and_roles_remain_clean(expression: str,
     sql = _UNALIASED_SCALAR_PREFIX + (
         f"(SELECT {expression} FROM hydro.hydro_run hr WHERE hr.run_id = :r LIMIT 1)"
     )
-    expected = set() if door == "helper" else sql.replace(
-        "hydro.river_timeseries", "hydro.river_timeseries_legacy" if door == "legacy" else "hydro.river_timeseries",
-    )
+    expected = set() if door == "helper" else sql
     assert _unaliased_scalar_door(sql, "unaliased-role-control", door) == expected
 
 
-@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("door", ("helper", "narrow"))
 @pytest.mark.parametrize(
     ("body", "reason"),
     (
@@ -5194,8 +4667,5 @@ def test_unaliased_scalar_older_refusals_keep_precedence(body: str, reason: str,
 def test_unaliased_scalar_outer_fallback_remains_attributed() -> None:
     sql = "SELECT value FROM hydro.river_timeseries WHERE variable = :v"
     assert fact_table_text_identity_columns(sql, entry="unaliased-outer") == {"variable"}
-    assert render_river_ts_sql(sql, "legacy", entry="unaliased-outer").sql == sql.replace(
-        "hydro.river_timeseries", "hydro.river_timeseries_legacy",
-    )
     with pytest.raises(RiverTemplateError, match="text identity"):
         render_river_ts_sql(sql, "narrow", entry="unaliased-outer")

@@ -1,0 +1,27 @@
+[Unit]
+# System-scope twin of the user template nhms-node27-unit-failure-alert@.service
+# (#2360, design D5). Consumed via
+# `OnFailure=nhms-node27-system-unit-failure-alert@%n.service` on a node-27
+# SYSTEM unit; `%i` carries the failed unit's full name, `.service` included.
+#
+# Consumers: nhms-node27-canonical-retention.service.
+#
+# Same handler and same mail channel as the user template, run as nwm (who
+# owns the frontier alert env). `systemd-journal` gives nwm read access to
+# the system journal, and NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system makes the
+# handler quote `journalctl -u` instead of `journalctl --user -u`. `%h` is
+# not used: in a system unit it does not name nwm's home.
+Description=NHMS node-27 system unit failure alert for %i
+
+[Service]
+Type=oneshot
+User=nwm
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/home/nwm/NWM
+# `-` prefix: a missing env file must leave the handler on its soft-exit path,
+# not add a second failed unit.
+EnvironmentFile=-/home/nwm/NWM/infra/env/node27-frontier-alert.env
+Environment=NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system
+ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i
+# Bounded like the user template: a wedged alerter must become visible.
+TimeoutStartSec=120

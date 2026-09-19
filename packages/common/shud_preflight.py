@@ -151,6 +151,10 @@ def check_shud_executable(
         )
         return ShudPreflightResult(ok=False, blockers=blockers, checks=checks)
 
+    # ADR 0009 clause 1: the product only feeds the _is_stub_basename(real) verdict a
+    # few lines down, and the executable it judges is afterwards actually executed, so
+    # a phantom product faults at the kernel instead of being admitted here.
+    #
     # Re-check stub after realpath resolution (e.g. a symlink named ``shud`` that
     # points at ``/bin/true``).
     try:

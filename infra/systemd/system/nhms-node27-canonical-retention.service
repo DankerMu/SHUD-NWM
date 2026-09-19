@@ -1,0 +1,30 @@
+[Unit]
+Description=NHMS node-27 retention: canonical precipitation mirror, run as the copyback root owner
+# #2360: SYSTEM unit (not an nwm user unit). The canonical lane removes every
+# canonical/<S>/<cycle> under `<object-store>/.nhms-copyback-batch.lock`, which
+# is `0600` owned by the copyback root's owner (frd_muziyao, uid 1103); the
+# lock contract is not relaxed, so this lane runs as that uid. The raw and
+# precip-cache lanes stay in the nwm user unit nhms-node27-raw-retention.service
+# (the PNG cache root is nwm-owned). Both units use one cutoff rule.
+# Installed by scripts/node27_canonical_retention_install.sh (operator, sudo),
+# which also generates the env file below from the nwm raw-retention env; rerun
+# it after any change to that env. Rollback: docs/runbooks/current-production-ops.md
+# "node-27 canonical 删除持锁".
+OnFailure=nhms-node27-system-unit-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+User=frd_muziyao
+WorkingDirectory=/home/nwm/NWM
+Environment=NODE27_RAW_RETENTION_ENV_FILE=/etc/nhms/node27-canonical-retention.env
+Environment=NODE27_RAW_RETENTION_BOOTSTRAP_LOG=/var/log/nhms-node27-canonical-retention/bootstrap.log
+# Summaries, raw-retention.log and bootstrap.log land here; 0755 so nwm can
+# read the summaries for the documented jq check.
+LogsDirectory=nhms-node27-canonical-retention
+LogsDirectoryMode=0755
+# The wrapper's flock path (NODE27_RAW_RETENTION_LOCK_PATH in the env file).
+RuntimeDirectory=nhms-node27-canonical-retention
+ExecStart=/home/nwm/NWM/scripts/node27_raw_retention_once.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=0

@@ -94,9 +94,7 @@ from packages.common import river_ts_render
 from packages.common.river_ts_render import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
-    PUSHDOWN_AID_MARKER,
     RIVER_TABLE,
-    RIVER_TABLE_LEGACY,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
@@ -110,7 +108,7 @@ from packages.common.river_ts_render import (
     strip_scalar_subqueries,
     text_fact_columns,
 )
-from tests.river_ts_template_registry import REGISTRY
+from tests.river_ts_template_registry import REGISTRY, aid_comment_lines
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -463,14 +461,17 @@ def test_strip_comments_removes_both_styles_but_not_string_literals() -> None:
 
 
 def test_outer_predicates_collapses_a_comment_between_paired_predicates() -> None:
-    """The production layout puts the aid comment between the two conjuncts.
+    """A comment between two conjuncts must not break the pairing assertion.
 
-    Without comment removal plus whitespace collapsing, the pairing assertion
+    Without comment removal plus whitespace collapsing, a pairing assertion
     could only be written as two independent substring checks, which pass on a
-    query where the text predicate sits in a completely different conjunction.
+    query where the two predicates sit in completely different conjunctions.
+    The specimen keeps a fact-table text predicate on purpose: this helper is a
+    TEXT traversal and must keep answering about statements the renderer itself
+    would refuse.
     """
     sql = """
-        -- transitional compressed-chunk pushdown aid, remove with #1342
+        -- a comment the collapsed form is required to ignore
         WHERE ts.run_id = :run_id
           AND ts.run_key = (
                   SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
@@ -717,7 +718,7 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
         assert "enum_range" not in stripped, name
 
     for factory in (_valid_times_named_source_template, _valid_times_any_source_template):
-        for store in ("legacy", "narrow"):
+        for store in ("narrow",):
             sql = factory(store)
             assert "FROM hydro.river_timeseries" in sql
             stripped = strip_scalar_subqueries(sql)
@@ -732,86 +733,48 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
 
 
 # ---------------------------------------------------------------------------
-# Per-store rendering of every registered template (#1980, task 1.3)
+# Narrow-store validation of every registered template (#1980 task 1.3, collapsed
+# to one store by #1342's contract, task 6.3)
 #
 # The shared half of the coverage: this module is the one both display and
-# out-of-boundary oracles depend on, so "every registered template survives both
-# renderings" is asserted here once instead of twice, per file, with two
-# definitions of what survival means. The per-file marker/aid CENSUS stays in
+# out-of-boundary oracles depend on, so "every registered template survives the
+# rendering" is asserted here once instead of twice, per file, with two
+# definitions of what survival means. The per-file aid CENSUS stays in
 # each file's owning oracle (fixture decision 7) — this is about the templates,
 # not about who owns them.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_template_renders_for_the_legacy_store(entry) -> None:
-    """Legacy is the template plus a rename — every aid included.
-
-    The legacy table keeps 000047's text-column compression layout, so an aid
-    dropped from this branch is the measured compressed-chunk collapse applied to
-    exactly the rows that have not moved yet.
-    """
-    template = entry.source("legacy")
-
-    rendered = render_river_ts_sql(template, "legacy", entry=entry.key)
-
-    assert rendered.sql == template.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
-    assert rendered.sql.count(PUSHDOWN_AID_MARKER) == entry.expected_aids
-    assert rendered.removed_placeholders == ()
-
-
-@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
 def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
     """Narrow keeps the canonical name and carries no text identity at all.
 
-    ``render_river_ts_sql`` refuses rather than returns on a mis-shaped marker, a
-    lost key predicate or a broken structure, so calling it IS most of the
-    assertion; what is added here is the census-shaped part (the aid count) and
-    the table-scoped emptiness the whole cleanup turns on.
+    ``render_river_ts_sql`` refuses rather than returns on an unmodelled
+    reference form or a broken structure, so calling it IS most of the
+    assertion; what is added here is the table-scoped emptiness the whole
+    cleanup turns on, and the byte identity that says the renderer is a
+    validator now rather than an editor.
     """
     template = entry.source("narrow")
 
     rendered = render_river_ts_sql(template, "narrow", entry=entry.key)
 
-    assert PUSHDOWN_AID_MARKER not in rendered.sql
-    assert RIVER_TABLE_LEGACY not in rendered.sql
+    assert rendered.sql == template
+    assert RIVER_TABLE in rendered.sql or fact_table_name_occurrences(rendered.sql) == 0
     assert fact_table_text_identity_columns(rendered.sql) == set()
-    # Non-vacuity: the narrow variant really is shorter by exactly the aid blocks.
-    assert len(rendered.sql.split("\n")) == len(template.split("\n")) - 2 * entry.expected_aids
-    if entry.params == "positional":
-        # A deleted aid line takes its `%s` with it, and the caller's tuple has to
-        # shrink by exactly that many. Checked against the AIDS, not against
-        # `count('%s')` before minus after: that difference is computed by the same
-        # deletion it is supposed to audit, so it holds for any indices the renderer
-        # cares to report and cannot go red (round-2 H7-a). Guarded on the dialect,
-        # not on the tuple being non-empty, so an entry that stopped reporting
-        # removals is caught rather than skipped.
-        assert len(rendered.removed_placeholders) == sum("%s" in aid for aid in rendered.removed_aids)
-        assert rendered.removed_placeholders == POSITIONAL_INDEX_PINS[entry.key], entry.key
-    else:
-        assert rendered.removed_placeholders == ()
-        assert rendered.removed_aids == () or all("%s" not in aid for aid in rendered.removed_aids)
-
-
-#: The removed positional-placeholder indices of every positional entry, spelled
-#: out. I7 removed the parser's historical run_id aid and its binding, so both
-#: live narrow-only entries now remove nothing. Computing the pins from the same
-#: render would agree with any result (round-2 H7-a); an incorrect index is an
-#: arity error or a silently reordered caller tuple in the migration window.
-POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
-    "parser:replace_chain_probe": (),
-    "parser:replace_chain_window": (),
-}
-
-
-def test_every_positional_entry_has_an_index_pin() -> None:
-    """No positional entry may join the register without its indices being written down."""
-    assert set(POSITIONAL_INDEX_PINS) == {entry.key for entry in REGISTRY if entry.params == "positional"}
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_every_registered_template_is_counted_the_same_way_twice(entry, store) -> None:
+def test_no_registered_template_renders_for_the_retired_legacy_store(entry) -> None:
+    """``spec.md:66``: the renderer accepts only the narrow store."""
+    with pytest.raises(river_ts_render.RiverTemplateError) as caught:
+        render_river_ts_sql(entry.source("narrow"), "legacy", entry=entry.key)
+    assert entry.key in str(caught.value)
+    assert "unknown timeseries store" in str(caught.value)
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
     """The structural walk and the name counter must agree, entry by entry.
 
     The name counter is deliberately ignorant of `FROM` / `JOIN` / aliases so it
@@ -819,30 +782,19 @@ def test_every_registered_template_is_counted_the_same_way_twice(entry, store) -
     do over the real register — every registered template names the fact table in
     exactly the forms the walk models (round-2 H3).
     """
-    template = entry.source(store)
+    template = entry.source("narrow")
 
     assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count, entry.key
 
 
-@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
-def test_every_registered_templates_aid_count_matches_its_marker_count(entry, store) -> None:
-    """1:1, which is the invariant the whole line-deletion scheme rests on."""
-    template = entry.source(store)
+def test_no_registered_template_carries_a_transitional_aid_comment() -> None:
+    """Zero, and zero is the point: #1342's contract removed all 28 of them.
 
-    assert template.count(PUSHDOWN_AID_MARKER) == entry.expected_aids, entry.key
-    assert template.count("remove with #1342") == entry.expected_aids, (
-        f"{entry.key}: a non-verbatim aid marker is present"
-    )
-
-
-def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
-    """The 13 raw templates carry 28 aids after I7 removes the two writer aids.
-
-    Forecast execution coverage is separate: eight spanning callers consume
-    the shared segment source, and A9 consumes the known-run source.
+    Asserted over the register rather than per file so a template that grew a new
+    aid comment is red even before its owning file census is updated.
     """
-    assert sum(entry.expected_aids for entry in REGISTRY) == 28
+    for entry in REGISTRY:
+        assert aid_comment_lines(entry.source("narrow")) == (), entry.key
 
 
 def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:

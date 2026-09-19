@@ -42,6 +42,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - SHUD required-file content integrity before package source identity/publication: bounded verified reads and zero partial object-store output
 - Whole-cluster physical relocation: clean stop, complete-copy proof, exact container rebind, and stale rollback after write release
 - Frontend API consumers: a new `unwrapApiData` / `getApi` consumer ships with a malformed-payload test (wrong container, null element, wrong element type).
+- Operator alerting lanes: an observer's run-set/criterion predicates must equal the predicates of the surface it claims to watch, or it reports healthy while the watched surface is dark.
 
 ## Typical evidence
 
@@ -77,6 +78,10 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - OpenSpec -> `openspec validate <change> --strict --no-interactive` -> strict-valid change.
 - DB migration/Timescale behavior -> node-27 isolated real-DB pytest/catalog query -> captured exact-head evidence; never run migration tests against production `nhms`. Live host PGDATA is `/data/GHDC/nhms-primary/pgdata` (container `/home/postgres/pgdata/data`), per operator update 2026-09-12. Production activation is a separate maintenance-window action.
 - Physical PGDATA tooling -> exact-image disposable node-27 copy/rebind/rollback oracle; actual production hardware/performance and cutover remain separately authorized live gates
+- node-27 alerting lane (script + systemd unit) -> targeted pytest through the injected
+  observation seam plus a node-27 live receipt (read-only run against the production DSN,
+  scratch-DB condition->alert->clear->recover through the real `OnFailure=` wiring) ->
+  exit contract and delivered mail captured on the exact head; local pytest alone is not a receipt.
 - Working-set capacity/receipt -> node-27 focused CLI/schema/history/alert tests plus an isolated-checkout read-only live audit -> configured PGDATA path/device/free bytes govern comparison; missing evidence is non-healthy; old receipts remain readable without current-writer home fallback.
 - Display/API/frontend -> node-27 live receipt + frontend test/build -> C1-C4 receipt and passing build.
 - Slurm/SHUD scheduling -> node-22 runtime receipt -> terminal Slurm/SHUD evidence; only when scheduling/runtime changes.
@@ -91,6 +96,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - External hydro-met providers / snapshot reproducibility
 - Run manifest / QC provenance
 - Published NHMS artifacts / display identity
+- Operator alerting lanes / observer-observed predicate parity
 
 ## Domain expanded-triggers
 

@@ -129,7 +129,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 `000047` 的期望值按名字 `river_timeseries` 比对压缩设置；生产 ledger 已应用，不重跑；CI 干跑在空库按序执行 000047（旧表）→ expand（改名 + 新表），不冲突。expand 迁移在 000047 之后、以自己的守卫比对新表设置。contract 迁移不重放 000047。
 
 ### D11 硬门与 #1342 验收项的归属
-本 change 的性能硬门在 SQL / 本机 API 层：逐河段曲线 SQL 在 narrow 未压缩与压缩 chunk 上 `river_segment_key` 进 Index Cond 或 segmentby 剪枝、`Rows Removed by Filter / returned ≤ 10`、`shared hit ≤ 5000`、SQL warm P95 ≤ 300 ms（≥ 5 个 warm 样本）、本机单源 `forecast-series` warm P95 ≤ 500 ms（SHJ-NJ 大河网 + 一个小河网）；identity-existence 探针 miss 分支与 QHH 回落 CTE 的 before/after EXPLAIN（D4 的索引证据门）。rollout receipt 另含 #1342 的两条验收项：注册表全量口径计数（active/runnable/selected/excluded）；`/` 实机点击覆盖 SHJ-NJ、一个中等河网、一个小河网（GFS/IFS 双曲线成功、身份不串档，agent-browser 截图证据）；以及 display 只读边界 deny-write receipt（`docs/runbooks/node-27-bringup-checklist.md` C1–C4）。浏览器点击 P95 < 2 s 的验收文字在关闭 #1342 前显式迁移到 #1970 的 body。
+本 change 的性能硬门在 SQL / 本机 API 层：逐河段曲线 SQL 在 narrow 未压缩与压缩 chunk 上 `river_segment_key` 进 Index Cond 或 segmentby 剪枝、`Rows Removed by Filter / returned ≤ 10`、`shared hit ≤ 5000`、SQL warm P95 ≤ 300 ms（≥ 5 个 warm 样本）、本机单源 `forecast-series` warm P95 ≤ 500 ms（SHJ-NJ 大河网 + 一个小河网；≥ 30 个 warm 样本，且在静默态测量——`nhms-node27-autopipe.service` inactive 且 1 分钟 load < 2.0）；identity-existence 探针 miss 分支与 QHH 回落 CTE 的 before/after EXPLAIN（D4 的索引证据门）。rollout receipt 另含 #1342 的两条验收项：注册表全量口径计数（active/runnable/selected/excluded）；`/` 实机点击覆盖 SHJ-NJ、一个中等河网、一个小河网（GFS/IFS 双曲线成功、身份不串档，agent-browser 截图证据）；以及 display 只读边界 deny-write receipt（`docs/runbooks/node-27-bringup-checklist.md` C1–C4）。浏览器点击 P95 < 2 s 的验收文字在关闭 #1342 前显式迁移到 #1970 的 body。
 
 ### D12 回退（expand 后、contract 前可执行的反向序列）
 停 timers 与 API/parser → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → 回滚代码到 change 之前版本 → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'`（列保留，旧代码不读它）→ 启动。窄表中已写入的 run 在回退后对读路径不可见（旧代码只读正名表）；这些 run 按旧 parser 重解析进（现为正名的）旧表；`narrow_rollback` 表要么由显式 post-D12 re-forward（change `node27-post-d12-reforward`：保留双 OID 与 ledger、不重跑 expand 迁移、按保留事实与 D12 快照推导 route）原样重挂，要么在从零重新 expand 前 DROP。允许的中间态"store 回置 legacy 且窄表残留行存在"写进 spec。contract 之后不可回退。
@@ -167,8 +167,28 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 
 ## Open Questions
 
-- forcing 两张 authority 表 IDENTITY 列的 ADD 锁时长（node-27 实测后填入 I12 issue）。
-- `native_resolution` 的现网 distinct 值实测（spec 已钉 `TEXT NULL`；实测若显示低基数词表，作为后续 change 的输入而非本 change 的变更；原问句：是否改为枚举，默认保留 TEXT 可空）。
+**两项均已由 I10（#1989）实测回填，receipt：`receipts/2026-09-18-i10-forcing-readonly/`。**
+
+- ~~forcing 两张 authority 表 IDENTITY 列的 ADD 锁时长~~ → **已实测**。`ADD COLUMN ... INTEGER GENERATED
+  ALWAYS AS IDENTITY UNIQUE` 的默认值 `nextval` 是 volatile，因此整表重写并持 `AccessExclusiveLock`，代价随**页数**
+  而非行数走。throwaway 库实测：`forcing_version`（17 MB 播种 / 生产 15 MB）**689 ms**；`met_station` 按生产**数据**
+  构成（47 MB）**1 141 ms**，按生产**页**构成（375 MB）**1 863 ms**——两者相差是因为生产 `met.met_station` 约 8 倍膨胀
+  （325 MB 页承载约 40 MB 列数据，TOAST 仅 8 kB）。**重写顺带消除膨胀**（375 MB → 47 MB），所以 I12 窗口不需要为这两张表
+  另做 `VACUUM FULL`，事先去膨胀也只省约 700 ms。锁在秒级，不构成窗口约束。
+- ~~`native_resolution` 的现网 distinct 值~~ → **已实测，全表精确**（2.59 亿行，3 分 08 秒）：只有 **`3h`
+  (249 196 518) 与 `6h` (10 058 808) 两个值，且无 NULL**，尽管列是 `TEXT NULL`。这正是原问句设想的「低基数词表」情形。
+  按原定口径，这是**后续 change 的输入，不是本 change 的变更**：spec 保持 `TEXT NULL`。同批实测的另三列：`variable` 6 值
+  （`PRCP`/`Press`/`RH`/`Rn`/`TEMP`/`wind`）、`unit` 6 值且与 `variable` 严格 1:1、`quality_flag` 仅 `ok` 1 值；
+  四列在生产上**都没有 CHECK 约束**，所以 forcing 窄表的枚举列是在「引入」词表而不是「镜像」已有词表。
+
+新增记录（I10 实测的副产物，供 I11/I12 使用）：
+
+- **D9 不对称的代价已量化**：river 按 run 读 `hydro.hydro_run` 的列即可路由，forcing 无 run 概念，backfill 必须**逐
+  `forcing_version` 探测事实表**。全部 8 653 个版本一条语句：冷 **21 849 ms**、热 **238 ms**，146 170 buffer hit。
+  其中 **4 764 个有行、3 889 个没有**（45% 是 no-op，可跳过）。一次性 22 秒可接受；但探测**必须在最后一次 legacy 写入之后
+  执行**，否则后来才获得行的版本会被误路由。
+- 生产只有 **2 个源**（`gfs`、`IFS`，`met.data_source` 中均为 `enabled`），与 task 7.1 文字里的「三源并集」不符；按实测的
+  二源记录。
 
 ## Known limits
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 timeseries retention daily
+
+[Timer]
+OnCalendar=*-*-* 05:15:00 UTC
+Persistent=true
+Unit=nhms-node27-timeseries-retention.service
+
+[Install]
+WantedBy=timers.target

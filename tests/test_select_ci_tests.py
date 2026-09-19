@@ -47,6 +47,7 @@ from scripts.select_ci_tests import (
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
+    FORCING_SQL_SHAPE_ORACLE_TESTS,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
@@ -56,6 +57,8 @@ from scripts.select_ci_tests import (
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
     RELEASED_RESERVATION_RECOVERY_TESTS,
+    REVIEW_GATE_ISSUE_MEMORY_PATH,
+    REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
@@ -248,7 +251,31 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     "infra/systemd/nhms-node27-autopipe.service": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
     "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-frontier-alert.service": frozenset({"tests/test_node27_frontier_stall_alert.py"}),
-    "infra/systemd/nhms-node27-raw-retention.service": frozenset({"tests/test_node27_raw_retention.py"}),
+    "infra/systemd/nhms-node27-raw-retention.service": frozenset(
+        {
+            "tests/test_node27_raw_retention.py",
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        }
+    ),
+    # #2360: the nwm raw-retention timer and the user alert template are
+    # compared line-for-line with their system-unit twins.
+    "infra/systemd/nhms-node27-raw-retention.timer": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/nhms-node27-unit-failure-alert@.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    # #2360: node-27 SYSTEM units live under `infra/systemd/system/`, outside
+    # the `#2173` glob, so they owe no sibling lane pin.
+    "infra/systemd/system/nhms-node27-canonical-retention.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/system/nhms-node27-canonical-retention.timer": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/system/nhms-node27-system-unit-failure-alert@.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
     "infra/systemd/nhms-node27-timeseries-compression-replay.service": frozenset(
         {
             "tests/test_node27_timeseries_compression.py",
@@ -452,20 +479,37 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # #1644: the runtime schema owner adds the drift + 3.1-contract suites to
     # its existing broad API consumers (the three contract suites that already
     # covered apps/api/**). A patch-owner-only PR must reach both the drift and
-    # the finalizer/security truth assertions.
+    # the finalizer/security truth assertions. Both supplemental scans over
+    # `apps/**` ride along: the river-segment write surface (#2185) and the
+    # path-canonicalisation family guard (#1627).
+    #
+    # #2211 quantified the module's 13 `_patch_*_openapi` implementations
+    # against the #1644 six and added exactly one suite:
+    # tests/test_hydro_display_mvt_scaling.py, the only unreached capability
+    # oracle that reads the PATCHED runtime document
+    # (`main.create_app().openapi()`), proven by a `_patch_mvt_tile_openapi`
+    # no-op that reds its two `test_runtime_openapi_documents_*` tile-route
+    # pins. The other candidates were measured and rejected
+    # — they never read the schema this module produces, so they cannot red on
+    # a patch change; see the rule's comment in scripts/select_ci_tests.py.
+    # Literals on purpose: this is the exact-set anchor for that rule, so it
+    # must never be derived from PATH_TEST_RULES.
     selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
 
-    assert selected == [
-        "tests/test_api.py",
-        "tests/test_api_contract.py",
-        "tests/test_monitoring_api.py",
-        "tests/test_openapi_31_contract.py",
-        "tests/test_openapi_drift.py",
-        "tests/test_pipeline_ops_identity_envelope.py",
-        WRITE_SURFACE_SCAN_PATH,
-        "tests/test_slurm_gateway_openapi_security.py",
-    ]
-
+    assert selected == sorted(
+        {
+            "tests/test_api.py",
+            "tests/test_api_contract.py",
+            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_monitoring_api.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_drift.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
+            WRITE_SURFACE_SCAN_PATH,
+            "tests/test_slurm_gateway_openapi_security.py",
+            FAMILY_GUARD_PATH,
+        }
+    )
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
     fallback_only = set(CORE_SMOKE_TESTS) - {"tests/test_api.py"}
@@ -535,21 +579,25 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # #1455's narrow `workers/shud_runtime/runtime.py` rule: every one is a
     # non-gated top-level importer of runtime.py that no rule reached before.
     # The write-site invariant joins because runtime.py lives under workers/**
-    # (#1656 supplemental routing), and the river-segment write-surface scan
-    # joins by the same root (#2185).
+    # (#1656 supplemental routing), the river-segment write-surface scan joins
+    # by the same root (#2185), and so does the path-canonicalisation family
+    # guard (#1627).
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
-    assert selected == [
-        "tests/test_direct_grid_e2e.py",
-        "tests/test_e2e.py",
-        WRITE_SURFACE_SCAN_PATH,
-        "tests/test_runtime_ic_header.py",
-        "tests/test_runtime_mode.py",
-        "tests/test_shud_runtime.py",
-        INVARIANT_SUITE_PATH,
-        "tests/test_warm_start.py",
-        "tests/test_warm_start_chaining.py",
-    ]
+    assert selected == sorted(
+        {
+            "tests/test_direct_grid_e2e.py",
+            "tests/test_e2e.py",
+            WRITE_SURFACE_SCAN_PATH,
+            "tests/test_runtime_ic_header.py",
+            "tests/test_runtime_mode.py",
+            "tests/test_shud_runtime.py",
+            INVARIANT_SUITE_PATH,
+            "tests/test_warm_start.py",
+            "tests/test_warm_start_chaining.py",
+            FAMILY_GUARD_PATH,
+        }
+    )
 
 
 def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture() -> None:
@@ -561,14 +609,16 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
     # DIRECT_GRID_SURFACE_TESTS itself must not move — the openspec-change rule
     # below shares it). The redirect intent is unchanged: the whole
     # tests/test_forcing_producer.py never comes back. The write-site invariant
-    # joins because direct_grid_contract.py lives under workers/** (#1656), and
-    # the river-segment write-surface scan joins by the same root (#2185).
+    # joins because direct_grid_contract.py lives under workers/** (#1656), the
+    # river-segment write-surface scan joins by the same root (#2185), and so
+    # does the path-canonicalisation family guard (#1627).
     assert selected == sorted(
         {
             *DIRECT_GRID_SURFACE_TESTS,
             *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
@@ -601,18 +651,20 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
 
     # Still bounded, just by a bigger constant: the compact e2e fixture plus the
     # five #1455 importer suites (all seconds-scale), plus the write-site
-    # invariant (workers/** root, #1656) and the river-segment write-surface
-    # scan (same root, #2185) — and no core-smoke blowout.
+    # invariant (workers/** root, #1656), the river-segment write-surface
+    # scan (same root, #2185) and the path-canonicalisation family guard (same
+    # root, #1627) — and no core-smoke blowout.
     assert selected == sorted(
         {
             *DIRECT_GRID_SURFACE_TESTS,
             *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
-    # The trailing `+ 2` is the two supplemental riders: #1656 and #2185.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 2
+    # The trailing `+ 3` is the three supplemental riders: #1656, #2185, #1627.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 3
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -620,14 +672,16 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
 def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:
     selected = select_tests(["services/orchestrator/chain_types.py"], repo_root=Path("."))
 
-    # services/** is a river-segment write-surface root (#2185), so the scan
-    # rides along with the redirect targets. #2420's publisher imports
+    # services/** is a river-segment write-surface root (#2185) and a
+    # path-canonicalisation family-guard root (#1627), so both scans ride along
+    # with the redirect targets. #2420's publisher imports
     # OrchestratorError from this module, so that suite joins the stop rule.
     assert selected == sorted(
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             "tests/test_pipeline_job_provenance_publisher.py",
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -639,13 +693,15 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
 def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suites() -> None:
     selected = select_tests(["services/orchestrator/chain_manifests.py"], repo_root=Path("."))
 
-    # services/** is a river-segment write-surface root (#2185), so the scan
-    # rides along with the redirect targets.
-    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH})
+    # services/** is a river-segment write-surface root (#2185) and a
+    # path-canonicalisation family-guard root (#1627), so both scans ride along
+    # with the redirect targets.
+    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
     # The REDIRECT targets are still focused node ids — that is what keeps the
-    # whole slow suites out. #2185's supplemental rider is a whole file by
-    # construction and is excluded here by name, not by loosening the check.
-    assert all("::" in test_path for test_path in selected if test_path != WRITE_SURFACE_SCAN_PATH)
+    # whole slow suites out. The supplemental riders are whole files by
+    # construction and are excluded here by name, not by loosening the check.
+    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH}
+    assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
 
 def test_select_tests_maps_scheduler_facade_to_manifest_and_file_journal_surfaces() -> None:
@@ -735,6 +791,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -779,6 +836,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
             "tests/test_pipeline_job_provenance_publisher.py",
             "tests/test_select_ci_tests.py",
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -831,9 +889,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 57 targets, the rule's 55 plus two riders that arrive from OUTSIDE the rule
-    # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
-    # river-segment write-surface scan by the services/** supplemental route.
+    # 58 targets, the rule's 55 plus three riders that arrive from OUTSIDE the
+    # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
+    # river-segment write-surface scan by the services/** supplemental route,
+    # and #1627's path-canonicalisation family guard by the services/**
+    # supplemental route it shares.
     # The literal stays FROZEN here:
     # reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
@@ -888,6 +948,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_orchestrator_demote_core_cas.py",
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        # #1627: services/** is a path-canonicalisation family-guard root, so the
+        # guard rides every source under it — a supplemental rider, not a rule
+        # target. It sorts here, between the demote and pipeline suites.
+        FAMILY_GUARD_PATH,
         "tests/test_pipeline_job_provenance_copyback.py",
         "tests/test_pipeline_job_provenance_importer.py",
         "tests/test_pipeline_job_provenance_publisher.py",
@@ -966,9 +1030,10 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
         repo_root=Path("."),
     )
 
-    # #2185: services/** is a river-segment write-surface root, so the scan is
-    # part of the pinned set; the broad-orchestrator fallback still may not be.
-    assert selected == sorted({*RELEASED_RESERVATION_RECOVERY_TESTS, WRITE_SURFACE_SCAN_PATH})
+    # #2185/#1627: services/** is both a river-segment write-surface root and a
+    # path-canonicalisation family-guard root, so both scans are part of the
+    # pinned set; the broad-orchestrator fallback still may not be.
+    assert selected == sorted({*RELEASED_RESERVATION_RECOVERY_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
     assert "tests/test_state_clone.py" not in selected
     assert "tests/test_select_ci_tests.py" not in selected
 
@@ -1025,6 +1090,11 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_river_ts_render_reference_lexer.py",
             "tests/test_river_ts_template_golden.py",
             "tests/test_sql_shape_helpers.py",
+            # I11 #1990 task 7.2: five of the nine registered FORCING read
+            # templates live in this file, and it is the only wired reader file
+            # still in the forcing census (its two index/catalog metadata
+            # payloads). Nothing ran the forcing oracle on this path before.
+            *FORCING_SQL_SHAPE_ORACLE_TESTS,
             # #1728 merged the connection-attribution guards into this rule:
             # the module carries the application_name injection seam for both
             # nhms-api-forecast and nhms-api-data-sources.
@@ -1032,6 +1102,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_node27_connection_attribution_delegated.py",
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -1078,6 +1149,12 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        # #2156 (D-2): guard-derived entry, synced from the selector's own
+        # output per the procedure above — the geometry-identity suite imports
+        # TileInput / cache_key / display_ready_run from services.tiles.mvt at
+        # file level, so the closure guard puts it on this rule as a DIRECT
+        # importer.
+        "tests/test_mvt_run_and_river_network_geometry_identity.py",
         # #2032: guard-derived entries, synced from the selector's own output
         # per the procedure above — both new suites import services.tiles.mvt
         # at file level (the lock suite drives tile_generation_lock; the
@@ -1108,6 +1185,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #1627: services/** is a path-canonicalisation family-guard root, so
+        # the guard rides this rule too — routing is by root, not by an at-site
+        # entry (mvt.py canonicalises nothing today).
+        FAMILY_GUARD_PATH,
         # #2010: guard-derived entry, synced from the selector's own output per
         # the procedure above — the precip suite imports services.tiles.mvt
         # (layer_metadata / MVT_FILE_CACHE_DIR_ENV) at file level, so the
@@ -1204,15 +1285,8 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        "tests/river_ts_template_registry.py",
-    ],
-)
-def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target: str) -> None:
-    selected = set(select_tests([target], repo_root=Path(".")))
+def test_select_tests_routes_the_template_registry_to_its_unit_owners() -> None:
+    selected = set(select_tests(["tests/river_ts_template_registry.py"], repo_root=Path(".")))
     assert {
         "tests/test_display_coverage_refresh.py",
         "tests/test_river_ts_template_golden.py",
@@ -1220,14 +1294,8 @@ def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target:
     assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
-        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
-        "tests/river_ts_template_registry.py",
-    ],
-)
-def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> None:
+def test_template_registry_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/river_ts_template_registry.py"
     patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
     assert target in patterns, f"{target}: an isolated change must open the database lane"
     remaining = patterns.copy()
@@ -1237,46 +1305,10 @@ def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> Non
     )
 
 
-def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
-    selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
-
-    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
-
-
-def test_frozen_hydro_sql_database_edge_deletion_is_unrescued() -> None:
-    target = "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"
-    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
-
-    assert target in patterns, "a frozen-SQL-only diff must open the database lane through its exact literal"
-    # Delete the dedicated literal from the parsed database filter, not other lanes.
-    # Every surviving pattern must be checked: a broad fixture glob could rescue it.
-    remaining = patterns.copy()
-    remaining.remove(target)
-    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
-        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
-    )
-
-
-def test_select_tests_routes_the_frozen_national_sql_fixture_to_its_shape_owner() -> None:
-    selected = select_tests(["tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"], repo_root=Path("."))
-    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
-
-
 def test_select_tests_routes_the_registry_partition_additions_ledger_to_the_meta_suite() -> None:
     # #2183: the ledger is data read only by the #1913 guards in this suite.
     selected = select_tests(["tests/fixtures/basins_registry_partition_additions.json"], repo_root=Path("."))
     assert selected == ["tests/test_select_ci_tests.py"]
-
-
-def test_frozen_national_sql_database_edge_deletion_is_unrescued() -> None:
-    target = "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"
-    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
-    assert target in patterns
-    remaining = patterns.copy()
-    remaining.remove(target)
-    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
-        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
-    )
 
 
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
@@ -1328,6 +1360,58 @@ def test_select_tests_maps_every_registered_cleanup_source_to_the_zero_text_orac
         assert oracle in selected, source
 
 
+def test_select_tests_maps_every_forcing_census_and_reader_path_to_the_forcing_oracle() -> None:
+    """I11 #1990 task 7.2's half of the rule above, for the FORCING census.
+
+    The census in ``tests/test_forcing_ts_template_census.py`` pins a mention
+    count per production file and refuses any mention that is neither a
+    registered read template nor an exempt row with a named owner. That is only
+    worth anything if a diff to one of those files actually runs it — and when
+    cut (a) landed, none of the sixteen paths routed the census at all: adding a
+    ``met.forcing_station_timeseries`` mention to
+    ``workers/forcing_producer/store.py`` went red on the post-merge master run
+    and nowhere else. River solved the identical problem with a per-site rider
+    plus this meta-test; forcing had neither until cut (b).
+
+    The expectation is DERIVED from the census and the register — the same two
+    objects the oracle judges the tree with — so a file entering either without a
+    routing rule is red HERE, which a frozen second copy of the path list could
+    never catch.
+
+    All three members of the group are asserted, not just the census: the
+    register is the parametrisation source of the byte-identity / M6 / narrow
+    shape suite, and the renderer's own unit oracle is what a template refusal
+    fails in. Routing one and not the others would leave the other two as
+    post-merge discoveries.
+    """
+    from tests.forcing_ts_template_registry import FORCING_REGISTRY
+    from tests.test_forcing_ts_template_census import FORCING_TABLE_CENSUS
+
+    guarded = sorted(set(FORCING_TABLE_CENSUS) | {entry.path for entry in FORCING_REGISTRY})
+    assert guarded, "the forcing census declares no path; the sweep or the register is broken"
+
+    for source in guarded:
+        selected = select_tests([source], repo_root=Path("."))
+        for oracle in FORCING_SQL_SHAPE_ORACLE_TESTS:
+            assert oracle in selected, f"{source} does not select {oracle}"
+
+
+def test_the_forcing_oracle_group_is_not_folded_into_the_river_one() -> None:
+    """Two groups, on purpose — and the reason is a scheduled deletion.
+
+    ``tasks.md`` 6.3 removes the river renderer's legacy path and collapses its
+    oracles while the forcing transition is still open (``tasks.md`` 8.3 retires
+    the forcing set, much later). A merged tuple would make the river contract
+    migration edit the forcing routing, and would route every river reader diff
+    at three forcing suites that assert nothing about it.
+    """
+    from scripts.select_ci_tests import SQL_SHAPE_ORACLE_TESTS
+
+    assert not set(FORCING_SQL_SHAPE_ORACLE_TESTS) & set(SQL_SHAPE_ORACLE_TESTS)
+    for suite in FORCING_SQL_SHAPE_ORACLE_TESTS:
+        assert Path(suite).is_file(), suite
+
+
 def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:
     # scripts/node27_autopipeline.py has no same-name tests/test_node27_autopipeline.py,
     # so before its explicit rule it dropped into the core-smoke fallback and none
@@ -1339,6 +1423,12 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
 
     assert selected == [
         "tests/test_display_publish_status_only.py",
+        # I11 #1990 task 7.2: this script is in the forcing discovery-set census
+        # (one `row_counts` lookup key), and nothing routed the census here, so a
+        # new forcing table mention was red only on the post-merge master run.
+        "tests/test_forcing_read_path_store_routing.py",
+        "tests/test_forcing_ts_render.py",
+        "tests/test_forcing_ts_template_census.py",
         # #1647: the `_connect` bounds + stats-guard flag parser suite, added to
         # the same rule for the same reason (no same-name fallback finds it).
         "tests/test_node27_autopipeline_connection_bounds.py",
@@ -1411,12 +1501,17 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     # so a migration that adds an enum member changes what that suite asserts —
     # and only running it here makes the "closed enum" claim red on the
     # migration's own PR instead of silently stale.
+    #
+    # #2154 adds a third leg by the supplemental route: the river-segment
+    # write-surface scan reads every db/**/*.sql statement, so a migration that
+    # rewrites core.river_segment or geometry_generation reds on its own PR.
     migration = "db/migrations/000043_canonical_grid_snapshot.sql"
     assert Path(migration).exists()
     expected = [
         "tests/test_hydro_status_set_parity.py",
         "tests/test_migrations.py",
         "tests/test_node27_write_roles.py",
+        "tests/test_river_segment_write_surface_scan.py",
     ]
 
     assert select_tests([migration], repo_root=Path(".")) == expected
@@ -1486,6 +1581,8 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         "tests/test_node27_raw_retention.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #1627: the changed tree is a path-canonicalisation family-guard root.
+        FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
@@ -1509,6 +1606,8 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #1627: the changed tree is a path-canonicalisation family-guard root.
+        FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
@@ -1570,6 +1669,8 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
         "tests/test_node27_connection_attribution_delegated.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #1627: the changed tree is a path-canonicalisation family-guard root.
+        FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
@@ -1595,6 +1696,8 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #1627: the changed tree is a path-canonicalisation family-guard root.
+        FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
@@ -2190,6 +2293,89 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
         assert "tests/test_select_ci_tests.py" in selected
 
 
+def test_review_gate_issue_memory_selects_exactly_its_guard_and_the_meta_guard() -> None:
+    # #2261 selector leg, exact set (same shape as
+    # test_demote_helper_rule_selects_public_chain_consumer_exactly): the
+    # committed round-ceiling memory routes to its structural guard plus the
+    # selector meta-guard, nothing more and nothing less. The meta-guard has to
+    # be an explicit rule target — select_tests only rides it in for changed
+    # `tests/` paths, and this is a root JSON file. Exact set: the path is not a
+    # backend Python path, so no core-smoke fallback, no same-name derivation
+    # and no supplemental routing can join it, and a membership pin would stay
+    # green if the guard target were dropped for the meta-guard alone.
+    selected = set(select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")))
+
+    assert selected == {REVIEW_GATE_ISSUE_MEMORY_TEST, SELECTOR_META_GUARD_TEST}
+    assert not set(CORE_SMOKE_TESTS) & selected
+
+
+def test_review_gate_issue_memory_route_reds_when_the_rule_or_its_guard_is_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2261 selector leg, red (constructed rule table; tracked selector
+    # untouched): deleting the rule empties the selection, and dropping the
+    # guard from its targets leaves the accounting PR running the meta-guard
+    # only — the same selector call the green row uses, not a read of the rule.
+    from scripts import select_ci_tests
+
+    stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REVIEW_GATE_ISSUE_MEMORY_PATH)
+    assert len(stripped) == len(PATH_TEST_RULES) - 1, "review-gate memory rule not found"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", stripped)
+    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == []
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != REVIEW_GATE_ISSUE_MEMORY_TEST),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == REVIEW_GATE_ISSUE_MEMORY_PATH
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+
+
+def test_review_gate_issue_memory_backend_filter_entry_is_block_scoped() -> None:
+    # #2261 backend-filter leg, positive: without this exact literal inside the
+    # ci.yml `backend:` block, the post-merge accounting PR shape (docs/** +
+    # openspec/** + this JSON — the `e78cf98a` commit that introduced the bare
+    # top-level key) starts no targeted Unit Tests job, and the structural guard
+    # above never runs. A mention under another filter opens no job, and a root
+    # `*.json` glob would drag unrelated data files into the backend lane.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{REVIEW_GATE_ISSUE_MEMORY_PATH}'\n"
+    assert literal in _backend_filter_block(workflow), (
+        "review-gate issue memory missing from ci.yml backend filter"
+    )
+    assert Path(REVIEW_GATE_ISSUE_MEMORY_TEST).is_file(), "the guard the filter entry exists to start is gone"
+
+    entries = _filter_entries(_backend_filter_block(workflow))
+    assert not any(
+        fnmatch.fnmatch(REVIEW_GATE_ISSUE_MEMORY_PATH, pattern) and pattern != REVIEW_GATE_ISSUE_MEMORY_PATH
+        for pattern in entries
+    ), "backend filter must not cover the review-gate memory with a broad glob"
+
+
+def test_review_gate_issue_memory_backend_filter_entry_reds_when_removed_or_moved() -> None:
+    # #2261 backend-filter leg, red (constructed workflow text; tracked ci.yml
+    # untouched): deleting the exact entry, or moving it under another filter,
+    # must fail the same block-scoped assertion the positive row pins — `docs:`
+    # and `frontend:` start no targeted Unit Tests job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{REVIEW_GATE_ISSUE_MEMORY_PATH}'\n"
+    assert literal in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(literal, "")
+    assert literal not in _backend_filter_block(deleted)
+
+    moved_to_docs = deleted.replace("            docs:\n", "            docs:\n" + literal)
+    assert literal in moved_to_docs
+    assert literal not in _backend_filter_block(moved_to_docs)
+
+
 def test_shared_auth_owners_select_their_focused_contract_suites() -> None:
     # #1684 EVID-01 green rows: each shared auth owner must reach its focused
     # contract suite (plus the preserved riders). Membership pins on purpose:
@@ -2702,9 +2888,19 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # #2146 round 2 widened it by one more: the probe suite reads this runbook's
     # probe section and pins every verdict name, each threshold's default AND
     # ceiling, the receipt field set and the probe timer's steady-state row.
+    # #2473 widened it by one more: the coverage freshness alert suite reads this
+    # runbook's §11 and pins that every `COVERAGE_FRESHNESS_*` code is named there.
+    # #2472/#2473 round 1 added the three readers the row had been missing: the
+    # node-22 entrypoint invariant suite (scans every `uv run` / `uv sync` line),
+    # the Python environment truth suite (`df -h / /home /data/GHDC`) and the role
+    # boundary static suite (node-27/node-22 topology sentences).
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
+        "tests/test_node22_entrypoint_invariant.py",
         "tests/test_node22_refresh_timer_health.py",
+        "tests/test_node27_coverage_freshness_alert.py",
+        "tests/test_python_environment_truth.py",
+        "tests/test_role_boundary_static.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
 
@@ -2865,8 +3061,17 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
     # target must not replace the explicit ones, and an explicit rule that later
     # also names it must not false-red the pin. The selector meta-guard joins
     # every same-name source route, so it is part of the union here; #2185's
-    # write-surface scan joins because apps/** is one of its roots.
-    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH})
+    # write-surface scan and #1627's path-canonicalisation family guard join
+    # because apps/** is a root of both.
+    assert selected == sorted(
+        {
+            *matching[0].tests,
+            same_name_target,
+            SELECTOR_META_GUARD_TEST,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+        }
+    )
 
 
 # The `git ls-files` pathspecs for the same-name derivation are derived from the
@@ -4464,14 +4669,16 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
     assert redirect_targets, "conditional rule did not activate with its surface present"
 
     selected = set(select_tests([owner, surface], repo_root=Path(".")))
-    # The surface lives under services/**, a #2185 write-surface root, so the
-    # scan rides along; the redirect itself is what this pins.
+    # The surface lives under services/**, a root of both the #2185 write-surface
+    # scan and the #1627 family guard, so both ride along; the redirect itself is
+    # what this pins. #2420's publisher imports OrchestratorError from chain_types,
+    # so that suite also joins via the chain_types stop rule.
     assert selected == redirect_targets | {
         SELECTOR_META_GUARD_TEST,
         WRITE_SURFACE_SCAN_PATH,
+        FAMILY_GUARD_PATH,
         "tests/test_pipeline_job_provenance_publisher.py",
     }
-
     assert owner not in selected
 
 
@@ -5273,19 +5480,21 @@ def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
     # No-suite fallback compatibility (CAND-R2-02): an unknown backend Python
-    # path selects the five core-smoke suites plus one supplemental rider,
-    # #2185's river-segment write-surface scan (services/** is one of its five
-    # roots) — six targets — and still no selector meta-guard rider, because D6
-    # adds that one only to same-name routes. The pin stays exact equality, so
-    # a SEVENTH target on every unknown route reds here before it silently
-    # costs lane time across the whole tree. That was the point of the ~15 s
-    # projection this comment used to carry; #2185's actual price is now
-    # measured rather than projected — `uv run pytest -q
-    # tests/test_river_segment_write_surface_scan.py` is 4 tests in about 2 s,
-    # dominated by a module-level AST parse paid once per session.
+    # path selects the five core-smoke suites plus two supplemental riders,
+    # #2185's river-segment write-surface scan and #1627's path-canonicalisation
+    # family guard (services/** is a root of both) — seven targets — and still
+    # no selector meta-guard rider, because D6 adds that one only to same-name
+    # routes. The pin stays exact equality, so an EIGHTH target on every unknown
+    # route reds here before it silently costs lane time across the whole tree.
+    # That was the point of the ~15 s projection this comment used to carry;
+    # both riders' actual price is now measured rather than projected —
+    # `uv run pytest -q tests/test_river_segment_write_surface_scan.py` is 4
+    # tests in about 2 s and `uv run pytest -q
+    # tests/test_path_canonicalization_family_guard.py` is 2 tests in about 2 s,
+    # each dominated by a module-level AST parse paid once per session.
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
-    assert selected == sorted({*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH})
+    assert selected == sorted({*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
     assert SELECTOR_META_GUARD_TEST not in selected
 
 
@@ -5314,11 +5523,21 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
 
     selected = select_tests([known, "services/new_surface/new_module.py"], repo_root=Path("."))
 
-    # The known path lives under workers/**, a root of both supplemental
-    # scans, so #1656's write-site invariant and #2185's river-segment
-    # write-surface scan both join the union too.
+    # The known path lives under workers/**, a root of all three supplemental
+    # scans, so #1656's write-site invariant, #2185's river-segment
+    # write-surface scan and #1627's family guard all join the union too. The
+    # unknown path is under services/**, which also routes #2185 and #1627.
     assert (
-        sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH})
+        sorted(
+            set(CORE_SMOKE_TESTS)
+            | {
+                suite,
+                SELECTOR_META_GUARD_TEST,
+                INVARIANT_SUITE_PATH,
+                WRITE_SURFACE_SCAN_PATH,
+                FAMILY_GUARD_PATH,
+            }
+        )
         == selected
     )
 
@@ -5426,11 +5645,13 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
 
     selected = set(select_tests([path], repo_root=Path(".")))
 
-    # #2185: apps/** is a write-surface root, so the scan joins the union too.
+    # #2185/#1627: apps/** is a root of both supplemental scans, so both join
+    # the union too.
     assert selected == _effective_explicit_targets(path) | {
         same_name_target,
         SELECTOR_META_GUARD_TEST,
         WRITE_SURFACE_SCAN_PATH,
+        FAMILY_GUARD_PATH,
     }
 
 
@@ -5444,12 +5665,12 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # target. Missing meta-guard target under a temporary root is dropped with
     # a warning (row 7), not special-cased.
     no_suite = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
-    # #1744 path B + #1656 + #2185: packages/common/** retains the core-smoke
-    # baseline BY POLICY and routes both supplemental scans — no meta-guard
-    # rider (D6 unchanged). #1684 EVID-01: the shared policy owner now also
-    # selects its dedicated focused matrix suite.
+    # #1744 path B + #1656 + #2185 + #1627: packages/common/** retains the
+    # core-smoke baseline BY POLICY and routes all three supplemental scans — no
+    # meta-guard rider (D6 unchanged). #1684 EVID-01: the shared policy owner now
+    # also selects its dedicated focused matrix suite.
     assert sorted(no_suite) == sorted(
-        {*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH, AUTH_POLICY_TEST}
+        {*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH, AUTH_POLICY_TEST, FAMILY_GUARD_PATH}
     )
     assert SELECTOR_META_GUARD_TEST not in no_suite
 
@@ -5500,7 +5721,8 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     assert SELECTOR_META_GUARD_TEST in selected
     # known lives under workers/** and auth_policy under packages/common/**,
     # so both #1656 invariant roots add the write-site suite (deduplicated),
-    # and both paths sit under #2185 write-surface roots, which adds the scan.
+    # and both paths sit under #2185 write-surface roots, which adds the scan,
+    # and under #1627 family-guard roots, which adds the guard.
     # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
     assert (
         sorted(
@@ -5511,6 +5733,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 INVARIANT_SUITE_PATH,
                 WRITE_SURFACE_SCAN_PATH,
                 AUTH_POLICY_TEST,
+                FAMILY_GUARD_PATH,
             }
         )
         == selected
@@ -5524,8 +5747,15 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     # changes still select nothing.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
+        # #2472/#2473 round 1: bare `uv run` / `uv sync` line scanner.
+        "tests/test_node22_entrypoint_invariant.py",
         # #2146 round 2: third literal reader -- the node-22 probe suite.
         "tests/test_node22_refresh_timer_health.py",
+        # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
+        "tests/test_node27_coverage_freshness_alert.py",
+        # #2472/#2473 round 1: capacity-check and topology sentence readers.
+        "tests/test_python_environment_truth.py",
+        "tests/test_role_boundary_static.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
     assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
@@ -5764,9 +5994,10 @@ def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> Non
     # `py-under-apps-frontend` param above. `BACKEND_PYTHON_SOURCE_PREFIXES`
     # covers `apps/api/` only, so a `.py` elsewhere under `apps/` used to select
     # nothing; it is inside the write-surface scan's roots, so it now selects
-    # exactly that suite. Both a TRACKED member of the class and a
-    # future-shaped one are pinned, and neither may reappear among the
-    # empty-selection params.
+    # exactly that suite — and, since #1627, the path-canonicalisation family
+    # guard, whose `apps/**` root is the same width. Both a TRACKED member of
+    # the class and a future-shaped one are pinned, and neither may reappear
+    # among the empty-selection params.
     tracked = "apps/__init__.py"
     future = "apps/frontend/scripts/gen.py"
     assert Path(tracked).is_file()
@@ -5774,8 +6005,9 @@ def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> Non
     assert not tracked.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
     assert not future.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
 
+    expected = sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
     for path in (tracked, future):
-        assert select_tests([path], repo_root=Path(".")) == [WRITE_SURFACE_SCAN_PATH], path
+        assert select_tests([path], repo_root=Path(".")) == expected, path
 
     pinned_empty = {
         param.values[0]
@@ -5973,15 +6205,24 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
         # owner selecting focused suites — still non-collapsed. #2075 added a
         # second reader (`tests/test_env_templates.py` asserts the pinned
-        # terminal stage appears in this runbook) and #2146 round 2 a third
+        # terminal stage appears in this runbook), #2146 round 2 a third
         # (`tests/test_node22_refresh_timer_health.py` pins the probe section's
-        # verdicts, thresholds and receipt fields), so the count is 3.
-        ("docs/runbooks/current-production-ops.md", "3"),
+        # verdicts, thresholds and receipt fields) and #2473 a fourth
+        # (`tests/test_node27_coverage_freshness_alert.py` pins that runbook §11
+        # names every `COVERAGE_FRESHNESS_*` code). #2472/#2473 round 1 added the
+        # three readers the row had been missing (node-22 entrypoint invariant,
+        # Python environment truth, role boundary static), so the count is 7.
+        ("docs/runbooks/current-production-ops.md", "7"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
         # extra collection pass on all of them and nothing here would notice.
-        ("db/schema.sql", "1"),
+        # #2154 moved this probe off `db/schema.sql`: a `.sql` under db/ now
+        # also selects the river-segment write-surface scan (two targets, kept
+        # below), so the single-target boundary needs a path that still selects
+        # exactly one file.
+        ("infra/compose.compute.yml", "1"),
+        ("db/schema.sql", "2"),
     ],
 )
 def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
@@ -8813,6 +9054,25 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/file_orchestration_journal.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/scheduler.py", "tests/test_production_scheduler.py"): "redirect",
     ("workers/forcing_producer/direct_grid_contract.py", "tests/test_forcing_producer.py"): "redirect",
+    # -- edge-consumer: the loop-spelling measurement's import-order fixture --
+    # (#1627) ---------------------------------------------------------------
+    # tests/test_preserve_final_component_loop_spelling.py has exactly one
+    # subject: `_safe_preserve_final_component` in
+    # services/orchestrator/scheduler_config/path_modes.py, which owns the suite
+    # through its own per-file rule in the selector. The other two edges are an
+    # import-order fixture, not consumption: the scheduler package and its
+    # config package import each other, so the module imports
+    # `services.orchestrator.scheduler` (and thereby the package `__init__`)
+    # FIRST — under its own `noqa: F401  (import-order fixture)` — purely so
+    # reaching path_modes does not hit a partially initialised package. Copying
+    # the suite into either module's rule would couple unrelated PR classes,
+    # which is exactly what this token refuses: the scheduler stop rule's own
+    # convention (SCHEDULER_IMPORTER_TESTS in the selector) admits a suite when
+    # "the suite's subject IS this module", and this one's subject is one
+    # function two packages down; the broad `services/orchestrator/**` list
+    # would make every orchestrator PR pay for it as well.
+    ("services/orchestrator/__init__.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
+    ("services/orchestrator/scheduler.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
     # -- edge-consumer: slurm array-job entry points ------------------------
     # tests/test_slurm_array_contract.py contracts the sbatch array entry
     # points, so it top-level-imports the `cli` module (and package) of five
@@ -9039,6 +9299,22 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_baseline_cutover_cli.py"): "edge-consumer",
+    # -- edge-consumer: the forcing read-path suite's package drag-in (#1990) -
+    # tests/test_forcing_read_path_store_routing.py belongs to the FORCING read
+    # surface: FORCING_SQL_SHAPE_ORACLE_TESTS is ridden by every registered
+    # forcing reader path, INCLUDING
+    # workers/model_registry/qhh_production_bootstrap.py, which is the module
+    # this suite actually contracts (reader #8). The gap is only the PACKAGE
+    # BASE: `from workers.model_registry import qhh_production_bootstrap`
+    # contributes `workers.model_registry` to the importer index as well as the
+    # submodule, exactly as the slurm array-job `__init__.py` entries above do.
+    # Copying the suite into `workers/model_registry/**` would make every
+    # model-registry PR — list-basins, bootstrap CLI, registry writes — pay for
+    # nine forcing template oracles it cannot break.
+    (
+        "workers/model_registry/__init__.py",
+        "tests/test_forcing_read_path_store_routing.py",
+    ): "edge-consumer",
 }
 
 
@@ -10046,6 +10322,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
         "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
         "tests/test_orchestration_chain.py::test_psycopg_has_active_pipeline_includes_queued_pipeline_rows",
+        # #1627: services/** is a path-canonicalisation family-guard root.
+        FAMILY_GUARD_PATH,
         "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
         "tests/test_production_scheduler.py::test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission",
         "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_download_source_cycle",
@@ -10072,6 +10350,8 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # supplemental invariant routes all still accumulate beside the mutex suite.
     # 10 -> 15: harden-copyback-mutex-residuals routed the guard's primitive
     # suite and the four lane suites that read its new names.
+    # 15 -> 16 (#1627): packages/** is a path-canonicalisation family-guard root,
+    # so the guard accumulates here as a third supplemental rider.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
@@ -10083,6 +10363,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_migrations.py",
         "tests/test_node27_raw_retention_copyback_mutex.py",
         "tests/test_orchestration_chain.py",
+        "tests/test_path_canonicalization_family_guard.py",
         "tests/test_production_scheduler.py",
         "tests/test_retention_copyback_lock_signal.py",
         "tests/test_retention_copyback_mutex.py",
@@ -10145,10 +10426,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
     # I1 #1980: the river read-template register. The golden equivalence
-    # oracle anchors the raw corpus; #2208 also imports its frozen coverage
-    # loader in the capture owner and national historical fixture preparation.
+    # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
-    ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
+    # I11 #1990: the forcing read-template register. Its derived closure is a
+    # single suite — the discovery-set census — so that suite is both the anchor
+    # and the whole routed set; an anchor that stops deriving here means the
+    # census stopped importing the register, which is itself the alarm.
+    ("tests/forcing_ts_template_registry.py", "tests/test_forcing_ts_template_census.py"),
     (
         "tests/state_clone_recalibration_fixtures.py",
         "tests/test_state_clone_recalibration.py",
@@ -10196,6 +10480,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #1948: the QHH bootstrap corpus's shared helper. All three partitions import it at
     # module scope; the retained historical path is a valid anchor for the same reason.
     ("tests/qhh_production_bootstrap_helpers.py", "tests/test_qhh_production_bootstrap.py"),
+    # #2451: the segment-index bench's pass criteria. Anchored on the synthetic-plan
+    # proof, which is both the same-name owner and a module-scope importer; the
+    # gated integration bench is not an anchor for the #2208 reason.
+    ("tests/river_ts_plan_criteria.py", "tests/test_river_ts_plan_criteria.py"),
+    # #2451: the bench's condition seed. Its one non-gated module-scope importer is
+    # the offline capture/digest suite, so that suite is the only valid anchor.
+    ("tests/river_ts_stats_matrix_seed.py", "tests/test_river_ts_stats_harness_offline.py"),
     # #1913: the registry-import helper. Its eight direct collectible importers all
     # import it at module scope; the retained historical path is a valid derivation
     # anchor for the same reason #1912 pinned the publication core. The three QHH
@@ -11037,15 +11328,22 @@ def test_write_surface_scan_literal_anchors_to_the_selector_constant() -> None:
 # This is NOT the shape _invariant_scan_roots() uses above: that suite exposes a
 # `_scan_roots` FunctionDef returning `REPO_ROOT / <part>` BinOp chains, and its
 # walker would find nothing here. Only the ROUTING shape is shared with #1656.
-def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, ...]:
+#
+# The derivation is parameterized by BINDING NAME because #1627's family guard
+# (below) declares its scan surface in the identical shape -- a module-level
+# annotated assignment of a tuple of string literals, `_SCAN_ROOTS`. Every
+# message interpolates the name, so each caller's reds still name the binding
+# the reader has to go fix, and the #2185 fixture tests that match on
+# "PRODUCTION_DIRS" keep matching.
+def _module_level_string_sequence(path: str, name: str) -> tuple[str, ...]:
     tree = _parse_tracked(path)
     stores = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id == "PRODUCTION_DIRS" and isinstance(node.ctx, ast.Store)
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store)
     ]
     assert len(stores) == 1, (
-        f"{path}: expected exactly one store of PRODUCTION_DIRS anywhere in the module, got "
+        f"{path}: expected exactly one store of {name} anywhere in the module, got "
         f"{len(stores)} at lines {sorted(node.lineno for node in stores)}"
     )
 
@@ -11057,26 +11355,28 @@ def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, 
             targets = [node.target]
         else:
             continue
-        if any(isinstance(target, ast.Name) and target.id == "PRODUCTION_DIRS" for target in targets):
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
             bindings.append(node.value)
 
     assert len(bindings) == 1, (
-        f"{path}: the single PRODUCTION_DIRS store is not a module-level assignment the "
+        f"{path}: the single {name} store is not a module-level assignment the "
         f"derivation can read (module-level Assign/AnnAssign bindings found: {len(bindings)})"
     )
     value = bindings[0]
     shape = ast.dump(value) if value is not None else "an annotation with no value"
-    assert isinstance(value, ast.Tuple | ast.List), (
-        f"{path}: PRODUCTION_DIRS must be bound to a tuple/list literal, got {shape}"
-    )
-    dirs: list[str] = []
+    assert isinstance(value, ast.Tuple | ast.List), f"{path}: {name} must be bound to a tuple/list literal, got {shape}"
+    items: list[str] = []
     for element in value.elts:
         assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
-            f"{path}: PRODUCTION_DIRS holds a non-string element: {ast.dump(element)!r}"
+            f"{path}: {name} holds a non-string element: {ast.dump(element)!r}"
         )
-        dirs.append(element.value)
-    assert dirs, f"{path}: PRODUCTION_DIRS derivation returned no directories"
-    return tuple(dirs)
+        items.append(element.value)
+    assert items, f"{path}: {name} derivation returned no entries"
+    return tuple(items)
+
+
+def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, ...]:
+    return _module_level_string_sequence(path, "PRODUCTION_DIRS")
 
 
 def _write_surface_root_globs() -> set[str]:
@@ -11174,18 +11474,16 @@ def test_write_surface_routing_is_set_union_over_every_derived_root() -> None:
         selected = set(select_tests([probe], repo_root=Path(".")))
         assert WRITE_SURFACE_SCAN_PATH not in selected, f"{probe}: must not select {WRITE_SURFACE_SCAN_PATH}"
 
-    # `db/**` is spelled as a LITERAL, not derived. The obvious derivation
-    # `set(TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS) - _write_surface_root_globs()`
-    # is a plain string difference and also yields `packages/common/**`, whose
-    # probe DOES select the scan (it is under `packages/**`) -- so a derived
-    # negative probe would red. Derivation buys coverage on the POSITIVE side
-    # only. db/** must keep the sibling #1656 route and refuse this one.
+    # #2154 flipped `db/**` from refused to routed: the scan now walks db/ (its
+    # Python and its SQL). Spelled as a LITERAL here on top of the derived probe
+    # above, so the flip itself is pinned, and db/** must keep the sibling #1656
+    # route alongside this one.
     db_selected = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
-    assert WRITE_SURFACE_SCAN_PATH not in db_selected, (
-        f"db/brand_new_thing.py: db/ is not a scanned directory, it must not select {WRITE_SURFACE_SCAN_PATH}"
+    assert WRITE_SURFACE_SCAN_PATH in db_selected, (
+        f"db/brand_new_thing.py: db/ is a scanned directory since #2154, it must select {WRITE_SURFACE_SCAN_PATH}"
     )
     assert INVARIANT_SUITE_PATH in db_selected, (
-        f"db/brand_new_thing.py lost the sibling #1656 route while refusing {WRITE_SURFACE_SCAN_PATH}"
+        f"db/brand_new_thing.py lost the sibling #1656 route while selecting {WRITE_SURFACE_SCAN_PATH}"
     )
 
     # Live state: the same positive oracle the mutant test uses reports nothing.
@@ -11248,14 +11546,16 @@ def test_write_surface_derivation_grows_with_a_sixth_scanned_directory(
     monkeypatch.chdir(
         _write_scan_fixture(
             tmp_path,
-            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")\n',
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db", "infra")\n',
         )
     )
 
-    assert _write_surface_scan_dirs() == ("apps", "services", "workers", "packages", "scripts", "db")
-    assert "db/**" in _write_surface_root_globs()
-    assert _write_surface_future_probes()["db"] == "db/brand_new_thing.py"
-    with pytest.raises(AssertionError, match=r"missing \['db/\*\*'\]"):
+    # #2154 made `db` the live sixth directory, so the hypothetical grows to a
+    # seventh (`infra`); the derivation contract is unchanged.
+    assert _write_surface_scan_dirs() == ("apps", "services", "workers", "packages", "scripts", "db", "infra")
+    assert "infra/**" in _write_surface_root_globs()
+    assert _write_surface_future_probes()["infra"] == "infra/brand_new_thing.py"
+    with pytest.raises(AssertionError, match=r"missing \['infra/\*\*'\]"):
         _assert_write_surface_roots_match(live)
 
 
@@ -11347,19 +11647,361 @@ def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
             _write_surface_scan_dirs()
 
 
+def _write_surface_sql_roots() -> tuple[str, ...]:
+    """The selector's `.sql` write-surface root globs, read lazily (pre-change red runs)."""
+    from scripts.select_ci_tests import RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS
+
+    return RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS
+
+
+def _write_surface_sql_root_globs(path: str = WRITE_SURFACE_SCAN_PATH) -> set[str]:
+    """The scan's own SQL_DIRS binding mapped to `<dir>/**` (same derivation shape)."""
+    return {f"{directory}/**" for directory in _module_level_string_sequence(path, "SQL_DIRS")}
+
+
+def test_write_surface_sql_roots_derive_from_the_scan_sql_dirs() -> None:
+    # #2154: the scan reads `*.sql` statement text under its SQL_DIRS; the
+    # selector's `.sql` roots must be exactly that set, never a second list.
+    expected = _write_surface_sql_root_globs()
+    roots = set(_write_surface_sql_roots())
+    assert roots == expected, (
+        f"{WRITE_SURFACE_SCAN_PATH}: the selector's .sql roots and the scan's SQL_DIRS disagree -- "
+        f"missing {sorted(expected - roots)}, unexpected {sorted(roots - expected)}"
+    )
+    # Every SQL root is also a Python root: the scan walks db/ both ways.
+    assert roots <= set(_write_surface_roots()), sorted(roots - set(_write_surface_roots()))
+
+
+def test_write_surface_routing_selects_the_scan_for_sql_under_db_only() -> None:
+    # #2154: a data-fix migration is a write surface, so a `.sql` change under
+    # db/ must run the scan. `.sql` the scan never reads must not.
+    for probe in ("db/migrations/x.sql", "db/roles/brand_new_roles.sql"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH in selected, f"{probe}: does not select {WRITE_SURFACE_SCAN_PATH}"
+    for probe in (
+        "tests/fixtures/brand_new_fixture.sql",
+        "openspec/changes/x/evidence/probe.sql",
+        "scripts/brand_new_query.sql",
+        "db/migrations/README.md",
+    ):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH not in selected, f"{probe}: must not select {WRITE_SURFACE_SCAN_PATH}"
+
+
+def test_write_surface_sql_routing_reds_when_the_sql_root_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2154 mutant: the `.sql` leg reads the constant, not an inlined glob, and
+    # a `.py` under db/ still routes through the Python leg when it is dropped.
+    from scripts import select_ci_tests
+
+    monkeypatch.setattr(select_ci_tests, "RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS", ())
+
+    dropped = set(select_tests(["db/migrations/x.sql"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH not in dropped, (
+        f"emptying RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS left {WRITE_SURFACE_SCAN_PATH} selected for a .sql path"
+    )
+    retained = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH in retained
+
+
 def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_path: Path) -> None:
     # #2185's one semantic flip, pinned where its cost actually lands. Before
-    # this change `apps/__init__.py` selected nothing, so ci.yml's `count == 0`
+    # that change `apps/__init__.py` selected nothing, so ci.yml's `count == 0`
     # branch ran the zero-assertion full-tree collect-only smoke. It now selects
-    # exactly the scan, so the targeted branch runs instead. Neither carve-out
-    # re-arms the smoke: the one element is not the selector meta-guard suite,
-    # and neither the selector source nor its suite is in such a diff.
+    # the supplemental scans, so the targeted branch runs instead. Neither
+    # carve-out re-arms the smoke: neither element is the selector meta-guard
+    # suite, and neither the selector source nor its suite is in such a diff.
+    # #1627 added the SECOND supplemental scan over `apps/**` (the path
+    # canonicalisation family guard), so the selection is the two of them —
+    # still the targeted branch, one more assertion-bearing suite.
     fields = _github_output_fields(tmp_path, ["apps/__init__.py"], repo_root=Path("."))
 
-    assert fields["count"] == "1"
-    assert fields["tests"] == WRITE_SURFACE_SCAN_PATH
+    assert fields["count"] == "2"
+    assert fields["tests"] == " ".join(sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH}))
     assert fields["meta_guard_only"] == "false"
     assert fields["collection_smoke_required"] == "false"
+
+
+# --------------------------------------------------------------------------
+# #1627 path-canonicalisation family-guard routing meta-guards (ADR 0009)
+# --------------------------------------------------------------------------
+
+# The family guard's repo-relative path, spelled locally for the same reason
+# INVARIANT_SUITE_PATH and WRITE_SURFACE_SCAN_PATH above are: this module must
+# still import against PRE-change selector source, where the production
+# constant does not exist yet. It is also the path _family_guard_scan_roots()
+# parses, and it is deliberately RELATIVE — the fixture-copy tests below chdir
+# into a tmp_path holding a repo-shaped copy, which an absolute or
+# REPO_ROOT-joined default would silently bypass. An anchor test keeps the
+# literal in sync with the constant.
+FAMILY_GUARD_PATH = "tests/test_path_canonicalization_family_guard.py"
+
+
+def _family_guard_roots() -> tuple[str, ...]:
+    """The selector's family-guard root globs, read lazily from the source.
+
+    Lazy (function-level import) so pre-change-source red runs can still
+    exercise the routing tests without the constant existing.
+    """
+    from scripts.select_ci_tests import PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS
+
+    return PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS
+
+
+def test_family_guard_literal_anchors_to_the_selector_constant() -> None:
+    # The local FAMILY_GUARD_PATH literal and the production constant must
+    # agree, and the suite must exist on disk — otherwise `select_tests` would
+    # drop the target as missing and every routing assertion below would be
+    # asserting against a suite that never runs.
+    from scripts.select_ci_tests import PATH_CANONICALIZATION_FAMILY_GUARD_TEST
+
+    assert FAMILY_GUARD_PATH == PATH_CANONICALIZATION_FAMILY_GUARD_TEST
+    assert Path(FAMILY_GUARD_PATH).is_file()
+
+
+# The family guard's scan surface, read from the guard's OWN module-level
+# `_SCAN_ROOTS` binding (the authority) rather than frozen a second time here.
+# That binding is a module-level AnnAssign of a tuple of string constants —
+# the #2185 PRODUCTION_DIRS shape, NOT the #1656 `_scan_roots` FunctionDef
+# shape — so the derivation is _module_level_string_sequence above, reused by
+# binding name and keeping all four of its loud-fail guards:
+# exactly one `ast.Name` store of the name anywhere in the module (so a legal
+# rewrite such as `_SCAN_ROOTS = _SCAN_ROOTS + ("scripts",)`, or an `if`-nested
+# or `for`-target rebind, cannot leave a stale first-match read agreeing with
+# the selector while the guard really walks five roots); that store being a
+# module-level Assign/AnnAssign; a tuple/list of string constants; non-empty.
+# A rewrite into a shape the derivation cannot read FAILS LOUDLY naming
+# `_SCAN_ROOTS`, it never returns an empty set that would make every assertion
+# below vacuously true.
+def _family_guard_scan_roots(path: str = FAMILY_GUARD_PATH) -> tuple[str, ...]:
+    return _module_level_string_sequence(path, "_SCAN_ROOTS")
+
+
+def _family_guard_root_globs() -> set[str]:
+    """The guard's `_SCAN_ROOTS` mapped to the glob spelling the selector uses.
+
+    The guard's `_iter_python_sources` rglobs `REPO_ROOT / <root>`; the selector
+    matches repo-relative fnmatch globs, where `*` also matches `/`. So each
+    root maps to `<root>/**` at FULL width — `packages/**` and `apps/**`
+    included, exactly as RIVER_SEGMENT_WRITE_SURFACE_ROOTS spells them and
+    unlike TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS' narrower `packages/common/**`.
+    """
+    return {f"{root}/**" for root in _family_guard_scan_roots()}
+
+
+def _family_guard_future_probes() -> dict[str, str]:
+    """A future-shaped probe path per scanned root, keyed by root.
+
+    Derived rather than written out, so a fifth root added to the guard's
+    `_SCAN_ROOTS` grows a probe here instead of going untested.
+    """
+    return {root: f"{root}/brand_new_thing.py" for root in _family_guard_scan_roots()}
+
+
+def _assert_family_guard_roots_match(roots: Sequence[str]) -> None:
+    """Assert ``roots`` equals the globs derived from the guard's own source.
+
+    Set EQUALITY, naming the offending roots in both directions: a root added to
+    `_SCAN_ROOTS` without wiring reds as `missing` (a new canonicalisation site
+    under that root would otherwise never reach the merge gate), and a
+    root left in the selector after the guard stops scanning it reds as
+    `unexpected` (dead routing costs CI time and lies about coverage).
+    """
+    expected = _family_guard_root_globs()
+    missing = sorted(expected - set(roots))
+    unexpected = sorted(set(roots) - expected)
+    assert not missing and not unexpected, (
+        f"{FAMILY_GUARD_PATH}: the selector's roots and the guard's _SCAN_ROOTS "
+        f"disagree -- missing {missing}, unexpected {unexpected}"
+    )
+
+
+def test_family_guard_roots_derive_from_the_guard_scan_roots() -> None:
+    # #1627: the four supplemental roots must equal the guard's own _SCAN_ROOTS
+    # set (as globs), never a second frozen list. Adding a root to the scan
+    # without wiring it here reddens by that root's name.
+    _assert_family_guard_roots_match(_family_guard_roots())
+
+
+def _family_guard_roots_violations(roots: Sequence[str], *, probe: str) -> list[str]:
+    """Positive oracle: missing family-guard root coverage, naming the root.
+
+    ``roots`` are the root globs under test; the expected set is the INDEPENDENT
+    ``_family_guard_root_globs()`` derived from the guard's own `_SCAN_ROOTS` --
+    never the monkeypatched production constant. Returns a violation naming each
+    expected root absent from ``roots``, plus (if ``probe`` matches none of
+    ``roots``) a violation naming the probe. Live state yields an empty list; a
+    mutant that drops ``services/**`` yields a named violation through this SAME
+    helper. Every message embeds the suite path as a formatted value, so the red
+    names the suite without relying on pytest's assertion rewriting.
+    """
+    expected = _family_guard_root_globs()
+    violations: list[str] = []
+    if not any(fnmatch.fnmatch(probe, root) for root in roots):
+        violations.append(f"probe {probe} is covered by no root routing {FAMILY_GUARD_PATH}")
+    for root in sorted(expected - set(roots)):
+        violations.append(f"root {root} is missing from the routing of {FAMILY_GUARD_PATH}")
+    return violations
+
+
+def test_family_guard_routing_is_set_union_over_every_derived_root() -> None:
+    # #1627: every module ADR 0009's census names as a canonicalisation site,
+    # plus a FUTURE-shaped probe DERIVED from the guard's own _SCAN_ROOTS (one
+    # per scanned root), selects the family guard IN ADDITION to its ordinary
+    # selection. Before this routing existed each of these selected 7-55 tests
+    # and never the guard, so a new site with only a non-strict call was green
+    # on the merge gate and caught only by the post-merge master run.
+    named = (
+        "services/orchestrator/scheduler_preflight.py",
+        "services/orchestrator/scheduler_runtime_roots.py",
+        "services/orchestrator/scheduler_config/path_modes.py",
+        "services/orchestrator/scheduler_config/db_free.py",
+        "services/orchestrator/journal_scope_census.py",
+        "packages/common/shud_preflight.py",
+        "workers/model_registry/basins_discovery.py",
+    )
+    for module in named:
+        assert Path(module).is_file(), f"named canonicalisation module missing: {module} -- the probe is stale"
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert FAMILY_GUARD_PATH in selected, f"{module}: does not select {FAMILY_GUARD_PATH}"
+
+    for root, probe in sorted(_family_guard_future_probes().items()):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert FAMILY_GUARD_PATH in selected, f"{probe} (scanned root {root!r}): does not select {FAMILY_GUARD_PATH}"
+
+    # Negatives. `apps/frontend/src/main.ts` is under a scanned root but is not
+    # Python; `openspec/tools/x.py` is Python outside every scanned root.
+    for probe in ("apps/frontend/src/main.ts", "openspec/tools/x.py"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert FAMILY_GUARD_PATH not in selected, f"{probe}: must not select {FAMILY_GUARD_PATH}"
+
+    # `scripts/**` and `db/**` are spelled as LITERALS: both are roots of a
+    # SIBLING supplemental scan and neither is scanned by this guard (ADR 0009
+    # records that scripts/, db/ and infra/ hold zero real call sites). Each
+    # must refuse this route while keeping the sibling route it does own.
+    scripts_selected = set(select_tests(["scripts/brand_new_thing.py"], repo_root=Path(".")))
+    assert FAMILY_GUARD_PATH not in scripts_selected, (
+        f"scripts/brand_new_thing.py: scripts/ is not a scanned root, it must not select {FAMILY_GUARD_PATH}"
+    )
+    assert WRITE_SURFACE_SCAN_PATH in scripts_selected, (
+        f"scripts/brand_new_thing.py lost the sibling #2185 route while refusing {FAMILY_GUARD_PATH}"
+    )
+    db_selected = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
+    assert FAMILY_GUARD_PATH not in db_selected, (
+        f"db/brand_new_thing.py: db/ is not a scanned root, it must not select {FAMILY_GUARD_PATH}"
+    )
+    assert INVARIANT_SUITE_PATH in db_selected, (
+        f"db/brand_new_thing.py lost the sibling #1656 route while refusing {FAMILY_GUARD_PATH}"
+    )
+
+    # Live state: the same positive oracle the mutant test uses reports nothing.
+    live_violations = _family_guard_roots_violations(_family_guard_roots(), probe="services/brand_new_thing.py")
+    assert not live_violations, f"live routing of {FAMILY_GUARD_PATH} has violations: {live_violations}"
+
+
+def test_family_guard_routing_reds_when_a_root_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #1627 mutant, in two legs. Leg (a): the SAME positive oracle the live test
+    # uses reports the dropped root by name. Leg (b): dropping the root from the
+    # CONSTANT changes what select_tests returns — which is what makes the
+    # constant the live routing authority rather than a description of it. An
+    # implementation that spells the roots inline in the routing loop passes
+    # leg (a) and fails leg (b). Constructed via monkeypatch on the selector
+    # module; tracked source untouched.
+    from scripts import select_ci_tests
+
+    live = _family_guard_roots()
+    assert "services/**" in live
+    reduced = tuple(root for root in live if root != "services/**")
+    monkeypatch.setattr(select_ci_tests, "PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS", reduced)
+
+    violations = _family_guard_roots_violations(reduced, probe="services/brand_new_thing.py")
+    assert any("services/**" in v for v in violations), f"expected a named services/** violation, got {violations}"
+
+    dropped = set(select_tests(["services/brand_new_thing.py"], repo_root=Path(".")))
+    assert FAMILY_GUARD_PATH not in dropped, (
+        f"dropping services/** from PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS left "
+        f"{FAMILY_GUARD_PATH} selected: the routing loop reads inlined roots, not the constant"
+    )
+    retained = set(select_tests(["workers/brand_new_thing.py"], repo_root=Path(".")))
+    assert FAMILY_GUARD_PATH in retained, (
+        f"dropping services/** also stopped a RETAINED root from selecting {FAMILY_GUARD_PATH}"
+    )
+
+
+def _write_family_guard_fixture(root: Path, source: str) -> Path:
+    """Write a repo-shaped COPY of the guard under ``root`` and return ``root``.
+
+    `_parse_tracked` keys its cache on the RESOLVED path, so a copy under a
+    tmp_path is a distinct key from the tracked file: the fixture-copy tests
+    below never read, write or invalidate the tracked guard.
+    """
+    target = root / FAMILY_GUARD_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    return root
+
+
+def test_family_guard_derivation_grows_with_a_fifth_scanned_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1627 derivation robustness: a guard copy naming a FIFTH root must grow
+    # the derived root set and the derived probe set, and must red the equality
+    # assertion against the unchanged selector constant, by that root's name.
+    # This is the exact scenario the finding is about — widening the scan
+    # without widening the routing leaves the new root's canonicalisation sites
+    # off the merge gate.
+    live = _family_guard_roots()
+    monkeypatch.chdir(
+        _write_family_guard_fixture(
+            tmp_path,
+            '_SCAN_ROOTS: tuple[str, ...] = ("services", "workers", "packages", "apps", "scripts")\n',
+        )
+    )
+
+    assert _family_guard_scan_roots() == ("services", "workers", "packages", "apps", "scripts")
+    assert "scripts/**" in _family_guard_root_globs()
+    assert _family_guard_future_probes()["scripts"] == "scripts/brand_new_thing.py"
+    with pytest.raises(AssertionError, match=r"missing \['scripts/\*\*'\]"):
+        _assert_family_guard_roots_match(live)
+
+
+def test_family_guard_derivation_rejects_unreadable_scan_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1627 derivation robustness: a `_SCAN_ROOTS` rewritten into a shape the
+    # derivation cannot read must fail loudly naming `_SCAN_ROOTS`, never return
+    # an empty set that would make `_assert_family_guard_roots_match` and every
+    # probe below it vacuously true. Six shapes, each a real rewrite:
+    # a comprehension-built value and a `tuple(sorted(...))` call (no literal to
+    # read); the name absent entirely (renamed); a second module-level binding
+    # and an augmented rebind (both stale under a first-match read, and both
+    # still equal to the selector constant so nothing else would red); and a
+    # rebind nested in an `if` body, whose single store is not a module-level
+    # Assign/AnnAssign. Each fixture gets its own directory so the parses cannot
+    # share a `_parse_tracked` key.
+    for case, source in (
+        ("comprehension", '_SCAN_ROOTS = tuple(name for name in ("services", "workers"))\n'),
+        ("computed", '_SCAN_ROOTS = tuple(sorted({"services", "workers"}))\n'),
+        ("absent", '_SCANNED_ROOTS = ("services", "workers")\n'),
+        (
+            "double-binding",
+            '_SCAN_ROOTS = ("services", "workers", "packages", "apps")\n_SCAN_ROOTS = _SCAN_ROOTS + ("scripts",)\n',
+        ),
+        (
+            "augmented",
+            '_SCAN_ROOTS = ("services", "workers", "packages", "apps")\n_SCAN_ROOTS += ("scripts",)\n',
+        ),
+        (
+            "lone-nested",
+            'import os\n\nif os.environ.get("NHMS_X"):\n    _SCAN_ROOTS = ("services", "workers")\n',
+        ),
+    ):
+        monkeypatch.chdir(_write_family_guard_fixture(tmp_path / case, source))
+        with pytest.raises(AssertionError, match="_SCAN_ROOTS"):
+            _family_guard_scan_roots()
 
 
 # The #1744 shared-library additivity authority: `packages/common/**` must
@@ -11687,6 +12329,10 @@ def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
     # the derived set, so a derivation that collapses to silence reds here.
     assert "tests/test_direct_grid_display_cutover_flip.py" in required
     assert "tests/test_openapi_31_contract.py" in required
+    # #2156 (D-2): the geometry-identity suite is a direct importer carrying the
+    # real _run_row / _river_network_source_version SQL; pinned by name so its
+    # routing cannot fall out with the derivation.
+    assert "tests/test_mvt_run_and_river_network_geometry_identity.py" in required
 
     selected = set(select_tests(["apps/api/routes/hydro_display.py"], repo_root=Path(".")))
     missing = required - selected
@@ -12932,6 +13578,28 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_orchestration_chain.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+
+
+def test_lineage_state_index_fixtures_rule_selects_its_exact_suites() -> None:
+    # #1827, same rot as the demote anchor above. The #1735 lineage index
+    # builders are consumed by four suites, two of which
+    # (tests/test_scheduler_generation.py, tests/test_state_manager_generation_
+    # history.py) import them inside a function body, so the derived importer
+    # closure — which reads module-level statements only — cannot see them. The
+    # generic parametrized test above derives `required` from
+    # SUPPORT_MODULE_TEST_RULES itself, so deleting either function-body target
+    # from the rule shrinks both sides and stays green while a helper-only PR
+    # silently stops running that consumer's regressions. This exact-set anchor
+    # is written as literals ON PURPOSE: it must never be derived from the rule
+    # table it is pinning.
+    selected = set(select_tests(["tests/lineage_state_index_fixtures.py"], repo_root=Path(".")))
+    assert selected == {
+        "tests/test_scheduler_backfill.py",
+        "tests/test_scheduler_lineage.py",
+        "tests/test_scheduler_generation.py",
+        "tests/test_state_manager_generation_history.py",
         SELECTOR_META_GUARD_TEST,
     }
 
@@ -17650,3 +18318,31 @@ def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
     assert "tests/test_node27_pgdata_workload_io.py" in selected
     assert set(CORE_SMOKE_TESTS) <= selected
 
+
+
+@pytest.mark.parametrize(
+    ("path", "owners"),
+    [
+        (
+            "scripts/node27_unit_failure_alert_once.sh",
+            {
+                "tests/test_node27_timeseries_retention.py",
+                "tests/test_node27_working_set.py",
+                "tests/test_node27_raw_retention_canonical_deployment.py",
+            },
+        ),
+        (
+            "scripts/node27_canonical_retention_install.sh",
+            {"tests/test_node27_raw_retention_canonical_deployment.py"},
+        ),
+    ],
+)
+def test_node27_raw_retention_split_scripts_select_their_readers(path: str, owners: set[str]) -> None:
+    """#2360 — both shell scripts used to fall to core smoke only (no row named
+    them), so a handler- or installer-only diff ran none of the suites that
+    drive them.
+    """
+    selected = set(select_tests([path], repo_root=Path(".")))
+
+    assert owners <= selected, f"{path} lost reader suite(s): {sorted(owners - selected)}"
+    assert not set(CORE_SMOKE_TESTS) & selected, f"{path} still degrades to core smoke"

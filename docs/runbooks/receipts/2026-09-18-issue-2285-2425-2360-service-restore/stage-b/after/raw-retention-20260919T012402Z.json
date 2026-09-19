@@ -1,0 +1,517 @@
+{
+  "anchor": {
+    "decision": "issue-1407-keep-watermark-anchor",
+    "frontier_active_lower_bound": null,
+    "mode": "display_watermark",
+    "reference_time": "2026-09-18T00:00:00Z",
+    "residual_risk": "backfill cycles older than watermark - retention_days are unprotected"
+  },
+  "canonical_root": "/home/ghdc/nwm/object-store/canonical",
+  "copyback_lock_failures": {
+    "lock_budget_exhausted": 0,
+    "lock_timeout": 0,
+    "lock_unsafe": 0
+  },
+  "counts": {
+    "deleted": 14,
+    "failed": 0,
+    "planned": 14,
+    "skipped": 61
+  },
+  "cutoff": "2026-09-04T00:00:00Z",
+  "deleted": [
+    {
+      "cycle_time": "2026-08-31T12:00:00Z",
+      "key": "canonical/gfs/2026083112",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026083112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794357,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-01T00:00:00Z",
+      "key": "canonical/gfs/2026090100",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090100",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794551,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-01T12:00:00Z",
+      "key": "canonical/gfs/2026090112",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794162,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-02T00:00:00Z",
+      "key": "canonical/gfs/2026090200",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090200",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794554,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-02T12:00:00Z",
+      "key": "canonical/gfs/2026090212",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090212",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67793795,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "canonical/gfs/2026090300",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090300",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794661,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "canonical/gfs/2026090312",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090312",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794156,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-08-31T12:00:00Z",
+      "key": "canonical/IFS/2026083112",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026083112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007034,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-01T00:00:00Z",
+      "key": "canonical/IFS/2026090100",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090100",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007211,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-01T12:00:00Z",
+      "key": "canonical/IFS/2026090112",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007212,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-02T00:00:00Z",
+      "key": "canonical/IFS/2026090200",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090200",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007036,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-02T12:00:00Z",
+      "key": "canonical/IFS/2026090212",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090212",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007213,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "canonical/IFS/2026090300",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090300",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007387,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "canonical/IFS/2026090312",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090312",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007388,
+      "source": "IFS"
+    }
+  ],
+  "dry_run": false,
+  "enabled": true,
+  "execution_mode": "production_execute",
+  "failed": [],
+  "finished_at": "2026-09-19T01:24:02Z",
+  "freed_bytes": 922610717,
+  "lanes": [
+    "canonical"
+  ],
+  "object_store_root": "/home/ghdc/nwm/object-store",
+  "planned": [
+    {
+      "cycle_time": "2026-08-31T12:00:00Z",
+      "key": "canonical/gfs/2026083112",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026083112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794357,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-01T00:00:00Z",
+      "key": "canonical/gfs/2026090100",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090100",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794551,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-01T12:00:00Z",
+      "key": "canonical/gfs/2026090112",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794162,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-02T00:00:00Z",
+      "key": "canonical/gfs/2026090200",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090200",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794554,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-02T12:00:00Z",
+      "key": "canonical/gfs/2026090212",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090212",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67793795,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "canonical/gfs/2026090300",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090300",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794661,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "canonical/gfs/2026090312",
+      "path": "/home/ghdc/nwm/object-store/canonical/gfs/2026090312",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 67794156,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-08-31T12:00:00Z",
+      "key": "canonical/IFS/2026083112",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026083112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007034,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-01T00:00:00Z",
+      "key": "canonical/IFS/2026090100",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090100",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007211,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-01T12:00:00Z",
+      "key": "canonical/IFS/2026090112",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090112",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007212,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-02T00:00:00Z",
+      "key": "canonical/IFS/2026090200",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090200",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007036,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-02T12:00:00Z",
+      "key": "canonical/IFS/2026090212",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090212",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007213,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "canonical/IFS/2026090300",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090300",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007387,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "canonical/IFS/2026090312",
+      "path": "/home/ghdc/nwm/object-store/canonical/IFS/2026090312",
+      "reason": "canonical_cycle_aged_out",
+      "size_bytes": 64007388,
+      "source": "IFS"
+    }
+  ],
+  "precip_cache_root": "/home/nwm/.cache/nhms/mvt",
+  "raw_root": "/home/ghdc/nwm/object-store/raw",
+  "reference_time": "2026-09-18T00:00:00Z",
+  "retention_days": 14,
+  "schema_version": "nhms.node27_raw_retention.production.v5",
+  "skipped": [
+    {
+      "key": "raw",
+      "reason": "lane_not_selected"
+    },
+    {
+      "key": "canonical/gfs/2026090400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090900",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026090912",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091000",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091012",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091100",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091112",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091200",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091212",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091300",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091312",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/2026091800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/gfs/grid",
+      "reason": "grid_definitions_preserved"
+    },
+    {
+      "key": "canonical/IFS/2026090400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090900",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026090912",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091000",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091012",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091100",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091112",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091200",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091212",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091300",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091312",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/2026091800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical/IFS/grid",
+      "reason": "grid_definitions_preserved"
+    },
+    {
+      "key": "precip-cache",
+      "reason": "lane_not_selected"
+    }
+  ],
+  "sources": [
+    "gfs",
+    "ifs"
+  ],
+  "started_at": "2026-09-19T01:24:02Z",
+  "status": "completed"
+}

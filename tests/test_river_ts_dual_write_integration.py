@@ -1,7 +1,17 @@
-"""Disposable-database coverage of narrow writes and compressed-key access."""
+"""Disposable-database coverage of narrow writes and compressed-key access.
+
+Migration pins here are load-bearing. Cases that read or write
+``hydro.river_timeseries_legacy`` / ``hydro_run.timeseries_store``, or that
+replay 000059's own SQL, stop at ``through="000059"``: 000060 (the #1988
+contract) drops both objects, and an unpinned ``apply_migrations_from_zero``
+would carry the catalog past the transitional world those cases are about.
+Cases that only exercise the post-contract surface stay unpinned on purpose, so
+they keep running against the final schema.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,10 +60,23 @@ def _connect(database_url: str) -> Any:
 
 
 def _scalar(connection: Any, sql: str, params: Any = None) -> Any:
+    """First column of the first row, whatever cursor factory the caller owns.
+
+    Most of this module reads through ``_connect``'s ``RealDictCursor``, but the
+    decline tests drive ``scripts.node27_autopipeline._declined_runs``, which
+    indexes its rows POSITIONALLY (``row[0]``/``row[1]``/``row[2]``,
+    ``scripts/node27_autopipeline.py:1075``) — a ``RealDictRow`` would raise
+    ``KeyError: 0`` there, so those tests must own a TUPLE cursor.
+    Branching here keeps one helper for both, the same way ``_explain``
+    (``tests/test_river_timeseries_stats_index_choice_integration.py:433``)
+    does it.
+    """
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
         row = cursor.fetchone()
-    return None if row is None else next(iter(row.values()))
+    if row is None:
+        return None
+    return next(iter(row.values())) if isinstance(row, Mapping) else row[0]
 
 
 def _rows(connection: Any, sql: str, params: Any = None) -> list[dict[str, Any]]:
@@ -166,7 +189,7 @@ def _parse(database_url: str, root: Path) -> Any:
 @pytest.fixture()
 def parsed_run(throwaway_database_url: str, tmp_path: Path) -> Any:
     """A migrated database with authority rows and one parsed run."""
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = _connect(throwaway_database_url)
     _seed_authority(connection, output_uri=f"{_OBJECT_STORE_PREFIX}/runs/{_RUN_ID}/output/")
     result = _parse(throwaway_database_url, tmp_path / "object-store")
@@ -220,20 +243,38 @@ def test_parse_and_replay_write_only_narrow_facts(
     assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries") == 12
 
 
-def test_legacy_refusal_preserves_facts_and_parse_timestamp(
+def test_the_retired_routing_column_no_longer_gates_the_narrow_write(
     parsed_run: Any, throwaway_database_url: str, tmp_path: Path
 ) -> None:
-    from workers.output_parser.parser import LegacyStoreWriteRefused
+    """#1342's contract (task 6.3): a ``legacy`` run is written, not refused.
 
+    The writer used to ``SELECT timeseries_store ... FOR UPDATE`` and raise
+    ``LegacyStoreWriteRefused`` on ``legacy``, leaving the run's facts and its
+    ``parsed_at`` untouched. The column is dropped by task 6.2 and is dead
+    weight until then, so the writer no longer reads it: the same run, with the
+    column still set to ``legacy``, parses normally.
+
+    The column is still SET here on purpose — it exists in the schema until
+    6.2, and a test that could not set it would not be testing that the writer
+    ignores it. What replaced the refusal is the row lock and the existence
+    check, and those are still exercised: the write below takes the same
+    ``FOR UPDATE`` path.
+    """
     connection, _result = parsed_run
     before = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key")
     stamp = _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (_RUN_ID,))
     with connection.cursor() as cursor:
         cursor.execute("UPDATE hydro.hydro_run SET timeseries_store = 'legacy' WHERE run_id = %s", (_RUN_ID,))
-    with pytest.raises(LegacyStoreWriteRefused):
-        _parse(throwaway_database_url, tmp_path / "refused")
-    assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key") == before
-    assert _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (_RUN_ID,)) == stamp
+
+    result = _parse(throwaway_database_url, tmp_path / "replayed")
+
+    assert result.rows_written == len(before)
+    after = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key")
+    assert [row["value"] for row in after] == [row["value"] for row in before]
+    assert len(after) == len(before)
+    # The write ran, so the parse stamp advanced — the half the refusal used to
+    # hold back. `parsed_at` is set by the writer without reading the column.
+    assert _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (_RUN_ID,)) > stamp
 
 
 def test_expand_replay_does_not_reclassify_a_new_parse(parsed_run: Any) -> None:
@@ -395,7 +436,7 @@ def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
 
 @pytest.fixture()
 def compressed_history(throwaway_database_url: str) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = _connect(throwaway_database_url)
     try:
         yield connection, _seed_compressed_history_and_new_run(connection)
@@ -577,7 +618,7 @@ def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
         assert _scalar(connection, "SELECT count(*) FROM information_schema.columns "
                        "WHERE table_schema='hydro' AND table_name='hydro_run' "
                        "AND column_name='timeseries_store'") == 0
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         _parse(throwaway_database_url, tmp_path)
         facts = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time")
         assert len(facts) == _SEGMENTS * _HOURS
@@ -591,25 +632,50 @@ def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
         connection.close()
 
 
-def test_legacy_decline_reopens_only_after_authority_becomes_narrow(
-    throwaway_database_url: str,
+def test_a_historical_legacy_decline_is_governed_by_its_key_not_by_the_column(
+    throwaway_database_url: str, tmp_path: Path,
 ) -> None:
-    from scripts.node27_autopipeline import _declined_runs
+    """The integration twin of the M2 unit boundary, against real SQL.
 
-    apply_migrations_from_zero(throwaway_database_url)
+    A ``legacy_store_refused`` record used to suppress its run unconditionally,
+    and the routing column decided when it reopened. #1342's contract (task
+    6.3) made the reason code a dead vocabulary word: the record is governed by
+    ``(init_state_id, product_mtime)`` like every other, and the column — which
+    is still in the schema until task 6.2, and is set here to prove it — has no
+    say. A real database is the oracle for the statement's own semantics, which
+    is why this is asserted here and not only against the cursor double.
+    """
+    from scripts.node27_autopipeline import _decline_key, _declined_runs
+
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
+    # NOT `_connect`: `_declined_runs` reads its rows positionally (`row[0]`),
+    # which is how the production cursor behaves and what a `RealDictRow` would
+    # turn into `KeyError: 0`. `_scalar` handles both row shapes.
     connection = psycopg2.connect(throwaway_database_url)
     try:
         _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        product = tmp_path / "runs" / _RUN_ID / "output" / "fixture.rivqdown"
+        product.parent.mkdir(parents=True)
+        product.write_text("1,2\n")
+        key = _decline_key(tmp_path, _RUN_ID)
+        assert key is not None
         with connection.cursor() as cursor:
             cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE run_id=%s", (_RUN_ID,))
             cursor.execute(
                 "INSERT INTO ops.ingest_recompute_decline "
                 "(run_id, init_state_id, product_mtime, reason_code, detail) "
-                "VALUES (%s, '', 1, 'legacy_store_refused', 'fixture')", (_RUN_ID,),
+                "VALUES (%s, %s, %s, 'legacy_store_refused', 'fixture')", (_RUN_ID, key[0], key[1]),
             )
-            assert _declined_runs(cursor, [_RUN_ID], None) == {_RUN_ID}
-            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='narrow' WHERE run_id=%s", (_RUN_ID,))
-            assert _declined_runs(cursor, [_RUN_ID], None) == set()
+            # Key matches: suppressed, exactly as any other reason code would be.
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
+            # Key changed: re-queued, even though the run is still marked legacy.
+            cursor.execute(
+                "UPDATE ops.ingest_recompute_decline SET product_mtime = product_mtime + 10 WHERE run_id=%s",
+                (_RUN_ID,),
+            )
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+            assert _scalar(connection, "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id=%s",
+                           (_RUN_ID,)) == "legacy"
     finally:
         connection.rollback()
         connection.close()
@@ -636,7 +702,7 @@ def test_expand_classifies_preexisting_authority_without_overrides(throwaway_dat
             {"run_id": "run_dual_write", "timeseries_store": "legacy"},
             {"run_id": "running_only", "timeseries_store": "narrow"},
         ]
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         for _ in range(2):
             assert _rows(connection, "SELECT run_id, timeseries_store FROM hydro.hydro_run ORDER BY run_id") == expected
             with connection.cursor() as cursor:
@@ -682,7 +748,7 @@ def test_expand_preserves_preexisting_compressed_legacy_catalog(throwaway_databa
 
         before = snapshot("river_timeseries")
         assert before["chunks"] and all(row["is_compressed"] for row in before["chunks"])
-        apply_migrations_from_zero(throwaway_database_url)
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         assert snapshot("river_timeseries_legacy") == before
         assert _scalar(
             connection, "SELECT pg_get_userbyid(relowner) FROM pg_class "
@@ -730,10 +796,21 @@ def test_out_of_vocabulary_enum_literal_rejects_entire_narrow_write(parsed_run: 
     assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time") == before
 
 
-@pytest.mark.parametrize("first", ["legacy_store_refused", "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"])
-def test_real_decline_conflict_polarity_and_narrow_reentry(
+@pytest.mark.parametrize(
+    "first", ["OUTPUT_PARSE_IDENTITY_KEY_MISSING", "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"]
+)
+def test_real_decline_conflict_polarity_and_key_reentry(
     throwaway_database_url: str, tmp_path: Path, first: str,
 ) -> None:
+    """The decline race, against real SQL rather than a cursor double.
+
+    Three things at once, which is why it is one test: the upsert's polarity on
+    a repeated key (last write wins — #1342's contract, task 6.3, removed the
+    ``CASE`` that made ``legacy_store_refused`` permanent), the suppression rule
+    while the key is unchanged, and the reopen when the product's mtime moves.
+    Parametrised over which reason code lands first so the polarity claim is not
+    an artefact of one ordering.
+    """
     from scripts.node27_autopipeline import (
         _already_ingested_runs,
         _decline_key,
@@ -745,8 +822,6 @@ def test_real_decline_conflict_polarity_and_narrow_reentry(
     connection = psycopg2.connect(throwaway_database_url)
     try:
         _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
-        with connection.cursor() as cursor:
-            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE run_id=%s", (_RUN_ID,))
         connection.commit()
         product = tmp_path / "runs" / _RUN_ID / "output" / "fixture.rivqdown"
         product.parent.mkdir(parents=True)
@@ -754,35 +829,43 @@ def test_real_decline_conflict_polarity_and_narrow_reentry(
         key = _decline_key(tmp_path, _RUN_ID)
         assert key is not None
         compressed = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
+        other = "OUTPUT_PARSE_IDENTITY_KEY_MISSING" if first == compressed else compressed
 
         def record(reason: str) -> None:
             _record_recompute_decline(throwaway_database_url, run_id=_RUN_ID,
                                       init_state_id=key[0], product_mtime=key[1], reason_code=reason, detail=reason)
 
         record(first)
-        record(compressed if first == "legacy_store_refused" else "legacy_store_refused")
+        record(other)
         with connection.cursor() as cursor:
+            # One row per key, and the LAST reason code is the one on it. No
+            # reason code outranks another any more.
             cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
-            assert cursor.fetchone() == ("legacy_store_refused",)
-            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
-            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='narrow' WHERE run_id=%s", (_RUN_ID,))
-        connection.commit()
-        with connection.cursor() as cursor:
-            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
-        connection.commit()
-        record(compressed)
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
-            assert cursor.fetchone() == (compressed,)
+            assert cursor.fetchall() == [(other,)]
             assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
         assert _already_ingested_runs(throwaway_database_url, [_RUN_ID], object_store_root=tmp_path) == {_RUN_ID}
         connection.commit()
-        with pytest.raises(RuntimeError, match="stale"):
-            record("legacy_store_refused")
+
+        # The product moves: the key stops matching and the run re-enters the
+        # queue. This is the ONLY reopen condition now.
         import os
+
         os.utime(product, (key[1] + 10, key[1] + 10))
         with connection.cursor() as cursor:
             assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+        assert _already_ingested_runs(throwaway_database_url, [_RUN_ID], object_store_root=tmp_path) == set()
+
+        # A decline written against the NEW key suppresses again, and the stale
+        # record for the old key is still there — records are per key, and none
+        # of them is permanent.
+        new_key = _decline_key(tmp_path, _RUN_ID)
+        assert new_key is not None and new_key != key
+        _record_recompute_decline(throwaway_database_url, run_id=_RUN_ID, init_state_id=new_key[0],
+                                  product_mtime=new_key[1], reason_code=compressed, detail=compressed)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
+            assert cursor.fetchone() == (2,)
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
     finally:
         connection.close()
 
@@ -791,7 +874,7 @@ def test_seed_database_roundtrips_exact_river_authorities_postexpand(throwaway_d
     from db.seeds import seed_demo
     from tests.test_seed import _expected_river_seed_samples
 
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000059")
     connection = psycopg2.connect(throwaway_database_url)
     try:
         # Distinct identity domains make even cross-column key swaps visible.

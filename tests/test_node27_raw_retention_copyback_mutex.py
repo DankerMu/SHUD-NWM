@@ -103,6 +103,7 @@ def _production_env(monkeypatch: pytest.MonkeyPatch, *, store: Path, cache: Path
         "NODE27_RAW_RETENTION_SUMMARY_PATH",
         "NODE27_RAW_RETENTION_DAYS",
         "NODE27_RAW_RETENTION_SOURCES",
+        "NODE27_RAW_RETENTION_LANES",
         "NHMS_MVT_FILE_CACHE_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -439,6 +440,82 @@ def test_ef12_a_non_owner_with_no_lock_file_is_refused_without_creating_one(
     assert not (store / COPYBACK_BATCH_LOCK_NAME).exists()
     assert canonical.is_dir()
     assert not raw.exists()
+
+
+# --- #2360: the nwm unit's lanes never reach the lock --------------------------
+
+
+@pytest.mark.parametrize("lock_mode", [0o644, 0o000], ids=["unsafe-mode", "unopenable"])
+def test_the_nwm_unit_lanes_exclude_canonical_and_never_touch_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], lock_mode: int
+) -> None:
+    """Spec scenario "the nwm unit excludes the canonical lane".
+
+    The same lock that EF-12 turns into `lock_unsafe` + rc=1 above: with
+    `NODE27_RAW_RETENTION_LANES=raw,precip-cache` the aged canonical cycles are
+    one `lane_not_selected` skip, no acquisition is attempted, and the tick is
+    clean.
+    """
+    if lock_mode == 0o000 and os.geteuid() == 0:
+        pytest.skip("root opens any file mode, so the denial cannot be simulated")
+    store = _store(tmp_path)
+    cache = tmp_path / "cache"
+    raw = _raw_cycle(store, "gfs", "2026060100")
+    canonical = [_canonical_cycle(store, "IFS", cycle) for cycle in ("2026060100", "2026060112")]
+    aged_cache = _cache_cycle(cache, "IFS", "2026060100")
+    lock_file = store / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, lock_mode)
+    _production_env(monkeypatch, store=store, cache=cache)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "raw,precip-cache")
+    _forbid_acquisitions(monkeypatch)
+
+    try:
+        exit_code, payload = _main(capsys, REFERENCE_ARGS)
+    finally:
+        os.chmod(lock_file, 0o600)
+
+    assert exit_code == 0
+    assert payload["lanes"] == ["precip-cache", "raw"]
+    assert _keys(payload["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
+    assert payload["skipped"] == [{"key": "canonical", "reason": "lane_not_selected"}]
+    assert payload["failed"] == []
+    assert payload["copyback_lock_failures"] == ZERO_LOCK_FAILURES
+    assert not raw.exists()
+    assert not aged_cache.exists()
+    for tree in canonical:
+        assert (tree / "prcp_rate_or_amount").is_dir()
+
+
+def test_the_canonical_unit_takes_the_lock_once_per_canonical_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canonical-only run keeps the #2252 lock contract unchanged (MP4)."""
+    store = _store(tmp_path)
+    raw = _raw_cycle(store, "gfs", "2026060100")
+    canonical = [_canonical_cycle(store, "IFS", cycle) for cycle in ("2026060100", "2026060112")]
+    events: list[tuple[Any, ...]] = []
+    _record_lock_calls(monkeypatch, events)
+    config = node27_raw_retention.RawRetentionConfig(
+        object_store_root=store,
+        retention_days=14,
+        sources=frozenset({"gfs", "ifs"}),
+        summary_path=None,
+        lanes=frozenset({"canonical"}),
+    )
+
+    result = node27_raw_retention.run_retention(config, now=NOW)
+
+    assert _keys(result["deleted"]) == ["canonical/IFS/2026060100", "canonical/IFS/2026060112"]
+    assert events == [
+        ("acquire", str(store), "posix"),
+        ("release", "posix"),
+        ("acquire", str(store), "posix"),
+        ("release", "posix"),
+    ]
+    assert result["copyback_lock_failures"] == ZERO_LOCK_FAILURES
+    assert raw.is_dir()
+    assert all(not tree.exists() for tree in canonical)
 
 
 # --- EF-12b: the lock file is never a removal candidate ------------------------

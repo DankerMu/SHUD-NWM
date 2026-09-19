@@ -37,26 +37,91 @@ promoting cold requirements. GitHub records the actual issue-close events.
   exact-driver seats CLEAN. This is not a live compression tick, v3 replay
   PASS, privilege revocation, or data deletion.
 
-Observed live compression unit (do not delete these paths):
+Observed live compression unit as of the #1895 handoff (do not delete these
+paths). **2026-09-18 (#2285 / #2425, design D7):** #1895 is closed and its
+fence tree at `95481481` never receives fixes, so the unit is to be rebound
+(Stage B, after merge; procedure below) to the repo unit on `/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` under
+`/home/nwm/NWM`, env `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
+carried over from the fence env with `REPO_ROOT` rewritten to
+`/home/nwm/NWM`). The live env's bound moved 4 → 2 on 2026-09-18 (stage A,
+backup `…env.bak-bound4-20260918`). After the rebind the fence SOURCE, its
+`.venv` and STATE below are **rollback inputs**, not the active deployment —
+still retained, not deleted. Proof the rebind took: the next receipt's
+`head_sha` equals `git -C /home/nwm/NWM rev-parse HEAD` and
+`systemctl --user show -p DropInPaths` is empty.
 
 - WorkingDirectory / ExecStart / ExecStartPre SOURCE
   `/home/nwm/NWM-maintenance-reviewed-95481481` (including its `.venv`)
 - private live env
   `/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
-- wrapper 3900 s, wall 3941 s, statement 3600000 ms, bound 4, lag 172800 s
+- wrapper 3900 s, wall 3941 s, statement 3600000 ms, bound 4 (2 since
+  2026-09-18), lag 172800 s
 - original timer active/enabled baseline and compression deadline preserved
 - 92 protected identities unchanged
 - installed replay unit `absent-approved`; old cold env archived privately
 - source/templates and all private replay env/plan/ledger/terminal/consumed-finalizer/recovery evidence retained
 
-SOURCE, `.venv`, STATE/config and private replay/rollback archives are active
-deployment and recovery inputs, not disposable test evidence. Do not clean
-them. Governance and retention units were not rebound; business checkout SHA
+SOURCE, `.venv`, STATE/config and private replay/rollback archives were the
+active deployment at the #1895 handoff, stay active until the D7 rebind and
+are rollback and recovery inputs after it, not disposable test evidence. Do
+not clean them. Governance and retention units were not rebound; business checkout SHA
 `415cbd1e` is unchanged. No maintenance service was started by this handoff;
 no DB/schema/role change, `REVOKE`, `DROP`, tablespace/data deletion, or
 PGDATA/evidence/container-mount deletion is claimed. Unexpected leftover
 cold catalog/bind state still requires stop/preserve and a separately
 approved safe disposition.
+
+**Rebind to the repo unit (design D7, #2285).** As `nwm` on node-27, after
+`git pull --ff-only` in `/home/nwm/NWM`. Never print env values (no `cat` of
+either env file).
+
+```bash
+FENCE_ENV=/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env
+REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
+```
+
+1. `systemctl --user stop nhms-node27-timeseries-compression.timer`, then
+   `systemctl --user is-active nhms-node27-timeseries-compression.service`
+   must not print `active` or `activating` (a run in progress: wait for it to end).
+2. `cp -p "$REPO_ENV" "$REPO_ENV.bak-pre-rebind-$(date -u +%Y%m%d)"`.
+3. `install -m 0600 "$FENCE_ENV" "$REPO_ENV"`.
+4. `sed -i 's#^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=.*#NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM#' "$REPO_ENV"`.
+5. Each of these must print `1`; anything else: stop, restore the step-2
+   backup and restart the timer. The unit's `ExecStartPre` `--check` returns
+   before it resolves the runner root, so it cannot catch a fence `REPO_ROOT`.
+
+   ```bash
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/home/nwm/NWM/.nhms-issue1069-live/compression.lock$' "$REPO_ENV"
+   ```
+
+6. Budget preflight with the repo code against the new env, rc 0:
+   `/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py --compression-env "$REPO_ENV" --check`.
+7. `install -m 0644 /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service ~/.config/systemd/user/`
+   and `systemctl --user daemon-reload`.
+8. `diff ~/.config/systemd/user/nhms-node27-timeseries-compression.service /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service`
+   prints nothing, and
+   `systemctl --user show -p DropInPaths nhms-node27-timeseries-compression.service`
+   prints an empty `DropInPaths=`.
+9. `git -C /home/nwm/NWM diff --quiet HEAD --; echo $?` must print `0`: the enforce runner refuses a
+   checkout whose tracked files differ from HEAD (`freeze_head`, rc 1), so after the rebind no tracked
+   edit may be left in `/home/nwm/NWM` (keep receipts under `/home/nwm/tmp/`).
+10. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
+   after the next run: the receipt's `head_sha`
+   (`jq -r .head_sha /home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json`)
+   equals `git -C /home/nwm/NWM rev-parse HEAD`. A receipt with `outcome` `failed` and
+   `failure.stage` `freeze_head` means the checkout was dirty. Restarting the timer after a
+   missed 04:25Z elapse fires a `Persistent=` catch-up run immediately, so do
+   step 10 only when a run started now ends before the 06:36Z retention tick
+   (start by 05:30Z, the 3941 s wall) or after that retention tick has finished.
+
+Rollback: `install -m 0644` the pre-rebind unit kept at
+`/home/nwm/NWM/docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/stage-a/before/nhms-node27-timeseries-compression.service`
+into `~/.config/systemd/user/`, `systemctl --user daemon-reload`, restart the
+timer. The rebind does not touch the fence env, so rollback needs no env
+restore.
 
 Cold samples, I9, I8, issues #2162 and #2017 are not blanket retirement
 dependencies. Existing PGDATA, compression, retention, readonly/display,
@@ -119,6 +184,19 @@ even if the host date is later.
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`
 
 ## Three-day chunk geometry (#2210; requires migration rollout)
+
+**River half superseded 2026-09-19; forcing half still live.** `000058`'s
+3-day interval was set on the *then-canonical, text-identity*
+`hydro.river_timeseries` — the table `000059` renamed to
+`hydro.river_timeseries_legacy` and `000060` dropped on 2026-09-19 (receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+The live river store is the narrow table created by `000059` with
+`chunk_time_interval => interval '1 day'` (`000059:28-30`), measured after the
+contract window at **1 day**, 30 chunks, oldest `range_start`
+`2026-08-27T00:00Z`, newest `range_end` `2026-09-26T00:00Z`, 10 compressed.
+**Do not read 3 days (or 7) as current river geometry.**
+`met.forcing_station_timeseries` was never renamed or recreated; everything
+below still describes it, and its narrow expand is the deferred I12 work.
 
 Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
 **new** chunks of `hydro.river_timeseries` and `met.forcing_station_timeseries`
@@ -3384,11 +3462,16 @@ Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
 0600). Read them on the box before quoting any value; these are the deltas
 against the committed `.example` templates as of 2026-08-01:
 
-- **Compression per-tick bound.** No longer a drift: the committed template
-  and the deployed env both carry `=4` since issue #1237 decided it as a
-  capacity target (the box already ran `=4`; the template's stale `=5` was
-  the side that moved). Still read the live value off the box before quoting
-  it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
+- **Compression per-tick bound.** The committed template carries `=2` since
+  #2425 re-derived it on 2026-09-18 for the narrow one-day geometry; before
+  that it carried `=4` from #1237. The ACTIVE compression env today is the
+  fence env
+  `~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+  (bound `2` since Stage A, 2026-09-18);
+  `/home/nwm/NWM/infra/env/node27-timeseries-compression.env` becomes the
+  active one only after the D7 rebind (§ "Rebind to the repo unit").
+  Still read the live value off the box before quoting it. See §4 "Per-tick
+  capacity".
 - **Compression chunk-selection lag.**
   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
   box (re-confirmed 2026-08-14). The template now also ships `172800` under
@@ -3429,7 +3512,114 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
-### Per-tick capacity (live state 2026-08-14, decided in #1237)
+### Per-tick capacity (current: bound 2, re-derived 2026-09-18 in #2425; history from #1237)
+
+**Current decision (2026-09-18, #2425): `PER_TICK_BOUND=2`, newest-first
+within a hypertable.** This re-derivation replaces the 7-day-geometry numbers
+further down (`bound=4`, ~6.0 s/GB, 2 arrivals/week), which stay as historical
+evidence. Template, pin test (`tests/test_node27_timeseries_compression.py`),
+in-code direct-invocation default
+(`packages/common/node27_timeseries_compression_budget.py`
+`DEFAULT_COMPRESSION_PER_TICK_BOUND`) and the live env all carry `2`.
+
+Measured inputs (node-27):
+
+- **Chunk size.** Narrow `hydro.river_timeseries` day chunks are 19–21 GB.
+- **Rate ≈ 55 s/GB, per-chunk overhead included.** 2026-09-17 tick: 46.84 GB
+  in 2593 s (timer start 04:25:32Z → receipt 05:08:45Z). 2026-09-18 bound-2
+  run: `_hyper_9_153` + `_hyper_9_154` (20.2 + 21.0 = 41.13 GB) in 2241 s =
+  54.5 s/GB. The old 6.0 s/GB figure is 7-day-chunk evidence and does not
+  apply to this geometry.
+- **Arrival.** 1 river day-chunk/day, plus ~1 forcing chunk/week.
+- **The failure the old bound produced.** 2026-09-18: `bound=4` selected four
+  river chunks (~78 GB); three committed, the fourth was `TERM`ed at the
+  3900 s wrapper wall and rolled back → `rc=124`.
+
+The two constraints:
+
+1. **Wall.** `Σ(selected GB) × 55 s/GB ≤ 3900 s` (wrapper wall; the whole tick,
+   not one chunk). `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for growth and the
+   non-compress residual; `4 × 20 GB × 55 ≈ 4400 s` does not fit — exactly the
+   2026-09-18 `rc=124`.
+2. **Throughput.** `bound × 1 tick/day ≥` arrival. River takes both slots
+   while it has ≥ 2 eligible chunks: 2/day compressed from the young end,
+   1/day arriving, 1/day dropped by retention from the old end, so a river
+   backlog shrinks by ~2 chunks/day net. After the 2026-09-18 bound-2 run
+   (W = 2026-09-17T12:00Z) 14 eligible uncompressed river chunks remained,
+   so the backlog drains ~2026-09-25. After that the steady state is 1
+   arrival/day against 2 slots.
+
+**Retention overlap.** A ≤ 2310 s tick from 04:25Z ends by ~05:04Z; even the
+full 3941 s systemd wall (05:30:41Z) ends before the 06:36Z retention timer,
+so `RETENTION_CONCURRENT_INVOCATION` needs a wall overrun, not a normal tick.
+
+**Concurrent sessions eat the wall budget (2026-09-19).** The 55 s/GB figure
+assumes a quiet database. The first Stage B run hit `rc=124`: one 23 GB
+chunk took 47 min while #1988 read-only sessions were open, and it committed
+15 s after the longest of them closed. The rerun with no operator sessions
+did `_hyper_9_143` (23.04 GB) at ≈50 s/GB with `pg_blocking_pids` always
+empty (receipt
+`docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/`
+Stage B). A lock wait was not established (`log_lock_waits` is off).
+Operator rule: keep long-open transactions and full scans of the river
+hypertables out of 04:25Z–05:30Z, and out of any manual compression run. An
+open transaction holding `ACCESS SHARE` on a chunk can hold up the lock
+`compress_chunk` takes to finish. Chunks now measure ~23 GB:
+`2 × 23 × 55 ≈ 2530 s`, still inside the wall.
+
+**Timer cadence.** No change. Chunk count is set by the time dimension (one
+day), not by ingest volume, and 2 slots/day already exceed the 1/day
+arrival.
+
+**Selection order (#2425).** Within one hypertable the runner walks eligible
+chunks newest `range_end` first; the hypertable order stays
+`(schema, name)`, which since 2026-09-19 is `hydro.river_timeseries` →
+`met.*` — `hydro.river_timeseries_legacy` was a member of that walk until
+`000060` dropped it. Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
+the same display watermark W, so retention's drop set is always the OLDEST
+prefix of compression's eligible set; oldest-first spent the slots on chunks
+retention dropped the same day (2026-09-16: 4 of 4; 2026-09-17: 3 of 4).
+Newest-first compresses chunks with ~19 days of life left.
+
+**Retired risk: the legacy giant chunk (#1988).** This block described a
+`rc=124` trajectory in which slot 2 selected the uncompressed 558 GB chunk
+`_hyper_3_110_chunk` of `hydro.river_timeseries_legacy` once the river table ran
+out of eligible chunks, with a bound-1 override as the remedy. It became
+structurally impossible on 2026-09-19, when `000060` dropped the legacy table
+(receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md));
+the compression lane now walks only `hydro.river_timeseries` and `met.*`. Its
+detection SQL named `river_timeseries_legacy` in an `IN`-list, which is now
+simply a row that never matches, and its bound-1 remedy has nothing to protect
+against. Do not run either; the block's history is in git.
+
+The live env identification it relied on is still useful and is kept here: the
+live compression env is the fence env
+`~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+before the D7 rebind and `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
+after it; `systemctl --user show -p Environment,ExecStart nhms-node27-timeseries-compression.service`
+tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
+`ExecStart` = before; an `/home/nwm/NWM` `ExecStart` with an empty
+`Environment=` = after. Record any env change with the receipt of the next
+tick.
+
+**Invalidation conditions for this derivation.** Re-derive when the chunk
+interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
+wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
+changes (including a §4.5 override window), the retention window or timer
+changes, or a hypertable joins or leaves the lane. **That last condition fired
+on 2026-09-19**: `hydro.river_timeseries_legacy` left the lane when `000060`
+dropped it. The bound-2 arithmetic above is not recomputed here — it was
+derived from the narrow one-day chunks, which are unchanged; what the drop
+removes is the legacy sibling that the retired risk block above guarded
+against.
+
+---
+
+**Historical (#1237 / #2210 / #1985, 7-day and transition geometry;
+superseded 2026-09-18 by the decision above).** Everything from here to
+"4.0" is the record the current decision replaced. Its numbers are not
+current inputs.
 
 The measurements and 2-chunks/week arithmetic below are historical evidence
 for 7-day chunk geometry, not a capacity guarantee after #2210. Once both
@@ -3552,10 +3742,11 @@ other being the archive root sharing the hot filesystem — see
 (2026-07-26)").
 
 **A backlog by itself invalidates the wall constraint — no config has to
-change.** Selection is table-major
-(`scripts/node27_timeseries_compression.py:396` orders by
-`hypertable_schema, hypertable_name, range_end`, so `hydro` sorts before
-`met` and **every** eligible river chunk is taken before any forcing chunk),
+change.** Selection is table-major: the catalog query orders by
+`hypertable_schema, hypertable_name` and `_classify` walks each hypertable
+newest `range_end` first (#2425; before 2026-09-18 it was oldest first), so
+`hydro` sorts before `met` and **every** eligible river chunk is taken before
+any forcing chunk,
 so at `bound=4` any unattended tick holding **≥2 eligible river chunks** can
 overrun the 3900 s wall while every chunk is still inside the normal
 268–409 GB band: `2 river + 2 forcing` already exceeds it once river chunks
@@ -4920,9 +5111,15 @@ the currently observed live `TimeoutStartUSec` has changed. Retention stays
 scheduled at 06:36 UTC; this section does not retighten that cadence.
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
-automated lane, and because selection is oldest-first (`ORDER BY range_end
-ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. A catch-up is a
+automated lane. Selection is table-major and newest `range_end` first within a
+table (#2425), then `[:per_tick_bound]`, so such a chunk is re-selected every
+tick (and burns it) only while it is among the first `per_tick_bound` of that
+order — at bound 1, while it is the newest eligible chunk of the first table
+with eligible chunks. Once at least `per_tick_bound` newer chunks of that
+table are eligible it moves to `deferred` and stops blocking. A bound-1 catch-up selects the newest
+eligible chunk of the first table with eligible chunks, so step 4a's dry-run
+check that the selection is the intended chunk stays the gate: if it shows
+another chunk, stop. A catch-up is a
 bounded one-file override window, not a manual `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**
@@ -5229,7 +5426,38 @@ in the gated first-enforce protocol (§4.0 step 9) belongs to that one-shot
 forensic evidence run. This section governs incident catch-up on a lane that is
 already live. The two do not overlap and neither relaxes the other.
 
-### 4.6 River identity normalization: backfill + cutover (`#1339`)
+### 4.6 River identity normalization: backfill + cutover (`#1339`) — historical, never executed
+
+Archive status:
+- status: superseded
+- current_authority: db/migrations/000059_river_timeseries_narrow_expand.sql; db/migrations/000060_river_timeseries_contract.sql
+- superseded_by: docs/adr/0002-node27-timeseries-hot-cold-tiering.md, section "Amendment (2026-09-19)"
+- status_since: 2026-09-19
+- archive_scope: section, §4.6 through the paragraph before §4.7
+- retained_for: the 2.10.2 engine measurements and the #1339/#1476 fail-closed taxonomy, which are still the record of why the narrow store has the shape it has
+
+**This whole section is dead procedure. Do not execute any of it.** The
+identity switch it describes — an in-place cutover of the text-identity
+`hydro.river_timeseries` via `hydro.verify_river_identity_normalization()` and
+`hydro.cutover_river_identity_normalization()` — was written but **never ran**.
+No migration ever called either function; `000060_river_timeseries_contract.sql`
+dropped both (`:100-101`) on node-27 on 2026-09-19 alongside the table they
+would have operated on. The runner `scripts/node27_river_identity_backfill.py`
+that §4.6.2 drives was deleted by `timeseries-narrow-store-expand-contract`
+task 6.3 (`bd06c6dd`) and is no longer in the tree.
+
+What shipped instead is expand–contract, recorded in §4.10 (itself now history —
+its window has executed):
+`000059_river_timeseries_narrow_expand.sql` renamed the old table to
+`hydro.river_timeseries_legacy` and created a new key-only, one-day
+`hydro.river_timeseries` beside it; `000060` dropped the legacy table, both
+functions and `hydro.hydro_run.timeseries_store`. Window receipt:
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+
+Read on only for the engine facts: the 2.10.2 DDL refusals under
+`timescaledb.compress = true`, the measured `VALIDATE`/`SET NOT NULL` costs, and
+the fail-closed backfill taxonomy are real measurements and they are why the
+delivered design creates a new table rather than mutating one.
 
 Migration `000050_river_identity_normalization.sql` adds integer surrogate keys
 to the four authority tables, three native enums, and seven **nullable** columns
@@ -5279,7 +5507,8 @@ NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH=/home/nwm/locks/river-identity-backfill
 ```
 
 **Mask the compression timer for the whole enforce window.** This is not
-advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=4`; a tick
+advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=2` (`=4`
+when #1339 ran); a tick
 landing mid-backfill compresses a chunk that still holds NULL rows, and the
 only way to reach those rows again is decompressing 200+ GB.
 
@@ -5389,7 +5618,18 @@ distinguished in `stop.stage`:
   committed before the refusal are kept, counted, and resumable — the receipt's
   `cursor` points at the batch that was refused.
 
-#### 4.6.3 Cutover (one-shot maintenance window)
+#### 4.6.3 Cutover (one-shot maintenance window) — dead procedure, never executed
+
+**Unrunnable as of 2026-09-19.** Step 3's
+`hydro.verify_river_identity_normalization()` and step 5's
+`hydro.cutover_river_identity_normalization()` were dropped by
+`000060_river_timeseries_contract.sql:100-101`; both calls now raise
+`function does not exist`. The table the sequence operates on was dropped in the
+same statement. This is not an annotation problem — the sequence has no valid
+execution path and is retained only as the record of the design that
+expand–contract replaced (§4.10; receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+The measured costs below are still true of TimescaleDB 2.10.2.
 
 There is **no work that can be done ahead of the window.** With
 `timescaledb.compress = true` in force, TimescaleDB 2.10.2 rejects
@@ -5479,15 +5719,24 @@ state and no compensating action to write.
 - [ ] Compression timer masked.
 - [ ] Low-peak window, display-read blocking announced.
 
-**Retiring the text foreign key early is a real, accepted loss.** TimescaleDB
-2.10.2 requires foreign-key columns to be covered by segmentby, and the target
-segmentby is integer-only, so
-`river_timeseries_river_segment_id_river_network_version_id_fkey` cannot
-survive the cutover (measured:
-`ERROR: column "river_segment_id" must be used for segmenting`). Between this
-cutover and the text-column-retirement issue, the fact table has no
-database-enforced referential link to `core.river_segment`. Recorded in the
-ADR 0002 amendment.
+**The foreign-key loss never happened.** This paragraph used to record, as an
+accepted cost, that the cutover would leave the fact table with no
+database-enforced referential link to `core.river_segment`. The cutover never
+ran, so the loss was never taken. The engine fact behind it is real —
+TimescaleDB 2.10.2 requires foreign-key columns to be covered by segmentby, and
+the cutover's target segmentby was integer-only, so
+`river_timeseries_river_segment_id_river_network_version_id_fkey` could not have
+survived it (measured:
+`ERROR: column "river_segment_id" must be used for segmenting`).
+
+The delivered narrow table sidesteps the rule instead of paying it: `000059`
+creates it key-only with both foreign keys inline (`:13`, `:16`) and a segmentby
+list (`run_key, river_segment_key`, `:62`) that **is** the foreign-key column
+set. Measured live on node-27 after `000060`, both are present and enforced:
+`river_timeseries_run_key_fkey` → `hydro.hydro_run(run_key)` and
+`river_timeseries_river_segment_key_fkey` → `core.river_segment(river_segment_key)`.
+`basin_version_key` and `river_network_version_key` carry no FK. Current
+authority: ADR 0002 "Amendment (2026-09-19)" and `pg_constraint` itself.
 
 ### 4.7 ingest 前沿 chunk 统计漂移 (`#1378`)
 
@@ -6101,7 +6350,27 @@ code/schema/read checks. Then restore only the originally active, authorized
 timers **last**, preserving enablement/mask/hold states. Persistent timers can
 fire immediately; never `enable --now` the whole family by default.
 
-#### 4.10.3 D12 reverse, before contract only
+#### 4.10.3 D12 reverse — historical; the contract executed 2026-09-19, this rollback option is gone
+
+Archive status:
+- status: historical baseline
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
+- superseded_by: none
+- status_since: 2026-09-19
+- archive_scope: section, §4.10.3 only
+- retained_for: the record of the rollback option that existed between expand and contract, and of the post-D12 re-forward that was actually exercised on 2026-09-15
+
+**Not executable.** Every object this procedure renames, updates or preserves is
+gone: `000060_river_timeseries_contract.sql` dropped
+`hydro.river_timeseries_legacy` (`:97`) and `hydro.hydro_run.timeseries_store`
+(`:106`) on node-27 on 2026-09-19, 16:06:50–16:07:35 CST, rc=0, ledger 60 → 61
+(receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+post-state `to_regclass('hydro.river_timeseries_legacy') -> None`). The rename
+pair below has nothing to rename back to, and the `UPDATE … SET
+timeseries_store = 'legacy'` targets a dropped column. The section's own closing
+sentence, "Contract removes this rollback option", is now past tense. **No
+successor rollback procedure exists in this runbook.**
 
 Repeat the same stop/drain and ingress fence. Preserve the narrow run identity
 list, fact values/keys/windows, original SHUD artifact digests and both OIDs.
@@ -6160,7 +6429,8 @@ new `narrow-routes-before-reverse.json`; cite the original D12 state as
 provenance again (nothing was written before reattach, so it still verifies).
 The DROP path above remains the only alternative, and is required before any
 from-scratch expand. No automatic ledger deletion, implicit reclassification
-or unreviewed recovery shortcut. Contract removes this rollback option.
+or unreviewed recovery shortcut. Contract removes this rollback option — and
+did, on 2026-09-19; see this subsection's archive block.
 
 **Transitional cold tier does not cover `_legacy`.** The canonical-only cold
 allowlist is unchanged; discovery by compression/retention is not cold-move

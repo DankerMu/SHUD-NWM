@@ -53,6 +53,18 @@ MVT_MAX_COORDINATES = 50_000
 # threshold of all five tile layers, so a global raise would also loosen
 # hydro-national's fair budget window and the per-basin layer's truncation.
 NATIONAL_RIVER_COLLECTION_COORDINATE_LIMIT = 120_000
+# Feature budget of the national discharge layer only (#2165). Measured on the
+# node-27 production DB (q_down, one valid_time): the z0-z3 China tiles
+# intersect 13,770 / 13,770 / 13,392 / 10,991 features, all above
+# MVT_MAX_FEATURES (10,000), so the fair budget window was dropping up to ~27%
+# of the segments; z4/z5 peak at 7,242 / 7,035. 20,000 leaves ~45% headroom
+# over 13,770. At a measured 160-202 bytes per feature it stays under
+# MVT_MAX_BYTES (a hard 413, not a graceful truncation), and at 2.0-2.3
+# coordinates per feature under the layer's 50,000 collection coordinate
+# budget, so the feature arm remains the one that trips first. Raising
+# MVT_MAX_FEATURES globally was rejected for the same reason as the coordinate
+# limit above: it is also the feature budget of the other four layers.
+NATIONAL_DISCHARGE_FEATURE_LIMIT = 20_000
 MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
@@ -77,7 +89,14 @@ NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"
 # given tile is painted from. The legacy source-less route's cache key rotates
 # once as a result -- one post-deploy cold miss per legacy tile, expected, not a
 # regression in the node-27 cold/hot numbers.
-NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
+#
+# Now at v6, bumped for the layer's own feature budget
+# (`NATIONAL_DISCHARGE_FEATURE_LIMIT`, #2165): the SQL text is unchanged, but
+# the bound `:feature_limit` moves from 10,000 to 20,000, so every tile that
+# intersects more than 10,000 features now paints more of them. The cache key
+# hashes neither the SQL nor its binds, so without this bump the truncated
+# pre-switch bytes would keep being served under the old key.
+NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v6"
 
 # The national run selection is bound to the requested `(source, cycle)`
 # identity (issue #2007). `postgis_tile_sql(layer)` keeps its single-argument
@@ -444,6 +463,19 @@ def collection_coordinate_limit(layer: str | None) -> int:
     return MVT_MAX_COORDINATES
 
 
+def feature_limit(layer: str | None) -> int:
+    """Feature budget of one tile layer.
+
+    Only `hydro-national` carries a raised budget; every other layer -- and a
+    caller that supplies no layer -- keeps `MVT_MAX_FEATURES`. The route binds
+    this value as `:feature_limit` and uses the same value for its 413
+    predicate and its `MVT_TILE_BUDGET_TRUNCATED` signal.
+    """
+    if layer == "hydro-national":
+        return NATIONAL_DISCHARGE_FEATURE_LIMIT
+    return MVT_MAX_FEATURES
+
+
 def build_tile_response(
     session: Session,
     tile: TileInput,
@@ -598,9 +630,9 @@ def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, exte
 
 
 def _hydro_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
             SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
                    rs.river_segment_id AS segment_id,
                    rs.river_segment_id,
@@ -616,22 +648,15 @@ def _hydro_source_template(store: str) -> str:
               ON rs.river_segment_key = ts.river_segment_key
             WHERE ts.run_key = (
                       SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-                        AND timeseries_store = '{store}'
                   )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.run_id = :run_id
               AND ts.basin_version_key = (
                       SELECT basin_version_key FROM core.basin_version
                       WHERE basin_version_id = :basin_version_id
                   )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.river_network_version_id = :river_network_version_id
               AND ts.river_network_version_key = (
                       SELECT river_network_version_key FROM core.river_network_version
                       WHERE river_network_version_id = :river_network_version_id
                   )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.variable = :variable
               AND ts.variable_e = (
                       SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                       WHERE e::text = :variable
@@ -641,32 +666,25 @@ def _hydro_source_template(store: str) -> str:
 
 
 def _hydro_national_identity_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
                     SELECT 1
                     FROM hydro.river_timeseries ts
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.run_id = lr.run_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_network_version_id = lr.river_network_version_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.variable = :variable
                       AND ts.variable_e = (
                               SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                               WHERE e::text = :variable
                           )
                       AND ts.valid_time = :valid_time
-                      AND lr.timeseries_store = '{store}'
     """
 
 
 def _hydro_national_data_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
                     SELECT ts.basin_version_key,
                            ts.value,
                            ts.unit_e::text AS unit,
@@ -677,52 +695,32 @@ def _hydro_national_data_source_template(store: str) -> str:
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
                       AND ts.river_segment_key = seg.river_segment_key
-                      -- These four aids do double duty: 000047's segmentby
-                      -- pruning AND the text primary key's per-loop lookup.
-                      -- The nuance lives here, in prose, because the removal
-                      -- marker below is byte-frozen (#1342 deletes by that
-                      -- exact line) and carries one aid each.
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.run_id = lr.run_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_network_version_id = lr.river_network_version_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_segment_id = seg.river_segment_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.variable = :variable
                       AND ts.variable_e = (
                               SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                               WHERE e::text = :variable
                           )
                       AND ts.valid_time = :valid_time
-                      AND lr.timeseries_store = '{store}'
     """
 
 
 def _valid_times_named_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
                 SELECT valid_time
                 FROM hydro.river_timeseries
                 WHERE run_key = (
                           SELECT h.run_key FROM hydro.hydro_run h
-                          WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'
+                          WHERE h.run_id = :run_id
                       )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND run_id = :run_id
                   AND basin_version_key = (
                           SELECT basin_version_key FROM core.basin_version
                           WHERE basin_version_id = :basin_version_id
                       )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND river_network_version_id = :river_network_version_id
                   AND river_network_version_key = (
                           SELECT river_network_version_key FROM core.river_network_version
                           WHERE river_network_version_id = :river_network_version_id
                       )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND variable = :variable
                   AND variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
@@ -731,20 +729,18 @@ def _valid_times_named_source_template(store: str) -> str:
 
 
 def _valid_times_any_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
                 SELECT ts.valid_time
                 FROM hydro.river_timeseries ts
                 WHERE ts.variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
                       )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND ts.variable = :variable
                   AND EXISTS (
                           SELECT 1 FROM hydro.hydro_run h
-                          WHERE h.run_key = ts.run_key AND h.timeseries_store = '{store}'
+                          WHERE h.run_key = ts.run_key
                       )
     """
 
@@ -905,11 +901,9 @@ def postgis_tile_sql(layer: str) -> str:
         # narrow, never widen: NULL-key rows stay excluded by the key
         # predicates. basin_version_id and river_segment_id are deliberately
         # NOT in the sanctioned set, and no text column may join the fact
-        # table. All of these come out with the text columns in #1342, where a
-        # missed one fails loudly because the column is gone.
-        legacy = render_river_ts_sql(_hydro_source_template("legacy"), "legacy").sql
-        narrow = render_river_ts_sql(_hydro_source_template("narrow"), "narrow").sql
-        source_cte = f"{legacy}\nUNION ALL\n{narrow}"
+        # table. All of them CAME OUT with the text columns in #1342's contract
+        # (task 6.3): this statement is one narrow leg now, not a per-store union.
+        source_cte = render_river_ts_sql(_hydro_source_template("narrow"), "narrow").sql
     elif layer == "hydro-national":
         # National overview: render q_down for every basin by joining each river
         # network's latest display-ready run. Identity (run/network) is chosen by
@@ -1005,25 +999,21 @@ def postgis_tile_sql(layer: str) -> str:
         #   * The discovery sub-select stays INLINE rather than referencing the
         #     shared `latest_runs` CTE: that CTE is nested inside the
         #     `source_rows` sub-query's own WITH, so it is not in scope for this
-        #     sibling CTE. It is the same display-coverage gating, widened from
-        #     two columns to four for the legacy aids, plus the candidate store.
+        #     sibling CTE. It is the same display-coverage gating, projecting
+        #     the run and network identity the lateral probe correlates on.
         #   * The probe MUST keep touching the fact table. `run_display_coverage`
         #     windows are a MIN/MAX over complete instants, not a per-instant
         #     bitmap, so answering existence from the window alone would turn an
         #     interior gap's 424 into an empty-tile 200.
-        legacy = render_river_ts_sql(_hydro_national_identity_source_template("legacy"), "legacy").sql
-        narrow = render_river_ts_sql(_hydro_national_identity_source_template("narrow"), "narrow").sql
-        identity_source = f"{legacy}\nUNION ALL\n{narrow}"
-        legacy = render_river_ts_sql(_hydro_national_data_source_template("legacy"), "legacy").sql
-        narrow = render_river_ts_sql(_hydro_national_data_source_template("narrow"), "narrow").sql
-        data_source = f"{legacy}\nUNION ALL\n{narrow}"
+        identity_source = render_river_ts_sql(_hydro_national_identity_source_template("narrow"), "narrow").sql
+        data_source = render_river_ts_sql(_hydro_national_data_source_template("narrow"), "narrow").sql
         source_identity_stats_sql = f"""
             SELECT CASE WHEN EXISTS (
                 SELECT 1
                 FROM (
                     SELECT DISTINCT ON (mi.river_network_version_id)
                            h.run_key, rnv.river_network_version_key,
-                           h.run_id, mi.river_network_version_id, h.timeseries_store
+                           h.run_id, mi.river_network_version_id
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
                     JOIN core.river_network_version rnv
@@ -1054,7 +1044,7 @@ def postgis_tile_sql(layer: str) -> str:
             WITH latest_runs AS MATERIALIZED (
                 SELECT DISTINCT ON (mi.river_network_version_id)
                        h.run_id, mi.river_network_version_id,
-                       h.run_key, rnv.river_network_version_key, h.timeseries_store
+                       h.run_key, rnv.river_network_version_key
                 FROM hydro.hydro_run h
                 JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
                 JOIN core.river_network_version rnv
@@ -1110,8 +1100,8 @@ def postgis_tile_sql(layer: str) -> str:
             -- typed_values and untyped_ranked are the SAME fact read under two
             -- zoom branches (z>=9 vs z<9). Issue #1341 switches BOTH to the
             -- surrogate keys in one step: leaving either leg on the old text
-            -- predicates would make NULL-key legacy rows visible at one zoom
-            -- and invisible at the other for one and the same national
+            -- predicates would have made NULL-key legacy rows visible at one
+            -- zoom and invisible at the other for one and the same national
             -- identity. The two legs therefore stay symmetric — same probe,
             -- same predicates, same fact columns — and only their zoom guard,
             -- projection tail and percent-rank window differ.
@@ -1814,14 +1804,21 @@ def _layer_source_refs(
 
 
 def display_ready_run(session: Session) -> Mapping[str, Any] | None:
-    """Latest display-ready hydro run for layer catalog discovery."""
+    """Latest display-ready hydro run for layer catalog discovery.
+
+    Projects `rnv.geometry_generation` exactly like
+    `apps/api/routes/hydro_display.py::_run_row`: both rows feed the same
+    `_run_source_version`, and the catalog's `source_version` for a run must equal
+    the one the run-scoped tile route computes for it (#2156).
+    """
     row = session.execute(
         text(
             """
             SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
-                   mi.river_network_version_id
+                   mi.river_network_version_id, rnv.geometry_generation
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            LEFT JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id
             WHERE h.status IN ('succeeded', 'parsed', 'published')
             ORDER BY h.cycle_time DESC, h.run_id DESC
             LIMIT 1
@@ -1996,17 +1993,14 @@ def valid_times_for_layer(
         # is recorded in issue #1378. Unknown identity resolves to NULL and the
         # branch returns no rows, exactly as the text predicates did.
         # The `run_id` / `river_network_version_id` / `variable` text conjuncts
-        # in the raw source are transitional compressed-chunk pushdown aids (#1341);
-        # this is the shape node-27 measured collapsing to a 598,280-cost full
-        # decompression on chunk 51 without them. They go with #1342.
+        # the raw source used to carry were transitional compressed-chunk pushdown
+        # aids (#1341) against the legacy table's text segmentby; they went with
+        # that table in #1342's contract (task 6.3), so this is one narrow leg.
         source_template = _valid_times_named_source_template if run_id is not None else _valid_times_any_source_template
-        legacy_source = render_river_ts_sql(source_template("legacy"), "legacy").sql
         narrow_source = render_river_ts_sql(source_template("narrow"), "narrow").sql
         sql = f"""
             SELECT DISTINCT valid_time
             FROM (
-                {legacy_source}
-                UNION ALL
                 {narrow_source}
             ) source_rows
             ORDER BY valid_time DESC
@@ -2127,15 +2121,26 @@ def national_discharge_cycles(
     colourless basins that look like "no flow" rather than "no data".
 
     Sets, not cardinalities, because the denominator and the coverage rows come
-    from two statements with their own READ COMMITTED snapshots. Activating a
-    network between them is enough to make equal counts lie: statement 1 sees
-    ``{B, C1, C2}``, ``A`` is activated with a run for cycle K, statement 2
-    returns ``{A, C1, C2}`` for K, and ``3 == 3`` would list a cycle the active
-    network ``B`` cannot render. Without a race the two forms agree (same
-    predicates, one snapshot, so covered is a subset of active). A network
-    activated with ZERO display-ready rows never appears in statement 2 at all
-    and no comparison of statement-2 output can catch it -- that branch needs a
-    single-statement merge or a higher isolation level and is deferred.
+    from two statements with their own READ COMMITTED snapshots. A membership
+    change landing between them is enough to make equal counts lie: the coverage
+    read returns ``{B, C1, C2}``, then ``C1`` is deactivated and ``A`` activated,
+    and the active read returns ``{A, B, C2}`` -- ``3 == 3`` would list a cycle
+    the network ``A`` cannot render. Without a race the two forms agree (same
+    predicates, one snapshot, so covered is a subset of active).
+
+    Which of the two statements runs first is equally load-bearing, and
+    ``_national_discharge_coverage_rows`` owns that choice: it reads the coverage
+    rows first and the active set second (#2087), so a network activated between
+    the reads is in the active set, cannot be in any cycle's covered set, and
+    closes EVERY cycle -- including the cycles the set comparison alone cannot
+    see, which are the cycles the newcomer has NO rows for: all of them when it
+    brings zero display-ready rows, and the uncovered ones when it holds rows for
+    some cycles but not others. Its COVERED cycles the set comparison (#2073)
+    already caught, because there the newcomer's rows made the covered set a
+    strict SUPERSET of the stale active set. Read that helper's docstring for
+    what the order costs (a covered run that stops being display-ready between
+    the reads is the residual fail-open class) before reasoning about either
+    endpoint's behaviour under a race.
 
     ``valid_time_start`` / ``valid_time_end`` are the FIRST and LAST entries of
     that cycle's clamped 3-hour list, produced by the same function
@@ -2216,7 +2221,12 @@ class NationalCycleCoverage:
     @property
     def complete(self) -> bool:
         # SETS, not cardinalities, the `national_discharge_cycles` rule: equal
-        # counts with different members is the fail-open case (matrix 40b).
+        # counts with different members is the fail-open case (matrix 40b). The
+        # set rule is only half the invariant -- it catches a mid-flight
+        # activation only for the cycles the newcomer already has rows for; the
+        # other half is the read ORDER inside
+        # `_national_discharge_coverage_rows` (matrix 40d, #2087), which is what
+        # closes the zero-coverage and partial-coverage newcomers here too.
         return self.covered_networks == self.active_networks
 
 
@@ -2261,9 +2271,81 @@ def _national_discharge_coverage_rows(
     is precisely the case that must fail the intersection closed; deriving the set
     from the rows would make it invisible and turn the intersection into a union
     over whoever happens to have data. Callers compare it to the covered networks
-    as a SET: the two statements take separate READ COMMITTED snapshots, and a
-    network activated between them can keep the cardinalities equal while the
-    membership differs (see ``national_discharge_cycles``).
+    as a SET, never as cardinalities: equal counts with different membership is a
+    fail-open state (see ``national_discharge_cycles``).
+
+    STATEMENT ORDER IS LOAD-BEARING (#2087). The coverage rows are read FIRST
+    (call it T1), the active set SECOND (T2). Each statement takes its own READ
+    COMMITTED snapshot, so a membership change landing between them is visible to
+    exactly one of the two sets, and this order chooses which drift direction the
+    comparison can catch. It is a TRADE, not a one-sided improvement:
+
+    * CLOSED by this order -- numerator GROWTH. The coverage statement carries
+      ``mi.active_flag`` itself, so the covered networks are a subset of the
+      networks active in T1's snapshot. A network activated between T1 and T2 is
+      therefore in the T2 active set and cannot be in the covered set, the
+      comparison is unequal, and EVERY cycle judged by this pair of reads fails
+      closed -- whether the newcomer brought no display-ready row at all or rows
+      for only some cycles. Those are #2087's two branches; with the active set
+      read first, the cycles the newcomer has NO rows for were invisible to any
+      comparison of the coverage rows, because a network with no rows for a cycle
+      simply is not in that cycle's output. The cycles it DID bring rows for were
+      already caught by the set comparison (#2073): the coverage statement
+      applies ``mi.active_flag`` in its own snapshot -- the LATER of the two
+      under that order -- so those rows landed in the covered set while the stale
+      active set still lacked the newcomer, making covered a strict SUPERSET.
+    * NEWLY OPENED by this order -- numerator SHRINK. A row that is in the T1
+      covered set and stops being display-ready before T2 leaves the comparison
+      equal, so the cycle is listed although its run is gone. The other order
+      caught that one. This class has LIVE WRITERS and must not be described as
+      unreachable. Each one below was read in the tree, not inferred:
+
+      - ``mark_run_failed`` (``workers/output_parser/parser.py``) rewrites
+        ``hydro.hydro_run.status`` to ``failed`` under a guard,
+        ``FAILABLE_RUN_STATUSES``, that INCLUDES ``succeeded`` and ``parsed``
+        (only ``published`` is outside it). ``mark_run_parsed``'s own gate admits
+        an already-``parsed`` run, so a re-parse that then fails moves a run
+        holding a POPULATED coverage row straight out of the display-ready set.
+        This is the routine, single-actor writer of the class.
+      - ``scripts/node27_refresh_coverage.py --force`` drives
+        ``rdc.segment_count`` to zero, and the ``rdc.segment_count > 0`` join
+        below then drops the row. #1446 made the upsert refuse to zero a
+        populated row, but that refusal is spelled ``WHERE %(force)s OR ...`` in
+        ``packages/common/display_coverage.py``, which ``force=True`` bypasses
+        outright -- and the script documents ``--run-id <run> --force`` as the
+        INTENDED manual remediation for a legacy run whose fresh scan computes
+        zero, i.e. exactly a run the national tile may be painting right now. The
+        cron loop never passes it: operator-gated, not automatic, but live.
+      - ``mark_failed`` (``workers/shud_runtime/runtime.py``) issues an UPDATE to
+        ``failed`` with no status guard at all, but its only production caller is
+        ``SHUDRuntime.execute``'s failure path, which is reached only after
+        ``create_run`` accepted the ``run_id`` -- and ``create_run`` refuses a
+        display-ready one (``HYDRO_RUN_NOT_RETRIABLE``). Reaching it therefore
+        needs a duplicate concurrent ``execute`` of the same run: rare, not
+        impossible.
+
+      Neither table has a production ``DELETE`` (the only ones in the tree are
+      test teardown and a one-off cutover-rehearsal script removing its own
+      seeded run). The residual is accepted because
+      no TWO-statement design can close both classes -- a numerator shrink is
+      invisible to any re-read of the denominator -- so the choice is which class
+      to close, not whether to close both. Closing both means merging these two
+      statements into one, which changes the returned row shape (zero-coverage
+      networks become all-NULL rows) and rewrites one of the four run-selection
+      sites the module header requires to stay identical.
+    * Deactivation is not symmetric between the orders, and the difference is a
+      race-path behaviour delta rather than a regression: a network deactivated
+      between the reads that HAS coverage rows still fails closed (it is in the T1
+      covered set and not in the T2 active set), while one with NO coverage rows
+      now lets the cycle through -- the correct answer, since a deactivated
+      network does not need rendering.
+
+    Availability cost of failing closed on activation: one ordinary activation can
+    empty the whole intersection, and the display catalog may keep serving that
+    empty answer for up to one fresh TTL or, on the stale-while-revalidate path,
+    up to ``DISPLAY_CATALOG_STALE_MAX_SECONDS`` (``apps/api/display_cache.py``).
+    That is this module's declared fail-closed semantics -- no data beats wrong
+    data -- and the exposure is bounded by the cache, not by the activation.
 
     ``source`` / ``cycle`` / ``since`` are NULL-guarded in the
     ``CAST(:x AS type) IS NULL OR`` form the three tile-side run-selection sites
@@ -2278,22 +2360,6 @@ def _national_discharge_coverage_rows(
     intersection -- bounding it there would silently drop the network and change a
     result the catalog has always published.
     """
-    active_networks = (
-        session.execute(
-            text(
-                """
-                SELECT DISTINCT mi.river_network_version_id
-                FROM core.model_instance mi
-                WHERE mi.active_flag
-                  AND mi.river_network_version_id IS NOT NULL
-                ORDER BY mi.river_network_version_id
-                """
-            )
-        )
-        .mappings()
-        .all()
-    )
-    active_network_ids = frozenset(row["river_network_version_id"] for row in active_networks)
     rows = (
         session.execute(
             text(
@@ -2338,6 +2404,22 @@ def _national_discharge_coverage_rows(
         .mappings()
         .all()
     )
+    active_networks = (
+        session.execute(
+            text(
+                """
+                SELECT DISTINCT mi.river_network_version_id
+                FROM core.model_instance mi
+                WHERE mi.active_flag
+                  AND mi.river_network_version_id IS NOT NULL
+                ORDER BY mi.river_network_version_id
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    active_network_ids = frozenset(row["river_network_version_id"] for row in active_networks)
     return list(rows), active_network_ids
 
 

@@ -575,6 +575,35 @@ def test_no_template_still_carries_the_unprovisioned_writer_placeholder() -> Non
     )
 
 
+def test_loopback_dsns_in_env_templates_target_the_node27_postgres_port() -> None:
+    """#2472/#2473 round 2: node-27's PostgreSQL publishes only
+    `127.0.0.1:55432`, so a template DSN on loopback port 5432 reaches nothing.
+    `node27-resource-governance.example` shipped `@127.0.0.1:5432/nhms` while every
+    other node-27 template used 55432. The expected port comes from the endpoint
+    allow-list the node-27 writer lanes enforce at runtime, not from this file.
+    """
+    from scripts.node27_autopipeline import DEFAULT_ALLOWED_DB_ENDPOINTS
+
+    allowed_ports = {
+        endpoint.rsplit(":", 1)[1]
+        for endpoint in DEFAULT_ALLOWED_DB_ENDPOINTS.split(",")
+        if endpoint.startswith("127.0.0.1:")
+    }
+    assert allowed_ports == {"55432"}, DEFAULT_ALLOWED_DB_ENDPOINTS
+
+    loopback = re.compile(r"(?m)^[A-Z0-9_]*DATABASE_URL=postgresql://[^@\s]*@127\.0\.0\.1:(\d+)/")
+    seen: dict[str, list[str]] = {
+        path.name: loopback.findall(path.read_text(encoding="utf-8")) for path in _env_templates()
+    }
+    assert any(seen.values()), "no template carries a loopback DSN; the scan has gone vacuous"
+    offenders = {
+        name: ports for name, ports in seen.items() if set(ports) - allowed_ports
+    }
+    assert offenders == {}, (
+        f"loopback DSNs must use node-27's PostgreSQL port {sorted(allowed_ports)}: {offenders}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Scenario: Provision is idempotent  /  role flag contract
 # --------------------------------------------------------------------------- #

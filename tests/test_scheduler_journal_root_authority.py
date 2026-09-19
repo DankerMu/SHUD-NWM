@@ -4,7 +4,8 @@ A symlink in ANY ancestor of ``NHMS_SCHEDULER_JOURNAL_ROOT`` passes the db-free
 required-path preflight (which only judges the leaf and its direct parent) and
 then makes every hardened journal read a blocked row with a diagnostic that
 names neither the symlink nor the remedy.  These tests pin both halves: the
-preflight still says "no blocker" (the trap is real and unchanged -- #1627 owns
+preflight still says "no blocker" (the trap is real and unchanged -- ADR 0009,
+``docs/adr/0009-path-canonicalization-dereference-doctrine.md``, owns
 that lane), and ``ProductionScheduler.from_env`` now refuses typed with
 ``FILE_JOURNAL_INVALID_ROOT`` before any repository read.
 
@@ -131,8 +132,8 @@ def test_db_free_from_env_reaches_the_repository_factory_on_a_real_root(
 def test_alias_ancestor_root_passes_db_free_path_check(monkeypatch: Any, tmp_path: Path) -> None:
     """Pin of the trap itself: the preflight lane reports no blocker.
 
-    ``_db_free_path_check`` is deliberately unchanged (#1627 adjudicates that
-    lane's realpath/ENOENT family).  If this assertion ever flips, the #1943
+    ``_db_free_path_check`` is deliberately unchanged (ADR 0009 adjudicates
+    that lane's realpath/ENOENT family).  If this assertion ever flips, the #1943
     factory seam stops being the thing under test here.
     """
 
@@ -216,7 +217,7 @@ def test_symlink_leaf_and_loop_roots_are_refused_with_the_same_code(
     Pinned at the repository factory rather than at ``from_env``: unlike the
     alias-ancestor shape, a symlinked LEAF and a symlink loop are exactly what
     ``_db_free_path_check`` does catch, so ``from_env`` short-circuits into the
-    preflight-blocked branch (#1627's redacted blocker) and never reaches the
+    preflight-blocked branch (ADR 0009's redacted blocker) and never reaches the
     factory.  The assertion below is the one that would hold for those shapes if
     the preflight ever stopped catching them; the preflight's ownership of them
     today is pinned by the companion test.

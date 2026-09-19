@@ -4,7 +4,7 @@ recalibration state carry-over suites.
 Consumed by :file:`tests/test_state_clone_recalibration.py` (the eight-surface
 gate) and :file:`tests/test_state_clone_recalibration_cli.py` (the dual-index
 CLI end-to-end). Extracted into its own non-suite module (house style:
-``tests/river_identity_backfill_fakes.py``) so both modules share ONE package
+``tests/slurm_template_helpers.py``) so both modules share ONE package
 fixture builder and ONE oracle instead of two drifting copies.
 
 Expected fingerprint values are derived INDEPENDENTLY: ``_expected_state_

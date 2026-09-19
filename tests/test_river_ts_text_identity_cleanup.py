@@ -54,18 +54,19 @@ Scope is exactly this issue's register. The display four (``mvt.py``,
 ``hydro_display.py``, ``display_coverage.py``, ``production_closure``) are
 watched by ``tests/test_river_ts_read_path_surrogate_keys.py`` and are
 deliberately NOT re-asserted here, so #1341's grouped-comment style cannot be
-false-flagged by a second, differently-worded oracle. ``db/migrations/**`` and
-``scripts/node27_river_identity_backfill.py`` read the text columns by
-definition and are out of register too.
+false-flagged by a second, differently-worded oracle. ``db/migrations/**`` reads
+the text columns by definition and is out of register too (so did
+``scripts/node27_river_identity_backfill.py``, deleted by #1342's contract,
+task 6.3).
 
 Two invariants are checked on every registered surface beyond "which text
 columns are referenced" (design D10.5/D10.6, added after cross-review):
 
-* **adjacency** — a sanctioned aid must be AND-ed in the same conjunction as the
-  key/enum predicate that supersedes it, and its ``remove with #1342`` marker
-  must be on its own line or the one immediately above. Both are what make the
-  aid deletable: an aid separated from its counterpart is load-bearing, and a
-  marker separated from its aid does not say which line to delete.
+* **adjacency** (RETIRED by #1342's contract, task 6.3) — a sanctioned aid had
+  to be AND-ed in the same conjunction as the key/enum predicate that superseded
+  it, with its marker comment on its own line immediately above. Both were what
+  made the aid deletable. There are no aids left, so what this oracle now checks
+  is that the count is ZERO, per registered file.
 * **census** — each registered file declares how many ``hydro.river_timeseries``
   mentions it has, so a NEW statement in a registered file is red until it is
   registered and given a shape pin. Without it the register only ever checked
@@ -81,6 +82,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -94,19 +96,19 @@ from packages.common.forecast_store import (
     _run_identity_filter,
     _ScenarioFilter,
 )
-from packages.common.river_ts_render import PUSHDOWN_AID_MARKER
 from services.tile_publisher import forcing_copyback_backfill as backfill_module
 from services.tile_publisher import publisher as publisher_module
 from tests.river_ts_template_registry import (
+    AID_COMMENT_PHRASE,
     NON_TEMPLATE_MENTIONS,
     REGISTRY,
+    aid_comment_lines,
     assert_marker_census,
 )
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     TEXT_IDENTITY_COLUMNS,
-    assert_aid_is_conjoined_with_its_counterpart,
     assert_text_fact_columns,
     outer_predicates,
     strip_all_subqueries,
@@ -188,44 +190,43 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
     "scripts/node27_autopipeline.py": 0,
-    "scripts/summarize_qhh_smoke_results.py": 2,
-    "scripts/reset_qhh_smoke_db.py": 2,
+    # Both were 2 until #1342's contract (task 6.3): each had a twin statement
+    # against `hydro.river_timeseries_legacy`, and `_river_table_mentions`
+    # matches a PREFIX of the name, so the retired table counted here too.
+    "scripts/summarize_qhh_smoke_results.py": 1,
+    "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
-    "tests/integration_helpers.py": 9,
-    # river_ts_render.py 2 = RIVER_TABLE and RIVER_TABLE_LEGACY. Two, not one,
-    # because `_river_table_mentions` matches a PREFIX of the name (the `_legacy`
-    # literal opens with the canonical one), not a whole identifier. Any third
-    # mention means a statement (or a third name) arrived in the shared helper —
-    # including one spelled in a refusal MESSAGE, which is why that module's
-    # messages describe the fact table rather than naming it.
-    "packages/common/river_ts_render.py": 2,
+    # 9 until #1988's contract coverage added the fixture's own pre-contract
+    # guard: a `to_regclass` catalog probe and the message it fails with, both
+    # of which spell `hydro.river_timeseries_legacy` and so count here. Neither
+    # reads the fact table; both are pinned by
+    # `test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums`.
+    "tests/integration_helpers.py": 11,
+    # river_ts_render.py 1 = RIVER_TABLE. It was two until #1342's contract
+    # (task 6.3) deleted `RIVER_TABLE_LEGACY`; `_river_table_mentions` matches a
+    # PREFIX of the name (the `_legacy` literal opened with the canonical one),
+    # not a whole identifier. Any second mention means a statement (or a second
+    # name) arrived in the shared helper — including one spelled in a refusal
+    # MESSAGE, which is why that module's messages describe the fact table
+    # rather than naming it.
+    "packages/common/river_ts_render.py": 1,
 }
 
-# Per-file marker/aid census (#1980, task 1.1). The four production files this
-# oracle owns (fixture decision 7); mvt, hydro_display and display_coverage are
-# censused by tests/test_river_ts_read_path_surrogate_keys.py, and the two
-# registers stay mutually exclusive so exactly one test reddens per file.
+# Per-file transitional-aid census (#1980 task 1.1, zeroed by #1342's contract,
+# task 6.3). The four production files this oracle owns (fixture decision 7);
+# mvt, hydro_display and display_coverage are censused by
+# tests/test_river_ts_read_path_surrogate_keys.py, and the two registers stay
+# mutually exclusive so exactly one test reddens per file.
 #
-# Counted on the SOURCE, which is the number #1342 deletes:
-#
-# * forecast_store.py 8 = the three-aid segment source (written once,
-#   consumed by all eight blocks) + the latest-product source's three + the two
-#   run-identity pushdown fragments #2417 added to the segment source's slot: one
-#   scalar `rt.run_id = %(run_id)s` for the explicit-cycle read whose caller bound
-#   a run_id, one `rt.run_id = ANY(...)` for the reads whose run set was resolved.
-#   Two constants rather than one because the bound read has no resolved array to
-#   bind — its `run_key` comes from an in-SQL scalar sub-select.
-# * publisher.py 1 / forcing_copyback_backfill.py 1 = one raw-source variable
-#   aid apiece, retained only in the rendered legacy branch.
-# * parser.py 0: narrow compression segmentby starts with run_key.
-# * the remaining registered files carry no aid at all, and 0 is asserted rather
-#   than skipped: an aid appearing in the autopipeline tick or a seed helper is
-#   exactly the regression the zero says will not happen.
+# Every number is 0, and 0 is asserted rather than skipped: this is the tripwire
+# against a text pushdown aid coming back to a table that has no text column to
+# predicate on, where the failure mode is not a slow query but
+# `column river_segment_id does not exist`.
 MARKER_AID_CENSUS: dict[str, int] = {
-    "packages/common/forecast_store.py": 8,
-    "services/tile_publisher/publisher.py": 1,
-    "services/tile_publisher/forcing_copyback_backfill.py": 1,
+    "packages/common/forecast_store.py": 0,
+    "services/tile_publisher/publisher.py": 0,
+    "services/tile_publisher/forcing_copyback_backfill.py": 0,
     "scripts/node27_autopipeline.py": 0,
     "scripts/summarize_qhh_smoke_results.py": 0,
     "scripts/reset_qhh_smoke_db.py": 0,
@@ -234,48 +235,6 @@ MARKER_AID_CENSUS: dict[str, int] = {
     "tests/integration_helpers.py": 0,
     "packages/common/river_ts_render.py": 0,
 }
-
-# Lines that carry the ``#1342`` tag WITHOUT being an aid marker, per file. Only
-# the renderer has any: the marker constant itself and the tag it matches
-# non-verbatim markers by. Declared rather than tolerated, so mvt's pre-#1980
-# 1:N wording cannot reappear anywhere in this register as "just a comment".
-NON_AID_MARKER_TAG_LINES: dict[str, int] = {
-    "packages/common/river_ts_render.py": 2,
-}
-
-# The marker every retained transitional text predicate must carry, verbatim.
-# #1341 introduced the wording; #1342 removes every line that has it, so a
-# retained aid without the marker is an aid nobody will remember to delete.
-# Imported, not re-declared (#1980): `packages/common/river_ts_render.py` deletes
-# by exactly this string, and a second copy here could drift from the one the
-# renderer actually matches — which would make this oracle green on a template
-# the renderer refuses.
-
-# Per-group ceilings, as adjudicated in design D1 (A segment blocks amended by
-# D10.7). The segment blocks are the one group whose ceiling exceeds the shared
-# SANCTIONED_TEXT_PUSHDOWN_COLUMNS, and for exactly one measured reason: without
-# a literal `rt.river_segment_id` the COMPRESSED leg loses 000047's third
-# segmentby column and decompresses the whole network (32660 batches / Rows
-# Removed 3,292,128 / 18549ms, against 40 / 4032 / 1085ms with it). The
-# uncompressed leg gains nothing from the aid — its Index Cond and Rows Removed
-# are identical either way; it runs on 000051's key index plus a heap filter.
-# The switch's accepted residual, from the quiet-database shipped-SQL receipts
-# (node-27 `/home/nwm/nwm-1442-e4/final/`, warm second run, superseding the
-# contended earlier figures): uncompressed 6.2ms -> 226ms, buffers 387 ->
-# 15,439; compressed 3.0ms -> 1085ms, where the old number came from run-level
-# segmentby pruning through the text PK loop parameter — structurally
-# unavailable to a keyed join, since a text fact join is forbidden. The cure is
-# #1342's `(river_segment_key, variable_e, valid_time DESC)` successor index
-# plus a compression-layout re-cut, not a text predicate. The
-# widening is expressed HERE, per call site, and deliberately not folded into
-# the shared constant — #1341's display oracles consume that constant and must
-# keep rejecting the column.
-A_SEGMENT_BLOCK_ALLOWED_AIDS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
-A_SEGMENT_BLOCK_AIDS = {"river_segment_id", "river_network_version_id", "variable"}
-A_FALLBACK_AIDS = {"run_id", "river_network_version_id", "variable"}
-PUBLISHER_AIDS = {"variable"}
-COPYBACK_AIDS = {"variable"}
-NO_AIDS: set[str] = set()
 
 _IDENTITY = {
     "basin_version_id": "basin_v1",
@@ -433,59 +392,16 @@ def _assert_no_text_identity_predicate(sql: str, label: str, *, resolves_keys_in
         assert match is None, f"{label}: text identity predicate on {column} -> {match.group(0)!r}"
 
 
-def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label: str) -> None:
-    """Every sanctioned text conjunct of ``alias`` sits under the removal marker.
+def _assert_no_aid_comment(sql: str, label: str) -> None:
+    """No transitional-aid comment survives on this surface.
 
-    Asserted per aid on the RAW sql (markers are comments, so they are gone from
-    ``outer_predicates``): the marker must be on EXACTLY the line above the aid,
-    it must be the whole line, and markers and aid lines must be 1:1.
-
-    Tightened from "the aid's own line or the line above" to "the line above,
-    alone" by #1980, because a renderer now consumes this layout: it deletes a
-    marker line PLUS THE LINE UNDER IT, so an inline marker (``AND rt.variable =
-    'q_down' -- marker``) means deleting the aid's own line and whatever the aid
-    shared it with, and a marker covering two aids (mvt's pre-#1980 wording, one
-    comment over four conjuncts) means deleting one of them and leaving three
-    text predicates on a table that has no text columns. Both shapes were
-    accepted before and both are now refused, here and in
-    ``packages.common.river_ts_render``, from one definition of the marker.
-
-    1:1 rather than "at least one marker per aid" for the same reason: an extra
-    marker no longer means an extra comment, it means an extra deleted line.
-
-    Alias-scoped, because these statements read more than one table: the
-    latest-product fallback's station CTE carries ``fst.variable = ANY(...)`` on
-    a met table that this change does not touch, and an unscoped check would
-    demand a #1342 marker on it.
+    #1342's contract (task 6.3) deleted every aid together with its marker line,
+    so this is a tripwire rather than a layout rule: an aid comment coming back
+    means a text predicate came back with it, on a table whose text columns no
+    longer exist.
     """
-    if not expected_aids:
-        assert PUSHDOWN_AID_MARKER not in sql, f"{label}: marker present but no aid is sanctioned here"
-        return
-    lines = sql.splitlines()
-    marker_lines = {index for index, line in enumerate(lines) if line.strip() == PUSHDOWN_AID_MARKER}
-    tagged_lines = {index for index, line in enumerate(lines) if "remove with #1342" in line}
-    assert tagged_lines == marker_lines, (
-        f"{label}: lines {sorted(index + 1 for index in tagged_lines - marker_lines)} carry the #1342 tag "
-        "without being a verbatim marker on their own line"
-    )
-    all_aid_lines: set[int] = set()
-    for aid in expected_aids:
-        aid_lines = [
-            index
-            for index, line in enumerate(lines)
-            if re.search(rf"\b{re.escape(alias)}\.{re.escape(aid)}\b\s*(=|<>|!=)", strip_comments(line))
-        ]
-        assert aid_lines, f"{label}: sanctioned aid {aid} is not present at all"
-        for aid_line in aid_lines:
-            assert aid_line - 1 in marker_lines, (
-                f"{label}: aid {aid} on line {aid_line + 1} has no verbatim marker on the line IMMEDIATELY "
-                f"above it (markers on lines {sorted(index + 1 for index in marker_lines)})"
-            )
-        all_aid_lines.update(aid_lines)
-    assert len(marker_lines) == len(all_aid_lines), (
-        f"{label}: {len(marker_lines)} markers for {len(all_aid_lines)} aid lines — the mapping must be 1:1, "
-        "because #1342 deletes a marker line and the line under it"
-    )
+    found = aid_comment_lines(sql)
+    assert found == (), f"{label}: transitional-aid comment on lines {list(found)}"
 
 
 def _assert_no_text_fact_join(sql: str, alias: str, label: str) -> None:
@@ -506,28 +422,18 @@ def _assert_no_text_fact_join(sql: str, alias: str, label: str) -> None:
             assert match is None, f"{label}: text fact join on {column} -> {match.group(0)!r}"
 
 
-def _assert_switched_surface(
-    sql: str,
-    alias: str,
-    expected_aids: set[str],
-    label: str,
-    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
-) -> None:
+def _assert_switched_surface(sql: str, alias: str, label: str) -> None:
     """The full per-surface contract, in one call.
 
-    ``allowed`` is the ceiling the expectation is measured against; it defaults
-    to the shared sanctioned set and is widened only by the A segment blocks
-    (``A_SEGMENT_BLOCK_ALLOWED_AIDS``, design D10.7), so a future surface cannot
-    grow a ``river_segment_id`` predicate just by inheriting a default.
+    The expectation is EXACTLY the empty set on every surface since #1342's
+    contract (task 6.3): the fact table is key/enum-only, so any text identity
+    reference through ``alias`` is a regression rather than a sanctioned
+    pushdown aid. The per-group ceilings and the aid-adjacency invariant went
+    with the aids they governed.
     """
-    assert_text_fact_columns(sql, alias, expected_aids, label, allowed=allowed)
+    assert_text_fact_columns(sql, alias, set(), label)
     _assert_no_text_fact_join(sql, alias, label)
-    _assert_aids_are_marked(sql, alias, expected_aids, label)
-    # Adjacency (#1442 round-2, design D10.5): presence of the aid is not
-    # enough — it must be AND-ed to the key/enum predicate that supersedes it,
-    # or it is load-bearing rather than redundant and #1342 cannot delete it.
-    for aid in sorted(expected_aids):
-        assert_aid_is_conjoined_with_its_counterpart(sql, alias, aid, label)
+    _assert_no_aid_comment(sql, label)
 
 
 # ---------------------------------------------------------------------------
@@ -641,8 +547,7 @@ def _segment_block_statements() -> dict[str, str]:
 #: because this harness calls the segment-block methods DIRECTLY and therefore
 #: never sees what `forecast_series` resolves one layer up.
 PUSHED_RUN_KEYS: tuple[int, ...] = (101, 202)
-PUSHED_RUN_IDS: tuple[str, ...] = ("qhh_gfs_2026050700", "qhh_ifs_2026050700")
-PUSHED_RUNS = _ResolvedRuns(PUSHED_RUN_KEYS, PUSHED_RUN_IDS)
+PUSHED_RUNS = _ResolvedRuns(PUSHED_RUN_KEYS)
 #: Two scenarios on two DISTINCT cycles, so the `:718` owner's pushed window is
 #: an envelope and not one scenario's cycle used as both bounds.
 PUSHED_CYCLES: dict[str, datetime] = {"forecast_gfs_deterministic": _T0, "forecast_ifs_deterministic": _T1}
@@ -709,11 +614,15 @@ def _pushed_segment_block_executions() -> dict[str, tuple[str, Any]]:
     return rendered
 
 
-def _latest_product_fallback_execution(store: str = "legacy") -> tuple[str, Any]:
-    """The known-run heavy execution, distinct from its raw renderer input."""
+def _latest_product_fallback_execution() -> tuple[str, Any]:
+    """The known-run heavy execution, distinct from its raw renderer input.
+
+    The ``store`` parameter this helper carried went with #1342's contract
+    (task 6.3) together with ``hydro.hydro_run.timeseries_store``: the header
+    prefetch no longer projects a routing column, so there is nothing to vary.
+    """
     header = {
         "run_id": "qhh_gfs_2026050700",
-        "timeseries_store": store,
         "forcing_version_id": "forc_qhh_gfs_2026050700",
         "basin_version_id": "basins_qhh_vbasins",
         "river_network_version_id": "basins_qhh_rivnet_vbasins",
@@ -735,13 +644,7 @@ def _latest_product_fallback_statement() -> str:
 
 def test_forecast_store_segment_blocks_carry_only_their_sanctioned_aids() -> None:
     for label, sql in _segment_block_statements().items():
-        _assert_switched_surface(
-            sql,
-            "rt",
-            A_SEGMENT_BLOCK_AIDS,
-            f"forecast_store {label}",
-            allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
-        )
+        _assert_switched_surface(sql, "rt", f"forecast_store {label}")
 
 
 def test_forecast_store_pushed_segment_blocks_carry_only_their_sanctioned_aids() -> None:
@@ -753,13 +656,7 @@ def test_forecast_store_pushed_segment_blocks_carry_only_their_sanctioned_aids()
     pushed = _pushed_segment_block_executions()
     assert len(pushed) == 3
     for label, (sql, _params) in pushed.items():
-        _assert_switched_surface(
-            sql,
-            "rt",
-            A_SEGMENT_BLOCK_AIDS | {"run_id"},
-            f"forecast_store pushed {label}",
-            allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
-        )
+        _assert_switched_surface(sql, "rt", f"forecast_store pushed {label}")
 
 
 #: Per-owner: what the UNION branches of a pushed rendering must contain, and what
@@ -767,15 +664,13 @@ def test_forecast_store_pushed_segment_blocks_carry_only_their_sanctioned_aids()
 #: pass by asserting nothing (#2417 task 3.3).
 _PUSHED_BRANCH_REQUIRED: dict[str, tuple[str, ...]] = {
     "forecast_segment_rows_bound_run": (
-        "AND rt.run_id = %(run_id)s",
+        # The text twin this conjunct used to carry was the transitional
+        # compressed-chunk pushdown aid; #1342's contract (task 6.3) deleted it
+        # with the column it pushed into.
         "AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s)",
     ),
-    "forecast_segment_rows_resolved_runs": (
-        "AND rt.run_id = ANY(%(pushdown_run_ids)s)",
-        "AND rt.run_key = ANY(%(pushdown_run_keys)s)",
-    ),
+    "forecast_segment_rows_resolved_runs": ("AND rt.run_key = ANY(%(pushdown_run_keys)s)",),
     "forecast_segment_rows_selected_cycles_resolved_runs": (
-        "AND rt.run_id = ANY(%(pushdown_run_ids)s)",
         "AND rt.run_key = ANY(%(pushdown_run_keys)s)",
         "AND rt.valid_time >= %(pushdown_window_start)s",
         "AND rt.valid_time <= %(pushdown_window_end)s",
@@ -786,7 +681,7 @@ _PUSHED_BRANCH_REQUIRED: dict[str, tuple[str, ...]] = {
 #: branches may acquire. `latest_analysis_issue_time`/`analysis_segment_rows`
 #: splice across every analysis run; the two run-type owners report over every run
 #: of a run type. Converging either to a run set would delete rows.
-#: ``rt.run_key =`` rather than ``run_key =``: every branch carries the routing
+#: ``rt.run_key =`` rather than ``run_key =``: the branch carries the routing
 #: join ``h.run_key = rt.run_key``, which is the key-only join this whole epic
 #: exists to have. What must not appear is a CONSTRAINT on the fact side.
 _SPANNING_BRANCH_FORBIDDEN: dict[str, tuple[str, ...]] = {
@@ -799,12 +694,20 @@ _SPANNING_BRANCH_FORBIDDEN: dict[str, tuple[str, ...]] = {
 _PROJECTION = "SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e"
 
 
-def _union_branches(sql: str) -> tuple[str, str]:
-    """The legacy and narrow UNION branch texts of one composed segment statement."""
+def _fact_branch(sql: str) -> str:
+    """The fact-table branch text of one composed segment statement.
+
+    It was ``_union_branches`` and returned a (legacy, narrow) pair until #1342's
+    contract (task 6.3) retired the routed store: the composed source is now a
+    single leg, so there is exactly one branch and no ``UNION ALL`` to split on.
+    The ``UNION ALL``-free shape is asserted rather than assumed — a second leg
+    returning would make every per-branch pin below read only the first one.
+    """
     start = sql.index(_PROJECTION)
-    end = sql.index(") rt", sql.index("UNION ALL"))
-    legacy, narrow = sql[start:end].split("UNION ALL")
-    return legacy, narrow
+    end = sql.index(") rt", start)
+    branch = sql[start:end]
+    assert "UNION ALL" not in branch, "the segment source is a single narrow leg"
+    return branch
 
 
 def test_forecast_store_pushed_branches_converge_run_identity_inside_the_union() -> None:
@@ -815,24 +718,18 @@ def test_forecast_store_pushed_branches_converge_run_identity_inside_the_union()
     either, so "the spanning branch has no run_key" would be vacuously true.
     """
     for label, (sql, _params) in _pushed_segment_block_executions().items():
-        legacy, narrow = _union_branches(sql)
+        branch = _fact_branch(sql)
         for predicate in _PUSHED_BRANCH_REQUIRED[label]:
-            assert predicate in legacy, (label, predicate)
-        # The narrow store has no text identity column, so its branch keeps the
-        # key-side push and loses the marker-guarded `rt.run_id` aid with it.
-        for predicate in _PUSHED_BRANCH_REQUIRED[label]:
-            if "rt.run_id" in predicate:
-                assert predicate not in narrow, (label, predicate)
-            else:
-                assert predicate in narrow, (label, predicate)
-        assert "rt.run_id" not in narrow, label
+            assert predicate in branch, (label, predicate)
+        # The fact table has no text identity column left, so the branch keeps
+        # the key-side push and carries no `rt.run_id` constraint at all.
+        assert "rt.run_id" not in branch, label
         # Task 2.7: a filter fragment is pushed WHOLE or not at all. The scenario
         # filter is one conjunct whose interior is an OR, so half of it inside a
         # branch would be unsound; none of it is pushed — the resolved run set
         # already carries what it selected.
-        for branch in (legacy, narrow):
-            assert "LOWER(h.source_id)" not in branch, label
-            assert "scenario_tokens" not in branch, label
+        assert "LOWER(h.source_id)" not in branch, label
+        assert "scenario_tokens" not in branch, label
         if label == "forecast_segment_rows_selected_cycles_resolved_runs":
             # …and that owner really was rendered WITH a scenario filter, so the
             # two assertions above cannot pass for want of anything to leak.
@@ -905,52 +802,288 @@ def test_forecast_store_deliberately_spanning_branches_push_nothing_that_pins_a_
     """
     rendered = _segment_block_statements()
     for label, forbidden in _SPANNING_BRANCH_FORBIDDEN.items():
-        legacy, narrow = _union_branches(rendered[label])
-        for branch, route in ((legacy, "legacy"), (narrow, "narrow")):
-            for needle in forbidden:
-                assert needle not in branch, (label, route, needle)
+        branch = _fact_branch(rendered[label])
+        for needle in forbidden:
+            assert needle not in branch, (label, needle)
     for label in ("latest_run_type_valid_time", "run_type_segment_rows"):
-        legacy, narrow = _union_branches(rendered[label])
-        for branch in (legacy, narrow):
-            assert "AND LOWER(h.run_type::text) = ANY(%(run_types)s)" in branch, label
+        assert "AND LOWER(h.run_type::text) = ANY(%(run_types)s)" in _fact_branch(rendered[label]), label
     for label in ("latest_analysis_issue_time", "analysis_segment_rows"):
-        legacy, narrow = _union_branches(rendered[label])
-        for branch in (legacy, narrow):
-            assert "AND h.scenario_id = 'analysis_true_field'" in branch, label
+        assert "AND h.scenario_id = 'analysis_true_field'" in _fact_branch(rendered[label]), label
 
 
-def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() -> None:
-    """Presence pin for the D10.7 aid, verbatim, in all eight blocks.
+def test_forecast_store_segment_blocks_carry_no_text_pushdown_aid() -> None:
+    """The inverse of the D10.7 presence pin this test used to be.
 
-    The ceiling check above is an equality and would already redden on removal,
-    but this states the requirement in the form the next reader will search for:
-    a "finish the cleanup, drop the last text predicate" edit is the regression
-    E4(ii) caught on node-27 — the compressed leg loses segmentby pruning and
-    decompresses the whole network (32660 batches / 18549ms, against 40 / 1085ms
-    with the aid) — and it must fail here rather than in a plan nobody
-    re-measures.
+    Until #1342's contract (task 6.3) all eight blocks were REQUIRED to carry
+    ``AND rt.river_segment_id = %(river_segment_id)s``: on the routed store the
+    compressed leg lost segmentby pruning without it and decompressed the whole
+    network (measured on node-27: 32660 batches / 18549ms, against 40 / 1085ms
+    with the aid). The narrow table segments by ``river_segment_key`` instead, so
+    that column is gone and the predicate would now raise ``column
+    river_segment_id does not exist``. The requirement flipped sign; it did not
+    disappear, which is why it is still asserted over all eight.
     """
     rendered = _segment_block_statements()
     assert len(rendered) == 8
     for label, sql in rendered.items():
-        assert "AND rt.river_segment_id = %(river_segment_id)s" in sql, label
+        assert "rt.river_segment_id" not in sql, label
+        assert "AND rt.river_segment_key = (" in sql, label
+
+
+def _assert_segment_block_identity_predicates(sql: str, label: str) -> None:
+    """The oracle design.md F4b names, factored so it can be proven to bite.
+
+    Asserted on the two UNION BRANCH texts rather than on the composed statement,
+    because sargability is a property of the BRANCH SCAN: the outer layer's
+    ``JOIN core.river_network_version rnv ON rnv.river_network_version_key =
+    rt.river_network_version_key`` is a different predicate on the same column
+    and must not be able to answer for the branch's.
+
+    #2451 C1 changed the spelling of two of these conjuncts, deliberately and
+    visibly (``packages/common/forecast_store.py``): ``basin_version_key`` and
+    ``river_network_version_key`` are compared with ``IS NOT NULL AND … IS NOT
+    DISTINCT FROM`` so they cannot form an index condition on
+    ``river_ts_run_discovery_key_idx``'s 2nd and 3rd columns; what changed is
+    sargability, not enforcement.
+
+    The ``IS NOT NULL`` half is part of the spelling, not decoration, and is
+    pinned as a CONTIGUOUS PAIR with the conjunct it guards. ``IS NOT DISTINCT
+    FROM`` on its own is NOT equivalent to ``=``: with NULL on both sides it is
+    TRUE where ``=`` is UNKNOWN, so the row is RETURNED instead of excluded. The
+    two columns are ``NOT NULL`` only on ``hydro.river_timeseries``
+    (``db/migrations/000059_river_timeseries_narrow_expand.sql:14-15``); on the
+    routing target #1342's contract retired they were NULLABLE, and ONE template
+    rendered both. The second rendering is gone and the spelling deliberately
+    stays: with the left side guarded non-NULL the pair filters exactly as ``=``
+    does on every input, so the branch predicate does not depend on a nullability
+    fact stated in another file, and reverting to ``=`` would re-enable the
+    discovery index prefix this spelling exists to suppress. ``test_the_null_guard_is_what_makes_
+    the_c1_spelling_filter_like_equality`` is the executable proof.
+
+    Each of the two is pinned TWICE — the new spelling present AND the plain
+    ``=`` spelling absent. Presence alone would pass a half-revert that adds
+    ``rt.basin_version_key = (…)`` back BESIDE the ``IS NOT DISTINCT FROM`` one,
+    which re-enables the discovery index's prefix and reinstates the defect while
+    still "keeping the predicate". ``rt.river_segment_key`` keeps its ``=`` and is
+    deliberately NOT swept into the absence check: it is the conjunct that must
+    stay sargable, and it is pinned as an equality here.
+    """
+    for branch in (_fact_branch(sql),):
+        where = (label, "narrow")
+        assert "rt.basin_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.basin_version_key = (" not in branch, where
+        # The leading keyword is deliberately NOT part of the pin: #1342's
+        # contract (task 6.3) deleted the store predicate that used to open this
+        # chain, so the guard is now the `WHERE` conjunct in some owners and an
+        # `AND` conjunct in others. What must hold is the ADJACENCY of the guard
+        # to the conjunct it guards, and that is what is spelled.
+        assert (
+            "rt.basin_version_key IS NOT NULL\n  AND rt.basin_version_key IS NOT DISTINCT FROM (\n"
+        ) in branch, where
+        assert "SELECT basin_version_key FROM core.basin_version" in branch, where
+        assert "rt.river_segment_key = (" in branch, where
+        # The segment resolution binds the network too: core.river_segment's
+        # primary key is (river_segment_id, river_network_version_id), so a bare
+        # segment lookup could return more than one row and raise at runtime.
+        assert "SELECT river_segment_key FROM core.river_segment" in branch, where
+        assert "AND river_network_version_id = %(river_network_version_id)s" in branch, where
+        assert "rt.river_network_version_key IS NOT DISTINCT FROM (" in branch, where
+        assert "rt.river_network_version_key = (" not in branch, where
+        assert (
+            "rt.river_network_version_key IS NOT NULL\n"
+            "  AND rt.river_network_version_key IS NOT DISTINCT FROM (\n"
+        ) in branch, where
+        assert "rt.variable_e = 'q_down'::hydro.river_variable" in branch, where
+        # The run is reached by key, never by its text.
+        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in branch, where
 
 
 def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
     """Non-vacuity: every block really predicates on the four keys and the enum."""
-    for label, sql in _segment_block_statements().items():
-        assert "rt.basin_version_key = (" in sql, label
-        assert "SELECT basin_version_key FROM core.basin_version" in sql, label
-        assert "rt.river_segment_key = (" in sql, label
-        # The segment resolution binds the network too: core.river_segment's
-        # primary key is (river_segment_id, river_network_version_id), so a bare
-        # segment lookup could return more than one row and raise at runtime.
-        assert "SELECT river_segment_key FROM core.river_segment" in sql, label
-        assert "AND river_network_version_id = %(river_network_version_id)s" in sql, label
-        assert "rt.river_network_version_key = (" in sql, label
-        assert "rt.variable_e = 'q_down'::hydro.river_variable" in sql, label
-        # The run is reached by key, never by its text.
-        assert "JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in sql, label
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        _assert_segment_block_identity_predicates(sql, label)
+
+
+def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> None:
+    """The pin above may not be satisfiable by loosening it (tasks.md §3.2).
+
+    ``_assert_key_predicates_retained`` (``packages/common/river_ts_render.py``)
+    compares a template against a rendering derived from that same template, so a
+    symmetric rewrite of a conjunct leaves it silent — its silence is not evidence
+    the spelling survived. This pin is the one that bites, and this case is the
+    proof that it does: reverting exactly C1's substitution, on every one of the
+    eight blocks, must make it RED. If this ever passes, the pin above has been
+    weakened to something a plain ``=`` also satisfies.
+    """
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        reverted = sql.replace(" IS NOT DISTINCT FROM (", " = (")
+        assert reverted != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(reverted, label)
+        # And the same for a HALF revert, which keeps the C1 spelling and adds the
+        # sargable one back beside it — the shape a presence-only pin would miss.
+        half = sql.replace(
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+            "  AND rt.basin_version_key = (\n      SELECT basin_version_key FROM core.basin_version\n"
+            "      WHERE basin_version_id = %(basin_version_id)s\n  )\n"
+            "  AND rt.basin_version_key IS NOT DISTINCT FROM (\n",
+        )
+        assert half != sql, label
+        with pytest.raises(AssertionError):
+            _assert_segment_block_identity_predicates(half, label)
+        # And an UNGUARDED revert, which drops only the `IS NOT NULL` line. Every
+        # other pin above still passes on it — the C1 spelling is present, the
+        # plain `=` is absent, the authority sub-select is intact — so the
+        # contiguous-pair pin is the only thing standing between this branch and
+        # `IS NOT DISTINCT FROM`'s NULL-vs-NULL divergence from `=`.
+        for column in ("basin_version_key", "river_network_version_key"):
+            # The guard is removed WITH the connective that followed it, so the
+            # chain stays well formed whether the guard opened it with `WHERE` or
+            # continued it with `AND` — #1342's contract (task 6.3) deleted the
+            # store predicate that used to be the chain's first conjunct.
+            unguarded = re.sub(rf"rt\.{column} IS NOT NULL\n  AND ", "", sql)
+            assert unguarded != sql, (label, column)
+            with pytest.raises(AssertionError):
+                _assert_segment_block_identity_predicates(unguarded, label)
+
+
+#: One ``IS NOT DISTINCT FROM`` identity conjunct of ``_SEGMENT_ROWS_SOURCE_SQL``,
+#: SLICED OUT of the shipped template instead of copied, so the executable
+#: semantics case below cannot drift away from the SQL the product runs.
+#:
+#: Deliberately anchored on the COMPARISON and not on the guard: the guard's
+#: presence is an assertion this test makes, so it may not also be a precondition
+#: for the test running. Anchored on the guard, deleting the guard from
+#: ``forecast_store.py`` would make the slice come up empty and the failure would
+#: read "found 0 conjuncts" instead of naming the semantics that were lost.
+_IDENTITY_COMPARISON_CONJUNCT = re.compile(
+    r"  AND rt\.(?P<column>[a-z_]+) IS NOT DISTINCT FROM \(\n(?P<subselect>(?:      [^\n]*\n)+)  \)\n"
+)
+
+#: The authority resolution inside such a conjunct, parsed so the fixture tables
+#: below are built from the template's own names rather than from a guess.
+_AUTHORITY_SUBSELECT = re.compile(
+    r"\s*SELECT (?P<key>\w+) FROM (?P<schema>\w+)\.(?P<table>\w+)\s+WHERE (?P<member>\w+) = %\((?P<param>\w+)\)s\s*"
+)
+
+#: The five NULL/non-NULL combinations the two sides of an identity comparison can
+#: take, with what PostgreSQL's ``=`` does with each inside a ``WHERE`` conjunct.
+#: ``authority_seeded`` False binds an id with no authority row, which is what
+#: makes the scalar sub-select yield NULL.
+_IDENTITY_NULL_CELLS: tuple[tuple[str, int | None, bool, int], ...] = (
+    ("both_bound_match", 7, True, 1),
+    ("both_bound_mismatch", 9, True, 0),
+    ("fact_null_authority_bound", None, True, 0),
+    ("fact_bound_authority_null", 7, False, 0),
+    # The only cell where the guard changes the answer.
+    ("both_null", None, False, 0),
+)
+
+
+def _identity_comparison_conjuncts() -> dict[str, tuple[str, bool, re.Match[str]]]:
+    """``{column: (comparison_sql, guarded, authority_match)}`` off the shipped template.
+
+    ``guarded`` is whether the line immediately ABOVE the comparison is that same
+    column's ``IS NOT NULL``. Read here, asserted by the caller.
+
+    The guard's own leading keyword is not part of the match: #1342's contract
+    (task 6.3) deleted the store predicate that used to open this chain, so the
+    first guard is now the ``WHERE`` conjunct and the second is still an ``AND``
+    one. Adjacency is the property; which keyword introduces the chain is not.
+    """
+    template = forecast_store._SEGMENT_ROWS_SOURCE_SQL
+    found: dict[str, tuple[str, bool, re.Match[str]]] = {}
+    for match in _IDENTITY_COMPARISON_CONJUNCT.finditer(template):
+        column = match.group("column")
+        authority = _AUTHORITY_SUBSELECT.fullmatch(match.group("subselect"))
+        assert authority is not None, match.group("subselect")
+        guard = f"rt.{column} IS NOT NULL\n"
+        found[column] = (match.group(0), template[: match.start()].endswith(guard), authority)
+    return found
+
+
+def _sqlite_row_count(connection: sqlite3.Connection, predicate: str, params: dict[str, Any]) -> int:
+    """Rows a one-row fact table returns under ``predicate``, in SQLite's 3VL."""
+    sql = re.sub(r"%\((\w+)\)s", r":\1", f"SELECT COUNT(*) FROM rt WHERE {predicate}")
+    return int(connection.execute(sql, params).fetchone()[0])
+
+
+def test_the_null_guard_is_what_makes_the_c1_spelling_filter_like_equality() -> None:
+    """The guard is LOAD-BEARING, proven by executing the three spellings.
+
+    Not a restatement of the text pin and not a model of SQL: the two guarded
+    conjuncts are sliced out of ``_SEGMENT_ROWS_SOURCE_SQL`` and RUN, against a
+    fact column declared NULLABLE exactly as
+    ``hydro.river_timeseries_legacy``'s three key columns really are
+    (``db/migrations/000050_river_identity_normalization.sql:216-222``; the
+    narrow table's are ``NOT NULL``, and one template renders both branches).
+    SQLite is the engine because it implements the same three-valued logic for
+    ``=`` and for ``IS NOT DISTINCT FROM`` and needs no server — the oracle is
+    the ``=`` column, which is the pre-#2451 spelling this change may not alter
+    the meaning of.
+
+    What it proves, per cell:
+
+    * the shipped guarded spelling returns exactly what ``=`` returns, on all
+      five NULL/non-NULL combinations of the two sides;
+    * dropping the ``IS NOT NULL`` makes ``both_null`` return the row that ``=``
+      excludes — a fail-open on identity verification, the class design.md F4
+      forbids reopening.
+
+    So if the guard is deleted from ``forecast_store.py``, this reddens on the
+    per-column ``guarded`` assertion, AFTER the cells above have run and pinned
+    what that deletion costs — the failure names the divergent cell rather than
+    reporting an empty slice.
+    """
+    conjuncts = _identity_comparison_conjuncts()
+    assert set(conjuncts) == {"basin_version_key", "river_network_version_key"}
+
+    for column, (comparison_sql, guarded_in_template, authority) in conjuncts.items():
+        schema, table = authority["schema"], authority["table"]
+        key, member, param = authority["key"], authority["member"], authority["param"]
+        # Built from the sliced comparison, INDEPENDENTLY of what the template
+        # currently spells, so all three columns of the table below are measured
+        # whether or not the guard is in the file right now.
+        unguarded = comparison_sql.strip().removeprefix("AND ").strip()
+        guarded = f"rt.{column} IS NOT NULL AND {unguarded}"
+        equality = unguarded.replace("IS NOT DISTINCT FROM", "=", 1)
+        assert equality != unguarded != guarded
+
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute(f"ATTACH DATABASE ':memory:' AS {schema}")
+            connection.execute(f"CREATE TABLE {schema}.{table} ({member} TEXT NOT NULL, {key} INTEGER NOT NULL)")
+            connection.execute(f"INSERT INTO {schema}.{table} VALUES ('seeded-id', 7)")
+            # NULLABLE on purpose: this is the legacy table's real column shape.
+            connection.execute(f"CREATE TABLE rt ({column} INTEGER)")
+            divergent: list[str] = []
+            for cell, fact_key, authority_seeded, expected in _IDENTITY_NULL_CELLS:
+                connection.execute("DELETE FROM rt")
+                connection.execute("INSERT INTO rt VALUES (?)", (fact_key,))
+                params = {param: "seeded-id" if authority_seeded else "absent-id"}
+                where = (column, cell)
+                assert _sqlite_row_count(connection, equality, params) == expected, where
+                assert _sqlite_row_count(connection, guarded, params) == expected, where
+                # The unguarded spelling agrees everywhere EXCEPT both-NULL, where
+                # it returns the row `=` excludes. That single divergence is the
+                # whole reason the guard is in the template.
+                fail_open = 1 if cell == "both_null" else expected
+                assert _sqlite_row_count(connection, unguarded, params) == fail_open, where
+                if fail_open != expected:
+                    divergent.append(cell)
+            assert divergent == ["both_null"], (column, divergent)
+        finally:
+            connection.close()
+
+        assert guarded_in_template, (
+            f"rt.{column}'s IS NOT DISTINCT FROM conjunct lost its `IS NOT NULL` guard; "
+            f"without it the branch predicate diverges from `=` on {divergent} and returns "
+            f"a row that identity verification excludes"
+        )
 
 
 def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> None:
@@ -1038,7 +1171,7 @@ def test_forecast_store_segment_blocks_emit_unit_and_network_without_the_text_co
 def test_latest_product_fallback_river_chain_is_keyed_end_to_end() -> None:
     sql = _latest_product_fallback_statement()
 
-    _assert_switched_surface(sql, "rt", A_FALLBACK_AIDS, "forecast_store latest-product fallback")
+    _assert_switched_surface(sql, "rt", "forecast_store latest-product fallback")
     # The join to candidate_runs is key-only on all three identities.
     for key in ("run_key", "basin_version_key", "river_network_version_key"):
         assert f"cr.{key} = rt.{key}" in sql, key
@@ -1079,21 +1212,18 @@ def test_latest_product_fallback_scan_guards_still_fold_away_on_a_null_binding()
     river_cte = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]
     outer = outer_predicates(river_cte)
 
-    # run_id / river_network_version_id keep their transitional text conjunct
-    # INSIDE the guard, AND-ed with the key predicate that supersedes it; the
-    # `= )` tail is the key-resolution sub-select the stripper removed.
-    # #1980 note on the space in ``OR ( rt.``: the removal marker now sits on
-    # its own line INSIDE the disjunct, immediately above the aid, so once
-    # ``strip_comments`` has replaced it the bracket is followed by whitespace.
-    # The pin is re-spelled rather than loosened — the shape it protects (the
-    # aid AND-ed to its key resolution inside the guard, the guard folding away
-    # on a NULL binding) is unchanged, and the fold is exactly what makes the
-    # aid line deletable by #1342.
-    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in outer
+    # run_id / river_network_version_id used to carry a transitional text
+    # conjunct INSIDE the guard, AND-ed with the key predicate that superseded
+    # it. #1342's contract (task 6.3) deleted both the conjunct and the marker
+    # above it, so the disjunct holds its key resolution alone; the `= )` tail is
+    # that sub-select, which the stripper removed. The inner bracket is kept
+    # verbatim rather than tidied — it is still the escape branch's own group,
+    # and re-spelling production SQL for cosmetics is how a fold-away guard loses
+    # a branch unnoticed.
+    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_key = ))" in outer
     assert (
         "AND (%(scan_river_network_version_id)s IS NULL "
-        "OR ( rt.river_network_version_id = %(scan_river_network_version_id)s "
-        "AND rt.river_network_version_key = ))"
+        "OR ( rt.river_network_version_key = ))"
     ) in outer
     # basin_version_id is not a sanctioned aid, so its guard is key-only: it no
     # longer appears as a fact predicate at all, only inside the authority
@@ -1138,7 +1268,7 @@ def _publisher_sql(*, is_sqlite: bool) -> str:
 def test_publisher_discovery_carries_only_the_variable_aid_on_both_dialects(is_sqlite: bool) -> None:
     sql = _publisher_sql(is_sqlite=is_sqlite)
 
-    _assert_switched_surface(sql, "r", PUBLISHER_AIDS, f"publisher (sqlite={is_sqlite})")
+    _assert_switched_surface(sql, "r", f"publisher (sqlite={is_sqlite})")
     assert "ON r.run_key = h.run_key" in sql
 
 
@@ -1177,8 +1307,10 @@ def test_publisher_discovery_aggregates_enums_and_restores_the_network_text() ->
 def test_publisher_where_clause_fragments_name_no_text_identity_column() -> None:
     """Bare-fragment face: ``_discover_qdown_runs``'s own ``where_clauses`` list.
 
-    The fragments are joined onto one line. The #1342 marker belongs in the
-    raw fact source; this outer fragment list stays text-free.
+    The fragments are joined onto one line and stay text-free. The transitional
+    aid comment that used to live in the raw fact source went with #1342's
+    contract (task 6.3); its absence is asserted here too, because a fragment
+    list is exactly where a reintroduced aid would hide from the renderer.
     """
     fragments = _sql_constants(
         module=("services", "tile_publisher", "publisher.py"),
@@ -1189,7 +1321,7 @@ def test_publisher_where_clause_fragments_name_no_text_identity_column() -> None
 
     assert fact_fragments == ["r.variable_e = 'q_down'"]
     for fragment in fact_fragments:
-        assert PUSHDOWN_AID_MARKER not in fragment, fragment
+        _assert_no_aid_comment(fragment, f"publisher fragment {fragment!r}")
         assert_text_fact_columns(fragment, "r", set(), f"publisher fragment {fragment!r}")
 
 
@@ -1201,41 +1333,14 @@ def test_publisher_where_clause_fragments_name_no_text_identity_column() -> None
 def test_copyback_discovery_probe_correlates_on_the_run_key() -> None:
     sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
 
-    _assert_switched_surface(sql, "rt", COPYBACK_AIDS, "copyback discovery")
+    _assert_switched_surface(sql, "rt", "copyback discovery")
     assert "WHERE rt.run_key = h.run_key" in sql
-    assert "AND rt.variable_e = 'q_down'" in sql
-
-
-def test_copyback_aid_is_labelled_as_an_orderby_batch_filter_not_a_pushdown() -> None:
-    """#1778: the surviving aid must say what it actually does to the planner.
-
-    ``variable`` is an ORDERBY column of 000047's compression layout, not a
-    segmentby column, so it prunes decompressed BATCHES by their min/max
-    metadata and cannot prune segments. The generic removal marker reads
-    "pushdown aid" and is byte-frozen (#1342 deletes by that line), so the
-    correction has to live in the prose beside it — and it has to be asserted,
-    or the next reader re-derives the same wrong conclusion from the marker.
-
-    Pinned on the block ABOVE the marker rather than anywhere in the module:
-    prose parked in the module docstring would satisfy a containment check while
-    leaving the aid itself unlabelled.
-    """
-    sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
-    lines = sql.splitlines()
-    marker_line = next(index for index, line in enumerate(lines) if PUSHDOWN_AID_MARKER in line)
-    # The marker keeps its adjacency to the aid (_assert_aids_are_marked above
-    # enforces that); the explanation is the contiguous comment block above it.
-    block: list[str] = []
-    index = marker_line - 1
-    while index >= 0 and lines[index].strip().startswith("--"):
-        block.append(lines[index].strip())
-        index -= 1
-    explanation = " ".join(reversed(block)).lower()
-
-    assert "orderby" in explanation, "the aid must be named an orderby-level filter"
-    assert "segmentby" in explanation, "and contrasted with the segmentby columns it is not"
-    assert "000047" in explanation, "cite the layout migration, so the claim is checkable"
-    assert "not a segmentby index pushdown" in explanation
+    # The enum predicate lives in the interpolated fact source, which is one
+    # narrow leg since #1342's contract (task 6.3) — it used to be a per-store
+    # render spliced into the same EXISTS.
+    assert "WHERE rt.variable_e = 'q_down'" in sql
+    assert "UNION ALL" not in sql
+    assert "hydro.river_timeseries_legacy" not in sql
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1455,7 @@ def test_autopipeline_publish_criterion_reads_only_the_authority_table() -> None
     assert "WHERE h.status = 'parsed'" in sql
     assert "AND h.parsed_at IS NOT NULL" in sql
     assert RIVER_TABLE not in sql
-    assert PUSHDOWN_AID_MARKER not in sql, "publish is aid-free: it reads no fact table at all"
+    _assert_no_aid_comment(sql, "autopipeline publish")
 
 
 # ---------------------------------------------------------------------------
@@ -1389,7 +1494,7 @@ def test_parser_probe_and_window_locate_rows_by_key_without_text_aids() -> None:
         assert "WHERE run_key = %s" in sql, label
         assert "AND river_network_version_key = %s" in sql, label
         assert "AND variable_e = %s" in sql, label
-        assert PUSHDOWN_AID_MARKER not in sql
+        _assert_no_aid_comment(sql, f"parser {label}")
         _assert_no_text_identity_predicate(sql, label)
     assert "WITH existing AS MATERIALIZED" in window
 
@@ -1400,8 +1505,8 @@ def test_parser_delete_locates_rows_by_key_with_no_aid() -> None:
     Unlike the two read statements it is valid_time bounded and runs only after
     ``check_batch_targets_uncompressed`` passed, so every chunk it can touch is
     uncompressed and 000051's key index is a complete access path. No aid is
-    sanctioned here, and the marker's absence is asserted so #1681's aid cannot
-    be copied into this statement without a decision.
+    sanctioned here, and the aid comment's absence is asserted so #1681's aid
+    cannot be copied into this statement without a decision.
     """
     _probe, _window, delete, _insert = _parser_river_statements()
 
@@ -1409,7 +1514,7 @@ def test_parser_delete_locates_rows_by_key_with_no_aid() -> None:
     assert "AND river_network_version_key = %s" in delete
     assert "AND variable_e = %s" in delete
     _assert_no_text_identity_predicate(delete, "parser delete")
-    assert PUSHDOWN_AID_MARKER not in delete, "parser delete: no aid is sanctioned here"
+    _assert_no_aid_comment(delete, "parser delete")
     # The window predicate is untouched: replace semantics depend on it, and the
     # guard's compressed-chunk verdict is computed from what this returns.
     assert "AND valid_time >= %s" in delete
@@ -1442,11 +1547,11 @@ def test_smoke_summary_counts_segments_and_filters_by_key() -> None:
         function="main",
         needle="hydro.river_timeseries",
     )
-    canonical = [sql for sql in statements if "hydro.river_timeseries_legacy" not in sql]
-    legacy = [sql for sql in statements if "hydro.river_timeseries_legacy" in sql]
-    assert len(canonical) == len(legacy) == 1
-    sql = canonical[0]
-    _assert_no_text_identity_predicate(legacy[0], "legacy summary", resolves_keys_inline=True)
+    # ONE statement: the second, against `hydro.river_timeseries_legacy`, went
+    # with the table in #1342's contract (task 6.3).
+    assert [sql for sql in statements if "hydro.river_timeseries_legacy" in sql] == []
+    assert len(statements) == 1
+    sql = statements[0]
 
     assert "count(DISTINCT river_segment_key) AS segment_count" in sql
     assert "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)" in sql
@@ -1478,8 +1583,10 @@ def test_reset_smoke_db_delete_fragment_targets_the_run_key() -> None:
         function="main",
         needle="FROM hydro.hydro_run",
     )
+    # ONE fragment: the twin that deleted from the retired physical table went
+    # with it in #1342's contract (task 6.3).
     river_fragments = [fragment for fragment in fragments if fragment.startswith("run_key")]
-    assert len(river_fragments) == 2
+    assert len(river_fragments) == 1
     for fragment in river_fragments:
         assert fragment == "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
         _assert_no_text_identity_predicate(fragment, "reset fragment", resolves_keys_inline=True)
@@ -1513,8 +1620,17 @@ def test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums() ->
         function="post_expand_forecast_database",
         needle="hydro.river_timeseries",
     )
-    assert len(statements) == 3
-    narrow_copy, copy, decoys = statements
+    assert len(statements) == 5
+    pin_probe, pin_message, narrow_copy, copy, decoys = statements
+    # The first two arrived with #1988's contract coverage and are NOT fact
+    # reads: a catalog probe that fails the fixture closed when its caller
+    # skipped the `through="000059"` pin, plus the message it raises. They are
+    # registered here because the census counts every mention of the fact
+    # table's name, a message included. Pinning the probe's shape is what keeps
+    # it a catalog lookup: `to_regclass` takes the name as a VALUE, so no
+    # rewrite of it can grow a text-identity predicate on the fact table.
+    assert pin_probe == "SELECT to_regclass('hydro.river_timeseries_legacy') AS legacy"
+    assert 'through="000059"' in pin_message
     assert "FROM hydro.river_timeseries_legacy" in narrow_copy
     assert "INSERT INTO hydro.river_timeseries_legacy" in copy
     assert "FROM hydro.river_timeseries rt" in copy
@@ -1532,7 +1648,15 @@ def test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums() ->
 # #1341 shipped exactly that.
 # ---------------------------------------------------------------------------
 
-_SWITCHED_SPECIMEN = f"""
+#: The specimen is AID-FREE since #1342's contract (task 6.3). It used to carry
+#: three marked text aids (`river_segment_id`, `river_network_version_id`,
+#: `variable`) so the marker/adjacency counter-examples had something to mutate;
+#: those columns no longer exist on the fact table, so a specimen that still
+#: spelled them would be proving the oracle bites on a shape production can no
+#: longer produce. What remains is a plain key/enum surface — which is what every
+#: registered surface now looks like, so a counter-example built from it reddens
+#: for the same reason a real regression would.
+_SWITCHED_SPECIMEN = """
     SELECT rt.valid_time, rt.unit_e::text AS unit
     FROM hydro.river_timeseries rt
     JOIN hydro.hydro_run h ON h.run_key = rt.run_key
@@ -1543,23 +1667,17 @@ _SWITCHED_SPECIMEN = f"""
               SELECT river_segment_key FROM core.river_segment
               WHERE river_segment_id = %s AND river_network_version_id = %s
           )
-      {PUSHDOWN_AID_MARKER}
-      AND rt.river_segment_id = %s
-      {PUSHDOWN_AID_MARKER}
-      AND rt.river_network_version_id = %s
       AND rt.river_network_version_key = (
               SELECT river_network_version_key FROM core.river_network_version
               WHERE river_network_version_id = %s
           )
-      {PUSHDOWN_AID_MARKER}
-      AND rt.variable = 'q_down'
       AND rt.variable_e = 'q_down'::hydro.river_variable
 """
 
 
 def _assert_specimen_surface(sql: str, label: str) -> None:
-    """``_assert_switched_surface`` at the A segment blocks' widened ceiling."""
-    _assert_switched_surface(sql, "rt", A_SEGMENT_BLOCK_AIDS, label, allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS)
+    """``_assert_switched_surface`` at the register's one remaining ceiling: empty."""
+    _assert_switched_surface(sql, "rt", label)
 
 
 def test_the_specimen_the_counter_examples_mutate_is_itself_green() -> None:
@@ -1568,26 +1686,49 @@ def test_the_specimen_the_counter_examples_mutate_is_itself_green() -> None:
 
 
 def test_a_forbidden_text_predicate_turns_the_oracle_red() -> None:
-    """``basin_version_id`` stays forbidden on every surface in this register.
+    """Every text identity column is forbidden on every surface in this register.
 
-    ``river_segment_id`` used to be injected here too; since D10.7 it is the
-    group's third sanctioned aid, so the forbidden case is basin alone — and the
-    ceiling that admits the segment aid still has to reject this one.
+    ``river_segment_id`` was this group's third SANCTIONED aid under D10.7 and is
+    now forbidden like the rest; both it and ``basin_version_id`` are asserted so
+    the widened-ceiling era cannot come back by accident.
     """
+    for mutation in (
+        ("WHERE rt.basin_version_key = (", "WHERE rt.basin_version_id = %s AND rt.basin_version_key = ("),
+        ("      AND rt.variable_e =", "      AND rt.river_segment_id = %s\n      AND rt.variable_e ="),
+        ("      AND rt.variable_e =", "      AND rt.river_network_version_id = %s\n      AND rt.variable_e ="),
+        ("      AND rt.variable_e =", "      AND rt.variable = 'q_down'\n      AND rt.variable_e ="),
+    ):
+        mutated = _SWITCHED_SPECIMEN.replace(*mutation)
+        assert mutated != _SWITCHED_SPECIMEN, mutation
+        with pytest.raises(AssertionError):
+            _assert_specimen_surface(mutated, f"forbidden predicate {mutation[1]!r}")
+
+
+def test_a_reintroduced_transitional_aid_comment_turns_the_oracle_red() -> None:
+    """The zero-valued tripwire #1342's contract left behind (task 6.3).
+
+    The marker/adjacency counter-examples this file used to carry proved that a
+    MALFORMED aid was red. There is no well-formed aid any more, so the property
+    that replaces them is simpler and stricter: the aid comment itself must not
+    reappear on a registered surface. It is the cheap signal that someone is
+    re-adding a text pushdown to a table whose text columns are gone, where the
+    failure mode is ``column river_segment_id does not exist`` at runtime.
+
+    Asserted on BOTH halves of the old marker comment — the descriptive phrase
+    (which is what the tripwire keys on) and a hand-written aid that carries only
+    the phrase — so the check cannot be satisfied by renaming the comment.
+    """
+    assert AID_COMMENT_PHRASE, "the tripwire needs a phrase to key on"
     mutated = _SWITCHED_SPECIMEN.replace(
-        "WHERE rt.basin_version_key = (",
-        "WHERE rt.basin_version_id = %s AND rt.basin_version_key = (",
+        "      AND rt.variable_e =",
+        f"      -- {AID_COMMENT_PHRASE}, remove later\n      AND rt.variable_e =",
     )
-
+    assert mutated != _SWITCHED_SPECIMEN
+    assert aid_comment_lines(mutated) != ()
     with pytest.raises(AssertionError):
-        _assert_specimen_surface(mutated, "forbidden predicate")
-
-
-def test_an_unmarked_aid_turns_the_oracle_red() -> None:
-    mutated = _SWITCHED_SPECIMEN.replace(PUSHDOWN_AID_MARKER, "-- keep this one", 1)
-
+        _assert_no_aid_comment(mutated, "reintroduced aid comment")
     with pytest.raises(AssertionError):
-        _assert_specimen_surface(mutated, "unmarked aid")
+        _assert_specimen_surface(mutated, "reintroduced aid comment")
 
 
 def test_a_text_fact_join_turns_the_oracle_red() -> None:
@@ -1597,160 +1738,12 @@ def test_a_text_fact_join_turns_the_oracle_red() -> None:
         "JOIN hydro.hydro_run h ON h.run_key = rt.run_key AND rt.run_id = h.run_id",
     )
 
-    # It is caught twice over: as an out-of-ceiling column for this group, and
-    # as a text fact join regardless of group.
+    # It is caught twice over: as an out-of-ceiling column, and as a text fact
+    # join regardless of ceiling.
     with pytest.raises(AssertionError):
         _assert_specimen_surface(mutated, "text fact join")
     with pytest.raises(AssertionError):
         _assert_no_text_fact_join(mutated, "rt", "text fact join")
-
-
-def test_a_text_fact_join_is_red_even_where_that_column_is_a_sanctioned_aid() -> None:
-    """``run_id`` is sanctioned for the fallback — but only as a bound constant."""
-    mutated = _SWITCHED_SPECIMEN.replace(
-        "JOIN hydro.hydro_run h ON h.run_key = rt.run_key",
-        f"JOIN hydro.hydro_run h ON h.run_key = rt.run_key\n      {PUSHDOWN_AID_MARKER}\n"
-        "      AND rt.run_id = h.run_id",
-    )
-
-    assert_text_fact_columns(
-        mutated,
-        "rt",
-        A_FALLBACK_AIDS | {"river_segment_id"},
-        "widened group",
-        allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
-    )
-    with pytest.raises(AssertionError):
-        _assert_no_text_fact_join(mutated, "rt", "widened group")
-
-
-def test_an_aid_whose_counterpart_disappears_turns_the_oracle_red() -> None:
-    """M10/M30: delete the enum conjunct, keep the text one.
-
-    Every other check stays green — the aid set is unchanged, nothing forbidden
-    appeared, the marker is still adjacent — so before the adjacency invariant
-    this mutation shipped a surface that reads identity from the text column and
-    would break outright when #1342 drops it.
-    """
-    mutated = _SWITCHED_SPECIMEN.replace("\n      AND rt.variable_e = 'q_down'::hydro.river_variable", "")
-
-    assert_text_fact_columns(
-        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
-    )
-    _assert_no_text_fact_join(mutated, "rt", "counterpart dropped")
-    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
-    with pytest.raises(AssertionError):
-        _assert_specimen_surface(mutated, "counterpart dropped")
-
-
-def test_the_segment_aid_without_its_key_counterpart_turns_the_oracle_red() -> None:
-    """D10.7's own M-case: keep the restored text aid, drop ``rt.river_segment_key``.
-
-    The aid is only sanctioned because the key predicate that supersedes it sits
-    in the same conjunction; without it the block reads segment identity from
-    the text column and #1342's column drop would break it outright — while the
-    aid set, the marker and the fact-join checks all stay green.
-    """
-    mutated = re.sub(
-        r"\n      AND rt\.river_segment_key = \([^)]*\)\n",
-        "\n",
-        _SWITCHED_SPECIMEN,
-        flags=re.DOTALL,
-    )
-
-    assert "rt.river_segment_key" not in mutated
-    assert "AND rt.river_segment_id = %s" in mutated
-    assert_text_fact_columns(
-        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "segment counterpart dropped", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
-    )
-    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "segment counterpart dropped")
-    with pytest.raises(AssertionError):
-        _assert_specimen_surface(mutated, "segment counterpart dropped")
-
-
-def test_an_aid_separated_from_its_counterpart_turns_the_oracle_red() -> None:
-    """Both columns still present, but no longer the same conjunction."""
-    mutated = _SWITCHED_SPECIMEN.replace(
-        "AND rt.variable = 'q_down'\n",
-        "AND rt.variable = 'q_down'\n      AND rt.valid_time >= %s\n",
-    )
-
-    with pytest.raises(AssertionError):
-        _assert_specimen_surface(mutated, "separated aid")
-
-
-def test_a_marker_detached_from_its_aid_turns_the_oracle_red() -> None:
-    """F6: #1342 deletes BY LINE, so a marker that floats free is not a marker.
-
-    The mutation keeps all three markers and all three aids — it only hoists the
-    markers to the top of the block, which is exactly the shape the pre-#1442
-    "somewhere above" rule accepted. The count is kept whole on purpose: one
-    marker fewer than sanctioned aids would redden the arithmetic check instead
-    of the adjacency one this test is about.
-    """
-    without_markers = _SWITCHED_SPECIMEN.replace(f"      {PUSHDOWN_AID_MARKER}\n", "")
-    hoisted = f"    {PUSHDOWN_AID_MARKER}\n" * len(A_SEGMENT_BLOCK_AIDS)
-    mutated = f"{hoisted}{without_markers}"
-
-    assert mutated.count(PUSHDOWN_AID_MARKER) == len(A_SEGMENT_BLOCK_AIDS) == 3
-    assert_text_fact_columns(
-        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
-    )
-    with pytest.raises(AssertionError):
-        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
-
-
-def test_a_marker_on_the_aids_own_line_turns_the_oracle_red() -> None:
-    """Inverted by #1980: adjacency is now "the line above, alone".
-
-    This shape was ACCEPTED before, on the reasoning that a reader can see which
-    predicate the marker belongs to. A renderer cannot: it deletes the marker's
-    line and the line below it, so an inline marker makes it delete the aid's own
-    line plus the NEXT conjunct — a silently wrong statement rather than a
-    refusal. The rule and its enforcement now live in one place
-    (``packages.common.river_ts_render``), and this is the counter-example that
-    says the tightening actually took.
-    """
-    mutated = _SWITCHED_SPECIMEN.replace(
-        f"      {PUSHDOWN_AID_MARKER}\n      AND rt.variable = 'q_down'",
-        f"      AND rt.variable = 'q_down' {PUSHDOWN_AID_MARKER}",
-    )
-
-    with pytest.raises(AssertionError):
-        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "inline marker")
-
-
-def test_one_marker_covering_two_aids_turns_the_oracle_red() -> None:
-    """mvt's pre-#1980 shape: one comment over three or four conjuncts.
-
-    The 1:N form is what task 1.1 expands into eleven 1:1 markers. Without this
-    counter-example the census could be re-pinned back down and the adjacency
-    rule would still pass, because every aid would have "a" marker above it — the
-    first one.
-    """
-    mutated = _SWITCHED_SPECIMEN.replace(
-        f"      {PUSHDOWN_AID_MARKER}\n      AND rt.river_network_version_id",
-        "\n      AND rt.river_network_version_id",
-    )
-
-    assert mutated.count(PUSHDOWN_AID_MARKER) == 2
-    with pytest.raises(AssertionError):
-        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "one marker, two aids")
-
-
-def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
-    """The other direction: losing an aid silently reinstates the chunk collapse.
-
-    Both aids the E4(ii) receipts measured are covered: the network one (000047's
-    second segmentby column) and the segment one (its third — the whole-network
-    decompression D10.7 reverses, 18549ms against 1085ms). Both are
-    compressed-leg pruning; neither is an uncompressed-leg index prefix.
-    """
-    for dropped in ("AND rt.river_network_version_id = %s\n", "AND rt.river_segment_id = %s\n"):
-        mutated = _SWITCHED_SPECIMEN.replace(dropped, "")
-        assert mutated != _SWITCHED_SPECIMEN, dropped
-        with pytest.raises(AssertionError):
-            _assert_specimen_surface(mutated, f"dropped aid {dropped.strip()}")
 
 
 def test_a_bare_column_regression_turns_the_oracle_red() -> None:
@@ -1820,37 +1813,37 @@ def test_every_registered_file_declares_its_river_timeseries_statement_count() -
         )
 
 
-def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
-    """34/34 across the REGISTERED files, of which this register owns ten (#1980, task 1.1).
+def test_every_registered_file_declares_its_transitional_aid_count() -> None:
+    """Zero aids across the REGISTERED files, asserted rather than skipped.
 
-    The 34 is the total over ``REGISTERED_SOURCES`` plus the display oracle's
+    It was 34/34 (ten of them this register's) until #1342's contract (task 6.3)
+    deleted every aid together with its marker line. The census stays, and stays
+    per file, for one reason: an aid comment reappearing is the cheap signal that
+    a text pushdown came back to a table whose text columns no longer exist,
+    where the failure mode is ``column river_segment_id does not exist`` at
+    runtime rather than a slow plan.
+
+    The total is over ``REGISTERED_SOURCES`` plus the display oracle's
     ``DISPLAY_MARKER_AID_CENSUS``, not over the tree: nothing here sweeps the
     repository, so a NEW reader that is in neither register is invisible to this
     assertion. Finding one is the I11 discovery-set census's job (tasks 7.2a).
 
-    Two things at once, and both matter:
-
-    * the COUNT per file, so an aid added or dropped is red where it happened;
-    * the SHAPE of every one of them — verbatim marker, alone on its line,
-      exactly one aid conjunct underneath — which is what
-      ``packages.common.river_ts_render`` deletes by and what the pre-#1980 mvt
-      wording (one comment over four conjuncts) violated.
-
     Asserted through the shared counter in ``tests/river_ts_template_registry.py``
-    so the display oracle's half uses the same definition of "a marker".
+    so the display oracle's half uses the same definition of "an aid comment".
     """
     assert set(MARKER_AID_CENSUS) == set(REGISTERED_SOURCES), "census and register must list the same files"
     for path, expected in MARKER_AID_CENSUS.items():
-        assert_marker_census(path, expected, non_aid_tag_lines=NON_AID_MARKER_TAG_LINES.get(path, 0))
+        assert_marker_census(path, expected)
 
 
-def test_this_registers_marker_total_is_the_measured_ten() -> None:
-    """The two parser aids retired with narrow segmentby; ten reader aids remain.
+def test_this_registers_transitional_aid_total_is_zero() -> None:
+    """Ten until #1342's contract (task 6.3); zero is the terminal state.
 
-    Eight until #2417, which added the segment source's two run-identity pushdown
-    fragments. Re-pinned to the measured count, never relaxed.
+    Stated as its own assertion rather than folded into the per-file loop because
+    the number is the thing task 6.3 delivered: the migration in task 6.2 can only
+    DROP the text columns while nothing predicates on them.
     """
-    assert sum(MARKER_AID_CENSUS.values()) == 10
+    assert sum(MARKER_AID_CENSUS.values()) == 0
 
 
 def test_every_registered_read_template_is_registered_in_the_template_registry() -> None:
@@ -1924,23 +1917,33 @@ def test_the_census_counts_the_qualified_spelling_however_it_is_quoted_spaced_or
     assert _river_table_mentions(source) == 2
 
 
-def test_the_sanctioned_ceiling_is_the_shared_one_not_a_private_copy() -> None:
-    """Every per-group ceiling in this file is the shared vocabulary, plus one adjudicated column.
+def test_this_register_holds_no_private_text_ceiling_any_more() -> None:
+    """Every surface in this register is at the empty ceiling (task 6.3).
 
-    The A segment blocks are the single exception (design D10.7) and it is
-    stated here as an exact difference, mirroring how #1341 pins its
-    lateral-probe extension: the local ceiling may add ``river_segment_id`` and
-    nothing else, and every other group stays at the shared set.
+    This file used to carry five per-group ceilings — ``A_SEGMENT_BLOCK_AIDS``
+    and its D10.7-widened ``A_SEGMENT_BLOCK_ALLOWED_AIDS``, ``A_FALLBACK_AIDS``,
+    ``PUBLISHER_AIDS``, ``COPYBACK_AIDS``, ``NO_AIDS`` — and a pin that the
+    widening was exactly ``river_segment_id``. #1342's contract deleted the aids,
+    so the ceilings went with them and ``_assert_switched_surface`` passes the
+    empty set unconditionally.
+
+    The SHARED vocabulary is a different thing and deliberately survives: it is
+    what ``assert_text_fact_columns`` and ``_assert_no_text_identity_predicate``
+    use to decide what counts as a text identity column at all. What is asserted
+    here is that this register adds nothing to it.
     """
-    for group in (A_FALLBACK_AIDS, PUBLISHER_AIDS, COPYBACK_AIDS, NO_AIDS):
-        assert group <= set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
-    assert A_FALLBACK_AIDS == set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
-    assert set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) < set(A_SEGMENT_BLOCK_ALLOWED_AIDS)
-    assert set(A_SEGMENT_BLOCK_ALLOWED_AIDS) - set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) == {"river_segment_id"}
-    assert A_SEGMENT_BLOCK_AIDS <= set(A_SEGMENT_BLOCK_ALLOWED_AIDS)
-    # The widening is local: the shared constant #1341's display oracles consume
-    # still classifies river_segment_id as a forbidden text fact column, and
-    # basin_version_id is forbidden on EVERY surface, this register included.
+    assert set(TEXT_IDENTITY_COLUMNS) == (
+        set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) | set(FORBIDDEN_TEXT_FACT_COLUMNS)
+    )
+    # Non-vacuity: the helper really is called with the empty set on a surface
+    # that would otherwise be allowed to keep a sanctioned column.
+    sanctioned = sorted(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
+    assert sanctioned, "the shared vocabulary must still name sanctioned columns to make this bite"
+    for column in sanctioned:
+        widened = _SWITCHED_SPECIMEN.replace(
+            "      AND rt.variable_e =", f"      AND rt.{column} = %s\n      AND rt.variable_e ="
+        )
+        with pytest.raises(AssertionError):
+            _assert_switched_surface(widened, "rt", f"formerly sanctioned {column}")
+    # basin_version_id was forbidden on EVERY surface before and still is.
     assert {"basin_version_id", "river_segment_id"} <= set(FORBIDDEN_TEXT_FACT_COLUMNS)
-    assert "river_segment_id" not in set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
-    assert forecast_store is not None  # import is load-bearing for the capture harness

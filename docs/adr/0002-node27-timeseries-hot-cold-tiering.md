@@ -21,6 +21,12 @@ Amendment: 2026-08-29 (DB-only `nhms_cold` successor; archive retirement
 stands; isolated 2.10.2 probe freezes shell-first movement — see
 "Amendment (2026-08-29)" below)
 
+Amendment: 2026-09-19 (the river narrow store shipped as rename + `CREATE TABLE`,
+not as the in-place cutover; Decision 4's river segmentby/orderby list, its
+"one chunk width, 7 days" lag wording, and the 2026-08-15 amendment's
+"no database-enforced referential integrity" cost record are superseded — see
+"Amendment (2026-09-19)" below)
+
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source
@@ -115,6 +121,122 @@ safe disposition.
 Operator-facing current state:
 [`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md).
 
+## Amendment (2026-09-18): per-tick bound 2; compression unit rebind to the repo
+
+The 2026-09-16 record above stays as history. On 2026-09-18 (#2425) the
+compression per-tick bound became **2**: narrow one-day
+`hydro.river_timeseries` chunks (~20 GB each, ~55 s/GB) mean `bound 4` no
+longer fits the 3900 s wrapper wall. The live env (the fence env below)
+moved 4 → 2 that day.
+
+The compression unit is to be rebound (#2285, design D7; Stage B, after this
+change merges) from the #1895 fence tree
+`/home/nwm/NWM-maintenance-reviewed-95481481` to the repo unit on
+`/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` and env
+`/home/nwm/NWM/infra/env/node27-timeseries-compression.env`). Until that
+rebind the fence tree and its private env remain the active deployment; after
+it, the fence SOURCE, its `.venv` and STATE/config are **rollback inputs**.
+Either way, do not clean them.
+
+Current state and the bound derivation:
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md);
+decision record: OpenSpec change `restore-node27-maintenance-services`
+(design D7; under `openspec/changes/archive/` once archived).
+
+## Amendment (2026-09-19): the river narrow store shipped by rename + recreate; Decision 4's river settings and the FK cost record are superseded
+
+The 2026-08-15 amendment below described the river identity switch as an
+in-place cutover performed by `hydro.cutover_river_identity_normalization()`.
+**That function was never executed.** It was defined by
+`000050_river_identity_normalization.sql:372`, called by no migration in
+`db/migrations/`, and dropped unexecuted by
+`000060_river_timeseries_contract.sql:100`. What actually shipped is the
+expand–contract pair:
+
+- `000059_river_timeseries_narrow_expand.sql` renamed the text-identity table to
+  `hydro.river_timeseries_legacy` (`:9`), created a new key-only
+  `hydro.river_timeseries` (`:12-26`), made it a hypertable with
+  `chunk_time_interval => interval '1 day'` (`:28-30`), and set its compression
+  configuration last (`:61-63`). The two stores then coexisted, routed per run by
+  `hydro.hydro_run.timeseries_store`.
+- `000060_river_timeseries_contract.sql` dropped the legacy table (`:97`), both
+  identity-normalization functions (`:100-101`) and the routing column (`:106`).
+  Applied on node-27 2026-09-19 16:06:50–16:07:35 CST, rc=0, ledger 60 → 61,
+  in a 67 s quiet window. Receipt:
+  [`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+
+### The delivered geometry and compression configuration (measured after 000060)
+
+| | live `hydro.river_timeseries`, 2026-09-19 after the window |
+|---|---|
+| time dimension | single, `valid_time`, **1 day** |
+| chunks | 30; oldest `range_start` `2026-08-27T00:00Z`, newest `range_end` `2026-09-26T00:00Z`; 10 compressed |
+| segmentby | `run_key, river_segment_key` |
+| orderby | `variable_e, valid_time` |
+| indexes | exactly three: `river_timeseries_narrow_pkey`, `river_ts_run_discovery_key_idx`, `river_ts_segment_time_key_idx` |
+| size | 400 GB (whole `nhms` database 480 GB) |
+
+Decision 4's river column list (segmentby
+`run_id, river_network_version_id, river_segment_id`, orderby
+`variable, valid_time`) described the table 000060 dropped. It is history, not
+production configuration. Decision 4's *principle* — segment/order choices must
+cover the primary key — still holds and is satisfied: the narrow primary key is
+`(run_key, river_segment_key, variable_e, valid_time)` (`000059:24-25`), exactly
+the union of the segmentby and orderby lists above. The forcing half of
+Decision 4 (`met.forcing_station_timeseries`, segmentby
+`forcing_version_id, station_id`) is **unchanged** — that hypertable was not
+renamed, recreated, or contracted here; its expand is still the deferred I12
+work.
+
+Decision 4's parenthetical "compress-after lag is configurable (default one
+chunk width, 7 days)" is stale in both halves: the live lag is **172800 s
+(2 days)** and the live river chunk width is **1 day**, so lag is no longer a
+chunk-width multiple at all. The lag figure and the bound-2 derivation live in
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md)
+and in the 2026-09-18 amendment above; that configurability statement should be
+read as "operator-configured, read the live env", never as a default.
+
+### The foreign keys were not traded away
+
+The "A cost this amendment records rather than hides" subsection of the
+2026-08-15 amendment below recorded, as an accepted cost, that the fact table
+would carry **no database-enforced referential integrity** against
+`core.river_segment`, guarded instead by the backfill's four-way join and the
+read-only verify function's equality audit. That cost was never incurred,
+because the cutover it belonged to never ran. The delivered narrow table
+carries two real, enforced foreign keys, written inline at creation
+(`000059:13`, `:16`) and measured present on node-27 after 000060:
+
+- `river_timeseries_run_key_fkey FOREIGN KEY (run_key) REFERENCES hydro.hydro_run(run_key)`
+- `river_timeseries_river_segment_key_fkey FOREIGN KEY (river_segment_key) REFERENCES core.river_segment(river_segment_key)`
+
+TimescaleDB 2.10.2's rule that foreign-key columns must be covered by segmentby
+is not violated: the segmentby list is `run_key, river_segment_key` — exactly
+the two foreign-key columns. The rule that defeated the in-place design (a
+text `river_segment_id` FK against an integer-only segmentby) simply does not
+arise for a table created key-only from the start.
+
+Two of the four surrogate columns are **not** FK-enforced:
+`basin_version_key` and `river_network_version_key` are `INTEGER NOT NULL` with
+no `REFERENCES` clause (`000059:14-15`). The guards the old cost record named
+are gone, not merely superseded: `hydro.verify_river_identity_normalization()`
+was dropped by `000060:101`, and `scripts/node27_river_identity_backfill.py`
+was deleted by `timeseries-narrow-store-expand-contract` task 6.3
+(`bd06c6dd`). Anyone auditing referential integrity on
+this table today reads `pg_constraint`, not that paragraph.
+
+### What this amendment does not claim
+
+It records the catalog state measured inside the 2026-09-19 window and the
+migration source that produced it. It changes no retention or compression
+policy and does not touch the forcing hypertable. On Decision 6: the
+**narrow hot fact table** half is now delivered for the river store — that is
+what `000059` created — while the **surrogate-key dimension tables** half stays
+deferred, exactly as the 2026-08-15 amendment's "Disposition for Decision 6"
+narrowed it. The 2919 legacy-routed runs that lost their last physical copy, and
+the pre-existing populated-but-empty coverage rows found beside them, are
+accounted for in the receipt's §8 and §10, not here.
+
 ## Context
 
 Live measurements on node-27 (2026-07-04 CST; governance receipt
@@ -132,7 +254,10 @@ container) established:
   hypertables ARE the size problem.
 - TimescaleDB **2.10.2** / PostgreSQL 15.2. `compression_enabled = false` on
   both hypertables. No `drop_chunks`/retention policy exists anywhere.
-- DB chunk coverage starts 2026-05-28 (7-day chunks). The hot object-store
+- DB chunk coverage starts 2026-05-28 (7-day chunks — this is the
+  text-identity `hydro.river_timeseries` of the 2026-07-04 epoch, the table
+  `000059` renamed to `_legacy` and `000060` dropped on 2026-09-19; the live
+  narrow store's dimension is 1 day, see "Amendment (2026-09-19)"). The hot object-store
   (`/home/ghdc/nwm/object-store/`) retains `forcing/` only since 2026-06-16
   (a mid-June ad-hoc reset; no code routinely rotates `forcing/` or `runs/`),
   `runs/` since 2026-05-31, and `raw/` is pruned at 14 days by
@@ -170,9 +295,13 @@ it omits TimescaleDB native compression entirely.
    chunks only; the active chunk stays uncompressed). Segment/order choices
    must cover the existing primary keys (river: segmentby
    `run_id, river_network_version_id, river_segment_id`, orderby
-   `variable, valid_time`; forcing: segmentby
+   `variable, valid_time` — **the river half of this list is superseded; it
+   describes the text-identity table dropped on 2026-09-19, see "Amendment
+   (2026-09-19)". The forcing half is still live.**; forcing: segmentby
    `forcing_version_id, station_id`, orderby `variable, valid_time`).
-   Compress-after lag is configurable (default one chunk width, 7 days) and
+   Compress-after lag is configurable (default one chunk width, 7 days —
+   **both numbers superseded: the live lag is 172800 s and the live river
+   chunk width is 1 day, see "Amendment (2026-09-19)"**) and
    is evaluated against the node-27 display business-time watermark.
    Reingest into a compressed chunk requires an explicit, documented
    decompress step; tooling must fail closed with instructions rather than
@@ -504,7 +633,7 @@ general lesson for this ADR: "cannot be pruned further" is a measurement, not a
 property — index redundancy claims expire and must be re-measured against
 growth, not carried forward.
 
-## Amendment (2026-08-15): Decision 6 re-evaluated EARLY; Decision 4's column list is superseded at cutover
+## Amendment (2026-08-15): Decision 6 re-evaluated EARLY; Decision 4's column list is superseded at cutover (the cutover never ran — see Amendment (2026-09-19))
 
 This amendment covers two Decisions at once because issue #1339 touches both:
 it revives the star-schema idea Decision 6 deferred, and the mechanism it uses
@@ -589,47 +718,84 @@ already exist (`hydro.hydro_run`, `core.basin_version`,
 `core.river_network_version`, `core.river_segment`), which avoids the duplicate
 identity source and the DISTINCT-scan seeding phase that made the dimension-table
 shape unattractive. Narrow hot fact tables remain deferred and remain governed
-by Decision 6 as written.
+by Decision 6 as written (**superseded for the river store: `000059` created
+exactly such a narrow hot fact table, and it is the only river store since
+`000060` on 2026-09-19 — see "Amendment (2026-09-19)". The dimension-table half
+stays deferred**).
 
 ### Decision 4's segmentby column list is superseded at cutover
 
-Decision 4 pins the river hypertable's compression configuration as segmentby
+Archive status:
+- status: superseded
+- current_authority: db/migrations/000059_river_timeseries_narrow_expand.sql; db/migrations/000060_river_timeseries_contract.sql; docs/runbooks/tier-node27-timeseries-storage.md
+- superseded_by: docs/adr/0002-node27-timeseries-hot-cold-tiering.md, section "Amendment (2026-09-19)"
+- status_since: 2026-09-19
+- archive_scope: section, this subsection and "A cost this amendment records rather than hides" below, through the paragraph before "Provenance"
+- retained_for: the 2.10.2 engine measurements, which remain true, and the record of a design that was written but never executed
+
+Decision 4 pinned the river hypertable's compression configuration as segmentby
 `run_id, river_network_version_id, river_segment_id`, orderby
-`variable, valid_time`, chosen to cover the then-current primary key. That
-column list is rewritten by
-`hydro.cutover_river_identity_normalization()` to segmentby
+`variable, valid_time`, chosen to cover the then-current primary key. The plan
+recorded here was to rewrite that column list in place, via
+`hydro.cutover_river_identity_normalization()`, to segmentby
 `run_key, river_network_version_key, river_segment_key`, orderby
 `variable_e, valid_time`, simultaneously with the primary key it covers.
 
-The two cannot be separated: TimescaleDB 2.10 requires segmentby ∪ orderby to
-cover every unique/primary-key column, so the key swap and the settings swap
-are one atomic act. Decision 4's *principle* — "segment/order choices must cover
-the existing primary keys" — is unchanged and is exactly what forces this. Only
-the literal column names are superseded, and only once the cutover has been
-executed in a maintenance window. **As of this amendment the production
-configuration is still Decision 4's original list**; `000050` changes no
-compression setting and the migration chain never calls the cutover function.
+**That cutover never ran.** The function was defined
+(`000050_river_identity_normalization.sql:372`), called by no migration, and
+dropped unexecuted by `000060_river_timeseries_contract.sql:100`. The identity
+switch shipped instead as expand–contract: `000059` renamed the old table to
+`hydro.river_timeseries_legacy` and created a new key-only table with segmentby
+`run_key, river_segment_key`, orderby `variable_e, valid_time` and a 1-day
+chunk interval; `000060` dropped the legacy table on 2026-09-19. The live
+settings are therefore a **two**-column segmentby, not the three-column list
+this subsection anticipated — `river_network_version_key` is not in it. See
+"Amendment (2026-09-19)" and
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+
+The engine constraint stated here survives the change of mechanism: TimescaleDB
+2.10 requires segmentby ∪ orderby to cover every unique/primary-key column, so
+the key swap and the settings swap could not be separated. Decision 4's
+*principle* — "segment/order choices must cover the existing primary keys" — is
+unchanged, and the delivered table satisfies it:
+`(run_key, river_segment_key, variable_e, valid_time)` is exactly segmentby ∪
+orderby.
 
 ### A cost this amendment records rather than hides
 
-The cutover **drops the two-column text foreign key** from
-`hydro.river_timeseries` to `core.river_segment` (000006_hydro.sql:57-58). This
-is forced, not chosen: TimescaleDB 2.10.2 refuses a compression configuration
+**This cost was never incurred.** It belonged to the in-place cutover above,
+which never executed; the paragraphs below are kept because their 2.10.2
+measurements are real and because the delivered table's shape only makes sense
+against the design it replaced. The live table's actual referential state —
+two enforced foreign keys, `run_key` and `river_segment_key` — is in
+"Amendment (2026-09-19)".
+
+The cutover would have **dropped the two-column text foreign key** from
+`hydro.river_timeseries` to `core.river_segment` (000006_hydro.sql:57-58). That
+was forced, not chosen: TimescaleDB 2.10.2 refuses a compression configuration
 that does not cover a foreign key's columns
 (measured: `ERROR: column "river_segment_id" must be used for segmenting`), and
-the target segmentby is integer-only. No integer replacement FK can be added
-either — `basin_version_key` is not in the target segmentby, so an FK on it
-would hit the same rule.
+the target segmentby was integer-only. No integer replacement FK could be added
+either — `basin_version_key` was not in the target segmentby, so an FK on it
+would have hit the same rule.
 
-The consequence: between this cutover and the text-column-retirement issue, the
-fact table has **no database-enforced referential integrity** against
-`core.river_segment`. It is guarded instead by the backfill's four-way join,
-the runner's fail-closed unmatched counter, the read-only verify function's
-equality audit, and the seven `NOT NULL` constraints the cutover installs.
-Those are real checks, but they are point-in-time checks, not a continuously
-enforced constraint. Anyone reading this ADR later and wondering where the
-foreign key went: it was traded for a 45x-compressible integer segmentby, and
-the trade is recorded here rather than discovered in the catalog.
+The consequence would have been: between that cutover and the
+text-column-retirement issue, the fact table carries **no database-enforced
+referential integrity** against `core.river_segment`, guarded instead by the
+backfill's four-way join, the runner's fail-closed unmatched counter, the
+read-only verify function's equality audit, and the seven `NOT NULL`
+constraints the cutover installs — point-in-time checks, not a continuously
+enforced constraint.
+
+What shipped avoided the trade entirely. `000059` created the table key-only
+from the start, so its segmentby (`run_key, river_segment_key`) *is* the
+foreign-key column set and 2.10.2's rule is satisfied rather than worked
+around; both FKs are inline at creation (`000059:13`, `:16`) and were measured
+present on node-27 after `000060`. None of the named guards survives to back
+that claim up in any case: the verify function is dropped
+(`000060:101`) and `scripts/node27_river_identity_backfill.py` was deleted by
+task 6.3. Anyone reading this ADR later and wondering where the foreign key
+went: it never went anywhere — read `pg_constraint`.
 
 ### Provenance
 

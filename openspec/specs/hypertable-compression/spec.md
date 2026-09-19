@@ -762,14 +762,15 @@ committed env template SHALL carry the target value with a comment
 identifying it as a capacity conclusion and pointing at the recorded
 derivation in the operator runbook, the deployed node-27 env SHALL carry
 the same value, and every receipt echoes the effective bound via its
-existing `per_tick_bound` field. The variable remains mandatory with no
-in-code default.
+existing `per_tick_bound` field. The variable remains mandatory in the
+compression env (an env without it is refused); the in-code default, equal to
+the target, serves only direct unassembled invocations that read no env.
 
 #### Scenario: Template carries the pinned capacity target
 
 - **WHEN** `infra/env/node27-timeseries-compression.example` is read
 - **THEN** it SHALL contain the uncommented line
-  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4` with a
+  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2` with a
   capacity-conclusion comment, and an enforced test SHALL pin that exact
   assignment line so silent drift back to a stale value fails CI
 
@@ -1445,3 +1446,42 @@ unchanged.
 - **WHEN** a compression child exceeds the configured finite timeout
 - **THEN** bounded termination and cleanup finish within the wrapper/systemd
   relationship without starting a cold leg or leaving the lifecycle mutex owned
+
+### Requirement: Compression selection SHALL walk each hypertable newest-eligible-first
+
+The compression runner SHALL order eligible chunks (uncompressed, `range_end`
+before `now − lag`) hypertable by hypertable in the catalog query's
+`(hypertable_schema, hypertable_name)` order, and within one hypertable by
+`range_end` descending, and SHALL select the first `per_tick_bound` chunks of
+that sequence. Deferred chunks SHALL follow the same sequence; chunks inside
+the lag window SHALL keep the catalog order. The resulting receipt order SHALL
+be deterministic for a given catalog. This keeps compression work on the
+chunks with the longest remaining life instead of on the chunks the DB
+retention lane drops next, because both lanes derive their cutoffs from the
+same display watermark and retention's eligible set is the oldest prefix of
+compression's.
+
+#### Scenario: compression's oldest end overlaps retention's drop set
+
+- **WHEN** one hypertable holds eligible chunks whose `range_end` spans both
+  sides of the retention cutoff `W − 21 d`, with at least `per_tick_bound`
+  eligible chunks younger than that cutoff
+- **THEN** every selected chunk has `range_end` later than `W − 21 d`
+- **AND** none of the selected chunks is in the set the retention runner would
+  drop on the same watermark
+
+#### Scenario: table order is preserved across hypertables
+
+- **WHEN** `hydro.river_timeseries` has at least `per_tick_bound` eligible
+  chunks and `hydro.river_timeseries_legacy` has older eligible chunks
+- **THEN** every selected chunk belongs to `hydro.river_timeseries`
+- **AND** the selected chunks are that table's newest eligible chunks in
+  `range_end` descending order
+
+#### Scenario: a free slot moves to the next hypertable
+
+- **WHEN** `hydro.river_timeseries` has fewer eligible chunks than
+  `per_tick_bound`
+- **THEN** the remaining slots go to the next hypertable in
+  `(schema, name)` order, newest eligible first
+

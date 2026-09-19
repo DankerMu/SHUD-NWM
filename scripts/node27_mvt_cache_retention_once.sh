@@ -78,6 +78,23 @@ LOCK_PATH="${NODE27_MVT_CACHE_RETENTION_LOCK_PATH:-/tmp/node27-mvt-cache-retenti
 SUMMARY_PATH="${NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH:-$LOG_ROOT/mvt-cache-retention-$(date -u +%Y%m%dT%H%M%SZ).json}"
 LOG_FILE="${NODE27_MVT_CACHE_RETENTION_LOG_FILE:-$LOG_ROOT/mvt-cache-retention.log}"
 
+# Same guard shape as LOG_ROOT, and BEFORE the lock is taken or anything is
+# written: `exec 9>` and the first log line resolve against the caller's cwd,
+# everything after `cd "$REPO"` against the git work tree, so a relative value
+# would drop files into the repository (and split one tick's log in two).
+case "$LOCK_PATH" in
+  /*) ;;
+  *) blocked "LOCK_PATH_NOT_ABSOLUTE" ;;
+esac
+case "$SUMMARY_PATH" in
+  /*) ;;
+  *) blocked "SUMMARY_PATH_NOT_ABSOLUTE" ;;
+esac
+case "$LOG_FILE" in
+  /*) ;;
+  *) blocked "LOG_FILE_NOT_ABSOLUTE" ;;
+esac
+
 exec 9>"$LOCK_PATH"
 if ! flock -n 9; then
   echo "[$(ts)] node27-mvt-cache-retention: previous run still active, skipping tick" >> "$LOG_FILE"

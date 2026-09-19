@@ -28,7 +28,7 @@ NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 
 # Use a node-27-local DB account. Read-only display credentials are enough for
 # the audit path; do not use this env for ingest or cleanup writes.
-DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
+DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:55432/nhms
 
 # Same lag as the compression lane; do not invent a second lag.
 NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800

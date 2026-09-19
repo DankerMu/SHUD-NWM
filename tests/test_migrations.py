@@ -406,48 +406,47 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
         "valid_time DESC",
     )
 
-    for store in ("legacy", "narrow"):
-        named_branch_sql = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
-        no_named_branch_sql = render_river_ts_sql(_valid_times_any_source_template(store), store).sql
-        for expected in (
-            "WHERE run_key = (",
-            "SELECT h.run_key FROM hydro.hydro_run h",
-            f"WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'",
-            "AND basin_version_key = (",
-            "SELECT basin_version_key FROM core.basin_version",
-            "WHERE basin_version_id = :basin_version_id",
-            "AND river_network_version_key = (",
-            "SELECT river_network_version_key FROM core.river_network_version",
-            "WHERE river_network_version_id = :river_network_version_id",
-            "variable_e = (",
-            "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e",
-            "WHERE e::text = :variable",
-        ):
-            assert expected in named_branch_sql, expected
+    # One store since #1342's contract (task 6.3): the routing column and the
+    # legacy physical table are gone, and with them the per-store rename, the
+    # `h.timeseries_store` discovery predicate and the three transitional
+    # compressed-chunk pushdown aids that used to sit beside the keys.
+    named_branch_sql = render_river_ts_sql(_valid_times_named_source_template("narrow"), "narrow").sql
+    no_named_branch_sql = render_river_ts_sql(_valid_times_any_source_template("narrow"), "narrow").sql
+    for expected in (
+        "WHERE run_key = (",
+        "SELECT h.run_key FROM hydro.hydro_run h",
+        "WHERE h.run_id = :run_id",
+        "AND basin_version_key = (",
+        "SELECT basin_version_key FROM core.basin_version",
+        "WHERE basin_version_id = :basin_version_id",
+        "AND river_network_version_key = (",
+        "SELECT river_network_version_key FROM core.river_network_version",
+        "WHERE river_network_version_id = :river_network_version_id",
+        "variable_e = (",
+        "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e",
+        "WHERE e::text = :variable",
+    ):
+        assert expected in named_branch_sql, expected
+    assert "timeseries_store" not in named_branch_sql
 
-        # Raw arms preserve the strict key prefix; the callable capture owns
-        # the single DISTINCT/order/limit above their union.
-        table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
-        run_aid = "AND run_id = :run_id " if store == "legacy" else ""
-        network_aid = "AND river_network_version_id = :river_network_version_id " if store == "legacy" else ""
-        variable_aid = "AND variable = :variable " if store == "legacy" else ""
-        assert outer_predicates(named_branch_sql) == (
-            f"SELECT valid_time FROM {table} WHERE run_key = {run_aid}"
-            f"AND basin_version_key = {network_aid}AND river_network_version_key = "
-            f"{variable_aid}AND variable_e ="
-        )
+    # The raw arm preserves the strict key prefix; the callable capture owns
+    # the single DISTINCT/order/limit above it.
+    assert outer_predicates(named_branch_sql) == (
+        "SELECT valid_time FROM hydro.river_timeseries WHERE run_key = "
+        "AND basin_version_key = AND river_network_version_key = AND variable_e ="
+    )
 
-        # Check each rendered fact arm independently, not an aggregate source
-        # region where an authority lookup could mask a forbidden fact column.
-        for branch in (named_branch_sql, no_named_branch_sql):
-            outer = outer_predicates(branch)
-            for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
-                assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
-            assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in branch
-            assert (
-                "(:river_network_version_id IS NULL OR "
-                "river_network_version_id = :river_network_version_id)"
-            ) not in branch
+    # Check each rendered fact arm independently, not an aggregate source
+    # region where an authority lookup could mask a forbidden fact column.
+    for branch in (named_branch_sql, no_named_branch_sql):
+        outer = outer_predicates(branch)
+        for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
+            assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
+        assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in branch
+        assert (
+            "(:river_network_version_id IS NULL OR "
+            "river_network_version_id = :river_network_version_id)"
+        ) not in branch
 
 
 def test_surrogate_key_read_index_migration_adds_one_plain_index_and_drops_nothing() -> None:
@@ -527,9 +526,26 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         )
     ]
     # I2 moved only the river scan into its authored raw-source template.
-    from packages.common.forecast_store import _latest_product_river_source_template
+    # I11 #1990 task 7.2 moved the STATION scan out of the method body the same
+    # way, into a per-store `ForcingTemplatePair` rendered through
+    # `packages/common/forcing_ts_render.py`. Both legs are appended for the same
+    # reason: this test's subject is the whole executed statement, and a slice of
+    # the `def` alone no longer contains either scan.
+    from packages.common.forcing_ts_render import render_forcing_ts_sql
+    from packages.common.forecast_store import (
+        _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
+        _latest_product_river_source_template,
+    )
 
-    query_source = candidate_source + fallback_source + _latest_product_river_source_template("legacy")
+    query_source = (
+        candidate_source
+        + fallback_source
+        + render_forcing_ts_sql(_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES, "legacy").sql
+        # Forcing is still mid-expand and routes on the literal "legacy"; river's
+        # own store went with #1342's contract (task 6.3), so its template takes
+        # no argument that could disagree.
+        + _latest_product_river_source_template("narrow")
+    )
     context_source = store_source[
         store_source.index("def _fetch_latest_qhh_display_unavailable_context") : store_source.index(
             "def _fetch_station_for_series"

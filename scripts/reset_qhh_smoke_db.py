@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,36 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # Run directly (`python scripts/reset_qhh_smoke_db.py`) as well as imported
+    # as `scripts.reset_qhh_smoke_db`, so the `packages.common` import below
+    # resolves either way.
+    sys.path.insert(0, str(ROOT))
+
+from packages.common.forcing_ts_render import (  # noqa: E402
+    FORCING_TABLE_LEGACY,
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
+
+# Reader #9 (#1990 task 7.2). ONE `_delete`, and river now has one too: river's
+# two-group split read its routing column to decide which physical table a run's
+# rows lived in, and #1342's contract (task 6.3) dropped both. Forcing's own
+# routing column `met.forcing_version.timeseries_store` arrives with task 7.3 and
+# the split lands with it; here store is the constant `legacy`.
+_FORCING_TIMESERIES_DELETE_TEMPLATES = ForcingTemplatePair(
+    legacy=f"DELETE FROM {FORCING_TABLE_TOKEN} WHERE forcing_version_id = ANY(%s)",
+    # `AS fst` is not decoration: it makes the fact-table reference carry the same
+    # alias the other eight narrow variants use, which is what the shape oracle
+    # scans for. An unaliased `DELETE FROM … WHERE forcing_version_key = …` reads
+    # identically to Postgres and is invisible to that oracle.
+    narrow=(
+        f"DELETE FROM {FORCING_TABLE_TOKEN} AS fst WHERE fst.forcing_version_key IN ("
+        "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = ANY(%s))"
+    ),
+)
+
 RUN_ROOT = Path(os.getenv("QHH_RUN_ROOT", ROOT / ".nhms-runs" / "qhh-smoke")).resolve()
 MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 BASIN_ID = os.getenv("QHH_BASIN_ID", "basins_qhh")
@@ -31,10 +62,6 @@ def main() -> int:
             (MODEL_ID, "qhh_%_smoke"),
             "run_id",
         )
-        river_runs = _river_run_groups(cur, run_ids)
-        if river_runs is None:
-            print(json.dumps({"status": "error", "error_code": "INVALID_TIMESERIES_STORE"}))
-            return 1
         forcing_ids = _list_values(
             cur,
             """
@@ -54,16 +81,8 @@ def main() -> int:
             deleted,
             "hydro.river_timeseries",
             "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
-            (river_runs["canonical"],),
+            (run_ids,),
         )
-        if river_runs["legacy"]:
-            _delete(
-                cur,
-                deleted,
-                "hydro.river_timeseries_legacy",
-                "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
-                (river_runs["legacy"],),
-            )
         _delete(cur, deleted, "hydro.state_snapshot", "model_id = %s OR run_id = ANY(%s)", (MODEL_ID, run_ids))
         _delete(cur, deleted, "ops.qc_result", _qc_where(), (MODEL_ID, run_ids, forcing_ids, "qhh_%_smoke"))
         _delete(cur, deleted, "ops.pipeline_job", "run_id = ANY(%s)", (run_ids,))
@@ -80,7 +99,17 @@ def main() -> int:
         )
         _delete(cur, deleted, "hydro.hydro_run", "run_id = ANY(%s)", (run_ids,))
 
-        _delete(cur, deleted, "met.forcing_station_timeseries", "forcing_version_id = ANY(%s)", (forcing_ids,))
+        _delete_rendered(
+            cur,
+            deleted,
+            FORCING_TABLE_LEGACY,
+            render_forcing_ts_sql(
+                _FORCING_TIMESERIES_DELETE_TEMPLATES,
+                "legacy",
+                entry="reset_qhh_smoke_db.forcing_timeseries_delete",
+            ).sql,
+            (forcing_ids,),
+        )
         _delete(cur, deleted, "met.forcing_version_component", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(cur, deleted, "met.forcing_version", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(
@@ -141,32 +170,6 @@ def main() -> int:
     return 0
 
 
-def _river_run_groups(cur: Any, run_ids: list[str]) -> dict[str, list[str]] | None:
-    cur.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'hydro' AND table_name = 'hydro_run'
-              AND column_name = 'timeseries_store'
-        ) AS has_store
-        """
-    )
-    if not cur.fetchone()["has_store"]:
-        return {"canonical": run_ids, "legacy": []}
-    cur.execute(
-        "SELECT run_id, timeseries_store FROM hydro.hydro_run WHERE run_id = ANY(%s)",
-        (run_ids,),
-    )
-    stores = {row["run_id"]: row["timeseries_store"] for row in cur.fetchall()}
-    groups: dict[str, list[str]] = {"canonical": [], "legacy": []}
-    for run_id in run_ids:
-        store = stores.get(run_id)
-        if store not in ("legacy", "narrow"):
-            return None
-        groups["legacy" if store == "legacy" else "canonical"].append(run_id)
-    return groups
-
-
 def _load_ids(cur: Any) -> dict[str, str]:
     cur.execute(
         """
@@ -211,6 +214,36 @@ def _qc_where() -> str:
 
 def _delete(cur: Any, deleted: dict[str, int], table: str, where: str, params: tuple[Any, ...]) -> None:
     cur.execute(f"DELETE FROM {table} WHERE {where}", params)
+    deleted[table] = cur.rowcount
+
+
+def _delete_rendered(
+    cur: Any,
+    deleted: dict[str, int],
+    table: str,
+    statement: str,
+    params: tuple[Any, ...],
+) -> None:
+    """:func:`_delete` for a statement a renderer already composed.
+
+    :func:`_delete` builds ``DELETE FROM {table} WHERE {where}`` itself, so it
+    cannot take renderer output — and the forcing fact table's name must come
+    from ``forcing_ts_render``'s constants rather than from this file (the
+    discovery-set census counts a literal spelling here as an unregistered read).
+    ``table`` survives only as the ``deleted`` payload key, which is therefore
+    the *physical* relation the statement touched and follows task 7.3's rename
+    for free.
+
+    SO THE RECEIPT KEY CHANGES AT 7.3, AND THAT IS INTENDED. The forcing entry
+    reads ``met.forcing_station_timeseries`` today and will read
+    ``met.forcing_station_timeseries_legacy`` the moment
+    ``forcing_ts_render.FORCING_TABLE_LEGACY`` is flipped in the migration's own
+    commit, because a receipt that names the relation the DELETE did not touch is
+    worse than no receipt. No consumer pins either spelling — the smoke receipt is
+    read by a human — so 7.3 has nothing to migrate here and should not treat the
+    changed key as a regression.
+    """
+    cur.execute(statement, params)
     deleted[table] = cur.rowcount
 
 

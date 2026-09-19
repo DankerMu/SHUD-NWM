@@ -167,10 +167,16 @@ def test_national_valid_times_use_active_basin_identity_not_transient_model_id()
         "2026-07-11T11:00:00Z",
     ]
     assert discovery.observed_count == 3
-    assert "mi.basin_version_id = h.basin_version_id" in session.sql
-    assert "hydro.run_display_coverage" in session.sql
-    assert "mi.model_id = h.model_id" not in session.sql
-    assert "hydro.river_timeseries" not in session.sql
+    # Selected BY CONTENT, not via `session.sql`: that attribute holds only the
+    # LAST statement executed, and since #2087 the last one is the active-network
+    # read, which mentions neither `h.model_id` nor `hydro.river_timeseries`. The
+    # two negatives below would pass against it for the trivial reason and stop
+    # testing anything, so the claims are pinned to the coverage statement itself.
+    coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
+    assert "mi.basin_version_id = h.basin_version_id" in coverage_sql
+    assert "hydro.run_display_coverage" in coverage_sql
+    assert "mi.model_id = h.model_id" not in coverage_sql
+    assert "hydro.river_timeseries" not in coverage_sql
 
 
 def test_national_valid_times_fail_closed_for_non_rectangular_coverage() -> None:
@@ -1013,11 +1019,16 @@ def test_national_discharge_query_version_is_pinned_to_the_literal_the_spec_name
 
     Every other assertion on this constant imports it from the module under
     test and interpolates it, so reverting the value would keep them all green
-    while silently un-rotating the cache key that #2007's new run selection
-    requires. The spec names `fair-network-budget-v5`; this is the only place
-    the repo says so.
+    while silently un-rotating the cache key that a tile-shape change requires.
+    The spec names `fair-network-budget-v6`; this is the only place the repo
+    says so.
+
+    Deliberately re-pinned from v5 to v6 by #2165 (design D4, a contract
+    change, not a loosening): the layer's own `NATIONAL_DISCHARGE_FEATURE_LIMIT`
+    binds `:feature_limit` at 20,000 instead of 10,000, which changes the bytes
+    of every national discharge tile that intersects more than 10,000 features.
     """
-    assert NATIONAL_DISCHARGE_QUERY_VERSION == "fair-network-budget-v5"
+    assert NATIONAL_DISCHARGE_QUERY_VERSION == "fair-network-budget-v6"
 
 
 def test_sibling_tile_layers_carry_no_source_or_cycle_bind() -> None:
@@ -1090,9 +1101,10 @@ class _TileResult:
 class _NationalRouteSession:
     """Answers every statement the national routes issue, and records their SQL and binds.
 
-    #2153 added the per-cycle coverage pair (active set, then coverage rows) to
-    the canonical route's miss path, so statements are classified by the feature
-    that distinguishes each one, in this order: the tile (`ST_AsMVT`), the digest
+    #2153 added the per-cycle coverage pair to the canonical route's miss path,
+    EXECUTED since #2087 as coverage rows then active set (`_statement_kinds`
+    pins that). Classification is a separate, stricter-check-first dispatch order
+    and is NOT the execution order: the tile (`ST_AsMVT`), the digest
     (`geometry_generation` -- `national_river_network_source_version` also
     mentions `core.model_instance mi`, so this check must precede the active-set
     one), the coverage rows (their `PARTITION BY`), the active set
@@ -2136,12 +2148,12 @@ def test_national_cycles_fail_closed_when_a_network_activates_between_the_two_st
     """Equal cardinality, different membership -- the minimal fail-OPEN race.
 
     The denominator query and the coverage query are two statements with their own
-    READ COMMITTED snapshots. Statement 1 sees the active set `{rn-b, rn-c1, rn-c2}`;
-    `rn-a` is then activated and already holds a display-ready run for the cycle,
-    so statement 2 (which re-evaluates `active_flag`) returns `{rn-a, rn-c1, rn-c2}`
-    while `rn-b` never had that cycle at all. `3 == 3`, so a cardinality comparison
-    lists a cycle the active network `rn-b` cannot render. The set comparison
-    refuses it.
+    READ COMMITTED snapshots. The coverage read returns `{rn-a, rn-c1, rn-c2}` for
+    the cycle; a version switch then deactivates `rn-a` and activates `rn-b`, which
+    never had that cycle at all, so the active read returns `{rn-b, rn-c1, rn-c2}`.
+    `3 == 3`, so a cardinality comparison lists a cycle the active network `rn-b`
+    cannot render. The set comparison refuses it in EITHER statement order, which
+    is why #2087's swap leaves this case alone.
     """
     session = _NationalDiscoverySession(
         _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
@@ -2980,11 +2992,12 @@ def test_national_per_cycle_valid_times_fail_closed_when_a_network_activates_bet
     Row 40's oracle only ever touched the `national_discharge_cycles` site; this
     one drives the SECOND set comparison, the one inside
     `national_discharge_valid_times`' per-cycle branch. Same race, same shape:
-    equal cardinality, different membership. Statement 1 sees the active set
-    `{rn-b, rn-c1, rn-c2}`; `rn-a` is activated with a display-ready run for the
-    requested cycle, so statement 2 returns `{rn-a, rn-c1, rn-c2}` while `rn-b`
-    never had that cycle at all. `3 == 3`, so a cardinality comparison would
-    serve `rn-b`'s basins a timeline they cannot render.
+    equal cardinality, different membership. The coverage read returns
+    `{rn-a, rn-c1, rn-c2}` for the requested cycle; a version switch then swaps
+    `rn-a` out for `rn-b`, which never had that cycle at all, so the active read
+    returns `{rn-b, rn-c1, rn-c2}`. `3 == 3`, so a cardinality comparison would
+    serve `rn-b`'s basins a timeline they cannot render. Order-independent, like
+    its `national_discharge_cycles` twin.
     """
     session = _NationalDiscoverySession(
         _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
@@ -3460,9 +3473,18 @@ class _LegacyRunRouteSession:
         return self.bind
 
 
-@pytest.mark.parametrize("store", ("legacy", "narrow"))
 @pytest.mark.parametrize("found", (True, False), ids=("found", "not-found"))
-def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, found: bool) -> None:
+def test_hydro_mvt_probe_reads_one_narrow_statement_and_preserves_not_found(found: bool) -> None:
+    """The probe's whole contract, with the store argument gone.
+
+    It used to be parametrised over ``timeseries_store`` and asserted the
+    rendered statement named one of two physical tables and carried three
+    transitional aids on the legacy one. #1342's contract (task 6.3) left one
+    table, so what is pinned is that the probe issues exactly ONE statement,
+    that the statement is the registered template rendered for ``narrow``, that
+    it names the canonical table and no other, and that the 404 payload is
+    byte-identical to the routed era's.
+    """
     session = _Session([{"exists": 1}] if found else [])
     arguments = {
         "run_id": _LEGACY_RUN_ID,
@@ -3472,10 +3494,10 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
         "river_network_version_id": "rnv_a",
     }
     if found:
-        hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+        hydro_display._require_hydro_mvt_source_identity(session, **arguments)
     else:
         with pytest.raises(ApiError) as raised:
-            hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+            hydro_display._require_hydro_mvt_source_identity(session, **arguments)
         assert raised.value.status_code == 404
         assert raised.value.code == "MVT_SOURCE_IDENTITY_NOT_FOUND"
         assert raised.value.details == {
@@ -3486,12 +3508,11 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
 
     assert len(session.executions) == 1
     sql, params = session.executions[0]
-    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
-    assert sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
-    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", sql) == [
-        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
-    ]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source("narrow")
+    assert sql == render_river_ts_sql(raw, "narrow", entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", sql) == ["river_timeseries"]
     assert "UNION" not in sql.upper()
+    assert "timeseries_store" not in sql
     assert len(re.findall(r"\bLIMIT\s+1\b", sql, re.IGNORECASE)) == 1
     assert params == arguments
     assert set(re.findall(r"(?<!:):([a-z_]+)", sql)) == set(arguments)
@@ -3500,61 +3521,39 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
         assert re.search(rf"\b{column}\s*=\s*\(", sql)
     assert "unnest(enum_range(NULL::hydro.river_variable))" in sql
     assert "AND valid_time = :valid_time" in sql
+    # The three transitional aids are gone with the column they pushed into.
     for column in ("run_id", "river_network_version_id", "variable"):
-        assert bool(re.search(rf"\bAND {column} = :{column}\b", sql)) is (store == "legacy")
-    assert sql.count("transitional compressed-chunk pushdown aid") == (3 if store == "legacy" else 0)
-
-
-@pytest.mark.parametrize(
-    "metadata",
-    ({"timeseries_store": None}, {"timeseries_store": "unknown"}, {"timeseries_store": ["legacy"]}),
-    ids=("missing-or-null", "unknown", "non-string"),
-)
-def test_hydro_mvt_probe_rejects_invalid_store_before_sql(metadata: dict[str, Any]) -> None:
-    session = _Session([])
-    with pytest.raises(ApiError) as raised:
-        hydro_display._require_hydro_mvt_source_identity(
-            session,
-            run_id=_LEGACY_RUN_ID,
-            variable="q_down",
-            valid_time=datetime(2026, 9, 3, tzinfo=UTC),
-            basin_version_id="bv_a",
-            river_network_version_id="rnv_a",
-            timeseries_store=metadata.get("timeseries_store"),
-        )
-    assert raised.value.status_code == 500
-    assert raised.value.code == "TIMESERIES_STORE_INVALID"
-    assert raised.value.details == {"run_id": _LEGACY_RUN_ID}
-    assert session.executions == []
+        assert re.search(rf"\bAND {column} = :{column}\b", sql) is None
+    assert sql.count("transitional compressed-chunk pushdown aid") == 0
 
 
 @pytest.mark.parametrize(
     "metadata, status, code",
     (
-        pytest.param({"status": "running"}, 409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-missing"),
+        pytest.param({"status": "running"}, 409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready"),
         pytest.param(
-            {"status": "running", "timeseries_store": "unknown"},
-            409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-invalid",
+            {"basin_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-basin",
         ),
         pytest.param(
-            {"basin_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-basin-missing",
+            {"river_network_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-network",
         ),
-        pytest.param(
-            {"river_network_version_id": None, "timeseries_store": "unknown"},
-            404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-network-invalid",
-        ),
-        pytest.param({}, 500, "TIMESERIES_STORE_INVALID", id="ready-missing"),
-        pytest.param({"timeseries_store": None}, 500, "TIMESERIES_STORE_INVALID", id="ready-null"),
-        pytest.param({"timeseries_store": "unknown"}, 500, "TIMESERIES_STORE_INVALID", id="ready-invalid"),
-        pytest.param({"timeseries_store": "legacy"}, 200, None, id="ready-legacy"),
-        pytest.param({"timeseries_store": "narrow"}, 200, None, id="ready-narrow"),
+        pytest.param({}, 200, None, id="ready"),
     ),
 )
-def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
+def test_hydro_mvt_route_preserves_error_precedence_and_sql_order(
     metadata: dict[str, Any], status: int, code: str | None, monkeypatch: Any, tmp_path: Path,
 ) -> None:
+    """Precedence and statement COUNT, with the store-invalid arm retired.
+
+    The route used to answer 500 ``TIMESERIES_STORE_INVALID`` when the run's
+    routing column was absent, null or unknown, and that 500 had to be reached
+    in ONE statement rather than the three the happy path pays. #1342's contract
+    (task 6.3) dropped the column, so the arm and its error code are gone; the
+    readiness and identity arms that outranked it are unchanged and are pinned
+    here with the same statement-count discipline.
+    """
     session = _LegacyRunRouteSession()
-    session._RUN_ROW = {key: value for key, value in session._RUN_ROW.items() if key != "timeseries_store"}
+    session._RUN_ROW = dict(session._RUN_ROW)
     session._RUN_ROW.update(metadata)
     response, captured = _request_national_identity_tile(_legacy_run_url(), session, monkeypatch, tmp_path)
 
@@ -3563,22 +3562,18 @@ def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
     assert len(session.executions) == session.execute_count
     metadata_sql, metadata_params = session.executions[0]
     assert "FROM hydro.hydro_run h" in metadata_sql
+    assert "timeseries_store" not in metadata_sql
     assert metadata_params == {"run_id": _LEGACY_RUN_ID}
     if status != 200:
         assert response.json()["error"]["code"] == code
-        if status == 500:
-            assert response.json()["error"]["details"] == {"run_id": _LEGACY_RUN_ID}
         assert captured == []
         assert session.tile_params == []
         return
 
-    store = metadata["timeseries_store"]
     probe_sql, probe_params = session.executions[1]
-    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
-    assert probe_sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
-    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", probe_sql) == [
-        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
-    ]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source("narrow")
+    assert probe_sql == render_river_ts_sql(raw, "narrow", entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", probe_sql) == ["river_timeseries"]
     assert probe_params == {
         "run_id": _LEGACY_RUN_ID,
         "variable": "q_down",
@@ -3898,76 +3893,6 @@ def test_seconds_precision_validator_still_returns_a_utc_normalized_instant() ->
     assert naive.utcoffset() == timedelta(0)
 
 
-def test_per_basin_store_union_preserves_the_frozen_public_sql_contract() -> None:
-    frozen = (Path(__file__).parent / "fixtures/hydro_mvt_pre_store_f33441a2.sql").read_text()
-    current = postgis_tile_sql("hydro")
-    opener = "source_rows AS NOT MATERIALIZED ("
-    closer = "\n        ),\n        source_identity_stats AS ("
-    before, rest = frozen.split(opener, 1)
-    original_source, after = rest.split(closer, 1)
-    actual_before, rest = current.split(opener, 1)
-    routed_source, actual_after = rest.split(closer, 1)
-    assert actual_before == before
-    assert actual_after == after
-    branches = routed_source.split("\nUNION ALL\n")
-    assert len(branches) == 2
-    for store, branch in zip(("legacy", "narrow"), branches, strict=True):
-        assert f"AND timeseries_store = '{store}'" in branch
-        restored = branch.replace(f"                        AND timeseries_store = '{store}'\n", "")
-        if store == "legacy":
-            restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
-            expected = original_source
-        else:
-            assert "hydro.river_timeseries_legacy" not in branch
-            expected = re.sub(
-                r"              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
-                r"              AND ts\.(?:run_id|river_network_version_id|variable) = :\w+\n",
-                "", original_source,
-            )
-        assert restored.strip() == expected.strip()
-    assert current.count("ST_AsMVT(tile_rows,") == 1
-    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
-
-
-def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
-    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_text()
-    current = postgis_tile_sql("hydro-national")
-    # Only the three already located LATERAL bodies and two candidate columns
-    # may change. Compare every byte outside them, not merely selected landmarks.
-    pattern = r"(?<=CROSS JOIN LATERAL \()(.*?)(?=\) (?:v|hit)\b)"
-    originals = re.findall(pattern, frozen, re.S)
-    routed = re.findall(pattern, current, re.S)
-    assert len(originals) == len(routed) == 3
-    for original, combined in zip(originals, routed, strict=True):
-        assert combined.count("UNION ALL") == 1
-        assert combined.count("LIMIT 1") == 1
-        assert combined.rstrip().endswith("LIMIT 1")
-        original_body = original.rsplit("LIMIT 1", 1)[0]
-        branches = combined.rsplit("LIMIT 1", 1)[0].split("\nUNION ALL\n")
-        for store, branch in zip(("legacy", "narrow"), branches, strict=True):
-            assert branch.count(f"AND lr.timeseries_store = '{store}'") == 1
-            restored = branch.replace(f"                      AND lr.timeseries_store = '{store}'\n", "")
-            if store == "legacy":
-                restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
-                expected = original_body
-            else:
-                assert "hydro.river_timeseries_legacy" not in branch
-                expected = re.sub(
-                    r"                      -- transitional compressed-chunk pushdown aid, remove with #1342\n"
-                    r"                      AND ts\."
-                    r"(?:run_id|river_network_version_id|river_segment_id|variable) = [^\n]+\n",
-                    "", original_body,
-                )
-            assert restored.strip() == expected.strip()
-    restored_sql = current
-    for combined, original in zip(routed, originals, strict=True):
-        restored_sql = restored_sql.replace(combined, original, 1)
-    assert restored_sql.count(", h.timeseries_store") == 2
-    assert restored_sql.replace(", h.timeseries_store", "") == frozen
-    assert current.count("ST_AsMVT(tile_rows,") == 1
-    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
-
-
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
@@ -3978,9 +3903,16 @@ def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
         ({"feature_count": 10001}, (413, "MVT_TILE_BUDGET_EXCEEDED")),
     ],
 )
-def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
+def test_per_basin_consumer_keeps_one_statement_and_first_row_outcomes(
     monkeypatch: Any, overrides: dict[str, Any], expected: Any,
 ) -> None:
+    """One statement, five first-row outcomes, one physical fact table.
+
+    The routing wiring made the per-basin source CTE a two-branch ``UNION ALL``
+    told apart by ``timeseries_store``; #1342's contract (task 6.3) left one
+    branch. The outcomes below never depended on the routing and are unchanged,
+    so the single-statement discipline is asserted with the single-table one.
+    """
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     session = _Session([{**_budget_row(6), **overrides}])
     params = {
@@ -3995,10 +3927,10 @@ def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
         assert (raised.value.status_code, raised.value.code) == expected
     assert len(session.executions) == 1
     sql, bound = session.executions[0]
-    assert "FROM hydro.river_timeseries_legacy ts" in sql
-    assert "FROM hydro.river_timeseries ts" in sql
-    assert "AND timeseries_store = 'legacy'" in sql
-    assert "AND timeseries_store = 'narrow'" in sql
+    assert sql.count("FROM hydro.river_timeseries ts") == 1
+    assert "hydro.river_timeseries_legacy" not in sql
+    assert "timeseries_store" not in sql
+    assert "UNION ALL" not in sql
     assert set(text(sql)._bindparams) <= bound.keys()
     assert all(bound[key] == value for key, value in params.items())
 
@@ -4211,10 +4143,13 @@ def test_national_cycle_coverage_helper_compares_sets_like_the_per_cycle_valid_t
     assert coverage.active_networks == frozenset(active), case
     assert coverage.complete is complete, case
     assert [row["river_network_version_id"] for row in coverage.rows] == list(covering), case
-    # The same two statements, with the same binds, the valid-times branch always issued.
+    # The same two statements, with the same binds, the valid-times branch always
+    # issued -- and in the #2087 order: the identity-bound coverage read first, the
+    # unbound active-set read second, so an activation between them cannot hide in
+    # the coverage rows.
     assert [params for _sql, params in helper_session.executions] == [
-        None,
         {"source": "gfs", "cycle": _CYCLE, "since": None},
+        None,
     ], case
 
     discovery = national_discharge_valid_times(
@@ -4250,10 +4185,20 @@ def test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_rout
     assert _code_enum("MvtLivePostgisUnavailable") == ["MVT_LIVE_POSTGIS_UNAVAILABLE"]
 
 
-# Captured on the pre-#2153 tree (origin/master 015423c71) for exactly this
-# request and fake session, never recomputed from the module under test: the
-# refusal must leave a fully covered identity's cache key and tile binds alone.
-_PRE_2153_FULL_COVERAGE_CACHE_KEY = "f408b0dfaa543ad513cd11a9c9bb231c2b1d2cdebf98e2c20fda26c72da47141"
+# Never recomputed from the module under test: the #2153 refusal must leave a
+# fully covered identity's cache key and tile binds alone.
+#
+# Deliberately re-pinned by #2165 (design D4, a contract change, not a
+# loosening): `NATIONAL_DISCHARGE_QUERY_VERSION` moved v5 -> v6 and the
+# hydro-national `feature_limit` bind moved 10000 -> 20000. The key below was
+# captured on a scratch export of 258b06ecf with ONLY the
+# `NATIONAL_DISCHARGE_QUERY_VERSION` literal edited to `fair-network-budget-v6`,
+# running exactly this test's request; reverting that literal to v5 in the same
+# export reproduced the previous pin `f408b0dfaa54...` (captured on the
+# pre-#2153 tree, origin/master 015423c71), so the version literal is the only
+# input that moved. The cache key hashes neither the SQL nor the binds, so the
+# `feature_limit` re-pin below does not feed it.
+_PRE_2153_FULL_COVERAGE_CACHE_KEY = "0b6ae6d0223c3a694e233bbcb01092fffff733a66b299a53acad78105efcd4a0"
 _PRE_2153_FULL_COVERAGE_TILE_BINDS: dict[str, Any] = {
     "variable": "q_down",
     "valid_time": datetime(2026, 9, 3, 0, 0, tzinfo=UTC),
@@ -4262,7 +4207,7 @@ _PRE_2153_FULL_COVERAGE_TILE_BINDS: dict[str, Any] = {
     "z": 4,
     "x": 13,
     "y": 6,
-    "feature_limit": 10000,
+    "feature_limit": 20000,
     "feature_coordinate_limit": 50000,
     "collection_coordinate_limit": 50000,
     "max_coordinate_dimensions": 3,
@@ -4277,6 +4222,10 @@ def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monke
 
     The coverage pair runs once each, bound to the requested identity, between the
     digest and the tile SQL. Byte-level sameness on real rows is E11's job.
+
+    The expected key and `feature_limit` were re-pinned by #2165 (design D4 contract
+    change: v6 query version, 20,000 national discharge feature budget); see the
+    derivation above `_PRE_2153_FULL_COVERAGE_CACHE_KEY`.
     """
     session = _NationalRouteSession(
         active_networks=("rn-a", "rn-b", "rn-c"), coverage_networks=("rn-a", "rn-b", "rn-c")
@@ -4286,8 +4235,621 @@ def test_canonical_national_tile_serves_a_fully_covered_identity_unchanged(monke
 
     assert response.status_code == 200, response.text
     assert response.content == b"pbf-bytes"
-    assert _statement_kinds(session) == ["digest", "active", "coverage", "tile"]
+    assert _statement_kinds(session) == ["digest", "coverage", "active", "tile"]
     assert len(session.active_params) == 1
     assert session.coverage_params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE, "since": None}]
     assert response.headers["X-Tile-Cache-Key"] == _PRE_2153_FULL_COVERAGE_CACHE_KEY
     assert session.tile_params == [_PRE_2153_FULL_COVERAGE_TILE_BINDS]
+
+
+# ---------------------------------------------------------------------------
+# #2087: the ORDER of `_national_discharge_coverage_rows`' two statements. Also
+# appended at the END, for the reason stated above the #2009 round-4 block.
+# ---------------------------------------------------------------------------
+
+
+class _ActivationBetweenStatementsSession(_NationalDiscoverySession):
+    """A network is activated BETWEEN the helper's two reads.
+
+    The name says "activation" because that is the case #2087 set out to close,
+    but nothing here constrains the DIRECTION: `active_after` may be any set, so
+    the same fake models a deactivation (`active_after` smaller) and a version
+    switch (equal size, different members). The deactivation cases below use it
+    as-is. Kept under this name rather than renamed because the invariant matrix's
+    row 40d cites it by name as the mutation oracle.
+
+    Deliberately order-INDEPENDENT, so the same case is red under the old
+    statement order and green under the #2087 one: the activation lands after the
+    FIRST `execute()`, whichever statement that turns out to be. A fake keyed on
+    "the active-set statement" instead would encode the very order under test and
+    could not distinguish the two.
+
+    The coverage branch filters its rows by the active set current AT THAT
+    EXECUTION, because `mi.active_flag` sits inside the real coverage statement:
+    a snapshot taken before the activation cannot see the newcomer's rows. Without
+    that filter the partial-coverage case would hand back the newcomer's rows from
+    a pre-activation snapshot and prove less than the SQL does.
+
+    A subclass, never an edit to `_NationalDiscoverySession`: the base
+    deliberately answers the coverage query without consulting `active_networks`,
+    and the fail-closed fixtures above pass an explicit `active_networks=` WIDER
+    than their rows precisely to exercise that.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        active_before: list[str],
+        active_after: list[str],
+    ) -> None:
+        super().__init__(rows, active_networks=active_before)
+        self.active_before = list(active_before)
+        self.active_after = list(active_after)
+        # What the coverage statement actually handed back, per execution: the
+        # non-vacuity oracle, so a case cannot pass on an empty fixture.
+        self.served_coverage_rows: list[list[dict[str, Any]]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        # Evaluated BEFORE `super().execute`, which is what appends to
+        # `executions`: read 1 sees the pre-activation state, every later read the
+        # post-activation one.
+        self.active_networks = self.active_before if not self.executions else self.active_after
+        result = super().execute(statement, params)
+        if "hydro.run_display_coverage" not in str(statement):
+            return result
+        visible = frozenset(self.active_networks)
+        served = [row for row in result.all() if row["river_network_version_id"] in visible]
+        self.served_coverage_rows.append(served)
+        return _Rows(served)
+
+
+def _zero_coverage_activation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-a` is activated between the reads holding NO display-ready run at all."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c"],
+        active_after=["rn-a", "rn-b", "rn-c"],
+    )
+
+
+def _partial_coverage_activation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-a` is activated between the reads with a run for `_CYCLE` (K) but not `_PREVIOUS_CYCLE` (J)."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b", "rn-c"))
+        + _full_coverage_rows(_PREVIOUS_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c"],
+        active_after=["rn-a", "rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_close_when_a_network_is_activated_with_zero_coverage_rows() -> None:
+    """Branch (a) of #2087, at the `cycles` site.
+
+    A newcomer with no display-ready row contributes to NO cycle's covered set, so
+    no comparison of coverage-statement output can see it. Reading the coverage
+    rows FIRST makes the denominator the younger set instead: `covered` lacks
+    `rn-a`, the active read has it, every cycle fails closed. Under the old order
+    the covered set equalled the stale active set and the cycle was listed.
+    """
+    session = _zero_coverage_activation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: three active networks after the activation, and the coverage
+    # statement really did serve rows -- an empty fixture would pass regardless.
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_per_cycle_valid_times_close_when_a_network_is_activated_with_zero_coverage_rows() -> None:
+    """Branch (a) of #2087, at the per-cycle valid-times site (through `NationalCycleCoverage`)."""
+    session = _zero_coverage_activation_session()
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result.valid_times == []
+    assert result.observed_count == 0
+
+
+def test_national_cycles_close_both_cycles_when_the_newcomer_covers_only_the_newer_one() -> None:
+    """Branch (b) of #2087: rows for K but not J must close J as well as K.
+
+    The set comparison alone (#2073) only ever caught K -- for J the newcomer is
+    absent from the covered set, which then equals the stale active set. With the
+    coverage read first, `rn-a`'s K rows are filtered out by the pre-activation
+    snapshot's `active_flag` too, so both cycles land unequal.
+    """
+    session = _partial_coverage_activation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    # Not a disguised branch (a): the newcomer really does hold a run for K.
+    assert any(
+        row["river_network_version_id"] == "rn-a" and row["cycle_time"] == _CYCLE for row in session.rows
+    )
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_per_cycle_valid_times_close_the_older_cycle_the_newcomer_does_not_cover() -> None:
+    """Branch (b) of #2087 at the per-cycle site, asked for J -- the cycle the newcomer misses."""
+    session = _partial_coverage_activation_session()
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_PREVIOUS_CYCLE)
+
+    assert len(session.active_after) == 3
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert any(
+        row["river_network_version_id"] == "rn-a" and row["cycle_time"] == _CYCLE for row in session.rows
+    )
+    assert result.valid_times == []
+    assert result.observed_count == 0
+
+
+# ---------------------------------------------------------------------------
+# #2087 round 2: the DEACTIVATION half of the read-order trade, and a
+# CHARACTERIZATION of the fail-open class the swap newly opens. The four cases
+# above cover activation (numerator growth) only; design D2 distinguishes two
+# deactivation outcomes and accepts one residual, and none of the three had an
+# oracle.
+# ---------------------------------------------------------------------------
+
+
+def _zero_coverage_deactivation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-d` is DEACTIVATED between the reads holding NO display-ready run at all."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        active_before=["rn-b", "rn-c", "rn-d"],
+        active_after=["rn-b", "rn-c"],
+    )
+
+
+def _covered_deactivation_session() -> _ActivationBetweenStatementsSession:
+    """`rn-d` is DEACTIVATED between the reads while HOLDING a display-ready run."""
+    return _ActivationBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c", "rn-d")),
+        active_before=["rn-b", "rn-c", "rn-d"],
+        active_after=["rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_list_a_cycle_when_a_zero_coverage_network_is_deactivated() -> None:
+    """The permissive half of #2087's deactivation delta (design D2), pinned.
+
+    `rn-d` is active with no display-ready row at T1 and gone by T2. Reading the
+    coverage rows FIRST makes it invisible to the comparison: `covered == {rn-b,
+    rn-c}` equals the T2 active set, so the cycle is LISTED. That is the right
+    answer -- a deactivated network does not need rendering -- but it is a
+    behaviour DELTA the swap introduced, not a pre-existing property: with the
+    active set read first, `active@T1 == {rn-b, rn-c, rn-d}` was compared against
+    the same `covered`, and every cycle failed closed.
+
+    Mutation killed: restoring the pre-#2087 statement order in
+    `_national_discharge_coverage_rows` (invariant matrix row 40d). This is the
+    only case asserting the swap relaxes a MEMBERSHIP-change outcome -- the four
+    activation cases all assert a newly CLOSED outcome, so a partial revert that
+    kept the growth closures while restoring the old deactivation strictness
+    would pass every one of them and fail only here. It is NOT the file's only
+    more-permissive assertion:
+    `test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_display_ready`
+    is listed under the swap where "the old order caught this one" too, but its
+    active set is identical at both reads -- only a row's display-readiness moves
+    -- so no membership-based revert can reach it.
+    """
+    session = _zero_coverage_deactivation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: three networks were really active at T1, one really left, and
+    # the departing one really brought no coverage row (otherwise this is the
+    # fail-closed case below wearing the wrong name).
+    assert len(session.active_before) == 3
+    assert "rn-d" not in session.active_after
+    assert all(row["river_network_version_id"] != "rn-d" for row in session.rows)
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert [entry["cycle_time"] for entry in result["cycles"]] == ["2026-09-02T12:00:00Z"]
+    assert result["default_cycle"] == "2026-09-02T12:00:00Z"
+
+
+def test_national_cycles_close_when_a_covered_network_is_deactivated() -> None:
+    """The fail-closed half of the same delta -- and it holds in BOTH statement orders.
+
+    `rn-d` is in the T1 covered set (it has a display-ready run) and out of the T2
+    active set, so `covered` is a strict SUPERSET of `active` and the cycle is
+    refused. Under the old order the deactivation instead shrank the coverage read
+    and `covered` was a strict SUBSET, refused as well. D2 distinguishes this case
+    from the zero-coverage one precisely because only one of the two moved; this
+    test is what keeps the unmoved one unmoved.
+
+    Mutation killed: relaxing the comparison in `national_discharge_cycles` from
+    equality to "covers at least the active set"
+    (`if not covered_networks >= active_networks: continue`). Every other case in
+    this file has `covered` a subset of `active` (equality included) or
+    incomparable with it, and on all three shapes `>=` and `==` return the same
+    verdict; this is the only case where `covered` is a strict SUPERSET, the one
+    shape where they differ, so that mutation is green everywhere except here.
+    """
+    session = _covered_deactivation_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: the departing network really did hold a display-ready row --
+    # the one thing that separates this case from the test above.
+    assert len(session.active_before) == 3
+    assert "rn-d" not in session.active_after
+    assert any(row["river_network_version_id"] == "rn-d" for row in session.rows)
+    assert session.served_coverage_rows and all(session.served_coverage_rows)
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+class _CoverageRowVanishesBetweenStatementsSession(_NationalDiscoverySession):
+    """A covered run stops being display-ready BETWEEN the helper's two reads.
+
+    The numerator-SHRINK race: the active-network SET never moves, only a row's
+    eligibility for the coverage statement does -- `h.status` leaving
+    `('succeeded', 'parsed', 'published')`, or `rdc.segment_count` going to zero.
+    `_ActivationBetweenStatementsSession` cannot express it: its only lever is the
+    active set, and `_NationalDiscoverySession.rows` is fixed at construction.
+
+    Order-INDEPENDENT on the same terms as its sibling: the write lands after the
+    FIRST `execute()`, whichever statement that turns out to be, so the case is
+    green under the #2087 order and red under the old one rather than encoding
+    either. A subclass, never an edit to the base.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        vanishing_network: str,
+        active_networks: list[str],
+    ) -> None:
+        super().__init__(rows, active_networks=active_networks)
+        self.vanishing_network = vanishing_network
+        self.served_coverage_rows: list[list[dict[str, Any]]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        # Evaluated BEFORE `super().execute`, which is what appends to
+        # `executions`: read 1 still sees the run as display-ready, every later
+        # read does not.
+        still_display_ready = not self.executions
+        result = super().execute(statement, params)
+        if "hydro.run_display_coverage" not in str(statement):
+            return result
+        served = [
+            row
+            for row in result.all()
+            if still_display_ready or row["river_network_version_id"] != self.vanishing_network
+        ]
+        self.served_coverage_rows.append(served)
+        return _Rows(served)
+
+
+def _coverage_shrink_session() -> _CoverageRowVanishesBetweenStatementsSession:
+    return _CoverageRowVanishesBetweenStatementsSession(
+        _full_coverage_rows(_CYCLE, networks=("rn-b", "rn-c")),
+        vanishing_network="rn-c",
+        active_networks=["rn-b", "rn-c"],
+    )
+
+
+def test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_display_ready() -> None:
+    """CHARACTERIZATION of the residual #2087 newly opens. NOT the desired answer.
+
+    `rn-c` is display-ready at T1 and not at T2 while the active set stays
+    `{rn-b, rn-c}`, so `covered == active` and the cycle is listed although the
+    run painting `rn-c` is gone. The old order caught this one; no TWO-statement
+    design can close it and the growth class at once, so it is accepted here and
+    the fix (merging the two statements) is tracked separately. This test exists
+    so the residual is VISIBLE to the suite -- if a later change closes it, this
+    case goes red and must be rewritten deliberately rather than silently.
+
+    Reachable in production, each writer read in the tree:
+      * `mark_run_failed` (`workers/output_parser/parser.py`) -- its
+        `FAILABLE_RUN_STATUSES` guard includes `succeeded` and `parsed`, and
+        `mark_run_parsed` admits an already-`parsed` run, so a failed re-parse
+        drops a run that HAS a populated coverage row. The routine writer.
+      * `scripts/node27_refresh_coverage.py --force` -- zeroes `segment_count`
+        past the #1446 refusal (`WHERE %(force)s OR ...`), which the coverage
+        statement's `rdc.segment_count > 0` join then drops. Operator-gated.
+      * `mark_failed` (`workers/shud_runtime/runtime.py`) -- unguarded UPDATE, but
+        behind `create_run`'s retriability refusal, so it needs a duplicate
+        concurrent `execute`.
+
+    Mutation killed: restoring the pre-#2087 statement order (matrix row 40d) --
+    which is also the empirical proof that the old order really did catch this
+    class, the claim the helper's docstring makes.
+    """
+    session = _coverage_shrink_session()
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == ["2026-09-02T12:00:00Z"]
+    assert result["default_cycle"] == "2026-09-02T12:00:00Z"
+    # Non-vacuity, and the whole point: the shrink is real and the DENOMINATOR
+    # never moved. A second pass over the same session -- now past the write --
+    # sees `rn-c` gone from the covered set while the active set still holds it.
+    after = mvt_module.national_discharge_cycle_coverage(session, source="gfs", cycle=_CYCLE)
+    assert after.covered_networks == frozenset({"rn-b"})
+    assert after.active_networks == frozenset({"rn-b", "rn-c"})
+    assert after.complete is False
+
+
+# ---------------------------------------------------------------------------
+# #2165: the national discharge layer's own feature budget, and #2166: a tile
+# blanked by a per-feature overflow is an observable event. Appended at the END,
+# for the reason stated above the #2009 round-4 block.
+# ---------------------------------------------------------------------------
+
+# The value design D4 / the `postgis-tile-clipping-cache` spec name, spelled as a
+# literal so it is not read back from the module under test.
+_NATIONAL_DISCHARGE_FEATURE_LIMIT = 20_000
+_GLOBAL_FEATURE_LIMIT = 10_000
+_LAYER_PARAMS: dict[str, dict[str, Any]] = {
+    "river-network-national": {},
+    "river-network": {"basin_version_id": "bv_a"},
+    "hydro": {"variable": "q_down"},
+    "hydro-national": {"variable": "q_down"},
+    "met-stations": {"basin_version_id": "bv_a"},
+}
+_DETAIL_LAYER_IDS = {
+    "river-network-national": "river-network-national",
+    "river-network": "river-network",
+    "hydro": "discharge",
+    "hydro-national": "discharge",
+    "met-stations": "met-stations",
+}
+
+
+def _blanked_records(caplog: Any) -> list[Any]:
+    return [record for record in caplog.records if "MVT_TILE_FEATURE_OVERFLOW_BLANKED" in record.getMessage()]
+
+
+def test_feature_limit_is_raised_only_for_the_national_discharge_layer() -> None:
+    assert mvt_module.feature_limit("hydro-national") == _NATIONAL_DISCHARGE_FEATURE_LIMIT
+    # The other four layers, and a caller that names no layer, keep the global
+    # budget -- whose value this change does not move.
+    assert mvt_module.MVT_MAX_FEATURES == _GLOBAL_FEATURE_LIMIT
+    for layer in ("river-network", "river-network-national", "hydro", "met-stations", None):
+        assert mvt_module.feature_limit(layer) == mvt_module.MVT_MAX_FEATURES, layer
+
+
+def test_postgis_tile_params_bind_each_layer_its_own_feature_limit() -> None:
+    expected = {layer: _GLOBAL_FEATURE_LIMIT for layer in _LAYER_PARAMS}
+    expected["hydro-national"] = _NATIONAL_DISCHARGE_FEATURE_LIMIT
+
+    for layer, value in expected.items():
+        assert hydro_display._postgis_tile_params({}, z=3, x=6, y=3, layer=layer)["feature_limit"] == value, layer
+    # Script callers pass no layer and compare the exact binding dictionary.
+    assert hydro_display._postgis_tile_params({}, z=3, x=6, y=3)["feature_limit"] == _GLOBAL_FEATURE_LIMIT
+
+
+def test_production_tile_bind_site_binds_the_layer_feature_limit(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+
+    for layer, params in _LAYER_PARAMS.items():
+        session = _Session([_budget_row(10)])
+
+        assert hydro_display._fetch_postgis_tile_bytes(session, layer, params, z=3, x=6, y=3) == b"pbf-bytes"
+
+        expected = _NATIONAL_DISCHARGE_FEATURE_LIMIT if layer == "hydro-national" else _GLOBAL_FEATURE_LIMIT
+        assert session.executions[0][1]["feature_limit"] == expected, layer
+
+
+def test_national_discharge_tile_above_the_old_limit_is_served_whole_and_silent(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """13,770 intersecting features were measured on node-27; 15,000 is above 10,000 too."""
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(30_000), "feature_count": 15_000, "intersecting_feature_count": 15_000}
+    session = _Session([row])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=0, x=0, y=0)
+
+    assert tile == b"pbf-bytes"
+    assert _truncation_records(caplog) == []
+    assert _blanked_records(caplog) == []
+
+
+def test_national_discharge_truncation_reports_the_layer_feature_limit(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(40_000), "feature_count": 20_000, "intersecting_feature_count": 21_000}
+    session = _Session([row])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=0, x=0, y=0)
+
+    assert tile == b"pbf-bytes"
+    records = _truncation_records(caplog)
+    assert len(records) == 1
+    assert records[0].max_features == _NATIONAL_DISCHARGE_FEATURE_LIMIT
+    assert records[0].max_features == session.executions[0][1]["feature_limit"]
+    assert "feature_count=20000/21000 max_features=20000" in records[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("layer", "feature_count", "max_features"),
+    (
+        pytest.param("hydro-national", 20_001, _NATIONAL_DISCHARGE_FEATURE_LIMIT, id="hydro-national"),
+        pytest.param("river-network", 10_001, _GLOBAL_FEATURE_LIMIT, id="river-network"),
+        pytest.param("hydro", 10_001, _GLOBAL_FEATURE_LIMIT, id="hydro"),
+    ),
+)
+def test_feature_budget_413_uses_the_layer_feature_limit(
+    monkeypatch: Any, layer: str, feature_count: int, max_features: int
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    row = {**_budget_row(10), "feature_count": feature_count, "intersecting_feature_count": feature_count}
+    session = _Session([row])
+
+    with pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(session, layer, _LAYER_PARAMS[layer], z=3, x=6, y=3)
+
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.code == "MVT_TILE_BUDGET_EXCEEDED"
+    assert excinfo.value.details["max_features"] == max_features
+    assert excinfo.value.details["max_features"] == session.executions[0][1]["feature_limit"]
+    assert excinfo.value.details["feature_count"] == feature_count
+
+
+def _overflow_row(**overrides: Any) -> dict[str, Any]:
+    """The row shape a per-feature overflow really produces.
+
+    Either overflow counter empties the shared `budget_gate`, so nothing is
+    selected: `tile` is NULL (ST_AsMVT over zero rows) and the selected counts are
+    0, while `prefilter_stats` still reports what intersected.
+    """
+    return {
+        "tile": None,
+        "feature_count": 0,
+        "coordinate_count": 0,
+        "source_identity_count": 1,
+        "invalid_property_count": 0,
+        "invalid_properties": "",
+        "intersecting_feature_count": 23,
+        "intersecting_coordinate_count": 86_160,
+        "feature_coordinate_overflow_count": 0,
+        "feature_coordinate_count": 12,
+        "coordinate_dimension_overflow_count": 0,
+        "coordinate_dimension_count": 2,
+        **overrides,
+    }
+
+
+_BLANKED_FIELDS = (
+    "layer_id",
+    "z",
+    "x",
+    "y",
+    "feature_coordinate_overflow_count",
+    "feature_coordinate_count",
+    "max_feature_coordinates",
+    "coordinate_dimension_overflow_count",
+    "coordinate_dimension_count",
+    "max_coordinate_dimensions",
+)
+
+
+def _assert_one_blanked_record(caplog: Any, session: _Session, layer: str, **expected: Any) -> None:
+    records = _blanked_records(caplog)
+    assert len(records) == 1, [record.getMessage() for record in records]
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.name == _TILE_ROUTE_LOGGER
+    bind = session.executions[0][1]
+    values = {name: getattr(record, name) for name in _BLANKED_FIELDS}
+    assert values == {
+        "layer_id": _DETAIL_LAYER_IDS[layer],
+        "z": 3,
+        "x": 6,
+        "y": 3,
+        "max_feature_coordinates": bind["feature_coordinate_limit"],
+        "max_coordinate_dimensions": bind["max_coordinate_dimensions"],
+        **expected,
+    }
+    message = record.getMessage()
+    for name, value in values.items():
+        assert f"{name}={value}" in message, (name, message)
+
+
+@pytest.mark.parametrize("layer", tuple(_LAYER_PARAMS))
+def test_per_feature_coordinate_overflow_blanks_the_tile_observably(
+    monkeypatch: Any, caplog: Any, layer: str
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(feature_coordinate_overflow_count=1, feature_coordinate_count=60_000)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, layer, _LAYER_PARAMS[layer], z=3, x=6, y=3)
+
+    # HTTP 200 semantics unchanged: empty bytes, no error.
+    assert tile == b""
+    assert _truncation_records(caplog) == []
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        layer,
+        feature_coordinate_overflow_count=1,
+        feature_coordinate_count=60_000,
+        coordinate_dimension_overflow_count=0,
+        coordinate_dimension_count=2,
+    )
+    assert session.executions[0][1]["feature_coordinate_limit"] == MVT_MAX_COORDINATES
+    assert session.executions[0][1]["max_coordinate_dimensions"] == 3
+
+
+def test_coordinate_dimension_overflow_blanks_the_tile_observably(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(coordinate_dimension_overflow_count=1, coordinate_dimension_count=4)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(
+            session, "hydro-national", {"variable": "q_down"}, z=3, x=6, y=3
+        )
+
+    assert tile == b""
+    assert _truncation_records(caplog) == []
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        "hydro-national",
+        feature_coordinate_overflow_count=0,
+        feature_coordinate_count=12,
+        coordinate_dimension_overflow_count=1,
+        coordinate_dimension_count=4,
+    )
+
+
+def test_blanked_record_reports_the_limit_actually_bound(monkeypatch: Any, caplog: Any) -> None:
+    """The maxima come from the query's bind, so a lowered limit is what gets reported."""
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setattr(hydro_display, "MVT_MAX_COORDINATES", 100)
+    session = _Session([_overflow_row(feature_coordinate_overflow_count=2, feature_coordinate_count=640)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
+
+    assert session.executions[0][1]["feature_coordinate_limit"] == 100
+    _assert_one_blanked_record(
+        caplog,
+        session,
+        "river-network-national",
+        feature_coordinate_overflow_count=2,
+        feature_coordinate_count=640,
+        coordinate_dimension_overflow_count=0,
+        coordinate_dimension_count=2,
+    )
+    assert _blanked_records(caplog)[0].max_feature_coordinates == 100
+
+
+def test_no_overflow_emits_no_blanked_record(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        for layer, params in _LAYER_PARAMS.items():
+            empty = _Session([_overflow_row(intersecting_feature_count=0, intersecting_coordinate_count=0)])
+            assert hydro_display._fetch_postgis_tile_bytes(empty, layer, params, z=3, x=6, y=3) == b""
+            full = _Session([_budget_row(10)])
+            assert hydro_display._fetch_postgis_tile_bytes(full, layer, params, z=3, x=6, y=3) == b"pbf-bytes"
+
+    assert _blanked_records(caplog) == []
+
+
+def test_overflow_on_a_424_identity_raises_before_any_blanked_record(monkeypatch: Any, caplog: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_overflow_row(source_identity_count=0, feature_coordinate_overflow_count=1)])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER), pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(session, "hydro-national", {"variable": "q_down"}, z=3, x=6, y=3)
+
+    assert excinfo.value.status_code == 424
+    assert _blanked_records(caplog) == []

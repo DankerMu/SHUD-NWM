@@ -3111,17 +3111,14 @@ def _quality_flags(value: Any) -> list[str]:
 
 
 def _qdown_discovery_source_template(store: str) -> str:
-    if store not in {"legacy", "narrow"}:
+    if store != "narrow":
         raise ValueError(f"Unsupported river timeseries store: {store}")
-    return f"""
+    return """
         SELECT r.run_key, r.river_network_version_key, r.river_segment_key,
                r.value, r.valid_time, r.unit_e, r.quality_flag_e, r.variable_e
         FROM hydro.river_timeseries r
         JOIN hydro.hydro_run authority ON authority.run_key = r.run_key
-        WHERE authority.timeseries_store = '{store}'
-          -- transitional compressed-chunk pushdown aid, remove with #1342
-          AND r.variable = 'q_down'
-          AND r.variable_e = 'q_down'
+        WHERE r.variable_e = 'q_down'
     """
 
 
@@ -3135,10 +3132,7 @@ def _qdown_discovery_sql(
     """Aggregate only authoritative facts, routing below the shared GROUP BY."""
     from packages.common.river_ts_render import render_river_ts_sql
 
-    sources = "\nUNION ALL\n".join(
-        render_river_ts_sql(_qdown_discovery_source_template(store), store).sql
-        for store in ("legacy", "narrow")
-    )
+    sources = render_river_ts_sql(_qdown_discovery_source_template("narrow"), "narrow").sql
     if is_sqlite:
         segment_count = "COUNT(DISTINCT r.river_network_version_key || ':' || r.river_segment_key)"
         agg_unit = "GROUP_CONCAT(DISTINCT r.unit_e)"
@@ -3197,9 +3191,7 @@ def _has_table(session: Session, schema: str, table_name: str) -> bool:
 
 
 def _has_qdown_river_table(session: Session) -> bool:
-    return _has_table(session, "hydro", "river_timeseries") and _has_table(
-        session, "hydro", "river_timeseries_legacy"
-    )
+    return _has_table(session, "hydro", "river_timeseries")
 
 
 def _has_optional_table(session: Session, schema: str, table_name: str) -> bool:

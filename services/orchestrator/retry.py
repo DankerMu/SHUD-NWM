@@ -1586,6 +1586,10 @@ def _local_runtime_root_safety(value: str) -> tuple[str | None, str]:
     except OSError as exc:
         if getattr(exc, "errno", None) != ENOENT:
             return None, "unresolvable_local_root"
+    # ADR 0009 loop-filtered: this leg (#1401) hands its product to the submission
+    # manifest, which performs no dereference of its own, so no admission clause is
+    # available and the fallback has to be re-checked strictly right here.
+    #
     # Loop-filtered admit: the ENOENT fallback is strictly re-resolved so that a
     # "<missing>/../<loop>" form -- whose strict resolution stops at the missing
     # component but whose fallback still carries a symlink loop -- cannot be
@@ -1671,6 +1675,10 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_relative", text)
             )
             continue
+        # ADR 0009 loop-filtered: this adjudicator does not admit the ENOENT arm on
+        # the non-strict product, it re-resolves that product strictly (#1400/#1626),
+        # so it rests on no admission clause.
+        #
         # Strict resolution + errno split: non-strict resolution stopped raising
         # on symlink loops in CPython 3.13+ and strict Path.resolve() raises an
         # errno-less RuntimeError on <=3.12, so this rejection only becomes
@@ -1738,6 +1746,10 @@ def _db_free_selector_path_rejection(
     path = Path(os.path.expanduser(value))
     if not path.is_absolute():
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_relative", value)
+    # ADR 0009 loop-filtered: same posture as _db_free_selector_allowed_roots above
+    # (#1400/#1626) -- the ENOENT fallback is re-resolved strictly rather than
+    # admitted, so this site invokes no admission clause.
+    #
     # Same paradigm as _db_free_selector_allowed_roots above, because this leg
     # consumes that leg's product: strict os.path.realpath is the only loop
     # predicate that behaves the same on every supported CPython, and the ENOENT

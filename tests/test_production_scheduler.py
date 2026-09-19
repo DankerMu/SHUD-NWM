@@ -18651,9 +18651,10 @@ def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoen
     # changed.  Scope sync: the PR carrying #1400/#1427 closes both, so
     # "separately tracked" would stop naming a live tracker.  The
     # geometry itself is untouched -- this arm is ``scheduler_preflight``'s, and
-    # that change treats only the ``retry`` leg -- and its live tracker is now
-    # #1627, the family-level ruling on whether every ENOENT non-strict fallback
-    # needs a loop-filtered re-check, whose payload carries this site
+    # that change treats only the ``retry`` leg -- and its ruling now lives in
+    # ``docs/adr/0009-path-canonicalization-dereference-doctrine.md`` (ADR 0009),
+    # the family-level ruling on whether every ENOENT non-strict fallback
+    # needs a loop-filtered re-check, whose census carries this site
     # (``scheduler_preflight``'s allowed-roots ENOENT arm) explicitly.
     anchor = tmp_path / "cwd-anchor"
     anchor.mkdir()

@@ -19,6 +19,14 @@ dependency flips the whole receipt to ``BLOCKED`` with a non-empty
 ``dependency_blocker`` and ``live_proof_accepted == false``. The emitter never
 fabricates a PASS.
 
+Auth (#1888/#1897): the two mutating stages carry the shared scheduler service
+bearer, read through ``packages.common.request_auth`` from the owner-readable
+``SLURM_GATEWAY_SERVICE_TOKEN`` environment source (never a CLI flag). Health
+and status polls stay anonymous by contract. Without a usable token the
+mutations are not attempted at all and the receipt is ``BLOCKED``. The
+credential value never reaches argv, ``--help``, ``command``, ``notes``, a log
+line, or the emitted evidence JSON; only the variable *name* may appear.
+
 Usage::
 
     uv run python scripts/m24_gateway_proof.py --run-id <id> \
@@ -33,6 +41,7 @@ import os
 import platform
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,6 +50,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from packages.common.request_auth import (  # noqa: E402
+    SLURM_GATEWAY_SERVICE_TOKEN_ENV,
+    read_configured_service_token,
+)
 from services.m24_live.receipt import (  # noqa: E402
     CONTRACT_ID,
     SCHEMA_VERSION,
@@ -74,9 +87,14 @@ class HttpResponse(Protocol):
 
 
 class HttpClient(Protocol):
+    # ``get`` deliberately takes no headers: health and status polls are
+    # anonymous by the #1888 contract, and sending a credential there would
+    # assert an access requirement that does not exist.
     def get(self, url: str) -> HttpResponse: ...
-    def post(self, url: str, json: dict[str, Any]) -> HttpResponse: ...
-    def delete(self, url: str) -> HttpResponse: ...
+    def post(
+        self, url: str, json: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> HttpResponse: ...
+    def delete(self, url: str, headers: dict[str, str] | None = None) -> HttpResponse: ...
 
 
 class _HttpxClient:
@@ -90,11 +108,11 @@ class _HttpxClient:
     def get(self, url: str) -> Any:
         return self._client.get(url)
 
-    def post(self, url: str, json: dict[str, Any]) -> Any:
-        return self._client.post(url, json=json)
+    def post(self, url: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
+        return self._client.post(url, json=json, headers=headers)
 
-    def delete(self, url: str) -> Any:
-        return self._client.delete(url)
+    def delete(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        return self._client.delete(url, headers=headers)
 
     def close(self) -> None:
         self._client.close()
@@ -111,6 +129,33 @@ class GatewayProofBlocked(Exception):
 def _safe_error(error: Exception) -> str:
     text = str(error).strip() or error.__class__.__name__
     return text.splitlines()[0][:500]
+
+
+def _mutation_auth_headers(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """Build the mutation ``Authorization`` header, or ``None`` when unusable.
+
+    The shared reader in ``packages.common.request_auth`` is the single legal
+    definition of the env var name, the minimum length, and the fail-closed
+    whitespace/non-ASCII rules; nothing is re-implemented here.
+    """
+    token = read_configured_service_token(env)
+    if token is None:
+        return None
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _require_mutation_auth(headers: dict[str, str] | None, action: str) -> dict[str, str]:
+    """Fail closed before any mutation: never emit an anonymous POST/DELETE.
+
+    Only the environment variable *name* enters the blocker text; the
+    credential value never does.
+    """
+    if not headers:
+        raise GatewayProofBlocked(
+            f"{action} requires the scheduler service bearer; no usable "
+            f"{SLURM_GATEWAY_SERVICE_TOKEN_ENV} is configured"
+        )
+    return headers
 
 
 def _body(response: HttpResponse) -> Any:
@@ -167,7 +212,9 @@ def _submit_smoke(
     run_id: str,
     sleep_seconds: int,
     partition: str | None,
+    auth_headers: dict[str, str] | None,
 ) -> tuple[str, dict[str, Any]]:
+    headers = _require_mutation_auth(auth_headers, "smoke submit")
     payload: dict[str, Any] = {
         "run_id": run_id,
         "model_id": SMOKE_MODEL_ID,
@@ -178,7 +225,7 @@ def _submit_smoke(
         payload["partition"] = partition
     url = base_url + "/api/v1/slurm/jobs"
     try:
-        response = client.post(url, json=payload)
+        response = client.post(url, json=payload, headers=headers)
     except Exception as error:  # noqa: BLE001
         raise GatewayProofBlocked(
             f"gateway unreachable on submit at {url}: {_safe_error(error)}"
@@ -221,10 +268,16 @@ def _run_submit_poll_terminal_stage(
     *,
     run_id: str,
     partition: str | None,
+    auth_headers: dict[str, str] | None,
     sleep_func=time.sleep,
 ) -> dict[str, Any]:
     job_id, _submit_body = _submit_smoke(
-        client, base_url, run_id=run_id, sleep_seconds=SHORT_SLEEP_SECONDS, partition=partition
+        client,
+        base_url,
+        run_id=run_id,
+        sleep_seconds=SHORT_SLEEP_SECONDS,
+        partition=partition,
+        auth_headers=auth_headers,
     )
     record: dict[str, Any] = {}
     status = "submitted"
@@ -266,10 +319,16 @@ def _run_submit_cancel_stage(
     *,
     run_id: str,
     partition: str | None,
+    auth_headers: dict[str, str] | None,
     sleep_func=time.sleep,
 ) -> dict[str, Any]:
     job_id, _submit_body = _submit_smoke(
-        client, base_url, run_id=run_id, sleep_seconds=LONG_SLEEP_SECONDS, partition=partition
+        client,
+        base_url,
+        run_id=run_id,
+        sleep_seconds=LONG_SLEEP_SECONDS,
+        partition=partition,
+        auth_headers=auth_headers,
     )
     # Wait for the job to become active (RUNNING) so the cancel is provably
     # cancel-while-active rather than cancel-before-start.
@@ -292,9 +351,10 @@ def _run_submit_cancel_stage(
             )
         sleep_func(POLL_INTERVAL_SECONDS)
 
+    cancel_headers = _require_mutation_auth(auth_headers, "smoke cancel")
     url = base_url + f"/api/v1/slurm/jobs/{job_id}"
     try:
-        response = client.delete(url)
+        response = client.delete(url, headers=cancel_headers)
     except Exception as error:  # noqa: BLE001
         raise GatewayProofBlocked(
             f"gateway unreachable on cancel at {url}: {_safe_error(error)}"
@@ -335,12 +395,19 @@ def build_gateway_receipt(
     partition: str | None = None,
     sleep_func=time.sleep,
     now=_utc_now_iso,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Drive the three live proofs and assemble a validated gateway receipt."""
+    """Drive the three live proofs and assemble a validated gateway receipt.
+
+    ``env`` defaults to the process environment (via the shared token reader);
+    it exists so tests can inject a credential source deterministically. The
+    token never reaches ``command``, which stays a literal + ``run_id``.
+    """
 
     base_url = gateway_url.rstrip("/")
     node = platform.node() or "unknown-node"
     command = "uv run python scripts/m24_gateway_proof.py --run-id " + run_id
+    auth_headers = _mutation_auth_headers(env)
 
     stages: list[dict[str, Any]] = []
     dependency_blocker: str | None = None
@@ -351,10 +418,20 @@ def build_gateway_receipt(
     stage_runners = (
         lambda: _run_health_stage(client, base_url),
         lambda: _run_submit_poll_terminal_stage(
-            client, base_url, run_id=run_id, partition=partition, sleep_func=sleep_func
+            client,
+            base_url,
+            run_id=run_id,
+            partition=partition,
+            auth_headers=auth_headers,
+            sleep_func=sleep_func,
         ),
         lambda: _run_submit_cancel_stage(
-            client, base_url, run_id=run_id, partition=partition, sleep_func=sleep_func
+            client,
+            base_url,
+            run_id=run_id,
+            partition=partition,
+            auth_headers=auth_headers,
+            sleep_func=sleep_func,
         ),
     )
     stage_names = ("health", "submit_poll_terminal", "submit_cancel")

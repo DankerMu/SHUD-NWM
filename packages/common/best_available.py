@@ -6,6 +6,78 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from packages.common.forcing_ts_render import (
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
+
+# Reader #7 (#1990 task 7.2). The cheapest of the nine: the legacy variant
+# already joins `met.forcing_version`, so the narrow variant only has to move
+# `source_id` and `forcing_version_id` onto that alias and the variable onto the
+# enum.
+#
+# `DISTINCT ON` / `ORDER BY` carry `::text` on `variable_e` deliberately: an enum
+# sorts by DECLARATION order, so ordering on the raw enum would reorder this
+# listing relative to legacy's alphabetical `ORDER BY fst.variable` for the same
+# rows (I5).
+_FORCING_INPUTS_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
+            SELECT DISTINCT ON (fst.valid_time, fst.variable)
+                fst.valid_time,
+                fst.variable,
+                fst.source_id AS selected_source,
+                COALESCE(cmp.cycle_time, fv.cycle_time, fst.valid_time) AS source_cycle_time
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_id = fst.forcing_version_id
+            LEFT JOIN met.forcing_version_component fvc
+              ON fvc.forcing_version_id = fst.forcing_version_id
+             AND fvc.variable = fst.variable
+             AND (fvc.valid_time_start IS NULL OR fst.valid_time >= fvc.valid_time_start)
+             AND (fvc.valid_time_end IS NULL OR fst.valid_time <= fvc.valid_time_end)
+            LEFT JOIN met.canonical_met_product cmp
+              ON cmp.canonical_product_id = fvc.canonical_product_id
+            WHERE fst.forcing_version_id = %s
+            ORDER BY
+                fst.valid_time,
+                fst.variable,
+                CASE UPPER(fst.source_id)
+                    WHEN 'ERA5' THEN 100
+                    WHEN 'CLDAS' THEN 90
+                    WHEN 'GFS' THEN 10
+                    ELSE 0
+                END DESC
+            """,
+    narrow=f"""
+            SELECT DISTINCT ON (fst.valid_time, fst.variable_e::text)
+                fst.valid_time,
+                fst.variable_e::text AS variable,
+                fv.source_id AS selected_source,
+                COALESCE(cmp.cycle_time, fv.cycle_time, fst.valid_time) AS source_cycle_time
+            FROM {FORCING_TABLE_TOKEN} fst
+            JOIN met.forcing_version fv
+              ON fv.forcing_version_key = fst.forcing_version_key
+            LEFT JOIN met.forcing_version_component fvc
+              ON fvc.forcing_version_id = fv.forcing_version_id
+             AND fvc.variable = fst.variable_e::text
+             AND (fvc.valid_time_start IS NULL OR fst.valid_time >= fvc.valid_time_start)
+             AND (fvc.valid_time_end IS NULL OR fst.valid_time <= fvc.valid_time_end)
+            LEFT JOIN met.canonical_met_product cmp
+              ON cmp.canonical_product_id = fvc.canonical_product_id
+            WHERE fv.forcing_version_id = %s
+            ORDER BY
+                fst.valid_time,
+                fst.variable_e::text,
+                CASE UPPER(fv.source_id)
+                    WHEN 'ERA5' THEN 100
+                    WHEN 'CLDAS' THEN 90
+                    WHEN 'GFS' THEN 10
+                    ELSE 0
+                END DESC
+            """,
+)
+
 
 class BestAvailableError(RuntimeError):
     def __init__(
@@ -148,33 +220,11 @@ class PsycopgBestAvailableRepository:
 
     def list_forcing_inputs(self, forcing_version_id: str) -> list[ForcingInputSelection]:
         rows = self._fetch_all(
-            """
-            SELECT DISTINCT ON (fst.valid_time, fst.variable)
-                fst.valid_time,
-                fst.variable,
-                fst.source_id AS selected_source,
-                COALESCE(cmp.cycle_time, fv.cycle_time, fst.valid_time) AS source_cycle_time
-            FROM met.forcing_station_timeseries fst
-            JOIN met.forcing_version fv
-              ON fv.forcing_version_id = fst.forcing_version_id
-            LEFT JOIN met.forcing_version_component fvc
-              ON fvc.forcing_version_id = fst.forcing_version_id
-             AND fvc.variable = fst.variable
-             AND (fvc.valid_time_start IS NULL OR fst.valid_time >= fvc.valid_time_start)
-             AND (fvc.valid_time_end IS NULL OR fst.valid_time <= fvc.valid_time_end)
-            LEFT JOIN met.canonical_met_product cmp
-              ON cmp.canonical_product_id = fvc.canonical_product_id
-            WHERE fst.forcing_version_id = %s
-            ORDER BY
-                fst.valid_time,
-                fst.variable,
-                CASE UPPER(fst.source_id)
-                    WHEN 'ERA5' THEN 100
-                    WHEN 'CLDAS' THEN 90
-                    WHEN 'GFS' THEN 10
-                    ELSE 0
-                END DESC
-            """,
+            render_forcing_ts_sql(
+                _FORCING_INPUTS_TEMPLATES,
+                "legacy",
+                entry="best_available.forcing_inputs",
+            ).sql,
             (forcing_version_id,),
         )
         return [

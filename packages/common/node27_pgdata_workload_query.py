@@ -50,16 +50,38 @@ CapturedParameters = dict[str, Any]
 
 _PYFORMAT_REFERENCE_RE = re.compile(r"%\(([A-Za-z_][A-Za-z0-9_]*)\)s")
 _UNSUPPORTED_PERCENT_RE = re.compile(r"%(?!s|\([A-Za-z_][A-Za-z0-9_]*\)s)")
+# The alias prefix is OPTIONAL because the segment and network identity are no
+# longer bound on the fact table itself. #1342's contract (task 6.3) deleted the
+# transitional text conjuncts `rt.river_segment_id` / `rt.river_network_version_id`
+# that used to carry them; what survives is the key resolution they guarded,
+# which binds the same two placeholders against the AUTHORITY tables, where the
+# columns are unqualified:
+#
+#     AND rt.river_segment_key = (
+#         SELECT river_segment_key FROM core.river_segment
+#         WHERE river_segment_id = %(river_segment_id)s
+#           AND river_network_version_id = %(river_network_version_id)s)
+#
+# The identity the capture asserts is therefore unchanged; only the column it is
+# read from is. `_REQUIRED_KEY_RESOLUTIONS` below keeps the anchor that the
+# unqualified spelling would otherwise lose: the resolution must be the fact
+# table's own surrogate-key predicate, not some unrelated sub-select.
 _NAMED_EQUALS_RE = re.compile(
-    r"\b(?P<predicate>(?:h|rt|rnv)\.[A-Za-z_][A-Za-z0-9_]*)\s*=\s*%\((?P<key>[A-Za-z_][A-Za-z0-9_]*)\)s",
+    r"\b(?P<predicate>(?:(?:h|rt|rnv)\.)?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*%\((?P<key>[A-Za-z_][A-Za-z0-9_]*)\)s",
     re.IGNORECASE,
 )
 _REQUIRED_EQUALS: tuple[tuple[str, str, str], ...] = (
     ("h.cycle_time", "issue_time", "QUERY_IDENTITY_UNBOUND"),
     ("h.run_id", "run_id", "QUERY_IDENTITY_UNBOUND"),
     ("h.model_id", "model_id", "QUERY_IDENTITY_UNBOUND"),
-    ("rt.river_segment_id", "river_segment_id", "QUERY_SEGMENT_UNBOUND"),
-    ("rt.river_network_version_id", "river_network_version_id", "QUERY_IDENTITY_UNBOUND"),
+    ("river_segment_id", "river_segment_id", "QUERY_SEGMENT_UNBOUND"),
+    ("river_network_version_id", "river_network_version_id", "QUERY_IDENTITY_UNBOUND"),
+)
+#: Fact-table anchors for the two resolutions above, with the error code the
+#: missing one reports.
+_REQUIRED_KEY_RESOLUTIONS: tuple[tuple[str, str], ...] = (
+    ("rt.river_segment_key = (", "QUERY_SEGMENT_UNBOUND"),
+    ("rt.river_network_version_key IS NOT DISTINCT FROM (", "QUERY_IDENTITY_UNBOUND"),
 )
 _REQUIRED_PRESENT_KEYS: tuple[str, ...] = (
     "basin_version_id",
@@ -366,9 +388,16 @@ def validate_captured_explicit_cycle_query(
         "h.cycle_time": (identity.issue_time, True),
         "h.run_id": (identity.run_id, False),
         "h.model_id": (identity.model_id, False),
-        "rt.river_segment_id": (identity.timeseries_segment_id, False),
-        "rt.river_network_version_id": (identity.river_network_version_id, False),
+        "river_segment_id": (identity.timeseries_segment_id, False),
+        "river_network_version_id": (identity.river_network_version_id, False),
     }
+    for anchor, anchor_error_code in _REQUIRED_KEY_RESOLUTIONS:
+        if anchor not in text:
+            refuse(
+                "recorded SQL does not resolve the identity on the fact table's surrogate key",
+                code=anchor_error_code,
+                stage="query",
+            )
     for predicate, canonical_key, error_code in _REQUIRED_EQUALS:
         keys = _equals_keys(text, predicate)
         if not keys or any(key != canonical_key for key in keys):

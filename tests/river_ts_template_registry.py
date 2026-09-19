@@ -5,11 +5,12 @@ own — deliberately: a production helper that knew about every call site would
 have to import them all. The register is therefore test-side, and it is what
 makes the oracles exhaustive rather than anecdotal:
 
-* every entry is rendered for BOTH stores by the shape oracles, so a template
-  that cannot survive the narrow rendering is red in the PR that writes it, not
-  in the migration window;
+* every entry is rendered by the shape oracles, so a template that cannot
+  survive the narrow rendering is red in the PR that writes it. It used to be
+  rendered once per store; #1342's contract (task 6.3) left exactly one, and the
+  renderer now refuses every other name rather than routing it;
 * the frozen I1 golden retains its 20 historical keys. Three unchanged entries
-  still compare against current raw inputs; eight store-qualified raw sources
+  still compare against current raw inputs; eight raw sources the wave changed
   and two narrow-only writer reads have separate semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
@@ -26,9 +27,9 @@ is what lets four PRs touch this file without colliding on one tuple.
 Executed forecast statements
 ---------------------------
 
-``FORECAST_STORE_EXECUTIONS`` captures all eight spanning segment queries plus
-the known-run latest-product fallback, separately from the 13 raw ``REGISTRY``
-inputs. A composed store union is never passed wholesale to the narrow renderer.
+``FORECAST_STORE_EXECUTIONS`` captures all eight segment queries plus the
+known-run latest-product fallback, separately from the 13 raw ``REGISTRY``
+inputs. Composed executed SQL is never passed wholesale to the renderer.
 The capture harness remains in ``tests/test_river_ts_text_identity_cleanup.py``.
 Imports stay inside callables because the owning test modules import this
 register at module level.
@@ -72,21 +73,59 @@ GOLDEN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / f"river_ts_templates_{GOLDEN
 #: keeps its 54 chains and the file its 215, and all 19 other entries are
 #: byte-identical to the `51f9d273` capture. `base_sha` is therefore left
 #: alone — every other entry genuinely still comes from that base.
-GOLDEN_SHA256 = "d104d1c69cea55cdb86bd8a44d90d8f93c621580b43f74744f6b5cca7cd5a453"
+#:
+#: NOT moved for #2451, and that is the point. #2451 changed
+#: `_SEGMENT_ROWS_SOURCE_SQL`'s two identity conjuncts from `=` to a guarded
+#: `IS NOT DISTINCT FROM` — the `IS NOT NULL` half is what keeps the pair
+#: filtering exactly as `=` did, since `hydro.river_timeseries_legacy`'s key
+#: columns are nullable:
+#:
+#:     rt.basin_version_key IS NOT NULL
+#:     rt.basin_version_key IS NOT DISTINCT FROM (SELECT basin_version_key ...)
+#:     rt.river_network_version_key IS NOT NULL
+#:     rt.river_network_version_key IS NOT DISTINCT FROM (SELECT ...)
+#:
+#: The golden's eight `forecast_store:<label>` entries and
+#: `forecast_store:segment_identity_predicates` still record the `= (` spelling.
+#: That is not stale data: it is `51f9d273`'s own text (`git show
+#: 51f9d273:packages/common/forecast_store.py`, lines 92 and 105), which is
+#: exactly what a base-tree capture is supposed to say. Those nine keys are
+#: RECORD-ONLY — they are not in `REGISTRY` at all (13 registered entries, 20
+#: golden entries), so no `source()` can replay them and
+#: `test_legacy_renderer_preserves_every_current_template_predicate` never
+#: compares them. The live source for that SQL is
+#: `forecast_store:segment_rows_source`, which is in `ROUTED_SOURCE_KEYS` and is
+#: not in the golden.
+#:
+#: The fixture was NOT regenerated and the base did not move. Regenerating it
+#: from the post-#2451 tree is the self-certifying capture the fixture's own
+#: `note` field, `test_the_golden_was_captured_at_the_change_base` and this pin
+#: exist to prevent; regenerating it from a pristine `51f9d273` tree — the
+#: documented path (I1-1980 decisions 11/12) — reproduces the `= (` spelling
+#: byte for byte, so it is a no-op for this change.
+#: Moved for #1342's contract (task 6.3), and again this is a DECLARED
+#: BEHAVIOURAL DELTA, not a re-capture — the fixture's own `delta_from` block
+#: records the commit, the one entry touched and why. Task 6.3 deletes the river
+#: legacy read path and with it every transitional pushdown aid, so
+#: `hydro_display:mvt_source_identity_probe`'s first chain lost exactly three
+#: conjuncts:
+#:
+#:     river_network_version_id = :river_network_version_id
+#:     run_id = :run_id
+#:     variable = :variable
+#:
+#: Each was the TEXT half of a pair whose key/enum half is still recorded in the
+#: same chain, so the identity the chain asserts is unchanged — only the column
+#: it reads it from. The delta removes three JSON lines from one chain and
+#: rewrites none; the other 19 entries are byte-identical to the `51f9d273`
+#: capture, the file still holds 20 entries / 215 chains, and `base_sha` is
+#: therefore left alone.
+GOLDEN_SHA256 = "df78289367d4b4b6f678495447d8e588fe701e2a7e192b34d63bb740e8baba61"
 
 
 def golden_sha256() -> str:
     """The captured golden's actual content hash."""
     return hashlib.sha256(GOLDEN_FIXTURE.read_bytes()).hexdigest()
-
-
-def historical_display_coverage_sql() -> str:
-    """Immutable pre-store DML: historical oracle and pre-transition seed only."""
-    data = (REPO_ROOT / "tests/fixtures/display_coverage_pre_store_b7cdce63.sql").read_bytes()
-    assert hashlib.sha256(data).hexdigest() == (
-        "17283e0277c6b8d2047ffa8aacc36e2b4bab4bb67063e9a15d44668f25490952"
-    ), "pre-store display coverage snapshot changed"
-    return data.decode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -97,23 +136,20 @@ class TemplateEntry:
         ``statement`` is a raw renderer input, never composed executed SQL.
     ``params``
         ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``).
-    ``expected_aids``
-        how many transitional aid conjuncts the template carries after #1980's
-        normalisation — the per-entry half of the 34/34 marker/aid census.
     ``mentions``
         canonical-table occurrences in the entry's own text, which the closure
         check sums per file.
     ``source(store)``
-        Raw input for that store, including caller-owned routing literals.
-        A store-independent raw input is the same authored SQL for either store.
-        The store is required: there is no implicit legacy input for a narrow render.
+        Raw input for the named store. After #1342's contract (task 6.3) the
+        only store is ``narrow``; the argument is kept — and kept required —
+        because ``render_river_ts_sql`` keeps it, so a caller that still believes
+        in routing is refused by name rather than silently answered.
     """
 
     key: str
     path: str
     kind: str
     params: str
-    expected_aids: int
     mentions: int
     source: Callable[[str], str]
 
@@ -134,10 +170,11 @@ NON_TEMPLATE_MENTIONS: dict[str, int] = {
     # The replace chain's two WRITE statements (DELETE + INSERT). #1980 registers
     # read templates only; the write side is #1985's (I7) narrow-write oracle.
     "workers/output_parser/parser.py": 2,
-    # The renderer's own two table-name constants. Two, not one, because
+    # The renderer's own canonical table-name constant. One since #1342's
+    # contract (task 6.3) deleted `RIVER_TABLE_LEGACY`; it used to be two because
     # `_river_table_mentions` matches a PREFIX of the name (the `_legacy` literal
     # opens with the canonical one), not a whole identifier.
-    "packages/common/river_ts_render.py": 2,
+    "packages/common/river_ts_render.py": 1,
     "apps/api/routes/hydro_display.py": 0,
     "services/tile_publisher/forcing_copyback_backfill.py": 0,
     "services/tiles/mvt.py": 0,
@@ -169,7 +206,6 @@ HYDRO_DISPLAY_ENTRIES: tuple[TemplateEntry, ...] = (
         path="apps/api/routes/hydro_display.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_hydro_display_identity_probe,
     ),
@@ -193,7 +229,6 @@ DISPLAY_COVERAGE_ENTRIES: tuple[TemplateEntry, ...] = (
         path="packages/common/display_coverage.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_display_coverage_refresh,
     ),
@@ -258,7 +293,6 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
         path="packages/common/forecast_store.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_segment_rows_source,
     ),
@@ -267,7 +301,6 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
         path="packages/common/forecast_store.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_latest_product_river_source,
     ),
@@ -291,7 +324,6 @@ COPYBACK_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tile_publisher/forcing_copyback_backfill.py",
         kind="statement",
         params="named",
-        expected_aids=1,
         mentions=1,
         source=_copyback_discovery,
     ),
@@ -315,7 +347,6 @@ PUBLISHER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tile_publisher/publisher.py",
         kind="statement",
         params="named",
-        expected_aids=1,
         mentions=1,
         source=_publisher_discovery,
     ),
@@ -363,7 +394,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_hydro_source,
     ),
@@ -372,7 +402,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_hydro_national_identity_source,
     ),
@@ -381,7 +410,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=4,
         mentions=1,
         source=_hydro_national_data_source,
     ),
@@ -390,7 +418,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=3,
         mentions=1,
         source=_valid_times_named_source,
     ),
@@ -399,7 +426,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=1,
         mentions=1,
         source=_valid_times_any_source,
     ),
@@ -432,7 +458,6 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=0,
         mentions=1,
         source=_parser_read(0),
     ),
@@ -441,7 +466,6 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=0,
         mentions=1,
         source=_parser_read(1),
     ),
@@ -470,9 +494,13 @@ REGISTRY: tuple[TemplateEntry, ...] = (
     *PARSER_ENTRIES,
 )
 
-#: Changed store-qualified raw sources, not the set of renderer callers.
-#: The MVT identity probe executes through the renderer but keeps its unchanged,
-#: store-independent raw input and therefore remains historical-comparable.
+#: The raw sources this wave changed, not the set of renderer callers. They were
+#: store-qualified until #1342's contract (task 6.3) left one store; the set is
+#: kept because what it names is "the wave's own routed sources", whose live
+#: owners are composed statements the golden records separately. The MVT identity
+#: probe stays OUT: it executes through the renderer and remains the one entry
+#: compared chain-for-chain against the golden — with the declared `delta_from`
+#: above, which is why it must stay comparable rather than be reclassified.
 ROUTED_SOURCE_KEYS = frozenset({
     "publisher:qdown_discovery",
     "forcing_copyback_backfill:discover_backfill_runs",
@@ -498,69 +526,54 @@ def entry_by_key(key: str) -> TemplateEntry:
 
 
 # ---------------------------------------------------------------------------
-# Marker / aid census (#1980, task 1.1)
+# Aid-marker tripwire (#1980 task 1.1, collapsed to zero by #1342's contract)
 #
-# The counting itself is shared; the NUMBERS are pinned in each file's owning
-# oracle (fixture decision 7: the cleanup oracle owns forecast_store, publisher,
-# forcing_copyback_backfill and parser; the surrogate-keys oracle owns mvt,
-# hydro_display and display_coverage), so exactly one test reddens per file.
+# The transitional aid markers are gone from every file, so what is left is a
+# TRIPWIRE: a reintroduced aid comment must be red here, not discovered when the
+# narrow table answers `column river_segment_id does not exist`. The numbers are
+# still pinned in each file's owning oracle (fixture decision 7: the cleanup
+# oracle owns forecast_store, publisher, forcing_copyback_backfill and parser;
+# the surrogate-keys oracle owns mvt, hydro_display and display_coverage), so
+# exactly one test reddens per file.
 #
-# Counted on the SOURCE FILE, not on executed statements. Forecast's two raw
-# sources each carry three aids; the segment source has eight execution owners.
+# The marker's own issue tag is deliberately NOT spelled as a literal anywhere
+# in this repository any more: a repo-wide grep for it is the contract's own
+# acceptance criterion (task 6.3, criterion 1) and must come back empty, so a
+# test that spelled it in order to assert its absence would be the only thing
+# keeping the criterion from passing. Both halves of the marker are therefore
+# COMPOSED here, from the issue number, and every call site imports them.
+#
+# The tripwire keys on the DESCRIPTIVE half, which every spelling of the marker
+# (verbatim or the pre-#1980 one-comment-covers-four form) carried; the tag half
+# is what the absence assertions elsewhere search for.
 # ---------------------------------------------------------------------------
 
+#: The expand/contract issue whose transitional aids these constants describe.
+AID_ISSUE = 1342
 
-@dataclass(frozen=True)
-class MarkerCensus:
-    """What a source file's ``#1342`` marker lines look like."""
+#: The aid comment's descriptive half, as #1341 worded it.
+AID_COMMENT_PHRASE = "transitional compressed-chunk pushdown aid"
 
-    #: line numbers (1-based) whose stripped content IS the verbatim marker
-    marker_lines: tuple[int, ...]
-    #: line numbers carrying the issue tag in any form — prose, constants, a
-    #: non-verbatim marker. Everything here that is not a marker line has to be
-    #: declared by the owning oracle, so a 1:N marker cannot come back unnoticed.
-    tag_lines: tuple[int, ...]
-    #: the aid conjunct under each marker; ``None`` where the next line is not
-    #: exactly one aid conjunct, which is the layout violation itself.
-    aids: tuple[str | None, ...]
+#: The aid comment's tag half, composed rather than spelled — see above.
+AID_MARKER_TAG = f"remove with #{AID_ISSUE}"
 
 
-def marker_census(source: str) -> MarkerCensus:
-    from packages.common.river_ts_render import PUSHDOWN_AID_MARKER, aid_conjunct
-
-    tag = "remove with #1342"
-    lines = source.split("\n")
-    marker_lines = tuple(number for number, line in enumerate(lines, 1) if line.strip() == PUSHDOWN_AID_MARKER)
-    tag_lines = tuple(number for number, line in enumerate(lines, 1) if tag in line)
-    aids = tuple(aid_conjunct(lines[number]) if number < len(lines) else None for number in marker_lines)
-    return MarkerCensus(marker_lines, tag_lines, aids)
+def aid_comment_lines(source: str) -> tuple[int, ...]:
+    """1-based line numbers of every transitional-aid comment in ``source``."""
+    return tuple(
+        number for number, line in enumerate(source.split("\n"), 1) if AID_COMMENT_PHRASE in line
+    )
 
 
-def assert_marker_census(
-    path: str,
-    expected_markers: int,
-    *,
-    non_aid_tag_lines: int = 0,
-) -> None:
-    """Every marker in ``path`` is verbatim, on its own line, over exactly one aid.
+def assert_marker_census(path: str, expected_markers: int) -> None:
+    """``path`` carries exactly ``expected_markers`` transitional-aid comments.
 
-    ``non_aid_tag_lines`` is the number of lines that carry the issue tag WITHOUT
-    being an aid marker (a constant, a docstring). Declared per file rather than
-    tolerated globally: the pre-#1980 mvt wording was a tag line that was not a
-    verbatim marker, and an unbounded allowance would let it back in.
+    Every owner passes ``0``: #1342's contract removed the aids and the renderer
+    machinery that deleted them. The parameter stays so the call sites keep
+    naming the number they assert instead of asserting an implicit zero.
     """
     source = (REPO_ROOT / path).read_text(encoding="utf-8")
-    census = marker_census(source)
-
-    assert len(census.marker_lines) == expected_markers, (
-        f"{path}: {len(census.marker_lines)} verbatim aid markers, census says {expected_markers}"
+    found = aid_comment_lines(source)
+    assert len(found) == expected_markers, (
+        f"{path}: {len(found)} transitional-aid comments (lines {list(found)}), census says {expected_markers}"
     )
-    assert len(census.tag_lines) == expected_markers + non_aid_tag_lines, (
-        f"{path}: {len(census.tag_lines)} lines carry the #1342 tag but only "
-        f"{expected_markers} are verbatim markers and {non_aid_tag_lines} are declared non-aid mentions "
-        f"(lines {[number for number in census.tag_lines if number not in census.marker_lines]})"
-    )
-    for line_number, aid in zip(census.marker_lines, census.aids, strict=True):
-        assert aid is not None, (
-            f"{path}:{line_number}: the line under this aid marker is not exactly one aid conjunct"
-        )

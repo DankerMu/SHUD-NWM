@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from packages.common.forcing_ts_render import (
+    FORCING_TABLE_TOKEN,
+    ForcingTemplatePair,
+    render_forcing_ts_sql,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -35,6 +40,7 @@ from .basins_registry_import import (
     _inventory_root,
     _json,
     _json_dict,
+    _lock_river_network_version,
     _prepare_sources,
     _recorded_relative_inventory_root,
     _source_root,
@@ -683,6 +689,11 @@ def seed_qhh_output_segments(
     output_segment_count, checksum = read_qhh_output_segment_count(sp_riv_path, root, model_id=model_id)
     with _transaction(database_url) as cursor:
         model = _fetch_model_identity(cursor, model_id)
+        # #2157 lock order: parent network row BEFORE the upsert takes row locks
+        # on existing output segments. Locking only inside the trailing backfill
+        # would turn this path into children -> parent and deadlock against an
+        # autopipeline backfill (parent -> children) on the same network.
+        _lock_river_network_version(cursor, model["river_network_version_id"])
         counts = _seed_output_segment_rows(
             cursor,
             model=model,
@@ -692,6 +703,11 @@ def seed_qhh_output_segments(
             sp_riv_checksum=checksum,
         )
         geometry_backfilled_count = _backfill_output_segment_geometry(cursor, model["river_network_version_id"])
+        _assert_complete_qhh_output_segment_stream_type(
+            cursor,
+            model["river_network_version_id"],
+            model_id=model_id,
+        )
         geometry_counts = _qhh_output_segment_geometry_counts(
             cursor,
             model["river_network_version_id"],
@@ -1065,6 +1081,11 @@ def _bootstrap_database(
                 model_id=model_id,
                 details={"rollback_expected": True, "failure_point": "output_segment_seed"},
             )
+        # #2157 lock order: `import_basin_into_registry_core` already UPDATEd the
+        # parent row above, so this re-take is a same-transaction no-op; it keeps
+        # "parent lock before the upsert" explicit and identical on both entry
+        # points of `_seed_output_segment_rows`.
+        _lock_river_network_version(cursor, sources.ids["river_network_version_id"])
         output_counts = _seed_output_segment_rows(
             cursor,
             model=_fetch_model_identity(cursor, model_id),
@@ -1083,6 +1104,11 @@ def _bootstrap_database(
             cursor,
             context,
             geometry_backfilled_count=geometry_backfilled_count,
+        )
+        _assert_complete_qhh_output_segment_stream_type(
+            cursor,
+            sources.ids["river_network_version_id"],
+            model_id=model_id,
         )
         forcing_after = _dynamic_forcing_counts(cursor, model_id)
         _assert_dynamic_forcing_unchanged(model_id, before=forcing_before, after=forcing_after)
@@ -1394,6 +1420,69 @@ def _assert_complete_qhh_output_segment_geometry(
             },
         )
     return geometry_counts
+
+
+def _assert_complete_qhh_output_segment_stream_type(
+    cursor: Any,
+    river_network_version_id: str,
+    *,
+    model_id: str,
+) -> None:
+    """Fail closed when the output-segment upsert left an erased ``Type`` behind (#2154).
+
+    ``_seed_output_segment_rows``' ``ON CONFLICT DO UPDATE`` rewrites
+    ``properties_json`` wholesale, dropping the ``Type`` a previous backfill
+    copied in and so NULLing the STORED ``stream_type``; it never bumps
+    ``geometry_generation`` itself. Both of its entry points rely on the
+    trailing ``_backfill_output_segment_geometry`` on the same cursor to
+    restore ``Type`` and bump. When that backfill updates nothing -- e.g. every
+    candidate is dropped by its ``ST_Length(source.geom) > 0`` filter -- the
+    erasure would commit with the tile cache identity unrotated.
+
+    The predicate reuses the backfill's candidate/source predicates and
+    deliberately omits ``ST_Length(s.geom) > 0``: a degenerate source reach
+    that still carries ``Type`` is exactly the case the backfill skips and this
+    check must catch. "Carries ``Type``" means a non-null value
+    (``->>'Type' IS NOT NULL``), mirroring the backfill, which copies ``Type``
+    only when the source value is not JSON null: a source whose ``Type`` is
+    ``null`` (a blank dbf cell) legitimately leaves the output row without one.
+    Run it after the trailing backfill; raising rolls the whole transaction
+    back, upsert included.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS stream_type_missing_count
+        FROM core.river_segment t
+        WHERE t.river_network_version_id = %s
+          AND COALESCE(t.properties_json->>'shud_output_river', 'false') = 'true'
+          AND (t.properties_json->>'shud_riv_index') ~ '^[0-9]+$'
+          AND NOT t.properties_json ? 'Type'
+          AND EXISTS (
+              SELECT 1
+              FROM core.river_segment s
+              WHERE s.river_network_version_id = t.river_network_version_id
+                AND COALESCE(s.properties_json->>'shud_output_river', 'false') <> 'true'
+                AND s.properties_json ? 'iRiv'
+                AND (s.properties_json->>'iRiv') ~ '^[0-9]+$'
+                AND s.properties_json->>'iRiv' = t.properties_json->>'shud_riv_index'
+                AND s.geom IS NOT NULL
+                AND s.properties_json->>'Type' IS NOT NULL
+          )
+        """,
+        (river_network_version_id,),
+    )
+    missing = int(cursor.fetchone()["stream_type_missing_count"] or 0)
+    if missing > 0:
+        raise QhhProductionBootstrapError(
+            "QHH_OUTPUT_SEGMENT_STREAM_TYPE_INCOMPLETE",
+            "QHH output river segments lost their source stream Type and the geometry backfill did not restore it.",
+            model_id=model_id,
+            details={
+                "river_network_version_id": river_network_version_id,
+                "stream_type_missing_count": missing,
+                "rollback_expected": True,
+            },
+        )
 
 
 def _qhh_output_segment_geometry_counts(
@@ -1819,17 +1908,46 @@ def _fetch_model_identity(cursor: Any, model_id: str) -> dict[str, Any]:
     return row
 
 
-def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
-    cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
-    forcing_versions = int(cursor.fetchone()["count"])
-    cursor.execute(
-        """
+# Reader #8 (#1990 task 7.2). This reader does NOT join `met.forcing_version` at
+# all — it counts fact rows by MODEL across every forcing version, so "look the
+# store up by forcing version" does not map onto it even once task 7.3 adds the
+# routing column. Its narrow variant is the legacy one with the station join
+# moved onto `station_key`.
+#
+# THE CROSS-STORE SHAPE IS 7.3's (invariant I7), and it is not written as dead
+# code here. When both tables exist this becomes ONE aggregate over the two
+# rendered fact-row subrelations composed inside this function — not two counts
+# summed by Python, which is the shape the invariant forbids. In this task store
+# is the constant `legacy` and there is nothing to compose: a narrow branch would
+# emit `station_key` against a table that has no such column, and
+# `_dynamic_forcing_counts` executes against node-27 (must-preserve M6).
+_DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
+    legacy=f"""
         SELECT COUNT(*) AS count
-        FROM met.forcing_station_timeseries fst
+        FROM {FORCING_TABLE_TOKEN} fst
         JOIN met.met_station ms
           ON ms.station_id = fst.station_id
         WHERE ms.properties_json->>'model_id' = %s
         """,
+    narrow=f"""
+        SELECT COUNT(*) AS count
+        FROM {FORCING_TABLE_TOKEN} fst
+        JOIN met.met_station ms
+          ON ms.station_key = fst.station_key
+        WHERE ms.properties_json->>'model_id' = %s
+        """,
+)
+
+
+def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
+    cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
+    forcing_versions = int(cursor.fetchone()["count"])
+    cursor.execute(
+        render_forcing_ts_sql(
+            _DYNAMIC_FORCING_COUNT_TEMPLATES,
+            "legacy",
+            entry="qhh_production_bootstrap.dynamic_forcing_count",
+        ).sql,
         (model_id,),
     )
     timeseries_rows = int(cursor.fetchone()["count"])

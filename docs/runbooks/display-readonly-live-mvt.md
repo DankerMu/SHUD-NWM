@@ -143,7 +143,7 @@ Root-equality pairings (template comments at
    `display.example`'s `/tmp/nhms-mvt-cache`.
 
 If the retention key is absent, the PNG lane records
-`precip_cache_root_unconfigured` and raw + canonical still prune. That
+`precip_cache_root_unconfigured` and raw still prunes (canonical: below). That
 is the #2431 defect: PNG then only grows. Activation of the PNG lane
 requires a configured non-null `precip_cache_root`, both configured
 sources (`GFS`→`gfs`, `IFS`→`IFS`) safely evaluated, and none of
@@ -153,11 +153,25 @@ Zero expired PNG candidates is legitimate only after that evaluation;
 it is not deletion proof. Do not create cache fixtures.
 
 Canonical copyback lock `/home/ghdc/nwm/object-store/.nhms-copyback-batch.lock`
-is `0600` uid 1103. The retention unit runs as uid 1005, so aged
-canonical cycles fail `lock_unsafe` and the oneshot returns rc=1. That
-is #2360, fail-closed, and out of this batch: never chmod / chown /
-delete / bypass the lock to green PNG pruning. Record canonical
-`lock_unsafe` separately from PNG planned/deleted/failed.
+is `0600` uid 1103. Until the canonical system unit is installed
+(#2360 Stage B, after merge) the `nwm` user unit
+`nhms-node27-raw-retention.service` (uid 1005) has no `LANES` line and
+still selects canonical: every aged canonical cycle records `lock_unsafe`
+and the tick exits rc=1 — the known #2360 state, not a new fault. Once
+installed, retention is split by lane: the `nwm` unit runs
+`NODE27_RAW_RETENTION_LANES=raw,precip-cache`, so canonical appears
+in its summary only as `skipped[]` `lane_not_selected` (no lock taken);
+aged canonical cycles are pruned by the system unit
+`nhms-node27-canonical-retention.service` as `frd_muziyao` (uid 1103).
+A canonical `lock_unsafe` after the split means a lane runs under the
+wrong account (the `nwm` env lost its `LANES` line, or the system unit's
+`User=` changed) — an incident. Never chmod / chown / delete / bypass
+the lock to green PNG pruning. Record canonical separately from PNG
+planned/deleted/failed: after the split canonical results are in the
+system unit's summary under `/var/log/nhms-node27-canonical-retention/`,
+PNG results in the `nwm` unit's summary (before it, both are in the
+`nwm` unit's summary). Split, install and rollback:
+[`current-production-ops.md`](current-production-ops.md) §"node-27 canonical 删除持锁".
 
 Plan-only must set `NODE27_RAW_RETENTION_PLAN_ONLY=true` **after**
 sourcing the env file (the wrapper `set -a; . env`). The current
@@ -433,6 +447,17 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
   生成即触发本记录。
 - **`layer_id=discharge` 在本记录里恒指 `hydro-national`**：预算窗口只在全国层（`services/tiles/mvt.py` 的
   `national_budget_window` CTE），按 run 的 `hydro` 层没有该窗口。
+- **单要素超限清空信号**（WARNING，#2166）：`MVT_TILE_FEATURE_OVERFLOW_BLANKED layer_id z x y
+  feature_coordinate_overflow_count feature_coordinate_count max_feature_coordinates
+  coordinate_dimension_overflow_count coordinate_dimension_count max_coordinate_dimensions`；同一 logger、同一
+  bind site（`_fetch_postgis_tile_bytes`），缓存语义同上（每次生成一条）。含义：瓦片内有要素的单要素坐标数或
+  坐标维数超过上限（`*_overflow_count` 为超限要素数，`feature_coordinate_count` / `coordinate_dimension_count`
+  为瓦片内单要素最大值，两个 `max_*` 为本次查询实际绑定的上限），共享的 `budget_gate` 因此清空，整张瓦片以
+  **HTTP 200、零要素**返回并照常缓存。不限全国层，任何 live MVT 层都可能触发。与 `MVT_TILE_BUDGET_TRUNCATED`
+  **对同一瓦片互斥**（后者要求两个 overflow 计数均为 0）。注意：上一条「`layer_id=discharge` 恒指 `hydro-national`」只对
+  TRUNCATED 成立；本记录的 `layer_id=discharge` 既可能来自全国层也可能来自按 run 的 `hydro` 层，以 z/x/y 与请求路径区分。
+- **grep**：`grep -E 'MVT_TILE_BUDGET_TRUNCATED|MVT_TILE_FEATURE_OVERFLOW_BLANKED' /tmp/display-api.log`
+  （单查截断：`grep MVT_TILE_BUDGET_TRUNCATED`，单查清空：`grep MVT_TILE_FEATURE_OVERFLOW_BLANKED`）。
 
 ## 残留风险与处置
 
