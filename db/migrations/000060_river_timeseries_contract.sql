@@ -7,10 +7,30 @@
 -- statements committed while the ledger row is never recorded. A single DO
 -- block is one statement, hence one transaction, hence all-or-nothing.
 --
--- Ordering inside the block keeps the hydro_run ACCESS EXCLUSIVE lock (taken by
--- the final ALTER) held for as short a window as possible; migrate.py bounds the
--- wait at lock_timeout=5s, so contention aborts and rolls back cleanly rather
--- than queueing behind live display traffic.
+-- LOCKS -- read this before running it against live traffic. An earlier version
+-- of this comment claimed the only ACCESS EXCLUSIVE lock was taken by the final
+-- ALTER and that lock_timeout bounded the exposure to 5s. Both were wrong.
+--
+--   * The DROP TABLE below is the FIRST DDL in the block, and it takes ACCESS
+--     EXCLUSIVE on `core.river_segment` as well as on the legacy table: the
+--     legacy table carries an outgoing FK to core.river_segment (000006_hydro.sql:57-59),
+--     and dropping that constraint removes the RI trigger on the REFERENCED
+--     side, which locks core.river_segment. TimescaleDB replicates the
+--     constraint per chunk, so there are more triggers but the same one lock.
+--     core.river_segment is read by MVT, /river-segments and /forecast-series.
+--   * The final ALTER then takes ACCESS EXCLUSIVE on hydro_run, upgrading the
+--     ACCESS SHARE the refusal count already holds -- a lock upgrade, which a
+--     conflicting concurrent request resolves via lock_timeout or deadlock
+--     detection. That aborts safely (whole block rolls back), but it is a real
+--     abort path, not "the window is minimised".
+--   * lock_timeout bounds how long we WAIT for a lock, not how long we HOLD it.
+--     Every lock above is held until COMMIT, and COMMIT is where the 717 GB of
+--     relation segments are actually unlinked. statement_timeout is unset by
+--     default (packages/common/migrate.py:258) and does not cover commit either.
+--
+-- Therefore: run this in a maintenance window with the API and parser units
+-- stopped. That is a requirement, not a recommendation. The block is atomic, so
+-- an abort is always safe -- but "safe to abort" is not "safe to run hot".
 DO $$
 DECLARE
     window_days integer;
@@ -45,18 +65,33 @@ BEGIN
           AND end_time > now() - make_interval(days => window_days);
 
         IF in_window <> 0 THEN
+            -- end_time and timeseries_store are both NOT NULL (000006_hydro.sql:55,
+            -- 000059:76), so no row escapes this predicate by being NULL.
             RAISE EXCEPTION
                 'contract refused: % legacy-routed run(s) with end_time inside the %-day '
                 'retention window; bring them to the narrow store with the #2382 reparse '
                 'backfill or wait for retention, then re-run -- nothing was changed',
                 in_window, window_days;
         END IF;
+    ELSIF to_regclass('hydro.river_timeseries_legacy') IS NOT NULL THEN
+        -- Column already gone but the table still here: an operator who hit the
+        -- refusal and hand-dropped the column would otherwise get an
+        -- unconditional 717 GB drop, because the routing column is this
+        -- migration's ONLY evidence of what is still routed legacy. Refuse
+        -- instead. A successful run leaves BOTH gone, so replay still no-ops.
+        RAISE EXCEPTION
+            'contract refused: hydro.hydro_run.timeseries_store is already absent while '
+            'hydro.river_timeseries_legacy still exists; the routing column is the only '
+            'evidence of what is still routed legacy, so the drop cannot be justified '
+            '-- nothing was changed';
     END IF;
 
     -- Legacy-routed runs outside the window keep route `legacy`; their remaining
     -- chunks go with the table, the same visibility loss retention imposes.
     -- Their hydro.run_display_coverage rows are deliberately left untouched:
-    -- the #1446 overwrite guard (packages/common/display_coverage.py:699-701)
+    -- the #1446 overwrite guard (packages/common/display_coverage.py:687-689,
+    -- the `WHERE %(force)s OR EXCLUDED.segment_count > 0 OR ... = 0` clause on
+    -- the upsert -- NOT :699-701, which is only the cheap-path existence gate)
     -- keeps them frozen at their last populated values, and the contract must
     -- never zero or delete them.
     DROP TABLE IF EXISTS hydro.river_timeseries_legacy;
