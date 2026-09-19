@@ -272,7 +272,11 @@ def publish_run_pipeline_job_provenance(
                         staged["err_uri"],
                         staged["stderr"],
                         published_artifact_root=published_artifact_root,
-                        existing_uri=staged["err_uri"] if refuse_divergent_existing else None,
+                        existing_uri=(
+                            staged["err_uri"]
+                            if refuse_divergent_existing and existing_job and existing_job.get("log_stderr_bytes")
+                            else None
+                        ),
                     )
             sidecar = _merge_published_sidecar(
                 store,
@@ -977,7 +981,7 @@ def _publish_task_log_streams(
             err_uri,
             stderr_bytes,
             published_artifact_root=published_artifact_root,
-            existing_uri=err_uri if existing_job is not None else None,
+            existing_uri=err_uri if existing_job and existing_job.get("log_stderr_bytes") else None,
         )
     return out_uri
 

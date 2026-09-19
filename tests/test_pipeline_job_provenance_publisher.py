@@ -666,3 +666,77 @@ def test_publisher_identical_log_refetch_is_a_noop(tmp_path: Path) -> None:
     assert artifact_path.read_bytes() == IFS_STDOUT.encode("utf-8")
     assert sidecar_path.read_bytes() == original_sidecar
 
+
+def test_publisher_enriches_same_version_with_stdout_and_stderr(tmp_path: Path) -> None:
+    unavailable = _parent_array_response(include_sibling=False)
+    unavailable["metadata_complete"] = False
+    first, journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: unavailable,
+    )
+    assert first["advertised_logs"] == 0
+    available = _parent_array_response(include_sibling=False)
+    available["array_task_logs"][0]["stderr"] = "task diagnostic\n"
+    args = {
+        "run_id": IFS_SELECTED_RUN_ID,
+        "journal_root": journal_root,
+        "object_store_root": object_root,
+        "published_artifact_root": published_root,
+        "fetch_logs": lambda _job_id: available,
+    }
+
+    enriched = publish_run_pipeline_job_provenance(**args)
+
+    log_root = published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID
+    assert enriched["status"] == "published"
+    assert (log_root / f"{IFS_JOB_ID}.out").read_bytes() == IFS_STDOUT.encode("utf-8")
+    assert (log_root / f"{IFS_JOB_ID}.err").read_bytes() == b"task diagnostic\n"
+    sidecar_path = object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json"
+    sidecar_bytes = sidecar_path.read_bytes()
+    row = json.loads(sidecar_bytes)["jobs"][0]
+    assert row["log_uri"] == _expected_log_uri()
+    assert row["log_stderr_bytes"] == len(b"task diagnostic\n")
+    assert row["updated_at"] == "2026-09-16T12:40:00Z"
+
+    assert publish_run_pipeline_job_provenance(**args)["status"] == "published"
+    assert sidecar_path.read_bytes() == sidecar_bytes
+    (log_root / f"{IFS_JOB_ID}.err").unlink()
+    with pytest.raises(PipelineJobProvenanceError) as caught:
+        publish_run_pipeline_job_provenance(**args)
+    assert caught.value.code == "PUBLISHED_LOG_MISSING"
+    assert sidecar_path.read_bytes() == sidecar_bytes
+
+
+def test_publisher_updates_logs_for_newer_source_version(tmp_path: Path) -> None:
+    original = _parent_array_response(include_sibling=False)
+    original["array_task_logs"][0]["stderr"] = "old diagnostic\n"
+    _, journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: original,
+    )
+    newer = _forecast_job()
+    newer["updated_at"] = "2026-09-16T12:50:00Z"
+    _seed_ifs_journal(journal_root, jobs=[newer])
+    replacement = _parent_array_response(include_sibling=False)
+    replacement["array_task_logs"][0]["stdout"] = "new stdout\n"
+    replacement["array_task_logs"][0]["stderr"] = "new diagnostic\n"
+
+    result = publish_run_pipeline_job_provenance(
+        run_id=IFS_SELECTED_RUN_ID,
+        journal_root=journal_root,
+        object_store_root=object_root,
+        published_artifact_root=published_root,
+        fetch_logs=lambda _job_id: replacement,
+    )
+
+    log_root = published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID
+    assert result["status"] == "published"
+    assert (log_root / f"{IFS_JOB_ID}.out").read_bytes() == b"new stdout\n"
+    assert (log_root / f"{IFS_JOB_ID}.err").read_bytes() == b"new diagnostic\n"
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_bytes()
+    )
+    assert sidecar["jobs"][0]["updated_at"] == "2026-09-16T12:50:00Z"
+    assert sidecar["jobs"][0]["log_stderr_bytes"] == len(b"new diagnostic\n")
