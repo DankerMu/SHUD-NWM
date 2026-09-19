@@ -1,0 +1,442 @@
+{
+  "anchor": {
+    "decision": "issue-1407-keep-watermark-anchor",
+    "frontier_active_lower_bound": null,
+    "mode": "display_watermark",
+    "reference_time": "2026-09-18T00:00:00Z",
+    "residual_risk": "backfill cycles older than watermark - retention_days are unprotected"
+  },
+  "canonical_root": "/home/ghdc/nwm/object-store/canonical",
+  "copyback_lock_failures": {
+    "lock_budget_exhausted": 0,
+    "lock_timeout": 0,
+    "lock_unsafe": 0
+  },
+  "counts": {
+    "deleted": 4,
+    "failed": 0,
+    "planned": 4,
+    "skipped": 82
+  },
+  "cutoff": "2026-09-04T00:00:00Z",
+  "deleted": [
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "raw/IFS/2026090300",
+      "path": "/home/ghdc/nwm/object-store/raw/IFS/2026090300",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 53061543,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "raw/IFS/2026090312",
+      "path": "/home/ghdc/nwm/object-store/raw/IFS/2026090312",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 53061543,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "raw/gfs/2026090300",
+      "path": "/home/ghdc/nwm/object-store/raw/gfs/2026090300",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 48162623,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "raw/gfs/2026090312",
+      "path": "/home/ghdc/nwm/object-store/raw/gfs/2026090312",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 48162623,
+      "source": "gfs"
+    }
+  ],
+  "dry_run": false,
+  "enabled": true,
+  "execution_mode": "production_execute",
+  "failed": [],
+  "finished_at": "2026-09-19T00:57:32Z",
+  "freed_bytes": 202448332,
+  "lanes": [
+    "precip-cache",
+    "raw"
+  ],
+  "object_store_root": "/home/ghdc/nwm/object-store",
+  "planned": [
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "raw/IFS/2026090300",
+      "path": "/home/ghdc/nwm/object-store/raw/IFS/2026090300",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 53061543,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "raw/IFS/2026090312",
+      "path": "/home/ghdc/nwm/object-store/raw/IFS/2026090312",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 53061543,
+      "source": "IFS"
+    },
+    {
+      "cycle_time": "2026-09-03T00:00:00Z",
+      "key": "raw/gfs/2026090300",
+      "path": "/home/ghdc/nwm/object-store/raw/gfs/2026090300",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 48162623,
+      "source": "gfs"
+    },
+    {
+      "cycle_time": "2026-09-03T12:00:00Z",
+      "key": "raw/gfs/2026090312",
+      "path": "/home/ghdc/nwm/object-store/raw/gfs/2026090312",
+      "reason": "raw_cycle_aged_out",
+      "size_bytes": 48162623,
+      "source": "gfs"
+    }
+  ],
+  "precip_cache_root": "/home/nwm/.cache/nhms/mvt",
+  "raw_root": "/home/ghdc/nwm/object-store/raw",
+  "reference_time": "2026-09-18T00:00:00Z",
+  "retention_days": 14,
+  "schema_version": "nhms.node27_raw_retention.production.v5",
+  "skipped": [
+    {
+      "key": "raw/.reset-quarantine",
+      "reason": "source_not_enabled"
+    },
+    {
+      "key": "raw/IFS/2026090400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090900",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026090912",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091000",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091012",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091100",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091112",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091200",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091212",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091300",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091312",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/IFS/2026091812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/direct-grid-display-cutover-rehearsal",
+      "reason": "source_not_enabled"
+    },
+    {
+      "key": "raw/gfs/2026090400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090900",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026090912",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091000",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091012",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091100",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091112",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091200",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091212",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091300",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091312",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "raw/gfs/2026091812",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "canonical",
+      "reason": "lane_not_selected"
+    },
+    {
+      "key": "precip-cache/gfs/2026091212",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091312",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091400",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/gfs/2026091800",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026090600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091412",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091500",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091512",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091600",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091612",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091700",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091712",
+      "reason": "within_retention_window"
+    },
+    {
+      "key": "precip-cache/IFS/2026091800",
+      "reason": "within_retention_window"
+    }
+  ],
+  "sources": [
+    "gfs",
+    "ifs"
+  ],
+  "started_at": "2026-09-19T00:57:32Z",
+  "status": "completed"
+}

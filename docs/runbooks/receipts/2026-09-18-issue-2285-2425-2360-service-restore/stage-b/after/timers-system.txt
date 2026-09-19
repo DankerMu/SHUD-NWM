@@ -1,0 +1,4 @@
+NEXT                        LEFT          LAST PASSED UNIT                                  ACTIVATES
+Sat 2026-09-19 11:35:00 CST 2h 10min left n/a  n/a    nhms-node27-canonical-retention.timer nhms-node27-canonical-retention.service
+
+1 timers listed.

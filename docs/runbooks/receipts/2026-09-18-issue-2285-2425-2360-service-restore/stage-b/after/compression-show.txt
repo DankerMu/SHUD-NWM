@@ -1,0 +1,3 @@
+ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+WorkingDirectory=/home/nwm/NWM
+DropInPaths=

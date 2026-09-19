@@ -1,0 +1,4 @@
+nhms-node27-timeseries-retention.service same
+nhms-node27-timeseries-retention.timer same
+nhms-node27-timeseries-compression.timer same
+nhms-node27-raw-retention.timer same

@@ -1,0 +1,24 @@
+2026-09-19 00:57:32.673 UTC [253564] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=nhms-ts-compression
+2026-09-19 00:57:32.702 UTC [253564] LOG:  disconnection: session time: 0:00:00.041 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=52148
+2026-09-19 00:57:32.839 UTC [253565] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=nhms-ts-compression
+2026-09-19 00:57:32.864 UTC [253565] LOG:  disconnection: session time: 0:00:00.035 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=52154
+2026-09-19 00:57:32.875 UTC [253566] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=nhms-ts-compression
+2026-09-19 00:57:32.881 UTC [253566] LOG:  disconnection: session time: 0:00:00.016 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=52168
+2026-09-19 00:57:32.893 UTC [253567] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=nhms-ts-compression
+2026-09-19 00:57:33.615 UTC [253568] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-predeploy-readonly
+2026-09-19 01:10:18.476 UTC [253748] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-exposure-readonly
+2026-09-19 01:11:02.240 UTC [253749] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-sample-ro
+2026-09-19 01:12:18.126 UTC [253910] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-traffic-ro
+2026-09-19 01:17:21.889 UTC [253922] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-settle-ro
+2026-09-19 01:23:52.728 UTC [254095] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-settle2-ro
+2026-09-19 01:28:18.599 UTC [254129] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-lossless-ro
+2026-09-19 01:28:30.115 UTC [254130] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-cols-ro
+2026-09-19 01:28:52.124 UTC [254132] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-lossless2-ro
+2026-09-19 01:39:01.656 UTC [254322] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-contain-ro
+2026-09-19 01:44:19.515 UTC [253568] LOG:  disconnection: session time: 0:46:45.913 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=52200
+2026-09-19 01:44:34.514 UTC [253567] LOG:  disconnection: session time: 0:47:01.631 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=52184
+2026-09-19 01:44:34.594 UTC [254492] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=nhms-ts-compression
+2026-09-19 01:47:15.271 UTC [254562] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-deps-ro
+2026-09-19 01:47:43.714 UTC [254563] LOG:  connection authorized: user=nhms_ingest_rw database=nhms application_name=i9-deps-ro
+2026-09-19 02:03:57.267 UTC [254492] LOG:  unexpected EOF on client connection with an open transaction
+2026-09-19 02:03:58.831 UTC [254492] LOG:  disconnection: session time: 0:19:24.255 user=nhms_ingest_rw database=nhms host=172.17.0.1 port=38006

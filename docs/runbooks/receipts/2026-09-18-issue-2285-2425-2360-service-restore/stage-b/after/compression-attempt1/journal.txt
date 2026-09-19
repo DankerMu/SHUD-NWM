@@ -1,0 +1,4 @@
+2026-09-19T08:57:32+0800 ghdc systemd[2047]: Starting NHMS node-27 timeseries compression...
+2026-09-19T10:02:32+0800 ghdc systemd[2047]: nhms-node27-timeseries-compression.service: Main process exited, code=exited, status=124/n/a
+2026-09-19T10:02:32+0800 ghdc systemd[2047]: nhms-node27-timeseries-compression.service: Failed with result 'exit-code'.
+2026-09-19T10:02:32+0800 ghdc systemd[2047]: Failed to start NHMS node-27 timeseries compression.

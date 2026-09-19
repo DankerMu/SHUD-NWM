@@ -1,0 +1,16 @@
+node27-canonical-retention-install: wrote /etc/nhms/node27-canonical-retention.env (600 frd_muziyao; values not shown)
+Created symlink /etc/systemd/system/timers.target.wants/nhms-node27-canonical-retention.timer → /etc/systemd/system/nhms-node27-canonical-retention.timer.
+node27-canonical-retention-install: systemctl start nhms-node27-canonical-retention.service rc=0
+Result=success
+ExecMainStatus=0
+User=frd_muziyao
+timer: active
+NEXT                        LEFT          LAST PASSED UNIT                                  ACTIVATES
+Sat 2026-09-19 11:35:00 CST 2h 10min left n/a  n/a    nhms-node27-canonical-retention.timer nhms-node27-canonical-retention.service
+
+1 timers listed.
+Pass --all to see loaded but inactive timers, too.
+newest summary: /var/log/nhms-node27-canonical-retention/raw-retention-20260919T012402Z.json
+{"copyback_lock_failures": {"lock_budget_exhausted": 0, "lock_timeout": 0, "lock_unsafe": 0}, "counts": {"deleted": 14, "failed": 0, "planned": 14, "skipped": 61}, "cutoff": "2026-09-04T00:00:00Z", "execution_mode": "production_execute", "lanes": ["canonical"], "retention_days": 14, "sources": ["gfs", "ifs"], "status": "completed"}
+copyback lock: -rw------- frd_muziyao
+node27-canonical-retention-install: OK: nhms-node27-canonical-retention.service Result=success

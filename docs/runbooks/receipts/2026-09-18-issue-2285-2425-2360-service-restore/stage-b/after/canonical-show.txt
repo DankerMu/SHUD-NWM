@@ -1,0 +1,5 @@
+Result=success
+ExecMainStatus=0
+User=frd_muziyao
+OnFailure=nhms-node27-system-unit-failure-alert@nhms-node27-canonical-retention.service.service
+DropInPaths=

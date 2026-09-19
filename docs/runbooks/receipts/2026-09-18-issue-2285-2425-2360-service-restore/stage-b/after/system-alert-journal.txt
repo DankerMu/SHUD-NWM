@@ -1,0 +1,5 @@
+Sep 19 09:26:10 ghdc systemd[1]: Starting NHMS node-27 system unit failure alert for nhms-node27-canonical-retention.service...
+Sep 19 09:26:11 ghdc node27_unit_failure_alert_once.sh[2320928]: SMTP-ACCEPTED host=smtp.163.com code=250 recipients=1
+Sep 19 09:26:11 ghdc node27_unit_failure_alert_once.sh[2320918]: node27-unit-failure-alert: SENT unit=nhms-node27-canonical-retention.service to=<recipient>
+Sep 19 09:26:11 ghdc systemd[1]: nhms-node27-system-unit-failure-alert@nhms-node27-canonical-retention.service.service: Deactivated successfully.
+Sep 19 09:26:11 ghdc systemd[1]: Finished NHMS node-27 system unit failure alert for nhms-node27-canonical-retention.service.
