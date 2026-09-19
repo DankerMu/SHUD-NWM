@@ -220,21 +220,53 @@ filed separately, see §10.
   one my probes scanned — but no lock-graph snapshot was captured at 14:41, so
   this is not a recorded lock holder.
 
-  Not remediated here, deliberately: the unit is left `failed` (no
-  `reset-failed`), and retention was **not** triggered by hand — the next
-  scheduled tick is 2026-09-20 14:36 and should now succeed, with my backends
-  gone and the API restarted. Manufacturing that evidence by hand is exactly
-  what the standing constraint forbids.
+  **Amended 2026-09-19 ~16:52 CST — remediated at the authorizer's direction.**
+  The paragraph originally standing here said the unit was left `failed` and
+  that retention would not be triggered by hand. Danker then directed both the
+  drop and the unit's restoration, so that is no longer what happened and the
+  original wording is superseded rather than left to read as fact:
+
+  - `_hyper_9_150_chunk` was dropped through the gated
+    `scripts/node27_timeseries_retention.py`, not a hand-written `drop_chunks`:
+    680 ms, `freed_bytes` 4 291 829 760. Narrow went 30 → 29 chunks (oldest now
+    `2026-08-28`, compressed 10 → 9), 400 GB → 396 GB, database 480 GB → 476 GB.
+    `_hyper_9_151` `[08-28, 08-29)` was **not** eligible: the script's own cutoff
+    is `2026-08-28T12:00:00Z` (`reference_time` `2026-09-18T12:00:00Z` minus 21
+    days), stricter than a naive `now() - interval '21 days'`, which had
+    suggested two chunks.
+  - The replayed `forecast-series` probe after the drop is still **byte-identical**
+    to the pre-window baseline: 200 / 6075 B / sha `a48605688b2e09c4`.
+  - The unit was restored by **running it once to a real success**
+    (`exit-code failed` → `success inactive`, `{"mode": "enforce", "outcome":
+    "enforced"}`, nothing eligible so nothing dropped), not by `reset-failed`.
+    Clearing the flag would have proved nothing; a clean run proves the unit
+    works. Timer active, next elapse 2026-09-20 14:36 CST.
+
+  **A defect surfaced doing this, and it is not cosmetic.** The drop was issued
+  as `--dry-run`. It enforced anyway: `scripts/node27_timeseries_retention.py:462-468`
+  never reads `args.dry_run` — `--enforce` wins, otherwise
+  `NODE27_TIMESERIES_RETENTION_ENFORCE` decides, and the deployed env file sets
+  it. The mutually-exclusive group makes `--dry-run` *look* like an opt-out when
+  it only blocks `--enforce`, and its help text still reads "dry-run (default)".
+  This is already filed as **#2355**; today's occurrence is recorded there as the
+  first real hit. No loss resulted only because the chunk was one the authorizer
+  had just asked to delete and retention was owed anyway — intent and outcome
+  coincided; the mechanism did not protect anything.
 
 ## 10. Out of scope, carried
 
 - **Stale populated coverage for the 48 runs above** — the #1446 guard keeps a
   `segment_count > 0` that no longer describes any stored fact, so the UI offers
   a curve that comes back empty. Pre-existing, independent of 000060.
-- **Neither the compression nor the retention timer has yet run against the
-  post-contract state.** Both last fired before the window (12:25 and 14:36) and
-  next fire 2026-09-20. The "legacy gone" path is therefore verified by the
-  contract tests, not yet by a production tick. Not triggered by hand.
+- **Retention has now run against the post-contract state; compression has not.**
+  Retention was hand-started at the authorizer's direction after the window (see
+  §9) and succeeded with the legacy hypertable absent — so its lane walk tolerates
+  the drop on live production, not only in the contract tests. The **compression**
+  timer still last fired at 12:25, before the window; its next tick is
+  2026-09-20 12:25 and it has **not** been triggered by hand — that standing
+  constraint is untouched, and the "legacy gone" compression path remains verified
+  by `test_contract_drops_a_legacy_hypertable_carrying_compressed_chunks` on the
+  node-27 oracle rather than by a production tick.
 - `nhms-node27-timeseries-retention.service` also failed on 09-14 and 09-18 with
   `RETENTION_CONCURRENT_INVOCATION` — a pre-existing race between overlapping
   invocations, unrelated to this epic.
