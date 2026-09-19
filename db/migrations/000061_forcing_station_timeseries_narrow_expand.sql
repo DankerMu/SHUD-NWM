@@ -94,7 +94,12 @@
 -- to map onto. The only fact available is whether the version has rows in the
 -- renamed legacy table, so that is what is used. It is a PK-leading probe per
 -- version (the legacy PK leads with `forcing_version_id`), i.e. an index
--- descent per row rather than a scan of the 259M-row hypertable. Do not ask for
+-- descent per row rather than a scan of the 226M-row hypertable (2026-09-19;
+-- see the lock budget). That probe shape is not automatic: it survives only
+-- because the sublink is written so the planner cannot flatten it -- §4 got it
+-- by putting `EXISTS` in the TARGET LIST, and step 11 gets it by using a
+-- correlated scalar sublink. `EXISTS` in step 11's WHERE would NOT be the
+-- same query; see the rejection recorded in the lock budget. Do not ask for
 -- river's shape here; it does not exist on this side.
 --
 -- Classification happens ONLY on installation, inside the `IF NOT EXISTS` guard,
@@ -102,18 +107,18 @@
 -- narrow-only writer has since populated.
 --
 -- ---------------------------------------------------------------------------
--- Lock budget: >= ~24 s COLD, >= ~3 s warm -- the block, not one step
+-- Lock budget: ~24 s COLD, ~3 s warm -- the block, not one step
 -- ---------------------------------------------------------------------------
 --
 -- There is no BEGIN/COMMIT in this file and that is not an omission: it is ONE
 -- `DO $$` block, hence ONE implicit transaction (see the note at the top of
 -- this file). So every AccessExclusiveLock it takes -- step 1's two table
--- rewrites, step 3's RENAME of the 259M-row fact table, step 11's ADD COLUMN on
+-- rewrites, step 3's RENAME of the 226M-row fact table, step 11's ADD COLUMN on
 -- met.forcing_version -- is held until the BLOCK ends. The window to plan
--- against is the SUM, and the two measured components come from the SAME
--- receipt
+-- against is the SUM. The §3 and §4 figures come from ONE receipt
 -- (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/`
--- `2026-09-18-i10-forcing-readonly/README.md`):
+-- `2026-09-18-i10-forcing-readonly/README.md`); step 11's line is added from a
+-- read-only re-measurement on the same node-27 primary, 2026-09-19:
 --
 --   component                                        cold        warm
 --   -------------------------------------------      --------    ------
@@ -122,16 +127,47 @@
 --     met.forcing_version                                689 ms
 --   routing backfill existence probe, §4 (:82-96)    21 849 ms    238 ms
 --     (one PK-leading probe per version, all 8 653)
---   step 11 ADD COLUMN + UPDATE on met.forcing_version  UNMEASURED
+--   step 11 ADD COLUMN on met.forcing_version        catalog-only    --
+--   step 11 UPDATE on met.forcing_version            == the §4 row above
+--     (its WHERE *is* that probe -- counted once, not twice)
 --   -------------------------------------------      --------    ------
 --   MEASURED TOTAL, AccessExclusiveLock window           ~24 s      ~3 s
 --
--- The totals are a LOWER BOUND. Step 11's `ADD COLUMN timeseries_store TEXT NOT
--- NULL DEFAULT 'narrow'` and the `UPDATE` beneath it take their own
--- AccessExclusiveLock on met.forcing_version and are not in the receipt; the
--- ADD COLUMN is a catalog-only change on PG11+ (non-volatile default) and the
--- UPDATE touches at most the 4 764 versions §4 found rows for, so it is
--- expected to be small -- but no number is invented here. 8.1 measures it.
+-- The totals are APPROXIMATE, not a lower bound: the DOMINANT components are
+-- measured now, but a cold cache is not reproducible on demand, so the cold
+-- column is one observation rather than a bound. Still unmeasured, and left so
+-- deliberately rather than guessed at: the UPDATE's WRITE path (~4 289 rows
+-- plus the CHECK and heap/index maintenance) and steps 3-10 (RENAME, the
+-- empty-table DDL, create_hypertable, the drift SELECT, OWNER TO). All are
+-- small against a ~24 s window, and none is invented here. Step 11 is no
+-- longer the unmeasured term. Its `ADD COLUMN timeseries_store TEXT NOT NULL DEFAULT 'narrow'` is a
+-- catalog-only change on PG11+ -- the default is non-volatile, so there is no
+-- table rewrite and no number of its own to quote -- and its `UPDATE`'s WHERE
+-- clause IS the §4 probe, in the scalar-sublink spelling of step 11 below
+-- (21 849 ms cold / 238 ms warm; reproduced 2026-09-19 at 238.017 ms over the
+-- current 8 881 versions, 0.25 ms / 19 buffers for a single version). So that
+-- row already accounts for step 11 and must not be added to the total twice.
+-- Lock levels, stated precisely because this is a lock budget: the ADD COLUMN
+-- takes AccessExclusiveLock on met.forcing_version; the UPDATE takes only
+-- RowExclusiveLock. Neither widens the window, because step 1's IDENTITY
+-- ADD COLUMN already holds AccessExclusiveLock on that same table and the
+-- single DO block holds it to the end regardless. Classification on the
+-- live population, read-only, 2026-09-19: 4 289 versions route to `legacy`
+-- and 4 592 to `narrow`, of 8 881. (§4's 4 764-of-8 653 is the 2026-09-18
+-- reading of the same question; the population moved between the two dates.)
+--
+-- The `EXISTS (...)` spelling of that same predicate is REJECTED, on plan
+-- shape rather than on a timing. In a WHERE qual, `pull_up_sublinks` flattens
+-- EXISTS into a semi-join, and on the live constitution (2026-09-19: 226M
+-- rows, 77 GB, 6 chunks, 2 of them compressed) the planner then chose a
+-- HashAggregate over an estimated 838 174 864 rows fed by `DecompressChunk`
+-- on both compressed chunks and `Seq Scan` on the four uncompressed ones,
+-- total cost 10 328 441 -- i.e. decompress and aggregate the whole fact table
+-- instead of doing 8 881 index descents. That plan was NOT EXECUTED: it was
+-- read off `EXPLAIN` without ANALYZE, on a read-only `count(*)` proxy
+-- carrying the identical predicate, because confirming a plan we are
+-- replacing is not worth stressing production. The shape and the cost are the
+-- entire argument.
 --
 -- `ADD COLUMN ... INTEGER GENERATED ALWAYS AS IDENTITY UNIQUE` carries a
 -- volatile default, so PostgreSQL rewrites the whole table and then builds the
@@ -276,11 +312,38 @@ ALTER TABLE met.forcing_station_timeseries OWNER TO nhms_ingest_rw;
     ) THEN
         ALTER TABLE met.forcing_version ADD COLUMN timeseries_store TEXT NOT NULL DEFAULT 'narrow'
             CHECK (timeseries_store IN ('legacy', 'narrow'));
+        -- A correlated SCALAR sublink, deliberately not `WHERE EXISTS (...)`,
+        -- and that is structural rather than a lucky plan choice.
+        -- `pull_up_sublinks` (planner preprocessing, before any path is
+        -- costed) flattens an EXISTS/ANY sublink sitting in a WHERE qual into
+        -- a semi-join, so the EXISTS spelling plans as a HashAggregate over
+        -- an estimated 838 174 864 rows behind
+        -- `DecompressChunk` on both compressed chunks, total cost 10 328 441
+        -- (2026-09-19; rejected on shape, see the lock budget above). A scalar
+        -- (EXPR) sublink is never pulled up -- it stays a SubPlan, and being
+        -- correlated it cannot degrade to a hashed SubPlan either -- so it
+        -- keeps the per-version PK-leading probe §4 measured: 21 849 ms cold /
+        -- 238 ms warm, reproduced 2026-09-19 at 238.017 ms over all 8 881
+        -- versions, 0.25 ms / 19 buffers for one. This is why the fix is a
+        -- rewrite and not `SET LOCAL enable_hashagg = off`: the flattening has
+        -- already happened by the time that GUC applies, so the GUC only bans
+        -- one way of executing the semi-join and leaves the shape to the cost
+        -- model on whatever chunk constitution exists on install day. The
+        -- scalar sublink removes the choice instead of re-weighting it.
+        -- `LIMIT 1` is CORRECTNESS, not tuning: a scalar subquery raises
+        -- "more than one row returned by a subquery used as an expression",
+        -- and every version with legacy rows has thousands of them. Removing
+        -- the LIMIT breaks the migration on the first such version.
+        -- Semantics match EXISTS exactly, with no three-valued-logic trap: the
+        -- subquery projects the constant 1, so it yields either the single row
+        -- `1` or no row at all (NULL), and `IS NOT NULL` is true exactly when
+        -- a row exists.
         UPDATE met.forcing_version fv SET timeseries_store = 'legacy'
-        WHERE EXISTS (
+        WHERE (
             SELECT 1 FROM met.forcing_station_timeseries_legacy legacy
             WHERE legacy.forcing_version_id = fv.forcing_version_id
-        );
+            LIMIT 1
+        ) IS NOT NULL;
     END IF;
 END;
 $$;
