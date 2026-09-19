@@ -658,12 +658,12 @@ def _insert_runs(connection: Any, scenario: Scenario) -> list[dict[str, Any]]:
             INSERT INTO hydro.hydro_run (
                 run_id, run_type, scenario_id, model_id, basin_version_id,
                 forcing_version_id, source_id, cycle_time, start_time, end_time,
-                status, timeseries_store, run_manifest_uri, output_uri, log_uri
+                status, run_manifest_uri, output_uri, log_uri
             )
             VALUES (
                 %(run_id)s, 'forecast', %(scenario_id)s, %(model_id)s, %(basin_version_id)s,
                 %(forcing_version_id)s, %(source_id)s, %(cycle_time)s, %(cycle_time)s, %(end_time)s,
-                'parsed', %(timeseries_store)s, %(manifest_uri)s, %(output_uri)s, %(log_uri)s
+                'parsed', %(manifest_uri)s, %(output_uri)s, %(log_uri)s
             )
             """,
             {
@@ -675,7 +675,11 @@ def _insert_runs(connection: Any, scenario: Scenario) -> list[dict[str, Any]]:
                 "source_id": SOURCE_ID,
                 "cycle_time": cycle_time,
                 "end_time": cycle_time + timedelta(hours=STEP_COUNT - 1),
-                "timeseries_store": scenario.branch,
+                # No `timeseries_store`: #1988's contract (task 6.2, migration
+                # 000060) dropped the routing column, and this seed runs on a
+                # fully migrated catalog. Nothing is lost — `BRANCHES` has been
+                # single-valued since #1342 (task 6.3), so the column only ever
+                # got written 'narrow' here.
                 "manifest_uri": f"s3://nhms/runs/{run_id}/input/manifest.json",
                 "output_uri": f"s3://nhms/runs/{run_id}/output/",
                 "log_uri": f"s3://nhms/runs/{run_id}/logs/",

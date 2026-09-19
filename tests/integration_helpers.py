@@ -69,7 +69,15 @@ def post_expand_forecast_database(
     """Route mixed facts; historical goldens may first stop at migration 000058."""
 
     def prepare(store_overrides: Mapping[str, str]) -> None:
-        apply_migrations_from_zero(throwaway_database_url)
+        # Pinned at 000059 on purpose. This fixture models the world BETWEEN
+        # expand (000059) and contract (000060): it reads and writes
+        # `hydro.river_timeseries_legacy` and `hydro_run.timeseries_store`,
+        # which 000060 drops. That transitional state still exists inside every
+        # from-zero rebuild, so pinning keeps the semantics a rewrite would
+        # throw away. Callers that apply migrations themselves before invoking
+        # `prepare` must pin to the same version, or the ledger will already be
+        # past 000060 and this call becomes a no-op over a contracted catalog.
+        apply_migrations_from_zero(throwaway_database_url, through="000059")
         with psycopg_connection(throwaway_database_url) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
