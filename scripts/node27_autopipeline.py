@@ -69,7 +69,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload, redact_text
-from services.orchestrator.pipeline_job_provenance import import_runs_pipeline_job_provenance
+from services.orchestrator.pipeline_job_provenance import import_discovered_pipeline_job_provenance
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
 from workers.output_parser.parser import LEGACY_STORE_REFUSED_EXIT_CODE
@@ -2578,7 +2578,7 @@ def main(argv: list[str] | None = None) -> int:
         provenance_run_ids = [r["run_id"] for r in runnable]
         if provenance_run_ids:
             try:
-                job_provenance = import_runs_pipeline_job_provenance(
+                job_provenance = import_discovered_pipeline_job_provenance(
                     database_url=database_url,
                     object_store_root=object_store_root,
                     run_ids=provenance_run_ids,
@@ -2603,6 +2603,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+
 
     def by(outcome: str) -> list[dict[str, Any]]:
         return [r for r in run_results if r["outcome"] == outcome]

@@ -80,19 +80,70 @@ def test_openapi_scopes_strict_identity_to_ops_success_responses() -> None:
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
     success_envelope = spec["components"]["schemas"]["SuccessEnvelope"]
     assert "identity" not in success_envelope["properties"]
+    identity_schema = spec["components"]["schemas"]["OpsStrictIdentity"]
+    assert identity_schema["required"] == ["source", "cycle_time", "run_id", "model_id"]
 
     for path in ("/api/v1/pipeline/status", "/api/v1/pipeline/stages", "/api/v1/jobs"):
         response_schema = spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
         response_fields = response_schema["allOf"][1]
-        assert response_fields["required"] == ["data", "identity"]
-        assert response_fields["properties"]["identity"] == {
-            "$ref": "#/components/schemas/OpsStrictIdentity"
-        }
+        assert response_fields["required"] == ["data"]
+        identity_property = response_fields["properties"]["identity"]
+        assert identity_property["allOf"][0] == {"$ref": "#/components/schemas/OpsStrictIdentity"}
+
 
     logs_schema = spec["paths"]["/api/v1/jobs/{job_id}/logs"]["get"]["responses"]["200"]["content"][
         "application/json"
     ]["schema"]
     log_identity = logs_schema["allOf"][1]["properties"]["identity"]
-    assert logs_schema["allOf"][1]["required"] == ["data", "identity"]
+    assert logs_schema["allOf"][1]["required"] == ["data"]
     assert log_identity["allOf"][0] == {"$ref": "#/components/schemas/OpsStrictIdentity"}
     assert log_identity["allOf"][1]["required"] == ["job_id"]
+
+
+def test_non_strict_ops_success_bodies_omit_identity(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        cycle_id = cycle_id_for("GFS", CYCLE_TIME)
+        _insert_cycle(store, cycle_time=CYCLE_TIME, source="GFS", current_state="forecast_running")
+        _insert_hydro_run(
+            store,
+            SELECTED_RUN_ID,
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=CYCLE_TIME,
+            model_id=SELECTED_MODEL_ID,
+        )
+        (tmp_path / "selected.log").write_text("selected log", encoding="utf-8")
+        _create_job(
+            store,
+            job_id=SELECTED_JOB_ID,
+            run_id=SELECTED_RUN_ID,
+            cycle_id=cycle_id,
+            model_id=SELECTED_MODEL_ID,
+            stage="forecast",
+            status="succeeded",
+            log_uri="selected.log",
+        )
+        with _client(store) as client:
+            status_response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": CYCLE_TIME.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": CYCLE_TIME.isoformat()},
+            )
+            jobs_response = client.get("/api/v1/jobs", params={"limit": 10, "sort_order": "asc"})
+            logs_response = client.get(f"/api/v1/jobs/{SELECTED_JOB_ID}/logs")
+
+    assert status_response.status_code == 200
+    assert stages_response.status_code == 200
+    assert jobs_response.status_code == 200
+    assert logs_response.status_code == 200
+    assert "identity" not in status_response.json()
+    assert "identity" not in stages_response.json()
+    assert "identity" not in jobs_response.json()
+    assert "identity" not in logs_response.json()
+    assert logs_response.json()["data"]["content"] == "selected log"
+
+

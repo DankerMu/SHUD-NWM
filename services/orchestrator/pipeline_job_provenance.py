@@ -51,6 +51,8 @@ SIDECAR_OBJECT_KEY_TEMPLATE = "runs/{run_id}/input/pipeline_jobs.json"
 MAX_SIDECAR_BYTES = MAX_OBJECT_MANIFEST_BYTES
 MAX_SIDECAR_JOBS = 256
 MAX_PROVENANCE_RUNS_PER_BATCH = MAX_SIDECAR_JOBS
+JOB_PROJECTION_LOCK_NAMESPACE = "ops.pipeline_job"
+
 MAX_IDENTITY_CHARS = 128
 MAX_STATUS_CHARS = 64
 MAX_LOG_BYTES = 16 * 1024 * 1024
@@ -211,26 +213,65 @@ def publish_run_pipeline_job_provenance(
                 published_artifact_root=published_artifact_root,
             )
             cache = log_cache or _ParentArrayLogCache(_bound_fetch_logs(slurm_client, fetch_logs))
+            sidecar_key = sidecar_object_key(safe_run_id)
+            existing_jobs: dict[str, dict[str, Any]] = {}
+            if store.exists(sidecar_key):
+                existing_sidecar = _load_sidecar(store, sidecar_key)
+                _require_sidecar_matches_manifest(existing_sidecar, identity)
+                existing_jobs = _validated_jobs_by_id(existing_sidecar["jobs"], identity=identity)
             advertised_logs = 0
             published_jobs: list[dict[str, Any]] = []
+            staged_logs: list[dict[str, Any]] = []
             for job in jobs:
                 advertised_job, advertised = _maybe_advertise_verified_log(
                     job,
                     identity=identity,
                     log_cache=cache,
                     published_artifact_root=published_artifact_root,
+                    existing_job=existing_jobs.get(str(job.get("job_id") or "")),
+                    stage_only=True,
+                )
+                staged_logs.append(
+                    {
+                        "job_id": str(advertised_job.get("job_id") or ""),
+                        "stdout": advertised_job.pop("_pending_stdout_bytes", None),
+                        "stderr": advertised_job.pop("_pending_stderr_bytes", None),
+                        "out_uri": advertised_job.pop("_pending_out_uri", None),
+                        "err_uri": advertised_job.pop("_pending_err_uri", None),
+                    }
                 )
                 if advertised:
                     advertised_logs += 1
                 published_jobs.append(advertised_job)
-
-            sidecar_key = sidecar_object_key(safe_run_id)
+            _require_jobs_mergeable_with_existing(
+                published_jobs,
+                existing_jobs=existing_jobs,
+                identity=identity,
+            )
+            for staged in staged_logs:
+                existing_job = existing_jobs.get(staged["job_id"])
+                if staged["stdout"] is not None and staged["out_uri"]:
+                    _write_published_log(
+                        staged["out_uri"],
+                        staged["stdout"],
+                        published_artifact_root=published_artifact_root,
+                        existing_uri=None if existing_job is None else existing_job.get("log_uri"),
+                    )
+                if staged["stderr"] is not None and staged["err_uri"]:
+                    _write_published_log(
+                        staged["err_uri"],
+                        staged["stderr"],
+                        published_artifact_root=published_artifact_root,
+                    )
             sidecar = _merge_published_sidecar(
                 store,
                 sidecar_key=sidecar_key,
                 identity=identity,
                 jobs=published_jobs,
+                existing_jobs=existing_jobs,
             )
+
+
             store.write_bytes_atomic(sidecar_key, _encode_sidecar(sidecar))
             return publication_summary(
                 run_id=safe_run_id,
@@ -361,12 +402,14 @@ def import_run_pipeline_job_provenance(
             with connection.cursor() as cursor:
                 hydro = _load_hydro_identity(cursor, safe_run_id)
                 _require_hydro_matches_sidecar(hydro, sidecar["identity"])
+                _lock_projection_jobs(cursor, jobs)
                 result = _project_jobs(cursor, jobs)
     finally:
         connection.close()
     result["run_id"] = safe_run_id
     result["status"] = "imported"
     return result
+
 
 def import_runs_pipeline_job_provenance(
     *,
@@ -389,9 +432,61 @@ def import_runs_pipeline_job_provenance(
             "Provenance batch exceeds the existing transport row budget.",
             {"run_count": len(requested), "max_runs": MAX_PROVENANCE_RUNS_PER_BATCH},
         )
+    return _import_requested_pipeline_job_provenance(
+        database_url=database_url,
+        object_store_root=object_store_root,
+        run_ids=requested,
+        object_store_prefix=object_store_prefix,
+        connect=connect,
+    )
 
+
+def import_discovered_pipeline_job_provenance(
+    *,
+    database_url: str,
+    object_store_root: str | Path,
+    run_ids: Sequence[str],
+    object_store_prefix: str = "",
+    connect: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Project an unbounded discovered set through the existing 256-run cap."""
+
+    requested = [_require_safe_identity(run_id, field="run_id") for run_id in run_ids]
+    if len(set(requested)) != len(requested):
+        raise PipelineJobProvenanceError("DUPLICATE_RUN_ID", "Each import run_id must be requested once.")
     summaries: list[dict[str, Any]] = []
-    for run_id in requested:
+    for offset in range(0, len(requested), MAX_PROVENANCE_RUNS_PER_BATCH):
+        chunk = requested[offset : offset + MAX_PROVENANCE_RUNS_PER_BATCH]
+        if not chunk:
+            continue
+        chunk_summary = _import_requested_pipeline_job_provenance(
+            database_url=database_url,
+            object_store_root=object_store_root,
+            run_ids=chunk,
+            object_store_prefix=object_store_prefix,
+            connect=connect,
+        )
+        summaries.extend(chunk_summary["runs"])
+    failed = [item for item in summaries if item["status"] == "failed"]
+    return {
+        "status": "failed" if failed else "imported",
+        "runs": summaries,
+        "imported": len([item for item in summaries if item["status"] == "imported"]),
+        "unavailable": len([item for item in summaries if item["status"] == "unavailable"]),
+        "failed": len(failed),
+    }
+
+
+def _import_requested_pipeline_job_provenance(
+    *,
+    database_url: str,
+    object_store_root: str | Path,
+    run_ids: Sequence[str],
+    object_store_prefix: str = "",
+    connect: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    summaries: list[dict[str, Any]] = []
+    for run_id in run_ids:
         try:
             summaries.append(
                 import_run_pipeline_job_provenance(
@@ -435,6 +530,7 @@ def import_runs_pipeline_job_provenance(
         "unavailable": len([item for item in summaries if item["status"] == "unavailable"]),
         "failed": len(failed),
     }
+
 
 
 def _bound_fetch_logs(
@@ -719,6 +815,8 @@ def _maybe_advertise_verified_log(
     identity: Mapping[str, str],
     log_cache: _ParentArrayLogCache,
     published_artifact_root: str | Path | None,
+    existing_job: Mapping[str, Any] | None = None,
+    stage_only: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     exported = dict(job)
     if exported.get("log_uri"):
@@ -745,6 +843,9 @@ def _maybe_advertise_verified_log(
             identity=identity,
             job_id=str(job["job_id"]),
             published_artifact_root=published_artifact_root,
+            existing_job=existing_job,
+            stage_only=stage_only,
+            exported=exported,
         )
     except PipelineJobProvenanceError:
         return exported, False
@@ -759,6 +860,9 @@ def _maybe_advertise_verified_log(
     exported["log_stdout_bytes"] = len(stdout.encode("utf-8")) if isinstance(stdout, str) else None
     exported["log_stderr_bytes"] = len(stderr.encode("utf-8")) if isinstance(stderr, str) else None
     return exported, True
+
+
+
 
 
 def _select_matching_task_entry(
@@ -811,6 +915,9 @@ def _publish_task_log_streams(
     identity: Mapping[str, str],
     job_id: str,
     published_artifact_root: str | Path | None,
+    existing_job: Mapping[str, Any] | None = None,
+    stage_only: bool = False,
+    exported: dict[str, Any] | None = None,
 ) -> str | None:
     stdout = entry.get("stdout")
     if not isinstance(stdout, str) or not stdout:
@@ -826,11 +933,13 @@ def _publish_task_log_streams(
         job_id=job_id,
         stream="out",
     )
-    _write_published_log(out_uri, stdout_bytes, published_artifact_root=published_artifact_root)
     stderr = entry.get("stderr")
+    stderr_bytes: bytes | None = None
+    err_uri: str | None = None
     if isinstance(stderr, str) and stderr:
-        stderr_bytes = stderr.encode("utf-8")
-        if len(stderr_bytes) <= MAX_LOG_BYTES:
+        encoded_stderr = stderr.encode("utf-8")
+        if len(encoded_stderr) <= MAX_LOG_BYTES:
+            stderr_bytes = encoded_stderr
             err_uri = published_log_uri(
                 source=identity["source"],
                 cycle_time=cycle_time,
@@ -838,8 +947,27 @@ def _publish_task_log_streams(
                 job_id=job_id,
                 stream="err",
             )
-            _write_published_log(err_uri, stderr_bytes, published_artifact_root=published_artifact_root)
+    if stage_only:
+        if exported is not None:
+            exported["_pending_stdout_bytes"] = stdout_bytes
+            exported["_pending_out_uri"] = out_uri
+            if stderr_bytes is not None and err_uri is not None:
+                exported["_pending_stderr_bytes"] = stderr_bytes
+                exported["_pending_err_uri"] = err_uri
+        return out_uri
+    _write_published_log(
+        out_uri,
+        stdout_bytes,
+        published_artifact_root=published_artifact_root,
+        existing_uri=None if existing_job is None else existing_job.get("log_uri"),
+    )
+    if stderr_bytes is not None and err_uri is not None:
+        _write_published_log(err_uri, stderr_bytes, published_artifact_root=published_artifact_root)
     return out_uri
+
+
+
+
 
 
 def _published_artifact_root(published_artifact_root: str | Path | None) -> Path:
@@ -857,9 +985,17 @@ def _write_published_log(
     content: bytes,
     *,
     published_artifact_root: str | Path | None,
+    existing_uri: Any = None,
 ) -> None:
     root = _published_artifact_root(published_artifact_root)
     target = root / published_log_relative_path(log_uri)
+    if existing_uri not in (None, "") and existing_uri == log_uri:
+        try:
+            persisted = read_bytes_limited_no_follow(target, max_bytes=MAX_LOG_BYTES, containment_root=root)
+        except (OSError, SafeFilesystemError):
+            persisted = None
+        if persisted == content:
+            return
     atomic_write_bytes_no_follow(target, content, containment_root=root, temp_suffix="part")
     persisted = read_bytes_limited_no_follow(target, max_bytes=MAX_LOG_BYTES, containment_root=root)
     if persisted != content:
@@ -868,6 +1004,10 @@ def _write_published_log(
             "Published task-log content did not match the verified gateway stream.",
             {"log_uri": log_uri},
         )
+
+
+
+
 
 
 def _build_sidecar(*, identity: Mapping[str, str], jobs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -897,19 +1037,55 @@ def _merge_published_sidecar(
     sidecar_key: str,
     identity: Mapping[str, str],
     jobs: Sequence[Mapping[str, Any]],
+    existing_jobs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     incoming = _validated_jobs_by_id(jobs, identity=identity)
-    if not store.exists(sidecar_key):
+    if existing_jobs is None:
+        if not store.exists(sidecar_key):
+            return _build_sidecar(identity=identity, jobs=list(incoming.values()))
+        existing_sidecar = _load_sidecar(store, sidecar_key)
+        _require_sidecar_matches_manifest(existing_sidecar, identity)
+        existing = _validated_jobs_by_id(existing_sidecar["jobs"], identity=identity)
+    elif not existing_jobs:
         return _build_sidecar(identity=identity, jobs=list(incoming.values()))
+    else:
+        existing = {job_id: dict(job) for job_id, job in existing_jobs.items()}
+    return _merge_incoming_jobs_into_existing(existing, incoming, identity=identity)
 
-    existing_sidecar = _load_sidecar(store, sidecar_key)
-    _require_sidecar_matches_manifest(existing_sidecar, identity)
-    existing = _validated_jobs_by_id(existing_sidecar["jobs"], identity=identity)
-    merged = dict(existing)
+
+def _require_jobs_mergeable_with_existing(
+    jobs: Sequence[Mapping[str, Any]],
+    *,
+    existing_jobs: Mapping[str, Mapping[str, Any]],
+    identity: Mapping[str, str],
+) -> None:
+    if not existing_jobs:
+        if len(jobs) > MAX_SIDECAR_JOBS:
+            raise PipelineJobProvenanceError(
+                "JOB_COUNT_LIMIT",
+                "Provenance sidecar exceeds the published job-row budget.",
+                {"job_count": len(jobs), "max_jobs": MAX_SIDECAR_JOBS},
+            )
+        return
+    incoming = _validated_jobs_by_id(jobs, identity=identity)
+    _merge_incoming_jobs_into_existing(
+        {job_id: dict(job) for job_id, job in existing_jobs.items()},
+        incoming,
+        identity=identity,
+    )
+
+
+def _merge_incoming_jobs_into_existing(
+    existing: Mapping[str, Mapping[str, Any]],
+    incoming: Mapping[str, Mapping[str, Any]],
+    *,
+    identity: Mapping[str, str],
+) -> dict[str, Any]:
+    merged = {job_id: dict(job) for job_id, job in existing.items()}
     for job_id, incoming_job in incoming.items():
         existing_job = existing.get(job_id)
         if existing_job is None:
-            merged[job_id] = incoming_job
+            merged[job_id] = dict(incoming_job)
             continue
         existing_identity = {field: existing_job.get(field) for field in JOB_IDENTITY_FIELDS}
         incoming_identity = {field: incoming_job.get(field) for field in JOB_IDENTITY_FIELDS}
@@ -942,6 +1118,8 @@ def _merge_published_sidecar(
             )
         merged[job_id] = candidate
     return _build_sidecar(identity=identity, jobs=[merged[job_id] for job_id in sorted(merged)])
+
+
 
 
 def _validated_jobs_by_id(
@@ -1307,6 +1485,26 @@ def _project_jobs(cursor: Any, jobs: Sequence[Mapping[str, Any]]) -> dict[str, i
     }
 
 
+def _lock_projection_jobs(cursor: Any, jobs: Sequence[Mapping[str, Any]]) -> None:
+    lock_keys = sorted(
+        {
+            f"{JOB_PROJECTION_LOCK_NAMESPACE}:{job_id}"
+            for job_id in (str(job.get("job_id") or "") for job in jobs)
+            if job_id
+        }
+    )
+    for lock_key in lock_keys:
+        try:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (lock_key,),
+            )
+        except Exception:  # noqa: BLE001 - SQLite adapters have no advisory locks
+            return
+
+
+
+
 def _fetch_existing_job(cursor: Any, job_id: str) -> dict[str, Any] | None:
     cursor.execute(
         """
@@ -1316,6 +1514,7 @@ def _fetch_existing_job(cursor: Any, job_id: str) -> dict[str, Any] | None:
             error_code, error_message, log_uri, created_at, updated_at
         FROM ops.pipeline_job
         WHERE job_id = %s
+        FOR UPDATE
         """,
         (job_id,),
     )
@@ -1346,6 +1545,8 @@ def _fetch_existing_job(cursor: Any, job_id: str) -> dict[str, Any] | None:
         "updated_at",
     ]
     return dict(zip(columns, row, strict=True))
+
+
 
 
 def _insert_job(cursor: Any, job: Mapping[str, Any]) -> None:

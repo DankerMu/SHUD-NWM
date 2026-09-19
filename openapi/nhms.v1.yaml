@@ -1504,12 +1504,15 @@ paths:
                 - type: object
                   required:
                   - data
-                  - identity
+
                   properties:
                     data:
                       $ref: '#/components/schemas/PipelineStatus'
                     identity:
-                      $ref: '#/components/schemas/OpsStrictIdentity'
+                      allOf:
+                      - $ref: '#/components/schemas/OpsStrictIdentity'
+                      description: Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs.
+
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1555,14 +1558,17 @@ paths:
                 - type: object
                   required:
                   - data
-                  - identity
+
                   properties:
                     data:
                       type: array
                       items:
                         $ref: '#/components/schemas/PipelineStage'
                     identity:
-                      $ref: '#/components/schemas/OpsStrictIdentity'
+                      allOf:
+                      - $ref: '#/components/schemas/OpsStrictIdentity'
+                      description: Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs.
+
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1661,12 +1667,15 @@ paths:
                 - type: object
                   required:
                   - data
-                  - identity
+
                   properties:
                     data:
                       $ref: '#/components/schemas/PipelineJobPage'
                     identity:
-                      $ref: '#/components/schemas/OpsStrictIdentity'
+                      allOf:
+                      - $ref: '#/components/schemas/OpsStrictIdentity'
+                      description: Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs.
+
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1717,7 +1726,7 @@ paths:
                 - type: object
                   required:
                   - data
-                  - identity
+
                   properties:
                     data:
                       $ref: '#/components/schemas/JobLogs'
@@ -1730,6 +1739,8 @@ paths:
                         properties:
                           job_id:
                             type: string
+                      description: Present on strict Ops log successes with the resolved source, cycle_time, run_id, model_id, and job_id. Omitted for non-strict browsing.
+
         '400':
           $ref: '#/components/responses/JobLogError'
         '403':
@@ -3708,7 +3719,8 @@ components:
           example: ok
     OpsStrictIdentity:
       type: object
-      description: Resolved strict Ops identity returned as a top-level sibling of data on successful status, stages, jobs, and job-log responses.
+      description: Resolved strict Ops identity returned as a top-level sibling of data on successful status, stages, jobs, and job-log responses. Present only when the request used a complete strict identity; required fields apply whenever this object is present.
+
       required:
       - source
       - cycle_time

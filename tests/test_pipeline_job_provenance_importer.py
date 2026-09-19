@@ -50,10 +50,18 @@ class _PsycopgCompatibleCursor:
         self._cursor.close()
 
     def execute(self, sql: str, params: Any = None) -> sqlite3.Cursor:
-        translated = sql.replace("%s", "?").replace("%(", ":").replace(")s", "")
+        translated = (
+            sql.replace("%s", "?")
+            .replace("%(", ":")
+            .replace(")s", "")
+            .replace("FOR UPDATE", "")
+        )
+        if "hashtextextended" in translated:
+            return self._cursor
         if params is None:
             return self._cursor.execute(translated)
         return self._cursor.execute(translated, params)
+
 
     def fetchone(self) -> Any:
         return self._cursor.fetchone()
@@ -654,3 +662,38 @@ def test_backfill_cli_rejects_mixed_publish_and_import_modes() -> None:
         )
 
     assert caught.value.code == 2
+
+
+def test_backfill_cli_reports_invalid_symlink_journal_root_as_bounded_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_root = tmp_path / "real-journal"
+    alias = tmp_path / "alias-journal"
+    object_root = tmp_path / "object-store"
+    real_root.mkdir()
+    object_root.mkdir()
+    alias.symlink_to(real_root, target_is_directory=True)
+
+    exit_code = provenance_backfill.main(
+        [
+            "--publish-only",
+            "--run-id",
+            IFS_RUN_ID,
+            "--journal-root",
+            str(alias),
+            "--object-store-root",
+            str(object_root),
+        ]
+    )
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+
+    assert exit_code == 1
+    assert summary["publication"]["status"] == "failed"
+    assert summary["publication"]["reason"] == "FILE_JOURNAL_INVALID_ROOT"
+    assert "Traceback" not in captured.err
+    assert str(alias) not in captured.out
+    assert str(alias) not in captured.err
+    assert "FILE_JOURNAL_INVALID_ROOT:" in captured.err
+

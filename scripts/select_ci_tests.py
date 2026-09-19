@@ -303,7 +303,9 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_openapi_drift.py",
     "tests/test_openapi_response_conformance.py",
     "tests/test_slurm_gateway_openapi_security.py",
+    "tests/test_pipeline_ops_identity_envelope.py",
 )
+
 
 # #1646: the pytest warning-policy suite proves the SHIPPING config semantically
 # (subprocess + removed-filter mutant + unrelated-warning control) and parses
@@ -1298,9 +1300,9 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
     "apps/api/routes/best_available.py",
     "apps/api/routes/data_sources.py",
     "apps/api/routes/models.py",
-    "apps/api/routes/pipeline.py",
     "apps/api/routes/state_snapshots.py",
 )
+
 # The packages/common stores that carry the #1728 injection seam
 # (`application_name=` through `from_env` down to the connect call). Two more —
 # forecast_store.py and state_manager.py — already have exact rules, so the
@@ -2625,6 +2627,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
             "tests/test_slurm_gateway_openapi_security.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(
@@ -2633,6 +2636,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_api.py",
             "tests/test_api_contract.py",
             "tests/test_monitoring_api.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(
@@ -3725,13 +3729,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (SLURM_AUTH_CLIENT_TEST,),
     ),
     PathTestRule(
-        "services/orchestrator/scheduler_gateway.py",
-        (SLURM_AUTH_DEPLOYMENT_TEST,),
+        "apps/api/routes/pipeline.py",
+        (
+            *CONNECTION_ATTRIBUTION_TESTS,
+            "tests/test_pipeline_ops_identity_envelope.py",
+        ),
     ),
     *(
         PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
         for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
     ),
+
     PathTestRule(
         "apps/api/errors.py",
         (API_ERROR_LOGGING_TEST,),

@@ -10,7 +10,10 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import published_log_uri
 from services.orchestrator.chain_types import OrchestratorError
-from services.orchestrator.file_orchestration_journal import FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION
+from services.orchestrator.file_orchestration_journal import (
+    FILE_JOURNAL_READ_BLOCKED_STATUS,
+    FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+)
 from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
     publish_run_pipeline_job_provenance,
@@ -542,3 +545,124 @@ def test_publisher_journal_read_does_not_mkdir_or_take_write_lock(
     assert mkdir_calls == []
     assert after == before
     assert not (journal_root / "reconcile-inventory").exists()
+
+
+def test_publisher_leaves_log_unadvertised_when_metadata_is_incomplete(tmp_path: Path) -> None:
+    response = _parent_array_response(include_sibling=False)
+    response["metadata_complete"] = False
+
+    summary, _journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: response,
+    )
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_text(encoding="utf-8")
+    )
+
+    assert summary["advertised_logs"] == 0
+    assert sidecar["jobs"][0]["log_uri"] is None
+    assert not (published_root / "logs").exists()
+
+
+def test_publisher_leaves_log_unadvertised_when_task_identity_is_incomplete(tmp_path: Path) -> None:
+    response = _parent_array_response(include_sibling=False)
+    response["array_task_logs"][0]["identity_complete"] = False
+
+    summary, _journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: response,
+    )
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_text(encoding="utf-8")
+    )
+
+    assert summary["advertised_logs"] == 0
+    assert sidecar["jobs"][0]["log_uri"] is None
+    assert not (published_root / "logs").exists()
+
+
+def test_publisher_fail_closes_on_blocked_journal_row(tmp_path: Path) -> None:
+    blocked = _forecast_job()
+    blocked["status"] = FILE_JOURNAL_READ_BLOCKED_STATUS
+
+    with pytest.raises(PipelineJobProvenanceError) as caught:
+        _publish(tmp_path, jobs=[blocked], fetch_logs=lambda _job_id: _parent_array_response())
+
+    assert caught.value.code == "JOURNAL_READ_BLOCKED"
+
+
+def test_publisher_does_not_treat_file_uri_as_published_log(tmp_path: Path) -> None:
+    job = _forecast_job()
+    job["log_uri"] = "file:///tmp/secret.out"
+
+    summary, _journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[job],
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+    )
+    sidecar = json.loads(
+        (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").read_text(encoding="utf-8")
+    )
+
+    assert summary["status"] == "published"
+    assert sidecar["jobs"][0]["log_uri"] == _expected_log_uri()
+    assert "file://" not in json.dumps(sidecar)
+    assert (published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID / f"{IFS_JOB_ID}.out").exists()
+
+
+def test_publisher_refuses_equal_version_conflicting_sidecar_without_overwriting_log(
+    tmp_path: Path,
+) -> None:
+    original_bytes = IFS_STDOUT.encode("utf-8")
+    drifted_bytes = ("y" * IFS_STDOUT_BYTES).encode("utf-8")
+    summary, journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+    )
+    assert summary["status"] == "published"
+    artifact_path = published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID / f"{IFS_JOB_ID}.out"
+    sidecar_path = object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json"
+    original_sidecar = sidecar_path.read_bytes()
+
+    drifted = _parent_array_response(include_sibling=False)
+    drifted["array_task_logs"][0]["stdout"] = drifted_bytes.decode("utf-8")
+    with pytest.raises(PipelineJobProvenanceError) as caught:
+        publish_run_pipeline_job_provenance(
+            run_id=IFS_SELECTED_RUN_ID,
+            journal_root=journal_root,
+            object_store_root=object_root,
+            published_artifact_root=published_root,
+            fetch_logs=lambda _job_id: drifted,
+        )
+
+    assert caught.value.code == "EQUAL_VERSION_CONFLICT"
+    assert artifact_path.read_bytes() == original_bytes
+    assert sidecar_path.read_bytes() == original_sidecar
+
+
+def test_publisher_identical_log_refetch_is_a_noop(tmp_path: Path) -> None:
+    summary, journal_root, object_root, published_root = _publish(
+        tmp_path,
+        jobs=[_forecast_job()],
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+    )
+    artifact_path = published_root / "logs" / "IFS" / IFS_CYCLE_STAMP / IFS_SELECTED_RUN_ID / f"{IFS_JOB_ID}.out"
+    sidecar_path = object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json"
+    original_sidecar = sidecar_path.read_bytes()
+
+    replay = publish_run_pipeline_job_provenance(
+        run_id=IFS_SELECTED_RUN_ID,
+        journal_root=journal_root,
+        object_store_root=object_root,
+        published_artifact_root=published_root,
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+    )
+
+    assert summary["status"] == "published"
+    assert replay["status"] == "published"
+    assert artifact_path.read_bytes() == IFS_STDOUT.encode("utf-8")
+    assert sidecar_path.read_bytes() == original_sidecar
+

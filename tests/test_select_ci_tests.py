@@ -441,8 +441,10 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_openapi_response_conformance.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_slurm_gateway_openapi_security.py",
     ]
+
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -459,9 +461,11 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         WRITE_SURFACE_SCAN_PATH,
         "tests/test_slurm_gateway_openapi_security.py",
     ]
+
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
     fallback_only = set(CORE_SMOKE_TESTS) - {"tests/test_api.py"}
@@ -1380,6 +1384,17 @@ def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> No
         "tests/test_pipeline_job_provenance_publisher.py",
         "tests/test_pipeline_job_provenance_importer.py",
     } <= backfill_selected
+
+    envelope = "tests/test_pipeline_ops_identity_envelope.py"
+    for source in (
+        "apps/api/routes/pipeline.py",
+        "apps/api/openapi_patching.py",
+        "openapi/nhms.v1.yaml",
+        "apps/api/main.py",
+    ):
+        assert envelope in set(select_tests([source], repo_root=Path("."))), source
+
+
 
 def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None:
     # #1774 round 4. The stored-expression sweep's last leg is an ALLOW-list of
@@ -4451,7 +4466,12 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
     selected = set(select_tests([owner, surface], repo_root=Path(".")))
     # The surface lives under services/**, a #2185 write-surface root, so the
     # scan rides along; the redirect itself is what this pins.
-    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH}
+    assert selected == redirect_targets | {
+        SELECTOR_META_GUARD_TEST,
+        WRITE_SURFACE_SCAN_PATH,
+        "tests/test_pipeline_job_provenance_publisher.py",
+    }
+
     assert owner not in selected
 
 

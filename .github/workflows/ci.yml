@@ -103,6 +103,9 @@ jobs:
               - 'workers/model_registry/**'
               - 'workers/forcing_producer/**'
               - 'services/orchestrator/scheduler.py'
+              - 'services/orchestrator/pipeline_job_provenance.py'
+              - 'scripts/backfill_pipeline_job_provenance.py'
+
               - '.github/workflows/ci.yml'
               - 'pyproject.toml'
               - 'uv.lock'

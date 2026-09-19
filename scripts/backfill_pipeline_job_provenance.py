@@ -20,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from services.orchestrator.chain_slurm_client import HttpSlurmGatewayClient  # noqa: E402
+from services.orchestrator.chain_types import OrchestratorError  # noqa: E402
+from services.orchestrator.journal_root_authority import journal_root_refusal_line  # noqa: E402
 from services.orchestrator.pipeline_job_provenance import (  # noqa: E402
     PipelineJobProvenanceError,
     import_runs_pipeline_job_provenance,
@@ -113,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         except PipelineJobProvenanceError as error:
             publication = {"status": "failed", "reason": error.code, "runs": []}
+        except OrchestratorError as error:
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            publication = {"status": "failed", "reason": error.error_code, "runs": []}
         summary["publication"] = publication
         failed = failed or publication.get("status") != "published"
     if do_import:
@@ -127,11 +132,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         except PipelineJobProvenanceError as error:
             projection = {"status": "failed", "reason": error.code, "runs": []}
+        except OrchestratorError as error:
+            print(journal_root_refusal_line(error), file=sys.stderr)
+            projection = {"status": "failed", "reason": error.error_code, "runs": []}
         summary["projection"] = projection
         failed = failed or projection.get("status") == "failed"
     json.dump(summary, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return EXIT_FAILURES if failed else EXIT_OK
+
+
 
 
 if __name__ == "__main__":

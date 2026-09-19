@@ -1279,24 +1279,38 @@ def _success_response_schema(data_schema: dict) -> dict:
 
 
 def _ops_success_response_schema(data_schema: dict, *, job_identity: bool) -> dict:
-    identity_schema: dict[str, Any] = {"$ref": "#/components/schemas/OpsStrictIdentity"}
+    identity_schema: dict[str, Any] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/OpsStrictIdentity"},
+        ],
+        "description": (
+            "Present on strict Ops successes with the resolved source, cycle_time, "
+            "run_id, and model_id. Omitted for non-strict browsing. When present, "
+            "those four fields are required; job_id is additionally required on logs."
+        ),
+    }
+
     if job_identity:
         identity_schema = {
             "allOf": [
-                identity_schema,
+                {"$ref": "#/components/schemas/OpsStrictIdentity"},
                 {
                     "type": "object",
                     "required": ["job_id"],
                     "properties": {"job_id": {"type": "string"}},
                 },
-            ]
+            ],
+            "description": (
+                "Present on strict Ops log successes with the resolved source, "
+                "cycle_time, run_id, model_id, and job_id. Omitted for non-strict browsing."
+            ),
         }
     return {
         "allOf": [
             {"$ref": "#/components/schemas/SuccessEnvelope"},
             {
                 "type": "object",
-                "required": ["data", "identity"],
+                "required": ["data"],
                 "properties": {
                     "data": data_schema,
                     "identity": identity_schema,
@@ -1304,6 +1318,8 @@ def _ops_success_response_schema(data_schema: dict, *, job_identity: bool) -> di
             },
         ]
     }
+
+
 
 
 def _station_series_error_response(description: str, examples: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1373,7 +1389,9 @@ def _ops_strict_identity_schema() -> dict:
         "type": "object",
         "description": (
             "Resolved strict Ops identity returned as a top-level sibling of data "
-            "on successful status, stages, jobs, and job-log responses."
+            "on successful status, stages, jobs, and job-log responses. Present only "
+            "when the request used a complete strict identity; required fields apply "
+            "whenever this object is present."
         ),
         "required": ["source", "cycle_time", "run_id", "model_id"],
         "properties": {
@@ -1385,6 +1403,8 @@ def _ops_strict_identity_schema() -> dict:
         },
         "additionalProperties": False,
     }
+
+
 
 
 def _error_response_schema() -> dict:
