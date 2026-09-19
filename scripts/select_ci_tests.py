@@ -1944,6 +1944,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_pipeline_job_provenance_importer.py",
             "tests/test_pipeline_job_provenance_copyback.py",
             "tests/test_pipeline_ops_identity_envelope.py",
+            # The delegated attribution suite now top-level-imports
+            # services.orchestrator (package __init__) and
+            # pipeline_job_provenance.py so the provenance importer seam is
+            # classified. Those importer gaps close on this directory rule,
+            # the same disposition display_coverage / hydro_display already use.
+            *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
@@ -3215,6 +3221,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_pipeline_job_provenance_importer.py",
             "tests/test_pipeline_job_provenance_copyback.py",
             "tests/test_pipeline_ops_identity_envelope.py",
+            # Autopipeline now injects _attributed_connect into the provenance
+            # importer; the delegated attribution suite is the classification
+            # oracle for that seam.
+            *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),

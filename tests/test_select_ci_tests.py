@@ -889,7 +889,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 58 targets, the rule's 55 plus three riders that arrive from OUTSIDE the
+    # 60 targets, the rule's 57 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -930,6 +930,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
         # #1186: the operator-action listing suite rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and scheduler_evidence_payload.py,
@@ -1434,6 +1436,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.

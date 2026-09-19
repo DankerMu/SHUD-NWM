@@ -222,11 +222,12 @@ def _provision_pipeline_job_roles(database_url: str) -> None:
 
 
 def _connect_as_role(role: str) -> Any:
-    def connect(database_url: str, *, fallback_application_name: str) -> Any:
+    def connect(database_url: str, *, fallback_application_name: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("cursor_factory", RealDictCursor)
         connection = psycopg2.connect(
             database_url,
-            cursor_factory=RealDictCursor,
             fallback_application_name=fallback_application_name,
+            **kwargs,
         )
         connection.autocommit = True
         with connection.cursor() as cursor:
@@ -439,8 +440,12 @@ def test_importer_real_postgres_overlapping_stale_import_keeps_newer_row(
     barrier = threading.Barrier(2)
     inner_connect = _connect_as_role("nhms_ingest_rw")
 
-    def gated_connect(database_url: str, *, fallback_application_name: str) -> Any:
-        connection = inner_connect(database_url, fallback_application_name=fallback_application_name)
+    def gated_connect(database_url: str, *, fallback_application_name: str, **kwargs: Any) -> Any:
+        connection = inner_connect(
+            database_url,
+            fallback_application_name=fallback_application_name,
+            **kwargs,
+        )
         barrier.wait(timeout=5)
         return connection
 
