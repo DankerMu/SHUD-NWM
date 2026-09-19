@@ -19,6 +19,7 @@ import pytest
 from psycopg2.extras import RealDictCursor
 
 from packages.common.object_store import LocalObjectStore
+from services.artifacts import published_log_uri
 from services.orchestrator.pipeline_job_provenance import (
     PROVENANCE_SCHEMA_VERSION,
     PipelineJobProvenanceError,
@@ -44,6 +45,7 @@ CONVERT_JOB_ID = "it2420_cycle_convert"
 UPDATED_AT = "2026-05-03T00:40:00.900000Z"
 OLDER_UPDATED_AT = "2026-05-03T00:10:00Z"
 NEWER_UPDATED_AT = "2026-05-03T00:50:00.900000Z"
+MID_UPDATED_AT = "2026-05-03T00:45:00.900000Z"
 
 
 
@@ -319,8 +321,12 @@ def test_importer_real_postgres_update_stale_conflict_enrichment_and_rollback(
     object_root = tmp_path / "object-store"
     object_root.mkdir()
     connect = _connect_as_role("nhms_ingest_rw")
-    log_uri = (
-        f"published://logs/GFS/{CYCLE_TIME.strftime('%Y%m%d%H')}/{RUN_ID}/{JOB_ID}.out"
+    log_uri = published_log_uri(
+        source="gfs",
+        cycle_time=CYCLE_TIME,
+        run_id=RUN_ID,
+        job_id=JOB_ID,
+        stream="out",
     )
 
     _seed_object_store(object_root, _sidecar(jobs=[_forecast_job(), _convert_job()]))
@@ -414,7 +420,6 @@ def test_importer_real_postgres_update_stale_conflict_enrichment_and_rollback(
 def test_importer_real_postgres_overlapping_stale_import_keeps_newer_row(
     throwaway_database_url: str,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     apply_migrations_from_zero(throwaway_database_url)
     _provision_pipeline_job_roles(throwaway_database_url)
@@ -432,38 +437,31 @@ def test_importer_real_postgres_overlapping_stale_import_keeps_newer_row(
     )
 
     barrier = threading.Barrier(2)
-    original_fetch = __import__(
-        "services.orchestrator.pipeline_job_provenance",
-        fromlist=["_fetch_existing_job"],
-    )._fetch_existing_job
+    inner_connect = _connect_as_role("nhms_ingest_rw")
 
-    def gated_fetch(cursor: Any, job_id: str) -> dict[str, Any] | None:
-        row = original_fetch(cursor, job_id)
+    def gated_connect(database_url: str, *, fallback_application_name: str) -> Any:
+        connection = inner_connect(database_url, fallback_application_name=fallback_application_name)
         barrier.wait(timeout=5)
-        return row
+        return connection
 
-    monkeypatch.setattr(
-        "services.orchestrator.pipeline_job_provenance._fetch_existing_job",
-        gated_fetch,
-    )
     errors: list[str] = []
 
-    def import_stale() -> None:
-        stale_root = tmp_path / "stale"
-        stale_root.mkdir()
+    def import_mid() -> None:
+        mid_root = tmp_path / "mid"
+        mid_root.mkdir()
         _seed_object_store(
-            stale_root,
+            mid_root,
             _sidecar(
-                jobs=[_forecast_job(updated_at=OLDER_UPDATED_AT, status="running")],
-                source_version=int(datetime(2026, 5, 3, 0, 10, tzinfo=UTC).timestamp()),
+                jobs=[_forecast_job(updated_at=MID_UPDATED_AT, status="running")],
+                source_version=int(datetime(2026, 5, 3, 0, 45, tzinfo=UTC).timestamp()),
             ),
         )
         try:
             import_run_pipeline_job_provenance(
                 database_url=throwaway_database_url,
-                object_store_root=stale_root,
+                object_store_root=mid_root,
                 run_id=RUN_ID,
-                connect=connect,
+                connect=gated_connect,
             )
         except Exception as error:  # noqa: BLE001 - capture concurrent failure
             errors.append(type(error).__name__)
@@ -483,18 +481,21 @@ def test_importer_real_postgres_overlapping_stale_import_keeps_newer_row(
                 database_url=throwaway_database_url,
                 object_store_root=newer_root,
                 run_id=RUN_ID,
-                connect=connect,
+                connect=gated_connect,
             )
         except Exception as error:  # noqa: BLE001 - capture concurrent failure
             errors.append(type(error).__name__)
 
-    stale_thread = threading.Thread(target=import_stale)
+    mid_thread = threading.Thread(target=import_mid)
     newer_thread = threading.Thread(target=import_newer)
-    stale_thread.start()
+    mid_thread.start()
     newer_thread.start()
-    stale_thread.join(timeout=10)
+    mid_thread.join(timeout=10)
     newer_thread.join(timeout=10)
 
+    assert not mid_thread.is_alive()
+    assert not newer_thread.is_alive()
+    assert errors == []
     final = _fetch_job(throwaway_database_url, JOB_ID)
     assert final is not None
     assert final["status"] == "failed"

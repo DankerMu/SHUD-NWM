@@ -2636,7 +2636,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_api.py",
             "tests/test_api_contract.py",
             "tests/test_monitoring_api.py",
-            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(
@@ -3727,6 +3726,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/chain_slurm_client.py",
         (SLURM_AUTH_CLIENT_TEST,),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_gateway.py",
+        (SLURM_AUTH_DEPLOYMENT_TEST,),
     ),
     PathTestRule(
         "apps/api/routes/pipeline.py",

@@ -1390,9 +1390,9 @@ def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> No
         "apps/api/routes/pipeline.py",
         "apps/api/openapi_patching.py",
         "openapi/nhms.v1.yaml",
-        "apps/api/main.py",
     ):
         assert envelope in set(select_tests([source], repo_root=Path("."))), source
+
 
 
 

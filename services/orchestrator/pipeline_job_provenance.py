@@ -250,18 +250,29 @@ def publish_run_pipeline_job_provenance(
             )
             for staged in staged_logs:
                 existing_job = existing_jobs.get(staged["job_id"])
+                refuse_divergent_existing = False
+                if existing_job is not None:
+                    incoming_job = next(
+                        (job for job in published_jobs if str(job.get("job_id") or "") == staged["job_id"]),
+                        None,
+                    )
+                    refuse_divergent_existing = incoming_job is not None and _job_source_timestamp(
+                        existing_job
+                    ) >= _job_source_timestamp(incoming_job)
+                existing_out_uri = None if existing_job is None else existing_job.get("log_uri")
                 if staged["stdout"] is not None and staged["out_uri"]:
                     _write_published_log(
                         staged["out_uri"],
                         staged["stdout"],
                         published_artifact_root=published_artifact_root,
-                        existing_uri=None if existing_job is None else existing_job.get("log_uri"),
+                        existing_uri=existing_out_uri if refuse_divergent_existing else None,
                     )
                 if staged["stderr"] is not None and staged["err_uri"]:
                     _write_published_log(
                         staged["err_uri"],
                         staged["stderr"],
                         published_artifact_root=published_artifact_root,
+                        existing_uri=staged["err_uri"] if refuse_divergent_existing else None,
                     )
             sidecar = _merge_published_sidecar(
                 store,
@@ -962,7 +973,12 @@ def _publish_task_log_streams(
         existing_uri=None if existing_job is None else existing_job.get("log_uri"),
     )
     if stderr_bytes is not None and err_uri is not None:
-        _write_published_log(err_uri, stderr_bytes, published_artifact_root=published_artifact_root)
+        _write_published_log(
+            err_uri,
+            stderr_bytes,
+            published_artifact_root=published_artifact_root,
+            existing_uri=err_uri if existing_job is not None else None,
+        )
     return out_uri
 
 
@@ -992,10 +1008,25 @@ def _write_published_log(
     if existing_uri not in (None, "") and existing_uri == log_uri:
         try:
             persisted = read_bytes_limited_no_follow(target, max_bytes=MAX_LOG_BYTES, containment_root=root)
-        except (OSError, SafeFilesystemError):
-            persisted = None
+        except FileNotFoundError:
+            raise PipelineJobProvenanceError(
+                "PUBLISHED_LOG_MISSING",
+                "Advertised published log is missing from the published artifact root.",
+                {"log_uri": log_uri},
+            )
+        except (OSError, SafeFilesystemError) as error:
+            raise PipelineJobProvenanceError(
+                "PUBLISHED_LOG_UNREADABLE",
+                "Advertised published log could not be read without following links.",
+                {"log_uri": log_uri},
+            ) from error
         if persisted == content:
             return
+        raise PipelineJobProvenanceError(
+            "EQUAL_VERSION_CONFLICT",
+            "Equal-version published provenance conflicts with the existing advertised log.",
+            {"log_uri": log_uri},
+        )
     atomic_write_bytes_no_follow(target, content, containment_root=root, temp_suffix="part")
     persisted = read_bytes_limited_no_follow(target, max_bytes=MAX_LOG_BYTES, containment_root=root)
     if persisted != content:
