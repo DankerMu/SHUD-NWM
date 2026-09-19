@@ -137,14 +137,42 @@ legacy-routed version was re-applied and no new cycle arrived: both sources are 
 `2026-09-18T12:00:00Z`, and `met.forcing_station_timeseries` (narrow) still holds **0 rows**. The
 narrow write path and the refusal branch are unexercised in production. Both belong to part 2.
 
-**Observation, reported not diagnosed, and it predates this window.** Forcing cycles arrive on a
-12-hourly cadence at 76 versions each, written with roughly 19 h of lag
-(`2026-09-18 12:00` → written `2026-09-19 07:48`). The `2026-09-19 00:00` cycle has not appeared.
-That gap opened well before the window (last write `2026-09-19 07:48`; window `2026-09-20 00:27`),
-the `download` and `frontier-alert` units both last exited `0`, and nothing here was touched to
-investigate it. It matters only because **8.1 part 2 cannot start until a new cycle lands** — the
-first narrow write is what gives the QHH narrow-leg `EXPLAIN` and the station-series legacy-vs-narrow
-identity check something to read.
+**Retracted: the "missing cycle" in the first version of this receipt was my arithmetic error, not
+a production fault.** It is left here rather than deleted because the receipt was already merged
+and because the mistake is instructive.
+
+The claim was that the `2026-09-19 00:00` cycle was ~6 h overdue and that the gap had been open
+~17 h before the window. Both figures came from one mistake: `met.forcing_version.created_at`
+renders in **UTC**, and I compared it against the host's **CST** wall clock. Corrected, measured
+`2026-09-19T16:49:39Z` (= `2026-09-20 00:49:39+08:00`):
+
+| cycle (UTC) | versions | written (UTC) | lag |
+|---|---|---|---|
+| `2026-09-18 12:00` | 76 | `2026-09-19 07:48:52` | 19.81 h |
+| `2026-09-18 00:00` | 76 | `2026-09-18 19:46:49` | 19.78 h |
+| `2026-09-17 12:00` | 76 | `2026-09-18 07:05:38` | 19.09 h |
+| `2026-09-17 00:00` | 76 | `2026-09-17 19:11:25` | 19.19 h |
+
+Lag is tight at 19.09–19.81 h, so `2026-09-19 00:00Z` is due around `2026-09-19 19:30Z`
+(`2026-09-20 03:30+08:00`) — at the time of the original measurement it was roughly **three hours
+early, not overdue**. The real interval between the last write and the window was 8 h 39 m, not
+17 h. Independently corroborated read-only: the `2026091900` cohort is mid-pipeline with
+object-store file counts matching the last fully-landed cycle item for item (gfs raw 58 /
+canonical 56, IFS raw 54 / canonical 53), and its convert-cohort directory timestamp sits exactly
+`12h00m25s` after the previous cycle's — one cadence step, no drift.
+
+`nhms-node27-frontier-alert` exiting `0` is also not a blind spot, and citing it was a second
+error of mine: per `infra/env/node27-frontier-alert.example:30-31` that alert aggregates
+**`hydro.hydro_run`** and never reads `met.forcing_version`, and `:63-66` makes its progress test
+directional (new source, strictly increasing frontier / distinct-cycle / latest-arrival),
+explicitly *"NEVER compared against wall-clock lag"*. It is not the forcing-ingestion watchdog and
+must not be investigated as one.
+
+**So 8.1 part 2 is waiting on a scheduled event that is running on time, not on an incident.**
+Re-check after `2026-09-20 04:00+08:00`: `count(*) FROM met.forcing_version WHERE cycle_time =
+'2026-09-19 00:00+00'` should be 76, and `count(*) FROM met.forcing_station_timeseries` should be
+**> 0** — writers have been narrow-only since #2509. If the first holds and the second is still
+zero, *that* is the observation worth filing.
 
 ## State the plane is now in
 
