@@ -37,26 +37,91 @@ promoting cold requirements. GitHub records the actual issue-close events.
   exact-driver seats CLEAN. This is not a live compression tick, v3 replay
   PASS, privilege revocation, or data deletion.
 
-Observed live compression unit (do not delete these paths):
+Observed live compression unit as of the #1895 handoff (do not delete these
+paths). **2026-09-18 (#2285 / #2425, design D7):** #1895 is closed and its
+fence tree at `95481481` never receives fixes, so the unit is to be rebound
+(Stage B, after merge; procedure below) to the repo unit on `/home/nwm/NWM` (`WorkingDirectory` / `ExecStart*` under
+`/home/nwm/NWM`, env `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
+carried over from the fence env with `REPO_ROOT` rewritten to
+`/home/nwm/NWM`). The live env's bound moved 4 → 2 on 2026-09-18 (stage A,
+backup `…env.bak-bound4-20260918`). After the rebind the fence SOURCE, its
+`.venv` and STATE below are **rollback inputs**, not the active deployment —
+still retained, not deleted. Proof the rebind took: the next receipt's
+`head_sha` equals `git -C /home/nwm/NWM rev-parse HEAD` and
+`systemctl --user show -p DropInPaths` is empty.
 
 - WorkingDirectory / ExecStart / ExecStartPre SOURCE
   `/home/nwm/NWM-maintenance-reviewed-95481481` (including its `.venv`)
 - private live env
   `/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
-- wrapper 3900 s, wall 3941 s, statement 3600000 ms, bound 4, lag 172800 s
+- wrapper 3900 s, wall 3941 s, statement 3600000 ms, bound 4 (2 since
+  2026-09-18), lag 172800 s
 - original timer active/enabled baseline and compression deadline preserved
 - 92 protected identities unchanged
 - installed replay unit `absent-approved`; old cold env archived privately
 - source/templates and all private replay env/plan/ledger/terminal/consumed-finalizer/recovery evidence retained
 
-SOURCE, `.venv`, STATE/config and private replay/rollback archives are active
-deployment and recovery inputs, not disposable test evidence. Do not clean
-them. Governance and retention units were not rebound; business checkout SHA
+SOURCE, `.venv`, STATE/config and private replay/rollback archives were the
+active deployment at the #1895 handoff, stay active until the D7 rebind and
+are rollback and recovery inputs after it, not disposable test evidence. Do
+not clean them. Governance and retention units were not rebound; business checkout SHA
 `415cbd1e` is unchanged. No maintenance service was started by this handoff;
 no DB/schema/role change, `REVOKE`, `DROP`, tablespace/data deletion, or
 PGDATA/evidence/container-mount deletion is claimed. Unexpected leftover
 cold catalog/bind state still requires stop/preserve and a separately
 approved safe disposition.
+
+**Rebind to the repo unit (design D7, #2285).** As `nwm` on node-27, after
+`git pull --ff-only` in `/home/nwm/NWM`. Never print env values (no `cat` of
+either env file).
+
+```bash
+FENCE_ENV=/home/nwm/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env
+REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
+```
+
+1. `systemctl --user stop nhms-node27-timeseries-compression.timer`, then
+   `systemctl --user is-active nhms-node27-timeseries-compression.service`
+   must not print `active` or `activating` (a run in progress: wait for it to end).
+2. `cp -p "$REPO_ENV" "$REPO_ENV.bak-pre-rebind-$(date -u +%Y%m%d)"`.
+3. `install -m 0600 "$FENCE_ENV" "$REPO_ENV"`.
+4. `sed -i 's#^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=.*#NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM#' "$REPO_ENV"`.
+5. Each of these must print `1`; anything else: stop, restore the step-2
+   backup and restart the timer. The unit's `ExecStartPre` `--check` returns
+   before it resolves the runner root, so it cannot catch a fence `REPO_ROOT`.
+
+   ```bash
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/home/nwm/NWM/.nhms-issue1069-live/compression.lock$' "$REPO_ENV"
+   ```
+
+6. Budget preflight with the repo code against the new env, rc 0:
+   `/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py --compression-env "$REPO_ENV" --check`.
+7. `install -m 0644 /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service ~/.config/systemd/user/`
+   and `systemctl --user daemon-reload`.
+8. `diff ~/.config/systemd/user/nhms-node27-timeseries-compression.service /home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service`
+   prints nothing, and
+   `systemctl --user show -p DropInPaths nhms-node27-timeseries-compression.service`
+   prints an empty `DropInPaths=`.
+9. `git -C /home/nwm/NWM diff --quiet HEAD --; echo $?` must print `0`: the enforce runner refuses a
+   checkout whose tracked files differ from HEAD (`freeze_head`, rc 1), so after the rebind no tracked
+   edit may be left in `/home/nwm/NWM` (keep receipts under `/home/nwm/tmp/`).
+10. `systemctl --user start nhms-node27-timeseries-compression.timer`. Proof
+   after the next run: the receipt's `head_sha`
+   (`jq -r .head_sha /home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json`)
+   equals `git -C /home/nwm/NWM rev-parse HEAD`. A receipt with `outcome` `failed` and
+   `failure.stage` `freeze_head` means the checkout was dirty. Restarting the timer after a
+   missed 04:25Z elapse fires a `Persistent=` catch-up run immediately, so do
+   step 10 only when a run started now ends before the 06:36Z retention tick
+   (start by 05:30Z, the 3941 s wall) or after that retention tick has finished.
+
+Rollback: `install -m 0644` the pre-rebind unit kept at
+`/home/nwm/NWM/docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/stage-a/before/nhms-node27-timeseries-compression.service`
+into `~/.config/systemd/user/`, `systemctl --user daemon-reload`, restart the
+timer. The rebind does not touch the fence env, so rollback needs no env
+restore.
 
 Cold samples, I9, I8, issues #2162 and #2017 are not blanket retirement
 dependencies. Existing PGDATA, compression, retention, readonly/display,
@@ -3384,11 +3449,16 @@ Deployed env files live at `/home/nwm/NWM/infra/env/*.env` (gitignored, mode
 0600). Read them on the box before quoting any value; these are the deltas
 against the committed `.example` templates as of 2026-08-01:
 
-- **Compression per-tick bound.** No longer a drift: the committed template
-  and the deployed env both carry `=4` since issue #1237 decided it as a
-  capacity target (the box already ran `=4`; the template's stale `=5` was
-  the side that moved). Still read the live value off the box before quoting
-  it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
+- **Compression per-tick bound.** The committed template carries `=2` since
+  #2425 re-derived it on 2026-09-18 for the narrow one-day geometry; before
+  that it carried `=4` from #1237. The ACTIVE compression env today is the
+  fence env
+  `~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+  (bound `2` since Stage A, 2026-09-18);
+  `/home/nwm/NWM/infra/env/node27-timeseries-compression.env` becomes the
+  active one only after the D7 rebind (§ "Rebind to the repo unit").
+  Still read the live value off the box before quoting it. See §4 "Per-tick
+  capacity".
 - **Compression chunk-selection lag.**
   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
   box (re-confirmed 2026-08-14). The template now also ships `172800` under
@@ -3429,7 +3499,106 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
-### Per-tick capacity (live state 2026-08-14, decided in #1237)
+### Per-tick capacity (current: bound 2, re-derived 2026-09-18 in #2425; history from #1237)
+
+**Current decision (2026-09-18, #2425): `PER_TICK_BOUND=2`, newest-first
+within a hypertable.** This re-derivation replaces the 7-day-geometry numbers
+further down (`bound=4`, ~6.0 s/GB, 2 arrivals/week), which stay as historical
+evidence. Template, pin test (`tests/test_node27_timeseries_compression.py`),
+in-code direct-invocation default
+(`packages/common/node27_timeseries_compression_budget.py`
+`DEFAULT_COMPRESSION_PER_TICK_BOUND`) and the live env all carry `2`.
+
+Measured inputs (node-27):
+
+- **Chunk size.** Narrow `hydro.river_timeseries` day chunks are 19–21 GB.
+- **Rate ≈ 55 s/GB, per-chunk overhead included.** 2026-09-17 tick: 46.84 GB
+  in 2593 s (timer start 04:25:32Z → receipt 05:08:45Z). 2026-09-18 bound-2
+  run: `_hyper_9_153` + `_hyper_9_154` (20.2 + 21.0 = 41.13 GB) in 2241 s =
+  54.5 s/GB. The old 6.0 s/GB figure is 7-day-chunk evidence and does not
+  apply to this geometry.
+- **Arrival.** 1 river day-chunk/day, plus ~1 forcing chunk/week.
+- **The failure the old bound produced.** 2026-09-18: `bound=4` selected four
+  river chunks (~78 GB); three committed, the fourth was `TERM`ed at the
+  3900 s wrapper wall and rolled back → `rc=124`.
+
+The two constraints:
+
+1. **Wall.** `Σ(selected GB) × 55 s/GB ≤ 3900 s` (wrapper wall; the whole tick,
+   not one chunk). `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for growth and the
+   non-compress residual; `4 × 20 GB × 55 ≈ 4400 s` does not fit — exactly the
+   2026-09-18 `rc=124`.
+2. **Throughput.** `bound × 1 tick/day ≥` arrival. River takes both slots
+   while it has ≥ 2 eligible chunks: 2/day compressed from the young end,
+   1/day arriving, 1/day dropped by retention from the old end, so a river
+   backlog shrinks by ~2 chunks/day net. After the 2026-09-18 bound-2 run
+   (W = 2026-09-17T12:00Z) 14 eligible uncompressed river chunks remained,
+   so the backlog drains ~2026-09-25. After that the steady state is 1
+   arrival/day against 2 slots.
+
+**Retention overlap.** A ≤ 2310 s tick from 04:25Z ends by ~05:04Z; even the
+full 3941 s systemd wall (05:30:41Z) ends before the 06:36Z retention timer,
+so `RETENTION_CONCURRENT_INVOCATION` needs a wall overrun, not a normal tick.
+
+**Timer cadence.** No change. Chunk count is set by the time dimension (one
+day), not by ingest volume, and 2 slots/day already exceed the 1/day
+arrival.
+
+**Selection order (#2425).** Within one hypertable the runner walks eligible
+chunks newest `range_end` first; the hypertable order stays
+`(schema, name)`: `hydro.river_timeseries` → `hydro.river_timeseries_legacy`
+→ `met.*`. Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
+the same display watermark W, so retention's drop set is always the OLDEST
+prefix of compression's eligible set; oldest-first spent the slots on chunks
+retention dropped the same day (2026-09-16: 4 of 4; 2026-09-17: 3 of 4).
+Newest-first compresses chunks with ~19 days of life left.
+
+**Known risk: the legacy giant chunk (#1988), dated.** Once
+`hydro.river_timeseries` has fewer than 2 eligible uncompressed chunks, the
+free slot goes to `hydro.river_timeseries_legacy`. Its uncompressed 558 GB
+chunk `_hyper_3_110_chunk` (range 2026-09-10 → 2026-09-17) is
+compression-eligible from ~2026-09-19 and is dropped by retention ~2026-10-08.
+Between the river drain date (~2026-09-25) and ~2026-10-08, slot 2 can select
+it and every tick ends `rc=124`, seen only by the daily check or
+`systemctl --user show -p Result nhms-node27-timeseries-compression.service`
+(the unit has no `OnFailure=`). This trajectory is the same
+under oldest-first. Check before ~2026-09-25 and daily until the chunk is gone:
+
+```sql
+SELECT hypertable_name, chunk_name, range_end, is_compressed
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'hydro'
+  AND hypertable_name IN ('river_timeseries', 'river_timeseries_legacy')
+  AND NOT is_compressed
+ORDER BY hypertable_name, range_end;
+```
+
+If `river_timeseries` shows fewer than 2 rows older than `W − 2 d` while
+`_hyper_3_110_chunk` is still listed, **set
+`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` in the live env** (with one
+river arrival per day, bound 1 never reaches the legacy table), and return to
+`2` once retention has dropped that chunk or #1988 has dropped the legacy
+table. The live env is the fence env
+`~/.local/state/issue1895-maintenance-retirement-95481481/config/node27-timeseries-compression.env`
+before the D7 rebind and `/home/nwm/NWM/infra/env/node27-timeseries-compression.env`
+after it; `systemctl --user show -p Environment,ExecStart nhms-node27-timeseries-compression.service`
+tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
+`ExecStart` = before; an `/home/nwm/NWM` `ExecStart` with an empty
+`Environment=` = after. Record both env changes with the receipt of the next
+tick.
+
+**Invalidation conditions for this derivation.** Re-derive when the chunk
+interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
+wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
+changes (including a §4.5 override window), the retention window or timer
+changes, or a hypertable joins or leaves the lane.
+
+---
+
+**Historical (#1237 / #2210 / #1985, 7-day and transition geometry;
+superseded 2026-09-18 by the decision above).** Everything from here to
+"4.0" is the record the current decision replaced. Its numbers are not
+current inputs.
 
 The measurements and 2-chunks/week arithmetic below are historical evidence
 for 7-day chunk geometry, not a capacity guarantee after #2210. Once both
@@ -3552,10 +3721,11 @@ other being the archive root sharing the hot filesystem — see
 (2026-07-26)").
 
 **A backlog by itself invalidates the wall constraint — no config has to
-change.** Selection is table-major
-(`scripts/node27_timeseries_compression.py:396` orders by
-`hypertable_schema, hypertable_name, range_end`, so `hydro` sorts before
-`met` and **every** eligible river chunk is taken before any forcing chunk),
+change.** Selection is table-major: the catalog query orders by
+`hypertable_schema, hypertable_name` and `_classify` walks each hypertable
+newest `range_end` first (#2425; before 2026-09-18 it was oldest first), so
+`hydro` sorts before `met` and **every** eligible river chunk is taken before
+any forcing chunk,
 so at `bound=4` any unattended tick holding **≥2 eligible river chunks** can
 overrun the 3900 s wall while every chunk is still inside the normal
 268–409 GB band: `2 river + 2 forcing` already exceeds it once river chunks
@@ -4920,9 +5090,15 @@ the currently observed live `TimeoutStartUSec` has changed. Retention stays
 scheduled at 06:36 UTC; this section does not retighten that cadence.
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
-automated lane, and because selection is oldest-first (`ORDER BY range_end
-ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. A catch-up is a
+automated lane. Selection is table-major and newest `range_end` first within a
+table (#2425), then `[:per_tick_bound]`, so such a chunk is re-selected every
+tick (and burns it) only while it is among the first `per_tick_bound` of that
+order — at bound 1, while it is the newest eligible chunk of the first table
+with eligible chunks. Once at least `per_tick_bound` newer chunks of that
+table are eligible it moves to `deferred` and stops blocking. A bound-1 catch-up selects the newest
+eligible chunk of the first table with eligible chunks, so step 4a's dry-run
+check that the selection is the intended chunk stays the gate: if it shows
+another chunk, stop. A catch-up is a
 bounded one-file override window, not a manual `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**
@@ -5279,7 +5455,8 @@ NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH=/home/nwm/locks/river-identity-backfill
 ```
 
 **Mask the compression timer for the whole enforce window.** This is not
-advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=4`; a tick
+advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=2` (`=4`
+when #1339 ran); a tick
 landing mid-backfill compresses a chunk that still holds NULL rows, and the
 only way to reach those rows again is decompressing 200+ GB.
 

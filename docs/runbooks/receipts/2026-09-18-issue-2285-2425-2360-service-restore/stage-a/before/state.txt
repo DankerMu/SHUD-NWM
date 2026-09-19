@@ -1,0 +1,14 @@
+Result=exit-code
+ExecMainStatus=1
+Id=nhms-node27-raw-retention.service
+ActiveState=failed
+
+Result=exit-code
+ExecMainStatus=124
+Id=nhms-node27-timeseries-compression.service
+ActiveState=failed
+
+Result=exit-code
+ExecMainStatus=1
+Id=nhms-node27-timeseries-retention.service
+ActiveState=failed

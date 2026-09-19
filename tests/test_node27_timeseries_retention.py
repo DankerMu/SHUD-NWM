@@ -3459,6 +3459,33 @@ def test_alert_wrapper_mails_the_failed_unit_name(tmp_path: Path) -> None:
     assert f"argv=--user -u {unit} -n 30 --no-pager" in message
 
 
+@pytest.mark.parametrize(
+    ("scope", "expected_argv"),
+    [
+        pytest.param("system", "-u {unit} -n 30 --no-pager", id="system"),
+        pytest.param(None, "--user -u {unit} -n 30 --no-pager", id="unset"),
+        pytest.param("", "--user -u {unit} -n 30 --no-pager", id="empty"),
+        pytest.param("user", "--user -u {unit} -n 30 --no-pager", id="user"),
+        pytest.param("System", "--user -u {unit} -n 30 --no-pager", id="not-exactly-system"),
+    ],
+)
+def test_alert_wrapper_journal_scope_switch(tmp_path: Path, scope: str | None, expected_argv: str) -> None:
+    """#2360: only ``NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system`` reads the system
+    journal (the system alert template for the canonical-retention system
+    unit); every other value keeps today's ``--user`` read (MP5).
+    """
+    capture = _write_fake_sendmail(tmp_path)
+    unit = "nhms-node27-canonical-retention.service"
+
+    result = _run_alert_wrapper(unit, _alert_env(tmp_path, NHMS_UNIT_FAILURE_JOURNAL_SCOPE=scope))
+
+    assert result.returncode == 0, result.stderr
+    message = capture.read_text(encoding="utf-8")
+    journal_lines = [line for line in message.splitlines() if line.startswith(_FAKE_JOURNAL_SENTINEL)]
+    assert journal_lines == [f"{_FAKE_JOURNAL_SENTINEL} argv={expected_argv.format(unit=unit)}"]
+    assert f"SENT unit={unit}" in result.stderr
+
+
 def test_alert_wrapper_exits_zero_when_no_recipient_is_configured(tmp_path: Path) -> None:
     """T8 (b): an unconfigured recipient must not add a SECOND failed unit on
     top of the failure being reported.

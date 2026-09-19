@@ -251,7 +251,31 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     "infra/systemd/nhms-node27-autopipe.service": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
     "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-frontier-alert.service": frozenset({"tests/test_node27_frontier_stall_alert.py"}),
-    "infra/systemd/nhms-node27-raw-retention.service": frozenset({"tests/test_node27_raw_retention.py"}),
+    "infra/systemd/nhms-node27-raw-retention.service": frozenset(
+        {
+            "tests/test_node27_raw_retention.py",
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        }
+    ),
+    # #2360: the nwm raw-retention timer and the user alert template are
+    # compared line-for-line with their system-unit twins.
+    "infra/systemd/nhms-node27-raw-retention.timer": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/nhms-node27-unit-failure-alert@.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    # #2360: node-27 SYSTEM units live under `infra/systemd/system/`, outside
+    # the `#2173` glob, so they owe no sibling lane pin.
+    "infra/systemd/system/nhms-node27-canonical-retention.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/system/nhms-node27-canonical-retention.timer": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
+    "infra/systemd/system/nhms-node27-system-unit-failure-alert@.service": frozenset(
+        {"tests/test_node27_raw_retention_canonical_deployment.py"}
+    ),
     "infra/systemd/nhms-node27-timeseries-compression-replay.service": frozenset(
         {
             "tests/test_node27_timeseries_compression.py",
@@ -18236,3 +18260,31 @@ def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
     assert "tests/test_node27_pgdata_workload_io.py" in selected
     assert set(CORE_SMOKE_TESTS) <= selected
 
+
+
+@pytest.mark.parametrize(
+    ("path", "owners"),
+    [
+        (
+            "scripts/node27_unit_failure_alert_once.sh",
+            {
+                "tests/test_node27_timeseries_retention.py",
+                "tests/test_node27_working_set.py",
+                "tests/test_node27_raw_retention_canonical_deployment.py",
+            },
+        ),
+        (
+            "scripts/node27_canonical_retention_install.sh",
+            {"tests/test_node27_raw_retention_canonical_deployment.py"},
+        ),
+    ],
+)
+def test_node27_raw_retention_split_scripts_select_their_readers(path: str, owners: set[str]) -> None:
+    """#2360 — both shell scripts used to fall to core smoke only (no row named
+    them), so a handler- or installer-only diff ran none of the suites that
+    drive them.
+    """
+    selected = set(select_tests([path], repo_root=Path(".")))
+
+    assert owners <= selected, f"{path} lost reader suite(s): {sorted(owners - selected)}"
+    assert not set(CORE_SMOKE_TESTS) & selected, f"{path} still degrades to core smoke"

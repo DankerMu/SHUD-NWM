@@ -9,6 +9,7 @@ import hashlib
 import inspect
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -559,8 +560,141 @@ def test_classify_respects_per_tick_bound() -> None:
     assert len(selected) == 3
     assert len(deferred) == 5
     assert skipped == []
-    # Ordering: selected must be a strict prefix of deferred keyed by input order.
-    assert [c.chunk_name for c in selected + deferred] == [c.chunk_name for c in chunks]
+    # Ordering (#2425): one hypertable, walked newest range_end first; the
+    # input is oldest-first (c00 oldest), so selected + deferred is its reverse.
+    assert [c.chunk_name for c in selected] == ["c07", "c06", "c05"]
+    assert [c.chunk_name for c in selected + deferred] == [c.chunk_name for c in reversed(chunks)]
+
+
+# #2425: compression and DB retention derive their cutoffs from ONE display
+# watermark W: compression lag 2 d, retention window 21 d. Both values are the
+# production ones, spelled out here instead of read from either runner.
+_RETENTION_WINDOW = timedelta(days=21)
+_LAG_SECONDS = 2 * 86400
+
+
+def _day_chunk(schema_name: str, hyper: str, label: str, *, range_end: datetime) -> compression.ChunkRow:
+    return compression.ChunkRow(
+        hypertable_schema=schema_name,
+        hypertable_name=hyper,
+        chunk_schema="_timescaledb_internal",
+        chunk_name=label,
+        range_start=range_end - timedelta(days=1),
+        range_end=range_end,
+        is_compressed=False,
+    )
+
+
+def _river_backlog(watermark: datetime) -> list[compression.ChunkRow]:
+    """Day chunks ending W-25d .. W-3d, catalog order (range_end ASC).
+
+    Five of them (W-25d .. W-21d) are inside the retention drop set
+    `range_end <= W - 21 d`; the rest are younger, so at least `bound` eligible
+    chunks survive retention -- the spec's overlap precondition.
+    """
+    return [
+        _day_chunk("hydro", "river_timeseries", f"river-d{age:02d}", range_end=watermark - timedelta(days=age))
+        for age in range(25, 2, -1)
+    ]
+
+
+def test_classify_selection_is_disjoint_from_the_retention_drop_set() -> None:
+    """Spec scenario "compression's oldest end overlaps retention's drop set"."""
+    chunks = _river_backlog(_NOW)
+    retention_cutoff = _NOW - _RETENTION_WINDOW
+    retention_drop_set = {c.chunk_name for c in chunks if c.range_end <= retention_cutoff}
+    assert len(retention_drop_set) == 5, "fixture must straddle the retention cutoff"
+
+    selected, deferred, skipped = compression._classify(
+        chunks, now_utc=_NOW, lag_seconds=_LAG_SECONDS, per_tick_bound=2
+    )
+
+    assert [c.chunk_name for c in selected] == ["river-d03", "river-d04"]
+    assert all(c.range_end > retention_cutoff for c in selected)
+    assert {c.chunk_name for c in selected}.isdisjoint(retention_drop_set)
+    # The drop set is what is left at the far end of the deferred sequence.
+    assert [c.chunk_name for c in deferred[-5:]] == [
+        "river-d21",
+        "river-d22",
+        "river-d23",
+        "river-d24",
+        "river-d25",
+    ]
+    assert skipped == []
+
+
+def test_classify_keeps_table_order_across_hypertables() -> None:
+    """Spec scenario "table order is preserved across hypertables"."""
+    river = _river_backlog(_NOW)
+    legacy = [
+        _day_chunk("hydro", "river_timeseries_legacy", "legacy-old", range_end=_NOW - timedelta(days=40)),
+        _day_chunk("hydro", "river_timeseries_legacy", "legacy-new", range_end=_NOW - timedelta(days=30)),
+    ]
+    forcing = [_day_chunk("met", "forcing_station_timeseries", "forcing", range_end=_NOW - timedelta(days=9))]
+
+    selected, deferred, _skipped = compression._classify(
+        river + legacy + forcing, now_utc=_NOW, lag_seconds=_LAG_SECONDS, per_tick_bound=2
+    )
+
+    assert {(c.hypertable_schema, c.hypertable_name) for c in selected} == {("hydro", "river_timeseries")}
+    assert [c.chunk_name for c in selected] == ["river-d03", "river-d04"]
+    # Deferred: rest of the river table newest-first, then legacy newest-first,
+    # then met -- the table order of the input, never interleaved.
+    assert [c.chunk_name for c in deferred][-3:] == ["legacy-new", "legacy-old", "forcing"]
+    assert [c.chunk_name for c in deferred][:-3] == [f"river-d{age:02d}" for age in range(5, 26)]
+
+
+def test_classify_moves_a_free_slot_to_the_next_hypertable_newest_first() -> None:
+    """Spec scenario "a free slot moves to the next hypertable"."""
+    chunks = [
+        _day_chunk("hydro", "river_timeseries", "river-only", range_end=_NOW - timedelta(days=3)),
+        _day_chunk("hydro", "river_timeseries", "river-inside-lag", range_end=_NOW - timedelta(days=1)),
+        _day_chunk("hydro", "river_timeseries_legacy", "legacy-old", range_end=_NOW - timedelta(days=40)),
+        _day_chunk("hydro", "river_timeseries_legacy", "legacy-new", range_end=_NOW - timedelta(days=30)),
+        _day_chunk("met", "forcing_station_timeseries", "forcing", range_end=_NOW - timedelta(days=9)),
+    ]
+
+    selected, deferred, skipped = compression._classify(
+        chunks, now_utc=_NOW, lag_seconds=_LAG_SECONDS, per_tick_bound=2
+    )
+
+    assert [c.chunk_name for c in selected] == ["river-only", "legacy-new"]
+    assert [c.chunk_name for c in deferred] == ["legacy-old", "forcing"]
+    assert [c.chunk_name for c in skipped] == ["river-inside-lag"]
+
+
+def test_classify_order_is_deterministic_for_a_shuffled_catalog() -> None:
+    """The within-table order is a sort on range_end, not a reversal of input.
+
+    Table order follows first appearance, so each shuffle is regrouped by
+    table first; within that, any permutation must yield the same sequence.
+    """
+    river = _river_backlog(_NOW)
+    forcing = [
+        _day_chunk("met", "forcing_station_timeseries", f"forcing-d{age:02d}", range_end=_NOW - timedelta(days=age))
+        for age in (20, 13, 6)
+    ]
+    inside_lag = [
+        _day_chunk("hydro", "river_timeseries", "lag-a", range_end=_NOW - timedelta(days=1)),
+        _day_chunk("met", "forcing_station_timeseries", "lag-b", range_end=_NOW),
+    ]
+    expected_selected = ["river-d03", "river-d04"]
+    expected_deferred = [f"river-d{age:02d}" for age in range(5, 26)] + ["forcing-d06", "forcing-d13", "forcing-d20"]
+
+    rng = random.Random(2425)
+    for _ in range(20):
+        shuffled_river = list(river)
+        shuffled_forcing = list(forcing)
+        rng.shuffle(shuffled_river)
+        rng.shuffle(shuffled_forcing)
+        catalog = shuffled_river + inside_lag + shuffled_forcing
+        selected, deferred, skipped = compression._classify(
+            catalog, now_utc=_NOW, lag_seconds=_LAG_SECONDS, per_tick_bound=2
+        )
+        assert [c.chunk_name for c in selected] == expected_selected
+        assert [c.chunk_name for c in deferred] == expected_deferred
+        # Inside-lag chunks keep input order.
+        assert [c.chunk_name for c in skipped] == ["lag-a", "lag-b"]
 
 
 def test_main_uses_display_watermark_as_compression_reference(
@@ -1657,8 +1791,8 @@ def test_raising_the_compress_timeout_without_dropping_the_bound_fails_closed(
     [
         # Raised ceiling with the catch-up bound: the sanctioned combination.
         (_DEFAULT_BUDGET["compress_timeout_ms"] + 1, 3_901, 3_942, "1"),
-        # Default ceiling with the #1237 capacity bound: the normal régime.
-        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 3_941, "4"),
+        # Default ceiling with the #2425 capacity bound: the normal régime.
+        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 3_941, "2"),
         # Below the default with a high bound: leg 3 only guards raising.
         (1_800_000, 3_900, 3_941, "4"),
     ],
@@ -1689,7 +1823,7 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
     ``_DEFAULT_COMPRESS_TIMEOUT_MS`` is the threshold AND has been retuned once
     (#1352). A future lowering would keep every constant-based assertion green
     while the template's literal timeout became a "raised" one and node-27's
-    ``PER_TICK_BOUND=4`` tick started failing closed. The template is the
+    ``PER_TICK_BOUND=2`` tick started failing closed. The template is the
     deployment source, so pin the template's own numbers.
     """
 
@@ -1714,7 +1848,7 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
     assert config.compress_timeout_ms == int(override["NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS"])
     assert config.per_tick_bound == int(override["NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"])
     assert config.lag_seconds == 172800
-    assert config.per_tick_bound == 4
+    assert config.per_tick_bound == 2
     assert "one chunk width" not in text
 
 
@@ -1924,7 +2058,7 @@ def test_compression_cannot_shrink_service_to_wrapper_plus_margin(tmp_path: Path
 
 
 def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:
-    """#1237: the per-tick bound is a decided capacity target, not a default.
+    """#1237 / #2425: the per-tick bound is a decided capacity target, not a default.
 
     The substring pins above cannot see this line — the only other
     `PER_TICK_BOUND=` occurrence in the template is the commented catch-up
@@ -1934,7 +2068,7 @@ def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:
     exports). Derivation: runbook §4 "Per-tick capacity".
     """
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
-    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["4"]
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["2"]
 
 
 def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:

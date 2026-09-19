@@ -3523,7 +3523,53 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # bootstrap and the lane pin cannot see it). Pin suite comes from the
         # glob row by accumulation, not repeated here.
         "infra/systemd/nhms-node27-raw-retention.service",
-        ("tests/test_node27_raw_retention.py",),
+        (
+            "tests/test_node27_raw_retention.py",
+            # #2360: asserts this unit's `OnFailure=` line.
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        ),
+    ),
+    PathTestRule(
+        # #2360: the canonical system unit's timer must tick with this one (one
+        # cutoff date for a mirror and its PNGs); the deployment suite compares
+        # the two `OnCalendar=` lines. No other suite reads this timer.
+        "infra/systemd/nhms-node27-raw-retention.timer",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: the system alert template must run the SAME handler; the
+        # deployment suite compares its `ExecStart=` with this template's. The
+        # retention suite (its other reader) arrives from the `#2173` glob row.
+        "infra/systemd/nhms-node27-unit-failure-alert@.service",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: node-27 SYSTEM units (canonical retention + its timer + the
+        # system alert template). Outside the `#2173` glob on purpose: they are
+        # not nwm user units and carry no `systemd.err` lane. The deployment
+        # suite reads every file here and pins the directory's exact file set,
+        # so the row is a directory glob, not per-file.
+        "infra/systemd/system/*",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: root installer for the canonical system unit. `scripts/**.sh`
+        # only arms core smoke; the deployment suite drives its refusal path and
+        # its env rendering.
+        "scripts/node27_canonical_retention_install.sh",
+        ("tests/test_node27_raw_retention_canonical_deployment.py",),
+    ),
+    PathTestRule(
+        # #2360: the unit-failure alert handler (user + system journal scope).
+        # Before this row a handler-only diff fell to core smoke: its real
+        # readers are the retention suite's alert-wrapper rows (incl. the
+        # journal-scope switch) and the working-set suite's governance run.
+        "scripts/node27_unit_failure_alert_once.sh",
+        (
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_node27_working_set.py",
+            "tests/test_node27_raw_retention_canonical_deployment.py",
+        ),
     ),
     PathTestRule(
         # #2180: two suites read this unit by path.

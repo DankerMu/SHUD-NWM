@@ -1,5 +1,12 @@
 [Unit]
 Description=NHMS node-27 retention: raw source data, canonical precipitation mirror and its PNG cache
+# #2360: every raw-retention failure must reach an operator (same template as
+# nhms-node27-timeseries-retention.service; `%n` is the FULL unit name, so the
+# handler's $1 carries the `.service` suffix). On node-27 this nwm user unit
+# runs NODE27_RAW_RETENTION_LANES=raw,precip-cache; the canonical lane runs in
+# the system unit infra/systemd/system/nhms-node27-canonical-retention.service
+# as the copyback root's owner, which alerts through its own system template.
+OnFailure=nhms-node27-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

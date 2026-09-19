@@ -1,0 +1,10 @@
+[Unit]
+Description=NHMS node-27 raw source-data retention
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+ExecStart=/home/nwm/NWM/scripts/node27_raw_retention_once.sh
+StandardOutput=append:/home/nwm/node27-raw-retention-logs/systemd.log
+StandardError=append:/home/nwm/node27-raw-retention-logs/systemd.err
+TimeoutStartSec=0

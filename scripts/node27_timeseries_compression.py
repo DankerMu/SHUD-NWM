@@ -93,9 +93,10 @@ HYPERTABLES = CANONICAL_HYPERTABLES
 # ``chunk_compression_stats`` puts steady-state weekly chunks of
 # ``hydro.river_timeseries`` at 268-409 GB — every one of them needs
 # 1600-2450 s. The old 840 s per-chunk ceiling could not compress a single
-# steady-state chunk, and because selection is oldest-first that chunk is
-# re-selected and burns every subsequent tick. 3600000 ms covers 600 GB at the
-# measured rate, ~1.5x the largest chunk observed to date.
+# steady-state chunk, and because selection was then oldest-first that chunk
+# was re-selected and burned every subsequent tick (selection is newest-first
+# within a hypertable since #2425, see ``_classify``). 3600000 ms covers
+# 600 GB at the measured rate, ~1.5x the largest chunk observed to date.
 #
 # ``config_from_args`` enforces the chain over whatever the operator
 # configures, before any database connection is opened:
@@ -408,6 +409,8 @@ def acquire_lock(path: Path) -> int | None:
 # Deliberately catalog-only; MUST NOT reference the detail hypertables.
 # Filter for the two D3 hypertables. Ordering keeps the receipt deterministic
 # and the (selected, deferred) partition stable across ties.
+# ``range_end ASC`` is only the catalog order; ``_classify`` re-sorts each
+# hypertable newest-first (#2425) and keeps this table order.
 # is_compressed = false is an explicit stale-state guard so re-running the
 # runner over an already-compressed chunk is a no-op (see design "Workflow
 # Fixture: Issue #851" boundary-surface checklist).
@@ -670,19 +673,36 @@ def _classify(
     lag_seconds: int,
     per_tick_bound: int,
 ) -> tuple[list[ChunkRow], list[ChunkRow], list[ChunkRow]]:
-    """Partition chunks into (selected, deferred, skipped_inside_lag)."""
+    """Partition chunks into (selected, deferred, skipped_inside_lag).
+
+    #2425: eligible chunks are walked hypertable by hypertable in input
+    (catalog) order and, WITHIN one hypertable, newest ``range_end`` first.
+    The DB retention lane drops ``range_end <= W - 21 d`` on the same display
+    watermark W, so its drop set is always the oldest prefix of this lane's
+    eligible set; oldest-first compressed exactly the chunks retention removed
+    the same day. The table order is kept (not a global ``range_end DESC``) so
+    the legacy table's 7-day giant chunks never outrank the narrow day chunks.
+    A stable sort, not a reversal: an injected fetch does not promise the
+    query's ``range_end ASC`` order. Deferred follows the same sequence;
+    skipped (inside the lag) keeps input order.
+    """
     lag = timedelta(seconds=lag_seconds)
     cutoff = now_utc - lag
-    eligible: list[ChunkRow] = []
+    eligible_by_table: dict[tuple[str, str], list[ChunkRow]] = {}
     skipped: list[ChunkRow] = []
     for chunk in all_chunks:
         if chunk.is_compressed:
             # Query filter should exclude these, but keep the safety net.
             continue
         if chunk.range_end < cutoff:
-            eligible.append(chunk)
+            eligible_by_table.setdefault((chunk.hypertable_schema, chunk.hypertable_name), []).append(chunk)
         else:
             skipped.append(chunk)
+    eligible = [
+        chunk
+        for table_chunks in eligible_by_table.values()
+        for chunk in sorted(table_chunks, key=lambda row: row.range_end, reverse=True)
+    ]
     selected = eligible[:per_tick_bound]
     deferred = eligible[per_tick_bound:]
     return selected, deferred, skipped
