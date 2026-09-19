@@ -392,7 +392,7 @@ def test_importer_real_postgres_update_stale_conflict_enrichment_and_rollback(
     _seed_object_store(
         object_root,
         _sidecar(
-            jobs=[_forecast_job(updated_at=NEWER_UPDATED_AT, status="running", log_uri=log_uri), conflicting],
+            jobs=[_forecast_job(updated_at="2026-05-03T00:55:00Z", status="running", log_uri=log_uri), conflicting],
             source_version=int(datetime(2026, 5, 3, 0, 55, tzinfo=UTC).timestamp()),
         ),
     )
