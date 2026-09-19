@@ -202,8 +202,8 @@ unit or env change.
 At the operator's request, 16 leftover transient `nwm` user units were
 unloaded at 01:28Z: 12 `failed` one-offs (`reset-failed`) and 4
 `active (exited)` one-offs with no `ExecStop` and no process (`stop`), plus
-one orphan runtime drop-in. These were one-offs from issues #1987, #2349,
-#2370, #2373, #2374 and #2382, plus reslice and pgdata-prepare runs, all ended
+one orphan runtime drop-in. These were one-offs from issues
+1987/2349/2370/2373/2374/2382, plus reslice and pgdata-prepare runs, all ended
 2026-09-10 → 09-15. The `systemctl cat`/`show` snapshots stay on node-27
 under `/home/nwm/tmp/svc-restore/unit-cleanup/`; they are not copied here
 because `show` output carries unit environments. `nhms-node27-resource-governance.service`
