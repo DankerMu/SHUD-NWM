@@ -288,6 +288,22 @@ def test_the_snapshot_covers_the_eight_byte_identical_readers() -> None:
     assert "forecast_store.station_series_rows" not in FROZEN
 
 
+#: The line the task 7.3 projection is inserted AFTER in the candidate_runs CTE,
+#: and the six lines inserted. Both verbatim from
+#: ``packages/common/forecast_store.py:716-722``, indentation included, so the
+#: pin below stays a sequence equality on the WHOLE statement rather than a
+#: membership test that cannot see a line moved or duplicated.
+_LATEST_PRODUCT_STORE_ANCHOR = "                    fv.forcing_version_id AS fv_forcing_version_id,\n"
+_LATEST_PRODUCT_STORE_PROJECTION = (
+    "                    -- #1991 (task 7.3): the candidate's forcing store. This CTE\n"
+    "                    -- already LEFT JOINs met.forcing_version, so routing the\n"
+    "                    -- fallback's station leg costs no round trip and no extra\n"
+    "                    -- join -- the header statement projects it and the heavy\n"
+    "                    -- statement renders the matching variant.\n"
+    "                    fv.timeseries_store AS forcing_timeseries_store,\n"
+)
+
+
 def _renamed_to_legacy(frozen_sql: str) -> str:
     """The pre-wiring text with the fact table under the name 000061 left it.
 
@@ -380,25 +396,25 @@ def test_latest_product_fallback_follows_the_candidate_store(store: str) -> None
     """
     heavy_sql = _executed_latest_product(store)
     if store == FORCING_STORE_LEGACY:
-        # Not whole-statement equality any more, and the reason is declared: the
-        # candidate_runs CTE this statement embeds gained ONE projection,
+        # WHOLE-STATEMENT equality, kept: this is the longest composed statement
+        # on the read path and the no-regression claim for reader #2 rests
+        # entirely on it. The one declared delta -- the candidate_runs CTE gained
         # `fv.timeseries_store AS forcing_timeseries_store`, which is how the
-        # header learns which variant to ask for. Asserted as a line-level DELTA
-        # rather than by narrowing the pin to the station leg, so the statement is
-        # still checked end to end -- a dropped predicate anywhere in it shows up
-        # as a removed line.
+        # header learns which variant to ask for -- is expressed by APPLYING it
+        # to the snapshot and comparing SEQUENCES, not by comparing line
+        # membership. Membership is insensitive to order and to multiplicity, so
+        # a predicate moved between CTEs, or a line duplicated or lost where the
+        # same text occurs twice, would pass it; sequence equality sees all
+        # three. The delta is a single contiguous insert
+        # (`packages/common/forecast_store.py:717-722`), which is what makes the
+        # strong form available at all.
         frozen = _renamed_to_legacy(FROZEN["forecast_store.latest_product_statement"])
-        added = [line.strip() for line in heavy_sql.splitlines() if line not in frozen.splitlines()]
-        removed = [line.strip() for line in frozen.splitlines() if line not in heavy_sql.splitlines()]
-        assert removed == [], removed
-        assert added == [
-            "-- #1991 (task 7.3): the candidate's forcing store. This CTE",
-            "-- already LEFT JOINs met.forcing_version, so routing the",
-            "-- fallback's station leg costs no round trip and no extra",
-            "-- join -- the header statement projects it and the heavy",
-            "-- statement renders the matching variant.",
-            "fv.timeseries_store AS forcing_timeseries_store,",
-        ], added
+        assert frozen.count(_LATEST_PRODUCT_STORE_ANCHOR) == 1, "the insertion point must be unambiguous"
+        assert heavy_sql == frozen.replace(
+            _LATEST_PRODUCT_STORE_ANCHOR,
+            _LATEST_PRODUCT_STORE_ANCHOR + _LATEST_PRODUCT_STORE_PROJECTION,
+            1,
+        )
         assert "fst.forcing_version_key" not in heavy_sql
         return
     assert FORCING_TABLE_LEGACY not in heavy_sql
@@ -438,16 +454,55 @@ def test_the_smoke_reset_deletes_from_both_stores_under_their_own_keys() -> None
     it touched. A single ``DELETE`` would leave the other table's rows behind and
     report a count for a table it never opened; both tables hold live rows until
     task 8.2 drops the legacy one.
+
+    The (store, physical_table) PAIRING is pinned on the loop's own literals,
+    which is the successor of the single call site's ``args[2]`` pin this split
+    replaced. ``_delete_rendered`` takes the table name only for the receipt, so
+    swapping the loop's tuple to ``(FORCING_STORE_LEGACY, FORCING_TABLE)`` would
+    still delete the right rows and file the count against a relation it never
+    opened -- precisely what this test's name claims to prevent, and something
+    the rendered statements below cannot see because they are driven per store
+    rather than through the loop.
     """
     source = (REPO_ROOT / "scripts/reset_qhh_smoke_db.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
     calls = [
         node
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_delete_rendered"
     ]
     assert len(calls) == 1, "the split is a loop over the two stores, so there is one call site"
+
+    loops = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.For) and calls[0] in set(ast.walk(node))
+    ]
+    assert len(loops) == 1, "the one call site must sit inside exactly one loop"
+    loop = loops[0]
+    assert isinstance(loop.iter, ast.Tuple)
+    assert [
+        (pair.elts[0].id, pair.elts[1].id)
+        for pair in loop.iter.elts
+        if isinstance(pair, ast.Tuple)
+        and isinstance(pair.elts[0], ast.Name)
+        and isinstance(pair.elts[1], ast.Name)
+    ] == [
+        ("FORCING_STORE_LEGACY", "FORCING_TABLE_LEGACY"),
+        ("FORCING_STORE_NARROW", "FORCING_TABLE"),
+    ]
+    # ...and the call site really consumes those two loop variables: the receipt
+    # relation is the loop's table and the rendered variant is the loop's store.
+    assert isinstance(loop.target, ast.Tuple)
+    store_name, table_name = (element.id for element in loop.target.elts)
+    assert isinstance(calls[0].args[2], ast.Name) and calls[0].args[2].id == table_name
+    rendered = calls[0].args[3]  # `render_forcing_ts_sql(...).sql`
+    assert isinstance(rendered, ast.Attribute) and rendered.attr == "sql"
+    render_call = rendered.value
+    assert isinstance(render_call, ast.Call) and render_call.func.id == "render_forcing_ts_sql"
+    assert isinstance(render_call.args[1], ast.Name) and render_call.args[1].id == store_name
 
     legacy_statement, _ = _executed_forcing_delete(FORCING_STORE_LEGACY)
     narrow_statement, _ = _executed_forcing_delete(FORCING_STORE_NARROW)

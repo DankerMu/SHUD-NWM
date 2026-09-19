@@ -117,7 +117,7 @@ FORCING_NARROW_INSERT_TEMPLATE = (
 # into a production type would weld them in permanently: an enum value can be
 # added later but not removed.
 #
-# Kept in the same order as `workers/forcing_producer/producer.py:81`, which is
+# Kept in the same order as `workers/forcing_producer/producer.py:87`, which is
 # where the vocabulary comes from.
 FORCING_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 RIVER_VARIABLES = ("q_down", "y_stage")
@@ -290,7 +290,7 @@ def forcing_unit(variable: str) -> str:
     """The production unit of ``variable`` (#1991 R1).
 
     Byte-identical to ``workers/forcing_producer/producer.py``'s ``OUTPUT_UNITS``
-    (:82-89), and it has to stay that way: `met.forcing_unit` admits exactly
+    (:88-95), and it has to stay that way: `met.forcing_unit` admits exactly
     these six values, and the I10 receipt measured `variable` and `unit` in
     strict 1:1 across every live row.
     """

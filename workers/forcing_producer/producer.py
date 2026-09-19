@@ -14,7 +14,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AbstractSet, Any, Protocol
 
-from packages.common.forcing_store_routing import LegacyForcingStoreRefusedError
+from packages.common.forcing_store_routing import (
+    FORCING_STORE_LEGACY,
+    LegacyForcingStoreRefusedError,
+    forcing_version_store,
+    legacy_store_refusal_message,
+)
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     verify_download_bbox_matches_registry,
@@ -518,6 +523,7 @@ class ForcingProducer:
                 cycle_time=parsed_cycle_time,
                 model_id=model_id,
             )
+            self._refuse_legacy_routed_forcing_version(existing)
 
             model_identity = self._resolve_model_identity(model_id=model_id)
             self._validate_scheduler_identity(
@@ -842,6 +848,13 @@ class ForcingProducer:
         except LegacyForcingStoreRefusedError:
             # #1991 R2, and it MUST stay above the generic arm below — otherwise
             # this is wrapped/marked and the branch becomes dead code.
+            #
+            # Raised by `_refuse_legacy_routed_forcing_version`, the FIRST thing
+            # this try block does after reading the version, so by the time it
+            # lands here nothing has been written. The writer's own guard raises
+            # the same class and is kept as defence in depth, but it cannot be
+            # the primary gate: everything `_write_outputs_and_records` does
+            # before calling it is already committed.
             #
             # NO TERMINAL-STATE REWRITE. A routing refusal means "this forcing
             # version's rows live in the legacy store", not "this cycle failed".
@@ -2163,6 +2176,45 @@ class ForcingProducer:
                 "csv_debug": csv_uri,
                 "package_manifest": package_manifest_uri,
             },
+        )
+
+    def _refuse_legacy_routed_forcing_version(self, existing: Mapping[str, Any] | None) -> None:
+        """Refuse a legacy-routed version BEFORE the first write of any kind (#1991, M2/M3).
+
+        ``replace_forcing_timeseries`` already refuses, but by the time it runs
+        the damage is done: ``_write_outputs_and_records`` has upserted
+        ``met.forcing_version`` with ``checksum=None`` and overwritten the
+        object-store bytes, each in its own committed statement, and the checksum
+        is only restored by ``finalize_forcing_version`` — which the refusal
+        prevents from ever running. The version's rows survive intact in
+        ``met.forcing_station_timeseries_legacy`` while every reader answers HTTP
+        409 ``FORCING_VERSION_NOT_FINALIZED`` on the empty checksum, for ever.
+        That is the darkening must-preserve M2 forbids, and it is unreachable
+        from inside the writer: the only place that can prevent it is here,
+        ahead of ``_existing_forcing_version_is_current`` and therefore ahead of
+        every write on both the direct-grid and the IDW branch.
+
+        It also has to be here rather than relying on "the version looks
+        current": after 000061 the children probe reads the NARROW table, which
+        holds no row for a legacy version, so the freshness check is False and
+        the full regeneration path would run on EVERY attempt.
+
+        The store is read off the row ``get_forcing_version`` already returned —
+        that statement is ``SELECT *``, so 000061's ``NOT NULL`` routing column
+        rides along and this costs no extra round trip. The
+        :func:`forcing_version_store` fallback to ``narrow`` therefore only ever
+        applies to a mapping some test built by hand.
+
+        The in-writer guard stays: this is defence in depth, not a replacement.
+        A caller reaching ``replace_forcing_timeseries`` by another route still
+        gets refused before its DELETE.
+        """
+        if not existing:
+            return
+        if forcing_version_store(existing) != FORCING_STORE_LEGACY:
+            return
+        raise LegacyForcingStoreRefusedError(
+            legacy_store_refusal_message(str(existing.get("forcing_version_id") or ""))
         )
 
     def _existing_forcing_version_is_current(

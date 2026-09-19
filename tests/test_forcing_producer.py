@@ -15,6 +15,12 @@ from typing import Any
 import pytest
 
 from packages.common.forcing_domain_handoff import parse_forcing_domain_handoff_path
+from packages.common.forcing_store_routing import (
+    FORCING_STORE_LEGACY,
+    FORCING_STORE_NARROW,
+    LegacyForcingStoreRefusedError,
+    legacy_store_refusal_message,
+)
 from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.shud_forcing_contract import (
@@ -94,6 +100,13 @@ class FakeForcingRepository:
         self.direct_grid_station_ensure_calls: list[dict[str, Any]] = []
         self.direct_grid_station_ensure_count = 0
         self.forcing_versions: dict[str, dict[str, Any]] = {}
+        #: Versions ``met.forcing_version.timeseries_store`` routes to ``legacy``
+        #: (#1991). Held BESIDE the version records rather than inside them on
+        #: purpose: ``upsert_forcing_version`` replaces its record wholesale, and
+        #: 000061's routing column is not in that statement's column list either,
+        #: so a flag stored in the record would be cleared by the very write this
+        #: mirrors — and the fake would then stop modelling the database.
+        self.legacy_routed: set[str] = set()
         self.components: list[ForcingComponent] = []
         self.timeseries: list[ForcingTimeseriesRow] = []
         self.cycle_updates: list[dict[str, Any]] = []
@@ -311,7 +324,20 @@ class FakeForcingRepository:
                 and record["cycle_time"] == cycle_time
                 and record["model_id"] == model_id
             ):
-                return dict(record)
+                # `PsycopgForcingRepository.get_forcing_version` is `SELECT *`, so
+                # 000061's `NOT NULL` routing column always rides along. Projected
+                # from `legacy_routed` rather than read out of the record because
+                # `upsert_forcing_version`'s column list does not include it —
+                # in the database the upsert leaves the column alone, and the
+                # record-replacing fake has to reproduce that, not lose it.
+                return {
+                    **record,
+                    "timeseries_store": (
+                        FORCING_STORE_LEGACY
+                        if record["forcing_version_id"] in self.legacy_routed
+                        else FORCING_STORE_NARROW
+                    ),
+                }
         return None
 
     def upsert_forcing_version(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -370,10 +396,15 @@ class FakeForcingRepository:
             )
             for component in components
         )
+        # NARROW-ONLY since #1991: `PsycopgForcingRepository` verifies children
+        # against `met.forcing_station_timeseries`, which after 000061 holds no
+        # row for a legacy-routed version. Mirrored here, because it is what makes
+        # the producer re-enter the full regeneration path for such a version on
+        # EVERY attempt instead of short-circuiting on "already current".
         rows = [
             row
             for row in self.timeseries
-            if row.forcing_version_id == forcing_version_id
+            if row.forcing_version_id == forcing_version_id and forcing_version_id not in self.legacy_routed
         ]
         timeseries_tuples = Counter(
             (row.station_id, row.valid_time, row.variable)
@@ -430,6 +461,12 @@ class FakeForcingRepository:
         forcing_version_id: str,
         rows: list[ForcingTimeseriesRow] | tuple[ForcingTimeseriesRow, ...],
     ) -> None:
+        # `PsycopgForcingRepository.replace_forcing_timeseries`'s `_guard` reads
+        # `met.forcing_version.timeseries_store` as its first statement and
+        # refuses a legacy-routed version before the DELETE (#1991, M3). Mirrored
+        # so this fake cannot make a write look possible that production refuses.
+        if forcing_version_id in self.legacy_routed:
+            raise LegacyForcingStoreRefusedError(legacy_store_refusal_message(forcing_version_id))
         if self.fail_next_timeseries_replace:
             self.fail_next_timeseries_replace = False
             raise RuntimeError("timeseries write failed")
@@ -483,6 +520,23 @@ class FailingWriteObjectStore(LocalObjectStore):
     def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
         if str(key_or_uri).endswith(self.fail_key_suffix):
             raise RuntimeError("object write failed")
+        return super().write_bytes_atomic(key_or_uri, content)
+
+
+class RecordingObjectStore(LocalObjectStore):
+    """A real local store that also remembers which keys were WRITTEN.
+
+    Checking the filesystem cannot answer "did this run write?" once an earlier
+    run has already put the same bytes at the same key — an overwrite is
+    invisible there and visible here.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        object.__setattr__(self, "written_keys", [])
+
+    def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
+        self.written_keys.append(str(key_or_uri))
         return super().write_bytes_atomic(key_or_uri, content)
 
 
@@ -2440,6 +2494,58 @@ def test_failed_child_write_leaves_forcing_version_incomplete_and_retry_finalize
     assert result.forcing_version_id == forcing_version_id
     assert repository.forcing_versions[forcing_version_id]["checksum"] == result.checksum
     assert repository.upsert_count == 2
+
+
+def test_legacy_routed_version_is_refused_before_its_parent_row_is_darkened(tmp_path: Path) -> None:
+    """#1991 M2/M3: the routing refusal must fire before the FIRST write, not inside the last one.
+
+    ``_write_outputs_and_records`` upserts ``met.forcing_version`` with
+    ``checksum=None`` (``producer.py:2148,2155``), then writes the object-store
+    bytes, then replaces the children, and only ``finalize_forcing_version`` —
+    the LAST call — restores the checksum. Every one of those repository calls
+    self-commits. So a refusal raised inside ``replace_forcing_timeseries``
+    leaves a COMMITTED NULL checksum on a version whose rows are perfectly intact
+    in ``met.forcing_station_timeseries_legacy``, and
+    ``packages/common/forecast_store.py:3329-3340`` answers HTTP 409
+    ``FORCING_VERSION_NOT_FINALIZED`` for an empty checksum — permanently. That
+    is the darkening must-preserve M2 forbids, and no in-writer guard can prevent
+    it because the damage is already done by the time the writer is called.
+
+    It is not a one-off either: the narrow children probe finds no rows for a
+    legacy-routed version, so ``_existing_forcing_version_is_current`` is False
+    and the whole regeneration path runs again on every attempt.
+    """
+    _store, repository = _build_repository(tmp_path)
+    object_store = RecordingObjectStore(tmp_path)
+    producer = _build_producer(tmp_path, repository, object_store)
+
+    ready = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    forcing_version_id = ready.forcing_version_id
+    checksum_before = repository.forcing_versions[forcing_version_id]["checksum"]
+    assert checksum_before == ready.checksum
+
+    # 000061 classifies a version that has rows in the renamed legacy table.
+    repository.legacy_routed.add(forcing_version_id)
+    upsert_count_before = repository.upsert_count
+    cycle_updates_before = len(repository.cycle_updates)
+    object_store.written_keys.clear()
+    repository.events.clear()
+
+    with pytest.raises(LegacyForcingStoreRefusedError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert forcing_version_id in str(exc_info.value)
+    assert exc_info.value.error_code == "FORCING_LEGACY_STORE_REFUSED"
+    # The parent row is untouched: the checksum still finalizes the package that
+    # is still in the object store, so every reader keeps serving this version.
+    assert repository.forcing_versions[forcing_version_id]["checksum"] == checksum_before
+    assert repository.upsert_count == upsert_count_before
+    # Not one byte of the package was rewritten, and no child write was attempted.
+    assert object_store.written_keys == []
+    assert repository.events == []
+    # R2: a routing refusal is not a cycle failure, so `met.forecast_cycle` is
+    # not rewritten either.
+    assert len(repository.cycle_updates) == cycle_updates_before
 
 
 def test_failed_package_manifest_write_leaves_parent_incomplete_and_retry_finalizes(tmp_path: Path) -> None:

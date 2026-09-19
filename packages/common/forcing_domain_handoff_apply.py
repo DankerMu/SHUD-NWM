@@ -62,6 +62,13 @@ REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUA
 # NON-FAILING tick outcome -- it applies a handoff on EVERY tick, so a legacy
 # version in scope must not redden production continuously. That routing lives
 # with the pipeline; this module only has to make the code distinguishable.
+#
+# "Distinguishable" is an ORDERING property, not just a spelling one. This code
+# only actually reaches the pipeline because `_refuse_legacy_routed_forcing_version`
+# runs as the first statement of `_apply_with_cursor`. Moved below
+# `_upsert_forcing_version`, a regenerated package for a legacy version reports
+# REASON_APPLY_FORCING_VERSION_CONFLICT instead — a code the skip branch does not
+# recognise — and the non-failing outcome silently stops happening.
 REASON_APPLY_LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
 
 TARGET_TABLES = (
@@ -312,6 +319,16 @@ def _apply_with_cursor(
     interp_weights = prepared["interp_weights"]
     identity = prepared["identity"]
 
+    # ROUTING REFUSAL FIRST, above `_upsert_forcing_version` and not only inside
+    # `_replace_forcing_station_timeseries` (#1991, M5). That upsert's
+    # `ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)`
+    # returns no row when the checksum changes and raises
+    # REASON_APPLY_FORCING_VERSION_CONFLICT — so a node-22 REGENERATION of a
+    # legacy-routed version's package would report a code the ingest pipeline's
+    # skip branch does not recognise, failing every tick with no remedy. Hoisted
+    # here, both replay shapes report the one code that is true of both: the
+    # version's rows are in the other table.
+    _refuse_legacy_routed_forcing_version(cursor, forcing_version["forcing_version_id"])
     _verify_existing_station_rows(cursor, stations)
     _upsert_forcing_version(cursor, forcing_version, parser_envelope)
     _upsert_met_stations(cursor, stations)
@@ -805,6 +822,57 @@ def _coerce_valid_time(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _forcing_version_routing(cursor: Any, forcing_version_id: str) -> tuple[Any, str] | None:
+    """``(forcing_version_key, timeseries_store)``, or ``None`` when no version row exists.
+
+    One primary-key lookup, spelled once, used by both the hoisted refusal in
+    :func:`_apply_with_cursor` and by the writer's own guard — which additionally
+    needs the surrogate key. ``None`` means "this envelope introduces the
+    version", which is the normal case and not an error here.
+    """
+    cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return (
+        row_value(row, "forcing_version_key", 0),
+        str(row_value(row, "timeseries_store", 1) or FORCING_STORE_DEFAULT),
+    )
+
+
+def _legacy_store_refusal_reason(forcing_version_id: str, timeseries_store: str) -> dict[str, Any]:
+    return _reason(
+        REASON_APPLY_LEGACY_STORE_REFUSED,
+        field="met.forcing_version.timeseries_store",
+        forcing_version_id=forcing_version_id,
+        timeseries_store=timeseries_store,
+        detail=legacy_store_refusal_message(forcing_version_id),
+    )
+
+
+def _refuse_legacy_routed_forcing_version(cursor: Any, forcing_version_id: str) -> None:
+    """Refuse a legacy-routed version before ANY write in this transaction (#1991, M5).
+
+    Placed ahead of ``_upsert_forcing_version`` because that statement can fail
+    FIRST, with a different and misleading code: its ``ON CONFLICT ... WHERE
+    (checksum IS NULL OR checksum = EXCLUDED.checksum)`` returns no row on a
+    checksum change, which is exactly what a node-22 regeneration of a
+    legacy-routed version's package produces. The ingest pipeline routes the
+    refusal code to a non-failing tick outcome and does not recognise the
+    conflict code, so without this hoist a single legacy version in scope turns
+    every tick red with no operator remedy.
+
+    An absent version row is NOT an error: the envelope is introducing it, and
+    every version created after 000061 takes the column's ``narrow`` default.
+    """
+    routing = _forcing_version_routing(cursor, forcing_version_id)
+    if routing is None:
+        return
+    _forcing_version_key, timeseries_store = routing
+    if timeseries_store == FORCING_STORE_LEGACY:
+        raise ForcingDomainHandoffApplyError(_legacy_store_refusal_reason(forcing_version_id, timeseries_store))
+
+
 def _replace_forcing_station_timeseries(
     cursor: Any,
     forcing_version_id: str,
@@ -818,9 +886,13 @@ def _replace_forcing_station_timeseries(
     # is on the SAME cursor, inside the caller's transaction/savepoint, so the
     # value the refusal is based on is the value the write would have raced
     # against.
-    cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
-    version_row = cursor.fetchone()
-    if version_row is None:
+    #
+    # `_apply_with_cursor` already refused above `_upsert_forcing_version`, which
+    # is where the DECISION has to live because that upsert can fail first with a
+    # different code. This repeat is DEFENCE IN DEPTH, and it is also what
+    # resolves `forcing_version_key`, which the statements below predicate on.
+    routing = _forcing_version_routing(cursor, forcing_version_id)
+    if routing is None:
         raise ForcingDomainHandoffApplyError(
             _reason(
                 REASON_APPLY_FORCING_VERSION_CONFLICT,
@@ -828,18 +900,9 @@ def _replace_forcing_station_timeseries(
                 forcing_version_id=forcing_version_id,
             )
         )
-    forcing_version_key = row_value(version_row, "forcing_version_key", 0)
-    timeseries_store = str(row_value(version_row, "timeseries_store", 1) or FORCING_STORE_DEFAULT)
+    forcing_version_key, timeseries_store = routing
     if timeseries_store == FORCING_STORE_LEGACY:
-        raise ForcingDomainHandoffApplyError(
-            _reason(
-                REASON_APPLY_LEGACY_STORE_REFUSED,
-                field="met.forcing_version.timeseries_store",
-                forcing_version_id=forcing_version_id,
-                timeseries_store=timeseries_store,
-                detail=legacy_store_refusal_message(forcing_version_id),
-            )
-        )
+        raise ForcingDomainHandoffApplyError(_legacy_store_refusal_reason(forcing_version_id, timeseries_store))
 
     # Surrogate keys resolved in Python, not by an `INSERT … SELECT … JOIN
     # met.met_station`: a join DROPS a row whose station has no authority entry,

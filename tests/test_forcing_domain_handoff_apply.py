@@ -251,6 +251,62 @@ def test_existing_seed_forcing_version_with_same_checksum_allows_handoff_time_wi
     ]
 
 
+@pytest.mark.parametrize("regenerated_package", [False, True])
+def test_legacy_routed_forcing_version_is_refused_before_the_parent_upsert(regenerated_package: bool) -> None:
+    """#1991 M5: the apply layer's raise -> reported-reason link, on BOTH replay shapes.
+
+    The refusal has to sit above ``_upsert_forcing_version``, not only inside
+    ``_replace_forcing_station_timeseries``. That upsert's
+    ``ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)``
+    returns no row when the incoming checksum differs and raises
+    ``HANDOFF_APPLY_FORCING_VERSION_CONFLICT`` — so if node-22 REGENERATES the
+    package for a legacy-routed version, the conflict fires first and the tick
+    gets a reason code ``scripts/node27_autopipeline.py``'s skip branch does not
+    recognise: ``outcome="failed"``, ``rc=1``, on every tick, for ever. The
+    ``regenerated_package`` leg is exactly that shape.
+
+    Both legs must report the SAME permanent, recognised code, because "this
+    version's rows are in the other table" is the true and unchanging reason in
+    both, and only that code routes to a non-failing outcome.
+    """
+    envelope = _parse_complete()
+    seeded = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
+    seeded["source_id"] = "gfs"
+    # 000061's routing column, set on a version that had rows in the renamed
+    # legacy table. `_stamp_identity_keys` only fills a DEFAULT, so this survives.
+    seeded["timeseries_store"] = apply_module.FORCING_STORE_LEGACY
+    if regenerated_package:
+        seeded["checksum"] = "0" * 64
+        assert seeded["checksum"] != envelope["parsed"]["met.forcing_version"][0]["checksum"]
+    connection = _FakeConnection()
+    connection.tables["met.forcing_version"].append(seeded)
+    checksum_before = seeded["checksum"]
+
+    report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
+
+    assert report["status"] == "failed"
+    assert report["available"] is False
+    assert report["writes_performed"] is False
+    assert len(report["unavailable_reasons"]) == 1
+    reason = report["unavailable_reasons"][0]
+    assert reason["code"] == apply_module.REASON_APPLY_LEGACY_STORE_REFUSED
+    assert reason["code"] == "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
+    assert reason["timeseries_store"] == apply_module.FORCING_STORE_LEGACY
+    assert reason["forcing_version_id"] == seeded["forcing_version_id"]
+
+    # Nothing was written, and — the point of hoisting — the parent upsert was
+    # never even ATTEMPTED, so its conflict could not pre-empt this code.
+    statements = [statement.lower() for _mode, statement, _params in connection.executions]
+    assert not any("insert into met.forcing_version" in statement for statement in statements)
+    assert not any("insert into met.met_station" in statement for statement in statements)
+    assert not any("delete from met.forcing_station_timeseries" in statement for statement in statements)
+    assert "timeseries_store" in statements[0], "the routing read is the transaction's first statement"
+    assert connection.tables["met.forcing_version"][0]["checksum"] == checksum_before
+    assert connection.tables["met.forcing_station_timeseries"] == []
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_code"),
     [

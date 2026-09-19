@@ -28,11 +28,11 @@
 --       packages/common/forcing_domain_handoff_apply.py, which carry the
 --       producer's rows over the node-22 -> node-27 handoff unchanged).
 --         FORCING_VARIABLES = ("PRCP","TEMP","RH","wind","Rn","Press")
---                                                        (producer.py:81)
+--                                                        (producer.py:87)
 --         OUTPUT_UNITS      = PRCP mm/day, TEMP degC, RH 0-1, wind m/s,
---                             Rn W/m2, Press Pa        (producer.py:82-89)
---         quality_flag      = "ok"                      (producer.py:267,290
---                             dataclass default; store.py:165,253 and
+--                             Rn W/m2, Press Pa        (producer.py:88-95)
+--         quality_flag      = "ok"                      (producer.py:273,296
+--                             dataclass default; store.py:175,263 and
 --                             file_store.py:568,621 coalesce to the same
 --                             literal and no code path writes another)
 --   S = db/seeds/seed_demo.py -- demo/dev seeding. Its vocabulary WAS disjoint
@@ -73,8 +73,8 @@
 --      comparison is a PRE-INGEST FILTER that drops the product before any fact
 --      row exists. It is not a fact-table value and must not widen this type.
 --   4. Every IFS/GFS canonical variable name (`prcp_rate_or_amount`,
---      `air_temperature_2m`, ...; producer.py:60-80) and every canonical unit in
---      `EXPECTED_CANONICAL_UNITS` (producer.py:90-100). Those name the OBJECT
+--      `air_temperature_2m`, ...; producer.py:60-86) and every canonical unit in
+--      `EXPECTED_CANONICAL_UNITS` (producer.py:96-106). Those name the OBJECT
 --      STORE's vocabulary upstream of interpolation; the fact table only ever
 --      receives the `FORCING_VARIABLES` / `OUTPUT_UNITS` image of them.
 --
@@ -102,19 +102,49 @@
 -- narrow-only writer has since populated.
 --
 -- ---------------------------------------------------------------------------
--- Lock budget (planned against the WORST measured number, not the first)
+-- Lock budget: >= ~24 s COLD, >= ~3 s warm -- the block, not one step
 -- ---------------------------------------------------------------------------
 --
+-- There is no BEGIN/COMMIT in this file and that is not an omission: it is ONE
+-- `DO $$` block, hence ONE implicit transaction (see the note at the top of
+-- this file). So every AccessExclusiveLock it takes -- step 1's two table
+-- rewrites, step 3's RENAME of the 259M-row fact table, step 11's ADD COLUMN on
+-- met.forcing_version -- is held until the BLOCK ends. The window to plan
+-- against is the SUM, and the two measured components come from the SAME
+-- receipt
+-- (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/`
+-- `2026-09-18-i10-forcing-readonly/README.md`):
+--
+--   component                                        cold        warm
+--   -------------------------------------------      --------    ------
+--   IDENTITY rewrites, §3 (:53-65)                    ~2 552 ms   --
+--     met.met_station, live PAGE constitution          1 863 ms
+--     met.forcing_version                                689 ms
+--   routing backfill existence probe, §4 (:82-96)    21 849 ms    238 ms
+--     (one PK-leading probe per version, all 8 653)
+--   step 11 ADD COLUMN + UPDATE on met.forcing_version  UNMEASURED
+--   -------------------------------------------      --------    ------
+--   MEASURED TOTAL, AccessExclusiveLock window           ~24 s      ~3 s
+--
+-- The totals are a LOWER BOUND. Step 11's `ADD COLUMN timeseries_store TEXT NOT
+-- NULL DEFAULT 'narrow'` and the `UPDATE` beneath it take their own
+-- AccessExclusiveLock on met.forcing_version and are not in the receipt; the
+-- ADD COLUMN is a catalog-only change on PG11+ (non-volatile default) and the
+-- UPDATE touches at most the 4 764 versions §4 found rows for, so it is
+-- expected to be small -- but no number is invented here. 8.1 measures it.
+--
 -- `ADD COLUMN ... INTEGER GENERATED ALWAYS AS IDENTITY UNIQUE` carries a
--- volatile default, so PostgreSQL rewrites the whole table under
--- AccessExclusiveLock and then builds the UNIQUE index. From the I10 receipt
--- (README.md:53-65, throwaway cluster): met.forcing_version 689 ms;
--- met.met_station 1 141 ms at the live DATA constitution and 1 863 ms at the
--- live PAGE constitution. `identity.out`'s 734/625 ms are a rejected first
--- attempt (same receipt, :71) and must not be quoted. Plan the window against
--- 1 863 ms. met.met_station is joined by every narrow reader and read by the
--- display API on the active primary, and the routing backfill takes
--- AccessExclusiveLock on met.forcing_version on top of this.
+-- volatile default, so PostgreSQL rewrites the whole table and then builds the
+-- UNIQUE index; §3 also measures met.met_station at 1 141 ms on the live DATA
+-- constitution, and the window is planned against the PAGE figure (1 863 ms)
+-- because that is the worse one. `identity.out`'s 734/625 ms are a rejected
+-- first attempt (same receipt, :71) and must not be quoted.
+--
+-- Quoting the 1 863 ms IDENTITY figure ALONE understates this by roughly 10x;
+-- the backfill is the dominant term on a cold cache and it is not optional.
+-- Task 8.1 plans the production window from the TOTAL above. The lock covers
+-- met.forcing_station_timeseries(_legacy), met.met_station and
+-- met.forcing_version -- the display API on the active primary reads all three.
 DO $$
 DECLARE
     drift_count integer;
@@ -134,27 +164,27 @@ BEGIN
     --    is a `to_regtype` probe.
     IF to_regtype('met.forcing_variable') IS NULL THEN
         CREATE TYPE met.forcing_variable AS ENUM (
-            'PRCP',   -- P (producer.py:81), L
-            'TEMP',   -- P (producer.py:81), L
-            'RH',     -- P (producer.py:81), L
-            'wind',   -- P (producer.py:81), L
-            'Rn',     -- P (producer.py:81), L
-            'Press'   -- P (producer.py:81), L
+            'PRCP',   -- P (producer.py:87), L
+            'TEMP',   -- P (producer.py:87), L
+            'RH',     -- P (producer.py:87), L
+            'wind',   -- P (producer.py:87), L
+            'Rn',     -- P (producer.py:87), L
+            'Press'   -- P (producer.py:87), L
         );
     END IF;
     IF to_regtype('met.forcing_unit') IS NULL THEN
         CREATE TYPE met.forcing_unit AS ENUM (
-            'mm/day',  -- P (producer.py:83, PRCP), L
-            'degC',    -- P (producer.py:84, TEMP), L
-            '0-1',     -- P (producer.py:85, RH), L
-            'm/s',     -- P (producer.py:86, wind), L
-            'W/m2',    -- P (producer.py:87, Rn), L
-            'Pa'       -- P (producer.py:88, Press), L
+            'mm/day',  -- P (producer.py:89, PRCP), L
+            'degC',    -- P (producer.py:90, TEMP), L
+            '0-1',     -- P (producer.py:91, RH), L
+            'm/s',     -- P (producer.py:92, wind), L
+            'W/m2',    -- P (producer.py:93, Rn), L
+            'Pa'       -- P (producer.py:94, Press), L
         );
     END IF;
     IF to_regtype('met.forcing_quality_flag') IS NULL THEN
         CREATE TYPE met.forcing_quality_flag AS ENUM (
-            'ok'       -- P (producer.py:267,290 default), L (all 259 255 326 rows)
+            'ok'       -- P (producer.py:273,296 default), L (all 259 255 326 rows)
         );
     END IF;
 
