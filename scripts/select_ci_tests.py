@@ -773,6 +773,9 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # bytes anywhere the lane could have written — a claim only this module's
     # write paths can break. DB-free, 76 tests in 0.70s.
     "tests/test_journal_root_lane_adoption.py",
+    # #2420: the provenance publisher reads the source-owned publication view
+    # and fail-closes on blocked journal rows, so a journal-only PR must run it.
+    "tests/test_pipeline_job_provenance_publisher.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -1336,7 +1339,7 @@ PRECIP_SURFACE_TESTS: tuple[str, ...] = (
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
-        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_pipeline_job_provenance_publisher.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1583,10 +1586,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # / CycleDiscovery); those stay with the rules that own them (#1455
         # `edge-consumer` routings). The archive contract independently rebuilds
         # cycle identity through cycle_id_for, so its focused suite belongs here.
+        # #2420: the provenance publisher/importer and Ops identity envelope mint
+        # cycle ids through cycle_id_for, so a helper-only PR must run them.
         "workers/data_adapters/base.py",
         (
             "tests/test_state_clone_cutover_hook.py",
             "tests/test_scheduler_journal_retention_archive.py",
+            "tests/test_pipeline_job_provenance_importer.py",
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
         ),
     ),
     PathTestRule(

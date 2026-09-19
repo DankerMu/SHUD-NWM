@@ -13,7 +13,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
+from psycopg2.extras import RealDictCursor
 
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.pipeline_job_provenance import (
@@ -131,26 +133,89 @@ def _seed_published_hydro_run(database_url: str) -> dict[str, Any]:
     return dict(row)
 
 
+def _provision_pipeline_job_roles(database_url: str) -> None:
+    """Create disposable ingest/display roles and grant only this database.
+
+    Roles are cluster-wide in PostgreSQL; this is additive and never DROPs, so a
+    pre-existing cluster role is left intact. Grants stay on the throwaway
+    database created around this test.
+    """
+
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DO $roles$
+                DECLARE
+                  v_role text;
+                BEGIN
+                  FOREACH v_role IN ARRAY ARRAY['nhms_ingest_rw', 'nhms_display_ro'] LOOP
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+                      EXECUTE format(
+                        'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+                        v_role
+                      );
+                    END IF;
+                  END LOOP;
+                END
+                $roles$;
+                """
+            )
+            cursor.execute("GRANT USAGE ON SCHEMA hydro, ops TO nhms_ingest_rw, nhms_display_ro")
+            cursor.execute("GRANT SELECT ON hydro.hydro_run TO nhms_ingest_rw, nhms_display_ro")
+            cursor.execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ops.pipeline_job TO nhms_ingest_rw"
+            )
+            cursor.execute("GRANT SELECT ON ops.pipeline_job TO nhms_display_ro")
+            cursor.execute("REVOKE INSERT, UPDATE, DELETE ON ops.pipeline_job FROM nhms_display_ro")
+
+
+def _connect_as_role(role: str) -> Any:
+    def connect(database_url: str, *, fallback_application_name: str) -> Any:
+        connection = psycopg2.connect(
+            database_url,
+            cursor_factory=RealDictCursor,
+            fallback_application_name=fallback_application_name,
+        )
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('role', %s, false)", (role,))
+        connection.autocommit = False
+        return connection
+
+    return connect
+
+
 def test_importer_projects_real_postgres_rows_without_changing_published_hydro(
     throwaway_database_url: str,
     tmp_path: Path,
 ) -> None:
     apply_migrations_from_zero(throwaway_database_url)
+    _provision_pipeline_job_roles(throwaway_database_url)
     seed_issue_126_data(throwaway_database_url)
     before_hydro = _seed_published_hydro_run(throwaway_database_url)
     object_root = tmp_path / "object-store"
     object_root.mkdir()
     _seed_object_store(object_root)
+    with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+        import_run_pipeline_job_provenance(
+            database_url=throwaway_database_url,
+            object_store_root=object_root,
+            run_id=RUN_ID,
+            connect=_connect_as_role("nhms_display_ro"),
+        )
 
     first = import_run_pipeline_job_provenance(
         database_url=throwaway_database_url,
         object_store_root=object_root,
         run_id=RUN_ID,
+        connect=_connect_as_role("nhms_ingest_rw"),
     )
     second = import_run_pipeline_job_provenance(
         database_url=throwaway_database_url,
         object_store_root=object_root,
         run_id=RUN_ID,
+        connect=_connect_as_role("nhms_ingest_rw"),
     )
     with psycopg_connection(throwaway_database_url) as connection:
         with connection.cursor() as cursor:
@@ -164,14 +229,6 @@ def test_importer_projects_real_postgres_rows_without_changing_published_hydro(
                 (RUN_ID,),
             )
             after_hydro = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT
-                    has_table_privilege('nhms_ingest_rw', 'ops.pipeline_job', 'INSERT') AS ingest_can_insert,
-                    has_table_privilege('nhms_display_ro', 'ops.pipeline_job', 'INSERT') AS display_can_insert
-                """
-            )
-            privileges = cursor.fetchone()
 
     assert first["inserted"] == 1
     assert second["inserted"] == 0
@@ -184,4 +241,5 @@ def test_importer_projects_real_postgres_rows_without_changing_published_hydro(
         "updated_at": datetime(2026, 5, 3, 0, 40, 0, 900000, tzinfo=UTC),
     }
     assert dict(after_hydro) == before_hydro
-    assert dict(privileges) == {"ingest_can_insert": True, "display_can_insert": False}
+
+

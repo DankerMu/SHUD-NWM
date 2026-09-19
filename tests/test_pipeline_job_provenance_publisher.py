@@ -105,32 +105,43 @@ def _journal_record(job: dict[str, Any], *, sequence: int) -> dict[str, Any]:
 
 def _seed_ifs_journal(journal_root: Path, *, jobs: list[dict[str, Any]] | None = None) -> None:
     seeded = jobs if jobs is not None else [_forecast_job(), _cycle_scoped_convert_job()]
-    latest = _latest_view(
-        source_id="IFS",
-        cycle_time=IFS_CYCLE_TIME,
-        model_id=IFS_SELECTED_MODEL_ID,
-        hydro_status="published",
-        jobs=seeded,
-    )
-    latest["schema_version"] = FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION
-    latest["model_context"] = _model_context(IFS_SELECTED_MODEL_ID)
-    latest["forcing_version"] = None
-    hydro_run = latest.get("hydro_run")
-    if isinstance(hydro_run, dict):
-        hydro_run["run_id"] = IFS_SELECTED_RUN_ID
-        hydro_run["source_id"] = "IFS"
-    _write_json(
-        journal_root / "latest" / "IFS" / IFS_CYCLE_STAMP / f"{IFS_SELECTED_MODEL_ID}.json",
-        latest,
-    )
+    cycle_scoped = [job for job in seeded if not job.get("model_id")]
+    jobs_by_model: dict[str, list[dict[str, Any]]] = {}
+    for job in seeded:
+        model_id = job.get("model_id")
+        if isinstance(model_id, str) and model_id:
+            jobs_by_model.setdefault(model_id, []).append(job)
+    if not jobs_by_model:
+        jobs_by_model[IFS_SELECTED_MODEL_ID] = []
+    for model_id, model_jobs in jobs_by_model.items():
+        latest = _latest_view(
+            source_id="IFS",
+            cycle_time=IFS_CYCLE_TIME,
+            model_id=model_id,
+            hydro_status="published",
+            jobs=[*model_jobs, *cycle_scoped],
+        )
+        latest["schema_version"] = FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION
+        latest["model_context"] = _model_context(model_id)
+        latest["forcing_version"] = None
+        hydro_run = latest.get("hydro_run")
+        if isinstance(hydro_run, dict):
+            forecast = next((job for job in model_jobs if str(job.get("run_id") or "").startswith("fcst_")), None)
+            if forecast is not None:
+                hydro_run["run_id"] = forecast["run_id"]
+            hydro_run["source_id"] = "IFS"
+        _write_json(
+            journal_root / "latest" / "IFS" / IFS_CYCLE_STAMP / f"{model_id}.json",
+            latest,
+        )
     _write_jsonl(
         journal_root / "journal" / "IFS" / f"{IFS_CYCLE_STAMP}.jsonl",
         [_journal_record(job, sequence=index + 1) for index, job in enumerate(seeded)],
     )
-    for job in seeded:
+    for index, job in enumerate(seeded):
         _write_json(
             journal_root / "pipeline-jobs" / f"{job['job_id']}.json",
-            _journal_record(job, sequence=1),
+            _journal_record(job, sequence=index + 1),
         )
 
 

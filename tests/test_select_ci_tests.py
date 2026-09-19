@@ -617,8 +617,15 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
     selected = select_tests(["services/orchestrator/chain_types.py"], repo_root=Path("."))
 
     # services/** is a river-segment write-surface root (#2185), so the scan
-    # rides along with the redirect targets.
-    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH})
+    # rides along with the redirect targets. #2420's publisher imports
+    # OrchestratorError from this module, so that suite joins the stop rule.
+    assert selected == sorted(
+        {
+            *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            "tests/test_pipeline_job_provenance_publisher.py",
+            WRITE_SURFACE_SCAN_PATH,
+        }
+    )
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_orchestrator.py" not in selected
     assert "tests/test_scheduler_backfill.py" not in selected
@@ -763,7 +770,12 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
     # Focused nodes plus the selector meta-guards (#1254). The redirect intent —
     # never the whole slow suite — survives: the meta-guard suite costs ~6s.
     assert selected == sorted(
-        {*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_select_ci_tests.py", WRITE_SURFACE_SCAN_PATH}
+        {
+            *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_select_ci_tests.py",
+            WRITE_SURFACE_SCAN_PATH,
+        }
     )
     assert "tests/test_orchestration_chain.py" not in selected
 
@@ -815,7 +827,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 53 targets, the rule's 51 plus two riders that arrive from OUTSIDE the rule
+    # 57 targets, the rule's 55 plus two riders that arrive from OUTSIDE the rule
     # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
     # river-segment write-surface scan by the services/** supplemental route.
     # The literal stays FROZEN here:
@@ -872,6 +884,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_orchestrator_demote_core_cas.py",
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
         "tests/test_publish_scheduler_file_registry.py",
@@ -1324,14 +1340,14 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
-        "tests/test_pipeline_job_provenance_copyback.py",
-        "tests/test_pipeline_job_provenance_importer.py",
-        "tests/test_pipeline_job_provenance_publisher.py",
-        "tests/test_pipeline_ops_identity_envelope.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.
         "tests/test_node27_write_roles.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         # #2185: scripts/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         # #1442/#1789: the publish criterion is a registered oracle
