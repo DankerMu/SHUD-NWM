@@ -133,18 +133,25 @@
 --   -------------------------------------------      --------    ------
 --   MEASURED TOTAL, AccessExclusiveLock window           ~24 s      ~3 s
 --
--- The totals are APPROXIMATE, not a lower bound: every component is measured
--- now, but a cold cache is not reproducible on demand, so the cold column is
--- one observation rather than a bound. Step 11 is no longer the unmeasured
--- term. Its `ADD COLUMN timeseries_store TEXT NOT NULL DEFAULT 'narrow'` is a
+-- The totals are APPROXIMATE, not a lower bound: the DOMINANT components are
+-- measured now, but a cold cache is not reproducible on demand, so the cold
+-- column is one observation rather than a bound. Still unmeasured, and left so
+-- deliberately rather than guessed at: the UPDATE's WRITE path (~4 289 rows
+-- plus the CHECK and heap/index maintenance) and steps 3-10 (RENAME, the
+-- empty-table DDL, create_hypertable, the drift SELECT, OWNER TO). All are
+-- small against a ~24 s window, and none is invented here. Step 11 is no
+-- longer the unmeasured term. Its `ADD COLUMN timeseries_store TEXT NOT NULL DEFAULT 'narrow'` is a
 -- catalog-only change on PG11+ -- the default is non-volatile, so there is no
 -- table rewrite and no number of its own to quote -- and its `UPDATE`'s WHERE
 -- clause IS the §4 probe, in the scalar-sublink spelling of step 11 below
 -- (21 849 ms cold / 238 ms warm; reproduced 2026-09-19 at 238.017 ms over the
 -- current 8 881 versions, 0.25 ms / 19 buffers for a single version). So that
 -- row already accounts for step 11 and must not be added to the total twice.
--- Both still take their own AccessExclusiveLock on met.forcing_version, held
--- to the end of the block like every other lock here. Classification on the
+-- Lock levels, stated precisely because this is a lock budget: the ADD COLUMN
+-- takes AccessExclusiveLock on met.forcing_version; the UPDATE takes only
+-- RowExclusiveLock. Neither widens the window, because step 1's IDENTITY
+-- ADD COLUMN already holds AccessExclusiveLock on that same table and the
+-- single DO block holds it to the end regardless. Classification on the
 -- live population, read-only, 2026-09-19: 4 289 versions route to `legacy`
 -- and 4 592 to `narrow`, of 8 881. (§4's 4 764-of-8 653 is the 2026-09-18
 -- reading of the same question; the population moved between the two dates.)
