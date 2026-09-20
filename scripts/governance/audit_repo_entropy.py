@@ -578,7 +578,7 @@ SCOPED_AGENT_CONTEXT_CONFIGS = (
             "docs/runbooks/two-node-deployment-overview.md",
         ),
         required_verification_commands=(
-            "uv run pytest -q tests/test_entropy_audit_script.py",
+            "uv run pytest -q tests/test_entropy_audit_*.py",
             "openspec validate --all --strict --no-interactive",
         ),
     ),
@@ -597,7 +597,7 @@ SCOPED_AGENT_CONTEXT_CONFIGS = (
             "docs/runbooks/node-27-bringup-checklist.md",
         ),
         required_verification_commands=(
-            "uv run pytest -q tests/test_entropy_audit_script.py",
+            "uv run pytest -q tests/test_entropy_audit_*.py",
             "openspec validate --all --strict --no-interactive",
         ),
     ),
@@ -617,7 +617,7 @@ SCOPED_AGENT_CONTEXT_CONFIGS = (
             "docs/runbooks/qhh-backend-smoke.md",
         ),
         required_verification_commands=(
-            "uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py",
+            "uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py",
             "openspec validate --all --strict --no-interactive",
         ),
     ),
@@ -639,7 +639,7 @@ SCOPED_AGENT_CONTEXT_CONFIGS = (
         required_verification_commands=(
             "cd apps/frontend && pnpm test",
             "cd apps/frontend && pnpm build",
-            "uv run pytest -q tests/test_entropy_audit_script.py",
+            "uv run pytest -q tests/test_entropy_audit_*.py",
             "openspec validate --all --strict --no-interactive",
         ),
     ),

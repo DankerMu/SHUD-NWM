@@ -682,6 +682,41 @@ PUBLISH_SCHEDULER_REGISTRY_TESTS: tuple[str, ...] = (
 # so `is_test_suite_path` rejects it and it reaches SUPPORT_MODULE_TEST_RULES.
 PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH = "tests/publish_registry_helpers.py"
 
+
+# #1823: the entropy-audit corpus is fifteen collectible partitions plus one
+# non-collectible helper. The deleted 9860-line monolith was the ONLY target of
+# the three governance rules below and it had no same-name source pair to fall
+# back on, so every route has to name the partitions. Explicit sorted tuple,
+# never a `tests/test_entropy_audit_*.py` glob resolved at import time (same
+# reason as QHH_PRODUCTION_BOOTSTRAP_TESTS / PUBLISH_SCHEDULER_REGISTRY_TESTS):
+# a glob silently adopts a sixteenth partition nobody reviewed, while an
+# unlisted partition reddens the tracked-tree guard in
+# tests/test_select_ci_tests.py instead of dropping out of the PR lane.
+ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
+    "tests/test_entropy_audit_baseline_writer_safety.py",
+    "tests/test_entropy_audit_baseline_writer_summary.py",
+    "tests/test_entropy_audit_facade_guard_aliases.py",
+    "tests/test_entropy_audit_facade_guard_forwarders.py",
+    "tests/test_entropy_audit_instruction_inventory.py",
+    "tests/test_entropy_audit_report_contract.py",
+    "tests/test_entropy_audit_retired_paths.py",
+    "tests/test_entropy_audit_route_authority_caching.py",
+    "tests/test_entropy_audit_route_authority_context.py",
+    "tests/test_entropy_audit_route_authority_lists.py",
+    "tests/test_entropy_audit_scan_boundaries.py",
+    "tests/test_entropy_audit_structural_budget.py",
+    "tests/test_entropy_audit_structural_ownership.py",
+    "tests/test_entropy_audit_topology_authority.py",
+    "tests/test_entropy_audit_topology_db_boundary.py",
+)
+# The helper owns the monolith's module prefix (the repository/baseline path
+# constants and the memoized `build_report` accessor) and its whole private
+# helper tail, so ALL fifteen partitions import it at module scope and the
+# routed set IS the derived importer closure. Not collectible: the filename is
+# deliberately not `test_*`, so `is_test_suite_path` rejects it and it reaches
+# SUPPORT_MODULE_TEST_RULES.
+ENTROPY_AUDIT_HELPERS_PATH = "tests/entropy_audit_helpers.py"
+
 # #1100 split the 1495-line manual publisher into this package; the historical
 # path stayed the console entrypoint (it owns argparse + `main`) and an
 # attribute-broadcast facade, so it keeps its own row below and is NOT a member
@@ -1842,6 +1877,18 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # derived closure.
         PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
         PUBLISH_SCHEDULER_REGISTRY_TESTS,
+    ),
+    PathTestRule(
+        # #1823: the shared surface of the fifteen entropy-audit partitions --
+        # REPO_ROOT/BASELINE path constants, the memoized whole-repository
+        # `build_report` accessor (a ~20s call the corpus asks for from a dozen
+        # places), the finding selectors and every fixture builder. All fifteen
+        # import it at module scope, so the routed set IS the derived closure;
+        # without this row a helper-only diff collapses to the meta-guard,
+        # because the filename is not `test_*` and never reaches the `tests/**`
+        # suite branch.
+        ENTROPY_AUDIT_HELPERS_PATH,
+        ENTROPY_AUDIT_TESTS,
     ),
 )
 
@@ -4565,19 +4612,28 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_production_scheduler.py",),
     ),
     PathTestRule(
+        # #1823: the display-API wrapper's entropy reach is now the fifteen
+        # partitions, spliced in rather than globbed so the routed set is the
+        # reviewed tuple.
         "scripts/ops/start-display-api.sh",
         (
             "tests/test_two_node_docker_runtime.py",
-            "tests/test_entropy_audit_script.py",
+            *ENTROPY_AUDIT_TESTS,
         ),
     ),
     PathTestRule(
+        # #1823: the audit owner's corpus. Every partition drives `build_report`
+        # or the CLI against this module, so the whole corpus rides the rule.
         "scripts/governance/audit_repo_entropy.py",
-        ("tests/test_entropy_audit_script.py",),
+        ENTROPY_AUDIT_TESTS,
     ),
     PathTestRule(
+        # #1823: the baseline writer's own cases live in the two
+        # `..._baseline_writer_*` partitions, but its output is the baseline the
+        # report/allowlist/budget partitions read, so the rule keeps the whole
+        # corpus the monolith gave it rather than narrowing reach at the split.
         "scripts/governance/write_entropy_baseline.py",
-        ("tests/test_entropy_audit_script.py",),
+        ENTROPY_AUDIT_TESTS,
     ),
     PathTestRule(
         # The checked-in node-22 executable is a compatibility CLI; its owner

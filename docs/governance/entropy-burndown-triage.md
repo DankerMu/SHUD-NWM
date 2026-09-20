@@ -297,7 +297,7 @@ Verification:
 
 - `uv run python scripts/governance/audit_repo_entropy.py --format json
   >/tmp/nwm-entropy-768.json` passed.
-- `uv run pytest -q tests/test_entropy_audit_script.py` passed.
+- `uv run pytest -q tests/test_entropy_audit_*.py` passed.
 - `git diff -- .entropy-baseline/latest.json --exit-code` passed.
 
 ## Governance-8 Final Local Verification Gate

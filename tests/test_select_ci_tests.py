@@ -44,6 +44,8 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
+    ENTROPY_AUDIT_HELPERS_PATH,
+    ENTROPY_AUDIT_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
@@ -2038,8 +2040,11 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
     )
 
     # #1656 and #2185: scripts/** is a root of both supplemental scans, so both
-    # suites join the entropy-rule target.
-    assert selected == ["tests/test_entropy_audit_script.py", WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    # suites join the entropy-rule target. #1823 replaced that single target with
+    # the fifteen partitions: EXACT equality against the selector's own tuple, so
+    # a rule that quietly narrows to one partition — or a sixteenth partition that
+    # never reaches the rules — reds here rather than shrinking the PR lane.
+    assert selected == [*ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -2246,6 +2251,58 @@ def test_publish_registry_package_tracked_tree_is_exactly_nine_modules() -> None
         assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
         selected = set(select_tests([pattern], repo_root=Path(".")))
         assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+
+def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_helper() -> None:
+    # #1823: fifteen collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A sixteenth partition, a leftover compatibility
+    # shim for the deleted 9860-line monolith, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's own
+    # tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in nothing
+    # today but would silently adopt any future `tests/*entropy_audit*` file.
+    partitions = set(ENTROPY_AUDIT_TESTS)
+    helper = ENTROPY_AUDIT_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 15, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_entropy_audit_script.py").exists(), (
+        "the pre-#1823 monolith is back; it would be collected alongside the "
+        "partitions and double every one of the 410 node ids"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_entropy_audit_")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("entropy_audit")}
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+
+    # Every route that used to carry the 410-case monolith must still carry all
+    # fifteen, or the split silently narrowed CI's reach. The helper row is the
+    # fourth: it is not same-name derivable and does not reach the `tests/**`
+    # branch, so without it a helper-only diff collapses to the meta-guard.
+    carriers = {
+        "scripts/governance/audit_repo_entropy.py",
+        "scripts/governance/write_entropy_baseline.py",
+        "scripts/ops/start-display-api.sh",
+    }
+    routed = {
+        rule.pattern: set(rule.tests)
+        for rule in PATH_TEST_RULES
+        if rule.pattern in carriers
+    }
+    assert set(routed) == carriers, sorted(carriers - set(routed))
+    for pattern, tests in routed.items():
+        assert partitions <= tests, f"{pattern} dropped {sorted(partitions - tests)}"
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(helper) == partitions, sorted(
+        partitions ^ support.get(helper, set())
+    )
 
 
 def test_publish_registry_partition_tracked_tree_is_exactly_seven_suites_and_one_helper() -> None:
@@ -10981,6 +11038,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
         "tests/test_publish_registry_calibration_overrides.py",
     ),
+    # #1823: the shared surface of the fifteen entropy-audit partitions. The
+    # report-contract partition anchors it because it is the one that names the
+    # memoized whole-repository `build_report` accessor AND both CLI runners on
+    # top of the path constants every partition carries; an anchor that stops
+    # deriving here means the partitions stopped sharing that surface at all.
+    (ENTROPY_AUDIT_HELPERS_PATH, "tests/test_entropy_audit_report_contract.py"),
     # #1872 (+#2238): the retention partitions' shared helper is imported at
     # module scope by all five collectible partitions; any of them is a valid
     # derivation anchor, pinned on the core suite (which is also the same-name

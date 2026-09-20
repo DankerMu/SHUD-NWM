@@ -73,7 +73,7 @@ Always run the issue-required governance checks after changing this file or
 production_closure scoped context:
 
 ```bash
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 

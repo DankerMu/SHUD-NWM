@@ -71,7 +71,7 @@ Always run the issue-required scoped-context checks after changing this file or
 API scoped context:
 
 ```bash
-uv run pytest -q tests/test_entropy_audit_script.py tests/test_runtime_mode.py tests/test_api.py
+uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py
 openspec validate --all --strict --no-interactive
 ```
 
