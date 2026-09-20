@@ -2475,9 +2475,17 @@ def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
     packages; it says nothing about this test, so the comparison is against the
     runner's live constant rather than a restated literal.
     """
-    runner = (
-        Path(__file__).resolve().parents[1] / "scripts" / "scheduler_file_provider_refresh.py"
-    ).read_text()
+    # #1099 split the 3639-line runner into `scripts/scheduler_refresh/`; the
+    # historical path is now a re-export facade and holds none of the literals
+    # below.  The two owner modules are named EXPLICITLY rather than globbed:
+    # the `history_dirs` pin below is an exact-list equality, so a glob would
+    # quietly change what "the runner's source" means whenever the package gains
+    # a module, and a literal moving to a third module must red here.
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    runner = "\n".join(
+        (scripts_dir / "scheduler_refresh" / name).read_text()
+        for name in ("runner.py", "receipt.py")
+    )
 
     assert (
         "run_id = f\"refresh_{started.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:12]}\""

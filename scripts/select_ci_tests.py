@@ -434,6 +434,38 @@ SCHEDULER_REFRESH_TESTS: tuple[str, ...] = (
 SCHEDULER_REFRESH_DEPLOYMENT_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_refresh_deployment_contract.py",
 )
+# The whole reach of the refresh RUNNER: the fifteen partitions plus the node-22
+# probe suite, which both imports the runner and reads its source for the
+# history-receipt filename shape. Named once because #1099 gave it eleven
+# carriers (the facade and the ten package modules) instead of one.
+SCHEDULER_REFRESH_RUNNER_TESTS: tuple[str, ...] = (
+    *SCHEDULER_REFRESH_TESTS,
+    "tests/test_node22_refresh_timer_health.py",
+)
+# #1099 split the 3639-line runner into this package; the historical path stayed
+# an executable entrypoint and a re-export facade, so it keeps its own row below
+# and is NOT a member of this tuple. Each module gets an explicit row rather than
+# a `scripts/scheduler_refresh/**` glob: a glob routes an eleventh module nobody
+# reviewed, while an unlisted module reddens the tracked-tree guard in
+# tests/test_select_ci_tests.py instead of silently dropping out of the PR lane.
+# There is no same-name derivation to fall back on -- none of these basenames has
+# a `tests/test_<basename>.py` -- so a missing row here means NO route at all,
+# which degrades the lane to the zero-assertion `--collect-only` smoke in
+# silence. Every module carries the whole corpus for the same reason the runner
+# row does: a behaviour change in any of them can land in any partition.
+SCHEDULER_REFRESH_OWNER_PATH = "scripts/scheduler_file_provider_refresh.py"
+SCHEDULER_REFRESH_PACKAGE_MODULES: tuple[str, ...] = (
+    "scripts/scheduler_refresh/classification.py",
+    "scripts/scheduler_refresh/config.py",
+    "scripts/scheduler_refresh/constants.py",
+    "scripts/scheduler_refresh/cutover_declaration.py",
+    "scripts/scheduler_refresh/identity.py",
+    "scripts/scheduler_refresh/precommit_gate.py",
+    "scripts/scheduler_refresh/providers.py",
+    "scripts/scheduler_refresh/receipt.py",
+    "scripts/scheduler_refresh/receipt_validation.py",
+    "scripts/scheduler_refresh/runner.py",
+)
 # The two helper modules are imported by a SUBSET of the corpus, and the
 # support-module closure guard derives that subset from the tracked tree, so
 # these tuples are the derived sets -- not the whole corpus. The four suites
@@ -3740,13 +3772,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # #1101: this row was the runner's only surviving named route once the
     # same-name derivation died with the monolith, so it carries the WHOLE
     # fifteen-suite corpus -- a runner change can land in any partition.
+    # #1099: the path is now a re-export facade over scripts/scheduler_refresh/.
+    # It keeps its own row (it is still the `-m` entrypoint, still holds the
+    # argparse surface and `main`, and is still the patch target the whole
+    # corpus writes to), and the ten owner modules get the identical reach
+    # immediately below.
     PathTestRule(
-        "scripts/scheduler_file_provider_refresh.py",
-        (
-            *SCHEDULER_REFRESH_TESTS,
-            "tests/test_node22_refresh_timer_health.py",
-        ),
+        SCHEDULER_REFRESH_OWNER_PATH,
+        SCHEDULER_REFRESH_RUNNER_TESTS,
     ),
+    # #1099: one row per owner module -- see SCHEDULER_REFRESH_PACKAGE_MODULES
+    # for why these are enumerated rather than globbed, and why each carries the
+    # runner's whole reach. The probe suite rides along because it reads the
+    # history-receipt literals that now live in runner.py and receipt.py.
+    PathTestRule("scripts/scheduler_refresh/classification.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/config.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/constants.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/cutover_declaration.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/identity.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/precommit_gate.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/providers.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/receipt.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/receipt_validation.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule("scripts/scheduler_refresh/runner.py", SCHEDULER_REFRESH_RUNNER_TESTS),
     # #1611: the state-index copyback replay tool's own suite was partitioned
     # into four files and the 1378-line monolith deleted with no shim, which
     # killed the same-name derivation that had been this script's ONLY route.

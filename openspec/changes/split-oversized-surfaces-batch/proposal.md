@@ -36,6 +36,7 @@
 ## Impact
 
 - Affected specs: `orchestrator-structural-burndown`（ADDED 9 条 requirement）。
-- Affected code: 上表 10 个文件及其拆出模块；`.large-file-guard.json`（-10 条 exclude）；`scripts/select_ci_tests.py` + `tests/test_select_ci_tests.py`（新分区的定向路由与完备性守卫）；`scripts/governance/audit_repo_entropy.py` 的 `_ScopedAgentContextConfig` 路径字面量；4 个 scoped `AGENTS.md`、`docs/governance/*_INVENTORY.md`、`docs/governance/entropy-burndown-triage.md` 的 verification command 字面量。
+- Affected code: 上表 10 个文件及其拆出模块；`.large-file-guard.json`（-10 条 exclude，+1 条已记录的非替代豁免 `tests/test_node22_refresh_timer_health.py`，见下）；`scripts/select_ci_tests.py` + `tests/test_select_ci_tests.py`（新分区的定向路由与完备性守卫）；`scripts/governance/audit_repo_entropy.py` 的 `_ScopedAgentContextConfig` 路径字面量；4 个 scoped `AGENTS.md`、`docs/governance/*_INVENTORY.md`、`docs/governance/entropy-burndown-triage.md` 的 verification command 字面量。
 - Out of scope（report-only）：`.large-file-guard.json` 其余 86 条 exclude 与 `maxLines` 阈值本身；`scripts/governance/write_entropy_baseline.py`（1,150 行，同模式兄弟，未立单）；任何 retention / registry / audit 的行为变更。
+- 记录在案的偏离：`tests/test_node22_refresh_timer_health.py`（3436 行）在 master 上就超线且从未豁免。#1099 的拆分使它读 runner 源码的 4 处字面量断言失效，必须 repoint 14 行；而 guard 是整文件 touch 门，任何 touch 都被拒。全树实测另有 **164 个** tracked 文件同处此态（含 PNG 与 receipt JSON），说明 exclude 列表是「撞到过的文件」而非原则清单。本 PR 为它加一条 exclude 并另立 #2532 收口——它不是任何拆分产物的替代豁免，净账 96 → 87。
 - 已核销不实现：#2026 / #2074 / #2102（CLOSED-COMPLETED，实测均已 < 1000）、#1906（由 #1910 `f19d3e1c0` + #1903 `b7c3e680a` 完成，四个面实测 870/892/855/490）。

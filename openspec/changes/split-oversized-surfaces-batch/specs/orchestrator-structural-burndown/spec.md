@@ -5,14 +5,18 @@
 The repository SHALL split the ten guard-excluded oversized surfaces named by this
 change so that every resulting file is below the 1,000-line limit, and SHALL remove
 exactly those ten entries from `.large-file-guard.json` in the same commit as each
-split. No replacement exclusion SHALL be added, and both `maxLines` and every
-unrelated exclusion SHALL remain byte-identical.
+split. No replacement exclusion SHALL be added for any file a split produces. Where a
+split forces an edit to a file that already exceeded the limit before this change and
+was never excluded, the change MAY add one exclusion for that pre-existing surface,
+and SHALL record the deviation and file a separate split issue for it. Both `maxLines`
+and every unrelated exclusion SHALL remain byte-identical.
 
 #### Scenario: the ten exclusions disappear and nothing takes their place
 
 - **WHEN** `.large-file-guard.json` is compared against its pre-change content
-- **THEN** exactly the ten named entries are absent, no entry has been added,
-  and `maxLines` plus every remaining exclusion is byte-identical
+- **THEN** exactly the ten named entries are absent, the only added entry is a
+  recorded pre-existing oversize surface that a split had to edit, and `maxLines`
+  plus every remaining exclusion is byte-identical
 - **AND** every file produced by the ten splits is below 1,000 lines.
 
 #### Scenario: a split lands without its exclusion removal

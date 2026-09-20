@@ -33,11 +33,11 @@
 
 ## 4. #1099 — `scripts/scheduler_file_provider_refresh.py`（3639 行）
 
-- [ ] 4.1 拆 `scripts/scheduler_refresh/` 包（config / receipt / precommit_gate / cutover_declaration / providers / identity / main，按实测行数增删模块），每个 < 1000 行
-- [ ] 4.2 旧路径按 D1 保为 facade（非 2 行 shim）：`python -m scripts.scheduler_file_provider_refresh` CLI 契约、env、flag、退出码不变
-- [ ] 4.3 删除该条 exclude，零替代 exclude
-- [ ] 4.4 selector 对 `scripts/scheduler_file_provider_refresh.py` 及新包全部模块的定向选择覆盖全部 refresh 分区
-- [ ] 4.5 Evidence：`--help` **与** `--dry-run --help` 两份 stdout 均与 baseline 逐字节相等；refresh + publish 两套测试全绿
+- [x] 4.1 拆 `scripts/scheduler_refresh/` 包，实测拆为 10 个 module（constants / identity / config / classification / receipt_validation / cutover_declaration / receipt / precommit_gate / providers / runner），最大 716 行；`main` 与 `_build_parser` 按 D1 留在 facade（二者读 `__doc__`，搬走会改 argparse description）
+- [x] 4.2 旧路径按 D1 保为 facade（非 2 行 shim）：`python -m scripts.scheduler_file_provider_refresh` CLI 契约、env、flag、退出码不变。**按 D1 全部 20 个 patch 符号取第 1 种裁定（真实调用点可达）**，实现方式为 facade 的 `__setattr__` 广播——对每个属性写入，同步写到包内所有「当前绑定同一对象」的 module，等价还原拆分前的单一 namespace 语义；零调用点改写，零 test repoint
+- [x] 4.3 删除该条 exclude，零替代 exclude
+- [x] 4.4 selector：`SCHEDULER_REFRESH_PACKAGE_MODULES` + 10 条显式 `PathTestRule`（不用 `**` glob），facade 行改用 `SCHEDULER_REFRESH_RUNNER_TESTS`；`NODE22_REFRESH_READER_EDGES` 增 runner.py / receipt.py 两条 reader edge；`tests/test_select_ci_tests.py` 增 `test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules`
+- [x] 4.5 Evidence：`--help` **与** `--dry-run --help` 两份 stdout 均与 baseline 逐字节相等；refresh 315 / publish 59 / node-22 probe + registry-audit + safe-fs 251 全绿；AST+sha256 oracle 零 missing、1 条 changed（`_CUTOVER_DECLARATION_SCHEMA_PATH` 的 `parent.parent` → `parents[2]`，下沉一层目录的必要修正，实测解析到同一绝对路径）；20/20 patch 符号经「关闭广播 → 转红」核验非 vacuous
 
 ## 5. #1102 — `tests/test_publish_scheduler_file_registry.py`（3218 行 / 59 用例）
 
@@ -82,7 +82,7 @@
 ## 10. 收口
 
 - [ ] 10.1 `wc -l` 全量核验：本批产出的每个文件 < 1000
-- [ ] 10.2 `.large-file-guard.json` diff 只有 10 条删除，`maxLines` 与其余 86 条逐字节不变
+- [ ] 10.2 `.large-file-guard.json` diff 为 10 条删除 + 至多 1 条已记录的非替代新增（见 Evidence Floor 2），`maxLines` 与其余条目逐字节不变
 - [ ] 10.3 `uv run ruff check .` 绿
 - [ ] 10.4 `openspec validate split-oversized-surfaces-batch --strict --no-interactive` 绿
 - [ ] 10.5 node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）覆盖 retention / refresh / publish / entropy 全部分区
@@ -91,7 +91,7 @@
 ## Evidence Floor
 
 1. 每个被拆测试文件的 `--collect-only` suffix 集合与 §0 baseline **byte-identical**（25/32/315/59/410）。
-2. `.large-file-guard.json` 恰好删除 10 条 exclude，**零新增**；`maxLines` 与其余条目逐字节不变。
+2. `.large-file-guard.json` 恰好删除 10 条 exclude；`maxLines` 与其余条目逐字节不变。**唯一允许的新增**是 `tests/test_node22_refresh_timer_health.py`（3436 行，pre-existing 超线、从未豁免，#1099 必须 repoint 它读 runner 源码的 4 处字面量断言，而 guard 是整文件 touch 门）——它不是任何拆分产物的替代豁免，必须在 PR body 记偏离并由 #2532 收口撤销。除此之外零新增。
 3. 本批产出的每个 `.py` / `.md` 文件 `wc -l` < 1000。
 4. 每个被搬走的 monkeypatch 符号：原模块不再 re-export，且负向用例经「破坏真实调用点 → 转红」核验（D1）。
 5. `audit_repo_entropy.py` 单组 parity（D3）：8 个稳定 metadata 键、`check_id` 集合、`module_heatmap`/`high_spread_patterns` key 集合、顶层 public 函数集合逐一相等；`findings` 全量 diff 为空，或残差逐条归因到本次搬运路径并在 PR body 列举。

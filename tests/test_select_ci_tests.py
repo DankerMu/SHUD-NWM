@@ -67,8 +67,11 @@ from scripts.select_ci_tests import (
     SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     SCHEDULER_REFRESH_HELPER_TESTS,
     SCHEDULER_REFRESH_HELPERS_PATH,
+    SCHEDULER_REFRESH_OWNER_PATH,
+    SCHEDULER_REFRESH_PACKAGE_MODULES,
     SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
     SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+    SCHEDULER_REFRESH_RUNNER_TESTS,
     SCHEDULER_REFRESH_TESTS,
     SELECTOR_META_GUARD_TEST,
     STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
@@ -387,12 +390,18 @@ NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
     # explicit row is the only named route and it carries the whole corpus. The
     # edge asserts membership, so naming all fifteen is what keeps a partition
     # from quietly dropping off the runner's route.
-    "scripts/scheduler_file_provider_refresh.py": frozenset(
-        {
-            *SCHEDULER_REFRESH_TESTS,
-            "tests/test_node22_refresh_timer_health.py",
-        }
-    ),
+    # #1099: the path is now a re-export facade, but it is still what the probe
+    # suite IMPORTS (`SCHEMA_VERSION`, `OUTCOMES`, `MAX_HISTORY`), so the edge
+    # survives the split unchanged.
+    "scripts/scheduler_file_provider_refresh.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
+    # #1099: the four literals the probe `read_text`s -- the `run_id` filename
+    # shape, the history directory name, the history receipt name and
+    # `latest.json` -- moved out of the facade into these two owner modules, and
+    # the probe was re-pointed at them in the same commit. Without these rows a
+    # PR renaming the history directory in receipt.py would merge green and
+    # leave the probe permanently at `manifest_unavailable`.
+    "scripts/scheduler_refresh/runner.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
+    "scripts/scheduler_refresh/receipt.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
     # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
     # the probe stdlib-only) and derives both threshold ceilings from it.
     "services/orchestrator/scheduler_file_providers.py": frozenset({"tests/test_node22_refresh_timer_health.py"}),
@@ -2154,6 +2163,43 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
         # The rule is only honest if it equals what the tracked tree derives.
         derived = _derived_support_module_importers([helper])[helper]
         assert derived == expected, sorted(derived ^ expected)
+
+
+def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None:
+    # #1099 replaced the 3639-line refresh runner with ten owner modules behind a
+    # re-export facade kept at the historical path. Ten is a floor, not a
+    # preference: an eleventh module, a stray `__init__.py` (scripts/ is a PEP
+    # 420 namespace tree -- scripts/governance/ has none either), the facade
+    # reduced to a deleted module or a two-line shim, or a module deleted out
+    # from under its row all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # an unrouted module selects nothing and degrades the refresh lane to the
+    # zero-assertion `--collect-only` smoke in silence. That is why the reach is
+    # asserted end to end below and not just read back off the rule table.
+    modules = set(SCHEDULER_REFRESH_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/scheduler_refresh"))
+
+    assert len(modules) == 10, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert Path(SCHEDULER_REFRESH_OWNER_PATH).exists(), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert SCHEDULER_REFRESH_OWNER_PATH not in modules
+    assert not Path("scripts/scheduler_refresh/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(SCHEDULER_REFRESH_RUNNER_TESTS)
+    assert set(SCHEDULER_REFRESH_TESTS) < expected
+    for pattern in (SCHEDULER_REFRESH_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
 
 
 def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
