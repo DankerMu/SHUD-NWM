@@ -1691,10 +1691,42 @@ def test_station_forcing_readiness_rejects_not_finalized_forcing_version() -> No
     assert len(store.cursor.executions) == 1
 
 
-def test_station_forcing_readiness_reports_qhh_like_coverage_and_index_outcome() -> None:
+#: The readiness payload's `query_index`, per store, spelled from
+#: `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql` rather
+#: than imported from the module under test: :231 renames the wide table (its
+#: auto-generated `forcing_station_timeseries_pkey` travelling with it) and
+#: :250-251 names the narrow table's primary key explicitly. Restating the
+#: module's own literals is what let #2517 ship — the whole defect was a payload
+#: that agreed with its pin and with nothing else.
+_READINESS_QUERY_INDEX_BY_STORE = {
+    "legacy": {
+        "status": "covered_by_primary_key",
+        "table": "met.forcing_station_timeseries_legacy",
+        "index": "forcing_station_timeseries_pkey",
+        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    },
+    "narrow": {
+        "status": "covered_by_primary_key",
+        "table": "met.forcing_station_timeseries",
+        "index": "forcing_station_timeseries_narrow_pkey",
+        "columns": ["forcing_version_key", "station_key", "variable_e", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_key and station_key before variable_e and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    },
+}
+
+
+@pytest.mark.parametrize("timeseries_store", ["legacy", "narrow"])
+def test_station_forcing_readiness_reports_qhh_like_coverage_and_index_outcome(timeseries_store: str) -> None:
     store = SqlCaptureForecastStore(
         [
-            [_forcing_version_row(station_count=386)],
+            [_forcing_version_row(station_count=386, timeseries_store=timeseries_store)],
             [
                 {
                     "actual_station_count": 386,
@@ -1729,16 +1761,16 @@ def test_station_forcing_readiness_reports_qhh_like_coverage_and_index_outcome()
     assert coverage_by_variable["Rn"]["missing_unit_samples"] == 4
     assert coverage_by_variable["Press"]["sample_count"] == 0
     assert {"UNIT_MISSING", "VARIABLE_MISSING"} <= reason_codes
-    assert response["query_index"] == {
-        "status": "covered_by_primary_key",
-        "table": "met.forcing_station_timeseries",
-        "index": "forcing_station_timeseries_pkey",
-        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
-        "reason": (
-            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
-            "matching the source-of-truth primary key prefix; no additive index is required for #204."
-        ),
+    assert response["query_index"] == _READINESS_QUERY_INDEX_BY_STORE[timeseries_store]
+    # …and the named relation is the one the readiness statements actually
+    # scanned. Without this the payload is only pinned against another literal,
+    # which is precisely the shape that survived 000061's rename.
+    scanned = {
+        match
+        for statement, _parameters in store.cursor.executions
+        for match in re.findall(r"FROM (met\.forcing_station_timeseries(?:_legacy)?)\b", statement)
     }
+    assert scanned == {response["query_index"]["table"]}, scanned
     assert response["ready"] is False
 
 
@@ -1863,8 +1895,50 @@ def test_station_forcing_readiness_excludes_out_of_window_rows_from_sql_and_resp
     assert response["ready"] is True
 
 
-def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identity_counts() -> None:
-    store = SqlCaptureForecastStore([[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]])
+#: The forcing entry of `quality.query_indexes`, per store, spelled from
+#: `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql` and
+#: `db/migrations/000024_qhh_latest_display_product_indexes.sql` rather than
+#: imported. 000061:231 renames the wide table and
+#: `forcing_station_timeseries_qhh_latest_window_idx` travels with it;
+#: 000061:263-265 creates the narrow table's only secondary index.
+_LATEST_PRODUCT_FORCING_QUERY_INDEX_BY_STORE = {
+    "legacy": {
+        "table": "met.forcing_station_timeseries_legacy",
+        "index": "forcing_station_timeseries_qhh_latest_window_idx",
+        "status": "covered_by_latest_product_station_window_index",
+        "columns": [
+            "forcing_version_id",
+            "basin_version_id",
+            "LOWER(source_id)",
+            "variable",
+            "valid_time DESC",
+            "station_id",
+        ],
+    },
+    "narrow": {
+        "table": "met.forcing_station_timeseries",
+        "index": "forcing_ts_version_variable_time_key_idx",
+        "status": "covered_by_version_variable_time_key_index",
+        "columns": ["forcing_version_key", "variable_e", "valid_time DESC"],
+    },
+}
+
+
+@pytest.mark.parametrize("forcing_timeseries_store", ["legacy", "narrow"])
+def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identity_counts(
+    forcing_timeseries_store: str,
+) -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    cycle_time=_dt("2026-05-07T00:00:00Z"),
+                    source_id="gfs",
+                    forcing_timeseries_store=forcing_timeseries_store,
+                )
+            ]
+        ]
+    )
 
     response = store.latest_qhh_display_product("gfs")
 
@@ -1894,13 +1968,31 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
         "quality_notes": [],
     }
     assert response["quality"]["required_station_variables"] == ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]
-    assert {item["index"] for item in response["quality"]["query_indexes"]} == {
-        "hydro_run_qhh_latest_candidate_idx",
-        "basin_version_qhh_latest_lookup_idx",
-        "river_ts_selected_identity_key_valid_time_idx",
-        "forcing_station_timeseries_qhh_latest_window_idx",
-        "interp_weight_qhh_latest_membership_idx",
+    # (table, index) PAIRS, not a set of index names (#2517). The name set was
+    # green on the legacy route while the payload named the wrong table for it,
+    # and green on the narrow route while the named index did not exist on the
+    # named table at all — an index name carries no relation, so pinning names
+    # alone cannot see either half of that.
+    expected_forcing = _LATEST_PRODUCT_FORCING_QUERY_INDEX_BY_STORE[forcing_timeseries_store]
+    assert {(item["table"], item["index"]) for item in response["quality"]["query_indexes"]} == {
+        ("hydro.hydro_run", "hydro_run_qhh_latest_candidate_idx"),
+        ("core.basin_version", "basin_version_qhh_latest_lookup_idx"),
+        ("hydro.river_timeseries", "river_ts_selected_identity_key_valid_time_idx"),
+        (expected_forcing["table"], expected_forcing["index"]),
+        ("met.interp_weight", "interp_weight_qhh_latest_membership_idx"),
     }
+    assert [
+        item
+        for item in response["quality"]["query_indexes"]
+        if item["table"].startswith("met.forcing_station_timeseries")
+    ] == [expected_forcing]
+    # …and the relation it names is the one the station leg actually rendered.
+    scanned = {
+        match
+        for statement, _parameters in store.cursor.executions
+        for match in re.findall(r"FROM (met\.forcing_station_timeseries(?:_legacy)?) fst", statement)
+    }
+    assert scanned == {expected_forcing["table"]}, scanned
     # #1442 switched the river leg of the latest-product fallback onto the surrogate
     # keys and the enum, so the evidence payload must name migration 000051's key
     # index — its columns are exactly the leg's four equality binds plus the
@@ -3484,14 +3576,18 @@ def _forcing_version_row(
     *,
     station_count: int = 386,
     checksum: str | None = "sha256:fixture",
+    timeseries_store: str = "legacy",
 ) -> dict[str, Any]:
     return {
         "forcing_version_id": forcing_version_id,
         # Task 7.3: `met.forcing_version.timeseries_store` routes every
         # per-version reader. Naming it here (rather than letting
         # `forcing_store_or_default` fall back to 'narrow') is what keeps the
-        # `…_legacy` equalities below pins on the rename.
-        "timeseries_store": "legacy",
+        # `…_legacy` equalities below pins on the rename. #2517 made it a
+        # PARAMETER: the readiness payload's index evidence routes on this same
+        # column, so a test that can only build a legacy version can only ever
+        # see half of that routing.
+        "timeseries_store": timeseries_store,
         "model_id": "qhh_shud_v1",
         "source_id": "gfs",
         "cycle_time": _dt("2026-05-07T00:00:00Z"),
@@ -3595,6 +3691,7 @@ def _qhh_candidate_row(
     river_valid_time_start: datetime | None = _dt("2026-05-07T00:00:00Z"),
     river_valid_time_end: datetime | None = _dt("2026-05-14T00:00:00Z"),
     max_lead_time_hours: int | None = 168,
+    forcing_timeseries_store: str = "legacy",
 ) -> dict[str, Any]:
     default_cycle_time = _dt("2026-05-07T00:00:00Z")
     schedule_cycle_time = cycle_time or default_cycle_time
@@ -3629,11 +3726,13 @@ def _qhh_candidate_row(
         "timeseries_store": "legacy",
         # Task 7.3: the candidate CTE now also projects the FORCING version's
         # store, and the station leg renders against whichever one this row
-        # names. Pinning it to 'legacy' here is what keeps every `…_legacy`
+        # names. Defaulting it to 'legacy' here is what keeps every `…_legacy`
         # equality below a statement about the rename rather than about the
         # default — the narrow direction is covered, per store, in
-        # tests/test_forcing_read_path_store_routing.py.
-        "forcing_timeseries_store": "legacy",
+        # tests/test_forcing_read_path_store_routing.py. #2517 made it a
+        # parameter because the public `quality.query_indexes` evidence now
+        # routes on it too.
+        "forcing_timeseries_store": forcing_timeseries_store,
         "run_type": run_type,
         "scenario_id": scenario_id,
         "model_id": model_id,

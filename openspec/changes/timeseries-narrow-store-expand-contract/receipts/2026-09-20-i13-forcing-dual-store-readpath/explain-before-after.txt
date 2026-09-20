@@ -1,0 +1,80 @@
+===== BEFORE: legacy leg -> met.forcing_station_timeseries_legacy =====
+                                                                                                                                                                        QUERY PLAN                                                                                                                                                                         
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join  (cost=1.11..191.18 rows=1 width=258) (actual time=26.565..1610.432 rows=23856 loops=1)
+   Buffers: shared hit=210904 read=1244
+   ->  Append  (cost=0.69..56.46 rows=50 width=148) (actual time=26.462..1396.328 rows=23856 loops=1)
+         Buffers: shared hit=22576 read=1244
+         ->  Index Scan using _hyper_1_112_chunk_forcing_station_timeseries_qhh_latest_window on _hyper_1_112_chunk fst_1  (cost=0.69..50.64 rows=48 width=144) (actual time=26.460..1148.960 rows=18744 loops=1)
+               Index Cond: ((forcing_version_id = 'forc_gfs_2026091812_dg_0883c7e9c1006c6fd347df500315e9df'::text) AND (basin_version_id = 'basins_qhh_vbasins'::text) AND (lower(source_id) = 'gfs'::text) AND (valid_time >= '2026-09-18 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 09:00:00+00'::timestamp with time zone))
+               Filter: (variable = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::text[]))
+               Buffers: shared hit=18306 read=971
+         ->  Index Scan using _hyper_1_176_chunk_forcing_station_timeseries_qhh_latest_window on _hyper_1_176_chunk fst_2  (cost=0.55..2.79 rows=1 width=232) (actual time=108.415..133.844 rows=3408 loops=1)
+               Index Cond: ((forcing_version_id = 'forc_gfs_2026091812_dg_0883c7e9c1006c6fd347df500315e9df'::text) AND (basin_version_id = 'basins_qhh_vbasins'::text) AND (lower(source_id) = 'gfs'::text) AND (valid_time >= '2026-09-18 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 09:00:00+00'::timestamp with time zone))
+               Filter: (variable = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::text[]))
+               Buffers: shared hit=3327 read=181
+         ->  Index Scan using _hyper_1_184_chunk_forcing_station_timeseries_qhh_latest_window on _hyper_1_184_chunk fst_3  (cost=0.55..2.78 rows=1 width=232) (actual time=22.800..110.274 rows=1704 loops=1)
+               Index Cond: ((forcing_version_id = 'forc_gfs_2026091812_dg_0883c7e9c1006c6fd347df500315e9df'::text) AND (basin_version_id = 'basins_qhh_vbasins'::text) AND (lower(source_id) = 'gfs'::text) AND (valid_time >= '2026-09-18 12:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 09:00:00+00'::timestamp with time zone))
+               Filter: (variable = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::text[]))
+               Buffers: shared hit=943 read=92
+   ->  Index Scan using interp_weight_qhh_latest_membership_idx on interp_weight iw  (cost=0.42..2.65 rows=1 width=26) (actual time=0.007..0.007 rows=1 loops=23856)
+         Index Cond: ((model_id = 'dg_0883c7e9c1006c6fd347df500315e9df'::text) AND (station_id = fst_1.station_id) AND (variable = fst_1.variable) AND (lower(source_id) = 'gfs'::text))
+         Buffers: shared hit=173376
+ Planning:
+   Buffers: shared hit=1266
+ Planning Time: 13.303 ms
+ Execution Time: 1612.573 ms
+(23 rows)
+
+
+===== AFTER: narrow leg -> met.forcing_station_timeseries =====
+                                                                                                                                                      QUERY PLAN                                                                                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join  (cost=1.42..74.38 rows=1 width=334) (actual time=0.249..406.720 rows=23856 loops=1)
+   Join Filter: ((fst_1.variable_e)::text = iw.variable)
+   Rows Removed by Join Filter: 59640
+   Buffers: shared hit=533616
+   ->  Nested Loop  (cost=1.00..71.76 rows=1 width=138) (actual time=0.172..81.790 rows=23856 loops=1)
+         Buffers: shared hit=98861
+         ->  Nested Loop  (cost=0.71..69.73 rows=1 width=82) (actual time=0.130..21.605 rows=23856 loops=1)
+               Buffers: shared hit=11165
+               ->  Index Scan using forcing_version_pkey on forcing_version fv  (cost=0.41..2.63 rows=1 width=62) (actual time=0.065..0.067 rows=1 loops=1)
+                     Index Cond: (forcing_version_id = 'forc_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df'::text)
+                     Filter: (lower(source_id) = 'gfs'::text)
+                     Buffers: shared hit=4
+               ->  Append  (cost=0.29..67.03 rows=7 width=28) (actual time=0.062..17.867 rows=23856 loops=1)
+                     Buffers: shared hit=11161
+                     ->  Index Scan using _hyper_11_192_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_192_chunk fst_1  (cost=0.29..9.57 rows=1 width=28) (actual time=0.061..2.335 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1597
+                     ->  Index Scan using _hyper_11_193_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_193_chunk fst_2  (cost=0.29..9.57 rows=1 width=28) (actual time=0.046..2.155 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+                     ->  Index Scan using _hyper_11_194_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_194_chunk fst_3  (cost=0.29..9.57 rows=1 width=28) (actual time=0.044..2.132 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+                     ->  Index Scan using _hyper_11_195_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_195_chunk fst_4  (cost=0.29..9.57 rows=1 width=28) (actual time=0.041..2.136 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+                     ->  Index Scan using _hyper_11_196_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_196_chunk fst_5  (cost=0.29..9.57 rows=1 width=28) (actual time=0.041..2.208 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+                     ->  Index Scan using _hyper_11_197_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_197_chunk fst_6  (cost=0.29..9.57 rows=1 width=28) (actual time=0.064..2.095 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+                     ->  Index Scan using _hyper_11_198_chunk_forcing_ts_version_variable_time_key_idx on _hyper_11_198_chunk fst_7  (cost=0.29..9.57 rows=1 width=28) (actual time=0.046..2.059 rows=3408 loops=1)
+                           Index Cond: ((forcing_version_key = fv.forcing_version_key) AND (variable_e = ANY ('{PRCP,TEMP,RH,wind,Rn,Press}'::met.forcing_variable[])) AND (valid_time >= '2026-09-19 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-09-25 21:00:00+00'::timestamp with time zone))
+                           Buffers: shared hit=1594
+         ->  Index Scan using met_station_station_key_key on met_station ms  (cost=0.29..2.03 rows=1 width=64) (actual time=0.002..0.002 rows=1 loops=23856)
+               Index Cond: (station_key = fst_1.station_key)
+               Filter: (basin_version_id = 'basins_qhh_vbasins'::text)
+               Buffers: shared hit=79632
+   ->  Index Scan using interp_weight_qhh_latest_membership_idx on interp_weight iw  (cost=0.42..2.58 rows=1 width=26) (actual time=0.006..0.009 rows=4 loops=23856)
+         Index Cond: ((model_id = 'dg_0883c7e9c1006c6fd347df500315e9df'::text) AND (station_id = ms.station_id) AND (lower(source_id) = 'gfs'::text))
+         Buffers: shared hit=417928
+ Planning:
+   Buffers: shared hit=1129
+ Planning Time: 6.103 ms
+ Execution Time: 408.723 ms
+(46 rows)
+

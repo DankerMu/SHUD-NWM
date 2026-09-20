@@ -8,10 +8,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from packages.common.forcing_store_routing import (
+    FORCING_STORE_LEGACY,
+    FORCING_STORE_NARROW,
     forcing_store_or_default,
     forcing_version_store,
 )
 from packages.common.forcing_ts_render import (
+    FORCING_TABLE,
+    FORCING_TABLE_LEGACY,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -2502,6 +2506,7 @@ class PsycopgForecastStore:
                 cr.forcing_end_time,
                 cr.expected_station_count,
                 cr.forcing_checksum,
+                cr.forcing_timeseries_store,
                 cr.display_start_time,
                 cr.display_end_time,
                 COALESCE(sc.station_count, 0) AS station_count,
@@ -2615,6 +2620,13 @@ class PsycopgForecastStore:
                         rnv.segment_count
                     ) AS expected_segment_count,
                     fv.forcing_version_id AS fv_forcing_version_id,
+                    -- Mirrors _QHH_LATEST_CANDIDATE_RUNS_SQL's task 7.3
+                    -- projection at the identical position. The fast path runs
+                    -- no forcing fact scan of its own, but the row it hands
+                    -- back still has to say which relation this candidate's
+                    -- forcing rows live in (#2517) -- and it must stay
+                    -- field-for-field equal to the CTE path.
+                    fv.timeseries_store AS forcing_timeseries_store,
                     fv.model_id AS forcing_model_id,
                     fv.source_id AS forcing_source_id,
                     fv.cycle_time AS forcing_cycle_time,
@@ -2725,6 +2737,13 @@ class PsycopgForecastStore:
                     rnv.segment_count
                 ) AS expected_segment_count,
                 fv.forcing_version_id AS fv_forcing_version_id,
+                -- #2517: same projection as both candidate paths, so every row
+                -- shape `_qhh_latest_candidate_response` consumes carries the
+                -- store. These rows are only ever summarised (they are never
+                -- `ready`), so the evidence block they build is not served
+                -- today -- which is exactly why the column must be here rather
+                -- than relied on to be absent.
+                fv.timeseries_store AS forcing_timeseries_store,
                 fv.model_id AS forcing_model_id,
                 fv.source_id AS forcing_source_id,
                 fv.cycle_time AS forcing_cycle_time,
@@ -3663,7 +3682,12 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
             "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
             "search_limit": QHH_LATEST_SEARCH_LIMIT,
             "context_limit": QHH_LATEST_CONTEXT_LIMIT,
-            "query_indexes": _qhh_latest_query_indexes(),
+            # #2517: the candidate's OWN forcing store, resolved with the very
+            # function the station leg routes on (`forcing_store_or_default`
+            # over the candidate_runs CTE's `fv.timeseries_store`), so the
+            # evidence names the relation this candidate's rows were read from
+            # rather than one store's answer for both.
+            "query_indexes": _qhh_latest_query_indexes(row.get("forcing_timeseries_store")),
         },
     }
     return {"ready": not reasons, "product": product, "unavailable_reasons": reasons}
@@ -4210,7 +4234,116 @@ def _qhh_latest_context_reasons(evaluations: Sequence[Mapping[str, Any]]) -> lis
     return reasons
 
 
-def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
+# The forcing leg's index evidence, ROUTED (#2517) exactly like the SQL it
+# describes. Until #2517 this was one hardcoded entry, and 000061 made it false
+# on BOTH routes at once: the migration renamed the wide table to
+# `met.forcing_station_timeseries_legacy` (:231) — taking
+# `forcing_station_timeseries_qhh_latest_window_idx` with it — and created the
+# narrow table under the canonical name with a different secondary index
+# (:263-265). So the constant named the canonical table with an index that no
+# longer lives there (narrow route wrong) while the legacy route's SQL read the
+# renamed table the payload never mentioned (legacy route wrong).
+#
+# The table names come from the renderer's own D1 constants rather than being
+# spelled again here, so task 8.2's contract cannot desync the two a second
+# time. The index names cannot come from a constant — nothing in the read path
+# names an index — so each (table, index, columns) triple is attributed to the
+# migration that creates it by
+# `tests/test_migrations.py::test_forcing_query_index_payloads_name_the_relations_000061_actually_left`.
+# Refresh both this map and that pin whenever the shape moves. Do NOT reach for
+# the older `…_migration_matches_candidate_and_window_queries` pin beside it:
+# that one only asks whether an index NAME occurs in this source region, which
+# is why it stayed green all the way through #2517.
+#
+# Measured provenance for the narrow repin: the #1992 I13 rollout receipt's
+# production `EXPLAIN (ANALYZE)` on node-27, whose narrow leg scans
+# `forcing_ts_version_variable_time_key_idx`
+# (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/
+# 2026-09-20-i13-forcing-dual-store-readpath/explain-before-after.txt`).
+#
+# 8.2 drops the legacy table; the `legacy` entry goes with it.
+_QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE: dict[str, dict[str, Any]] = {
+    FORCING_STORE_LEGACY: {
+        "table": FORCING_TABLE_LEGACY,
+        "index": "forcing_station_timeseries_qhh_latest_window_idx",
+        "status": "covered_by_latest_product_station_window_index",
+        "columns": [
+            "forcing_version_id",
+            "basin_version_id",
+            "LOWER(source_id)",
+            "variable",
+            "valid_time DESC",
+            "station_id",
+        ],
+    },
+    FORCING_STORE_NARROW: {
+        "table": FORCING_TABLE,
+        "index": "forcing_ts_version_variable_time_key_idx",
+        "status": "covered_by_version_variable_time_key_index",
+        "columns": [
+            "forcing_version_key",
+            "variable_e",
+            "valid_time DESC",
+        ],
+    },
+}
+
+#: The readiness helper's primary-key evidence, routed for the same reason and
+#: from the same migration. The legacy table kept the auto-generated
+#: `forcing_station_timeseries_pkey` through 000061's rename; the narrow table's
+#: primary key is named explicitly (`000061:250-251`) because index names are
+#: unique per schema. `station_forcing_readiness` has no HTTP route, so this one
+#: is internal — but it is the same claim about the same catalog.
+_STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE: dict[str, dict[str, Any]] = {
+    FORCING_STORE_LEGACY: {
+        "status": "covered_by_primary_key",
+        "table": FORCING_TABLE_LEGACY,
+        "index": "forcing_station_timeseries_pkey",
+        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    },
+    FORCING_STORE_NARROW: {
+        "status": "covered_by_primary_key",
+        "table": FORCING_TABLE,
+        "index": "forcing_station_timeseries_narrow_pkey",
+        "columns": ["forcing_version_key", "station_key", "variable_e", "valid_time"],
+        "reason": (
+            "Station-series reads constrain forcing_version_key and station_key before variable_e and valid_time, "
+            "matching the source-of-truth primary key prefix; no additive index is required for #204."
+        ),
+    },
+}
+
+
+def _routed_query_index(by_store: Mapping[str, Mapping[str, Any]], store: Any) -> dict[str, Any]:
+    """A fresh copy of ``store``'s entry, ``columns`` list included.
+
+    ``store`` is typed as the routing helpers type it, because the value comes
+    off a LEFT JOIN: a candidate with no ``met.forcing_version`` row projects
+    ``None``, and ``forcing_store_or_default`` resolves that to the narrow table
+    — the one that survives task 8.2 — exactly as the render at :2088 does.
+
+    Copied rather than returned by reference because these entries are serialized
+    straight into a public response: handing the caller the module constant would
+    let one request's post-processing rewrite every later request's evidence.
+    """
+    entry = dict(by_store[forcing_store_or_default(store)])
+    entry["columns"] = list(entry["columns"])
+    return entry
+
+
+def _qhh_latest_query_indexes(store: Any) -> list[dict[str, Any]]:
+    """The latest-product index evidence for a candidate routed to ``store``.
+
+    Parameterless until #2517, which is how it came to describe one store's plan
+    for both. ``store`` is the SAME value the station leg renders from
+    (``forcing_store_or_default`` over the candidate's
+    ``met.forcing_version.timeseries_store``), so the description and the
+    described statement cannot disagree about which relation was read.
+    """
     return [
         {
             "table": "hydro.hydro_run",
@@ -4259,19 +4392,7 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
                 "valid_time DESC",
             ],
         },
-        {
-            "table": "met.forcing_station_timeseries",
-            "index": "forcing_station_timeseries_qhh_latest_window_idx",
-            "status": "covered_by_latest_product_station_window_index",
-            "columns": [
-                "forcing_version_id",
-                "basin_version_id",
-                "LOWER(source_id)",
-                "variable",
-                "valid_time DESC",
-                "station_id",
-            ],
-        },
+        _routed_query_index(_QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE, store),
         {
             "table": "met.interp_weight",
             "index": "interp_weight_qhh_latest_membership_idx",
@@ -4756,16 +4877,13 @@ def _station_forcing_readiness_response(
                 }
             )
 
-    query_index = {
-        "status": "covered_by_primary_key",
-        "table": "met.forcing_station_timeseries",
-        "index": "forcing_station_timeseries_pkey",
-        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
-        "reason": (
-            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
-            "matching the source-of-truth primary key prefix; no additive index is required for #204."
-        ),
-    }
+    # #2517: routed on the same `met.forcing_version.timeseries_store` the two
+    # readiness fetches above bind (`station_forcing_readiness`, :1794/:1802),
+    # so the primary key named here is the one the executed statement used.
+    query_index = _routed_query_index(
+        _STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE,
+        forcing_version_store(forcing_version),
+    )
     ready = not missing_reasons and all(item["ready"] for item in coverage)
     return {
         "forcing_version_id": str(forcing_version["forcing_version_id"]),

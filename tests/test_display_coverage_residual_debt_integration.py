@@ -101,11 +101,18 @@ assert _LEGACY_FALLBACK_SQL.count("%") == 6 and _LEGACY_FALLBACK_SQL.count("%s")
 
 # Columns the production candidate CTE carries that the frozen text does not:
 # #1442 added the three surrogate keys for the river fact-table join and the
-# final SELECT is `cr.*`, so they ride out to the caller. The parity helper pops
-# exactly this set off each production row and ASSERTS what it popped — the
-# projection is pinned, not tolerant, so a fourth new column reddens the parity
-# test instead of being silently excused.
-_NEW_ONLY_COLUMNS = frozenset({"run_key", "basin_version_key", "river_network_version_key"})
+# final SELECT is `cr.*`, so they ride out to the caller. #2517 added the
+# fourth: the candidate's `met.forcing_version.timeseries_store`, which task 7.3
+# already projected into the CTE for the header's routing decision and which the
+# final SELECT now passes through, because the public `quality.query_indexes`
+# evidence is assembled from the ROW and has to name the relation THIS
+# candidate's forcing rows were read from. The parity helper pops exactly this
+# set off each production row and ASSERTS what it popped — the projection is
+# pinned, not tolerant, so a fifth new column reddens the parity test instead of
+# being silently excused.
+_NEW_ONLY_COLUMNS = frozenset(
+    {"run_key", "basin_version_key", "river_network_version_key", "forcing_timeseries_store"}
+)
 
 # Sentinel for the pop above: a column present with value None must still count
 # as present, which `row.pop(key, None)` cannot express.
