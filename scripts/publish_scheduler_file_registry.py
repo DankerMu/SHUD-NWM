@@ -27,6 +27,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Protocol
 
+# `python scripts/publish_scheduler_file_registry.py` (the node-22 bringup
+# runbook invokes it that way) puts `scripts/` on sys.path, not the repository
+# root, so the owner package below is not importable without this. Idempotent,
+# and a no-op under `import scripts.publish_scheduler_file_registry`.
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from packages.common.object_store import LocalObjectStore
 
 # #1097: the audit contract lives in `packages/scheduler/registry_audit.py` so
