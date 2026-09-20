@@ -62,7 +62,18 @@ retention receipt 里 **`legacy_chunks` 键完全缺席**。
 
 这正是 #2515 第 (a) 条所述：`node27_timeseries_retention.py:1141-1143` 只对 `eligible`（已过 cutoff 者）中名字以 `_legacy` 结尾的 chunk 计数，而 `:1130` 是 `if legacy_chunks:`——零值时键根本不写入。所以把 `legacy_chunks = 0` 当作 8.2 的入场门禁，在今天（6 个 legacy chunk 一个都没到期）与将来（全部汰光）**读数完全相同，且都表现为键缺席**。这不是推演，是本 receipt 的原始 JSON。
 
-## 5. 本 receipt 不主张的事
+## 5. 两份 receipt 均通过各自 schema 校验
+
+`#1992` 的验收条款之一是「双表 tick receipt 通过 schema」，此处是该校验本身而非仅归档：
+
+```
+PASS  compression-20260920T042532Z.json  vs  schemas/timeseries_compression_receipt.schema.json
+PASS  retention-20260920T063632Z.json    vs  schemas/timeseries_retention_receipt.schema.json
+```
+
+压缩 receipt 的 `per_table_totals` 同时带正名键与 `_legacy` 键并通过校验，正是 3.2 把该字段改成 `patternProperties`（canonical 必需、`_legacy` 可选）所要保障的兼容性——过渡期的混合形状与历史无 `_legacy` 的 receipt 在同一 schema 下都合法。retention receipt 在 `legacy_chunks` 键缺席时同样合法，对应 3.2 把该键设为可选。
+
+## 6. 本 receipt 不主张的事
 
 - 不主张窄表的压缩效果——它还没有任何 chunk 出 lag 窗。
 - 不主张 retention 会按期汰掉 legacy 表的 chunk；只记录本次 cutoff 下它们均不合格。按现状最后一个 legacy chunk（`range_end 2026-09-28`）要到 2026-10-19 才满足 `range_end <= now - 21d`。
