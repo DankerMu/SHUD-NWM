@@ -4,8 +4,9 @@
 persistence channel (CLI summary, runner receipt, manifest companion receipt)
 must route through.  These tests pin the strict branches directly on the
 shared module plus the re-export identity the CLI/runner import paths depend
-on; channel-level behavior lives in
-`tests/test_publish_scheduler_file_registry.py`.
+on; channel-level behavior lives in the #1102 publisher partitions that drive
+the gate -- `tests/test_publish_registry_manual_cli.py` (CLI summary) and
+`tests/test_publish_registry_manifest_audit.py` (manifest companion receipt).
 """
 
 from __future__ import annotations

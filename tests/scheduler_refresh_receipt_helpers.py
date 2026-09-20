@@ -239,7 +239,10 @@ def _receipt_with_classification(
 
 
 # ---------------------------------------------------------------------------
-# #1433: declared retirement channel — `_classify_registry` decision grid
+# #1433: declared retirement channel — fixtures for the `_classify_registry`
+# decision grid.  #1101 put the grid itself in
+# tests/test_scheduler_refresh_retirement_reconciliation.py, and moved only the
+# payload builders below into this helper.
 # ---------------------------------------------------------------------------
 
 

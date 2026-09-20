@@ -10840,7 +10840,9 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # constant-only form: every route and selection pin in this file stayed
     # green, and the only reds were the directory-rule disposition audit plus
     # the four guards that derive from its gap set -- all five naming the one
-    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py`.
+    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py` (#2259
+    # repointed that at-site target to `RETENTION_COPYBACK_MUTEX_TESTS`, i.e. the
+    # `..._budget.py` / `..._protocol.py` partitions; the measurement predates the split).
     # And that audit is satisfiable by a token: adding a single `runtime-budget`
     # exclusion for that pair put the file back to all-green with the route
     # still gone. One token away from losing the requirement oracle for
@@ -18463,7 +18465,10 @@ def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
 
 
 def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> None:
-    # D is the sole support-to-support importer; A/B/C import D, never the registry helper.
+    # D is the support-to-support importer this case is scoped to; A/B/C import D, never the
+    # registry helper.  Since #1102 D is one of TWO such bridges -- `tests/publish_registry_helpers.py`
+    # imports `_make_valid_model` for `_write_healthy_basin_pair` -- so "exactly one" in the name
+    # means the one QHH edge, not the only support-to-support edge in the tree.
     oracle = _registry_partition_oracle()
     helper_module = REGISTRY_PARTITION_HELPER_MODULE
     support = oracle["helper_consumers"]["support_importer"]
@@ -18484,8 +18489,9 @@ def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> N
     assert len(all_helper_imports) == 2, "D must carry exactly its two retargeted imports"
     imported_names = {alias.name for node in all_helper_imports for alias in node.names}
     assert imported_names == {"_write_registry_fixture", "_package_manifest_for_model"}, sorted(imported_names)
-    # No tracked suite outside the derived direct eight may import the registry helper,
-    # and the three QHH partitions must import D rather than the registry helper.
+    # No tracked suite outside the derived direct importer set (eight before #1102, eleven now)
+    # may import the registry helper, and the three QHH partitions must import D rather than
+    # the registry helper.
     d_module = "tests.qhh_production_bootstrap_helpers"
     # #1102: read the oracle rather than re-spelling the set here -- the publisher side of
     # it is four partitions now, and the derivation guard above already proves the oracle

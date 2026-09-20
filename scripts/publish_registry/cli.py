@@ -66,8 +66,9 @@ def _build_manual_cutover_gate(
     """Wire the #1080 registry cutover gate for the manual CLI (finding C-D1).
 
     Lazy import of the refresh module keeps this file free of a top-level
-    dependency cycle (`scheduler_file_provider_refresh` already imports from
-    this module).  The manual CLI runs outside the refresh runner's own lock
+    dependency cycle: `scripts/scheduler_refresh/` already imports from the
+    `scripts/publish_scheduler_file_registry.py` facade this module sits
+    behind.  The manual CLI runs outside the refresh runner's own lock
     coordination, but the gate itself is stateless — it snapshots the
     previous canonical bytes inside the gate call and returns the same
     classification refusal that the runner path would produce.

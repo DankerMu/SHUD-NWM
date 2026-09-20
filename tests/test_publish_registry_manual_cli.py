@@ -33,9 +33,11 @@ from tests.publish_registry_helpers import (
 # publisher itself acquires that same canonical lock at replace time, so the
 # concurrency invariant it claimed to test lived entirely in test scaffolding.
 # The truthful coverage lives in
-# `tests/test_scheduler_file_provider_refresh.py::test_full_runner_refresh_lock_is_held_during_precommit_gate`
-# (T13, part a) which instruments the runner's real `refresh_lock` and proves
-# a competing non-blocking acquire fails while the gate runs.
+# `test_full_runner_refresh_lock_is_held_during_precommit_gate` (T13, part a),
+# which #1101 left in
+# `tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py`; it
+# instruments the runner's real `refresh_lock` and proves a competing
+# non-blocking acquire fails while the gate runs.
 # ---------------------------------------------------------------------------
 
 

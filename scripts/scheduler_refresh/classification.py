@@ -45,7 +45,9 @@ _CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode", "declared_retirements", "gene
 # #1433/#1553: skip-cause evidence keys copied onto a `registry_cutover_removal_refused`
 # entry when bulk publish reported the model as skipped.  Same key names the
 # publisher's not-publishable diagnostics use
-# (`publish_scheduler_file_registry.py:675`) so operators read one vocabulary.
+# (`scripts/publish_registry/selection.py`'s `_record_skipped_model`, which
+# #1100 moved out of `publish_scheduler_file_registry.py`) so operators read one
+# vocabulary.
 # `unreadable_required_files` mirrors the third discovery cause state (#1552):
 # a required file that MATCHED but could not be read is neither missing nor
 # invalid, and an omission here would render a `partial` refusal with every

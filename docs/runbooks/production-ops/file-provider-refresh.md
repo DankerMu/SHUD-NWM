@@ -268,8 +268,8 @@ publish 绑定的那个值，**不要从 dry-run 拷**。
 >   **文件级** declaration 加载失败（文件缺失 / 不可读 / 过期 / schema 不符）
 >   在 `--dry-run` 下**照样拒**：`_registry_precommit_gate()` 无条件先加载
 >   declaration、加载失败即按 `registry_cutover_declaration_invalid` 拒
->   （`scripts/scheduler_file_provider_refresh.py:3481-3508`），而 direct-grid 分支
->   在 dry-run return 之前就调用了 precommit（`:901-902`）。
+>   （`scripts/scheduler_refresh/precommit_gate.py`），而 direct-grid 分支
+>   在 dry-run return 之前就调用了 precommit（`scripts/scheduler_refresh/runner.py`）。
 > - **replace** entry 没有 `package_changed` 可覆盖，永远不生效；它的 `generation`
 >   一旦与 renewal 的 prospective 不符、或 declaration 过期 / 文件不可读，同样拖停
 >   每日管线。
@@ -376,9 +376,11 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    `failed` / `replace_uncertain` / `restored_previous` / `published_receipt_failed`）。
 5. Cutover 落地后**删除整行**。这不是可选的清理，而是主要失效模式：把非空行留着，
    一旦 declaration 过期（`effective_cycle_utc` 超出
-   `CUTOVER_PAST_TOLERANCE=24h`，见 `scripts/scheduler_file_provider_refresh.py:107`、
-   `:2327`）、文件被删除或轮转掉（`:2283-2289` 的 `OSError` 直接判 invalid）、
-   或 declaration 的 `generation` 相对新的 prospective 过期（`:2556+`），
+   `CUTOVER_PAST_TOLERANCE=24h`，见 `scripts/scheduler_refresh/constants.py` 与
+   `scripts/scheduler_refresh/cutover_declaration.py`）、文件被删除或轮转掉
+   （同一模块里的 `OSError` 分支直接判 invalid）、
+   或 declaration 的 `generation` 相对新的 prospective 过期
+   （`scripts/scheduler_refresh/precommit_gate.py` 的 `_prospective_registry_generation` 比对），
    **每一次**后续 refresh 都会以 outcome=`failed`、reason=
    `registry_cutover_declaration_invalid` 拒跑——每日 timer 管线从此停摆，直到有人删掉这一行。
    前两类（过期 / 文件不可读）是 declaration **加载**失败，在 `:2704-2732` 无条件生效，

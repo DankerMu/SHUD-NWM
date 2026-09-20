@@ -31,7 +31,8 @@ from tests.entropy_audit_helpers import (
 @pytest.mark.parametrize(
     "line",
     [
-        # docs/runbooks/current-production-ops.md:1560
+        # docs/runbooks/production-ops/recalibration-and-archive.md:15
+        # (#1103 moved it out of docs/runbooks/current-production-ops.md)
         "node-22 本地 scratch mirror 的机器；node-22 本身 DB-free，recalibration 模式只写",
         # openspec/specs/production-scheduler-orchestration/spec.md:103
         (

@@ -115,7 +115,8 @@ SYSTEMCTL_TIMEOUT_SECONDS = 30
 # Bounded history fallback (design D3b).  The refresh runner writes every
 # receipt to a `history/` sibling of `latest.json` as
 # `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`
-# (`scripts/scheduler_file_provider_refresh.py:611`), so the fixed-width UTC
+# (the `run_id` built in `scripts/scheduler_refresh/runner.py`, which #1099
+# carved out of the pre-split refresh monolith), so the fixed-width UTC
 # prefix makes a lexical DESCENDING sort chronological -- no timestamp is
 # parsed and no `mtime` is trusted.  The runner caps that directory at
 # `MAX_HISTORY = 32`; the 200-entry listing cap is the probe's own

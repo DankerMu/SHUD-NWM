@@ -188,7 +188,7 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 **不需要做的**（都核实过，别顺手做）：
 
 - **不需要 retirement declaration**。`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 让刷新走
-  [`scheduler_file_provider_refresh.py:896`](../../../scripts/scheduler_file_provider_refresh.py)
+  [`scripts/scheduler_refresh/runner.py`](../../../scripts/scheduler_refresh/runner.py)
   的 replay 分支，`previous_models_snapshot` 由
   `_load_previous_canonical_registry(registry_uri)` 直接读 manifest——手工删行之后
   previous 本身就是 56，分类器看到的是 `56/56 unchanged`，**根本不产生 `removed`**，

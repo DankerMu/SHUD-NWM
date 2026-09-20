@@ -599,7 +599,8 @@ staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标
 它只对 `config/calibration_overrides.yaml` 点名的流域参数生效，且记进 manifest。）
 **它记在发布 receipt 的 `summary["repairs"]` 里，不在 package manifest 里**——
 `publish_basins_package` 不收 repair 参数，manifest 对任何 repair 都没有字段。
-而 receipt 只在显式传了 `--output` 时才落盘（`publish_scheduler_file_registry.py:396-397`），
+而 receipt 只在显式传了 `--output` 时才落盘（`scripts/publish_registry/publisher.py` 里
+`if output_path is not None` 那支；#1100 把它从 `publish_scheduler_file_registry.py` 搬出来了），
 否则只打到 stdout。查 repair 溯源要找 receipt，不要翻 manifest。
 
 **当前 authority（2026-08-22 node-22 实测 canonical manifest）**：共 24 个业务流域，

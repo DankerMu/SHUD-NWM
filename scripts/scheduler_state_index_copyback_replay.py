@@ -216,8 +216,9 @@ _PRE_COMMIT_INDEX_REASONS = frozenset(
 #: is classified commit-uncertain (exit 3) and takes the committed tail, because
 #: only an audited pre-commit raise point proves the shared index is unchanged
 #: (#1189 r3 D1).  Same direction as
-#: `scripts/scheduler_file_provider_refresh.py:504-529`, which likewise treats
-#: only explicitly-uncommitted outcomes as uncommitted.
+#: `scripts/scheduler_refresh/config.py`'s `_provider_failure_reason` (#1099
+#: moved it out of the pre-split refresh monolith), which likewise treats only
+#: explicitly-uncommitted outcomes as uncommitted.
 MERGE_PRE_COMMIT_REFUSAL_REASONS = _PRE_COMMIT_PROVIDER_REASONS | _PRE_COMMIT_INDEX_REASONS
 
 # Reported-failure precedence for the committed/uncertain tail, most severe first.

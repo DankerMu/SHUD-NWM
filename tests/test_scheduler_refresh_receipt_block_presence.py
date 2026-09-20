@@ -378,7 +378,7 @@ def test_failed_id_only_receipt_keeps_the_single_declaration_refusal() -> None:
 
 # ---------------------------------------------------------------------------
 # #1832 round-2 C1: the `calibration_overrides` receipt block.  The end-to-end
-# lane pins live in tests/test_publish_scheduler_file_registry.py (they need a
+# lane pins live in tests/test_publish_registry_refresh_lane.py (they need a
 # real Basins tree); these pin the receipt contract itself, on both readers --
 # the runtime validator and the JSON Schema must reject the same corpus, or a
 # receipt that one accepts and the other refuses breaks the emergency channel.

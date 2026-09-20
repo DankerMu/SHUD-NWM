@@ -36,11 +36,17 @@ from workers.canonical_converter.converter import required_standard_variables_fo
 
 # #1832 round-2 C2: a declared basin that the discovered inventory does not
 # contain is now a refusal, and the checked-in declaration names `hetianhe`.
-# The suites below publish synthetic fixture trees that contain no such basin
-# and are not about calibration overrides at all, so they take the module's
-# documented escape hatch and load no declaration.  Default loading is pinned
-# where it belongs: `test_checked_in_declaration_loads_without_anyone_naming_it`
-# and the two refresh-lane receipt tests.
+# The cases that pass this constant -- spread over the five #1102 partitions
+# that import it (calibration-overrides, manifest-audit, package-contexts,
+# radiation-repair, skip-refusals) -- publish synthetic fixture trees that
+# contain no such basin and are not about calibration overrides at all, so they
+# take the module's documented escape hatch and load no declaration.  Note this
+# is a per-case property, not a per-file one: the calibration-overrides
+# partition owns the declaration channel and only reaches for `_NO_DECLARATION`
+# in the cases that must stay out of it.  Default loading is pinned where it belongs:
+# `tests/test_publish_registry_calibration_overrides.py`'s
+# `test_checked_in_declaration_loads_without_anyone_naming_it` and the two
+# refresh-lane receipt tests.
 _NO_DECLARATION: Path | None = None
 
 

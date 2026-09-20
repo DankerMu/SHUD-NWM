@@ -662,7 +662,8 @@ ssh -p 32099 nwm@210.77.77.27 \
 inventory；但 `forcing_dir` / `forcing_dir_original_name` 仍在 inventory 里（打包要靠
 它们定位源目录），它们随目录存在与否变化，进而改变
 `source_inventory_checksum`——而 cutover 门把该字段算作 model identity
-（`scripts/scheduler_file_provider_refresh.py:164`）。目录是结构事实，载荷不是。
+（`scripts/scheduler_refresh/identity.py` 的 `REGISTRY_MODEL_NESTED_IDENTITY_FIELDS`，
+由 #1099 从 `scheduler_file_provider_refresh.py` 拆出）。目录是结构事实，载荷不是。
 
 所以清理动作是：
 

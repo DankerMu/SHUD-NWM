@@ -389,8 +389,10 @@ def test_receipt_barrier_harness_whole_run_is_terminable_and_the_unbounded_mutan
 
     The in-process injection tests release and join every peer, so they cannot
     see what happens when the harness must FAIL while a pre-arrival worker
-    exception is still pending. This proof runs the REAL module-local seam in a
-    bounded child subprocess with the same pre-arrival failure injected: the
+    exception is still pending. This proof runs the REAL seam -- #1101 moved it
+    to the sibling `tests/test_scheduler_refresh_barrier_seam.py`, which the
+    probe below imports by dotted path -- in a bounded child subprocess with
+    the same pre-arrival failure injected: the
     repaired seam must report the failure and exit before the external bound. An
     isolated mutant that removes the Barrier timeout (restoring the unbounded
     non-daemon strand shape) must hit the external bound instead, proving the

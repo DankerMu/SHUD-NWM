@@ -18,9 +18,10 @@ from typing import Any, Protocol
 # and bypass runs).  See design.md D7 sub-decision on `cutover_gate`.
 SCHEMA_VERSION = "nhms.scheduler.basins_file_registry_publish.v2"
 
-# Env name owned by scheduler_file_provider_refresh._registry_precommit_gate;
-# hard-coded here so the CLI can audit it even when the refresh module is not
-# imported (bootstrap path).
+# Env name owned by `scripts/scheduler_refresh/precommit_gate.py`'s
+# `_registry_precommit_gate` (#1099 moved it out of the pre-split
+# `scheduler_file_provider_refresh` monolith); hard-coded here so the CLI can
+# audit it even when the refresh module is not imported (bootstrap path).
 CUTOVER_DECLARATION_ENV_NAME = "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH"
 
 # #1104: `main()` does not populate `expected_preimage`, so this CLI has NO
@@ -56,7 +57,8 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # The single "declared but not applied" reason token.  Two other places pin the
 # same vocabulary and must move with it: `CALIBRATION_OVERRIDE_NOT_APPLIED_REASONS`
-# in `scripts/scheduler_file_provider_refresh.py` (which imports this constant)
+# in `scripts/scheduler_refresh/constants.py` (which imports this constant
+# through the `scripts/publish_scheduler_file_registry.py` facade)
 # and the `reason_not_applied` enum in
 # `schemas/scheduler_file_provider_refresh_receipt.schema.json`, which the
 # refresh receipt is validated against before it is published.

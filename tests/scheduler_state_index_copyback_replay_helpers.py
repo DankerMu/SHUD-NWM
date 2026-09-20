@@ -65,8 +65,11 @@ def _call_without_hanging(call: Any) -> Any:
     for exactly the thread that never finishes.  A thread stuck here goes on
     holding whatever fd it took for the rest of this pytest session.
 
-    The two caller shapes in this file differ in whether that can actually
-    happen, so the bound means different things to each.
+    The two caller shapes -- both in
+    `tests/test_scheduler_state_index_copyback_replay_refusals.py`, which is
+    where #1611 left them when it partitioned the monolith this helper was
+    carved out of -- differ in whether that can actually happen, so the bound
+    means different things to each.
 
     For the **probe-seam** caller
     (`test_replay_refuses_alias_roots_reporting_one_filesystem_identity`) the

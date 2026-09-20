@@ -1708,8 +1708,11 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2238's copyback-mutex partition joined that set: it imports
         # EXTRA_CONFIG/NOW/_seed_cycle/_pass_scheduler from here at top level,
         # so it is a derived importer like the other four, not a rider.
-        # 25 tests in 5.27s (median of three `uv run pytest -q
-        # tests/test_retention_copyback_mutex.py` runs: 5.27/5.24/5.30s).
+        # 25 tests in 5.27s (median of three runs of the then-single
+        # `tests/test_retention_copyback_mutex.py`: 5.27/5.24/5.30s).  The same
+        # 25 cases now collect from `tests/test_retention_copyback_mutex_budget.py`
+        # plus `tests/test_retention_copyback_mutex_protocol.py`, which is what
+        # `RETENTION_COPYBACK_MUTEX_TESTS` below expands to.
         # #2259 split that partition in two and moved its 99-line fixture
         # preamble into this helper, so the derived importer set is SIX, not
         # five, and the helper now also owns the `_forbid_acquisitions` /

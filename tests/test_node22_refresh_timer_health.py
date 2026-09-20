@@ -1979,7 +1979,8 @@ def _history_root(tmp_path: Path) -> Path:
 
 
 def _history_name(hour: int, marker: int = 0) -> str:
-    """The runner's own name shape (`scheduler_file_provider_refresh.py:611`):
+    """The runner's own name shape (the ``run_id`` built in
+    ``scripts/scheduler_refresh/runner.py``):
     ``refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json``."""
     return f"refresh_202609{11:02d}T{hour:02d}0000Z_{marker:012x}.json"
 

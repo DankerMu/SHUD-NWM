@@ -86,8 +86,10 @@ def _delete_entry(
     ``OSError``s, so both must be named explicitly here: letting either escape
     would collapse the pass receipt to ``{"status": "error"}``
     (scheduler_runtime) and abort the ``cleanup`` CLI mid-sweep (cli.py wraps
-    nothing), both violating this module's "failures never abort the pass"
-    contract. An unavailable mutex is therefore one ``failed`` entry carrying
+    nothing), both violating ``services/orchestrator/retention.py``'s "failures
+    never abort the pass" contract -- #2259 carved this helper out of that
+    module, but the contract is still documented and owned there.
+    An unavailable mutex is therefore one ``failed`` entry carrying
     the error text, its class name and its typed ``lock_failure`` shape --
     never a removal, and never an interrupted sweep.
     """

@@ -108,12 +108,14 @@ def _write_current_published_receipt(config: refresh.RefreshConfig) -> tuple[Pat
         path = Path(uri)
         # Deliberately ambient-umask, NOT pinned (#1513, tasks.md §6 item 2).
         # These four lanes are receipt *preimage* surfaces: no caller of this
-        # helper (:1692, :1735, :6527) ever takes a provider lock or publishes
-        # over them, and the only consumers are pure reads --
-        # `capture_scheduler_provider_preimage`
+        # helper (three call sites, in
+        # tests/test_scheduler_refresh_emergency_receipts.py and
+        # tests/test_scheduler_refresh_receipt_block_presence.py) ever takes a
+        # provider lock or publishes over them, and the only consumers are pure
+        # reads -- `capture_scheduler_provider_preimage`
         # (scheduler_file_providers.py:1751) and `refresh.validate_current_receipt`
-        # (scripts/scheduler_file_provider_refresh.py:1216, whose sole provider
-        # touch at :1251 is another preimage capture). So neither gate is
+        # (`scripts/scheduler_refresh/providers.py`, whose sole provider touch
+        # is another preimage capture). So neither gate is
         # reached and the landed modes are inert: under umask 0002 the files
         # come out 0o664 and the `registry_worker_mirror` parent 0o775 -- that
         # lane's parent is created ONLY here, whereas `registry`,
@@ -375,7 +377,10 @@ def _tracked_transaction_fixture(
 
 
 # ---------------------------------------------------------------------------
-# #1080 Registry Cutover Gate — direct classification and refusal coverage.
+# #1080 Registry Cutover Gate — builders for the direct classification and
+# refusal coverage.  #1101 put the cases themselves in
+# tests/test_scheduler_refresh_cutover_gate.py and its sibling partitions, and
+# moved only the row builders below into this helper.
 # ---------------------------------------------------------------------------
 
 
