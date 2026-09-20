@@ -365,6 +365,26 @@ API_CONTRACT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
     "tests/test_openapi_response_conformance.py",
 )
 
+# #1611 partitioned tests/test_scheduler_state_index_copyback_replay.py (1378
+# lines, 32 cases) into these four collectible suites plus one non-collectible
+# helper. The monolith is GONE with no compatibility shim, so the same-name
+# derivation from `scripts/scheduler_state_index_copyback_replay.py` stopped
+# resolving — and a rule target that no longer exists is only a WARNING here, so
+# the derivation could not simply be left to rot into an empty selection. Both
+# routes below therefore enumerate every partition explicitly: the owner route
+# for a change to the replay script, the support-module route for a change to
+# the shared fixtures. tests/test_select_ci_tests.py closes the set against the
+# tracked tree (exactly four suites + one helper), so a fifth partition or a
+# leftover shim reddens instead of silently falling out of the PR lane.
+STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH = "scripts/scheduler_state_index_copyback_replay.py"
+STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH = "tests/scheduler_state_index_copyback_replay_helpers.py"
+STATE_INDEX_COPYBACK_REPLAY_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_state_index_copyback_replay_commit_uncertainty.py",
+    "tests/test_scheduler_state_index_copyback_replay_reason_owners.py",
+    "tests/test_scheduler_state_index_copyback_replay_refusals.py",
+    "tests/test_scheduler_state_index_copyback_replay_selection.py",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -1261,6 +1281,15 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_source_cycle_raw_manifest.py",
             "tests/test_publish_scheduler_file_registry.py",
         ),
+    ),
+    PathTestRule(
+        # #1611: the four replay partitions share their whole fixture surface
+        # through this helper (the `fixture` / `private_umask_fixture` factories,
+        # the alias-identity and fsync-failure seams, the index-entry builder).
+        # Each partition imports it at module scope, so all four are its derived
+        # importer closure and a helper-only diff must run all four.
+        STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
+        STATE_INDEX_COPYBACK_REPLAY_TESTS,
     ),
     PathTestRule(
         # A 0-byte package file with a rule looks wrong until you follow the
@@ -3533,6 +3562,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_node22_refresh_timer_health.py",
         ),
+    ),
+    # #1611: the state-index copyback replay tool's own suite was partitioned
+    # into four files and the 1378-line monolith deleted with no shim, which
+    # killed the same-name derivation that had been this script's ONLY route.
+    # An explicit row is the replacement: a dropped target here is a warning,
+    # but a dropped ROUTE would have been silent.
+    PathTestRule(
+        STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH,
+        STATE_INDEX_COPYBACK_REPLAY_TESTS,
     ),
     # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
     # After cold-family retirement that consumer contract is gone, while the

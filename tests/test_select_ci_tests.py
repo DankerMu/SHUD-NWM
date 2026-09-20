@@ -61,6 +61,9 @@ from scripts.select_ci_tests import (
     REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
+    STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
+    STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH,
+    STATE_INDEX_COPYBACK_REPLAY_TESTS,
     SUPPORT_MODULE_TEST_RULES,
     THREAD_EXCEPTION_POLICY_TESTS,
     TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
@@ -1999,14 +2002,57 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
-def test_select_tests_maps_script_to_its_same_name_suite_without_core_smoke_fallback() -> None:
-    selected = select_tests(
-        ["scripts/scheduler_state_index_copyback_replay.py"],
-        repo_root=Path("."),
+def test_select_tests_maps_the_replay_script_to_every_partition_without_core_smoke_fallback() -> None:
+    # #1611 replaced this route's same-name derivation with an explicit row:
+    # tests/test_scheduler_state_index_copyback_replay.py was partitioned into
+    # four suites and deleted with no shim, so `tests/test_<stem>.py` stopped
+    # resolving. EXACT equality, not membership: membership would stay green if
+    # the row lost a partition, and an earlier stop-on-match glob padding the
+    # selection would go unnoticed. The live same-name derivation itself is
+    # pinned by test_same_name_victim_pin_is_live_without_fallback.
+    assert Path(STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH).is_file()
+    assert not Path("tests/test_scheduler_state_index_copyback_replay.py").exists(), (
+        "the pre-#1611 monolith is back; the explicit row and the same-name derivation would both fire"
     )
 
-    assert "tests/test_scheduler_state_index_copyback_replay.py" in selected
+    selected = select_tests([STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH], repo_root=Path("."))
+
+    # #1656 and #2185: scripts/** is a root of both supplemental scans.
+    assert selected == sorted(
+        [*STATE_INDEX_COPYBACK_REPLAY_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH]
+    )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_replay_partition_tracked_tree_is_exactly_four_suites_and_one_helper() -> None:
+    # #1611: four collectible suites is a floor, not a choice. A fifth partition, a
+    # leftover compatibility shim for the deleted monolith, or the helper renamed
+    # into a `test_*.py` suite all redden here. The expected membership is the
+    # selector's own tuple, never a glob result — the glob is the MUTANT side.
+    # The corpus filter carries the full stem on purpose: the shorter
+    # `scheduler_state_index` prefix would sweep in the unrelated
+    # tests/test_scheduler_state_index_repair.py corpus.
+    partitions = set(STATE_INDEX_COPYBACK_REPLAY_TESTS)
+    helper = STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 4, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    corpus = {
+        path for path in tracked if "scheduler_state_index_copyback_replay" in PurePosixPath(path).name
+    }
+    assert corpus == partitions | {helper}, sorted(corpus ^ (partitions | {helper}))
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+    # Both routes must carry the whole corpus, or the tracked-tree count above is
+    # satisfied by files nothing selects.
+    owner_rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH)
+    helper_rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
+    assert set(owner_rule.tests) == partitions, sorted(set(owner_rule.tests) ^ partitions)
+    assert set(helper_rule.tests) == partitions, sorted(set(helper_rule.tests) ^ partitions)
 
 
 def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
@@ -10621,6 +10667,16 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # A/B/C suites are explicit extra route edges (they import D, not this helper),
     # so they are not this derivation's anchors.
     ("tests/basins_registry_import_helpers.py", "tests/test_basins_registry_import.py"),
+    # #1611: the shared fixture surface of the four state-index copyback replay
+    # partitions. All four import it at module scope, so any of them is a valid
+    # anchor; the selection partition is named because it owns the dry-run and
+    # enforce happy paths — the cases that exercise the `fixture` factory most
+    # directly, so an anchor that stops deriving here means the partitions
+    # stopped sharing the factory at all.
+    (
+        STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
+        "tests/test_scheduler_state_index_copyback_replay_selection.py",
+    ),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
