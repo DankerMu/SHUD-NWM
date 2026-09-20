@@ -102,7 +102,7 @@ deployed-source readonly receipts passed nine reads and all 23 write denials acr
 **freeze, browser, bind, verify all passed** for QHH GFS/IFS `2026-09-19T00:00:00Z`.
 
 Evidence and rollback history:
-[deployment receipt](../../../docs/runbooks/receipts/2026-09-20-issue2420-job-provenance.json). The earlier live UTC
+[deployment receipt](../../../../docs/runbooks/receipts/2026-09-20-issue2420-job-provenance.json). The earlier live UTC
 spelling failure was rolled back before repair. Final deployment preserved node-27's intervening `000061`/query-index
 changes and node-22's backport ancestry; no environment rebuild or role-default change occurred. Both timers resumed. C4
 completion releases the #2420 merge gate; issue closure and the held joint batch follow that merge, not this source

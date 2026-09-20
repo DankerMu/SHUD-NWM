@@ -5,11 +5,11 @@ TBD - created by archiving change m3-slurm-nationalization. Update Purpose after
 ## Requirements
 ### Requirement: pipeline_job Record Creation
 
-The system SHALL create a `pipeline_job` record in the `ops.pipeline_job` table whenever the Orchestrator submits a stage job to Slurm.
+In PostgreSQL-backed scheduler mode, the system SHALL create a `pipeline_job` record in the `ops.pipeline_job` table whenever the Orchestrator submits a stage job to Slurm. In DB-free scheduler mode, the node-22 file journal SHALL be the authoritative job record at submission, and node-27's `ops.pipeline_job` SHALL be a derived projection created from a validated published job-provenance record. Under no deployment SHALL node-27 display or ingest fabricate a job solely to satisfy evidence collection.
 
-#### Scenario: Orchestrator submits a single-basin stage job
+#### Scenario: PostgreSQL orchestrator submits a single-basin stage job
 
-- **WHEN** the Orchestrator submits a stage job (e.g., `run_shud_forecast_array`) for a single basin via `sbatch`
+- **WHEN** the PostgreSQL-backed Orchestrator submits a stage job (e.g., `run_shud_forecast_array`) for a single basin via `sbatch`
 - **THEN** a new row SHALL be inserted into `ops.pipeline_job` with:
   - `job_id` (PK, TEXT) generated before submission
   - `job_type` set to the upstream stage name (e.g., `run_shud_forecast_array`)
@@ -28,17 +28,24 @@ The system SHALL create a `pipeline_job` record in the `ops.pipeline_job` table 
   - `retry_count` set to 0
   - `created_at` and `updated_at` set to the current UTC timestamp
 
-#### Scenario: Orchestrator submits a cycle-level stage job (no per-basin scope)
+#### Scenario: DB-free orchestrator submits a stage job
 
-- **WHEN** the Orchestrator submits a cycle-level stage job (e.g., `convert_canonical`, `publish_tiles`) that is not scoped to a specific basin
+- **WHEN** the DB-free node-22 Orchestrator submits a stage job
+- **THEN** the authoritative job record SHALL be created in the file orchestration journal with the same identity and lifecycle fields
+- **AND** `ops.pipeline_job` SHALL not be populated by the node-22 journal lane
+- **AND** a node-27 projection SHALL be created only from the validated published job-provenance record
+- **AND** forecast-scoped rows SHALL match source, cycle, run, model, and job identity
+- **AND** cycle-scoped rows SHALL keep null `model_id` and their original cycle `run_id` rather than inherit an enclosing forecast identity
+
+#### Scenario: PostgreSQL orchestrator submits a cycle-level stage job (no per-basin scope)
+
+- **WHEN** the PostgreSQL-backed Orchestrator submits a cycle-level stage job (e.g., `convert_canonical`, `publish_tiles`) that is not scoped to a specific basin
 - **THEN** a new `pipeline_job` row SHALL be inserted with `run_id` set to NULL and `model_id` set to NULL; all other fields populated as above
 
 #### Scenario: sbatch submission fails
 
 - **WHEN** `sbatch` returns a non-zero exit code during submission
 - **THEN** a `pipeline_job` record SHALL still be created with `status` set to `submission_failed`, `slurm_job_id` set to NULL, and `error_message` populated with the sbatch stderr output
-
----
 
 ### Requirement: pipeline_job Schema and Fields
 
@@ -71,7 +78,7 @@ The `ops.pipeline_job` table MUST match the upstream schema (`docs/appendices/C_
 
 ### Requirement: Status Synchronization via sacct
 
-The Orchestrator SHALL update the `pipeline_job` status when `sacct` returns a new status for the corresponding Slurm job.
+In PostgreSQL-backed scheduler mode, the Orchestrator SHALL update the `pipeline_job` status when `sacct` returns a new status for the corresponding Slurm job. In DB-free scheduler mode, the file journal SHALL perform status synchronization; the node-27 derived projection SHALL advance only from validated published provenance whose source authority and ordering match the journal record.
 
 #### Scenario: Slurm job transitions to RUNNING
 
@@ -97,12 +104,11 @@ The Orchestrator SHALL update the `pipeline_job` status when `sacct` returns a n
 
 - **WHEN** a Slurm job reaches a terminal status (`succeeded`, `failed`, `cancelled`)
 - **THEN** the Orchestrator SHALL set `log_uri` to the path of the Slurm output log file (derived from the sbatch `--output` directive)
-
----
+- **AND** in the DB-free display projection, a previously null `log_uri` MAY be enriched monotonically only when the source journal proves that exact task/log binding and the published artifact verifies.
 
 ### Requirement: pipeline_event Append-Only Event Log
 
-The system SHALL maintain an append-only `ops.pipeline_event` table that records every status transition for a `pipeline_job`, matching upstream schema.
+The system SHALL maintain an append-only `ops.pipeline_event` table that records every status transition for a `pipeline_job`, matching upstream schema. In the DB-free scheduler lane the file journal's own append-only events SHALL remain the authority; node-27 SHALL not fabricate historical status-transition events merely to reconstruct unavailable authority history.
 
 #### Scenario: Status transition event recorded
 
@@ -132,8 +138,6 @@ The system SHALL maintain an append-only `ops.pipeline_event` table that records
 
 - **WHEN** any attempt is made to UPDATE or DELETE a row in `ops.pipeline_event`
 - **THEN** the operation MUST be rejected (the table is append-only by application-level constraint)
-
----
 
 ### Requirement: Database Indexes
 
