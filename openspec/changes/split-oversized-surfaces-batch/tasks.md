@@ -8,28 +8,28 @@
 
 ## 1. #1611 — `tests/test_scheduler_state_index_copyback_replay.py`（1378 行 / 32 用例）
 
-- [ ] 1.1 拆为多个 collectible 分区，每个 < 1000 行；共享定义进非收集 helper
-- [ ] 1.2 零断言改动（diff 内测试体只有位置移动）
-- [ ] 1.3 删除 `.large-file-guard.json` 该条 exclude，零替代 exclude
-- [ ] 1.4 按 D5 落地路由：`scripts/select_ci_tests.py` 新增 `PathTestRule` **显式枚举**本组全部分区（该文件当前对本语料零条规则，仅靠同名推导）；`tests/test_select_ci_tests.py` 新增 tracked-tree 守卫（恰好 N 分区 + M helper）；二者落地后 `uv run pytest -q tests/test_select_ci_tests.py` 绿
-- [ ] 1.5 Evidence：suffix 集合与 baseline byte-identical（32）；分区全量 pytest 绿
+- [x] 1.1 拆为多个 collectible 分区，每个 < 1000 行；共享定义进非收集 helper
+- [x] 1.2 零断言改动（diff 内测试体只有位置移动）
+- [x] 1.3 删除 `.large-file-guard.json` 该条 exclude，零替代 exclude
+- [x] 1.4 按 D5 落地路由：`scripts/select_ci_tests.py` 新增 `PathTestRule` **显式枚举**本组全部分区（该文件当前对本语料零条规则，仅靠同名推导）；`tests/test_select_ci_tests.py` 新增 tracked-tree 守卫（恰好 N 分区 + M helper）；二者落地后 `uv run pytest -q tests/test_select_ci_tests.py` 绿
+- [x] 1.5 Evidence：suffix 集合与 baseline byte-identical（32）；分区全量 pytest 绿
 
 ## 2. #2259 — `services/orchestrator/retention.py`(1107) + `tests/test_retention_copyback_mutex.py`(1119 / 25 用例)
 
-- [ ] 2.1 抽 copyback-mutex lane 到 `services/orchestrator/retention_copyback_mutex.py`，只搬 **3 个**符号：`_CopybackLockBudget` / `_delete_entry` / `_remove_tree_under_copyback_mutex`。**`_resolve_copyback_lock_root` 留在 `retention.py`**——它的唯一调用点是 `run_retention`（`retention.py:938`，本组不搬），且它自身调用 `_sanitize_root_candidate`(`:489`) 与 `EXTRA_ROOT_NOT_ABSOLUTE_REASON`(`:109`)（均不在搬运集内），搬走会造成 `retention.py` ↔ 新模块的顶层循环 import；它也不是 monkeypatch 面，D1 不要求搬
-- [ ] 2.2 按 D1 裁定 patch target：`acquire_copyback_batch_lock` / `release_copyback_batch_lock` / `remove_tree_allow_symlinks` 的调用点归属确定后，patch target 同 commit 改指真实 owner，原模块**不得** re-export 已搬走的 patch 符号
-- [ ] 2.3 测试侧：176 行 fixture 前言并入 `tests/retention_test_helpers.py`；正文按行为切 collectible 分区，各 < 1000 行，无 collectible 兼容 shim
-- [ ] 2.4 删除 `.large-file-guard.json` 两条 exclude（`services/orchestrator/retention.py`、`tests/test_retention_copyback_mutex.py`），零替代 exclude
-- [ ] 2.5 按 D5 落地路由：retention 的 `PathTestRule` 显式枚举新 owner 模块与全部新分区；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 契约用例更新并绿
-- [ ] 2.6 Evidence：suffix 集合与 baseline byte-identical（25）；每个负向 patch 用例经「故意破坏真实调用点 → 用例转红」核验非 vacuous
+- [x] 2.1 抽 copyback-mutex lane 到 `services/orchestrator/retention_copyback_mutex.py`，只搬 **3 个**符号：`_CopybackLockBudget` / `_delete_entry` / `_remove_tree_under_copyback_mutex`。**`_resolve_copyback_lock_root` 留在 `retention.py`**——它的唯一调用点是 `run_retention`（`retention.py:938`，本组不搬），且它自身调用 `_sanitize_root_candidate`(`:489`) 与 `EXTRA_ROOT_NOT_ABSOLUTE_REASON`(`:109`)（均不在搬运集内），搬走会造成 `retention.py` ↔ 新模块的顶层循环 import；它也不是 monkeypatch 面，D1 不要求搬
+- [x] 2.2 按 D1 裁定 patch target：`acquire_copyback_batch_lock` / `release_copyback_batch_lock` / `remove_tree_allow_symlinks` 的调用点归属确定后，patch target 同 commit 改指真实 owner，原模块**不得** re-export 已搬走的 patch 符号
+- [x] 2.3 测试侧：176 行 fixture 前言并入 `tests/retention_test_helpers.py`；正文按行为切 collectible 分区，各 < 1000 行，无 collectible 兼容 shim
+- [x] 2.4 删除 `.large-file-guard.json` 两条 exclude（`services/orchestrator/retention.py`、`tests/test_retention_copyback_mutex.py`），零替代 exclude
+- [x] 2.5 按 D5 落地路由：retention 的 `PathTestRule` 显式枚举新 owner 模块与全部新分区；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 契约用例更新并绿
+- [x] 2.6 Evidence：suffix 集合与 baseline byte-identical（25）；每个负向 patch 用例经「故意破坏真实调用点 → 用例转红」核验非 vacuous
 
 ## 3. #1101 — `tests/test_scheduler_file_provider_refresh.py`（9614 行 / 315 用例）
 
-- [ ] 3.1 按 §-boundary 拆分区，每个 < 1000 行（issue 表的 5 文件方案已 stale，按实测行数扩到所需数量）
-- [ ] 3.2 共享 fixture/helper 进 `tests/scheduler_refresh_helpers.py`（非收集）
-- [ ] 3.3 删除该条 exclude，零替代 exclude
-- [ ] 3.4 按 D5 落地路由：refresh 语料的 `PathTestRule` 显式枚举全部新分区（按 target 字符串定位规则，不按行号）；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 绿
-- [ ] 3.5 Evidence：suffix 集合与 baseline byte-identical（315）；分区全量 pytest 绿
+- [x] 3.1 按 §-boundary 拆分区，每个 < 1000 行（issue 表的 5 文件方案已 stale，按实测行数扩到所需数量）
+- [x] 3.2 共享 fixture/helper 进 `tests/scheduler_refresh_helpers.py`（非收集）
+- [x] 3.3 删除该条 exclude，零替代 exclude
+- [x] 3.4 按 D5 落地路由：refresh 语料的 `PathTestRule` 显式枚举全部新分区（按 target 字符串定位规则，不按行号）；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 绿
+- [x] 3.5 Evidence：suffix 集合与 baseline byte-identical（315）；分区全量 pytest 绿
 
 ## 4. #1099 — `scripts/scheduler_file_provider_refresh.py`（3639 行）
 
@@ -41,10 +41,10 @@
 
 ## 5. #1102 — `tests/test_publish_scheduler_file_registry.py`（3218 行 / 59 用例）
 
-- [ ] 5.1 按 CLI / manifest / cutover-audit 拆分区，每个 < 1000 行；fixture 进非收集 helper
-- [ ] 5.2 删除该条 exclude，零替代 exclude
-- [ ] 5.3 按 D5 落地路由：publish 语料的全部规则引用点按 target 字符串 `tests/test_publish_scheduler_file_registry.py` 全仓 grep 定位并改指新分区（行号已失效，六组先后改同一文件）；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 绿
-- [ ] 5.4 Evidence：suffix 集合与 baseline byte-identical（59）；分区全量 pytest 绿
+- [x] 5.1 按 CLI / manifest / cutover-audit 拆分区，每个 < 1000 行；fixture 进非收集 helper
+- [x] 5.2 删除该条 exclude，零替代 exclude
+- [x] 5.3 按 D5 落地路由：publish 语料的全部规则引用点按 target 字符串 `tests/test_publish_scheduler_file_registry.py` 全仓 grep 定位并改指新分区（行号已失效，六组先后改同一文件）；新增 tracked-tree 守卫；`tests/test_select_ci_tests.py` 绿
+- [x] 5.4 Evidence：suffix 集合与 baseline byte-identical（59）；分区全量 pytest 绿
 
 ## 6. #1100 — `scripts/publish_scheduler_file_registry.py`（1495 行）
 
@@ -76,7 +76,9 @@
 - [ ] 9.1 拆 `docs/runbooks/production-ops/` sub-runbook，每个 < 1000 行；主文件降为索引 landing page 且 < 1000 行
 - [ ] 9.2 命令、jq 表达式、复现步骤逐字保留；已用锚点 `#311-pipeline-job-provenance-sidecar-and-recovery-2420` 仍 resolve
 - [ ] 9.3 删除该条 exclude，零替代 exclude
-- [ ] 9.4 `scripts/select_ci_tests.py` 中 target 为 `docs/runbooks/current-production-ops.md` 的路由（按字符串 grep 定位）同步覆盖新 sub-runbook 路径
+- [ ] 9.4 `scripts/select_ci_tests.py` 中 target 为 `docs/runbooks/current-production-ops.md` 的路由（按字符串 grep 定位）同步覆盖 `docs/runbooks/production-ops/**`
+- [ ] 9.5 **阻塞依赖（前置扫描发现，非 issue 原文）**：`tests/test_node22_entrypoint_invariant.py` 用 `_read("docs/runbooks/current-production-ops.md")` 对该文档正文断言（`:89`/`:103` node-22 active 命令无裸 `uv`、`:558`、`:669`）。正文搬进 sub-runbook 后这些断言会**静默空过**（扫不到命令 → `remaining == []` → 绿）。必须让这些 reader 扫 `production-ops/` 全树。该文件 1003 行、未豁免，故本组同时把它拆到 1000 行以下（只超 3 行，按 section 切两半即可）——**不新增豁免**，#2532 的单条额度已用尽。拆分沿用本批 oracle：collection suffix 逐字节相等 + AST 指纹 + 显式 PathTestRule + tracked-tree 守卫
+- [ ] 9.6 空过红证：把一条 node-22 active 命令的裸 `uv` 形式写进某个 sub-runbook，断言 `:103` 一族转红——证明 reader 确实扫到了新位置
 - [ ] 9.5 Evidence：165 处引用文件逐一确认链接/锚点仍 resolve；markdown-lint 绿
 
 ## 10. 收口

@@ -22,6 +22,20 @@
 
 对**非 patch 面**的私有 helper / 常量，原模块可自由 re-export 以保 import 兼容（#1910 的 basins facade 先例，`openspec/specs/orchestrator-structural-burndown/spec.md` 的 "Basins package facade split" requirement）。
 
+### D1b — 重度 patch 面的 facade 机制：命名空间广播，而非逐 seam 注入
+
+`scripts/scheduler_file_provider_refresh.py`（#1099）实测被测试语料以 **20 个不同名字 / 74 个 patch 点 / 62 个不同属性 / 560 次读取**耦合。D1 的两条出路里，(b) 重指向要改 74 处 patch 与 560 处读取，(a) 才可行。但 #1910 在 basins facade 用的「逐 seam 运行时转发」需要改 leaf 函数签名与调用点，过不了本批的 pure-move oracle。
+
+因此本批为这类面确立第三种 (a) 实现：**facade 的 `__setattr__` / `__delattr__` 命名空间广播**。facade import 时按「同名 + 同一对象」identity 建一次镜像表；此后对 facade 的每次属性写，同步写到所有持有该绑定的包模块。拆分前一个名字在一个 module dict 里只有一份绑定，拆分后同一份绑定被复制进 N 个 dict——广播是对这一语义的精确还原，零调用点改写、零测试重指向。
+
+不取「owner 模块反向 import facade」：`python -m scripts.scheduler_file_provider_refresh` 下 facade 以 `__main__` 执行，反向 import 会造出第二份模块副本和第二个 `RefreshError` 类。
+
+与既有 spec 的关系：`openspec/specs/orchestrator-structural-burndown/spec.md` 的 "Basins package facade split" requirement 描述的是 #1910 的逐 seam 转发。两种风格并存，适用面不同（少量 seam vs 数十个 seam × 数百次读）；本 change 不统一它们，留待有第三例时再收口。
+
+**该机制没有 in-tree 守卫**，因为把守卫加进 refresh 语料会破坏 #1101 钉死的 315 条收集数。证据形式改为树外突变：逐名关闭镜像表（这恰好把 facade 退化成 D1 列为 forbidden 的「第三种东西」），断言对应套件转红。#1099 实测 20/20 全红，其中 18 个在单套件内即红，`capture_scheduler_provider_preimage` 与 `publish_scheduler_registry_manifest` 需放到 315 条全语料才红。该突变输出必须逐字进 PR body——这是本批唯一一条只活在证据里、不活在树上的不变量。
+
+#1842 若遇到同型耦合（`scripts/governance/write_entropy_baseline.py:18-20,179-912` 对 `audit_repo_entropy` 有约 15 个属性读，含 `_module_for_relative` / `_repo_text_rejection_reason` / `_git_tracked_paths` / `_is_scannable_dir` 四个私有），可直接复用本机制。
+
 ### D2 — 测试拆分 oracle：suffix 集合逐字节相等
 
 每个被拆测试文件，拆前后取 `pytest --collect-only -q <目标> | grep '::' | sed 's/^[^:]*:://' | sort`，两侧文件必须 byte-identical。文件段（module prefix）允许变化，`::test_name[param-id]` 后缀不允许。baseline 已在拆分前落盘（25 / 32 / 410 / 315 / 59 条）。不保留任何 collectible 兼容 shim（沿用 `spec.md:295-300` 既有做法）；共享定义只进非收集 helper module。
@@ -40,7 +54,7 @@ issue #1842 要求「拆分前后报告全量一致」。这条**不可能字面
 - `high_spread_patterns` / `module_heatmap` 的 key 集合相等（baseline 23 个 module）。
 - 顶层 public 函数集合相等；`--format json` 退出码不变。
 
-并且 #1842 的拆分 commit 必须**单独**跑一次全量 findings diff：在只有 `audit_repo_entropy.py` 被拆、其余 8 组已落地的树上取 before/after 两次 `--format json`。baseline 实测 801 条 findings 中**零条**的 `evidence_path`/`module` 命中 entropy audit 自身路径，因此该 diff 的期望是**空**。若出现残差，必须逐条归因到本次搬运产生/消失的路径，并在 PR body 内列举；**不可归因的残差 = 行为漂移，回退该组而非放宽 oracle**。
+并且 #1842 的拆分 commit 必须**单独**跑一次全量 findings diff：在只有 `audit_repo_entropy.py` 被拆、其余 8 组已落地的树上取 before/after 两次 `--format json`。**before 快照必须取在 #1823（第 7 组）落地之后的 HEAD 上**——第 7 组会改 `audit_repo_entropy.py` 内 `_ScopedAgentContextConfig` 的路径字面量，从而改变 audit 自身在 scoped-agent-context 一族上的输出；§0 落盘于 `e5ea7f788` 的那份 1.6 MB baseline 因此只能用于 check_id 集合与 `module_heatmap` key 集合的比对，**不能**用作 findings diff 的 before 边。baseline 实测 801 条 findings 中**零条**的 `evidence_path`/`module` 命中 entropy audit 自身路径，因此该 diff 的期望是**空**。若出现残差，必须逐条归因到本次搬运产生/消失的路径，并在 PR body 内列举；**不可归因的残差 = 行为漂移，回退该组而非放宽 oracle**。
 
 ### D4 — 执行顺序：共享治理面冲突驱动
 
@@ -49,7 +63,9 @@ issue #1842 要求「拆分前后报告全量一致」。这条**不可能字面
 `#1611 → #2259 → #1101 → #1099 → #1102 → #1100 → #1823 → #1842 → #1103`
 
 - 测试侧先于生产侧（#1101 先于 #1099、#1102 先于 #1100）：先收窄测试 import 面，生产拆分只需保住已收窄的面（issue #1101 自述的理由）。
-- #1823 先于 #1842：两者共同改 `select_ci_tests.py:4172-4181` 的三条 PathTestRule target、selector pin、`_ScopedAgentContextConfig` 四处字面量、4 个 AGENTS.md；测试侧先落，执法侧一次性收口，避免两轮互踩。
+- #1823 先于 #1842：两者共同改三条 PathTestRule target、selector pin、`_ScopedAgentContextConfig` 四处字面量、4 个 scoped AGENTS.md 与 governance inventory。归属切分定死，避免两轮改同几行：
+  - **第 7 组只改测试路径字面量**（`tests/test_entropy_audit_script.py` → `tests/test_entropy_audit_*.py` 分区），不动任何指向 `scripts/governance/audit_repo_entropy.py` 的字面量。
+  - **第 8 组只改 audit 脚本路径字面量**，不回头动第 7 组已落的测试路径。
 - #1103 末位：纯文档，与任何 Python 面无耦合。
 
 ### D5 — 新测试分区必须显式进 PathTestRule，且加 tracked-tree 守卫
