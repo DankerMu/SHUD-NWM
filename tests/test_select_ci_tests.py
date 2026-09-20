@@ -57,6 +57,10 @@ from scripts.select_ci_tests import (
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
     RELEASED_RESERVATION_RECOVERY_TESTS,
+    RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
+    RETENTION_COPYBACK_MUTEX_OWNER_PATH,
+    RETENTION_COPYBACK_MUTEX_OWNER_TESTS,
+    RETENTION_COPYBACK_MUTEX_TESTS,
     REVIEW_GATE_ISSUE_MEMORY_PATH,
     REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
@@ -817,10 +821,11 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # out when the surface is an orchestrator module (see the orchestrator
     # manifest tests); for a shared-library module the baseline legitimately
     # includes them.
-    # `tests/test_retention_copyback_mutex.py` is #2260's at-site addition to the
-    # scheduler_runtime.py stop rule (that stop shadows the orchestrator tree
-    # rule which carries the mutex partition). Additive to the redirect, exactly
-    # like the safe_fs.py and journal importer targets.
+    # The two `tests/test_retention_copyback_mutex_*.py` halves are #2260's
+    # at-site addition to the scheduler_runtime.py stop rule (that stop shadows
+    # the orchestrator tree rule which carries the mutex partition), split in two
+    # by #2259. Additive to the redirect, exactly like the safe_fs.py and journal
+    # importer targets.
     # The scope-disposition node id is #1186 round 2's at-site addition to the
     # same stop rule: scheduler_runtime.py writes most of the evidence keys the
     # closure pin dispositions, and the stop rule's ten pinned node ids did not
@@ -831,7 +836,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py"
             "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             "tests/test_safe_fs.py",
@@ -936,8 +941,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
-    # literal below — not the arithmetic above — is the authority: it now lists
-    # 60 targets, the rule's 57 plus three riders that arrive from OUTSIDE the
+    # literal below — not the arithmetic above — is the authority: #2259 split
+    # the copyback-mutex partition in two, so it now lists
+    # 61 targets, the rule's 58 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1022,7 +1028,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # importer derivation re-supplies it there), and no disposition token can
         # mask that -- `select_ci_tests` never reads the exclusion table.
         "tests/test_retention_copyback_lock_signal.py",
-        "tests/test_retention_copyback_mutex.py",
+        "tests/test_retention_copyback_mutex_budget.py",
+        "tests/test_retention_copyback_mutex_protocol.py",
         "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
         "tests/test_retention_pipeline_frontier.py",
@@ -9933,7 +9940,9 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
             # #2238 EF-16 (retention.py leg): the partition joins the floor row,
             # because the pin below only counts as "the positive floor above
             # proves each partition IS selected" if the floor actually names it.
-            "tests/test_retention_copyback_mutex.py",
+            # #2259 split it into two halves; both belong here for the same
+            # reason.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             # harden-copyback-mutex-residuals EF-20: the typed lock-failure signal.
             "tests/test_retention_copyback_lock_signal.py",
             "tests/test_retention_extra_roots.py",
@@ -9946,6 +9955,10 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/run_tree_copyback.py",
         ("tests/test_run_tree_copyback.py", "tests/test_run_tree_copyback_backup_lifecycle.py"),
     ),
+    # #2259: the extracted copyback-mutex owner. Its same-name derivation points
+    # at the deleted monolith, so the explicit owner row is its only named route;
+    # the floor is that row's whole target set.
+    (RETENTION_COPYBACK_MUTEX_OWNER_PATH, RETENTION_COPYBACK_MUTEX_OWNER_TESTS),
     ("scripts/node27_raw_retention.py", ("tests/test_node27_raw_retention_copyback_mutex.py",)),
 )
 
@@ -9997,14 +10010,14 @@ def test_river_expand_sources_open_the_database_lane(module_path: str, suite: st
 # production owner route for a `services/orchestrator/retention.py` change.
 RETENTION_PARTITIONS: tuple[str, ...] = (
     "tests/test_retention.py",
-    "tests/test_retention_copyback_mutex.py",
+    *RETENTION_COPYBACK_MUTEX_TESTS,
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
 )
 RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
-# Four partitions — #1872's three moved ones plus #2238's copyback-mutex
-# partition, which was born outside the monolith — are reached ONLY through the
+# Five partitions — #1872's three moved ones plus the two halves #2259 split
+# #2238's copyback-mutex partition into — are reached ONLY through the
 # owner rule: the retained same-name core also arrives via same-name suite
 # derivation, so it is not a fracture pin for the rule literal (removing it from
 # the rule stays green via derivation — which is correct, not a gap). The
@@ -10013,8 +10026,15 @@ RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
 # `retention.py`-only change never reaches, so it fractures here too. That
 # membership is the per-partition fracture pin #2238 EF-16 names for the
 # `retention.py` leg.
+#
+# #2259 deliberately did NOT give `services/orchestrator/retention.py` its own
+# path-exact row: a second route carrying the same partitions would re-supply
+# every one this fracture pin strips from the broad rule, and the pin would go
+# green on a dead route. The extracted owner module gets the explicit row (it
+# has no working same-name derivation); retention.py keeps riding the directory
+# rule that this pin holds load-bearing.
 RETENTION_RULE_ONLY_PARTITIONS: tuple[str, ...] = (
-    "tests/test_retention_copyback_mutex.py",
+    *RETENTION_COPYBACK_MUTEX_TESTS,
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
@@ -10070,6 +10090,56 @@ def test_retention_owner_reds_when_a_partition_is_removed(
     selected = select_tests(["services/orchestrator/retention.py"], repo_root=Path("."))
 
     assert removed not in selected
+
+
+def test_retention_copyback_mutex_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # #2259: two collectible halves is a floor, not a preference. A third
+    # partition, a leftover compatibility shim for the deleted 1119-line
+    # monolith, or the shared helper renamed into a `test_*.py` suite all redden
+    # here. Expected membership is the selector's own tuple, never a glob result
+    # — the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file name, not a substring: `in`
+    # would sweep in the unrelated tests/test_node27_raw_retention_copyback_mutex.py
+    # corpus (a different lane, its own owner rule).
+    partitions = set(RETENTION_COPYBACK_MUTEX_TESTS)
+    helper = RETENTION_COPYBACK_MUTEX_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 2, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_retention_copyback_mutex.py").exists(), (
+        "the pre-#2259 monolith is back; the owner row and its same-name derivation would both fire"
+    )
+    corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("test_retention_copyback_mutex")
+    }
+    assert corpus == partitions, sorted(corpus ^ partitions)
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the whole corpus,
+    # or the tracked-tree count above is satisfied by files nothing selects.
+    # The production owner `services/orchestrator/retention.py` rides the broad
+    # directory rule on purpose (see RETENTION_RULE_ONLY_PARTITIONS above), so
+    # that rule is checked here rather than a path-exact row of its own.
+    owner_rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == RETENTION_COPYBACK_MUTEX_OWNER_PATH
+    )
+    directory_rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == "services/orchestrator/**"
+    )
+    helper_rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
+    assert partitions <= set(owner_rule.tests), sorted(partitions - set(owner_rule.tests))
+    assert set(owner_rule.tests) == set(RETENTION_COPYBACK_MUTEX_OWNER_TESTS)
+    assert partitions <= set(directory_rule.tests), sorted(partitions - set(directory_rule.tests))
+    assert partitions <= set(helper_rule.tests), sorted(partitions - set(helper_rule.tests))
+    assert Path(RETENTION_COPYBACK_MUTEX_OWNER_PATH).is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -10396,7 +10466,7 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/cli.py",
         (
             *ORCHESTRATOR_CLI_IMPORTER_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
             "tests/test_operator_reentry_confirmation.py",
@@ -10415,14 +10485,15 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
     # redirect, pinned by the file-journal selection test), so only the at-site
     # target is named — the same "pin what the extension added" shape as the
-    # other rows. The exact 23-element selection is pinned below.
+    # other rows. The exact 24-element selection is pinned below (#2259 split the
+    # mutex partition in two, so 23 -> 24).
     # #1186 round 2 added a second at-site target to this same rule: one node id
     # of the scope-dimension closure pin, because this module publishes most of a
     # pass payload's top-level keys.
     (
         "services/orchestrator/scheduler_runtime.py",
         (
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         ),
     ),
@@ -10470,7 +10541,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     # 22 -> 23: the stop rule for scheduler_runtime.py shadows the orchestrator
     # tree rule, so the mutex suite arrives only through the at-site extension.
     # 23 -> 24 (#1186 round 2): the scope-dimension closure pin rides the same
-    # rule as a single node id. This module writes most of a pass payload's
+    # rule as a single node id; 24 -> 25 (#2259) split the mutex partition in
+    # two. This module writes most of a pass payload's
     # top-level keys, and that pin is what turns "a new key nobody dispositioned"
     # from a silent false exit 0 into a red test.
     assert Path("services/orchestrator/scheduler_runtime.py").is_file()
@@ -10497,7 +10569,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
         "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
-        "tests/test_retention_copyback_mutex.py",
+        *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         "tests/test_scheduler_journal_retention_archive.py",
@@ -10514,6 +10586,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # suite and the four lane suites that read its new names.
     # 15 -> 16 (#1627): packages/** is a path-canonicalisation family-guard root,
     # so the guard accumulates here as a third supplemental rider.
+    # 16 -> 17 (#2259): the mutex partition became two collectible halves.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
@@ -10528,7 +10601,8 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_path_canonicalization_family_guard.py",
         "tests/test_production_scheduler.py",
         "tests/test_retention_copyback_lock_signal.py",
-        "tests/test_retention_copyback_mutex.py",
+        "tests/test_retention_copyback_mutex_budget.py",
+        "tests/test_retention_copyback_mutex_protocol.py",
         "tests/test_river_segment_write_surface_scan.py",
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_select_ci_tests.py",
@@ -10540,15 +10614,22 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     "module_path",
     (
         "services/orchestrator/retention.py",
+        # #2259: the extracted mutex owner. Every seam these suites monkeypatch
+        # by name lives in THIS module now, so a diff to it that did not select
+        # them would be the exact blind spot this pin exists for.
+        RETENTION_COPYBACK_MUTEX_OWNER_PATH,
         "services/orchestrator/cli.py",
         "services/orchestrator/__init__.py",
-        "tests/retention_test_helpers.py",
+        RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
     ),
 )
 def test_copyback_mutex_routing_keeps_the_mutex_suite(module_path: str) -> None:
+    # #2259: BOTH halves, not either. The split is only invisible to CI routing
+    # if every route that used to carry the monolith carries the whole corpus.
     selected = select_tests([module_path], repo_root=Path("."))
 
-    assert "tests/test_retention_copyback_mutex.py" in selected, module_path
+    missing = sorted(set(RETENTION_COPYBACK_MUTEX_TESTS) - set(selected))
+    assert not missing, f"{module_path}: lost {missing}"
 
 
 # --------------------------------------------------------------------------

@@ -35,7 +35,11 @@ from packages.common.copyback_guard import (
     copyback_batch_lock,
     release_copyback_batch_lock,
 )
-from services.orchestrator import retention as retention_module
+
+# #2259: both seams this file patches -- the acquisition and the removal --
+# are called from `_delete_entry` / `_remove_tree_under_copyback_mutex`, which
+# moved to this module; `retention` no longer binds either name.
+from services.orchestrator import retention_copyback_mutex as mutex_module
 
 # `scheduler_evidence_payload` is loaded through `scheduler_evidence` (the two
 # import each other), exactly as production loads it.
@@ -147,7 +151,7 @@ def test_ef14_a_removal_error_carries_no_lock_failure_and_counts_stay_zero(
     def refusing_remove(parent: Path, name: str, **kwargs: Any) -> None:
         raise OSError(f"synthetic removal refusal for {name}")
 
-    monkeypatch.setattr(retention_module, "remove_tree_allow_symlinks", refusing_remove)
+    monkeypatch.setattr(mutex_module, "remove_tree_allow_symlinks", refusing_remove)
 
     result = _pass(store, copyback, budget=30.0)
 
@@ -216,7 +220,7 @@ def test_ef15_a_writer_committing_into_a_planned_tree_before_acquisition_does_no
     assert planned_keys == [key]
 
     committed: list[str] = []
-    real_acquire = retention_module.acquire_copyback_batch_lock
+    real_acquire = mutex_module.acquire_copyback_batch_lock
 
     def acquire_after_a_writer_commits(root: Path, **kwargs: Any) -> int:
         if not committed:
@@ -228,7 +232,7 @@ def test_ef15_a_writer_committing_into_a_planned_tree_before_acquisition_does_no
             committed.append(key)
         return real_acquire(root, **kwargs)
 
-    monkeypatch.setattr(retention_module, "acquire_copyback_batch_lock", acquire_after_a_writer_commits)
+    monkeypatch.setattr(mutex_module, "acquire_copyback_batch_lock", acquire_after_a_writer_commits)
 
     result = _pass(store, copyback, budget=30.0)
 

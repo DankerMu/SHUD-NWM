@@ -385,6 +385,40 @@ STATE_INDEX_COPYBACK_REPLAY_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_state_index_copyback_replay_selection.py",
 )
 
+# #2259 partitioned tests/test_retention_copyback_mutex.py (1119 lines, 25
+# cases) into these two collectible suites and moved its fixture preamble into
+# the #1872 helper; the monolith is GONE with no compatibility shim. Neither
+# partition has a same-name source, so every route that used to name the
+# monolith has to name both by hand -- five existing rule sites do (the helper
+# support rule, the cli.py and scheduler_runtime.py stop rules, the broad
+# orchestrator directory rule and the copyback_guard.py rule), and the owner
+# row below is the sixth.
+#
+# The owner is new: #2259 also extracted `_CopybackLockBudget` / `_delete_entry`
+# / `_remove_tree_under_copyback_mutex` out of retention.py into
+# retention_copyback_mutex.py, taking the acquire/release/remove call sites with
+# them. Its same-name derivation would resolve to the deleted monolith, so it
+# has no derived route at all; `services/orchestrator/**` would carry it, but
+# that rule is not where a reader looks for the mutex lane and a stop rule added
+# above it later would shadow it silently. The targets are this module's
+# requirement oracles plus the three sibling suites that monkeypatch it by name
+# (D1 moved their patch targets here in the same commit).
+# tests/test_select_ci_tests.py closes the corpus against the tracked tree
+# (exactly two suites + one helper), so a third partition or a leftover shim
+# reddens instead of falling out of the PR lane.
+RETENTION_COPYBACK_MUTEX_OWNER_PATH = "services/orchestrator/retention_copyback_mutex.py"
+RETENTION_COPYBACK_MUTEX_HELPERS_PATH = "tests/retention_test_helpers.py"
+RETENTION_COPYBACK_MUTEX_TESTS: tuple[str, ...] = (
+    "tests/test_retention_copyback_mutex_budget.py",
+    "tests/test_retention_copyback_mutex_protocol.py",
+)
+RETENTION_COPYBACK_MUTEX_OWNER_TESTS: tuple[str, ...] = (
+    *RETENTION_COPYBACK_MUTEX_TESTS,
+    "tests/test_retention.py",
+    "tests/test_retention_copyback_lock_signal.py",
+    "tests/test_retention_extra_roots.py",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -1340,10 +1374,16 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # so it is a derived importer like the other four, not a rider.
         # 25 tests in 5.27s (median of three `uv run pytest -q
         # tests/test_retention_copyback_mutex.py` runs: 5.27/5.24/5.30s).
-        "tests/retention_test_helpers.py",
+        # #2259 split that partition in two and moved its 99-line fixture
+        # preamble into this helper, so the derived importer set is SIX, not
+        # five, and the helper now also owns the `_forbid_acquisitions` /
+        # `_observe_removals` monkeypatch seams. Dropping either partition here
+        # reds the support-module closure guard, which derives importers from
+        # the tracked tree rather than from this tuple.
+        RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
         (
             "tests/test_retention.py",
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
@@ -1817,7 +1857,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
             *ORCHESTRATOR_CLI_IMPORTER_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            # #2259 split the copyback-mutex partition in two; the EF-15 case
+            # that drives `cli._run_cleanup` is in the budget half, but the
+            # protocol half rides with it because the two share every fixture.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
             "tests/test_operator_reentry_confirmation.py",
@@ -1865,7 +1908,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11],
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            # #2259: both halves of the split copyback-mutex partition.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         ),
         stop_on_match=True,
@@ -2216,7 +2260,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # stop-rule owned and rides THAT site, per this rule's #1455 note
             # above. DB-free, local, 25 tests in 5.27s, so a rule rather than a
             # rule-gap exclusion.
-            "tests/test_retention_copyback_mutex.py",
+            # #2259 partitioned it into these two halves and deleted the
+            # monolith; this rule is where `services/orchestrator/retention.py`
+            # and the extracted `retention_copyback_mutex.py` both reach them.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             # #2262: retention.py's typed lock-failure signal and the
             # compaction that must keep it (scheduler_evidence_payload.py rides
             # this rule too). DB-free, local, sub-second.
@@ -2744,7 +2791,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # path, so the existing selections accumulate unchanged beside it.
         "packages/common/copyback_guard.py",
         (
-            "tests/test_retention_copyback_mutex.py",
+            # #2259: both halves of the split copyback-mutex partition.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             # #2252/#2262 (harden-copyback-mutex-residuals): the guard gained the
             # `posix` primitive, the non-finite timeout refusal, the budget
             # constant and the lock-failure classifier. Its own primitive suite
@@ -2756,6 +2804,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_copyback_lock_signal.py",
             "tests/test_run_tree_copyback_backup_lifecycle.py",
         ),
+    ),
+    PathTestRule(
+        # #2259: the extracted copyback-mutex owner. Its same-name derivation
+        # points at the deleted monolith, so without this row its only route is
+        # the broad `services/orchestrator/**` rule -- which any later stop rule
+        # on this path would shadow without a sound. Path-exact with neither
+        # flag, so that directory selection still accumulates beside it.
+        RETENTION_COPYBACK_MUTEX_OWNER_PATH,
+        RETENTION_COPYBACK_MUTEX_OWNER_TESTS,
     ),
     PathTestRule(
         # #2252: the node-27 canonical lane's copyback-mutex oracle. Not a
