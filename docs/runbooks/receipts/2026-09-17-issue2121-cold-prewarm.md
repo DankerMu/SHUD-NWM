@@ -2,7 +2,7 @@
 
 ## 顺序与代码身份
 
-#2121-B 先由 PR #2449 合并，merge SHA `d3d09d9be9f52f02de45cf1727bbe5d2f8077feb`；本次在该已合并代码的 node-27 隔离 checkout `/home/nwm/tmp/nwm-2121-b` 执行。B 新增逐源 discharge_ok/failed，summary 为 v3。此 receipt 产出前没有修改 #2121-A / #2346 第二步的旋钮。
+\#2121-B 先由 PR #2449 合并，merge SHA `d3d09d9be9f52f02de45cf1727bbe5d2f8077feb`；本次在该已合并代码的 node-27 隔离 checkout `/home/nwm/tmp/nwm-2121-b` 执行。B 新增逐源 discharge_ok/failed，summary 为 v3。此 receipt 产出前没有修改 #2121-A / #2346 第二步的旋钮。
 
 测量窗口 UTC 03:27–03:29（node-27 本地 11:27–11:29）。生产 API `:8080` 保持原 SHA `7ecc46bed18cc8b6f20030f49aa3bf43a77b6858`、MainPID `3023964`；被测 API 是相同入口/数据库/角色/环境的独立双 worker 实例 `:8092`。两树的 display API 差异仅是 master 已合并的无 hydrological run 时保留 precip layer 定义；被测瓦片路径未变。未部署新的生产 API。
 
@@ -96,9 +96,9 @@ p95 采用 nearest-rank `ceil(0.95*n)`，包含失败样本（本次为 0）；�
 
 ## 数据依据下的联合批次决策
 
-#2121-A：**保持** prewarm workers=8、timeout=30s、deadline=540s 与 display pool 8+8 / 2 workers，不据此继续扩大池或超时。最大样本 3.125s，30s 超时约为其 9.6 倍；当前包络 18.771s，距 540s 预算很远，且无失败/跳过。这个结论仅覆盖本次现行包络，不能外推真实用户争用或全时间轴成本。
+\#2121-A：**保持** prewarm workers=8、timeout=30s、deadline=540s 与 display pool 8+8 / 2 workers，不据此继续扩大池或超时。最大样本 3.125s，30s 超时约为其 9.6 倍；当前包络 18.771s，距 540s 预算很远，且无失败/跳过。这个结论仅覆盖本次现行包络，不能外推真实用户争用或全时间轴成本。
 
-#2346 第二步仍必须做冷生成隔离；与 A 保持同一后续 PR、配置/部署/回滚批次。全时间轴扩窗、冷生成容量及角色 SQL 的最终选择须在联合批次中结合真实突发、EXPLAIN 和复测证据完成。仅增大 producer 外围 semaphore 而让等待者继续持有 digest/session 连接，不能宣称实现连接预留。
+\#2346 第二步仍必须做冷生成隔离；与 A 保持同一后续 PR、配置/部署/回滚批次。全时间轴扩窗、冷生成容量及角色 SQL 的最终选择须在联合批次中结合真实突发、EXPLAIN 和复测证据完成。仅增大 producer 外围 semaphore 而让等待者继续持有 digest/session 连接，不能宣称实现连接预留。
 
 ## 原始证据
 
@@ -107,4 +107,4 @@ node-27：`/home/nwm/tmp/issue2121-cold-20260917/cold-receipt.json`、`prewarm-s
 - cold-receipt.json SHA256：`16bc0fce2eeb9c9fbda6475834232e34799a7ac7f71f9eba15ae9c61a37e9103`
 - request-samples.json SHA256：`cbadfc3de585d177fce3e7cd45b0e10e2506c556b258d798d96c9973f6af7197`
 
-#2017 receipt 的 175/183 cache hits、1.891s 不能替代本次冷态证据。这里没有关闭 #2121 或 #2346，也没有声称全时间轴或实际用户突发验收通过。
+\#2017 receipt 的 175/183 cache hits、1.891s 不能替代本次冷态证据。这里没有关闭 #2121 或 #2346，也没有声称全时间轴或实际用户突发验收通过。
