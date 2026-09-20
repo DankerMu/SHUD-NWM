@@ -53,6 +53,8 @@ from scripts.select_ci_tests import (
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
+    PUBLISH_SCHEDULER_REGISTRY_TESTS,
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
@@ -964,9 +966,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: #2259 split
-    # the copyback-mutex partition in two and #1101 replaced the refresh
-    # monolith with fifteen partitions (+14), so it now lists
-    # 75 targets, the rule's 72 plus three riders that arrive from OUTSIDE the
+    # the copyback-mutex partition in two, #1101 replaced the refresh
+    # monolith with fifteen partitions (+14) and #1102 replaced the publisher
+    # monolith with seven (+6), so it now lists
+    # 81 targets, the rule's 78 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1037,7 +1040,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the seven partitions of the deleted publisher monolith. They
+        # sort into the slot the monolith held -- the literal is compared
+        # against `select_tests`'s sorted output, so placement matters.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
@@ -2202,6 +2208,70 @@ def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None
         assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
 
 
+def test_publish_registry_partition_tracked_tree_is_exactly_seven_suites_and_one_helper() -> None:
+    # #1102: seven collectible partitions plus one non-collectible helper is a floor,
+    # not a preference. An eighth partition, a leftover compatibility shim for the
+    # deleted 3218-line monolith, or the helper renamed into a `test_*.py` suite all
+    # redden here. Expected membership is the selector's own tuple, never a glob
+    # result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in nothing today
+    # but would silently adopt any future `tests/*publish_registry*` file.
+    partitions = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    helper = PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 7, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_publish_scheduler_file_registry.py").exists(), (
+        "the pre-#1102 monolith is back; the explicit rows and its same-name "
+        "derivation from scripts/publish_scheduler_file_registry.py would both fire"
+    )
+    suite_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("test_publish_registry_")}
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("publish_registry")}
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the right reach, or the
+    # tracked-tree count above is satisfied by files nothing selects. The publisher
+    # owner row and the two directory rules carry the WHOLE corpus; the narrow routes
+    # carry only the partitions that actually open their surface.
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    owner = "scripts/publish_scheduler_file_registry.py"
+    assert set(rule_for(owner).tests) == partitions, sorted(set(rule_for(owner).tests) ^ partitions)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert partitions <= selected, sorted(partitions - selected)
+    for pattern in (BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN, "services/orchestrator/**"):
+        targets = set(rule_for(pattern).tests)
+        assert partitions <= targets, f"{pattern} lost partitions: {sorted(partitions - targets)}"
+
+    # The two narrow routes are exact, not supersets: a partition that never opens the
+    # surface must NOT ride it, or the route stops meaning anything.
+    mode_gated = {
+        "tests/test_publish_registry_manifest_audit.py",
+        "tests/test_publish_registry_manual_cli.py",
+    }
+    mode_targets = set(rule_for("tests/provider_mode_helpers.py", SUPPORT_MODULE_TEST_RULES).tests)
+    assert partitions & mode_targets == mode_gated, sorted((partitions & mode_targets) ^ mode_gated)
+    declaration_targets = set(rule_for(CALIBRATION_OVERRIDES_PATH).tests)
+    assert partitions & declaration_targets == {"tests/test_publish_registry_calibration_overrides.py"}
+
+    # The helper's support rule must equal what the tracked tree derives: the autouse
+    # source-identity stub is module-wide, so all seven import it and a partition that
+    # stopped would be a behaviour change, not a routing one.
+    helper_targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+    assert helper_targets == partitions, sorted(helper_targets ^ partitions)
+    derived = _derived_support_module_importers([helper])[helper]
+    assert derived == partitions, sorted(derived ^ partitions)
+
+
 def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
     test_path = tmp_path / "tests" / "test_nested_helper_probe.py"
     test_path.parent.mkdir()
@@ -2492,7 +2562,11 @@ def test_calibration_declaration_selects_exactly_its_three_consumers() -> None:
 
     assert selected == [
         "tests/test_basins_package.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: of the seven publisher partitions only this one reads the
+        # checked-in declaration (default-load fixture + exact-content pin);
+        # the other six pass `_NO_DECLARATION` or write their own file, so the
+        # route stays exactly three consumers.
+        "tests/test_publish_registry_calibration_overrides.py",
         "tests/test_select_ci_tests.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -2546,7 +2620,7 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
     assert select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path(".")) == []
 
     # Leg 2: the rule kept but a consumer removed from its targets.
-    for removed in ("tests/test_basins_package.py", "tests/test_publish_scheduler_file_registry.py"):
+    for removed in ("tests/test_basins_package.py", "tests/test_publish_registry_calibration_overrides.py"):
         patched = tuple(
             PathTestRule(
                 rule.pattern,
@@ -10462,7 +10536,8 @@ def test_basins_publication_owner_rule_preserves_its_pre_existing_targets() -> N
         "tests/test_direct_grid_variant_registration.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_production_object_store_validation.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the publisher monolith literal expands to its seven partitions.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_qhh_production_bootstrap.py",
         "tests/test_qhh_scripts_static.py",
     )
@@ -10855,6 +10930,16 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     (
         SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
         "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    ),
+    # #1102: the shared fixture surface of the seven publisher partitions. The
+    # calibration-overrides partition anchors it because it is the one that names
+    # the most of that surface (the declaration builders, both published-bytes
+    # readers and the source-calibration text) on top of the module-wide autouse
+    # stub every partition carries; an anchor that stops deriving here means the
+    # partitions stopped sharing that surface at all.
+    (
+        PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
+        "tests/test_publish_registry_calibration_overrides.py",
     ),
     # #1872 (+#2238): the retention partitions' shared helper is imported at
     # module scope by all five collectible partitions; any of them is a valid
@@ -15465,8 +15550,17 @@ def _qhh_owner_rule_contract(rule: PathTestRule, baseline_rule: Sequence[str]) -
     unrelated future consumer added to this rule must not false-red the QHH contract, and
     the baseline transcription is provenance for the pre-#1948 content, not a ceiling.
     """
-    baseline_non_qhh = set(baseline_rule) - {_qhh_partitions()[0]}
+    # #1102 deleted `tests/test_publish_scheduler_file_registry.py` and replaced it with
+    # the seven-partition publisher corpus, which this rule carries in its place. The
+    # baseline transcription is pre-#1948 provenance, not a ceiling, so the replaced path
+    # is subtracted here -- and its replacement is asserted present, because a bare
+    # subtraction would let the rule lose the publisher lane entirely in silence.
+    replaced = {"tests/test_publish_scheduler_file_registry.py"}
+    assert replaced <= set(baseline_rule), "the #1102 replacement note no longer describes the baseline"
+    baseline_non_qhh = set(baseline_rule) - {_qhh_partitions()[0]} - replaced
     tests = set(rule.tests)
+    publisher = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    assert publisher <= tests, f"publisher partitions dropped: {sorted(publisher - tests)}"
     qhh_in_rule = tests & set(_qhh_partitions())
 
     assert qhh_in_rule == set(_qhh_partitions()), sorted(qhh_in_rule ^ set(_qhh_partitions()))
@@ -17079,8 +17173,11 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
     assert counts["helper_classes"] == 1
     assert counts["helper_constants"] == 4
     assert counts["partition_count"] == 7
-    assert counts["direct_collectible_importer_count"] == 8
-    assert counts["helper_route_test_count"] == 11
+    # #1102: the publisher monolith entry became four partitions on the direct side
+    # (+3) and five on the routed side (+4, the fifth arriving through the new
+    # `tests/publish_registry_helpers.py` support bridge).
+    assert counts["direct_collectible_importer_count"] == 11
+    assert counts["helper_route_test_count"] == 15
     assert counts["database_authority_count"] == len(oracle["database_authority"]["exact_paths"]) == 8
     assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
     assert len(rows) == 94
@@ -18065,7 +18162,10 @@ def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
     assert derived == expected, (
         f"registry helper direct importer set drifted: derived={sorted(derived)} expected={sorted(expected)}"
     )
-    assert len(derived) == 8
+    # #1102 moved this from 8 to 11: the single publisher monolith entry became the
+    # four partitions that name `_write_registry_fixture` / `_make_valid_model` at
+    # module scope. The set itself stays DERIVED, never frozen -- only the count is.
+    assert len(derived) == 11
     assert expected <= set(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS)
 
 
@@ -18094,9 +18194,12 @@ def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> N
     # No tracked suite outside the derived direct eight may import the registry helper,
     # and the three QHH partitions must import D rather than the registry helper.
     d_module = "tests.qhh_production_bootstrap_helpers"
-    direct_eight = set(_registry_partitions()) | {"tests/test_publish_scheduler_file_registry.py"}
+    # #1102: read the oracle rather than re-spelling the set here -- the publisher side of
+    # it is four partitions now, and the derivation guard above already proves the oracle
+    # equals the tracked-AST derivation.
+    direct_importers = set(oracle["helper_consumers"]["direct_collectible_importers"])
     for suite in _tracked_test_suites():
-        if suite in direct_eight:
+        if suite in direct_importers:
             continue
         names = _top_level_imported_module_names(suite, _parse_tracked(suite))
         assert helper_module not in names, f"{suite} is an unexpected direct helper importer"
@@ -18115,7 +18218,8 @@ def test_registry_partition_no_consumer_imports_the_retained_collectible_core() 
     oracle = _registry_partition_oracle()
     consumers = [
         *_registry_partitions(),
-        "tests/test_publish_scheduler_file_registry.py",
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+        PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
         oracle["helper_consumers"]["support_importer"],
         *oracle["helper_consumers"]["qhh_partitions_via_support"],
     ]
@@ -18175,7 +18279,8 @@ def test_registry_partition_owner_route_selects_all_seven_with_a_non_same_name_p
         "tests/test_direct_grid_variant_registration.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_production_object_store_validation.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the publisher monolith literal expands to its seven partitions.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_qhh_scripts_static.py",
         *BASINS_PACKAGE_PUBLICATION_TESTS,
         "tests/test_qhh_production_bootstrap.py",
@@ -18255,14 +18360,17 @@ def test_registry_partition_owner_rule_permits_an_unrelated_future_target(
     assert set(_registry_partitions()) <= set(future_rule.tests)
 
 
-def test_registry_partition_helper_route_selects_exactly_the_eleven_consumers() -> None:
-    # A helper-only diff must run the eight direct collectible importers plus QHH A/B/C —
-    # the support bridge is NOT transitively expanded, so the QHH trio must ride the exact
-    # rule — plus the selector's own meta-guard rider (added by the support-module branch,
-    # deliberately not duplicated inside the rule).
+def test_registry_partition_helper_route_selects_exactly_the_fifteen_consumers() -> None:
+    # A helper-only diff must run the eleven direct collectible importers plus the
+    # collectible reach of the TWO support bridges — QHH A/B/C behind
+    # `tests/qhh_production_bootstrap_helpers.py`, and (#1102) the publisher
+    # skip-refusals partition behind `tests/publish_registry_helpers.py`. Neither bridge
+    # is transitively expanded, so both reaches must ride the exact rule — plus the
+    # selector's own meta-guard rider (added by the support-module branch, deliberately
+    # not duplicated inside the rule).
     oracle = _registry_partition_oracle()
     expected = set(oracle["helper_consumers"]["helper_route_tests"])
-    assert len(expected) == 11
+    assert len(expected) == 15
     assert sorted(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS) == sorted(expected)
 
     selected = set(select_tests([REGISTRY_PARTITION_HELPER], repo_root=Path(".")))

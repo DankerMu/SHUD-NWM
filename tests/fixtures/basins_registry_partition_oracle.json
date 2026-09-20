@@ -25,11 +25,11 @@
   },
   "counts": {
     "database_authority_count": 8,
-    "direct_collectible_importer_count": 8,
+    "direct_collectible_importer_count": 11,
     "helper_classes": 1,
     "helper_constants": 4,
     "helper_functions": 19,
-    "helper_route_test_count": 11,
+    "helper_route_test_count": 15,
     "integration_nodes": 17,
     "nodes": 96,
     "partition_count": 7,
@@ -109,14 +109,14 @@
     "ast": "d4f069c7dbb343b32253a5bea204f4cc6df7cbc35f155ee4cc1042e12959fa54",
     "database_authority": "3f46cfb5a1f609d402ee99766bf68f114e3fd12a8043dec902c6394250638147",
     "definition": "9fcffe77f64696af9189c76cc35415b88ad024bbc65b908c92586d72eb5dfe7a",
-    "helper_consumers": "ee7fa88945e78bce81b049a5c82d5511362f454a276efb59b1ba0afb67f023b1",
+    "helper_consumers": "1a5a9ef2b152be6487d5190e6a8de2aa212a5a2142dd708bbc61a099308da440",
     "helper_inventory": "8840823ea7c0041ef3bc775601485452eeb6c04838dce454481d0c9ab43e5335",
-    "helper_route": "1039257007bcdadfb75462fbca1145953631132cd39230b072391d5f17c58c91",
+    "helper_route": "0508e027876055884c7af93c38b27212119e70ca7f2137d65ba2705f7255cc6e",
     "helper_source": "3a2e691d64683dc397f9fd6da6bf28cd61e8cfc099039d51eec95a7ea61e3abc",
     "integration_suffix": "2531bdef5d481f1024fafe0d5fe36ae7aabb47c478746ceb3286952bccefd73c",
     "oracle": "dfbe7bcf913562a012ab3a870a2810f67ecde9964cb59cac4cf09bfab9a86492",
     "owner_map": "f4f71687d744df2551f9ff0926e10fdd0498ade214fe67f6bb78ba62ee6879a9",
-    "self": "6fed8d1373b5dcaf91ccea54956e21a17e36e73112f777a101c74a4f65f0ef6b",
+    "self": "1d5be28e4bb9880fd63f677f82d90f343e2601088f6fb4d69aace6cde704607d",
     "suffix": "ba89c8cb7520a24aab19195dc0a724ecbf4034675d2bd38fba8b9e04aff6c5c8"
   },
   "execution": {
@@ -200,7 +200,10 @@
       "tests/test_basins_registry_import_auth.py",
       "tests/test_basins_registry_import_db.py",
       "tests/test_basins_registry_import_qhh.py",
-      "tests/test_publish_scheduler_file_registry.py"
+      "tests/test_publish_registry_package_contexts.py",
+      "tests/test_publish_registry_radiation_repair.py",
+      "tests/test_publish_registry_calibration_overrides.py",
+      "tests/test_publish_registry_refresh_lane.py"
     ],
     "helper_route_tests": [
       "tests/test_basins_registry_import.py",
@@ -210,7 +213,11 @@
       "tests/test_basins_registry_import_auth.py",
       "tests/test_basins_registry_import_db.py",
       "tests/test_basins_registry_import_qhh.py",
-      "tests/test_publish_scheduler_file_registry.py",
+      "tests/test_publish_registry_package_contexts.py",
+      "tests/test_publish_registry_radiation_repair.py",
+      "tests/test_publish_registry_calibration_overrides.py",
+      "tests/test_publish_registry_refresh_lane.py",
+      "tests/test_publish_registry_skip_refusals.py",
       "tests/test_qhh_production_bootstrap.py",
       "tests/test_qhh_production_bootstrap_scheduler.py",
       "tests/test_qhh_production_bootstrap_state.py"

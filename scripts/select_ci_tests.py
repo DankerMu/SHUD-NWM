@@ -660,6 +660,28 @@ JOURNAL_RETENTION_TESTS = (
     "tests/test_scheduler_journal_retention_archive.py",
 )
 
+# #1102: the scheduler-registry publisher corpus is seven collectible partitions
+# plus one non-collectible helper. The deleted 3218-line monolith was the ONLY
+# same-name suite of `scripts/publish_scheduler_file_registry.py`, so that
+# derivation died with it and every route below has to name the partitions.
+# Explicit sorted tuple, never derived at import time (same reason as
+# QHH_PRODUCTION_BOOTSTRAP_TESTS / BASINS_PACKAGE_PUBLICATION_TESTS); checked
+# against the tracked tree by the selector meta-suite.
+PUBLISH_SCHEDULER_REGISTRY_TESTS: tuple[str, ...] = (
+    "tests/test_publish_registry_calibration_overrides.py",
+    "tests/test_publish_registry_manifest_audit.py",
+    "tests/test_publish_registry_manual_cli.py",
+    "tests/test_publish_registry_package_contexts.py",
+    "tests/test_publish_registry_radiation_repair.py",
+    "tests/test_publish_registry_refresh_lane.py",
+    "tests/test_publish_registry_skip_refusals.py",
+)
+# The helper owns the monolith's module-wide autouse source-identity stub, so
+# EVERY partition imports it at module scope and the routed set IS the derived
+# importer closure. Not collectible: the filename is deliberately not `test_*`,
+# so `is_test_suite_path` rejects it and it reaches SUPPORT_MODULE_TEST_RULES.
+PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH = "tests/publish_registry_helpers.py"
+
 # #1860: the checked-in calibration declaration is a non-Python producer with no
 # mechanically derivable import closure, so the route must be explicit and test
 # its own continued existence. The three consumers are the package-manifest
@@ -667,10 +689,14 @@ JOURNAL_RETENTION_TESTS = (
 # scheduler-registry publisher suite (owns the declaration's default-load and
 # exact-content oracles), and the selector meta-guard (holds the route pins).
 # Exact set: no core-smoke fallback, no collect-only collapse.
+# #1102 kept the set at three: of the seven publisher partitions, only the
+# calibration-overrides one reads `config/calibration_overrides.yaml` (the
+# default-load fixture and the exact-content pin both live there). Every other
+# partition either passes `_NO_DECLARATION` or writes its own declaration file.
 CALIBRATION_OVERRIDES_PATH = "config/calibration_overrides.yaml"
 CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     "tests/test_basins_package.py",
-    "tests/test_publish_scheduler_file_registry.py",
+    "tests/test_publish_registry_calibration_overrides.py",
     SELECTOR_META_GUARD_TEST,
 )
 
@@ -729,20 +755,32 @@ BASINS_REGISTRY_IMPORT_TESTS: tuple[str, ...] = (
     "tests/test_basins_registry_import_security.py",
 )
 # The helper owns all 19 support functions, `_FakeRiverSegmentCursor` and the four
-# private constants of the former monolith, so a helper-only diff must run its eight
-# direct collectible importers — the seven registry suites plus
-# `tests/test_publish_scheduler_file_registry.py`, which imports `_write_registry_fixture`
-# and `_make_valid_model` at module scope. SUPPORT_MODULE_TEST_RULES does not recursively
-# expand one helper rule through another, and the QHH-bootstrap helper
-# (`tests/qhh_production_bootstrap_helpers.py`, the sole support-to-support importer)
-# imports this helper at module and function scope while its three collectible
-# partitions never import it directly — so the QHH A/B/C partitions are named
-# explicitly here, eleven collectible suites total. The selector meta-guard rider is
-# added by the support-module branch itself, deliberately not repeated.
+# private constants of the former monolith, so a helper-only diff must run its eleven
+# direct collectible importers — the seven registry suites plus the four #1102 publisher
+# partitions that import `_write_registry_fixture` / `_make_valid_model` at module scope
+# (package-contexts, radiation-repair, calibration-overrides, refresh-lane; before #1102
+# this was the single `tests/test_publish_scheduler_file_registry.py` entry).
+# SUPPORT_MODULE_TEST_RULES does not recursively expand one helper rule through another,
+# and there are now TWO support-to-support importers, both invisible to the non-recursive
+# walk, so their collectible reach is named explicitly here:
+#   * `tests/qhh_production_bootstrap_helpers.py` imports this helper at module and
+#     function scope while its three collectible partitions never import it directly —
+#     hence the QHH A/B/C partitions;
+#   * `tests/publish_registry_helpers.py` (#1102) imports `_make_valid_model` at module
+#     scope for `_write_healthy_basin_pair` — the ONE publisher partition that reaches
+#     that builder without importing the registry helper itself is the skip-refusals one,
+#     hence that single extra entry. The manual-CLI and manifest-audit partitions import
+#     the #1102 helper too but touch no bridged name, so they are deliberately absent.
+# Fifteen collectible suites total. The selector meta-guard rider is added by the
+# support-module branch itself, deliberately not repeated.
 BASINS_REGISTRY_IMPORT_HELPERS_PATH = "tests/basins_registry_import_helpers.py"
 BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
     *BASINS_REGISTRY_IMPORT_TESTS,
-    "tests/test_publish_scheduler_file_registry.py",
+    "tests/test_publish_registry_calibration_overrides.py",
+    "tests/test_publish_registry_package_contexts.py",
+    "tests/test_publish_registry_radiation_repair.py",
+    "tests/test_publish_registry_refresh_lane.py",
+    "tests/test_publish_registry_skip_refusals.py",
     *QHH_PRODUCTION_BOOTSTRAP_TESTS,
 )
 
@@ -1436,7 +1474,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_state_manager.py",
             "tests/test_run_tree_copyback.py",
             "tests/test_source_cycle_raw_manifest.py",
-            "tests/test_publish_scheduler_file_registry.py",
+            # #1102: two of the seven publisher partitions import this helper at
+            # module scope — the manual-CLI one pre-creates a provider
+            # destination and a mode-sensitive parent, the manifest-audit one
+            # builds its registry destination through
+            # `make_directory_with_explicit_mode`. The other five never open a
+            # gated surface, so listing them would be routing noise.
+            "tests/test_publish_registry_manifest_audit.py",
+            "tests/test_publish_registry_manual_cli.py",
         ),
     ),
     PathTestRule(
@@ -1744,16 +1789,32 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support
-        # functions, `_FakeRiverSegmentCursor` and the four private constants. Its eight
-        # direct collectible importers are the seven registry suites plus
-        # `tests/test_publish_scheduler_file_registry.py`, all at module scope. The
-        # support-to-support edge — `tests/qhh_production_bootstrap_helpers.py` importing
-        # `_write_registry_fixture` at module scope and `_package_manifest_for_model` at
-        # function scope — is invisible to the non-recursive support-rule walk, so the
-        # three QHH bootstrap partitions are routed explicitly here: eleven collectible
-        # suites total, meta-guard rider added by the support-module branch itself.
+        # functions, `_FakeRiverSegmentCursor` and the four private constants. Its eleven
+        # direct collectible importers are the seven registry suites plus the four #1102
+        # publisher partitions that name `_write_registry_fixture` / `_make_valid_model`,
+        # all at module scope. The TWO support-to-support edges are invisible to the
+        # non-recursive support-rule walk, so their collectible reach is routed
+        # explicitly here — `tests/qhh_production_bootstrap_helpers.py` (module-scope
+        # `_write_registry_fixture`, function-scope `_package_manifest_for_model`) brings
+        # the three QHH bootstrap partitions, and `tests/publish_registry_helpers.py`
+        # (module-scope `_make_valid_model`) brings the one publisher partition that
+        # reaches `_write_healthy_basin_pair` without importing this helper itself.
+        # Fifteen collectible suites total, meta-guard rider added by the support-module
+        # branch itself.
         BASINS_REGISTRY_IMPORT_HELPERS_PATH,
         BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS,
+    ),
+    PathTestRule(
+        # #1102: the shared fixture surface of the seven publisher partitions — the
+        # module-wide autouse `basins_package_source_identity` stub and its two readers,
+        # the canonical catalog seeder, the healthy/broken/radiation basin-pair builders,
+        # the fake inventory/packager/sources triple and the calibration-declaration
+        # builders. The autouse stub decides what EVERY case in the corpus sees (without
+        # it the real content-addressed identity runs and the synthetic inventories stop
+        # being stable), so all seven import it at module scope and the routed set IS the
+        # derived closure.
+        PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
+        PUBLISH_SCHEDULER_REGISTRY_TESTS,
     ),
 )
 
@@ -2186,7 +2247,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # material to production-closure's reconstruction of it.  A change
             # to one implementation must run the test that pins both.
             "tests/test_production_object_store_validation.py",
-            "tests/test_publish_scheduler_file_registry.py",
+            # #1102: the single publisher monolith literal expands to its seven
+            # partitions. The whole corpus rides the directory list, not a
+            # subset: `publish_all_basin_scheduler_registry` calls into
+            # basins_discovery / basins_package / basins_radiation_template /
+            # basins_calibration_overrides on every one of them, and the whole
+            # added set is the same ~5s the monolith was.
+            *PUBLISH_SCHEDULER_REGISTRY_TESTS,
             # #1948: the single QHH bootstrap monolith literal expands to the three
             # partitions; no prior target of this rule is dropped (the retained
             # historical path is QHH_PRODUCTION_BOOTSTRAP_TESTS[0]).
@@ -2385,7 +2452,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
             "tests/test_pipeline_persistence.py",
-            "tests/test_publish_scheduler_file_registry.py",
+            # #1102: the publisher corpus is physically partitioned; the broad
+            # orchestrator rule must select every collectible partition so a
+            # scheduler_file_providers change never blinds targeted CI to moved
+            # cases. Three of the seven top-level-import that module directly
+            # (package-contexts, manifest-audit, refresh-lane); the other four
+            # reach the same providers through `registry_script`, and the rule
+            # carried the undivided monolith before the split.
+            *PUBLISH_SCHEDULER_REGISTRY_TESTS,
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_replay_lineage.py",
             "tests/test_retention.py",
@@ -3795,6 +3869,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule("scripts/scheduler_refresh/receipt.py", SCHEDULER_REFRESH_RUNNER_TESTS),
     PathTestRule("scripts/scheduler_refresh/receipt_validation.py", SCHEDULER_REFRESH_RUNNER_TESTS),
     PathTestRule("scripts/scheduler_refresh/runner.py", SCHEDULER_REFRESH_RUNNER_TESTS),
+    PathTestRule(
+        # #1102: the manual publisher had NO row of its own -- its entire route was
+        # the selector's `tests/test_<module>.py` derivation onto the 3218-line
+        # monolith. That derivation died with the monolith (no partition is named
+        # `test_publish_scheduler_file_registry.py`), so without this row a
+        # publisher-only diff would select nothing from the corpus and degrade to
+        # the zero-assertion `--collect-only` smoke. It carries the WHOLE seven-suite
+        # corpus: every partition drives `publish_all_basin_scheduler_registry` or
+        # `main` out of this module, and it is the `monkeypatch.setattr` target of
+        # 50 of the corpus's 52 patch sites (the other two name the refresh
+        # facade), so a change to any of its seams can land in any partition.
+        # #1100 will split this module; its owner
+        # rows inherit this reach the same way scripts/scheduler_refresh/ did above.
+        "scripts/publish_scheduler_file_registry.py",
+        PUBLISH_SCHEDULER_REGISTRY_TESTS,
+    ),
     # #1611: the state-index copyback replay tool's own suite was partitioned
     # into four files and the 1378-line monolith deleted with no shim, which
     # killed the same-name derivation that had been this script's ONLY route.
