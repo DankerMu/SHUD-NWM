@@ -27,11 +27,13 @@ import pytest
 import tests.test_node27_connection_attribution as attribution
 from packages.common import display_coverage, display_watermark
 from scripts import (
+    node27_autopipeline,
     node27_raw_retention,
     node27_refresh_coverage,
     node27_timeseries_compression,
     node27_timeseries_retention,
 )
+from services.orchestrator import pipeline_job_provenance
 
 REGISTERED_COMPONENTS = attribution.REGISTERED_COMPONENTS
 REPO_ROOT = attribution.REPO_ROOT
@@ -99,6 +101,72 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         UNREACHABLE,
         "autopipeline imports only _backfill_output_segment_geometry(cursor, ...) and hands it a "
         "cursor from its own attributed _connect; basins_registry_import._transaction is never called",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "services/orchestrator/pipeline_job_provenance.py",
+        ATTRIBUTED,
+        "import_discovered_pipeline_job_provenance",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "packages/common/best_available.py",
+        UNREACHABLE,
+        "static import of services.orchestrator.pipeline_job_provenance also executes "
+        "services/orchestrator/__init__.py, whose AST names chain.py; BestAvailableManager is constructed "
+        "by the orchestrator/display best-available surfaces, never from autopipeline",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "packages/common/grid_registry_store.py",
+        UNREACHABLE,
+        "static-only through chain.py -> scheduler_file_providers -> forcing_producer; "
+        "PsycopgGridRegistryStore is constructed only in workers/grid_registry/__main__.py, "
+        "which autopipeline never calls",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "packages/common/met_store.py",
+        UNREACHABLE,
+        "static-only through chain.py -> forcing_producer/producer.py; PsycopgMetStore.from_env() is "
+        "called only from worker/CLI factories, none of which autopipeline reaches",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "packages/common/state_manager.py",
+        UNREACHABLE,
+        "static import of services.orchestrator.pipeline_job_provenance also executes "
+        "services/orchestrator/__init__.py, whose AST names chain.py; the state repository is built by "
+        "apps/api/routes/state_snapshots.py and orchestrator state selection, never from autopipeline",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "services/orchestrator/chain_compat_runtime.py",
+        UNREACHABLE,
+        "static-only: services/orchestrator/chain.py is named by services/orchestrator/__init__.py:53 "
+        "and by chain_forecast_execution.py; autopipeline never constructs ForecastOrchestrator or "
+        "installs chain runtime",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "services/orchestrator/chain_repository.py",
+        UNREACHABLE,
+        "static-only through file_orchestration_journal.py in the chain.py import graph; autopipeline "
+        "never constructs PsycopgOrchestratorRepository or calls upsert_pipeline_job",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "services/tile_publisher/publisher.py",
+        UNREACHABLE,
+        "static-only: imported by services/orchestrator/chain.py on the node-22 publisher path; "
+        "autopipeline never publishes tiles",
+    ),
+    (
+        "scripts/node27_autopipeline.py",
+        "workers/forcing_producer/store.py",
+        UNREACHABLE,
+        "static-only: imported function-locally at workers/forcing_producer/producer.py:485 inside "
+        "ForcingProducer.from_env(), which autopipeline never calls",
     ),
     (
         "scripts/node27_refresh_coverage.py",
@@ -204,6 +272,14 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         UNREACHABLE,
         "static-only: imported function-locally at workers/forcing_producer/producer.py:485 inside "
         "ForcingProducer.from_env(), which no display route calls",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "services/orchestrator/pipeline_job_provenance.py",
+        UNREACHABLE,
+        "import-only through services/orchestrator/chain_forecast_execution.py, itself behind the deferred "
+        "chain import in services/orchestrator/__init__.py:53; display routes never call the node-27 importer "
+        "and the node-22 publisher path opens no database connection",
     ),
     (
         "scripts/node27_timeseries_retention.py",
@@ -339,6 +415,7 @@ def test_delegated_helper_still_exposes_the_connect_injection_seam(
     module = {
         "packages/common/display_watermark.py": display_watermark,
         "packages/common/display_coverage.py": display_coverage,
+        "services/orchestrator/pipeline_job_provenance.py": pipeline_job_provenance,
     }[helper_module]
     parameters = inspect.signature(getattr(module, helper_function)).parameters
     assert DELEGATED_CONNECT_KEYWORD in parameters, (
@@ -372,6 +449,7 @@ def test_attributed_connect_wrapper_stamps_the_component_identity(
         "scripts/node27_timeseries_retention.py": node27_timeseries_retention,
         "scripts/node27_timeseries_compression.py": node27_timeseries_compression,
         "scripts/node27_raw_retention.py": node27_raw_retention,
+        "scripts/node27_autopipeline.py": node27_autopipeline,
     }[component]
     probe = _probe_psycopg2_connect(monkeypatch)
 
@@ -379,7 +457,10 @@ def test_attributed_connect_wrapper_stamps_the_component_identity(
         getattr(module, ATTRIBUTED_CONNECT_WRAPPER)(DSN, connect_timeout=5)
 
     assert probe.args == (DSN,)
-    assert probe.kwargs == {"fallback_application_name": expected_name, "connect_timeout": 5}
+    expected_kwargs = {"fallback_application_name": expected_name, "connect_timeout": 5}
+    if component == "scripts/node27_autopipeline.py":
+        expected_kwargs["options"] = "-c statement_timeout=600000"
+    assert probe.kwargs == expected_kwargs
 
 
 def test_delegated_closure_registry_is_well_formed() -> None:

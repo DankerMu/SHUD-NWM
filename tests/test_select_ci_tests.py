@@ -468,8 +468,10 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_openapi_response_conformance.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_slurm_gateway_openapi_security.py",
     ]
+
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -502,6 +504,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
+            "tests/test_pipeline_ops_identity_envelope.py",
             WRITE_SURFACE_SCAN_PATH,
             "tests/test_slurm_gateway_openapi_security.py",
             FAMILY_GUARD_PATH,
@@ -671,8 +674,16 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
 
     # services/** is a river-segment write-surface root (#2185) and a
     # path-canonicalisation family-guard root (#1627), so both scans ride along
-    # with the redirect targets.
-    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
+    # with the redirect targets. #2420's publisher imports
+    # OrchestratorError from this module, so that suite joins the stop rule.
+    assert selected == sorted(
+        {
+            *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            "tests/test_pipeline_job_provenance_publisher.py",
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+        }
+    )
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_orchestrator.py" not in selected
     assert "tests/test_scheduler_backfill.py" not in selected
@@ -822,6 +833,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
     assert selected == sorted(
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            "tests/test_pipeline_job_provenance_publisher.py",
             "tests/test_select_ci_tests.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
@@ -877,7 +889,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: it now lists
-    # 54 targets, the rule's 51 plus three riders that arrive from OUTSIDE the
+    # 60 targets, the rule's 57 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -918,6 +930,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
         # #1186: the operator-action listing suite rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and scheduler_evidence_payload.py,
@@ -940,6 +954,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # guard rides every source under it — a supplemental rider, not a rule
         # target. It sorts here, between the demote and pipeline suites.
         FAMILY_GUARD_PATH,
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
         "tests/test_publish_scheduler_file_registry.py",
@@ -1418,10 +1436,16 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.
         "tests/test_node27_write_roles.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
         # #2185: scripts/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         # #1442/#1789: the publish criterion is a registered oracle
@@ -1432,6 +1456,39 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         INVARIANT_SUITE_PATH,
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+
+
+def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> None:
+    all_provenance_tests = {
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+        "tests/test_pipeline_job_provenance_copyback.py",
+        "tests/test_pipeline_ops_identity_envelope.py",
+    }
+    for source in (
+        "services/orchestrator/pipeline_job_provenance.py",
+        "services/orchestrator/chain_forecast_execution.py",
+    ):
+        assert all_provenance_tests <= set(select_tests([source], repo_root=Path("."))), source
+
+    backfill_selected = set(select_tests(["scripts/backfill_pipeline_job_provenance.py"], repo_root=Path(".")))
+    assert {
+        "tests/test_pipeline_job_provenance_publisher.py",
+        "tests/test_pipeline_job_provenance_importer.py",
+    } <= backfill_selected
+
+    envelope = "tests/test_pipeline_ops_identity_envelope.py"
+    for source in (
+        "apps/api/routes/pipeline.py",
+        "apps/api/openapi_patching.py",
+        "openapi/nhms.v1.yaml",
+        "services/production_closure/readonly_db_route_smoke.py",
+    ):
+        assert envelope in set(select_tests([source], repo_root=Path("."))), source
+
+
 
 
 def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None:
@@ -4619,8 +4676,14 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
     selected = set(select_tests([owner, surface], repo_root=Path(".")))
     # The surface lives under services/**, a root of both the #2185 write-surface
     # scan and the #1627 family guard, so both ride along; the redirect itself is
-    # what this pins.
-    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH}
+    # what this pins. #2420's publisher imports OrchestratorError from chain_types,
+    # so that suite also joins via the chain_types stop rule.
+    assert selected == redirect_targets | {
+        SELECTOR_META_GUARD_TEST,
+        WRITE_SURFACE_SCAN_PATH,
+        FAMILY_GUARD_PATH,
+        "tests/test_pipeline_job_provenance_publisher.py",
+    }
     assert owner not in selected
 
 
@@ -13457,6 +13520,7 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
 def test_canonical_readonly_validator_selects_its_contract() -> None:
     producers = (
         "services/production_closure/readonly_db_validation.py",
+        "services/production_closure/readonly_db_route_smoke.py",
         "scripts/validate_readonly_db_boundary.py",
     )
     for producer in producers:

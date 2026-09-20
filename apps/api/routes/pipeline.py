@@ -329,6 +329,7 @@ def pipeline_status(
             ),
             "job_counts": job_counts,
         },
+        identity=strict_identity,
     )
 
 
@@ -371,7 +372,11 @@ def pipeline_stages(
 
     resolved_cycle_id = str(cycle.get("cycle_id") or cycle_id)
     if strict_identity is not None:
-        return _ok(request, _stage_summaries_for_strict_identity(store, strict_identity))
+        return _ok(
+            request,
+            _stage_summaries_for_strict_identity(store, strict_identity),
+            identity=strict_identity,
+        )
     return _ok(request, _stage_summaries(store, resolved_cycle_id))
 
 
@@ -436,7 +441,11 @@ def list_jobs(
             run_type=run_type,
             scenario=scenario,
         ):
-            return _ok(request, {"items": [], "total": 0, "limit": limit, "offset": offset})
+            return _ok(
+                request,
+                {"items": [], "total": 0, "limit": limit, "offset": offset},
+                identity=strict_identity,
+            )
     else:
         run_ids = _run_ids_matching_filters(store, run_type=run_type, scenario=scenario)
         if run_ids is not None:
@@ -461,6 +470,7 @@ def list_jobs(
             "limit": limit,
             "offset": offset,
         },
+        identity=strict_identity,
     )
 
 
@@ -515,6 +525,8 @@ def job_logs(
             "log_uri": log_result.log_uri,
             "content": log_result.content,
         },
+        identity=strict_identity,
+        job_id=job.job_id,
     )
 
 
@@ -1085,12 +1097,20 @@ def _table_columns(store: PipelineStore, table_name: str, schema: str) -> set[st
         return set()
 
 
-def _ok(request: Request, data: Any) -> dict[str, Any]:
+def _ok(
+    request: Request,
+    data: Any,
+    *,
+    identity: _StrictPipelineIdentity | None = None,
+    job_id: str | None = None,
+) -> dict[str, Any]:
     body = {
         "request_id": getattr(request.state, "request_id", None) or str(uuid4()),
         "status": "ok",
         "data": data,
     }
+    if identity is not None:
+        body["identity"] = _success_identity_payload(identity, job_id=job_id)
     decisions = getattr(request.state, "auth_policy_decisions", None)
     if decisions:
         body["auth_policy_decisions"] = decisions
@@ -1688,6 +1708,23 @@ def _source_cycle_for_job(store: PipelineStore, job: PipelineJob) -> tuple[str |
         str(row["source_id"]) if row.get("source_id") is not None else None,
         _coerce_datetime(row.get("cycle_time")),
     )
+
+
+
+def _success_identity_payload(
+    identity: _StrictPipelineIdentity,
+    *,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "source": identity.source,
+        "cycle_time": identity.cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "run_id": identity.run_id,
+        "model_id": identity.model_id,
+    }
+    if job_id is not None:
+        payload["job_id"] = job_id
+    return payload
 
 
 def _requested_identity_payload(identity: _StrictPipelineIdentity) -> dict[str, Any]:

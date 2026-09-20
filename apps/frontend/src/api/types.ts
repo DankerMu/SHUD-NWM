@@ -1224,6 +1224,15 @@ export interface components {
              */
             status: "ok";
         };
+        /** @description Resolved strict Ops identity returned as a top-level sibling of data on successful status, stages, jobs, and job-log responses. Present only when the request used a complete strict identity; required fields apply whenever this object is present. */
+        OpsStrictIdentity: {
+            source: string;
+            /** Format: date-time */
+            cycle_time: string;
+            run_id: string;
+            model_id: string;
+            job_id?: string;
+        };
         ErrorResponse: {
             /** @example req_01J0NHMS */
             request_id: string;
@@ -3113,6 +3122,8 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineStatus"];
+                        /** @description Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs. */
+                        identity?: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3142,6 +3153,8 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineStage"][];
+                        /** @description Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs. */
+                        identity?: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3179,6 +3192,8 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["PipelineJobPage"];
+                        /** @description Present on strict Ops successes with the resolved source, cycle_time, run_id, and model_id. Omitted for non-strict browsing. When present, those four fields are required; job_id is additionally required on logs. */
+                        identity?: components["schemas"]["OpsStrictIdentity"];
                     };
                 };
             };
@@ -3210,6 +3225,10 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["JobLogs"];
+                        /** @description Present on strict Ops log successes with the resolved source, cycle_time, run_id, model_id, and job_id. Omitted for non-strict browsing. */
+                        identity?: components["schemas"]["OpsStrictIdentity"] & {
+                            job_id: string;
+                        };
                     };
                 };
             };

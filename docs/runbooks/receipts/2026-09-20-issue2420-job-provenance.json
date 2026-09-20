@@ -1,0 +1,242 @@
+{
+  "status": "PASS",
+  "issue": 2420,
+  "pr": 2508,
+  "reviewed_deployed_sha": "87236ca540832ab6db6da96267234d00b6c92d61",
+  "production_baselines": {
+    "node22": "6031eb829b1ee801ee9334976f87a4b147829d8e",
+    "node27": "4f8d982637f67956acb788b813006e12c1c93174"
+  },
+  "verification": {
+    "final_node27": {
+      "passed": 1148,
+      "skipped": 1,
+      "seconds": 233.5
+    },
+    "previous_provenance_attribution_integration": {
+      "passed": 1196,
+      "seconds": 249.84
+    },
+    "canonical_timestamp_repair": {
+      "passed": 1027,
+      "seconds": 247.96
+    },
+    "ci": "https://github.com/DankerMu/SHUD-NWM/actions/runs/35483956257",
+    "base_red": [
+      "Original strict Ops success lacked identity",
+      "Same-version nonempty stderr enrichment failed PUBLISHED_LOG_MISSING",
+      "Reconciled child Slurm ID did not fetch parent logs",
+      "Both Z and +08:00 requests exposed noncanonical +00:00 success identity"
+    ]
+  },
+  "publication": {
+    "node22_interpreter": "Python 3.12.7; exact active .venv/bin/python; no uv sync",
+    "bounded_runs": 2,
+    "jobs_per_run": 5,
+    "verified_logs_per_run": 1,
+    "copyback_files": 2,
+    "copyback_bytes": 8632,
+    "copyback": "Existing mutex-protected copyback extra-object path; no scientific run-tree replacement",
+    "scientific_manifests_unchanged": true,
+    "rehearsal": "IFS parent envelope named a sibling run; task23 selected by exact task identity. strace -f -yy captured no production-root mutations; publisher path unchanged between rehearsal18af6d80f and finalsource."
+  },
+  "projection": {
+    "role": "nhms_ingest_rw",
+    "inserted": 10,
+    "replay_unchanged": 10,
+    "update_probe_rows": 10,
+    "update_probe_rolled_back": true,
+    "hydro_unchanged": true
+  },
+  "normal_tick": {
+    "log": "/home/nwm/autopipe-logs/autopipe.log",
+    "return_code": 0,
+    "already_ingested": 4188,
+    "scientific_ingested": 0,
+    "job_provenance": {
+      "failed": 0,
+      "imported": 2,
+      "status": "imported",
+      "unavailable": 4186
+    },
+    "projected_runs": [
+      {
+        "ignored_stale": 0,
+        "inserted": 0,
+        "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+        "status": "imported",
+        "unchanged": 5,
+        "updated": 0
+      },
+      {
+        "ignored_stale": 0,
+        "inserted": 0,
+        "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+        "status": "imported",
+        "unchanged": 5,
+        "updated": 0
+      }
+    ]
+  },
+  "normal_tick_execution": {
+    "start_cst": "2026-09-20T10:55:56+08:00",
+    "end_cst": "2026-09-20T10:56:11+08:00",
+    "exit_status": 0,
+    "deployed_sha": "87236ca540832ab6db6da96267234d00b6c92d61"
+  },
+  "live_evidence": {
+    "digests": {
+      "/home/nwm/issue2420-deploy-87236ca54/applied.json": "e7bd5b4a1eb80d6ac1bae334ae58d55e8ffe0bc97f321b1d1ac31db37cfd6411",
+      "/home/nwm/issue2420-deploy-87236ca54/c1-approved.json": "ccbb15b7f5265ad9d11e63058daab1f145e3406fc66cd890527243329c28f3de",
+      "/home/nwm/issue2420-deploy-87236ca54/c1-c4-approval.json": "10c531610e80ac35a62f4507f296a77be02ece616f4fe43fcf53f7d567f7c780",
+      "/home/nwm/issue2420-deploy-87236ca54/c4-a2/freeze.json": "b6b4db19f62fcba614fc38ceb73ec2ac2edd5ff1194679b3d2eeb58f8abbb22a",
+      "/home/nwm/issue2420-deploy-87236ca54/c4-a2/binding.json": "5790ed8635bb9359253eac91142506cfd112817223cdeca55e8c54842ae89fd4",
+      "/home/nwm/issue2420-deploy-87236ca54/c4-a2/acceptance.json": "117d30d52ad6ae773093e4a5c21d9c63c8b83ecf563ca12ed7299f8479d585c4",
+      "/home/nwm/issue2420-deploy-87236ca54/c4-a2/nhms-frontend-c4-live-evidence-issue2420.json": "1faafe46be16e1527861beacc34ab0089ffbcd43c0b0b6364a1f30137a469e69"
+    },
+    "gfs": {
+      "status": "PASS",
+      "identity": {
+        "cycle_time": "2026-09-19T00:00:00Z",
+        "job_id": "job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0",
+        "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+        "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+        "source": "GFS"
+      },
+      "denials": {
+        "blocked_count": 0,
+        "failed_mutating_count": 0,
+        "operation_count": 23,
+        "passed_denial_count": 23,
+        "target_count": 12
+      },
+      "reads": [
+        {
+          "name": "health",
+          "status": "PASS"
+        },
+        {
+          "name": "runtime_config",
+          "status": "PASS"
+        },
+        {
+          "name": "models",
+          "status": "PASS"
+        },
+        {
+          "name": "stations",
+          "status": "PASS"
+        },
+        {
+          "name": "latest_product",
+          "status": "PASS"
+        },
+        {
+          "name": "jobs",
+          "status": "PASS"
+        },
+        {
+          "name": "pipeline_status",
+          "status": "PASS"
+        },
+        {
+          "name": "pipeline_stages",
+          "status": "PASS"
+        },
+        {
+          "name": "job_logs",
+          "status": "PASS"
+        }
+      ],
+      "receipt": "/home/nwm/NWM/artifacts/issue2420-readonly-87236ca54/issue2420-canonical-gfs/db/readonly-db-boundary/summary.json",
+      "sha256": "22618276c73b9d5d9ee2fdc2f7dda73de047ab68d414335e1451b529c5e0430f"
+    },
+    "ifs": {
+      "status": "PASS",
+      "identity": {
+        "cycle_time": "2026-09-19T00:00:00Z",
+        "job_id": "job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23",
+        "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+        "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+        "source": "IFS"
+      },
+      "denials": {
+        "blocked_count": 0,
+        "failed_mutating_count": 0,
+        "operation_count": 23,
+        "passed_denial_count": 23,
+        "target_count": 12
+      },
+      "reads": [
+        {
+          "name": "health",
+          "status": "PASS"
+        },
+        {
+          "name": "runtime_config",
+          "status": "PASS"
+        },
+        {
+          "name": "models",
+          "status": "PASS"
+        },
+        {
+          "name": "stations",
+          "status": "PASS"
+        },
+        {
+          "name": "latest_product",
+          "status": "PASS"
+        },
+        {
+          "name": "jobs",
+          "status": "PASS"
+        },
+        {
+          "name": "pipeline_status",
+          "status": "PASS"
+        },
+        {
+          "name": "pipeline_stages",
+          "status": "PASS"
+        },
+        {
+          "name": "job_logs",
+          "status": "PASS"
+        }
+      ],
+      "receipt": "/home/nwm/NWM/artifacts/issue2420-readonly-87236ca54/issue2420-canonical-ifs/db/readonly-db-boundary/summary.json",
+      "sha256": "c91f02dbfdf57c9ca9b86dab31fd6f10e5b9e032800454c103c6b77213f5d98f"
+    },
+    "c4": {
+      "status": "PASS",
+      "started_at": "2026-09-20T02:55:34.591Z",
+      "ended_at": "2026-09-20T02:55:38.500Z",
+      "origins": {
+        "frontend": "https://test.nwm.ac.cn",
+        "api": "https://test.nwm.ac.cn"
+      },
+      "requested_pins": {
+        "basin_id": "basins_qhh",
+        "river_segment_id": "basins_qhh_shud_reach_000001"
+      }
+    }
+  },
+  "rollback_history": [
+    "18af6d80f live readonly acceptance found Z/+00:00 mismatch; restored node22 6031eb82 and node27 95f994a0c plus exact frontend; source sidecars/logs and valid derived rows retained. Validators were not weakened.",
+    "Concurrent node27 releases were preserved, including 000061 and query-index store routing. Node22 backport history was merged through an ordinary no-tree-change merge so both upgrades remained ff-only.",
+    "Final C4 first refused a complex approval payload before browser execution. A compact approval bound by SHA256 to the full successful C1 evidence passed unchanged freeze/browser/bind/verify in a fresh private directory."
+  ],
+  "operational_state": {
+    "node22_scheduler_timer": "active",
+    "node27_autopipe_timer": "active",
+    "display_api_main_pid_at_apply": 3224023,
+    "env_and_role_defaults": "unchanged",
+    "scientific_data": "not rolled back or rewritten by provenance projection"
+  },
+  "limits": [
+    "One targeted-test skip is reported, not counted as assertion execution.",
+    "C4 binds reviewed deployed source87236ca54; the final PR evidence-only commit does not change runtime source.",
+    "PR2450 remains held until PR2508 merges; its own coupled deployment and C4 are not covered by this receipt."
+  ]
+}

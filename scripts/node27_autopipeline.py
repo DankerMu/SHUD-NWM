@@ -70,6 +70,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload, redact_text
+from services.orchestrator.pipeline_job_provenance import import_discovered_pipeline_job_provenance
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
 
@@ -720,6 +721,7 @@ def _empty_runs_summary() -> dict[str, Any]:
         "skipped_runs": [],
         "failed_runs": [],
         "declined_runs": [],
+        "job_provenance": {"imported": 0, "unavailable": 0, "failed": 0, "runs": []},
     }
 
 
@@ -928,6 +930,7 @@ def _connect(database_url: str, **kwargs: Any) -> Any:
     other connect parameters pass through untouched, and an explicit
     `connect_timeout=` / `options=` from a Python caller still wins.
     """
+    kwargs.pop("fallback_application_name", None)
     if "connect_timeout" not in kwargs and not _dsn_sets_connect_timeout(database_url):
         kwargs["connect_timeout"] = _CONNECT_TIMEOUT_SECONDS
     if "options" not in kwargs:
@@ -938,6 +941,18 @@ def _connect(database_url: str, **kwargs: Any) -> Any:
     return psycopg2.connect(
         database_url, fallback_application_name=_APPLICATION_NAME, **kwargs
     )
+
+
+def _attributed_connect(database_url: str, **kwargs: Any) -> Any:
+    """Injected into helpers that open their own connection on this runner's behalf.
+
+    Provenance import supplies `fallback_application_name=` and `cursor_factory=`;
+    this wrapper reuses `_connect` so the component identity and #1647 bounds
+    stay on one path. `_connect` owns `fallback_application_name` so a helper
+    cannot stamp a second name. libpq still treats an operator
+    `?application_name=` in DATABASE_URL as final.
+    """
+    return _connect(database_url, **kwargs)
 
 
 def _basin_seeded(database_url: str, basin_id: str) -> bool:
@@ -2486,6 +2501,7 @@ def main(argv: list[str] | None = None) -> int:
     # ---- phase 2: per-run ingest (skip runs whose basin failed to seed) -------
     run_results: list[dict[str, Any]] = []
     already_count = 0
+    runnable: list[dict[str, str]] = []
     if not args.seed_only:
         runnable = [r for r in runs if r["basin"] in seeded_basins]
         done = (
@@ -2564,6 +2580,43 @@ def main(argv: list[str] | None = None) -> int:
         if args.progress:
             print(f"[publish] advanced {published_count} run(s) parsed -> published",
                   file=sys.stderr, flush=True)
+
+    # ---- phase 3.4: project published job provenance for eligible runs,
+    # including the already-ingested `done` set. Missing sidecars are
+    # unavailable provenance, not ingest failure, and never re-run
+    # register/forcing/parse or bump hydro coverage.
+    job_provenance = {"imported": 0, "unavailable": 0, "failed": 0, "runs": []}
+    if not args.seed_only:
+        provenance_run_ids = [r["run_id"] for r in runnable]
+        if provenance_run_ids:
+            try:
+                job_provenance = import_discovered_pipeline_job_provenance(
+                    database_url=database_url,
+                    object_store_root=object_store_root,
+                    run_ids=provenance_run_ids,
+                    object_store_prefix=object_store_prefix,
+                    connect=_attributed_connect,
+                )
+            except Exception as error:  # noqa: BLE001 - isolate provenance from hydro ingest
+                job_provenance = {
+                    "status": "failed",
+                    "imported": 0,
+                    "unavailable": 0,
+                    "failed": len(provenance_run_ids),
+                    "runs": [
+                        {"run_id": run_id, "status": "failed", "reason": type(error).__name__}
+                        for run_id in provenance_run_ids
+                    ],
+                }
+            if args.progress:
+                print(
+                    f"[job-provenance] imported {job_provenance.get('imported', 0)}"
+                    f", unavailable {job_provenance.get('unavailable', 0)}"
+                    f", failed {job_provenance.get('failed', 0)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
 
     def by(outcome: str) -> list[dict[str, Any]]:
         return [r for r in run_results if r["outcome"] == outcome]
@@ -2668,6 +2721,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 for r in by("declined")
             ],
+            "job_provenance": job_provenance,
         },
         "stats_guard": stats_guard,
         # #1781: a terminal decline is silent by construction -- it makes the
