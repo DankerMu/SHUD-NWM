@@ -496,7 +496,10 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # oracle that reads the PATCHED runtime document
     # (`main.create_app().openapi()`), proven by a `_patch_mvt_tile_openapi`
     # no-op that reds its two `test_runtime_openapi_documents_*` tile-route
-    # pins. The other candidates were measured and rejected
+    # pins. #2074 partitioned that suite and the two pins landed in two
+    # different partitions, so both are listed and the other seven are not:
+    # the #2211 criterion is "reads the document this module produces", and the
+    # rest do not. The other candidates were measured and rejected
     # — they never read the schema this module produces, so they cannot red on
     # a patch change; see the rule's comment in scripts/select_ci_tests.py.
     # Literals on purpose: this is the exact-set anchor for that rule, so it
@@ -507,7 +510,8 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
         {
             "tests/test_api.py",
             "tests/test_api_contract.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+            "tests/test_hydro_display_mvt_scaling_national_routes.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -1177,7 +1181,20 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_display_mvt_cold_admission.py",
         "tests/test_display_publish_status_only.py",
         "tests/test_hhe_mvt_binding.py",
+        # #2074: all NINE partitions of the former single hydro-display MVT
+        # suite. Eight import services.tiles.mvt at file level;
+        # `..._catalog_cache.py` is a one-hop importer through
+        # apps/api/routes/hydro_display.py. Synced from the selector's own output
+        # per the procedure above, not hand-assembled.
         "tests/test_hydro_display_mvt_scaling.py",
+        "tests/test_hydro_display_mvt_scaling_catalog.py",
+        "tests/test_hydro_display_mvt_scaling_catalog_cache.py",
+        "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+        "tests/test_hydro_display_mvt_scaling_discovery.py",
+        "tests/test_hydro_display_mvt_scaling_feature_budget.py",
+        "tests/test_hydro_display_mvt_scaling_instants.py",
+        "tests/test_hydro_display_mvt_scaling_national_routes.py",
+        "tests/test_hydro_display_mvt_scaling_national_sql.py",
         "tests/test_migrations.py",
         # #2156 (D-2): guard-derived entry, synced from the selector's own
         # output per the procedure above — the geometry-identity suite imports
@@ -3972,6 +3989,14 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "services.slurm_gateway.real_backend",
         "tests/test_real_slurm_gateway.py",
     ),
+    # #2074 partitioned tests/test_hydro_display_mvt_scaling.py into nine files
+    # but kept the base path as one of them, so this anti-vacuity anchor still
+    # names a real direct importer of services.tiles.mvt (the base partition
+    # holds the postgis_tile_sql shape and #2030 budget cases). The registry
+    # membership is unchanged at 6 — the partitions are TEST files, not guarded
+    # modules, and they are routed by the services/tiles/mvt.py and
+    # apps/api/routes/hydro_display*.py rules in scripts/select_ci_tests.py plus
+    # the tests/hydro_display_mvt_helpers.py support-module rule.
     (
         "services/tiles/mvt.py",
         "services.tiles.mvt",
@@ -10480,6 +10505,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_mapping_builder_algorithm.py",
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
+    # #2074: the shared doubles of the nine hydro-display MVT partitions. The
+    # base partition is the anchor because it is the one whose path three other
+    # registries already pin, so an anchor that stops deriving here means the
+    # split's own base file stopped importing the helpers — which would mean the
+    # shared surface was duplicated back into the partitions.
+    ("tests/hydro_display_mvt_helpers.py", "tests/test_hydro_display_mvt_scaling.py"),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),

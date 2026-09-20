@@ -938,6 +938,51 @@ READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
 )
 
 
+# #2074: `tests/test_hydro_display_mvt_scaling.py` (4888 lines, 210 cases) was
+# partitioned by topic to retire its `.large-file-guard.json` exemption. The base
+# path SURVIVES as one partition on purpose — three registries pin that literal
+# string: `openspec/specs/ci-contract-baseline/spec.md`, the
+# `infra/systemd/nhms-display-api.service` rule below (whose only reader is
+# `test_systemd_workers_receive_shared_file_cache_default`, which stayed there),
+# and the `services/tiles/mvt.py` closure anchor in
+# `tests/test_select_ci_tests.py`.
+#
+# TWO tuples, not one, because the two guarded families have different derived
+# closures (#1455/#1672 derive them from the tracked tree, so this is a
+# transcription of the derivation and not a hand-curated list):
+#
+# * every partition is a non-gated importer of `services.tiles.mvt` — directly,
+#   or one hop through `apps/api/routes/hydro_display.py` in the case of
+#   `..._catalog_cache.py`;
+# * `..._discovery.py` and `..._national_sql.py` import no `apps.api.routes`
+#   module at all (they drive `services/tiles/mvt.py` helpers through the shared
+#   fakes in `tests/hydro_display_mvt_helpers.py`), so they are absent from the
+#   facade closure. They stay in the PR lane through the mvt rule; a partition
+#   that starts importing the facade reds in the closure guard rather than
+#   silently dropping out of the lane.
+HYDRO_DISPLAY_MVT_SCALING_TESTS: tuple[str, ...] = (
+    "tests/test_hydro_display_mvt_scaling.py",
+    "tests/test_hydro_display_mvt_scaling_catalog.py",
+    "tests/test_hydro_display_mvt_scaling_catalog_cache.py",
+    "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+    "tests/test_hydro_display_mvt_scaling_discovery.py",
+    "tests/test_hydro_display_mvt_scaling_feature_budget.py",
+    "tests/test_hydro_display_mvt_scaling_instants.py",
+    "tests/test_hydro_display_mvt_scaling_national_routes.py",
+    "tests/test_hydro_display_mvt_scaling_national_sql.py",
+)
+
+HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS: tuple[str, ...] = tuple(
+    test
+    for test in HYDRO_DISPLAY_MVT_SCALING_TESTS
+    if test
+    not in {
+        "tests/test_hydro_display_mvt_scaling_discovery.py",
+        "tests/test_hydro_display_mvt_scaling_national_sql.py",
+    }
+)
+
+
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
 # contract: the boundary module imports helpers from the core suite at module
@@ -1123,6 +1168,22 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_generation.py",
             "tests/test_state_manager_generation_history.py",
         ),
+    ),
+    PathTestRule(
+        # #2074: the single home of every double the nine hydro-display MVT
+        # partitions share. Without this entry the module is a non-collectible
+        # `tests/` support module, so a fixture-only diff would collapse to the
+        # selector meta-guard and none of the 210 cases that depend on these
+        # fakes would run. The fakes are not passive: `_dual_patch` decides
+        # WHETHER a patch bites at all (both the facade and
+        # `hydro_display_catalog` homes, #2026), `_NationalRouteSession`
+        # classifies statements by SQL landmark and so decides which branch each
+        # route case exercises, and `_TILE_ROUTE_LOGGER` is the literal logger
+        # name the `#2030` negative caplog assertions filter on — a typo there
+        # makes them pass vacuously. Every partition imports it at module scope,
+        # so the routed set IS the derived closure.
+        "tests/hydro_display_mvt_helpers.py",
+        HYDRO_DISPLAY_MVT_SCALING_TESTS,
     ),
     PathTestRule(
         # Pins the modes `provider_atomic`'s two fail-closed gates inspect, for
@@ -1332,11 +1393,17 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2208: the national probe's file-level integration gate makes it a
         # database-lane consumer, not a unit target. ci.yml routes this support
         # path there; retain only the non-gated importers here.
+        # #2074: the hydro-display MVT suite was partitioned, and exactly ONE
+        # partition imports this register — `..._instants.py`, whose
+        # `hydro_display:mvt_source_identity_probe` cases render the registered
+        # template and compare it to the probe's statement. The other eight
+        # partitions never touch it, so listing them here would buy suites that
+        # cannot red on a register edit.
         "tests/river_ts_template_registry.py",
         (
             *SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_store_routing.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_hydro_display_mvt_scaling_instants.py",
         ),
     ),
     PathTestRule(
@@ -2257,7 +2324,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            # #2074: the hydro-display MVT suite is now nine partitions and ALL
+            # of them are in this closure (direct importers, plus
+            # `..._catalog_cache.py` one hop through
+            # apps/api/routes/hydro_display.py). Listing the tuple rather than
+            # the nine literals keeps this rule and the facade rule below from
+            # drifting apart.
+            *HYDRO_DISPLAY_MVT_SCALING_TESTS,
             # #2121-A: real QueuePool admission regression imports the shared
             # TileInput/TileResponse/cache-key contract at module scope.
             "tests/test_display_mvt_cold_admission.py",
@@ -2365,7 +2438,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_display_publish_status_only.py",
             "tests/test_hhe_mvt_binding.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            # #2074: seven of the nine hydro-display MVT partitions. The
+            # `..._discovery.py` and `..._national_sql.py` two import no
+            # apps.api.routes module, so they are outside this family's derived
+            # closure and stay routed by the services/tiles/mvt.py rule above.
+            *HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS,
             # #2156 (D-2): guard-derived — the run/river-network geometry-
             # identity suite imports this module at file level and runs the real
             # SQL of _river_network_source_version / _run_row /
@@ -2955,6 +3032,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # national_route_only`). Measured: no-op'ing `_patch_mvt_tile_openapi`
         # reds exactly those two, and the suite was not selected before.
         # Cost +22.6s.
+        # #2074: that suite is now nine partitions, and the two #2211 pins landed
+        # in exactly two of them —
+        # `test_runtime_openapi_documents_the_national_identity_tile_route` in
+        # `..._national_routes.py` and
+        # `test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_route_only`
+        # in `..._coverage_order.py`. Only those two are listed, for the same
+        # measured reason the other #2211 candidates were rejected: the remaining
+        # seven partitions never read the document this module produces, so they
+        # cannot red on a patch change however much tile surface they cover.
         #
         # The rest of the #2211 candidates were REJECTED on measured evidence,
         # not on cost. This module's only observable output is the OpenAPI
@@ -2994,7 +3080,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_api.py",
             "tests/test_api_contract.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+            "tests/test_hydro_display_mvt_scaling_national_routes.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -3725,7 +3812,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # nothing at all (`infra/**` is not a backend python path and
         # `_is_backend_shell_path` is scoped to `scripts/**.sh`) and a
         # unit-only diff degraded to a zero-assertion --collect-only smoke.
-        # `tests/test_hydro_display_mvt_scaling.py:198-204`
+        # `tests/test_hydro_display_mvt_scaling.py:184-190` (#2074 renumbered the
+        # citation when the suite was partitioned; the reading case stayed on this
+        # path, which is one reason the base path survives the split)
         # (`test_systemd_workers_receive_shared_file_cache_default`) `read_text`s
         # this exact path and asserts the two directives that carry the public
         # display entrypoint's cache/worker contract:

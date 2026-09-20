@@ -119,10 +119,35 @@
 
 ## 2. Test-suite splits
 
-- [ ] 2.1 Split `tests/test_hydro_display_mvt_scaling.py` (4875 lines, 61+ test
+- [x] 2.1 Split `tests/test_hydro_display_mvt_scaling.py` (4875 lines, 61+ test
       functions) into topic partitions (#2074 item 1).
   - Module/Scope: partition by topic; every partition <= 1000 lines with
     headroom. Shared fixtures go to a helper module, not a duplicated copy.
+  - Delivered: 4888 lines / 210 cases -> nine partitions (188-718 lines each)
+    plus one shared support module `tests/hydro_display_mvt_helpers.py` (487).
+    The base path `tests/test_hydro_display_mvt_scaling.py` SURVIVES as the
+    tile-SQL/`#2030`-budget partition because three registries pin that literal
+    string (`openspec/specs/ci-contract-baseline/spec.md:295,1160`, the
+    `infra/systemd/nhms-display-api.service` rule whose only reader
+    `test_systemd_workers_receive_shared_file_cache_default` stayed there, and
+    the `services/tiles/mvt.py` anchor in `GUARDED_MODULE_CLOSURES`), so no
+    deployed-spec delta is owed. Pure-move oracle: with imports and module
+    docstrings stripped, the 4079 non-blank body lines of the ten new files are a
+    multiset-identical partition of the original's 4079 — zero residue either
+    way. Test identity: 210 == 210 collected, and the sorted `name[param]` id
+    lists are byte-identical (the file prefix necessarily moves, nothing else).
+  - Single-use helpers stayed with their tests rather than moving to the shared
+    module: `_final_select_text` (base-only), `_national_sql_sites` /
+    `_national_digest_ranked_subquery` / `_VALID_TIME_*` (national_sql-only),
+    `_recording_digest_calls`, `_cycle_days_ago`, the `_LegacyRunRouteSession`
+    family and the `#2087` session subclasses. One consumer means no drift
+    hazard, and the landmark slices keep their preconditions inside the same
+    function as the slice they guard. The autouse
+    `_keep_fixed_instant_fixtures_inside_the_cycle_lookback` DID move to the
+    shared module and is imported by all nine partitions so its original
+    module-wide reach is unchanged; disabling it in the shared module reds 15
+    cases across three partitions (discovery / catalog / coverage_order), which
+    is the live proof the import preserves autouse.
   - Assertion Integrity: each SQL landmark `.index()/.rindex()` slice migrates
     together with its non-empty and ordering preconditions
     (`cte_start < cte_end < probe_start < probe_end`); no slice assertion may
@@ -132,9 +157,47 @@
     single target with every collectible partition in the
     `services/tiles/mvt.py` and `hydro_display` `PathTestRule` entries of
     `scripts/select_ci_tests.py`; keep the importer-closure guard green.
+  - Registry Update delivered: `.large-file-guard.json` entry removed, no new
+    entry added. In `scripts/select_ci_tests.py` the single target became
+    `HYDRO_DISPLAY_MVT_SCALING_TESTS` (all nine) on the `services/tiles/mvt.py`
+    rule and `HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS` (seven) on the
+    `apps/api/routes/hydro_display*.py` rule — the two derived closures differ
+    because `..._discovery.py` and `..._national_sql.py` import no
+    `apps.api.routes` module; both are still in the PR lane through the mvt rule.
+    A new `SUPPORT_MODULE_TEST_RULES` entry routes
+    `tests/hydro_display_mvt_helpers.py` to all nine (without it a
+    fixture-only diff collapses to the selector meta-guard), with the matching
+    `SUPPORT_MODULE_ROUTING_ANCHORS` pair. Two capability rules were narrowed
+    instead of widened, each per its own measured-provenance comment: the
+    `apps/api/openapi_patching*.py` rule takes only the two partitions holding
+    the `test_runtime_openapi_documents_*` pins (#2211's criterion is "reads the
+    patched document"), and `tests/river_ts_template_registry.py` takes only
+    `..._instants.py`, its one importer. The
+    `infra/systemd/nhms-display-api.service` rule is unchanged.
+    `GUARDED_MODULE_CLOSURES` stays at 6: the partitions are test files, not
+    guarded modules, and the `services/tiles/mvt.py` anchor still names a real
+    direct importer because the base partition survives.
   - Verification: `uv run pytest -q tests/test_hydro_display_mvt_scaling*.py`
     (all partitions collected, test count >= pre-split count);
     `uv run pytest -q tests/test_select_ci_tests.py`; `uv run ruff check .`.
+  - Verification run (local, 2026-09-20): `--collect-only` 210 collected;
+    `pytest -q tests/test_hydro_display_mvt_scaling*.py` 210 passed;
+    `pytest -q tests/test_select_ci_tests.py` 736 passed;
+    `pytest -q` over the nine partitions plus `test_openapi_drift`,
+    `test_display_mvt_cold_admission`, `test_precip_overlay`, `test_api_contract`,
+    `test_mvt_tile_generation_lock`, `test_hhe_mvt_binding`,
+    `test_openapi_31_contract` 415 passed; ruff over every tracked `*.py` green;
+    `openspec validate --strict --no-interactive` green. Non-vacuity receipts:
+    emptying the `preeligible` slice in the base partition reds
+    `assert 'source_coordinate_count <= :feature_coordinate_limit' in ''`;
+    collapsing `cte_end` onto `cte_start` reds `assert 164 < 164`; widening
+    `_national_digest_ranked_subquery` to the whole statement reds its
+    `WHERE rn = 1` exclusion. Logger receipt: a forced
+    `logger.warning` in `hydro_display_postgis._fetch_postgis_tile_bytes` reds
+    BOTH negative caplog assertions (`_truncation_records` in the base partition,
+    `_blanked_records` in the feature-budget partition) under the unchanged
+    `apps.api.routes.hydro_display` logger name, and was reverted
+    (`git status --porcelain apps/` empty).
 
 - [ ] 2.2 Split `tests/test_api_contract.py` (2114 lines, 38 test functions,
       6 mock store classes) into partitions (#2074 item 3).

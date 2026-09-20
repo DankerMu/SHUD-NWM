@@ -87,7 +87,6 @@
     "apps/api/routes/pipeline.py",
     "apps/frontend/src/api/types.ts",
     "tests/test_api_contract.py",
-    "tests/test_hydro_display_mvt_scaling.py",
     "tests/test_direct_grid_display_cutover_flip.py",
     "tests/test_precip_overlay.py",
     "workers/canonical_converter/converter.py",
