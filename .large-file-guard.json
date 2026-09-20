@@ -75,7 +75,6 @@
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
     "tests/test_real_database_integration.py",
-    "scripts/governance/audit_repo_entropy.py",
     "openapi/nhms.v1.yaml",
     "services/orchestrator/retry.py",
     "apps/api/routes/pipeline.py",

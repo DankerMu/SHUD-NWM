@@ -45,6 +45,8 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     ENTROPY_AUDIT_HELPERS_PATH,
+    ENTROPY_AUDIT_OWNER_PATH,
+    ENTROPY_AUDIT_PACKAGE_MODULES,
     ENTROPY_AUDIT_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
@@ -2251,6 +2253,58 @@ def test_publish_registry_package_tracked_tree_is_exactly_nine_modules() -> None
         assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
         selected = set(select_tests([pattern], repo_root=Path(".")))
         assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+
+def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> None:
+    # #1842 replaced the 9000-line audit enforcer with twenty-one owner modules
+    # behind the attribute-broadcast facade kept at the historical path.
+    # Twenty-one is a floor, not a preference: a twenty-second module, a stray
+    # `__init__.py` (scripts/ is a PEP 420 namespace tree -- neither
+    # scripts/governance/ nor scripts/publish_registry/ has one), the facade
+    # reduced to a deleted module or a two-line shim, or a module deleted out
+    # from under its row all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # measured before the rows landed, each of the twenty-one selected only the
+    # five generic core-smoke riders plus the two `scripts/**` supplemental-scan
+    # suites and zero entropy partitions, i.e. an unrouted module degrades the
+    # entropy lane to the zero-assertion `--collect-only` smoke in silence. That
+    # is why the reach is asserted end to end below and not just read back off
+    # the rule table.
+    modules = set(ENTROPY_AUDIT_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/governance/entropy_audit"))
+
+    assert len(modules) == 21, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert ENTROPY_AUDIT_OWNER_PATH in set(_tracked_python_files("scripts/governance")), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert ENTROPY_AUDIT_OWNER_PATH not in modules
+    assert not Path("scripts/governance/entropy_audit/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(ENTROPY_AUDIT_TESTS)
+    for pattern in (ENTROPY_AUDIT_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+    # Exact equality for one owner module, mirroring the owner-path assertion in
+    # test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback:
+    # `scripts/**` is a root of both supplemental scans, so those two suites join
+    # the fifteen partitions and nothing else does. A rule that quietly narrows to
+    # one partition -- or a core-smoke fallback creeping back in -- reds here.
+    assert select_tests(
+        ["scripts/governance/entropy_audit/report.py"], repo_root=Path(".")
+    ) == [*ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    assert not set(CORE_SMOKE_TESTS) & set(
+        select_tests(["scripts/governance/entropy_audit/report.py"], repo_root=Path("."))
+    )
 
 
 def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_helper() -> None:

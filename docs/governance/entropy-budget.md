@@ -8,8 +8,12 @@ gate.
 
 Source-of-truth order:
 
-1. `scripts/governance/audit_repo_entropy.py` defines the current report schema
-   and scan behavior.
+1. `scripts/governance/entropy_audit/` defines the current report schema and
+   scan behavior (`report.py` owns `build_report`, the metadata block and the
+   check-family roster; `constants.py` and `schema.py` own the scan scope and
+   the finding shape). `scripts/governance/audit_repo_entropy.py` stays the
+   console entrypoint and the compatibility facade over that package, so every
+   command in this document is unchanged.
 2. `docs/governance/ROLE_BOUNDARY.md` defines the role vocabulary.
 3. `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md` defines governed
    legacy/dead-code status and active counterparts.

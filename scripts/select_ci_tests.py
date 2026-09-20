@@ -717,6 +717,46 @@ ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
 # SUPPORT_MODULE_TEST_RULES.
 ENTROPY_AUDIT_HELPERS_PATH = "tests/entropy_audit_helpers.py"
 
+# #1842 split the 9000-line audit enforcer into this package; the historical
+# path stayed the console entrypoint (it owns the `__main__` guard) and an
+# attribute-broadcast facade, so it keeps its own row below and is NOT a member
+# of this tuple. Each module gets an explicit row rather than a
+# `scripts/governance/entropy_audit/**` glob, for the reason #1099 recorded for
+# `scripts/scheduler_refresh/` and #1100 for `scripts/publish_registry/`: a glob
+# routes a twenty-second module nobody reviewed, while an unlisted module
+# reddens the tracked-tree guard in tests/test_select_ci_tests.py instead of
+# silently dropping out of the PR lane. None of these basenames has a
+# `tests/test_<basename>.py`, so there is no same-name derivation to fall back
+# on -- measured before the rows landed, each of the twenty-one selected only
+# the five generic core-smoke riders plus the two `scripts/**` supplemental-scan
+# suites and ZERO entropy partitions. Every module carries the whole
+# fifteen-partition corpus for the same reason the owner row does: every
+# partition drives `build_report` or the CLI through all of them.
+ENTROPY_AUDIT_OWNER_PATH = "scripts/governance/audit_repo_entropy.py"
+ENTROPY_AUDIT_PACKAGE_MODULES: tuple[str, ...] = (
+    "scripts/governance/entropy_audit/archive_status.py",
+    "scripts/governance/entropy_audit/check_env_and_tokens.py",
+    "scripts/governance/entropy_audit/check_paths_and_api.py",
+    "scripts/governance/entropy_audit/check_stale_routes.py",
+    "scripts/governance/entropy_audit/check_topology.py",
+    "scripts/governance/entropy_audit/constants.py",
+    "scripts/governance/entropy_audit/facade_guard.py",
+    "scripts/governance/entropy_audit/findings.py",
+    "scripts/governance/entropy_audit/repo_files.py",
+    "scripts/governance/entropy_audit/report.py",
+    "scripts/governance/entropy_audit/route_governing_text.py",
+    "scripts/governance/entropy_audit/route_mentions.py",
+    "scripts/governance/entropy_audit/schema.py",
+    "scripts/governance/entropy_audit/scoped_context.py",
+    "scripts/governance/entropy_audit/structural_budget.py",
+    "scripts/governance/entropy_audit/structural_growth.py",
+    "scripts/governance/entropy_audit/structural_sources.py",
+    "scripts/governance/entropy_audit/structural_surface.py",
+    "scripts/governance/entropy_audit/topology_context_rules.py",
+    "scripts/governance/entropy_audit/topology_display_env.py",
+    "scripts/governance/entropy_audit/topology_predicates.py",
+)
+
 # #1100 split the 1495-line manual publisher into this package; the historical
 # path stayed the console entrypoint (it owns argparse + `main`) and an
 # attribute-broadcast facade, so it keeps its own row below and is NOT a member
@@ -4624,9 +4664,36 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         # #1823: the audit owner's corpus. Every partition drives `build_report`
         # or the CLI against this module, so the whole corpus rides the rule.
-        "scripts/governance/audit_repo_entropy.py",
+        # #1842 sank the twenty-one owner modules out of it; this path stays the
+        # console entrypoint and the attribute-broadcast facade the whole corpus
+        # still patches, and the owner modules get the identical reach below.
+        ENTROPY_AUDIT_OWNER_PATH,
         ENTROPY_AUDIT_TESTS,
     ),
+    # #1842: one row per owner module -- see ENTROPY_AUDIT_PACKAGE_MODULES for
+    # why these are enumerated rather than globbed, and why each carries the
+    # whole fifteen-partition corpus.
+    PathTestRule("scripts/governance/entropy_audit/archive_status.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/check_env_and_tokens.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/check_paths_and_api.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/check_stale_routes.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/check_topology.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/constants.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/facade_guard.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/findings.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/repo_files.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/report.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/route_governing_text.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/route_mentions.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/schema.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/scoped_context.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/structural_budget.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/structural_growth.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/structural_sources.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/structural_surface.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/topology_context_rules.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/topology_display_env.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/topology_predicates.py", ENTROPY_AUDIT_TESTS),
     PathTestRule(
         # #1823: the baseline writer's own cases live in the two
         # `..._baseline_writer_*` partitions, but its output is the baseline the
