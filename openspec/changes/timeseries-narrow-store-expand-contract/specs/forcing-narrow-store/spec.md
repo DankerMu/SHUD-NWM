@@ -42,11 +42,17 @@ Every reader of the forcing fact table (the display-coverage station leg, the QH
 
 ### Requirement: The forcing contract SHALL mirror the river contract
 
-The forcing contract migration SHALL refuse while `met.forcing_station_timeseries_legacy` holds any chunk, and otherwise drop it and `met.forcing_version.timeseries_store` after the routing-free code is deployed; the forcing renderer's legacy templates SHALL be deleted so only the narrow templates stay registered; `tests/test_forecast_api.py` index pins SHALL name the narrow primary key and successor index; the forcing census SHALL show no legacy-table reference, and the fourteen-day receipt gate applies as for river.
+The forcing contract migration SHALL refuse while any row of `met.forcing_version` has `timeseries_store = 'legacy'` and a `cycle_time` inside the retention window, and otherwise drop `met.forcing_station_timeseries_legacy` and `met.forcing_version.timeseries_store` after the routing-free code is deployed; the forcing renderer's legacy templates SHALL be deleted so only the narrow templates stay registered; `tests/test_forecast_api.py` index pins SHALL name the narrow primary key and successor index; and the forcing census SHALL show no legacy-table reference.
 
-#### Scenario: Refused while non-empty
-- **WHEN** the forcing contract migration runs with a remaining legacy chunk
-- **THEN** it raises and the catalog is unchanged
+The retention window SHALL be pinned in the migration as a floor of 21 days, matching `000060`: a GUC may widen it, never narrow it, because narrowing is the direction that loses data.
+
+**Amended by #2515 — the previous wording was undecidable and did not mirror river.** It required refusal "while `met.forcing_station_timeseries_legacy` holds any chunk" and invoked "the fourteen-day receipt gate … as for river". Three defects. (a) `DROP TABLE` removes a hypertable's chunks regardless, so chunk residue was never load-bearing; river recorded exactly this in task 6.1 ("amended by #2382: legacy chunks may remain; they are dropped with the table"). (b) The companion gate phrase `legacy_chunks = 0` is not a predicate at all: `node27_timeseries_retention.py:1141-1143` counts only chunks **already past the cutoff**, and `:1130` omits the key entirely at zero, so it reads the same before any chunk has expired and after all are gone — confirmed from a live receipt in `receipts/2026-09-20-i13-forcing-lifecycle-ticks/`. (c) River's `000060:71` refuses on in-window legacy-routed **runs**, never on chunk count, so "as for river" was literally false; and river's fourteen-day figure was itself superseded — the live window is 21.
+
+**Deviation recorded:** `met.forcing_version` does carry `end_time` (`000005_met.sql:74`, NOT NULL), which would be the literal mirror of river's `end_time` predicate. `cycle_time` is chosen instead because it is the forcing version's own time anchor and the key the QHH read path selects on, and because it opens the gate seven days earlier — measured on production, of 4 289 legacy-routed versions **3 040** are in window by `cycle_time` (max `2026-09-18 12:00` → **2026-10-09**) against **3 959** by `end_time` (max `2026-09-25 12:00` → **2026-10-16**). The cost is accepted and stated: at 2026-10-09 retention has not yet expired chunks 112/176/184, so the contract unlinks legacy facts that retention would still have kept. The time column SHALL be a single named constant in the migration so the choice is one token to revisit.
+
+#### Scenario: Refused while a legacy-routed version is in window
+- **WHEN** the forcing contract migration runs while any `met.forcing_version` row has `timeseries_store = 'legacy'` and `cycle_time` inside the retention window
+- **THEN** it raises and every object the migration would drop still exists
 
 #### Scenario: Ordering after the river contract
 - **WHEN** the forcing expand issue is scheduled

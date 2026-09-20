@@ -12,7 +12,7 @@ node-27（PG 15.2 / TimescaleDB 2.10.2）2026-09-03 只读实测：
 | 行宽 | text 身份列 run_id 56 + segment 40 + network 34 + basin 27 + variable/unit/flag 20 ≈ 177 B；键/枚举 7 列 28 B；键列 `null_frac = 0` |
 | `river_timeseries_valid_time_idx` | 9 GB，两周内两个活 chunk 的 `pg_stat_user_indexes.idx_scan` 合计 2（父表无计数；取自 chunk 级索引） |
 | 写入 | 38 流域 × 2 源 × 2 周期 = 152 run/天；每 run = 段数 × 168 行；analysis run 写 `lead_time_hours = NULL` |
-| 车道 | live lag 2 天（172800 s；模板 `infra/env/node27-timeseries-compression.example` 的赋值仍是 604800）；retention 14 天；watermark 落后约 1 天 |
+| 车道 | live lag 2 天（172800 s；模板 `infra/env/node27-timeseries-compression.example` 的赋值仍是 604800）；retention 21 天（活配置实测；`storage.py:35` 的 14 是 runner 默认值，非活值）；watermark 落后约 1 天 |
 | `met.forcing_station_timeseries` | 55 GB（索引 38 GB），同型 text 身份列 + text segmentby，无代理键；`met.forcing_version` 只有 `source_id`，`basin_version_id` 在 `met.met_station` 上 |
 
 约束（探针 `openspec/changes/archive/2026-08-15-river-identity-normalization-backfill/probe-1339-throwaway.md` 与 `db/migrations/000050_river_identity_normalization.sql:318-360` 实测）：
@@ -36,14 +36,14 @@ node-27（PG 15.2 / TimescaleDB 2.10.2）2026-09-03 只读实测：
 
 **Non-Goals:**
 - 不升级 PostgreSQL / TimescaleDB（DML-on-compressed 属于后续独立决策）。
-- 不改 lag（2 天）与 retention（14 天）的数值。
+- 不改 lag（2 天）与 retention（21 天，活配置实测值）的数值。
 - 不承接 #1970（浏览器点击 P95 oracle）与 #1895（冷 tablespace 只搬压缩 chunk；过渡期冷层目录不覆盖 `_legacy` 表，runbook 记一句）。
 - 不改 display API 对外响应字段；不改 SHUD 输出格式；不改 node-22 任何东西。
 
 ## Decisions
 
 ### D1 迁移机制：新表 expand–contract，而不是 in-place cutover
-新建窄表并改名旧表，写方按部署时点切换，旧表只读到被 retention 清空后 DROP。备选 in-place（000050 函数）需要零压缩 chunk + 窗口内主键重建，线上不可行；备选"临时把 retention 收到 lag 让压缩 chunk 归零再 cutover"仍要在 13 亿行上重建主键且损失 2–14 天历史。新表在**空表、尚未开启压缩设置**的状态下完成全部约束 DDL（主键与外键内联在 `CREATE TABLE`，二级索引在 `create_hypertable` 之后），压缩设置是最后一条 schema DDL——因为阻塞 ADD CONSTRAINT 的是 `compress = true` 这个设置而不是压缩 chunk 的存在。回退见 D12。
+新建窄表并改名旧表，写方按部署时点切换，旧表只读到被 retention 清空后 DROP。备选 in-place（000050 函数）需要零压缩 chunk + 窗口内主键重建，线上不可行；备选"临时把 retention 收到 lag 让压缩 chunk 归零再 cutover"仍要在 13 亿行上重建主键且损失 2–21 天历史（上界即 retention 窗口的活配置值）。新表在**空表、尚未开启压缩设置**的状态下完成全部约束 DDL（主键与外键内联在 `CREATE TABLE`，二级索引在 `create_hypertable` 之后），压缩设置是最后一条 schema DDL——因为阻塞 ADD CONSTRAINT 的是 `compress = true` 这个设置而不是压缩 chunk 的存在。回退见 D12。
 
 ### D2 命名：旧表改名 `_legacy`，新表用正名
 `hydro.river_timeseries` → `hydro.river_timeseries_legacy`，新表叫 `hydro.river_timeseries`。改名是元数据操作（毫秒级，短暂 ACCESS EXCLUSIVE），chunk 保持归属、owner（`nhms_ingest_rw`）保持，`db/roles/node27_write_roles.sql` 的 owner 审计按"每张 compression-capable hypertable"枚举，自动覆盖 `_legacy`。代码最终不留 `_v2` 痕迹。备选 UNION ALL 视图被否。
@@ -147,7 +147,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 - [渲染器删错行] → 规范化把布局钉成 1:1 且标记在上一行；渲染器对"下一行不是 aid"fail-closed；seam 1 双向断言。
 - [跨 store UNION ALL 分支在 legacy 压缩 chunk 上退化] → legacy 分支保留 aid；硬门在 legacy 与 narrow 各测一次。
 - [新表无 basin/network FK] → 与 ADR 0002 修正案同一规则；coverage 审计 join 等价校验。
-- [1 天 chunk 让 chunk 数 ×7] → 14 天内两表合计 ≈ 40 个；retention/compression 按 `range_end` 工作；autopipeline 前沿 ANALYZE 腿每 tick ≤ 3 个 chunk 的预算在 receipt 中复核（1 天 chunk 下未压缩 chunk 数 ≈ 9–10）。
+- [1 天 chunk 让 chunk 数 ×7] → 21 天 retention 窗口内三张关系合计 ≈ 40 个（2026-09-20 实测 43：河道 29 + forcing 窄 8 + forcing legacy 6）；retention/compression 按 `range_end` 工作；autopipeline 前沿 ANALYZE 腿每 tick ≤ 3 个 chunk 的预算在 receipt 中复核（1 天 chunk 下未压缩 chunk 数 ≈ 9–10）。
 - [forcing IDENTITY 列 ADD 的锁] → 先实测，receipt 前置。
 - [contract 迁移在 legacy 非空时被误跑] → 迁移内"保留窗口内 legacy 路由 run 数"计数 fail-closed（#2382 修订，原为 chunk 计数）；runbook 前置该计数 = 0 与补解析 receipt；contract 窗口先部署去掉列引用的代码再 DROP 列。
 - [维护窗口内旧进程读到空窄表] → 窗口顺序：timers stop → API/parser stop → pull → migrate → start → timers start。
@@ -163,7 +163,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 5. **I7 expand 迁移 + parser 窄写 + fixture 重钉**（一次合入；此时读方已按 store 路由，真实 DB pytest 可绿）。
 6. **I8 rollout runbook + node-27 receipt**（D11 全部项 + D12 回退演练在 throwaway 库）。
 7. **I9 river contract**：开门条件 = #2382 补解析 receipt 归档 + 保留窗口内 legacy 路由 run 数 = 0 + 无形状回归（2026-09-15 用户决定，取代原“14 天 receipt 归档 + `legacy_chunks = 0`”）；contract 迁移、删函数/backfill runner/aid、oracle 收敛、ADR/runbook/glossary、关闭 #1342/#1336。
-8. **I10 forcing 只读实测 receipt** → **I11 forcing 读方** → **I12 forcing expand + 写方** → **I13 forcing rollout receipt** → **I14 forcing contract**（开门条件同 I9）。
+8. **I10 forcing 只读实测 receipt** → **I11 forcing 读方** → **I12 forcing expand + 写方** → **I13 forcing rollout receipt** → **I14 forcing contract**（开门条件与 I9 同形，对象换成 version：`met.forcing_version` 中 `timeseries_store='legacy'` 且 `cycle_time` 落在 21 天 retention 窗内的版本数 = 0 + 无形状回归。#2515 更正，原写“同 I9”而 `specs/forcing-narrow-store/spec.md` 仍留着 chunk 判据）。**与河道处境相反**：I9 开门时 2919 个 legacy 路由 run 已全部出窗、补解析车道无事可做；forcing 于 2026-09-20 才切换，4289 个 legacy 版本中 3040 个仍在窗内，最早 2026-10-09 开门，否则需要 #2382 的 forcing 对应物把它打到 0。
 
 ## Open Questions
 
@@ -192,7 +192,7 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 
 ## Known limits
 
-- contract 之后 legacy 数据不可恢复；切换时刻之前 14 天的历史在 contract 时随 retention 自然消失，与今日 retention 语义一致。
+- contract 之后 legacy 数据不可恢复；切换时刻之前 21 天的历史在 contract 时随 retention 自然消失，与今日 retention 语义一致。
 - 新表到压缩 chunk 的 DML 仍受 TimescaleDB 2.10 限制；lag 内重解析仍是唯一写窗口。
 - 过渡期冷层目录（#1895）不覆盖 `_legacy` 表。
 
@@ -208,6 +208,6 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 | legacy 重解析 | fail-closed 拒绝（D6） |
 | 硬门归属 | 本 change 只持 SQL/API 门，浏览器 P95 留 #1970（D11） |
 | 键/索引/segmentby | 精简三索引（D4） |
-| 事实假设 ①–④ | lag 2 天 / retention 14 天不变；路由用 hydro_run 新列（Stage 3 修正：默认 `narrow`、expand 按 parse 事实回填 `legacy`）；legacy 变体 = 换表名、narrow 变体 = 剔除标记块（Stage 3 修正：先规范化模板，删"标记行 + 紧邻 aid 行"）；contract 删 000050 函数、backfill runner、全部 aid 并收口 #1336 |
+| 事实假设 ①–④ | lag 2 天 / retention 21 天（活配置实测）不变；路由用 hydro_run 新列（Stage 3 修正：默认 `narrow`、expand 按 parse 事实回填 `legacy`）；legacy 变体 = 换表名、narrow 变体 = 剔除标记块（Stage 3 修正：先规范化模板，删"标记行 + 紧邻 aid 行"）；contract 删 000050 函数、backfill runner、全部 aid 并收口 #1336 |
 
 开放项：forcing authority 表 IDENTITY 锁成本（实测后填）；`native_resolution` 现网 distinct 值（spec 已钉 `TEXT NULL`，实测只作后续输入）。
