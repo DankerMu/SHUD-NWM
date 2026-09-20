@@ -2977,7 +2977,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # Per-capability literals, never a directory pattern: every rule here is
         # an explicit tuple so the exact-set anchor in
         # tests/test_select_ci_tests.py can pin it.
-        "apps/api/openapi_patching.py",
+        #
+        # #2074: the pattern is a glob over the whole `openapi_patching*` family.
+        # The facade was split into openapi_patching_{nullable,security,
+        # envelopes,parameters,ops_schemas,display_schemas,pipeline}.py, and the
+        # component schemas, the parameter builders, the nullable finalizer and
+        # the whole pipeline patch family now live in the owner modules, so an
+        # exact-path entry would leave an owner-module-only diff selecting
+        # nothing here. One entry, not eight: the selector's duplicate-pattern
+        # guard forbids a second PATH_TEST_RULES entry for an already-owned
+        # module, and every suite below reaches the owners through the facade,
+        # which imports all seven. The glob is deliberately `openapi_patching*`
+        # and not `openapi_*`: apps/api/openapi_restored_schemas.py is a
+        # separate module this rule does not own.
+        "apps/api/openapi_patching*.py",
         (
             "tests/test_api.py",
             "tests/test_api_contract.py",

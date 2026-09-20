@@ -475,6 +475,13 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
+# #2074: the PATH_TEST_RULES pattern that owns the runtime OpenAPI patch family.
+# The facade `apps/api/openapi_patching.py` plus its seven owner modules are one
+# rule, so the two tests below bind the glob spelling in ONE place: a rule
+# rename that leaves either of them behind would silently stop matching.
+OPENAPI_PATCH_OWNER_PATTERN = "apps/api/openapi_patching*.py"
+
+
 def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> None:
     # #1644: the runtime schema owner adds the drift + 3.1-contract suites to
     # its existing broad API consumers (the three contract suites that already
@@ -496,7 +503,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # must never be derived from PATH_TEST_RULES.
     selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
 
-    assert selected == sorted(
+    expected = sorted(
         {
             "tests/test_api.py",
             "tests/test_api_contract.py",
@@ -510,6 +517,20 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             FAMILY_GUARD_PATH,
         }
     )
+    assert selected == expected
+    # #2074: the facade split moved the component schemas, the parameter
+    # builders, the nullable finalizer and the whole pipeline patch family into
+    # seven owner modules. The rule's pattern is the `openapi_patching*.py`
+    # glob, so a diff confined to ANY owner module must select the identical
+    # set — otherwise the patch owner could be edited in a PR lane that never
+    # executes the drift or 3.1-contract oracles. Derived from the tracked tree,
+    # so a new owner module that the glob fails to reach reds here.
+    owner_modules = sorted(
+        str(path) for path in Path("apps/api").glob("openapi_patching_*.py") if path.is_file()
+    )
+    assert len(owner_modules) == 7, owner_modules
+    for owner in owner_modules:
+        assert select_tests([owner], repo_root=Path(".")) == expected, owner
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
     fallback_only = set(CORE_SMOKE_TESTS) - {"tests/test_api.py"}
@@ -540,8 +561,13 @@ def test_select_tests_openapi_patch_owner_routing_reds_when_a_contract_leg_is_re
     # Constructed rule table: removing the drift suite OR the 3.1-contract suite
     # from the patch-owner rule's targets must drop it from the selection for a
     # patch-owner-only PR — both legs are load-bearing contract oracles.
+    # #2074: the rule's pattern is now the `openapi_patching*.py` glob, and this
+    # literal must track it — a stale exact-path spelling would match no rule,
+    # leave the table unpatched, and turn the assertion below into a no-op.
     from scripts import select_ci_tests
     from scripts.select_ci_tests import PathTestRule
+
+    assert sum(1 for rule in PATH_TEST_RULES if rule.pattern == OPENAPI_PATCH_OWNER_PATTERN) == 1
 
     for removed in ("tests/test_openapi_drift.py", "tests/test_openapi_31_contract.py"):
         patched = tuple(
@@ -551,15 +577,16 @@ def test_select_tests_openapi_patch_owner_routing_reds_when_a_contract_leg_is_re
                 rule.stop_on_match,
                 rule.only_when_any_changed,
             )
-            if rule.pattern == "apps/api/openapi_patching.py"
+            if rule.pattern == OPENAPI_PATCH_OWNER_PATTERN
             else rule
             for rule in PATH_TEST_RULES
         )
         monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
 
-        selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
+        for source in ("apps/api/openapi_patching.py", "apps/api/openapi_patching_pipeline.py"):
+            selected = select_tests([source], repo_root=Path("."))
 
-        assert removed not in selected, removed
+            assert removed not in selected, (removed, source)
 
 
 def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:

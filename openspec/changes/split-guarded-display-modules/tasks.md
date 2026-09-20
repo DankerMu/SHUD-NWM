@@ -100,7 +100,7 @@
     `git diff origin/master -- openapi/nhms.v1.yaml` empty;
     `uv run ruff check .`; pure-move oracle output recorded.
 
-- [ ] 1.2 Split `apps/api/openapi_patching.py` (2203 lines) below the guard
+- [x] 1.2 Split `apps/api/openapi_patching.py` (2203 lines) below the guard
       threshold (#2074 item 2).
   - Module/Scope: move `_patch_*` / `_*_parameter` families to owner modules;
     keep `openapi_patching.py` as a compatibility facade.
