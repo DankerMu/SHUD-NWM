@@ -279,8 +279,11 @@ PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
 - **必须显式传 `--registry-manifest`**：默认值取 `NHMS_SCHEDULER_REGISTRY_MANIFEST`，
   也就是**生产 canonical**。忘了就是直接往生产写 baseline/IDW 行。
 - `baseline-registry/` 目录 2026-08-22 前不存在，首次需 `mkdir -p`。
-- 缺 `PYTHONPATH` 会在 `_build_manual_cutover_gate` 处
-  `ModuleNotFoundError: No module named 'scripts'`——门是默认开的，不是没跑。
+- 历史坑（已修，保留以免误诊）：缺 `PYTHONPATH` 曾在 `_build_manual_cutover_gate` 处
+  `ModuleNotFoundError: No module named 'scripts'`——门是默认开的，不是没跑。#1100 把该
+  脚本拆成 facade 后补了按 `__file__` 定位仓库根的 `sys.path` bootstrap，直调与 `-m`
+  两种形态都不再需要 `PYTHONPATH`。现在再看到同一条报错，**不要**当成缺 `PYTHONPATH`：
+  那说明 bootstrap 被改坏或脚本被拷出仓库执行。
 - **第二次及以后的上线，`--registry-manifest` 必须换成本次专属路径**，例如
   `baseline-registry/<rollout>-<date>.json`。2026-08-22 #1699 是**首次**使用该目录，
   属 bootstrap（无 previous manifest）所以不触发闸门；2026-08-25 黄河子流域复用
