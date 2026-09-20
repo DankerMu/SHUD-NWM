@@ -1718,7 +1718,7 @@ def _success_identity_payload(
 ) -> dict[str, Any]:
     payload = {
         "source": identity.source,
-        "cycle_time": identity.cycle_time.isoformat(),
+        "cycle_time": identity.cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "run_id": identity.run_id,
         "model_id": identity.model_id,
     }
