@@ -23,7 +23,7 @@
       故改以 `processed` 跃升为据，并在 receipt 里明写不对上游恢复时点下结论）；对 `docs/runbooks/receipts/2026-09-16-display-v2.md:145` 采取
       **追加不改写**：原「取不到」段落逐字保留（它是当时的事实），在其后追加一个引用块记补记结果
       与新 receipt 链接，并声明 7.2 第 2 条挂账项关闭。
-- [ ] 1.5 把同一结论作为评论贴到 #2433（issue body 指定该处为可接受落点）。
+- [x] 1.5 把同一结论作为评论贴到 #2433（issue body 指定该处为可接受落点）。
 - [x] 1.6 **deferral 路由**：2026-09-19 两趟 `rc=1` 的部分发布（`OUTPUT_PARSE_DB_ERROR`
       statement timeout）是范围外发现，按「deferrals routed — never silent」由 `issue-scribe`
       去重后立单，issue 链接回填 receipt §3 finding 1 与工作说明。
@@ -64,7 +64,7 @@
       截图不受 grep 覆盖，由 capture 时保证：许可来源上横幅不出现，因而不存在含 key 的 URL 文本；
       若在拒绝来源取证则须沿用 `docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/capture.cjs:46-50`
       的横幅遮罩。
-- [ ] 2.6 把结论作为评论贴到 #2436。
+- [x] 2.6 把结论作为评论贴到 #2436。
 
 ## 3. 闸门
 
@@ -74,7 +74,7 @@
       为空则记录「纯 docs/spec，后端 pytest 按 CI 路径 scope 不触发」。
 - [x] 3.4 `markdownlint-cli2 "docs/**/*.md"`（CI 的 `Markdown Lint` job 同一 glob）。
 - [x] 3.5 task 2.5 的 key 扫描命令，期望 0 行。
-- [ ] 3.6 CI 绿。
+- [x] 3.6 CI 绿。
 
 ## Must-preserve（下游消费者，评审必看）
 
