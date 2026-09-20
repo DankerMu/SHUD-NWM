@@ -32,7 +32,8 @@ IDENTITY = {"basin_version_id": "basin_v1", "segment_id": "seg_001", "river_netw
 
 # Literal public contract from isolated pre-routing source d27601e8 (recipe:
 # .workplans/issue-1981/implementation/capture_response.py). Not regenerated
-# from the routed response builder.
+# from the routed response builder. One entry inside `quality.query_indexes`
+# was repinned by #2517 and carries its own note there.
 A9_RESPONSE = {
     "basin_id": "basins_qhh",
     "model_id": "basins_qhh_shud",
@@ -105,8 +106,17 @@ A9_RESPONSE = {
                     "valid_time DESC",
                 ],
             },
+            # #2517: the ONE licensed drift of this snapshot from the
+            # pre-routing capture, and it is a correction rather than a
+            # behaviour change. `_qhh_candidate_row` routes to `legacy`, and
+            # 000061:231 renamed the relation the legacy variant reads; the
+            # capture predates that rename. The index name is unchanged because
+            # it travelled with the table. The NARROW entry is asserted, per
+            # store and against the rendered SQL, in
+            # tests/test_forecast_api.py and
+            # tests/test_forcing_read_path_store_routing.py.
             {
-                "table": "met.forcing_station_timeseries",
+                "table": "met.forcing_station_timeseries_legacy",
                 "index": "forcing_station_timeseries_qhh_latest_window_idx",
                 "status": "covered_by_latest_product_station_window_index",
                 "columns": [

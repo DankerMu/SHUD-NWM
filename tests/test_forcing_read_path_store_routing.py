@@ -303,6 +303,16 @@ _LATEST_PRODUCT_STORE_PROJECTION = (
     "                    fv.timeseries_store AS forcing_timeseries_store,\n"
 )
 
+#: The SECOND declared delta, #2517: the CTE's store column, passed through the
+#: heavy statement's final SELECT so the served row carries it. Task 7.3 stopped
+#: at the CTE because only the header needed to read it; the public
+#: ``quality.query_indexes`` evidence is assembled from the ROW, and a column
+#: that never leaves the CTE cannot route it. Declared the same way as the
+#: projection above — anchor plus inserted line, applied to the snapshot — so
+#: the pin stays a whole-statement sequence equality.
+_LATEST_PRODUCT_ROW_STORE_ANCHOR = "                cr.forcing_checksum,\n"
+_LATEST_PRODUCT_ROW_STORE_PROJECTION = "                cr.forcing_timeseries_store,\n"
+
 
 def _renamed_to_legacy(frozen_sql: str) -> str:
     """The pre-wiring text with the fact table under the name 000061 left it.
@@ -405,22 +415,93 @@ def test_latest_product_fallback_follows_the_candidate_store(store: str) -> None
         # membership. Membership is insensitive to order and to multiplicity, so
         # a predicate moved between CTEs, or a line duplicated or lost where the
         # same text occurs twice, would pass it; sequence equality sees all
-        # three. The delta is a single contiguous insert
-        # (`packages/common/forecast_store.py:717-722`), which is what makes the
-        # strong form available at all.
+        # three. Each delta is a single contiguous insert
+        # (`packages/common/forecast_store.py:717-722` and #2517's pass-through
+        # in the final SELECT), which is what makes the strong form available at
+        # all.
         frozen = _renamed_to_legacy(FROZEN["forecast_store.latest_product_statement"])
         assert frozen.count(_LATEST_PRODUCT_STORE_ANCHOR) == 1, "the insertion point must be unambiguous"
-        assert heavy_sql == frozen.replace(
+        assert frozen.count(_LATEST_PRODUCT_ROW_STORE_ANCHOR) == 1, "the insertion point must be unambiguous"
+        expected = frozen.replace(
             _LATEST_PRODUCT_STORE_ANCHOR,
             _LATEST_PRODUCT_STORE_ANCHOR + _LATEST_PRODUCT_STORE_PROJECTION,
             1,
+        ).replace(
+            _LATEST_PRODUCT_ROW_STORE_ANCHOR,
+            _LATEST_PRODUCT_ROW_STORE_ANCHOR + _LATEST_PRODUCT_ROW_STORE_PROJECTION,
+            1,
         )
+        assert heavy_sql == expected
         assert "fst.forcing_version_key" not in heavy_sql
         return
     assert FORCING_TABLE_LEGACY not in heavy_sql
     assert f"FROM {FORCING_TABLE} fst" in heavy_sql
     assert "fst.forcing_version_key" in heavy_sql
     assert "fst.variable_e" in heavy_sql
+
+
+@pytest.mark.parametrize("store", list(FORCING_STORES))
+def test_latest_product_index_evidence_names_the_relation_the_leg_scanned(store: str) -> None:
+    """#2517: the diagnostic routes with the SQL, or it is a false public claim.
+
+    ``/api/v1/mvp/qhh/latest-product`` publishes ``quality.query_indexes``, and
+    until #2517 the forcing entry was a parameterless constant while the leg it
+    described was routed at ``forecast_store.py:2088``. After 000061 that made
+    every response wrong on both routes at once — narrow named an index that
+    lives on the legacy relation, legacy named a relation its SQL had stopped
+    reading.
+
+    The oracle is the EXECUTED statement, not a second copy of the payload's
+    literals: the relation the rendered station leg scans is extracted from the
+    heavy statement and compared with the relation the payload names. A pin that
+    restated the literals is what shipped the defect.
+    """
+    heavy_sql = _executed_latest_product(store)
+    scanned = set(re.findall(r"FROM (met\.forcing_station_timeseries(?:_legacy)?) fst", heavy_sql))
+    assert len(scanned) == 1, scanned
+
+    entries = [
+        entry
+        for entry in forecast_store._qhh_latest_query_indexes(store)
+        if entry["table"].startswith("met.forcing_station_timeseries")
+    ]
+    assert [entry["table"] for entry in entries] == list(scanned)
+    assert entries == [forecast_store._QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE[store]]
+    # Copied, not aliased: these dicts are serialized into a public response and
+    # a caller mutating one must not rewrite the next request's evidence.
+    assert entries[0] is not forecast_store._QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE[store]
+    assert entries[0]["columns"] is not forecast_store._QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE[store]["columns"]
+    # The other route's relation must not appear anywhere in the evidence.
+    other = FORCING_TABLE if store == FORCING_STORE_LEGACY else FORCING_TABLE_LEGACY
+    assert other not in {entry["table"] for entry in forecast_store._qhh_latest_query_indexes(store)}
+
+
+@pytest.mark.parametrize("store", list(FORCING_STORES))
+def test_station_forcing_readiness_index_evidence_names_the_relation_it_scanned(store: str) -> None:
+    """The internal sibling of the pin above, routed off the same column.
+
+    ``station_forcing_readiness`` has no HTTP route, so this payload is not
+    published — but it made the identical claim about the identical catalog and
+    was wrong in the identical way, so it is pinned the identical way.
+    """
+    statements = [
+        _executed_readiness_overall(store)[0],
+        _executed_readiness_variable_rows(store)[0],
+    ]
+    scanned = {
+        match
+        for statement in statements
+        for match in re.findall(r"FROM (met\.forcing_station_timeseries(?:_legacy)?)\b", statement)
+    }
+    assert len(scanned) == 1, scanned
+
+    entry = forecast_store._routed_query_index(
+        forecast_store._STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE,
+        store,
+    )
+    assert entry["table"] == scanned.pop()
+    assert entry == forecast_store._STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE[store]
+    assert entry is not forecast_store._STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE[store]
 
 
 def test_dynamic_forcing_count_aggregates_over_both_stores_once() -> None:

@@ -45,12 +45,15 @@ all nine readers**, so:
   ``packages/common/best_available.py``,
   ``workers/model_registry/qhh_production_bootstrap.py`` and
   ``scripts/reset_qhh_smoke_db.py`` score 0 and drop out, and
-  ``packages/common/forecast_store.py`` falls 7 → 2 (its two surviving mentions
-  are the index/catalog metadata payloads, which are not SQL). Closure for the
-  four departed files is ``0 + 0 == 0`` — trivially true, and the reason the
-  weight of the assertion moved onto the renderer's own two constants and onto
-  the exempt files. This is the execution split in ``fixtures/I11-1990.md``
-  playing out exactly as recorded, not a census that quietly went blind.
+  ``packages/common/forecast_store.py`` fell 7 → 2 (its two surviving mentions
+  were the index/catalog metadata payloads, which are not SQL) and then 2 → 0
+  at #2517, which routed those payloads off ``FORCING_TABLE`` /
+  ``FORCING_TABLE_LEGACY`` after 000061's rename had made both of them assert a
+  relation/index pairing that no longer existed. Closure for the five departed
+  files is ``0 + 0 == 0`` — trivially true, and the reason the weight of the
+  assertion moved onto the renderer's own two constants and onto the exempt
+  files. This is the execution split in ``fixtures/I11-1990.md`` playing out
+  exactly as recorded, not a census that quietly went blind.
 * **what a green run here still does NOT prove — and who proves it now.**
   Invariant I7 (a cross-store reader composes both rendered fact-row
   subrelations inside itself, before any outer aggregate) is a claim about
@@ -130,16 +133,20 @@ from tests.forcing_ts_template_registry import (
 # so the nine reader mentions are gone and four files left the discovery set
 # altogether. 49 − 9 = 40 across 12 files. The five reader files went to
 # 0 / 0 / 0 / 0 / 2 BY DESIGN — see the module docstring and the execution split
-# in the fixture. `packages/common/forecast_store.py` keeps 2 because its two
-# index/catalog metadata payloads name the table as DATA, not as SQL, and are
+# in the fixture. `packages/common/forecast_store.py` kept 2 because its two
+# index/catalog metadata payloads named the table as DATA, not as SQL, and were
 # exempt with `7.3 (I12) index pins` as their owner.
+#
+# #2517 took that last 2 to 0 and the file out of the set: those two payloads
+# asserted indexes that 000061's rename had moved to another relation, and the
+# fix routes them per store off `FORCING_TABLE` / `FORCING_TABLE_LEGACY`. So the
+# total is 40 − 2 = 38 across 11 files, and ALL FIVE wired readers now score 0.
 # ---------------------------------------------------------------------------
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
     "packages/common/forcing_domain_handoff.py": 3,
     "packages/common/forcing_domain_handoff_apply.py": 17,
     "packages/common/forcing_ts_render.py": 2,
-    "packages/common/forecast_store.py": 2,
     "packages/common/node27_container_contract.py": 1,
     "scripts/node27_autopipeline.py": 1,
     "scripts/node27_timeseries_compression_capture.py": 2,
@@ -173,10 +180,17 @@ FIXTURE_BASELINE_EXEMPT_MENTIONS = 38
 #: and only the exemption rows' notes are.
 TASK_73_ADDED_MENTIONS = 1
 
-#: The five files whose forcing readers this task wired. Four of them left the
-#: discovery set outright; `forecast_store.py` stayed for its two non-SQL index
-#: payloads. Named explicitly so the "went vacuous by design" claim is a pin and
-#: not a sentence in a PR body.
+#: Mentions #2517 REMOVED, declared for the same reason as the line above: the
+#: two `forecast_store.py` index-metadata payloads stopped spelling the table
+#: and started deriving it from the renderer's D1 constants. Subtracted from the
+#: baseline arithmetic rather than folded into C3's measured numbers, so 47/38
+#: stay the fixed points they were measured as.
+ISSUE_2517_REMOVED_MENTIONS = 2
+
+#: The five files whose forcing readers task 7.2 wired. All five score 0 since
+#: #2517 removed `forecast_store.py`'s last two non-SQL index payloads. Named
+#: explicitly so the "went vacuous by design" claim is a pin and not a sentence
+#: in a PR body.
 WIRED_READER_FILES: tuple[str, ...] = (
     "packages/common/best_available.py",
     "packages/common/display_coverage.py",
@@ -406,9 +420,10 @@ def test_the_nine_readers_left_the_exemption_ledger() -> None:
     """
     assert UNWIRED_READERS == ()
     still_exempt = {row.path for row in EXEMPT_MENTIONS} & set(WIRED_READER_FILES)
-    assert still_exempt == {"packages/common/forecast_store.py"}, (
-        "only forecast_store.py may keep an exemption row among the wired reader files, "
-        "and only for its two non-SQL index/catalog metadata payloads"
+    assert still_exempt == set(), (
+        "no wired reader file may keep an exemption row: forecast_store.py's was the last one, "
+        "and #2517 removed it by deriving its index payloads' table name from the renderer's "
+        "D1 constants — restoring the row would re-admit the literal that survived 000061's rename"
     )
 
 
@@ -426,18 +441,25 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
 
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
-    assert non_read_mentions - TASK_73_ADDED_MENTIONS == FIXTURE_BASELINE_EXEMPT_MENTIONS
-    assert declared == non_read_mentions + renderer_mentions
-    # C3's 47 = the 38 that are not reads + the 9 that were, and task 7.3's own
-    # addition is subtracted rather than folded in, so the historical measurement
-    # stays a fixed point.
     assert (
-        declared - renderer_mentions - TASK_73_ADDED_MENTIONS + len(FORCING_REGISTRY)
+        non_read_mentions - TASK_73_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
+        == FIXTURE_BASELINE_EXEMPT_MENTIONS
+    )
+    assert declared == non_read_mentions + renderer_mentions
+    # C3's 47 = the 38 that are not reads + the 9 that were. Task 7.3's addition
+    # is subtracted and #2517's removal added back, so the historical
+    # measurement stays a fixed point rather than being re-agreed.
+    assert (
+        declared
+        - renderer_mentions
+        - TASK_73_ADDED_MENTIONS
+        + ISSUE_2517_REMOVED_MENTIONS
+        + len(FORCING_REGISTRY)
         == FIXTURE_BASELINE_MENTIONS
     )
-    # Four of the five reader files left the set outright; forecast_store.py
-    # stayed for its two index payloads, and the renderer module joined.
-    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 4 + 1
+    # All five reader files have now left the set outright (#2517 took the last
+    # one), and the renderer module joined.
+    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1
     assert set(RENDERER_CONSTANTS) == {
         row for row in EXEMPT_MENTIONS if row.path == "packages/common/forcing_ts_render.py"
     }
@@ -448,18 +470,20 @@ def test_the_wired_reader_files_dropped_out_of_the_census_by_design() -> None:
 
     ``fixtures/I11-1990.md`` predicts `display_coverage.py` 1→0,
     `forecast_store.py` 7→2, `best_available.py` 1→0,
-    `qhh_production_bootstrap.py` 1→0, `reset_qhh_smoke_db.py` 1→0. Four files
-    going to zero is indistinguishable, from the closure equality alone, from
-    four files nobody ever swept — so the drop is pinned against the LIVE counter
-    over each file's current source.
+    `qhh_production_bootstrap.py` 1→0, `reset_qhh_smoke_db.py` 1→0. #2517 then
+    took `forecast_store.py` 2→0 as well: its two index-metadata payloads had
+    outlived 000061's rename precisely because being exempt made them
+    uncheckable, and they now take the name from the renderer's D1 constants.
+    Five files going to zero is indistinguishable, from the closure equality
+    alone, from five files nobody ever swept — so the drop is pinned against the
+    LIVE counter over each file's current source.
     """
     discovered = discover_forcing_mentions()
     for path in WIRED_READER_FILES:
         source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
         counted = forcing_table_mentions(source, filename=path)
-        expected = 2 if path == "packages/common/forecast_store.py" else 0
-        assert counted == expected, f"{path}: {counted} qualified mentions, expected {expected}"
-        assert discovered.get(path, 0) == expected
+        assert counted == 0, f"{path}: {counted} qualified mentions, expected 0"
+        assert discovered.get(path, 0) == 0
 
 
 def test_a_wired_reader_that_respells_the_table_name_is_red() -> None:

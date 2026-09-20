@@ -352,13 +352,15 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
         note="the file-store manifest entry and its row-count key (:740, :765)",
     ),
     # -- index and catalog metadata payloads --------------------------------
-    ExemptMentions(
-        path="packages/common/forecast_store.py",
-        count=2,
-        shape="index/catalog metadata payload",
-        owner="7.3 (I12) index pins",
-        note='the two `"table": …` index-metadata literals (:4009, :4507); they name the table but are not SQL',
-    ),
+    #
+    # `packages/common/forecast_store.py` USED TO SIT HERE with count=2, owner
+    # "7.3 (I12) index pins", for its two `"table": …` index-metadata literals.
+    # #2517 deleted the row instead of re-pinning it: the exemption was granted
+    # on the reading "name-only, not SQL", and that is exactly what let 000061's
+    # rename make both payloads false with nothing red. They now take the table
+    # name from the renderer's D1 constants, so the file scores 0 parsed
+    # mentions and has left the discovery set with the other four wired
+    # readers. Do not restore this row to re-admit a literal.
     ExemptMentions(
         path="packages/common/node27_container_contract.py",
         count=1,
