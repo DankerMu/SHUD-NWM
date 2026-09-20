@@ -22,7 +22,7 @@ pinned in ``openspec/changes/direct-grid-display-cutover/tasks.md``:
   no-ops with the audited skip reason ``no_previous_active_model`` and
   touches no station row.
 * (7) Static structural regression lock:
-  ``apps/api/routes/hydro_display.py::_station_source_version`` still
+  ``apps/api/routes/hydro_display_identity.py::_station_source_version`` still
   filters only by ``basin_version_id + active_flag=true`` and does NOT
   contain a ``model_id`` predicate (design §Decision 1 rejects the
   ``model_id`` filter form).
@@ -34,7 +34,7 @@ end-to-end via a ``_HarnessStore`` subclass (the pattern from
 ``tests/test_state_clone_index_publish.py``) so the real preflight →
 hook-dispatch → transition → audit path exercises the flip hook exactly
 as production will. Scenario (7) is a pure source-inspection test — it
-reads ``apps/api/routes/hydro_display.py`` from disk and asserts SQL
+reads ``apps/api/routes/hydro_display_identity.py`` from disk and asserts SQL
 substrings on the ``_station_source_version`` function body.
 """
 
@@ -1042,7 +1042,7 @@ def test_station_mvt_source_query_unchanged() -> None:
     visibility is delivered by row selection at the flip hook, not by
     adding a ``model_id`` filter to the MVT source query. This test is
     a static structural regression lock — it reads
-    ``apps/api/routes/hydro_display.py::_station_source_version`` from
+    ``apps/api/routes/hydro_display_identity.py::_station_source_version`` from
     disk (via :func:`inspect.getsource`), plus reads the file itself
     for redundancy, and asserts the query bodies still shape the
     invariant.
@@ -1060,7 +1060,10 @@ def test_station_mvt_source_query_unchanged() -> None:
     # ``tests/test_direct_grid_display_cutover_flip.py`` -> ``parents[0]``
     # is ``tests/`` and ``parents[1]`` is the repo root.
     repo_root = Path(__file__).resolve().parents[1]
-    disk_source = (repo_root / "apps/api/routes/hydro_display.py").read_text(
+    # #2026: the definition moved to the identity owner module when the facade was
+    # split; the facade only re-exports it, so reading the facade here would make
+    # the `def ...` assertion vacuous-by-absence rather than a structural lock.
+    disk_source = (repo_root / "apps/api/routes/hydro_display_identity.py").read_text(
         encoding="utf-8"
     )
     assert "def _station_source_version" in disk_source
@@ -1232,7 +1235,7 @@ def test_station_flag_flip_error_is_public_module_contract() -> None:
 #       size.
 #
 # "MVT layer returns" is modeled by :func:`_mvt_station_set` below — it
-# mirrors ``apps/api/routes/hydro_display.py::_station_source_version``'s
+# mirrors ``apps/api/routes/hydro_display_identity.py::_station_source_version``'s
 # row-selection predicate (locked byte-for-byte by test 7 above): the set
 # of ``met.met_station`` rows where ``basin_version_id`` matches the
 # scope AND ``active_flag`` is true. SUB-2 tests seed the fake inventory,
@@ -1251,7 +1254,7 @@ def _mvt_station_set(
 ) -> set[str]:
     """Return the set of ``station_id``s the station-MVT layer would emit.
 
-    Mirrors ``apps/api/routes/hydro_display.py::_station_source_version``'s
+    Mirrors ``apps/api/routes/hydro_display_identity.py::_station_source_version``'s
     row-selection predicate (locked by test 7 above): only rows where
     ``basin_version_id`` matches the scope AND ``active_flag`` is true.
     No role filter, no ``model_id`` filter — single-track visibility is

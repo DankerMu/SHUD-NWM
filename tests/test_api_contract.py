@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from apps.api.routes import hydro_display as hydro_display_routes
+from apps.api.routes import hydro_display_catalog as hydro_display_catalog_module
 from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.data_sources import get_data_source_store, get_station_lookup
 from apps.api.routes.forecast import get_forecast_store
@@ -1382,30 +1383,45 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
         observed_count = 1
         truncated = False
 
-    original_valid_times = hydro_display_routes.national_discharge_valid_times
-    original_cycles = hydro_display_routes.national_discharge_cycles
-    original_mvt_enabled = hydro_display_routes._mvt_live_postgis_enabled
+    def _fake_valid_times(_session: Any, **_kwargs: Any) -> Any:
+        return _ValidTimes()
+
+    def _fake_cycles(_session: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "source": "gfs",
+            "cycles": [{
+                "cycle_time": "2026-06-27T00:00:00Z",
+                "valid_time_start": "2026-06-27T12:00:00Z",
+                "valid_time_end": "2026-06-27T12:00:00Z",
+            }],
+            "default_cycle": "2026-06-27T00:00:00Z",
+        }
+
+    def _fake_mvt_enabled(_session: Any) -> bool:
+        return False
+
+    # #2026: `_default_layer_catalog` moved to apps/api/routes/hydro_display_catalog.py
+    # and resolves these three names from THAT module's globals. The two national
+    # discovery reads keep a second home on the facade (three route handlers), so both
+    # homes are rebound; `_mvt_live_postgis_enabled` moved with its whole consumer set,
+    # so the catalog module is its only home and the facade no longer exposes it.
+    catalog = hydro_display_catalog_module
+    original_valid_times = catalog.national_discharge_valid_times
+    original_cycles = catalog.national_discharge_cycles
+    original_mvt_enabled = catalog._mvt_live_postgis_enabled
+    original_route_valid_times = hydro_display_routes.national_discharge_valid_times
+    original_route_cycles = hydro_display_routes.national_discharge_cycles
     try:
         # Both national discovery symbols must be patched, and both must accept
         # the `(source, cycle)` identity: the discharge branch of
         # `_default_layer_catalog` resolves `default_cycle` from the cycles
         # intersection and then asks for that identity's list. The session here
         # is a bare `object()`, so anything reaching real SQL raises.
-        hydro_display_routes.national_discharge_valid_times = (  # type: ignore[assignment]
-            lambda _session, **_kwargs: _ValidTimes()
-        )
-        hydro_display_routes.national_discharge_cycles = (  # type: ignore[assignment]
-            lambda _session, **_kwargs: {
-                "source": "gfs",
-                "cycles": [{
-                    "cycle_time": "2026-06-27T00:00:00Z",
-                    "valid_time_start": "2026-06-27T12:00:00Z",
-                    "valid_time_end": "2026-06-27T12:00:00Z",
-                }],
-                "default_cycle": "2026-06-27T00:00:00Z",
-            }
-        )
-        hydro_display_routes._mvt_live_postgis_enabled = lambda _session: False  # type: ignore[assignment]
+        catalog.national_discharge_valid_times = _fake_valid_times  # type: ignore[assignment]
+        catalog.national_discharge_cycles = _fake_cycles  # type: ignore[assignment]
+        catalog._mvt_live_postgis_enabled = _fake_mvt_enabled  # type: ignore[assignment]
+        hydro_display_routes.national_discharge_valid_times = _fake_valid_times  # type: ignore[assignment]
+        hydro_display_routes.national_discharge_cycles = _fake_cycles  # type: ignore[assignment]
         layers = hydro_display_routes._default_layer_catalog(
             object(),
             run_id="run_1",
@@ -1418,9 +1434,11 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
             national=False,
         )
     finally:
-        hydro_display_routes.national_discharge_valid_times = original_valid_times  # type: ignore[assignment]
-        hydro_display_routes.national_discharge_cycles = original_cycles  # type: ignore[assignment]
-        hydro_display_routes._mvt_live_postgis_enabled = original_mvt_enabled  # type: ignore[assignment]
+        catalog.national_discharge_valid_times = original_valid_times  # type: ignore[assignment]
+        catalog.national_discharge_cycles = original_cycles  # type: ignore[assignment]
+        catalog._mvt_live_postgis_enabled = original_mvt_enabled  # type: ignore[assignment]
+        hydro_display_routes.national_discharge_valid_times = original_route_valid_times  # type: ignore[assignment]
+        hydro_display_routes.national_discharge_cycles = original_route_cycles  # type: ignore[assignment]
 
     by_id = {layer.layer_id: layer for layer in layers}
     discharge_metadata = by_id["discharge"].metadata or {}

@@ -2345,7 +2345,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # integration.py, test_mvt_national_identity_probe_integration.py) stay
         # out per the #1447 ruling — they auto-skip in the PR lane. The #1341
         # read-path shape pin rides along as an exact at-site entry.
-        "apps/api/routes/hydro_display.py",
+        # #2026: the pattern is a glob over the whole `hydro_display*` family.
+        # The facade was split into hydro_display_{constants,models,instants,
+        # catalog,identity,postgis}.py and the SQL, the budget signals and the
+        # layer catalog now live in the owner modules, so an exact-path entry
+        # would leave an owner-module-only diff selecting nothing here. One
+        # entry, not seven: the selector's duplicate-pattern guard forbids a
+        # second PATH_TEST_RULES entry for an already-owned module, and every
+        # suite below imports the facade, which imports all six owners.
+        "apps/api/routes/hydro_display*.py",
         (
             "tests/test_api_contract.py",
             # #1704: guard-derived, not hand-curated — the API error-logging

@@ -175,7 +175,9 @@ NON_TEMPLATE_MENTIONS: dict[str, int] = {
     # `_river_table_mentions` matches a PREFIX of the name (the `_legacy` literal
     # opens with the canonical one), not a whole identifier.
     "packages/common/river_ts_render.py": 1,
-    "apps/api/routes/hydro_display.py": 0,
+    # #2026: `_require_hydro_mvt_source_identity` (the only registered template of
+    # this family) moved to the identity owner module with the facade split.
+    "apps/api/routes/hydro_display_identity.py": 0,
     "services/tile_publisher/forcing_copyback_backfill.py": 0,
     "services/tiles/mvt.py": 0,
 }
@@ -188,13 +190,13 @@ def _sql_constant(module: tuple[str, ...], function: str, needle: str, index: in
 
 
 # ---------------------------------------------------------------------------
-# apps/api/routes/hydro_display.py
+# apps/api/routes/hydro_display_identity.py
 # ---------------------------------------------------------------------------
 
 
 def _hydro_display_identity_probe(_store: str) -> str:
     return _sql_constant(
-        ("apps", "api", "routes", "hydro_display.py"),
+        ("apps", "api", "routes", "hydro_display_identity.py"),
         "_require_hydro_mvt_source_identity",
         "FROM hydro.river_timeseries",
     )
@@ -203,7 +205,7 @@ def _hydro_display_identity_probe(_store: str) -> str:
 HYDRO_DISPLAY_ENTRIES: tuple[TemplateEntry, ...] = (
     TemplateEntry(
         key="hydro_display:mvt_source_identity_probe",
-        path="apps/api/routes/hydro_display.py",
+        path="apps/api/routes/hydro_display_identity.py",
         kind="statement",
         params="named",
         mentions=1,

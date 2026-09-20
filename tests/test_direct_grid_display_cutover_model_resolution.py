@@ -17,7 +17,7 @@ Path 1 — station-series endpoint required-filter contract
     "active-model" fallback lives on this route.
 
 Path 2 — MVT tile cache key derivation
-    ``apps/api/routes/hydro_display.py::_station_source_version`` derives
+    ``apps/api/routes/hydro_display_identity.py::_station_source_version`` derives
     the tile cache key exclusively from the ``active_flag=true`` station
     source identity — the SQL literal references no ``model_id`` column
     and the key self-invalidates when the SUB-1 flip flips

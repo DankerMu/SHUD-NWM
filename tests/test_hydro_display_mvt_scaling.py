@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from apps.api import display_cache, main
 from apps.api.errors import ApiError
-from apps.api.routes import hydro_display
+from apps.api.routes import hydro_display, hydro_display_catalog, hydro_display_postgis
 from packages.common.river_ts_render import render_river_ts_sql
 from scripts.node27_raw_retention import DEFAULT_RETENTION_DAYS
 from services.tiles import mvt as mvt_module
@@ -433,6 +433,19 @@ def test_production_tile_bind_site_forwards_the_layer_to_the_collection_limit(mo
 # #2030: the tile route's logger tree; `apps.api.routes.hydro_display` propagates
 # to the root, which is where `caplog` attaches.
 _TILE_ROUTE_LOGGER = "apps.api.routes.hydro_display"
+
+
+def _dual_patch(monkeypatch: Any, name: str, value: Any) -> None:
+    """#2026: patch a national-discharge read in BOTH of its homes.
+
+    `_default_layer_catalog` moved to `apps/api/routes/hydro_display_catalog.py`
+    and resolves these names from THAT module's globals; the `/api/v1/layers*` and
+    `hydro-national` route handlers stayed on the facade and resolve them from
+    there. Patching one home leaves the other path running the real SQL, so both
+    are patched at every site. Over-patching cannot produce a silent pass.
+    """
+    monkeypatch.setattr(hydro_display, name, value)
+    monkeypatch.setattr(hydro_display_catalog, name, value)
 _TILE_LAYERS = ("river-network", "river-network-national", "hydro", "hydro-national", "met-stations")
 
 
@@ -1643,7 +1656,7 @@ def _recording_digest_calls(monkeypatch: Any) -> list[dict[str, Any]]:
         recorded.append(kwargs)
         return "national-hydro-digest"
 
-    monkeypatch.setattr(hydro_display, "national_discharge_source_version", _recording_digest)
+    _dual_patch(monkeypatch, "national_discharge_source_version", _recording_digest)
     return recorded
 
 
@@ -1680,8 +1693,8 @@ def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> N
         truncated = False
 
     recorded = _recording_digest_calls(monkeypatch)
-    monkeypatch.setattr(
-        hydro_display,
+    _dual_patch(
+        monkeypatch,
         "national_discharge_cycles",
         lambda _session, **_kwargs: {
             "source": "gfs",
@@ -1695,8 +1708,8 @@ def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> N
             "default_cycle": "2026-09-02T12:00:00Z",
         },
     )
-    monkeypatch.setattr(
-        hydro_display, "national_discharge_valid_times", lambda _session, **_kwargs: _ValidTimes()
+    _dual_patch(
+        monkeypatch, "national_discharge_valid_times", lambda _session, **_kwargs: _ValidTimes()
     )
     monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
     monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
@@ -1705,7 +1718,7 @@ def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> N
     )
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    monkeypatch.setattr(hydro_display_catalog, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
@@ -1779,8 +1792,8 @@ def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_a
     """
 
     recorded = _recording_digest_calls(monkeypatch)
-    monkeypatch.setattr(
-        hydro_display,
+    _dual_patch(
+        monkeypatch,
         "national_discharge_cycles",
         lambda _session, **_kwargs: {
             "source": "gfs",
@@ -1788,8 +1801,8 @@ def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_a
             "default_cycle": advertised_default_cycle,
         },
     )
-    monkeypatch.setattr(
-        hydro_display,
+    _dual_patch(
+        monkeypatch,
         "national_discharge_valid_times",
         lambda _session, **_kwargs: SimpleNamespace(
             valid_times=advertised_valid_times,
@@ -1805,7 +1818,7 @@ def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_a
     )
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    monkeypatch.setattr(hydro_display_catalog, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
@@ -2575,10 +2588,10 @@ def _national_catalog_app(
     monkeypatch.setattr(hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a"))
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(
-        hydro_display, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1"
+    _dual_patch(
+        monkeypatch, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1"
     )
-    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    monkeypatch.setattr(hydro_display_catalog, "_mvt_live_postgis_enabled", lambda _s: False)
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
@@ -3240,7 +3253,7 @@ def _display_role_catalog_app(monkeypatch: Any, session: Any, tmp_path: Path) ->
     monkeypatch.setattr(hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a"))
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    monkeypatch.setattr(hydro_display_catalog, "_mvt_live_postgis_enabled", lambda _s: False)
     app = main.create_app(
         {
             "NHMS_REQUIRE_SERVICE_ROLE": "true",
@@ -4111,7 +4124,7 @@ def test_valid_times_and_the_tile_route_read_one_coverage_helper(monkeypatch: An
         return incomplete
 
     monkeypatch.setattr(mvt_module, "national_discharge_cycle_coverage", _incomplete_coverage)
-    monkeypatch.setattr(hydro_display, "national_discharge_cycle_coverage", _incomplete_coverage)
+    monkeypatch.setattr(hydro_display_postgis, "national_discharge_cycle_coverage", _incomplete_coverage)
 
     assert national_discharge_valid_times(full, source="gfs", cycle=_CYCLE).valid_times == []
     assert calls == [{"source": "gfs", "cycle": _CYCLE}]
@@ -4832,7 +4845,7 @@ def test_coordinate_dimension_overflow_blanks_the_tile_observably(monkeypatch: A
 def test_blanked_record_reports_the_limit_actually_bound(monkeypatch: Any, caplog: Any) -> None:
     """The maxima come from the query's bind, so a lowered limit is what gets reported."""
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
-    monkeypatch.setattr(hydro_display, "MVT_MAX_COORDINATES", 100)
+    monkeypatch.setattr(hydro_display_postgis, "MVT_MAX_COORDINATES", 100)
     session = _Session([_overflow_row(feature_coordinate_overflow_count=2, feature_coordinate_count=640)])
 
     with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):

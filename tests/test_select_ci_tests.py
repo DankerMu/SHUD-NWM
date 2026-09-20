@@ -3959,6 +3959,27 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "apps.api.routes.hydro_display",
         "tests/test_direct_grid_display_cutover_flip.py",
     ),
+    # #2026: the two owner modules split out of the facade that tests import
+    # DIRECTLY, because their patch targets moved with their whole consumer set
+    # (`_fetch_postgis_tile_bytes` / `MVT_MAX_COORDINATES` /
+    # `national_discharge_cycle_coverage` to postgis, `_mvt_live_postgis_enabled`
+    # to catalog). The other four owner modules
+    # (hydro_display_{constants,models,instants,identity}.py) have NO direct
+    # non-gated importer suite — only the facade imports them — so they cannot
+    # join this registry without making the closure guard's own
+    # "derived no non-gated top-level importer suites" anti-vacuity assertion
+    # fail. They are routed by the `apps/api/routes/hydro_display*.py` glob in
+    # scripts/select_ci_tests.py instead.
+    (
+        "apps/api/routes/hydro_display_postgis.py",
+        "apps.api.routes.hydro_display_postgis",
+        "tests/test_display_mvt_cold_admission.py",
+    ),
+    (
+        "apps/api/routes/hydro_display_catalog.py",
+        "apps.api.routes.hydro_display_catalog",
+        "tests/test_api_contract.py",
+    ),
 )
 
 DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_integration.py"
@@ -12314,15 +12335,22 @@ def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
 
 
-def test_three_guarded_closures_is_now_four_with_hydro_display() -> None:
+def test_four_guarded_closures_is_now_six_with_the_hydro_display_owner_modules() -> None:
     # #1672: hydro_display joins GUARDED_MODULE_CLOSURES. The existing guard
     # test derives the required importer set from the tree, so this asserts the
     # membership directly (the guard body in
     # test_guarded_module_rules_cover_their_non_gated_importer_closure is what
     # proves coverage).
+    # #2026: the facade split adds its two DIRECTLY imported owner modules. The
+    # four remaining owner modules are deliberately absent — no suite imports
+    # them at file level, so the closure guard could only be vacuous on them;
+    # the selector glob covers them. Pinning 6 rather than "the split happened"
+    # is what makes a silently dropped owner-module entry red.
     guarded_sources = {source_path for source_path, _, _ in GUARDED_MODULE_CLOSURES}
     assert "apps/api/routes/hydro_display.py" in guarded_sources
-    assert len(GUARDED_MODULE_CLOSURES) == 4
+    assert "apps/api/routes/hydro_display_postgis.py" in guarded_sources
+    assert "apps/api/routes/hydro_display_catalog.py" in guarded_sources
+    assert len(GUARDED_MODULE_CLOSURES) == 6
 
 
 def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
@@ -12364,6 +12392,14 @@ INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
     "packages/common/display_coverage.py",
     "services/tiles/mvt.py",
     "apps/api/routes/hydro_display.py",
+    # #2026: the display SQL split out of the facade. The identity digests /
+    # existence probe and the live-PostGIS tile SQL are what the real-DB lane
+    # exists to exercise, so a diff confined to an owner module must still
+    # trigger it. ci.yml matches all six with one
+    # `apps/api/routes/hydro_display_*.py` glob.
+    "apps/api/routes/hydro_display_postgis.py",
+    "apps/api/routes/hydro_display_identity.py",
+    "apps/api/routes/hydro_display_catalog.py",
     "apps/api/main.py",
     "scripts/node27_autopipeline.py",
     "workers/output_parser/parser.py",

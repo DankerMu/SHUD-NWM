@@ -701,7 +701,9 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
     repo_root = Path(__file__).resolve().parents[1]
     surfaces = {
         "existence probe": (
-            repo_root / "apps" / "api" / "routes" / "hydro_display.py",
+            # #2026: the existence probe moved to the identity owner module when
+            # the display facade was split; both anchors are adjacent in that file.
+            repo_root / "apps" / "api" / "routes" / "hydro_display_identity.py",
             "def _require_hydro_mvt_source_identity",
             "def _require_run_source_identity",
         ),
