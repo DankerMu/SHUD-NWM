@@ -1,6 +1,6 @@
 ## 0. Risk pack pass (canonical vocabulary)
 
-- [ ] 0.1 Record the pack verdicts below and keep each mapped item satisfied.
+- [x] 0.1 Record the pack verdicts below and keep each mapped item satisfied.
   - **Public API / CLI / script entry — SELECTED.** The display router, its nine
     route handlers and the runtime OpenAPI document are the public surface.
     Mapped to: `tests/test_openapi_drift.py` (whole-dict equality + facade
@@ -307,17 +307,44 @@
 
 ## 4. Closure evidence
 
-- [ ] 4.1 Guard closure: `wc -l` shows every touched and new file <= 1000; for
+- [x] 4.1 Guard closure: `wc -l` shows every touched and new file <= 1000; for
       each of the six paths `grep -c "<path>" .large-file-guard.json` == 0; no
       new path added to `exclude`; `apps/frontend/src/api/types.ts` still
       present. A commit touching each family passes the `large-file-guard` hook
       with no exemption.
-- [ ] 4.2 Local gate: `uv run ruff check .` green;
+- [x] 4.2 Local gate: `uv run ruff check .` green;
       `openspec validate split-guarded-display-modules --strict --no-interactive`
       green; frontend `tsc` + `pnpm test` + `pnpm build` green.
-- [ ] 4.3 node-27 live receipt (the oracle for display changes, per
+- [x] 4.3 node-27 live receipt (the oracle for display changes, per
       `docs/runbooks/node-27-bringup-checklist.md` C1-C4): real-DB pytest over
       the affected suites, plus `curl` on `/api/v1/layers` and at least one MVT
       tile route showing unchanged response shape.
 - [ ] 4.4 CI on the pushed head is green, including the targeted-test lane
       selecting the new partitions rather than degrading to `--collect-only`.
+
+### node-27 live receipt (task 4.3), head 9fd60807ca6289b9a3f60b54f87800ef00db641d
+
+Produced from an isolated `git worktree` at `/home/nwm/verify-2526` on node-27, served on spare
+port 8097 by `/home/nwm/NWM/.venv/bin/python` (3.11.15) against the active local PG `:55432`.
+The production `nhms-display-api.service` was never restarted and the shared `/home/nwm/NWM`
+checkout stayed on `master` and clean throughout (production PIDs 3270965/3270971/3270972
+unchanged before and after). Worktree, spare-port process and temp cache removed afterwards.
+
+Real-DB pytest on node-27:
+- `tests/test_api_contract{,_pipeline_ops,_resources}.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py` -> **71 passed**
+- the 9 `tests/test_hydro_display_mvt_scaling*.py` partitions + `test_display_mvt_cold_admission.py`
+  + `test_mvt_tile_generation_lock.py` + `test_node27_connection_attribution{,_delegated}.py`
+  + `test_precip_overlay.py` -> **478 passed**
+
+Live HTTP, new code (:8097) vs production master (:8080):
+- `GET /api/v1/layers` -> 200 / 6073 bytes on both; structural diff of the two JSON bodies has
+  **exactly one differing leaf, `request_id`** (a per-request UUID). 4 layers: discharge,
+  river-network, met-stations, precip.
+- `GET /api/v1/tiles/river-network-national/3/6/3.pbf` -> 200, `application/x-protobuf`,
+  248347 bytes, **byte-identical** between new code and production.
+- `GET /api/v1/tiles/river-network-national/5/26/12.pbf` -> 200, 148784 bytes,
+  **byte-identical**; 1.24s on the new instance (cold-generated, so the moved PostGIS path
+  really executed) vs 0.018s cached on production.
+- `GET /api/v1/layers/discharge/cycles` with no query params -> 422 on both, error envelope
+  identical ignoring `request_id`, `rejected_value` still `[redacted]`.
+- Verification instance log: 9 lines, no traceback; the single WARNING is the deliberate 422 above.
