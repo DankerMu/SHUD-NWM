@@ -39,7 +39,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from apps.api import main, route_registry
-from apps.api.routes import hydro_display
+from apps.api.routes import hydro_display, hydro_display_catalog
 from apps.api.routes import precip as precip_routes
 from services.precip import (
     GridDefinition,
@@ -1685,14 +1685,15 @@ def _catalog_app(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a"))
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1")
-    monkeypatch.setattr(hydro_display, "national_discharge_valid_times", lambda _s, **_k: _FakeValidTimes())
-    monkeypatch.setattr(
-        hydro_display,
-        "national_discharge_cycles",
-        lambda _s, **_k: {"source": "gfs", "cycles": [], "default_cycle": "2026-09-02T00:00:00Z"},
-    )
-    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    for _module in (hydro_display, hydro_display_catalog):
+        monkeypatch.setattr(_module, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1")
+        monkeypatch.setattr(_module, "national_discharge_valid_times", lambda _s, **_k: _FakeValidTimes())
+        monkeypatch.setattr(
+            _module,
+            "national_discharge_cycles",
+            lambda _s, **_k: {"source": "gfs", "cycles": [], "default_cycle": "2026-09-02T00:00:00Z"},
+        )
+    monkeypatch.setattr(hydro_display_catalog, "_mvt_live_postgis_enabled", lambda _s: False)
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()

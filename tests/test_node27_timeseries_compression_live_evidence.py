@@ -664,7 +664,7 @@ def _bundle(tmp_path: Path) -> dict[str, Any]:
     }
     curve_source = ROOT / "packages/common/forecast_store.py"
     mvt_source = ROOT / "services/tiles/mvt.py"
-    route_source = ROOT / "apps/api/routes/hydro_display.py"
+    route_source = ROOT / "apps/api/routes/hydro_display_postgis.py"
     curve_query, curve_names, curve_parameters = curve_capture.curve_query_and_binding(
         basin_version_id="basin-v1",
         river_segment_id="model_reach_000001",
@@ -5228,7 +5228,7 @@ def _e2e_benchmarks_document(starts: dict[str, datetime]) -> dict[str, Any]:
     )
     curve_source = ROOT / "packages/common/forecast_store.py"
     mvt_source = ROOT / "services/tiles/mvt.py"
-    route_source = ROOT / "apps/api/routes/hydro_display.py"
+    route_source = ROOT / "apps/api/routes/hydro_display_postgis.py"
 
     def window(base: datetime, offset: float) -> datetime:
         return base + _timedelta(seconds=offset)

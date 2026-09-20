@@ -62,7 +62,9 @@ from services.tiles.mvt import postgis_tile_sql
 ROOT = Path(__file__).resolve().parents[1]
 CURVE_SOURCE = ROOT / "packages/common/forecast_store.py"
 MVT_SOURCE = ROOT / "services/tiles/mvt.py"
-MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display.py"
+# #2026: `_postgis_tile_params` — the bind builder whose bytes this receipt
+# hashes as the production owner — moved to the postgis owner module.
+MVT_ROUTE_SOURCE = ROOT / "apps/api/routes/hydro_display_postgis.py"
 EXPLAIN_PREFIX = "EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON) "
 
 

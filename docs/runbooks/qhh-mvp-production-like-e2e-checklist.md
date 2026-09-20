@@ -192,7 +192,7 @@ export NHMS_FRONTEND_BASE_URL="http://<frontend-host>:4173"
 
 ```bash
 uv run ruff check . 2>&1 | tee "$MVP_E2E_EVIDENCE_ROOT/ruff.log"
-uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py 2>&1 \
+uv run pytest -q tests/test_forecast_api.py tests/test_api_contract*.py 2>&1 \
   | tee "$MVP_E2E_EVIDENCE_ROOT/backend_hydro_met_api.log"
 uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py 2>&1 \
   | tee "$MVP_E2E_EVIDENCE_ROOT/backend_ops_api.log"

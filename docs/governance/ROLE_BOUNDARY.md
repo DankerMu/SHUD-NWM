@@ -283,7 +283,9 @@ Current guard tests:
 - `tests/test_role_boundary_static.py`
 - `tests/test_openapi_drift.py`
 - `tests/test_migrations.py`
-- `tests/test_api_contract.py`
+- `tests/test_api_contract*.py` (#2074 partitioned this corpus into three
+  files; the model-admin mutation guard is in `..._resources.py` and the
+  dev-role retry/cancel guards are in `..._pipeline_ops.py`)
 - `tests/test_slurm_route_contract.py`
 
 ## #361 Hard Gate

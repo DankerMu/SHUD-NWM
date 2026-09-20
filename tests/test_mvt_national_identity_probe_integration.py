@@ -923,7 +923,8 @@ def test_national_digest_narrows_the_ranked_runs_to_the_bound_identity(national_
 
     The third `(source, cycle)` site lives in this helper's ranked sub-query and
     it was the only one with no behavioral oracle anywhere: `_CapturingSession`
-    in `tests/test_hydro_display_mvt_scaling.py` records binds and returns
+    in `tests/hydro_display_mvt_helpers.py` (#2074 moved it there with the suite
+    partition) records binds and returns
     canned rows without running SQL, so a predicate that is present but
     ineffective — the `AND (` -> `OR  (` flip, which SQL precedence turns into
     "every unbound row, OR the matching ones" — kept the whole suite green.
@@ -1065,7 +1066,8 @@ def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at
 #   here: `core.model_instance.river_network_version_id` is `TEXT NOT NULL`
 #   (`db/migrations/000004_core.sql:74`) and no later migration drops that, so
 #   the row the case would need is unsatisfiable by schema. Tripwire-only, in
-#   `tests/test_hydro_display_mvt_scaling.py::test_national_coverage_statements_pin_their_shape`.
+#   `tests/test_hydro_display_mvt_scaling_catalog.py::test_national_coverage_statements_pin_their_shape`
+#   (#2074 partitioned the former single suite; the case itself is unchanged).
 #
 # The seed cycle is months older than the real 12-day cycle lookback, so every
 # case except the lookback one widens

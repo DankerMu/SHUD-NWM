@@ -22,7 +22,7 @@ from sqlalchemy.pool import QueuePool
 
 from apps.api import main
 from apps.api.errors import ApiError
-from apps.api.routes import hydro_display
+from apps.api.routes import hydro_display, hydro_display_postgis
 from services.tiles.mvt import TileInput, TileResponse, cache_key
 
 _RIVER_URL = "/api/v1/tiles/river-network-national/3/6/3.pbf"
@@ -171,7 +171,10 @@ def test_saturated_distinct_cold_requests_return_503_while_hot_and_layers_stay_2
 
     monkeypatch.setattr(hydro_display, "read_cached_tile_response", fake_read)
     monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build)
-    monkeypatch.setattr(hydro_display, "_fetch_postgis_tile_bytes", fake_fetch)
+    # #2026: the patch target is the owner module, not the facade. The four
+    # `_fetch_*_tile_bytes` wrappers and the river-network-national route both
+    # resolve this name from `hydro_display_postgis`, so it is the only target.
+    monkeypatch.setattr(hydro_display_postgis, "_fetch_postgis_tile_bytes", fake_fetch)
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", identity_digest)
     monkeypatch.setattr(hydro_display, "display_ready_run", display_ready)
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, loader: loader())

@@ -348,7 +348,8 @@ M6 hardening is tracked in `openspec/changes/m6-system-hardening-alignment/` wit
 - `tests/test_source_identity.py`
 - `tests/test_object_store_roots.py`
 - `tests/test_retry_cancel_consistency.py`
-- `tests/test_api_contract.py`
+- `tests/test_api_contract*.py` (#2074: the retry/cancel envelope cases are in
+  `tests/test_api_contract_pipeline_ops.py`)
 
 ---
 

@@ -2948,7 +2948,8 @@ def _validate_benchmarks(
             # set is now the key/enum shape alone.
             required_query_tokens = _curve_required_query_tokens()
         else:
-            source_paths = ["services/tiles/mvt.py", "apps/api/routes/hydro_display.py"]
+            # #2026: the MVT bind builder moved to the postgis owner module.
+            source_paths = ["services/tiles/mvt.py", "apps/api/routes/hydro_display_postgis.py"]
             required_parameter_keys = {
                 "run_id",
                 "basin_version_id",

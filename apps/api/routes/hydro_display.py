@@ -1,220 +1,134 @@
+"""Hydro display read-only API: the router, its nine route handlers and the engine.
+
+Implementation bodies were split out to `hydro_display_constants.py`,
+`hydro_display_models.py`, `hydro_display_instants.py`, `hydro_display_catalog.py`,
+`hydro_display_identity.py` and `hydro_display_postgis.py` (#2026). This module
+stays the facade: every route handler, the `hydro-display` router, and the engine /
+pool-sizing / cold-gate / session block stay here, so `monkeypatch.setattr` on this
+module object keeps biting the bindings the routes actually resolve.
+
+Where to patch, after the split (getting this wrong makes a test pass while
+testing nothing, because a re-export does NOT preserve `monkeypatch.setattr`):
+
+- Patch the OWNER MODULE only — the whole consumer set moved, and the name is
+  deliberately absent here so a stale facade patch fails loudly:
+  `_mvt_live_postgis_enabled` in `hydro_display_catalog.py`;
+  `MVT_MAX_COORDINATES` and `national_discharge_cycle_coverage` in
+  `hydro_display_postgis.py`.
+- Patch `hydro_display_postgis` for `_fetch_postgis_tile_bytes`.
+  `river_network_national_mvt_tile` below calls it through the
+  `hydro_display_postgis` module object so that route and the four
+  `_fetch_*_tile_bytes` wrappers share ONE patch target. The name is still
+  re-exported here because scripts and suites read it, but the facade binding is
+  read-only: patching it here is inert.
+- Patch BOTH modules for `national_discharge_source_version`,
+  `national_discharge_valid_times` and `national_discharge_cycles`: they have two
+  live homes. `_default_layer_catalog` resolves them from
+  `hydro_display_catalog.py`, while `list_discharge_cycles`,
+  `list_layer_valid_times`, `hydro_national_mvt_tile` and
+  `hydro_national_source_cycle_mvt_tile` resolve them from here. Dropping either
+  half leaves that path on the real implementation (measured: dropping the facade
+  half reds the legacy national tile route with a 500).
+- Everything else — including `_default_layer_catalog` itself, whose only consumer
+  is `list_layers` here — stays patchable on this module.
+"""
+
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
-import re
 import threading
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import lru_cache
-from typing import Annotated, Any, Callable, Literal
+from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, BeforeValidator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
+from apps.api.routes import hydro_display_postgis
+from apps.api.routes.hydro_display_catalog import _default_layer_catalog, _empty_valid_times
+from apps.api.routes.hydro_display_constants import (
+    DISPLAY_PRODUCT_READY_STATUSES,
+    HYDRO_NATIONAL_SOURCE_ID,
+    HYDRO_NATIONAL_SOURCE_VERSION,
+    MVT_ROUTE_RESPONSES,
+    PUBLIC_LAYER_DEFINITIONS,
+    RIVER_NETWORK_NATIONAL_SOURCE_ID,
+    SUPPORTED_PUBLIC_LAYER_IDS,
+)
+from apps.api.routes.hydro_display_constants import TILE_X_DESCRIPTION as TILE_X_DESCRIPTION
+from apps.api.routes.hydro_display_constants import TILE_Y_DESCRIPTION as TILE_Y_DESCRIPTION
+from apps.api.routes.hydro_display_identity import (
+    _require_hydro_mvt_source_identity,
+    _require_run_source_identity,
+    _station_source_version,
+)
+from apps.api.routes.hydro_display_instants import (
+    Rfc3339Instant,
+    _format_time,
+    _national_source_cycle_tile_input,
+    _require_representable_instant,
+    _require_seconds_precision_instant,
+    _validated_national_valid_time_selector,
+)
+from apps.api.routes.hydro_display_models import ApiSuccessEnvelope as ApiSuccessEnvelope
+from apps.api.routes.hydro_display_models import DischargeCycle as DischargeCycle
+from apps.api.routes.hydro_display_models import DischargeCycles as DischargeCycles
+from apps.api.routes.hydro_display_models import (
+    DischargeCyclesResponse,
+    Layer,
+    LayerListResponse,
+    LayerValidTimesResponse,
+)
+from apps.api.routes.hydro_display_models import LayerValidTimes as LayerValidTimes
+from apps.api.routes.hydro_display_postgis import (
+    _fetch_hydro_mvt_tile_bytes,
+    _fetch_hydro_national_mvt_tile_bytes,
+    _fetch_river_network_mvt_tile_bytes,
+    _fetch_station_mvt_tile_bytes,
+    _validate_supported_hydro_variable,
+)
+from apps.api.routes.hydro_display_postgis import _fetch_postgis_tile_bytes as _fetch_postgis_tile_bytes
+from apps.api.routes.hydro_display_postgis import _postgis_tile_params as _postgis_tile_params
 from apps.api.routes.pipeline import _ok
-from packages.common.river_ts_render import render_river_ts_sql
 from services.tiles.mvt import (
-    MVT_BUFFER,
-    MVT_EXTENT,
-    MVT_MAX_COORDINATES,
-    MVT_MAX_FEATURES,
-    MVT_MAX_TILE_COORDINATE,
     MVT_MAX_ZOOM,
     MVT_MEDIA_TYPE,
     MVT_SCHEMA_VERSION,
-    MVT_VALID_TIME_SAMPLE_LIMIT,
-    NATIONAL_DISCHARGE_DEFAULT_SOURCE,
-    SUPPORTED_HYDRO_MVT_VARIABLES,
     TileError,
     TileInput,
     TileResponse,
-    ValidTimeDiscovery,
-    canonical_mvt_time,
-    collection_coordinate_limit,
     display_ready_run,
-    feature_limit,
     layer_metadata,
-    national_discharge_cycle_coverage,
     national_discharge_cycles,
     national_discharge_source_version,
     national_discharge_valid_times,
     national_river_network_source_version,
-    postgis_tile_sql,
     public_hydro_layer_id,
-    simplification_tolerance_m,
     tile_generation_lock,
     valid_times_for_layer,
 )
-from services.tiles.mvt import (
-    build_raw_tile_response as _build_raw_tile_response,
-)
-from services.tiles.mvt import (
-    read_cached_tile_response as _read_cached_tile_response,
-)
-from services.tiles.mvt import (
-    validate_identifier as _validate_tile_identifier,
-)
-from services.tiles.mvt import (
-    validate_xyz as _validate_tile_xyz,
-)
+from services.tiles.mvt import build_raw_tile_response as _build_raw_tile_response
+from services.tiles.mvt import read_cached_tile_response as _read_cached_tile_response
+from services.tiles.mvt import simplification_tolerance_m as simplification_tolerance_m
+from services.tiles.mvt import validate_identifier as _validate_tile_identifier
+from services.tiles.mvt import validate_xyz as _validate_tile_xyz
 
 router = APIRouter(tags=["hydro-display"])
+
 
 # #1714: default pg_stat_activity attribution for this component. libpq
 # treats fallback_application_name as a default only, so an operator's
 # explicit ?application_name=... in DATABASE_URL still wins.
 _APPLICATION_NAME = "nhms-display-api"
 
-# #2030: budget-window truncation signal. `apps.api.routes.hydro_display` is a
-# child of the `apps.api` tree that `apps/api/main.py::_install_api_log_handler`
-# gives a stderr handler, so WARNING+ reaches systemd's
-# `StandardError=append:/tmp/display-api.log` with no extra wiring.
-logger = logging.getLogger(__name__)
-
-HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
-HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v3"
-RIVER_NETWORK_NATIONAL_SOURCE_ID = "river-network-national"
-DISPLAY_PRODUCT_READY_STATUSES = {"succeeded", "parsed", "published"}
-PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
-    ("discharge", "Discharge", "hydrology", ["q_down"]),
-    ("river-network", "River network", "base", ["geometry"]),
-    ("met-stations", "Meteorological stations", "base", ["station_point"]),
-    # #2010: the precipitation raster is a PNG overlay, not an MVT layer. Its
-    # entry is independent of `run_id` and of live-PostGIS readiness, and its
-    # valid times come from `/api/v1/precip/{source}/{cycle}/index`, not from
-    # `valid-times` (which answers `[]` for it via the non-discharge branch).
-    ("precip", "Precipitation (past 24h)", "meteorology", ["precip_24h"]),
-)
-SUPPORTED_PUBLIC_LAYER_IDS = frozenset(definition[0] for definition in PUBLIC_LAYER_DEFINITIONS)
-MVT_RESPONSE_HEADERS = {
-    "Cache-Control": {"schema": {"type": "string"}},
-    "ETag": {"schema": {"type": "string"}},
-    "X-Tile-Layer-ID": {"schema": {"type": "string"}},
-    "X-Tile-Checksum": {"schema": {"type": "string"}},
-    "X-Tile-Cache": {"schema": {"type": "string", "enum": ["hit", "miss", "bypass"]}},
-    "X-Tile-Cache-Key": {"schema": {"type": "string"}},
-    "X-MVT-Schema-Version": {"schema": {"type": "string"}},
-}
-MVT_COLD_BUSY_RESPONSE_HEADERS = {
-    "Retry-After": {"schema": {"type": "string"}},
-    "Cache-Control": {"schema": {"type": "string"}},
-    "X-Request-ID": {"schema": {"type": "string"}},
-}
-MVT_ROUTE_RESPONSES = {
-    200: {
-        "description": "Raw Mapbox vector tile",
-        "headers": MVT_RESPONSE_HEADERS,
-        "content": {MVT_MEDIA_TYPE: {"schema": {"type": "string", "format": "binary"}}},
-    },
-    424: {
-        "description": "Live PostGIS MVT is unavailable for this canonical tile route.",
-        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
-    },
-    503: {
-        "description": "Cold MVT generation is saturated; retry after the stated delay.",
-        "headers": MVT_COLD_BUSY_RESPONSE_HEADERS,
-        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
-    },
-    "4XX": {"description": "MVT request validation error."},
-    "5XX": {"description": "MVT server error."},
-}
-TILE_X_DESCRIPTION = (
-    f"Web Mercator XYZ tile column. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
-    f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= x < 2^z."
-)
-TILE_Y_DESCRIPTION = (
-    f"Web Mercator XYZ tile row. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
-    f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z."
-)
-
-# RFC3339 at seconds precision, with an optional fractional part and a
-# mandatory offset: `2026-09-02T12:00:00Z`, `...T12:00:00.000Z`,
-# `...T12:00:00+00:00`, `...T20:00:00+08:00`. A fractional part is matched here
-# and rejected later by `_require_seconds_precision_instant`, so `.000` still
-# canonicalizes while `.500` gets the precision message rather than a shape one.
-_RFC3339_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
-
-
-def _reject_non_rfc3339_instant_text(value: Any) -> Any:
-    """Gate the raw path segment before pydantic's lax datetime coercion runs.
-
-    `cycle: datetime` on its own accepts spellings the tile contract does not
-    define an answer for: a bare Unix epoch (`1756814400` -> 2025-09-02T12:00Z),
-    an offset-less `2026-09-02T12:00:00`, and a space-separated
-    `2026-09-02 12:00:00` all coerce and reach the tile SQL. The contract's
-    "Invalid tile" scenario requires a 422 without expensive SQL instead, so the
-    string shape is checked first and the value handed on unchanged for pydantic
-    to parse.
-
-    Raises `ValueError`, never `ApiError`: only `ValueError`/`AssertionError`
-    become a `RequestValidationError`, which the app's handler renders as the
-    same 422 `VALIDATION_ERROR` an out-of-enum `source` produces. Any other
-    exception escapes dependency solving as a 500.
-    """
-    if isinstance(value, str) and not _RFC3339_INSTANT_RE.match(value):
-        raise ValueError("Input should be an RFC3339 instant, e.g. 2026-09-02T12:00:00Z")
-    return value
-
-
-# Only the canonical `{source}/{cycle}` national route uses this. The legacy
-# routes' `valid_time: datetime` laxness is pre-existing and deliberately left
-# alone here.
-Rfc3339Instant = Annotated[datetime, BeforeValidator(_reject_non_rfc3339_instant_text)]
-
-
-class Layer(BaseModel):
-    layer_id: str
-    layer_name: str
-    layer_type: str
-    variables: list[str]
-    metadata: dict[str, Any] | None = None
-
-
-class ApiSuccessEnvelope(BaseModel):
-    request_id: str
-    status: str
-
-
-class LayerListResponse(ApiSuccessEnvelope):
-    data: list[Layer]
-
-
-class LayerValidTimes(BaseModel):
-    valid_times: list[str]
-    items: list[str]
-    limit: int
-    observed_count: int
-    truncated: bool
-
-
-class LayerValidTimesResponse(ApiSuccessEnvelope):
-    data: LayerValidTimes
-
-
-class DischargeCycle(BaseModel):
-    cycle_time: str
-    valid_time_start: str
-    valid_time_end: str
-
-
-class DischargeCycles(BaseModel):
-    source: str
-    cycles: list[DischargeCycle]
-    default_cycle: str | None = None
-
-
-class DischargeCyclesResponse(ApiSuccessEnvelope):
-    data: DischargeCycles
 
 _POOL_CONFIGURATION_LOCK = threading.Lock()
 _DISPLAY_POOL_CONFIGURATION: tuple[int, int] | None = None
@@ -524,48 +438,6 @@ def list_layer_valid_times(
     )
 
 
-def _validated_national_valid_time_selector(
-    *,
-    layer_id: str,
-    run_id: str | None,
-    source: str | None,
-    cycle: datetime | None,
-) -> datetime | None:
-    """Fail closed on every half-formed national valid-time selector, before any SQL.
-
-    A source alone has no defined window, a cycle alone has no source to resolve
-    it against, `run_id` names a different identity than `(source, cycle)` does,
-    and only `discharge` has a national source/cycle contract at all. Each of
-    those is 422 rather than a silently-ignored argument, which would otherwise
-    serve gfs times under an ifs request.
-    """
-    if source is None and cycle is None:
-        return None
-    details: dict[str, Any] = {"layer_id": layer_id, "source": source, "run_id": run_id}
-    if layer_id != "discharge":
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="source/cycle valid-time discovery is defined for the discharge layer only.",
-            details=details,
-        )
-    if source is None or cycle is None:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="source and cycle must be given together.",
-            details=details,
-        )
-    if run_id is not None:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="run_id cannot be combined with source/cycle: they name different identities.",
-            details=details,
-        )
-    return _require_seconds_precision_instant(cycle, "cycle")
-
-
 @router.get(
     "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
     responses=MVT_ROUTE_RESPONSES,
@@ -772,7 +644,7 @@ def river_network_national_mvt_tile(
     return _cached_or_generated_mvt_response(
         session,
         tile_input,
-        lambda: _fetch_postgis_tile_bytes(session, "river-network-national", {}, z=z, x=x, y=y),
+        lambda: hydro_display_postgis._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=z, x=x, y=y),
     )
 
 
@@ -869,264 +741,6 @@ def _cached_or_generated_mvt_response(
             gate.release()
 
 
-def _mvt_live_postgis_enabled(session: Session) -> bool:
-    return session.get_bind().dialect.name != "sqlite" and os.getenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-
-
-def _require_live_postgis_mvt(session: Session, layer_id: str) -> None:
-    if _mvt_live_postgis_enabled(session):
-        return
-    raise ApiError(
-        status_code=424,
-        code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-        message="Live PostGIS MVT is required for canonical .pbf tile routes and is not enabled.",
-        details={"layer_id": layer_id, "required_env": "NHMS_ENABLE_LIVE_POSTGIS_MVT=true"},
-    )
-
-
-def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, Any], *, z: int, x: int, y: int) -> bytes:
-    _require_live_postgis_mvt(session, layer)
-    detail_layer_id = (
-        public_hydro_layer_id(str(params["variable"]))
-        if layer in {"hydro", "hydro-national"} and "variable" in params
-        else layer
-    )
-    max_coordinates = collection_coordinate_limit(layer)
-    bind = _postgis_tile_params(params, z=z, x=x, y=y, layer=layer)
-    # #2165: one value for the bind, the 413 predicate and the truncation signal.
-    max_features = bind["feature_limit"]
-    row = session.execute(text(postgis_tile_sql(layer)), bind).mappings().first()
-    feature_count = int(row.get("feature_count") or 0) if row else 0
-    coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
-    source_identity_count = int(row.get("source_identity_count") or 0) if row else 0
-    invalid_property_count = int(row.get("invalid_property_count") or 0) if row else 0
-    # #2030: pre-truncation totals over `bounded_rows` plus the two non-budget
-    # drop counters, so the fair-budget window stops dropping rows silently.
-    intersecting_feature_count = int(row.get("intersecting_feature_count") or 0) if row else 0
-    intersecting_coordinate_count = int(row.get("intersecting_coordinate_count") or 0) if row else 0
-    feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
-    coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
-    # #2166: the largest per-feature coordinate count / dimension over
-    # `bounded_rows`, reported next to the limits when an overflow blanks the tile.
-    feature_coordinate_count = int(row.get("feature_coordinate_count") or 0) if row else 0
-    coordinate_dimension_count = int(row.get("coordinate_dimension_count") or 0) if row else 0
-    if invalid_property_count > 0:
-        raise ApiError(
-            status_code=500,
-            code="MVT_TILE_CONTRACT_INVALID",
-            message="Live PostGIS MVT tile source rows violate the public tile contract.",
-            details={
-                "layer_id": detail_layer_id,
-                "z": z,
-                "x": x,
-                "y": y,
-                "invalid_property_count": invalid_property_count,
-                "properties": _mvt_invalid_properties(row.get("invalid_properties") if row else None),
-            },
-        )
-    if feature_count > max_features or coordinate_count > max_coordinates:
-        raise ApiError(
-            status_code=413,
-            code="MVT_TILE_BUDGET_EXCEEDED",
-            message="Live PostGIS MVT tile exceeded the configured feature or coordinate budget.",
-            details={
-                "layer_id": detail_layer_id,
-                "z": z,
-                "x": x,
-                "y": y,
-                "feature_count": feature_count,
-                "max_features": max_features,
-                "coordinate_count": coordinate_count,
-                "max_coordinates": max_coordinates,
-            },
-        )
-    if not row or source_identity_count <= 0:
-        raise ApiError(
-            status_code=424,
-            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-            message="Live PostGIS MVT query returned no source rows for the requested identity.",
-            details={"layer_id": detail_layer_id, "z": z, "x": x, "y": y},
-        )
-    # #2030: on a window layer `budget_stats` is computed FROM the already
-    # truncated `eligible`, so the 413 predicate above is unreachable there and an
-    # over-budget tile is a 200 with fewer rows. Compare the selected totals with
-    # the intersecting ones and say so. Both overflow counters must be 0: those
-    # two paths drop rows before `budget_stats` for a different reason and keep
-    # their existing (signal-free) behavior.
-    if (
-        (intersecting_coordinate_count > coordinate_count or intersecting_feature_count > feature_count)
-        and feature_coordinate_overflow_count == 0
-        and coordinate_dimension_overflow_count == 0
-    ):
-        logger.warning(
-            "MVT_TILE_BUDGET_TRUNCATED layer_id=%s z=%s x=%s y=%s "
-            "feature_count=%s/%s max_features=%s coordinate_count=%s/%s max_coordinates=%s",
-            detail_layer_id,
-            z,
-            x,
-            y,
-            feature_count,
-            intersecting_feature_count,
-            max_features,
-            coordinate_count,
-            intersecting_coordinate_count,
-            max_coordinates,
-            extra={
-                "layer_id": detail_layer_id,
-                "z": z,
-                "x": x,
-                "y": y,
-                "feature_count": feature_count,
-                "intersecting_feature_count": intersecting_feature_count,
-                "max_features": max_features,
-                "coordinate_count": coordinate_count,
-                "intersecting_coordinate_count": intersecting_coordinate_count,
-                "max_coordinates": max_coordinates,
-            },
-        )
-    # #2166: either overflow counter empties the shared `budget_gate`, so the tile
-    # is a 200 with zero features and is cached like any other generation. HTTP
-    # status and caching stay as they are (an error would never be cached and
-    # every request would re-run SQL that cannot succeed); say so instead. The two
-    # maxima are the values bound for THIS query, so the record reports the
-    # limits that were actually in force.
-    if feature_coordinate_overflow_count > 0 or coordinate_dimension_overflow_count > 0:
-        max_feature_coordinates = bind["feature_coordinate_limit"]
-        max_coordinate_dimensions = bind["max_coordinate_dimensions"]
-        logger.warning(
-            "MVT_TILE_FEATURE_OVERFLOW_BLANKED layer_id=%s z=%s x=%s y=%s "
-            "feature_coordinate_overflow_count=%s feature_coordinate_count=%s max_feature_coordinates=%s "
-            "coordinate_dimension_overflow_count=%s coordinate_dimension_count=%s max_coordinate_dimensions=%s",
-            detail_layer_id,
-            z,
-            x,
-            y,
-            feature_coordinate_overflow_count,
-            feature_coordinate_count,
-            max_feature_coordinates,
-            coordinate_dimension_overflow_count,
-            coordinate_dimension_count,
-            max_coordinate_dimensions,
-            extra={
-                "layer_id": detail_layer_id,
-                "z": z,
-                "x": x,
-                "y": y,
-                "feature_coordinate_overflow_count": feature_coordinate_overflow_count,
-                "feature_coordinate_count": feature_coordinate_count,
-                "max_feature_coordinates": max_feature_coordinates,
-                "coordinate_dimension_overflow_count": coordinate_dimension_overflow_count,
-                "coordinate_dimension_count": coordinate_dimension_count,
-                "max_coordinate_dimensions": max_coordinate_dimensions,
-            },
-        )
-    return bytes(row["tile"] or b"")
-
-
-def _mvt_invalid_properties(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item)]
-    return [item for item in str(value).split(",") if item]
-
-
-def _fetch_hydro_mvt_tile_bytes(
-    session: Session,
-    *,
-    run_id: str,
-    variable: str,
-    valid_time: datetime,
-    basin_version_id: str,
-    river_network_version_id: str,
-    z: int,
-    x: int,
-    y: int,
-) -> bytes:
-    return _fetch_postgis_tile_bytes(
-        session,
-        "hydro",
-        {
-            "run_id": run_id,
-            "variable": variable,
-            "valid_time": valid_time,
-            "basin_version_id": basin_version_id,
-            "river_network_version_id": river_network_version_id,
-        },
-        z=z,
-        x=x,
-        y=y,
-    )
-
-
-def _fetch_hydro_national_mvt_tile_bytes(
-    session: Session,
-    *,
-    variable: str,
-    valid_time: datetime,
-    z: int,
-    x: int,
-    y: int,
-    source: str | None,
-    cycle: datetime | None,
-) -> bytes:
-    if source is not None and cycle is not None:
-        # #2153: an identity only SOME active networks cover renders a national map
-        # whose missing basins look like "no flow", and it would be cached. Refuse
-        # it with the per-cycle valid-times rule (one helper, set comparison). The
-        # gate goes first so disabled/sqlite keeps its 424 with no statement run;
-        # covered = empty falls through to the tile SQL's own no-run 424 unchanged.
-        _require_live_postgis_mvt(session, "hydro-national")
-        coverage = national_discharge_cycle_coverage(session, source=source, cycle=cycle)
-        if coverage.covered_networks and not coverage.complete:
-            raise ApiError(
-                status_code=424,
-                code="MVT_NATIONAL_IDENTITY_INCOMPLETE",
-                message="The requested national identity is not covered by every active river network.",
-                details={
-                    "layer_id": public_hydro_layer_id(variable),
-                    "source": source,
-                    "cycle": _format_time(cycle),
-                    "covered_network_count": len(coverage.covered_networks),
-                    "active_network_count": len(coverage.active_networks),
-                },
-            )
-    return _fetch_postgis_tile_bytes(
-        session,
-        "hydro-national",
-        {"variable": variable, "valid_time": valid_time, "source": source, "cycle": cycle},
-        z=z,
-        x=x,
-        y=y,
-    )
-
-
-def _fetch_river_network_mvt_tile_bytes(
-    session: Session,
-    *,
-    basin_version_id: str,
-    z: int,
-    x: int,
-    y: int,
-) -> bytes:
-    return _fetch_postgis_tile_bytes(session, "river-network", {"basin_version_id": basin_version_id}, z=z, x=x, y=y)
-
-
-def _fetch_station_mvt_tile_bytes(
-    session: Session,
-    *,
-    basin_version_id: str,
-    z: int,
-    x: int,
-    y: int,
-) -> bytes:
-    return _fetch_postgis_tile_bytes(session, "met-stations", {"basin_version_id": basin_version_id}, z=z, x=x, y=y)
-
-
 def _river_network_source_version(session: Session, basin_version_id: str) -> str:
     """Digest every river network of one basin version, per network.
 
@@ -1167,181 +781,6 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
     )
     digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
     return f"river-network-set:{digest}:{joined}"
-
-
-def _station_source_version(session: Session, basin_version_id: str) -> str:
-    try:
-        row_limit = MVT_MAX_FEATURES + 1
-        if session.get_bind().dialect.name == "sqlite":
-            rows = session.execute(
-                text(
-                    """
-                    SELECT station_id, basin_version_id, COALESCE(station_name, '') AS station_name,
-                           station_role, active_flag, geom, created_at
-                    FROM met.met_station
-                    WHERE basin_version_id = :basin_version_id
-                      AND active_flag = 1
-                    ORDER BY station_id
-                    LIMIT :limit
-                    """
-                ),
-                {"basin_version_id": basin_version_id, "limit": row_limit},
-            ).mappings().all()
-        else:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT station_id, basin_version_id, COALESCE(station_name, '') AS station_name,
-                           station_role, active_flag, encode(ST_AsEWKB(geom), 'hex') AS geom, created_at
-                    FROM met.met_station
-                    WHERE basin_version_id = :basin_version_id
-                      AND active_flag = true
-                    ORDER BY station_id
-                    LIMIT :limit
-                    """
-                ),
-                {"basin_version_id": basin_version_id, "limit": row_limit},
-            ).mappings().all()
-    except SQLAlchemyError as exc:
-        try:
-            session.rollback()
-        except SQLAlchemyError:
-            pass
-        raise ApiError(
-            status_code=424,
-            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-            message="Station MVT source inventory is unavailable for canonical .pbf tile generation.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        ) from exc
-
-    if not rows:
-        raise ApiError(
-            status_code=404,
-            code="MVT_SOURCE_IDENTITY_NOT_FOUND",
-            message="Station MVT source identity was not found for the requested basin version.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        )
-    if len(rows) > MVT_MAX_FEATURES:
-        raise ApiError(
-            status_code=413,
-            code="MVT_TILE_BUDGET_EXCEEDED",
-            message="Station MVT source inventory exceeded the configured feature budget.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        )
-    basis = {
-        "rows": [
-            [
-                row.get("station_id"),
-                row.get("basin_version_id"),
-                row.get("station_name"),
-                row.get("station_role"),
-                _station_active_flag(row.get("active_flag")),
-                row.get("geom"),
-                _format_time(row.get("created_at")) if row.get("created_at") is not None else None,
-            ]
-            for row in rows
-        ],
-    }
-    digest = hashlib.sha256(
-        json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:16]
-    return f"met-stations:{digest}:{basin_version_id}:{len(rows)}"
-
-
-def _station_active_flag(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "t", "true", "yes"}
-    return bool(value)
-
-
-def _require_hydro_mvt_source_identity(
-    session: Session,
-    *,
-    run_id: str,
-    variable: str,
-    valid_time: datetime,
-    basin_version_id: str,
-    river_network_version_id: str,
-) -> None:
-    # Issue #1341: the existence probe filters on the integer surrogate keys /
-    # enum column served by migration 000051, resolving the caller's text
-    # identity through the authority tables inside the query. An unknown
-    # identity or an out-of-vocabulary variable makes a resolution subquery
-    # NULL, so the probe finds no row and the route still answers 404 —
-    # the same outcome the text predicates produced, never a SQL error.
-    #
-    # The redundant text conjuncts that used to sit beside each key predicate
-    # went with the text columns in #1342's contract
-    # (task 6.3); the fact table is key/enum-only and there is one store.
-    row = session.execute(
-        text(
-            render_river_ts_sql(
-                """
-            SELECT 1
-            FROM hydro.river_timeseries
-            WHERE run_key = (
-                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-                  )
-              AND basin_version_key = (
-                      SELECT basin_version_key FROM core.basin_version
-                      WHERE basin_version_id = :basin_version_id
-                  )
-              AND river_network_version_key = (
-                      SELECT river_network_version_key FROM core.river_network_version
-                      WHERE river_network_version_id = :river_network_version_id
-                  )
-              AND variable_e = (
-                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                      WHERE e::text = :variable
-                  )
-              AND valid_time = :valid_time
-            LIMIT 1
-            """,
-                "narrow",
-                entry="hydro_display:mvt_source_identity_probe",
-            ).sql
-        ),
-        {
-            "run_id": run_id,
-            "variable": variable,
-            "valid_time": valid_time,
-            "basin_version_id": basin_version_id,
-            "river_network_version_id": river_network_version_id,
-        },
-    ).first()
-    if row is not None:
-        return
-    raise ApiError(
-        status_code=404,
-        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
-        message="Hydrological MVT source/time identity was not found for the requested route.",
-        details={
-            "layer_id": public_hydro_layer_id(variable),
-            "run_id": run_id,
-            "variable": variable,
-            "valid_time": _format_time(valid_time),
-            "basin_version_id": basin_version_id,
-            "river_network_version_id": river_network_version_id,
-        },
-    )
-
-
-def _require_run_source_identity(run: dict[str, Any] | Any, *, layer_id: str) -> tuple[str, str]:
-    basin_version_id = run.get("basin_version_id")
-    river_network_version_id = run.get("river_network_version_id")
-    if basin_version_id and river_network_version_id:
-        return str(basin_version_id), str(river_network_version_id)
-    raise ApiError(
-        status_code=404,
-        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
-        message="Run-scoped MVT source identity was not found for the selected ready run.",
-        details={
-            "layer_id": layer_id,
-            "run_id": run.get("run_id"),
-            "basin_version_id": basin_version_id,
-            "river_network_version_id": river_network_version_id,
-        },
-    )
 
 
 def _run_source_version(run: dict[str, Any] | Any) -> str:
@@ -1425,261 +864,4 @@ def _mvt_response(tile: Any) -> Response:
             "X-Tile-Cache": tile.cache_status,
             "X-MVT-Schema-Version": MVT_SCHEMA_VERSION,
         },
-    )
-
-
-def _default_layer_catalog(
-    session: Session,
-    *,
-    run_id: str,
-    source_version: str,
-    basin_version_id: str,
-    river_network_version_id: str,
-    river_network_source_version: str,
-    national_river_source_version: str,
-    # Left `None` by `/api/v1/layers`, which cannot compute it: the discharge
-    # entry's digest is scoped to the identity resolved BELOW. Callers that already
-    # hold a digest (tests exercising this helper directly) pass it and the
-    # identity-scoped query is skipped entirely.
-    national_hydro_source_version: str | None = None,
-    national: bool = False,
-) -> list[Layer]:
-    layers = []
-    default_cycle: str | None = None
-    for layer_id, name, layer_type, variables in PUBLIC_LAYER_DEFINITIONS:
-        if layer_id == "discharge":
-            # One national identity for the whole entry, independent of `run_id`:
-            # the default cycle comes from the fail-closed intersection, and the
-            # advertised list comes from the SAME function
-            # `/api/v1/layers/discharge/valid-times?source=&cycle=` serves, so the
-            # frontend can skip the round trip while the identity is the default.
-            default_cycle = national_discharge_cycles(session, source=NATIONAL_DISCHARGE_DEFAULT_SOURCE)[
-                "default_cycle"
-            ]
-            # `canonical_mvt_time` spelling only: seconds precision with a literal
-            # `Z`, which `fromisoformat` reads back exactly. Parsed once and reused
-            # by the valid-times call and the digest below.
-            default_cycle_instant = None if default_cycle is None else datetime.fromisoformat(default_cycle)
-            valid_time_sample = (
-                _empty_valid_times()
-                if default_cycle_instant is None
-                else national_discharge_valid_times(
-                    session,
-                    source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
-                    cycle=default_cycle_instant,
-                )
-            )
-            # The two calls above are two full helper invocations, so they hold an
-            # OUTER snapshot seam on top of the inner two-statement one each of them
-            # owns (#2087 orders that inner pair and stays out of this one). The
-            # intersection can empty out between the calls -- a network ACTIVATED
-            # with no display-ready run for `default_cycle`, or a covered run's
-            # status / coverage row being rewritten so it stops being display-ready.
-            # Both are caught by the SECOND call's own pair of reads, which is why
-            # the guard below is here. DEACTIVATION between the calls is not in that
-            # list: the second call then reads a consistent smaller state (the gone
-            # network is in neither its covered nor its active set) and confirms
-            # `default_cycle` -- correctly, since a deactivated network does not need
-            # rendering. It fails closed only when it lands INSIDE one call, between
-            # that call's two reads, AND the departing network still has coverage
-            # rows in the coverage read -- with zero rows that call is equally
-            # consistent and confirms the cycle. The contract spells the empty intersection
-            # `default_cycle = null` AND `valid_times = []` together; `(C, [])`
-            # advertises a cycle whose timeline is empty and is forbidden.
-            if not valid_time_sample.valid_times:
-                default_cycle = None
-                default_cycle_instant = None
-            if national_hydro_source_version is None:
-                # Digest the identity this entry ADVERTISES. The argument-free form
-                # keeps one row per network across ALL sources and cycles, so in the
-                # normal propagation state (some networks already on the next cycle,
-                # or an `ifs` cycle newest) it observes no run of
-                # `(default_source, default_cycle)` at all: a corrective re-run of the
-                # advertised identity would leave `metadata.version` -- and therefore
-                # the frontend's cache token and MapLibre source key -- unchanged, and
-                # browsers would keep the superseded tiles. With `default_cycle` null
-                # the entry advertises nothing addressable, so the argument-free digest
-                # is the honest input.
-                national_hydro_source_version = (
-                    national_discharge_source_version(session)
-                    if default_cycle_instant is None
-                    else national_discharge_source_version(
-                        session,
-                        source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
-                        cycle=default_cycle_instant,
-                    )
-                )
-        else:
-            valid_time_sample = _empty_valid_times()
-        layers.append(
-            Layer(
-                layer_id=layer_id,
-                layer_name=name,
-                layer_type=layer_type,
-                variables=variables,
-                metadata=layer_metadata(
-                    layer_id,
-                    run_id=run_id,
-                    valid_times=valid_time_sample.valid_times,
-                    valid_time_limit=valid_time_sample.limit,
-                    valid_time_observed_count=valid_time_sample.observed_count,
-                    valid_times_truncated=valid_time_sample.truncated,
-                    source_version=(
-                        national_river_source_version
-                        if national and layer_id == "river-network"
-                        else national_hydro_source_version
-                        if layer_id == "discharge"
-                        else river_network_source_version
-                        if layer_id in {"river-network", "met-stations"}
-                        else source_version
-                    ),
-                    basin_version_id=basin_version_id,
-                    river_network_version_id=river_network_version_id,
-                    release_blocking=not _mvt_live_postgis_enabled(session),
-                    national=layer_id == "discharge" or (national and layer_id == "river-network"),
-                    default_cycle=default_cycle if layer_id == "discharge" else None,
-                ),
-            )
-        )
-    return layers
-
-
-def _empty_valid_times(limit: int = MVT_VALID_TIME_SAMPLE_LIMIT) -> ValidTimeDiscovery:
-    return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
-
-
-def _validate_supported_hydro_variable(variable: str) -> None:
-    if variable in SUPPORTED_HYDRO_MVT_VARIABLES:
-        return
-    raise ApiError(
-        status_code=422,
-        code="VALIDATION_ERROR",
-        message="Unsupported hydrological MVT variable.",
-        details={"variable": variable, "supported": list(SUPPORTED_HYDRO_MVT_VARIABLES)},
-    )
-
-
-def _postgis_tile_params(
-    params: dict[str, Any], *, z: int, x: int, y: int, layer: str | None = None
-) -> dict[str, Any]:
-    return {
-        **params,
-        "z": z,
-        "x": x,
-        "y": y,
-        "feature_limit": feature_limit(layer),
-        "feature_coordinate_limit": MVT_MAX_COORDINATES,
-        "collection_coordinate_limit": collection_coordinate_limit(layer),
-        "max_coordinate_dimensions": 3,
-        "extent": MVT_EXTENT,
-        "buffer": MVT_BUFFER,
-        "simplification_tolerance_m": simplification_tolerance_m(z),
-    }
-
-
-def _format_time(value: Any) -> str:
-    return canonical_mvt_time(value) or str(value)
-
-
-def _require_seconds_precision_instant(value: datetime, field_name: str) -> datetime:
-    """Reject a sub-second or out-of-range instant, and normalize the rest to UTC.
-
-    `canonical_mvt_time` does not truncate: a non-zero microsecond round-trips
-    as `...:00.500000Z`. Truncating one here would serve the `12:00:00` tile
-    under a `12:00:00.500Z` request, so this is a 422 instead. The
-    zero-microsecond spellings the contract is written for -- `...T12:00:00Z`,
-    `...T12:00:00.000Z`, `...T12:00:00+00:00`, and a non-UTC
-    `...T20:00:00+08:00` -- are all accepted and collapse onto one instant, one
-    SQL bind and one cache key.
-
-    The range check and the UTC normalization both live in
-    `_require_representable_instant`, which the two legacy tile routes call on
-    their own (they must NOT inherit the sub-second rejection above -- they have
-    always accepted an in-range `...T12:00:00.500Z`). Only the sub-second gate is
-    this function's own; everything else, including the exact success-path return
-    value, is that helper's contract.
-    """
-    if value.microsecond:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="Tile time instants must be RFC3339 with seconds precision.",
-            details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
-        )
-    return _require_representable_instant(value, field_name)
-
-
-def _require_representable_instant(value: datetime, field_name: str) -> datetime:
-    """Normalize an instant to UTC, or 422 if that shift leaves `datetime`'s range.
-
-    Extracted from `_require_seconds_precision_instant` so ONE implementation
-    serves all three instant-taking tile routes plus `list_layer_valid_times` and
-    the two precip routes (#2033). A sibling copy per route is exactly how the
-    error body drifts.
-
-    `9999-12-31T23:59:59-08:00` and `0001-01-01T00:00:00+08:00` are well-formed
-    RFC3339, so every string-shape gate passes them, and `astimezone(UTC)` then
-    raises `OverflowError` -- an HTTP 500 on a public URL, and on the legacy
-    routes a 500 charged AFTER their SQL. They are bad requests, so they get the
-    same 422 every other rejected instant gets, before any statement runs.
-
-    THE TERNARY IS THE CONTRACT, not an implementation detail:
-
-    - the naive branch is load-bearing because `valid_time: datetime` is lax on
-      both legacy tile aliases, so a NAIVE instant is a real input class there; a
-      flat `value.astimezone(UTC)` would reinterpret it in SERVER-LOCAL time
-      (macOS local vs node-27 UTC+8) and newly 422 a naive extreme, and
-    - the return must stay UTC-NORMALIZED rather than the caller's original
-      object, because `precip.py::_require_whole_hour_instant` reads
-      `.minute`/`.second` off it and `_RFC3339_INSTANT_RE` accepts half-hour
-      offsets: `2026-09-02T20:00:00+05:30` (= 14:30 UTC) would otherwise pass the
-      whole-hour gate and be floored to hour 14 by `cycle_token`.
-
-    Raising `ApiError` here, rather than in `services/tiles/mvt.py`, is the
-    layering: the tile helper raises the domain-level `MvtTimeOutOfRangeError` and
-    knows nothing about HTTP. This guard runs BEFORE the helper is ever reached
-    with an out-of-range user instant, so no import of that error is needed.
-    """
-    try:
-        return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    except (OverflowError, ValueError) as exc:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="Tile time instants must be representable in UTC.",
-            details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
-        ) from exc
-
-
-def _national_source_cycle_tile_input(
-    *,
-    source: str,
-    cycle_text: str,
-    variable: str,
-    valid_time: Any,
-    z: int,
-    x: int,
-    y: int,
-    source_digest: str,
-) -> TileInput:
-    """Cache identity for the canonical national tile.
-
-    `source` and the canonicalized `cycle` ride in `source_version`, so
-    `cache_key` -- and the file cache path derived from it -- separate two
-    identities that share a variable/valid_time/z/x/y. The ETag deliberately
-    does not: `stable_etag` hashes tile bytes only and is shared by all five
-    tile layers.
-
-    Factored out of the route so the identity can be asserted without a
-    database.
-    """
-    return TileInput(
-        layer_id=public_hydro_layer_id(variable),
-        source_id=HYDRO_NATIONAL_SOURCE_ID,
-        source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{source}:{cycle_text}:{source_digest}",
-        valid_time=_format_time(valid_time),
-        z=z,
-        x=x,
-        y=y,
-        variant_id=f"variable:{variable}",
     )

@@ -96,6 +96,8 @@ uv run pytest -q \
   tests/test_shud_runtime.py \
   tests/test_model_registration.py \
   tests/test_api_contract.py \
+  tests/test_api_contract_pipeline_ops.py \
+  tests/test_api_contract_resources.py \
   tests/test_openapi_drift.py
 ```
 
@@ -105,7 +107,7 @@ Focused M18 model asset lifecycle checks:
 openspec validate --all --strict --no-interactive  # m18-model-asset-operations is archived; its specs are promoted
 uv run pytest -q tests/test_model_registration.py tests/test_model_activation_audit_integration.py
 uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py
-uv run pytest -q tests/test_api_contract.py tests/test_auth_policy_matrix.py
+uv run pytest -q tests/test_api_contract*.py tests/test_auth_policy_matrix.py
 cd apps/frontend && corepack pnpm test
 cd apps/frontend && corepack pnpm build
 ```

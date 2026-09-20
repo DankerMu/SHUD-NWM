@@ -1,8 +1,9 @@
 """Validate real API response bodies against the static OpenAPI 200 schemas.
 
 `tests/test_openapi_drift.py` only proves `openapi/nhms.v1.yaml == app.openapi()`
-(both sides can carry the same lie) and `tests/test_api_contract.py` hand-writes
-per-field assertions without ever consulting the schema. This module closes the
+(both sides can carry the same lie) and the `tests/test_api_contract*.py`
+partitions hand-write per-field assertions without ever consulting the schema.
+This module closes the
 remaining gap for the 14 routes whose 200 responses were given named component
 schemas: it drives each route through `TestClient` with the established stub /
 dependency-override machinery and validates the resulting body against the
@@ -44,7 +45,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
-from tests.test_api_contract import _ModelRegistryStore, _RunStore
+from tests.api_contract_helpers import _ModelRegistryStore, _RunStore
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -68,7 +69,8 @@ COMPONENT_REF_PREFIX = "#/components/schemas/"
 # --------------------------------------------------------------------------- #
 # Stores
 #
-# `_ModelRegistryStore` / `_RunStore` (tests/test_api_contract.py) and the
+# `_ModelRegistryStore` / `_RunStore` (tests/api_contract_helpers.py, the shared
+# doubles of the #2074 API-contract partitions) and the
 # sqlite-backed `_store` / `_client` pair (tests/test_monitoring_api.py) are
 # reused verbatim. The stores below are local because no existing stub emits
 # these shapes, or emits them thinner than the real store: the shape oracle for
@@ -123,7 +125,7 @@ class _RiverSegmentStore(_ModelRegistryStore):
 class _LifecycleModelRegistryStore(_ModelRegistryStore):
     """Production-shaped `model_lifecycle_operation` rows.
 
-    The shared `tests/test_api_contract.py` stub builds its lifecycle `model`
+    The shared `tests/api_contract_helpers.py` stub builds its lifecycle `model`
     from `set_model_active`, which is thinner than any real lifecycle row: all
     three SQL projections feeding the route --
     `_fetch_model_lifecycle_row` (`packages/common/model_registry.py:2634-2662`),

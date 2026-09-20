@@ -158,9 +158,14 @@ def test_river_network_public_identity_lookup_uses_indexed_version_table() -> No
         encoding="utf-8"
     )
 
+    # #2026: the end anchor is the facade's next definition after the split.
+    # `_river_network_source_version` stayed on the facade (it shares a patch
+    # target with `river_network_mvt_tile`); `_require_hydro_mvt_source_identity`
+    # moved to apps/api/routes/hydro_display_identity.py, so the slice now ends
+    # at `_run_source_version` and covers exactly the function under test.
     function_source = route_source[
         route_source.index("def _river_network_source_version") : route_source.index(
-            "def _require_hydro_mvt_source_identity"
+            "def _run_source_version"
         )
     ]
     assert "FROM core.river_network_version" in function_source

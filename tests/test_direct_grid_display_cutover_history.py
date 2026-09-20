@@ -367,7 +367,7 @@ def test_hydro_display_flow_product_route_sql_does_not_join_met_station() -> Non
     ``LEFT JOIN core.river_network_version rnv`` (#2156, to project
     ``geometry_generation``), and nothing else.
 
-    ``apps/api/routes/hydro_display.py::_require_hydro_mvt_source_identity``
+    ``apps/api/routes/hydro_display_identity.py::_require_hydro_mvt_source_identity``
     is the sibling MVT source-identity guard that resolves flow-plane rows
     from ``hydro.river_timeseries`` keyed by ``(run_id, basin_version_id,
     river_network_version_id, variable, valid_time)``.

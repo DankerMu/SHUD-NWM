@@ -75,7 +75,10 @@ from tests.test_sql_shape_helpers import assert_text_fact_columns as _assert_tex
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MVT_SOURCE = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="utf-8")
-HYDRO_DISPLAY_SOURCE = (REPO_ROOT / "apps" / "api" / "routes" / "hydro_display.py").read_text(
+# #2026: the existence probe (`_require_hydro_mvt_source_identity`) moved to the
+# identity owner module when the facade was split; both `_slice` anchors below
+# (that def and `def _require_run_source_identity`) are adjacent in that file.
+HYDRO_DISPLAY_SOURCE = (REPO_ROOT / "apps" / "api" / "routes" / "hydro_display_identity.py").read_text(
     encoding="utf-8"
 )
 MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
@@ -891,7 +894,9 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 # display_coverage.py 3 (run_id, river_network_version_id and variable on the
 # existence probe and on the coverage river scan).
 DISPLAY_MARKER_AID_CENSUS: dict[str, int] = {
-    "apps/api/routes/hydro_display.py": 0,
+    # #2026: the identity probe moved to the identity owner module with the facade
+    # split, so the census must count the file that actually holds the statement.
+    "apps/api/routes/hydro_display_identity.py": 0,
     "packages/common/display_coverage.py": 0,
     "services/tiles/mvt.py": 0,
 }

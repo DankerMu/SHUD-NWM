@@ -463,8 +463,15 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
 
     selected = select_tests(["openapi/nhms.v1.yaml"], repo_root=Path("."))
 
+    # #2074: the API-contract corpus was physically partitioned into three
+    # collectible files and every one of them loads `openapi/nhms.v1.yaml` at
+    # assertion level, so all three replace the single target here (the #1684
+    # rule). Literals on purpose: this is the exact-set anchor for the
+    # `openapi/**` lane, so it must never be derived from OPENAPI_CONTRACT_TESTS.
     assert selected == [
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_openapi_response_conformance.py",
@@ -473,6 +480,13 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
     ]
 
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+# #2074: the PATH_TEST_RULES pattern that owns the runtime OpenAPI patch family.
+# The facade `apps/api/openapi_patching.py` plus its seven owner modules are one
+# rule, so the two tests below bind the glob spelling in ONE place: a rule
+# rename that leaves either of them behind would silently stop matching.
+OPENAPI_PATCH_OWNER_PATTERN = "apps/api/openapi_patching*.py"
 
 
 def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> None:
@@ -489,18 +503,29 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # oracle that reads the PATCHED runtime document
     # (`main.create_app().openapi()`), proven by a `_patch_mvt_tile_openapi`
     # no-op that reds its two `test_runtime_openapi_documents_*` tile-route
-    # pins. The other candidates were measured and rejected
+    # pins. #2074 partitioned that suite and the two pins landed in two
+    # different partitions, so both are listed and the other seven are not:
+    # the #2211 criterion is "reads the document this module produces", and the
+    # rest do not. The other candidates were measured and rejected
     # — they never read the schema this module produces, so they cannot red on
     # a patch change; see the rule's comment in scripts/select_ci_tests.py.
     # Literals on purpose: this is the exact-set anchor for that rule, so it
     # must never be derived from PATH_TEST_RULES.
     selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
 
-    assert selected == sorted(
+    expected = sorted(
         {
             "tests/test_api.py",
+            # #2074: the rule itself names only the retained base path (the one
+            # API-contract partition that reads `app.openapi()`); the other two
+            # arrive through the broad `apps/api/**` rule, which this pattern also
+            # matches, and are named here because this is a SELECTION pin, not the
+            # rule's membership anchor.
             "tests/test_api_contract.py",
-            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_api_contract_pipeline_ops.py",
+            "tests/test_api_contract_resources.py",
+            "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+            "tests/test_hydro_display_mvt_scaling_national_routes.py",
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
@@ -510,6 +535,20 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             FAMILY_GUARD_PATH,
         }
     )
+    assert selected == expected
+    # #2074: the facade split moved the component schemas, the parameter
+    # builders, the nullable finalizer and the whole pipeline patch family into
+    # seven owner modules. The rule's pattern is the `openapi_patching*.py`
+    # glob, so a diff confined to ANY owner module must select the identical
+    # set — otherwise the patch owner could be edited in a PR lane that never
+    # executes the drift or 3.1-contract oracles. Derived from the tracked tree,
+    # so a new owner module that the glob fails to reach reds here.
+    owner_modules = sorted(
+        str(path) for path in Path("apps/api").glob("openapi_patching_*.py") if path.is_file()
+    )
+    assert len(owner_modules) == 7, owner_modules
+    for owner in owner_modules:
+        assert select_tests([owner], repo_root=Path(".")) == expected, owner
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
     fallback_only = set(CORE_SMOKE_TESTS) - {"tests/test_api.py"}
@@ -540,8 +579,13 @@ def test_select_tests_openapi_patch_owner_routing_reds_when_a_contract_leg_is_re
     # Constructed rule table: removing the drift suite OR the 3.1-contract suite
     # from the patch-owner rule's targets must drop it from the selection for a
     # patch-owner-only PR — both legs are load-bearing contract oracles.
+    # #2074: the rule's pattern is now the `openapi_patching*.py` glob, and this
+    # literal must track it — a stale exact-path spelling would match no rule,
+    # leave the table unpatched, and turn the assertion below into a no-op.
     from scripts import select_ci_tests
     from scripts.select_ci_tests import PathTestRule
+
+    assert sum(1 for rule in PATH_TEST_RULES if rule.pattern == OPENAPI_PATCH_OWNER_PATTERN) == 1
 
     for removed in ("tests/test_openapi_drift.py", "tests/test_openapi_31_contract.py"):
         patched = tuple(
@@ -551,15 +595,16 @@ def test_select_tests_openapi_patch_owner_routing_reds_when_a_contract_leg_is_re
                 rule.stop_on_match,
                 rule.only_when_any_changed,
             )
-            if rule.pattern == "apps/api/openapi_patching.py"
+            if rule.pattern == OPENAPI_PATCH_OWNER_PATTERN
             else rule
             for rule in PATH_TEST_RULES
         )
         monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
 
-        selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
+        for source in ("apps/api/openapi_patching.py", "apps/api/openapi_patching_pipeline.py"):
+            selected = select_tests([source], repo_root=Path("."))
 
-        assert removed not in selected, removed
+            assert removed not in selected, (removed, source)
 
 
 def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:
@@ -1150,7 +1195,20 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_display_mvt_cold_admission.py",
         "tests/test_display_publish_status_only.py",
         "tests/test_hhe_mvt_binding.py",
+        # #2074: all NINE partitions of the former single hydro-display MVT
+        # suite. Eight import services.tiles.mvt at file level;
+        # `..._catalog_cache.py` is a one-hop importer through
+        # apps/api/routes/hydro_display.py. Synced from the selector's own output
+        # per the procedure above, not hand-assembled.
         "tests/test_hydro_display_mvt_scaling.py",
+        "tests/test_hydro_display_mvt_scaling_catalog.py",
+        "tests/test_hydro_display_mvt_scaling_catalog_cache.py",
+        "tests/test_hydro_display_mvt_scaling_coverage_order.py",
+        "tests/test_hydro_display_mvt_scaling_discovery.py",
+        "tests/test_hydro_display_mvt_scaling_feature_budget.py",
+        "tests/test_hydro_display_mvt_scaling_instants.py",
+        "tests/test_hydro_display_mvt_scaling_national_routes.py",
+        "tests/test_hydro_display_mvt_scaling_national_sql.py",
         "tests/test_migrations.py",
         # #2156 (D-2): guard-derived entry, synced from the selector's own
         # output per the procedure above — the geometry-identity suite imports
@@ -1608,7 +1666,13 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
 
     assert select_tests(["apps/api/routes/precip.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: all three API-contract partitions, contributed by the broad
+        # `apps/api/**` rule. `PRECIP_SURFACE_TESTS` itself was NOT widened — it
+        # still names the retained base path only — which is what the tree-rule
+        # pin above continues to prove.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
@@ -1669,7 +1733,11 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
 
     assert select_tests(["apps/api/route_registry.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: the three broad `apps/api/**` suites are now five files — the
+        # API-contract corpus is one of them and was partitioned in three.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_monitoring_api.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
@@ -1697,7 +1765,10 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
 
     assert select_tests(["apps/api/main.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: as above — the API-contract rider is three files now.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_api_errors_logging.py",
         "tests/test_display_mvt_cold_admission.py",
         "tests/test_monitoring_api.py",
@@ -3945,6 +4016,14 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "services.slurm_gateway.real_backend",
         "tests/test_real_slurm_gateway.py",
     ),
+    # #2074 partitioned tests/test_hydro_display_mvt_scaling.py into nine files
+    # but kept the base path as one of them, so this anti-vacuity anchor still
+    # names a real direct importer of services.tiles.mvt (the base partition
+    # holds the postgis_tile_sql shape and #2030 budget cases). The registry
+    # membership is unchanged at 6 — the partitions are TEST files, not guarded
+    # modules, and they are routed by the services/tiles/mvt.py and
+    # apps/api/routes/hydro_display*.py rules in scripts/select_ci_tests.py plus
+    # the tests/hydro_display_mvt_helpers.py support-module rule.
     (
         "services/tiles/mvt.py",
         "services.tiles.mvt",
@@ -3958,6 +4037,27 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "apps/api/routes/hydro_display.py",
         "apps.api.routes.hydro_display",
         "tests/test_direct_grid_display_cutover_flip.py",
+    ),
+    # #2026: the two owner modules split out of the facade that tests import
+    # DIRECTLY, because their patch targets moved with their whole consumer set
+    # (`_fetch_postgis_tile_bytes` / `MVT_MAX_COORDINATES` /
+    # `national_discharge_cycle_coverage` to postgis, `_mvt_live_postgis_enabled`
+    # to catalog). The other four owner modules
+    # (hydro_display_{constants,models,instants,identity}.py) have NO direct
+    # non-gated importer suite — only the facade imports them — so they cannot
+    # join this registry without making the closure guard's own
+    # "derived no non-gated top-level importer suites" anti-vacuity assertion
+    # fail. They are routed by the `apps/api/routes/hydro_display*.py` glob in
+    # scripts/select_ci_tests.py instead.
+    (
+        "apps/api/routes/hydro_display_postgis.py",
+        "apps.api.routes.hydro_display_postgis",
+        "tests/test_display_mvt_cold_admission.py",
+    ),
+    (
+        "apps/api/routes/hydro_display_catalog.py",
+        "apps.api.routes.hydro_display_catalog",
+        "tests/test_api_contract.py",
     ),
 )
 
@@ -5648,7 +5748,10 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
     path = "apps/api/runtime_mode.py"
     same_name_target = "tests/test_runtime_mode.py"
     assert Path(same_name_target).is_file()
-    assert len(_effective_explicit_targets(path)) == 3
+    # #2074: five, not three — the broad rule's "three broad API suites" are five
+    # FILES since the API-contract corpus was partitioned in three. The count is a
+    # non-vacuity floor on the explicit side of the union, so it tracks files.
+    assert len(_effective_explicit_targets(path)) == 5
 
     selected = set(select_tests([path], repo_root=Path(".")))
 
@@ -9119,7 +9222,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # adapter PR. The one importer with NO owning rule anywhere,
     # tests/test_state_clone_cutover_hook.py, is not here: it gets a narrow
     # `workers/data_adapters/base.py` rule instead.
-    ("workers/data_adapters/base.py", "tests/test_api_contract.py"): "edge-consumer",
+    # #2074 partitioned tests/test_api_contract.py; `cycle_id_for` is imported at
+    # module scope by the control-plane partition (it mints the cycle ids behind the
+    # pipeline/ops routes), so the disposition follows that owner.
+    ("workers/data_adapters/base.py", "tests/test_api_contract_pipeline_ops.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_e2e_m3.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal_read_cache.py"): "edge-consumer",
@@ -9246,7 +9352,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
-    ("services/orchestrator/production_contract.py", "tests/test_api_contract.py"): "edge-consumer",
+    # #2074 partitioned tests/test_api_contract.py; the two taxonomy constants are
+    # imported at module scope by the control-plane partition, so the disposition
+    # follows that owner. The retained base path no longer names this module.
+    ("services/orchestrator/production_contract.py", "tests/test_api_contract_pipeline_ops.py"): "edge-consumer",
     ("services/orchestrator/retry.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/scheduler.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     # #1948 moved the only scheduler-facade importer in the QHH bootstrap corpus to the
@@ -10432,6 +10541,18 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_mapping_builder_algorithm.py",
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
+    # #2074: the shared doubles of the nine hydro-display MVT partitions. The
+    # base partition is the anchor because it is the one whose path three other
+    # registries already pin, so an anchor that stops deriving here means the
+    # split's own base file stopped importing the helpers — which would mean the
+    # shared surface was duplicated back into the partitions.
+    ("tests/hydro_display_mvt_helpers.py", "tests/test_hydro_display_mvt_scaling.py"),
+    # #2074: the shared doubles of the three API-contract partitions. Anchored on
+    # the retained base path for the same reason as the MVT corpus above — three
+    # other registries pin that literal string, so an anchor that stops deriving
+    # here means the base partition stopped importing the shared stores, which
+    # would mean the doubles were duplicated back into the partitions.
+    ("tests/api_contract_helpers.py", "tests/test_api_contract.py"),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
@@ -12314,15 +12435,22 @@ def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
 
 
-def test_three_guarded_closures_is_now_four_with_hydro_display() -> None:
+def test_four_guarded_closures_is_now_six_with_the_hydro_display_owner_modules() -> None:
     # #1672: hydro_display joins GUARDED_MODULE_CLOSURES. The existing guard
     # test derives the required importer set from the tree, so this asserts the
     # membership directly (the guard body in
     # test_guarded_module_rules_cover_their_non_gated_importer_closure is what
     # proves coverage).
+    # #2026: the facade split adds its two DIRECTLY imported owner modules. The
+    # four remaining owner modules are deliberately absent — no suite imports
+    # them at file level, so the closure guard could only be vacuous on them;
+    # the selector glob covers them. Pinning 6 rather than "the split happened"
+    # is what makes a silently dropped owner-module entry red.
     guarded_sources = {source_path for source_path, _, _ in GUARDED_MODULE_CLOSURES}
     assert "apps/api/routes/hydro_display.py" in guarded_sources
-    assert len(GUARDED_MODULE_CLOSURES) == 4
+    assert "apps/api/routes/hydro_display_postgis.py" in guarded_sources
+    assert "apps/api/routes/hydro_display_catalog.py" in guarded_sources
+    assert len(GUARDED_MODULE_CLOSURES) == 6
 
 
 def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
@@ -12364,6 +12492,14 @@ INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
     "packages/common/display_coverage.py",
     "services/tiles/mvt.py",
     "apps/api/routes/hydro_display.py",
+    # #2026: the display SQL split out of the facade. The identity digests /
+    # existence probe and the live-PostGIS tile SQL are what the real-DB lane
+    # exists to exercise, so a diff confined to an owner module must still
+    # trigger it. ci.yml matches all six with one
+    # `apps/api/routes/hydro_display_*.py` glob.
+    "apps/api/routes/hydro_display_postgis.py",
+    "apps/api/routes/hydro_display_identity.py",
+    "apps/api/routes/hydro_display_catalog.py",
     "apps/api/main.py",
     "scripts/node27_autopipeline.py",
     "workers/output_parser/parser.py",
