@@ -1,0 +1,86 @@
+# captured_at=2026-09-20T12:05:37Z host=node-27 log=/home/nwm/autopipe-logs/autopipe.log
+
+## 1. published>0 的 tick（2026-09-15 起）
+##    起止时间戳按行内 'autopipe: start|done' 标记提取，不受同行 JSON 前缀干扰；
+##    cycles 列是该 tick 内出现过的 "cycle" 值去重后的有序列表。
+start=[2026-09-15T02:29:22Z] done=[2026-09-15T02:29:42Z] processed=0   published=1   rc=0 elapsed_sec=20    cycles=2026-09-14T00:00:00Z
+start=[2026-09-15T05:51:40Z] done=[2026-09-15T06:12:02Z] processed=38  published=38  rc=0 elapsed_sec=1222  cycles=2026-09-14T00:00:00Z,2026-09-14T12:00:00Z
+start=[2026-09-16T15:51:40Z] done=[2026-09-16T16:13:22Z] processed=38  published=38  rc=0 elapsed_sec=1302  cycles=2026-09-14T12:00:00Z
+start=[2026-09-16T17:50:40Z] done=[2026-09-16T18:10:45Z] processed=38  published=38  rc=0 elapsed_sec=1205  cycles=2026-09-15T00:00:00Z,2026-09-14T12:00:00Z
+start=[2026-09-16T19:05:40Z] done=[2026-09-16T19:27:54Z] processed=38  published=38  rc=0 elapsed_sec=1334  cycles=2026-09-15T00:00:00Z
+start=[2026-09-16T21:24:40Z] done=[2026-09-16T21:48:09Z] processed=38  published=38  rc=0 elapsed_sec=1409  cycles=2026-09-15T00:00:00Z,2026-09-15T12:00:00Z
+start=[2026-09-16T21:48:09Z] done=[2026-09-16T22:08:29Z] processed=38  published=38  rc=0 elapsed_sec=1220  cycles=2026-09-15T12:00:00Z
+start=[2026-09-16T23:35:40Z] done=[2026-09-16T23:57:56Z] processed=38  published=38  rc=0 elapsed_sec=1336  cycles=2026-09-15T12:00:00Z,2026-09-16T00:00:00Z
+start=[2026-09-16T23:57:57Z] done=[2026-09-17T00:17:50Z] processed=38  published=38  rc=0 elapsed_sec=1193  cycles=2026-09-16T00:00:00Z
+start=[2026-09-17T06:21:40Z] done=[2026-09-17T06:55:45Z] processed=65  published=65  rc=0 elapsed_sec=2045  cycles=2026-09-16T12:00:00Z,2026-09-16T00:00:00Z
+start=[2026-09-17T06:55:45Z] done=[2026-09-17T07:05:08Z] processed=11  published=11  rc=0 elapsed_sec=563   cycles=2026-09-16T12:00:00Z
+start=[2026-09-17T18:29:40Z] done=[2026-09-17T18:38:39Z] processed=10  published=10  rc=0 elapsed_sec=539   cycles=2026-09-16T12:00:00Z
+start=[2026-09-17T18:40:40Z] done=[2026-09-17T19:17:03Z] processed=66  published=66  rc=0 elapsed_sec=2183  cycles=2026-09-17T00:00:00Z
+start=[2026-09-18T06:30:32Z] done=[2026-09-18T07:11:35Z] processed=76  published=76  rc=0 elapsed_sec=2463  cycles=2026-09-17T12:00:00Z
+start=[2026-09-18T18:05:40Z] done=[2026-09-18T18:28:35Z] processed=38  published=38  rc=0 elapsed_sec=1375  cycles=2026-09-18T00:00:00Z,2026-09-17T12:00:00Z
+start=[2026-09-18T19:30:48Z] done=[2026-09-18T19:51:55Z] processed=38  published=38  rc=0 elapsed_sec=1267  cycles=2026-09-18T00:00:00Z
+start=[2026-09-19T05:55:40Z] done=[2026-09-19T06:30:56Z] processed=38  published=31  rc=1 elapsed_sec=2116  cycles=2026-09-18T00:00:00Z
+start=[2026-09-19T06:30:56Z] done=[2026-09-19T06:53:36Z] processed=7   published=3   rc=1 elapsed_sec=1360  cycles=2026-09-18T00:00:00Z
+start=[2026-09-19T06:53:36Z] done=[2026-09-19T07:02:41Z] processed=4   published=4   rc=0 elapsed_sec=545   cycles=2026-09-18T00:00:00Z,2026-09-18T12:00:00Z
+start=[2026-09-19T07:25:40Z] done=[2026-09-19T07:41:05Z] processed=21  published=21  rc=0 elapsed_sec=925   cycles=2026-09-18T00:00:00Z,2026-09-18T12:00:00Z
+start=[2026-09-19T07:41:05Z] done=[2026-09-19T07:53:21Z] processed=17  published=17  rc=0 elapsed_sec=736   cycles=2026-09-18T12:00:00Z
+start=[2026-09-19T22:53:51Z] done=[2026-09-19T23:31:29Z] processed=76  published=76  rc=0 elapsed_sec=2258  cycles=2026-09-19T00:00:00Z
+start=[2026-09-20T06:42:40Z] done=[2026-09-20T07:06:39Z] processed=38  published=38  rc=0 elapsed_sec=1439  cycles=2026-09-19T00:00:00Z,2026-09-19T12:00:00Z
+start=[2026-09-20T07:06:39Z] done=[2026-09-20T07:29:42Z] processed=38  published=38  rc=0 elapsed_sec=1383  cycles=2026-09-19T12:00:00Z
+
+## 2. 最近 6 趟 tick（含 no-op，证明 lane 仍在跑）
+[2026-09-20T11:10:07Z] autopipe: done rc=0 elapsed_sec=27
+[2026-09-20T11:20:55Z] autopipe: done rc=0 elapsed_sec=27
+[2026-09-20T11:30:58Z] autopipe: done rc=0 elapsed_sec=26
+[2026-09-20T11:41:07Z] autopipe: done rc=0 elapsed_sec=27
+[2026-09-20T11:51:07Z] autopipe: done rc=0 elapsed_sec=27
+[2026-09-20T12:02:07Z] autopipe: done rc=0 elapsed_sec=27
+
+## 3. 活动树身份（分支 + master reflog；HEAD reflog 见 §4）
+HEAD=f9da6805c14e78e5786a4a5104480b81d428037f branch=master
+f9da6805 master@{2026-09-20 15:06:41 +0800}: pull --ff-only -q: Fast-forward
+c57272a9 master@{2026-09-20 14:59:40 +0800}: pull --ff-only -q: Fast-forward
+e0b08f3e master@{2026-09-20 13:37:03 +0800}: merge e0b08f3ebc02c09b14d79ee5520f9dd26dda451e: Fast-forward
+87236ca5 master@{2026-09-20 12:39:38 +0800}: reset: moving to 87236ca540832ab6db6da96267234d00b6c92d61
+e0b08f3e master@{2026-09-20 12:35:52 +0800}: merge e0b08f3ebc02c09b14d79ee5520f9dd26dda451e: Fast-forward
+87236ca5 master@{2026-09-20 10:53:56 +0800}: merge 87236ca540832ab6db6da96267234d00b6c92d61: Fast-forward
+4f8d9826 master@{2026-09-20 10:22:41 +0800}: pull --ff-only -q: Fast-forward
+18f53e7f master@{2026-09-20 09:14:56 +0800}: pull --ff-only: Fast-forward
+95f994a0 master@{2026-09-20 08:20:09 +0800}: reset: moving to 95f994a0cb9f8a7a703cef76cbb0c598e04ab8ad
+18af6d80 master@{2026-09-20 08:15:03 +0800}: merge 18af6d80f86c98bd4639af1868fbbabb2eb034c8: Fast-forward
+95f994a0 master@{2026-09-20 00:45:03 +0800}: pull --ff-only: Fast-forward
+40153e05 master@{2026-09-20 00:27:41 +0800}: pull --ff-only: Fast-forward
+40593a99 master@{2026-09-19 16:06:49 +0800}: pull --ff-only: Fast-forward
+8942722d master@{2026-09-19 08:57:22 +0800}: pull -q --ff-only origin master: Fast-forward
+258b06ec master@{2026-09-18 13:56:11 +0800}: pull --ff-only: Fast-forward
+a31aec64 master@{2026-09-18 09:28:37 +0800}: pull --ff-only: Fast-forward
+7ecc46be master@{2026-09-17 15:30:57 +0800}: 
+c9891c14 master@{2026-09-17 15:13:59 +0800}: merge c9891c1419b1c2e9470a0302e058369034534643: Fast-forward
+7ecc46be master@{2026-09-16 16:15:15 +0800}: pull --ff-only: Fast-forward
+f2476c8c master@{2026-09-16 15:13:17 +0800}: branch: Reset to origin/master
+
+## 4. HEAD reflog（master 恢复点 2026-09-16 15:13 CST = 07:13Z）
+f9da6805 HEAD@{2026-09-20 15:06:41 +0800}: pull --ff-only -q: Fast-forward
+c57272a9 HEAD@{2026-09-20 14:59:40 +0800}: pull --ff-only -q: Fast-forward
+e0b08f3e HEAD@{2026-09-20 13:37:03 +0800}: merge e0b08f3ebc02c09b14d79ee5520f9dd26dda451e: Fast-forward
+87236ca5 HEAD@{2026-09-20 12:39:38 +0800}: reset: moving to 87236ca540832ab6db6da96267234d00b6c92d61
+e0b08f3e HEAD@{2026-09-20 12:35:52 +0800}: merge e0b08f3ebc02c09b14d79ee5520f9dd26dda451e: Fast-forward
+87236ca5 HEAD@{2026-09-20 10:53:56 +0800}: merge 87236ca540832ab6db6da96267234d00b6c92d61: Fast-forward
+4f8d9826 HEAD@{2026-09-20 10:22:41 +0800}: pull --ff-only -q: Fast-forward
+18f53e7f HEAD@{2026-09-20 09:14:56 +0800}: pull --ff-only: Fast-forward
+95f994a0 HEAD@{2026-09-20 08:20:09 +0800}: reset: moving to 95f994a0cb9f8a7a703cef76cbb0c598e04ab8ad
+18af6d80 HEAD@{2026-09-20 08:15:03 +0800}: merge 18af6d80f86c98bd4639af1868fbbabb2eb034c8: Fast-forward
+95f994a0 HEAD@{2026-09-20 00:45:03 +0800}: pull --ff-only: Fast-forward
+40153e05 HEAD@{2026-09-20 00:27:41 +0800}: pull --ff-only: Fast-forward
+40593a99 HEAD@{2026-09-19 16:06:49 +0800}: pull --ff-only: Fast-forward
+8942722d HEAD@{2026-09-19 08:57:22 +0800}: pull -q --ff-only origin master: Fast-forward
+258b06ec HEAD@{2026-09-18 13:56:11 +0800}: pull --ff-only: Fast-forward
+a31aec64 HEAD@{2026-09-18 09:28:37 +0800}: pull --ff-only: Fast-forward
+7ecc46be HEAD@{2026-09-17 15:30:57 +0800}: checkout: moving from 7ecc46bed18cc8b6f20030f49aa3bf43a77b6858 to master
+7ecc46be HEAD@{2026-09-17 15:30:57 +0800}: checkout: moving from master to 7ecc46bed18cc8b6f20030f49aa3bf43a77b6858
+c9891c14 HEAD@{2026-09-17 15:13:59 +0800}: merge c9891c1419b1c2e9470a0302e058369034534643: Fast-forward
+7ecc46be HEAD@{2026-09-16 16:15:15 +0800}: pull --ff-only: Fast-forward
+f2476c8c HEAD@{2026-09-16 15:13:17 +0800}: checkout: moving from issue1987-reviewed-new-415cbd1e to master
+415cbd1e HEAD@{2026-09-15 14:23:12 +0800}: checkout: moving from feat/issue-1739-batch5-clone-gate-provenance to issue1987-reviewed-new-415cbd1e
+ac0567a5 HEAD@{2026-09-15 14:22:17 +0800}: checkout: moving from issue1987-reviewed-new-415cbd1e to feat/issue-1739-batch5-clone-gate-provenance
+415cbd1e HEAD@{2026-09-15 10:28:32 +0800}: checkout: moving from hotfix/node27-rollback-pre-2073 to issue1987-reviewed-new-415cbd1e

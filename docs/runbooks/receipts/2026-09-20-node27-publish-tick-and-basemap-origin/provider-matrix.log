@@ -1,0 +1,14 @@
+# captured_at=2026-09-20T12:03:45Z host=node-27 source=/home/nwm/NWM/apps/frontend/src/components/map/m11MapRuntime.tsx (key redacted)
+## A. 非浏览器 UA（curl 默认）——key 权限类型闸
+A1 vec_w / no referer                          ua=curl    referer=-                          -> 403 116 application/json; charset=utf-8 {"resolve":"Key权限类型为:浏览器端，请使用浏览器访问！","code":301012,"msg":"权限类型错误"}
+A2 vec_w / loopback                            ua=curl    referer=http://127.0.0.1:18023/    -> 403 116 application/json; charset=utf-8 {"msg":"权限类型错误","resolve":"Key权限类型为:浏览器端，请使用浏览器访问！","code":301012}
+A3 vec_w / prod origin                         ua=curl    referer=https://test.nwm.ac.cn/    -> 403 116 application/json; charset=utf-8 {"msg":"权限类型错误","resolve":"Key权限类型为:浏览器端，请使用浏览器访问！","code":301012}
+## B. 浏览器 UA——域名白名单闸
+B1 vec_w / no referer                          ua=ua      referer=-                          -> 200 4769 image/png 
+B2 vec_w / loopback                            ua=ua      referer=http://127.0.0.1:18023/    -> 403 97 application/json; charset=utf-8 {"code":301007,"resolve":"请到API控制台查看域名配置并修改","msg":"域名不匹配"}
+B3 vec_w / prod origin                         ua=ua      referer=https://test.nwm.ac.cn/    -> 200 4769 image/png 
+B4 cva_w(注记) / loopback                    ua=ua      referer=http://127.0.0.1:18023/    -> 403 97 application/json; charset=utf-8 {"code":301007,"resolve":"请到API控制台查看域名配置并修改","msg":"域名不匹配"}
+B5 cva_w(注记) / prod origin                 ua=ua      referer=https://test.nwm.ac.cn/    -> 200 213 image/png 
+## C. 对照——非法 key 与缺 key
+C1 vec_w / bogus tk                            ua=ua      referer=https://test.nwm.ac.cn/    -> 403 79 application/json; charset=utf-8 {"resolve":"请到API控制台重新申请Key","code":301001,"msg":"非法key"}
+C2 vec_w / 无 tk 参数                       ua=ua      referer=https://test.nwm.ac.cn/    -> 418 3223 text/html; charset=utf-8 <!DOCTYPE html><html style="height:100%;width:100%"><head><meta http-equiv="Content-Type" content="text/html; charset=ut
