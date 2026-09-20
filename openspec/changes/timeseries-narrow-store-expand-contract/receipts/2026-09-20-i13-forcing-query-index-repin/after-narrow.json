@@ -1,0 +1,184 @@
+{
+  "data": {
+    "availability": {
+      "quality_flags": [
+        "shorter_horizon"
+      ],
+      "quality_notes": [
+        {
+          "available_end_time": "2026-09-25T21:00:00Z",
+          "available_horizon_hours": 165,
+          "code": "SHORTER_HORIZON",
+          "expected_horizon_hours": 168,
+          "message": "Available horizon is shorter than the default seven-day display window."
+        }
+      ],
+      "ready": true,
+      "unavailable_reasons": []
+    },
+    "available_horizon_hours": 165,
+    "basin_id": "basins_qhh",
+    "basin_version_id": "basins_qhh_vbasins",
+    "cycle_time": "2026-09-19T00:00:00Z",
+    "expected_horizon_hours": 168,
+    "expected_segment_count": 1633,
+    "expected_station_count": 71,
+    "forcing_valid_time_end": "2026-09-25T21:00:00Z",
+    "forcing_valid_time_start": "2026-09-19T00:00:00Z",
+    "forcing_version_id": "forc_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+    "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+    "quality": {
+      "candidate_limit": 1,
+      "context_limit": 10,
+      "query_indexes": [
+        {
+          "columns": [
+            "LOWER(source_id)",
+            "run_type",
+            "basin_version_id",
+            "cycle_time DESC",
+            "run_id DESC"
+          ],
+          "index": "hydro_run_qhh_latest_candidate_idx",
+          "predicate": "cycle_time IS NOT NULL AND status IN ('succeeded', 'parsed', 'published')",
+          "status": "covered_by_latest_product_candidate_index",
+          "table": "hydro.hydro_run"
+        },
+        {
+          "columns": [
+            "basin_id",
+            "basin_version_id"
+          ],
+          "index": "basin_version_qhh_latest_lookup_idx",
+          "status": "covered_by_latest_product_basin_lookup_index",
+          "table": "core.basin_version"
+        },
+        {
+          "columns": [
+            "run_key",
+            "basin_version_key",
+            "river_network_version_key",
+            "variable_e",
+            "valid_time DESC"
+          ],
+          "index": "river_ts_selected_identity_key_valid_time_idx",
+          "status": "covered_by_selected_identity_key_valid_time_index",
+          "table": "hydro.river_timeseries"
+        },
+        {
+          "columns": [
+            "forcing_version_key",
+            "variable_e",
+            "valid_time DESC"
+          ],
+          "index": "forcing_ts_version_variable_time_key_idx",
+          "status": "covered_by_version_variable_time_key_index",
+          "table": "met.forcing_station_timeseries"
+        },
+        {
+          "columns": [
+            "model_id",
+            "station_id",
+            "variable",
+            "LOWER(source_id)"
+          ],
+          "index": "interp_weight_qhh_latest_membership_idx",
+          "status": "covered_by_latest_product_station_membership_index",
+          "table": "met.interp_weight"
+        }
+      ],
+      "required_station_variables": [
+        "PRCP",
+        "TEMP",
+        "RH",
+        "wind",
+        "Rn",
+        "Press"
+      ],
+      "river_sample_count": 271078,
+      "search_limit": 1,
+      "station_sample_count": 23856,
+      "station_variable_coverage": [
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "PRCP"
+        },
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "Press"
+        },
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "RH"
+        },
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "Rn"
+        },
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "TEMP"
+        },
+        {
+          "missing_quality_flag_samples": 0,
+          "missing_unit_samples": 0,
+          "quality_flag_count": 1,
+          "sample_count": 3976,
+          "station_count": 71,
+          "unit_count": 1,
+          "valid_time_end": "2026-09-25T21:00:00Z",
+          "valid_time_start": "2026-09-19T00:00:00Z",
+          "variable": "wind"
+        }
+      ]
+    },
+    "river_network_version_id": "basins_qhh_rivnet_vbasins",
+    "river_valid_time_end": "2026-09-25T21:00:00Z",
+    "river_valid_time_start": "2026-09-19T00:00:00Z",
+    "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+    "run_status": "published",
+    "segment_count": 1633,
+    "shorter_horizon": true,
+    "source_id": "GFS",
+    "station_count": 71,
+    "status": "ready",
+    "valid_time_end": "2026-09-25T21:00:00Z",
+    "valid_time_start": "2026-09-19T00:00:00Z"
+  },
+  "status": "ok"
+}
