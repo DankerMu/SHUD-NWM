@@ -13,14 +13,20 @@
 - [x] 2.4 Verify live retention/disk capacity, then measure standalone full-cycle cold prewarm in a fresh empty namespace: counts/time/cache growth, no discharge failures/deadline skips, fresh files not selected for deletion. A later contention-recovery fill is not cold-budget proof.
 - [x] 2.5 Node-27 same-worker live cold burst plus hot/catalog probes: positive cold successes, declared bounded 503 excess, hot/catalog 200, zero river/cache-hit/catalog 500s and zero QueuePool timeout; capture per-request cold max/p95 and actual workload.
 - [x] 2.6 Node-27 complete-axis 4x playback after prewarm: actual browser/proxy-to-candidate or equivalent public HTTP traffic with explicit scope, predominantly cache hits, zero fast-surface 500s; record what was actually exercised.
-- [ ] 2.7 In the same deployment window apply code/cold cap and display-role timeout/parallel ceiling, with before/after capacity, role settings, EXPLAIN and production C1-C4 live receipt; preserve exact rollback state.
-- [ ] 2.8 Publish receipt with A keep/change decisions and pre/post failure/latency comparison, all #2346 body/comment acceptance items mapped; cross-review and CI must be clean before merge.
+- [x] 2.7 In the same deployment window apply code/cold cap and display-role timeout/parallel ceiling, with before/after capacity, role settings, EXPLAIN and production C1-C4 live receipt; preserve exact rollback state.
+- [x] 2.8 Publish receipt with A keep/change decisions and pre/post failure/latency comparison, all #2346 body/comment acceptance items mapped; cross-review and CI must be clean before merge.
 
-## Deployment hold (2026-09-17)
+## Historical deployment hold (2026-09-17)
 
 The reviewed joint candidate was applied on node-27, then formal public C4 produced `FAIL / JOB_LOG_MISSING / ops`, the existing #2420 blocker. Exact code/env/role/frontend rollback was executed and independently checked healthy. The user explicitly selected **“保持回滚，等待 #2420”**, not a scoped waiver. PR #2450 stays draft/unmerged; #2121-A and #2346 step two remain one held deployment batch. Tasks 2.7 and 2.8 intentionally remain unchecked until #2420 is resolved and joint acceptance is rerun.
 
 Evidence: `docs/runbooks/receipts/2026-09-17-issue2121-2346-joint.md`. Source round1 (three seats) is clean at `c9891c14`; this does not claim C4 acceptance or final-head merge-gate completion. Candidate tests reported 1258 passed; standalone full-cycle cold took 189.693s; same-worker fast probes had zero500/QueuePool timeout; China-framed 4x browser playback hit223/223 and222/222. Preserve the recorded failed attempts and rollback, not just successful samples.
+
+## Resumed acceptance (2026-09-20)
+
+#2420 is closed through #2508, with its specification archived through #2521. The rebased joint source passed fresh review, 1328 node-27 targeted tests and CI run 35488042839. Current receipt: `docs/runbooks/receipts/2026-09-20-issue2121-2346-joint.json`.
+
+Source `e0b08f3ebc02c09b14d79ee5520f9dd26dda451e` passed independent empty-cache full-cycle warming (1611 requests, 146.792s), single-worker same-pool contention, and full-axis 4Hz HTTP replay (672/672 hits). The first production attempt was rolled back after two readonly probes hit compression locks (`55P03`); that failed attempt remains in the receipt. After the complete compression invocation ended naturally, the second coupled deployment passed both sources' 23/23 permission probes and all formal public C4 freeze/browser/bind/verify stages. Production remains two workers, pool8+8/cold8, role30s/parallel2. Both timers were restored. Final evidence-only commit CI remains a merge gate, not a replacement for current-source live acceptance.
 
 ## Evidence Floor and oracle integrity
 Baseline receipt already committed at af61cccc after B merge d3d09d9be: 183/183 misses, 18.771s, p95 2.494663s, max 3.124972s, no failures/skips. EXPLAIN GFS z4/12/6 at that cycle: 2032.815ms, no parallel nodes (session timeout 30s only; role unchanged). Full-axis costs and same-worker isolation are NOT inferred from that baseline.

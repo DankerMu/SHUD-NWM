@@ -1,0 +1,1583 @@
+{
+  "schema": "nhms.issue2121-2346-joint-acceptance.v1",
+  "date": "2026-09-20",
+  "status": "PASS",
+  "pr": 2450,
+  "issues": [
+    2121,
+    2346
+  ],
+  "reviewed_source_sha": "de6e1aac0ceb646e0700f1699e7cbaf6c8ec7ba1",
+  "deployed_candidate_sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+  "prior_runtime_sha": "87236ca540832ab6db6da96267234d00b6c92d61",
+  "verification": {
+    "node27_targeted_tests": 1328,
+    "github_ci_run": 35488042839,
+    "github_ci_status": "PASS",
+    "source_review": "PASS; no findings",
+    "local": [
+      "ruff",
+      "both strict OpenSpec changes",
+      "frontend typecheck",
+      "check:types",
+      "check:api-types"
+    ],
+    "fresh_frontend_build": "node27 Vite build PASS"
+  },
+  "decisions": {
+    "keep": [
+      "prewarm workers=8",
+      "prewarm timeout=30s",
+      "prewarm deadline=540s",
+      "pool=8+8 per API worker",
+      "API workers=2",
+      "14-day PBF retention"
+    ],
+    "change": [
+      "full published default-cycle prewarm, no 12h truncation",
+      "cold admission=8 per worker",
+      "role statement_timeout=30s",
+      "role max_parallel_workers_per_gather=2"
+    ],
+    "parallel_ceiling_reason": "Both measured EXPLAIN plans launched zero parallel workers; 2 is a defensive ceiling, not a measured speedup.",
+    "not_changed": [
+      "tile SQL optimization",
+      "digest TTL",
+      "separate DB engine",
+      "frontend throttling",
+      "node22 runtime"
+    ]
+  },
+  "scope_notes": [
+    "Independent full-cold namespace used two workers and empty application cache; PostgreSQL/OS caches were not reset.",
+    "Independent contention namespace used exactly one worker to force all requests through the same pool. Production remains two workers.",
+    "Contention prewarm rc=1 and 301 controlled overload failures are retained; independent recovery fill rc=0 is not cold-budget proof.",
+    "672/672 cache hits is a complete-axis 4Hz HTTP replay, not a browser-playback claim.",
+    "Expected IFS precipitation gaps remain seven typed 404 responses, not successful PNG renders.",
+    "Client session sampling is not a QueuePool checkout measurement.",
+    "Historical 183-request baseline and 1611-request full-cycle measurement have different scopes; no apples-to-apples speedup is claimed."
+  ],
+  "raw_evidence_root": "/home/nwm/tmp/issue2450-joint-20260920",
+  "evidence": {
+    "full-cold/receipt.json": {
+      "sha256": "ccd733a0ce2ef58520aa66f44e04b244922d32193efdbb8a3d4f84335d4a4b12",
+      "data": {
+        "sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+        "mode": "full-cold",
+        "base_url": "http://127.0.0.1:8092",
+        "initial_cache": {
+          "files": 0,
+          "bytes": 0
+        },
+        "production_role_mutated": false,
+        "sources": {
+          "gfs": {
+            "cycle": "2026-09-19T00:00:00Z",
+            "valid_times": [
+              "2026-09-19T00:00:00Z",
+              "2026-09-19T03:00:00Z",
+              "2026-09-19T06:00:00Z",
+              "2026-09-19T09:00:00Z",
+              "2026-09-19T12:00:00Z",
+              "2026-09-19T15:00:00Z",
+              "2026-09-19T18:00:00Z",
+              "2026-09-19T21:00:00Z",
+              "2026-09-20T00:00:00Z",
+              "2026-09-20T03:00:00Z",
+              "2026-09-20T06:00:00Z",
+              "2026-09-20T09:00:00Z",
+              "2026-09-20T12:00:00Z",
+              "2026-09-20T15:00:00Z",
+              "2026-09-20T18:00:00Z",
+              "2026-09-20T21:00:00Z",
+              "2026-09-21T00:00:00Z",
+              "2026-09-21T03:00:00Z",
+              "2026-09-21T06:00:00Z",
+              "2026-09-21T09:00:00Z",
+              "2026-09-21T12:00:00Z",
+              "2026-09-21T15:00:00Z",
+              "2026-09-21T18:00:00Z",
+              "2026-09-21T21:00:00Z",
+              "2026-09-22T00:00:00Z",
+              "2026-09-22T03:00:00Z",
+              "2026-09-22T06:00:00Z",
+              "2026-09-22T09:00:00Z",
+              "2026-09-22T12:00:00Z",
+              "2026-09-22T15:00:00Z",
+              "2026-09-22T18:00:00Z",
+              "2026-09-22T21:00:00Z",
+              "2026-09-23T00:00:00Z",
+              "2026-09-23T03:00:00Z",
+              "2026-09-23T06:00:00Z",
+              "2026-09-23T09:00:00Z",
+              "2026-09-23T12:00:00Z",
+              "2026-09-23T15:00:00Z",
+              "2026-09-23T18:00:00Z",
+              "2026-09-23T21:00:00Z",
+              "2026-09-24T00:00:00Z",
+              "2026-09-24T03:00:00Z",
+              "2026-09-24T06:00:00Z",
+              "2026-09-24T09:00:00Z",
+              "2026-09-24T12:00:00Z",
+              "2026-09-24T15:00:00Z",
+              "2026-09-24T18:00:00Z",
+              "2026-09-24T21:00:00Z",
+              "2026-09-25T00:00:00Z",
+              "2026-09-25T03:00:00Z",
+              "2026-09-25T06:00:00Z",
+              "2026-09-25T09:00:00Z",
+              "2026-09-25T12:00:00Z",
+              "2026-09-25T15:00:00Z",
+              "2026-09-25T18:00:00Z",
+              "2026-09-25T21:00:00Z"
+            ]
+          },
+          "ifs": {
+            "cycle": "2026-09-19T00:00:00Z",
+            "valid_times": [
+              "2026-09-19T00:00:00Z",
+              "2026-09-19T03:00:00Z",
+              "2026-09-19T06:00:00Z",
+              "2026-09-19T09:00:00Z",
+              "2026-09-19T12:00:00Z",
+              "2026-09-19T15:00:00Z",
+              "2026-09-19T18:00:00Z",
+              "2026-09-19T21:00:00Z",
+              "2026-09-20T00:00:00Z",
+              "2026-09-20T03:00:00Z",
+              "2026-09-20T06:00:00Z",
+              "2026-09-20T09:00:00Z",
+              "2026-09-20T12:00:00Z",
+              "2026-09-20T15:00:00Z",
+              "2026-09-20T18:00:00Z",
+              "2026-09-20T21:00:00Z",
+              "2026-09-21T00:00:00Z",
+              "2026-09-21T03:00:00Z",
+              "2026-09-21T06:00:00Z",
+              "2026-09-21T09:00:00Z",
+              "2026-09-21T12:00:00Z",
+              "2026-09-21T15:00:00Z",
+              "2026-09-21T18:00:00Z",
+              "2026-09-21T21:00:00Z",
+              "2026-09-22T00:00:00Z",
+              "2026-09-22T03:00:00Z",
+              "2026-09-22T06:00:00Z",
+              "2026-09-22T09:00:00Z",
+              "2026-09-22T12:00:00Z",
+              "2026-09-22T15:00:00Z",
+              "2026-09-22T18:00:00Z",
+              "2026-09-22T21:00:00Z",
+              "2026-09-23T00:00:00Z",
+              "2026-09-23T03:00:00Z",
+              "2026-09-23T06:00:00Z",
+              "2026-09-23T09:00:00Z",
+              "2026-09-23T12:00:00Z",
+              "2026-09-23T15:00:00Z",
+              "2026-09-23T18:00:00Z",
+              "2026-09-23T21:00:00Z",
+              "2026-09-24T00:00:00Z",
+              "2026-09-24T03:00:00Z",
+              "2026-09-24T06:00:00Z",
+              "2026-09-24T09:00:00Z",
+              "2026-09-24T12:00:00Z",
+              "2026-09-24T15:00:00Z",
+              "2026-09-24T18:00:00Z",
+              "2026-09-24T21:00:00Z",
+              "2026-09-25T00:00:00Z",
+              "2026-09-25T03:00:00Z",
+              "2026-09-25T06:00:00Z",
+              "2026-09-25T09:00:00Z",
+              "2026-09-25T12:00:00Z",
+              "2026-09-25T15:00:00Z",
+              "2026-09-25T18:00:00Z",
+              "2026-09-25T21:00:00Z"
+            ]
+          }
+        },
+        "prewarm_rc": 0,
+        "prewarm": {
+          "schema": "nhms.node27-mvt-prewarm.v4",
+          "base_url": "http://127.0.0.1:8092",
+          "zooms": [
+            3,
+            4,
+            5
+          ],
+          "discharge_zooms": [
+            3,
+            4
+          ],
+          "workers": 8,
+          "river_tile_count": 43,
+          "requests_total": 1611,
+          "failed_count": 0,
+          "cache_hits": 0,
+          "bytes": 567847358,
+          "failures": [],
+          "elapsed_seconds": 146.792,
+          "deadline_seconds": 540,
+          "deadline_skipped": 0,
+          "prewarm_scope": "full_cycle",
+          "per_source": {
+            "gfs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 728,
+              "discharge_failed": 0,
+              "png_ok": 56,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 0,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            },
+            "ifs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 728,
+              "discharge_failed": 0,
+              "png_ok": 49,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 7,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            }
+          }
+        },
+        "status": "PASS",
+        "final_cache": {
+          "files": 1604,
+          "bytes": 567847358
+        },
+        "all_requests": {
+          "count": 1611,
+          "statuses": {
+            "200": 1604,
+            "404": 7
+          },
+          "cache": {
+            "miss": 1604,
+            "None": 7
+          },
+          "max_seconds": 2.8775334279052913,
+          "p95_seconds": 2.364907572977245
+        },
+        "by_phase": {
+          "standalone_full_cold": {
+            "count": 1611,
+            "statuses": {
+              "200": 1604,
+              "404": 7
+            },
+            "cache": {
+              "miss": 1604,
+              "None": 7
+            },
+            "max_seconds": 2.8775334279052913,
+            "p95_seconds": 2.364907572977245
+          }
+        },
+        "resources": {
+          "samples": 146,
+          "errors": [],
+          "client_connections_peak": 38,
+          "cpu_busy_peak_percent": 24.726368159203982
+        }
+      }
+    },
+    "full-cold/retention.json": {
+      "sha256": "6edab1ff794b0895ab787a30c11794bd90ca6fe496fb81cd53bdb610de69e7ae",
+      "data": {
+        "cache_root": "/home/nwm/tmp/issue2450-joint-20260920/full-cold/cache",
+        "counts": {
+          "deleted": 0,
+          "failed": 0,
+          "planned": 0,
+          "skipped": 0
+        },
+        "cutoff": "2026-09-06T04:16:14Z",
+        "deleted": [],
+        "enabled": true,
+        "execution_mode": "plan_only",
+        "failed": [],
+        "finished_at": "2026-09-20T04:16:14Z",
+        "freed_bytes": 0,
+        "plan_only": true,
+        "planned": [],
+        "precip_root_untouched": "/home/nwm/tmp/issue2450-joint-20260920/full-cold/cache/precip",
+        "reference_time": "2026-09-20T04:16:14Z",
+        "retention_days": 14,
+        "schema_version": "nhms.node27_mvt_cache_retention.production.v1",
+        "skipped": [],
+        "started_at": "2026-09-20T04:16:14Z",
+        "status": "completed"
+      }
+    },
+    "live-measurement-summary.json": {
+      "sha256": "01a3f1644c43e8798ce4b84458e8d17c25dbe8e36bfe625e1fdf566979280b45",
+      "data": {
+        "status": "PASS",
+        "sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+        "initial_cache": {
+          "files": 0,
+          "bytes": 0
+        },
+        "final_cache": {
+          "files": 1623,
+          "bytes": 568122181
+        },
+        "resources": {
+          "samples": 205,
+          "errors": [],
+          "client_connections_peak": 39,
+          "cpu_busy_peak_percent": 29.490683229813662
+        },
+        "admitted_cold_latency": {
+          "count": 170,
+          "statuses": {
+            "200": 170
+          },
+          "cache": {
+            "miss": 170
+          },
+          "max_seconds": 2.678283639252186,
+          "p95_seconds": 2.405213749036193
+        },
+        "overload_latency": {
+          "count": 664,
+          "statuses": {
+            "503": 664
+          },
+          "cache": {
+            "None": 664
+          },
+          "max_seconds": 1.1308228708803654,
+          "p95_seconds": 0.8154753777198493
+        },
+        "by_phase": {
+          "catalog_probe": {
+            "count": 189,
+            "statuses": {
+              "200": 189
+            },
+            "cache": {
+              "None": 189
+            },
+            "max_seconds": 0.6878318758681417,
+            "p95_seconds": 0.1527183330617845
+          },
+          "cold_playback": {
+            "count": 672,
+            "statuses": {
+              "200": 154,
+              "503": 518
+            },
+            "cache": {
+              "hit": 14,
+              "None": 518,
+              "miss": 140
+            },
+            "max_seconds": 2.678283639252186,
+            "p95_seconds": 1.6167771639302373
+          },
+          "cold_z10": {
+            "count": 112,
+            "statuses": {
+              "503": 94,
+              "200": 18
+            },
+            "cache": {
+              "None": 94,
+              "miss": 18
+            },
+            "max_seconds": 1.1890358780510724,
+            "p95_seconds": 1.0584151642397046
+          },
+          "concurrent_prewarm": {
+            "count": 1611,
+            "statuses": {
+              "503": 301,
+              "200": 1303,
+              "404": 7
+            },
+            "cache": {
+              "None": 308,
+              "miss": 1149,
+              "hit": 154
+            },
+            "max_seconds": 3.221016198862344,
+            "p95_seconds": 2.382280583959073
+          },
+          "cycle_probe": {
+            "count": 189,
+            "statuses": {
+              "200": 189
+            },
+            "cache": {
+              "None": 189
+            },
+            "max_seconds": 0.4901906861923635,
+            "p95_seconds": 0.08956084307283163
+          },
+          "dense_spike": {
+            "count": 64,
+            "statuses": {
+              "503": 52,
+              "200": 12
+            },
+            "cache": {
+              "None": 52,
+              "miss": 12
+            },
+            "max_seconds": 2.5227905958890915,
+            "p95_seconds": 1.739944374654442
+          },
+          "hot_probe": {
+            "count": 189,
+            "statuses": {
+              "200": 189
+            },
+            "cache": {
+              "hit": 189
+            },
+            "max_seconds": 0.5823632339015603,
+            "p95_seconds": 0.32938560703769326
+          },
+          "prime": {
+            "count": 4,
+            "statuses": {
+              "200": 4
+            },
+            "cache": {
+              "miss": 2,
+              "None": 2
+            },
+            "max_seconds": 1.9924200852401555,
+            "p95_seconds": 1.9924200852401555
+          },
+          "recovery_fill_not_cold_proof": {
+            "count": 1611,
+            "statuses": {
+              "200": 1604,
+              "404": 7
+            },
+            "cache": {
+              "hit": 1303,
+              "miss": 301,
+              "None": 7
+            },
+            "max_seconds": 2.6295847529545426,
+            "p95_seconds": 0.9727631132118404
+          },
+          "river_probe": {
+            "count": 189,
+            "statuses": {
+              "200": 189
+            },
+            "cache": {
+              "hit": 189
+            },
+            "max_seconds": 1.0339825488626957,
+            "p95_seconds": 0.20889566000550985
+          },
+          "same_key_followers": {
+            "count": 8,
+            "statuses": {
+              "200": 8
+            },
+            "cache": {
+              "miss": 1,
+              "hit": 7
+            },
+            "max_seconds": 2.2020848132669926,
+            "p95_seconds": 2.2020848132669926
+          },
+          "warm_axis_4x_http": {
+            "count": 672,
+            "statuses": {
+              "200": 672
+            },
+            "cache": {
+              "hit": 672
+            },
+            "max_seconds": 0.1668164748698473,
+            "p95_seconds": 0.07492535514757037
+          }
+        },
+        "concurrent_prewarm_rc": 1,
+        "recovery_fill_rc": 0,
+        "concurrent_prewarm": {
+          "schema": "nhms.node27-mvt-prewarm.v4",
+          "base_url": "http://127.0.0.1:8092",
+          "zooms": [
+            3,
+            4,
+            5
+          ],
+          "discharge_zooms": [
+            3,
+            4
+          ],
+          "workers": 8,
+          "river_tile_count": 43,
+          "requests_total": 1611,
+          "failed_count": 301,
+          "cache_hits": 154,
+          "bytes": 455392126,
+          "elapsed_seconds": 130.305,
+          "deadline_seconds": 540,
+          "deadline_skipped": 0,
+          "prewarm_scope": "full_cycle",
+          "per_source": {
+            "gfs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 595,
+              "discharge_failed": 133,
+              "png_ok": 56,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 0,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            },
+            "ifs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 592,
+              "discharge_failed": 136,
+              "png_ok": 49,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 7,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            }
+          }
+        },
+        "recovery_fill": {
+          "schema": "nhms.node27-mvt-prewarm.v4",
+          "base_url": "http://127.0.0.1:8092",
+          "zooms": [
+            3,
+            4,
+            5
+          ],
+          "discharge_zooms": [
+            3,
+            4
+          ],
+          "workers": 8,
+          "river_tile_count": 43,
+          "requests_total": 1611,
+          "failed_count": 0,
+          "cache_hits": 1303,
+          "bytes": 567847358,
+          "elapsed_seconds": 40.194,
+          "deadline_seconds": 540,
+          "deadline_skipped": 0,
+          "prewarm_scope": "full_cycle",
+          "per_source": {
+            "gfs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 728,
+              "discharge_failed": 0,
+              "png_ok": 56,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 0,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            },
+            "ifs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "valid_times_available": 56,
+              "valid_times_warmed": 56,
+              "discharge_requests": 728,
+              "discharge_ok": 728,
+              "discharge_failed": 0,
+              "png_ok": 49,
+              "png_not_mirrored": 0,
+              "png_window_incomplete": 7,
+              "png_out_of_contract": 0,
+              "png_failed": 0,
+              "error": null
+            }
+          }
+        },
+        "api_log_audits": {
+          "full-cold": {
+            "http500": 0,
+            "queuepool_timeout": 0,
+            "sqlalchemy_timeout": 0,
+            "tracebacks": 0,
+            "server_pids": [
+              "3248276",
+              "3248277"
+            ]
+          },
+          "contention": {
+            "http500": 0,
+            "queuepool_timeout": 0,
+            "sqlalchemy_timeout": 0,
+            "tracebacks": 0,
+            "server_pids": [
+              "3249632"
+            ]
+          }
+        }
+      }
+    },
+    "explain-before.json": {
+      "sha256": "363cc064bdac88ea49dc0e82f20f218333dd96e86c7cee72e179598afee2e17f",
+      "data": {
+        "source": "gfs",
+        "cycle": "2026-09-19T00:00:00Z",
+        "valid_time": "2026-09-19T00:00:00Z",
+        "xyz": [
+          4,
+          12,
+          6
+        ],
+        "statement_timeout": "30s",
+        "max_parallel_workers_per_gather": "20",
+        "planning_ms": 23.599,
+        "execution_ms": 1934.558,
+        "workers_planned": 0,
+        "workers_launched": 0
+      },
+      "full_plan_path": "/home/nwm/tmp/issue2450-joint-20260920/explain-before.json"
+    },
+    "explain-bounded.json": {
+      "sha256": "6a0a588983202afa277719869143d084df5baf2be49f7bec49af80352792d464",
+      "data": {
+        "source": "gfs",
+        "cycle": "2026-09-19T00:00:00Z",
+        "valid_time": "2026-09-19T00:00:00Z",
+        "xyz": [
+          4,
+          12,
+          6
+        ],
+        "statement_timeout": "30s",
+        "max_parallel_workers_per_gather": "2",
+        "planning_ms": 22.202,
+        "execution_ms": 1919.373,
+        "workers_planned": 0,
+        "workers_launched": 0
+      },
+      "full_plan_path": "/home/nwm/tmp/issue2450-joint-20260920/explain-bounded.json"
+    },
+    "deployment/before.json": {
+      "sha256": "acb0ec149ac58f403a8f919eca3dfe489e4c03ef05194cf13a905e9f89502676",
+      "data": {
+        "sha": "87236ca540832ab6db6da96267234d00b6c92d61",
+        "branch": "master",
+        "pid": "3224023",
+        "database": {
+          "max_connections": 100,
+          "reserved": 3,
+          "clients": 24,
+          "other_clients": 10,
+          "role_config": null,
+          "database_role_overrides": null
+        },
+        "effective": {
+          "role": "nhms_display_ro",
+          "statement_timeout": "0",
+          "max_parallel_workers_per_gather": "20"
+        },
+        "budget": 59,
+        "env_sha256": "6cf73372b5146aa753e050a04e6077b3f1cecb39381b5198112754c21df465da"
+      }
+    },
+    "deployment/applied.json": {
+      "sha256": "0402ebf1d1170d4c4cf4b4d081729a88a50e8b2d644a6e26052076387932368f",
+      "data": {
+        "status": "APPLIED_PENDING_ACCEPTANCE",
+        "sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+        "pid": "3254655",
+        "argv": [
+          "/home/nwm/NWM/.venv/bin/python",
+          "-m",
+          "uvicorn",
+          "apps.api.main:app",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "8080",
+          "--workers",
+          "2",
+          ""
+        ],
+        "keys": {
+          "NHMS_DISPLAY_DB_POOL_SIZE": "8",
+          "NHMS_DISPLAY_DB_MAX_OVERFLOW": "8",
+          "NHMS_DISPLAY_MVT_COLD_LIMIT": "8"
+        },
+        "database": {
+          "max_connections": 100,
+          "reserved": 3,
+          "clients": 2,
+          "other_clients": 2,
+          "role_config": [
+            "statement_timeout=30s",
+            "max_parallel_workers_per_gather=2"
+          ],
+          "database_role_overrides": null
+        },
+        "effective": {
+          "role": "nhms_display_ro",
+          "statement_timeout": "30s",
+          "max_parallel_workers_per_gather": "2"
+        },
+        "env_sha256": "776f1b166cfab10055180a370745a4b65f8b53422c342e86bc4913cc1361feba",
+        "frontend_index_sha256": "9f238b491320f1cdfd90b6738df27e3b390a17ad3086dace15b0f5288e56cf59"
+      }
+    },
+    "deployment/production-prewarm.json": {
+      "sha256": "e02dd9480b1bcb9fe3b72a32d7f2b4c0095811c9934bb31851f42453141f3192",
+      "data": {
+        "base_url": "http://127.0.0.1:8080",
+        "bytes": 567847358,
+        "cache_hits": 183,
+        "deadline_seconds": 540.0,
+        "deadline_skipped": 0,
+        "discharge_zooms": [
+          3,
+          4
+        ],
+        "elapsed_seconds": 134.45,
+        "failed_count": 0,
+        "failures": [],
+        "per_source": {
+          "gfs": {
+            "cycle": "2026-09-19T00:00:00Z",
+            "discharge_failed": 0,
+            "discharge_ok": 728,
+            "discharge_requests": 728,
+            "error": null,
+            "png_failed": 0,
+            "png_not_mirrored": 0,
+            "png_ok": 56,
+            "png_out_of_contract": 0,
+            "png_window_incomplete": 0,
+            "valid_times_available": 56,
+            "valid_times_warmed": 56
+          },
+          "ifs": {
+            "cycle": "2026-09-19T00:00:00Z",
+            "discharge_failed": 0,
+            "discharge_ok": 728,
+            "discharge_requests": 728,
+            "error": null,
+            "png_failed": 0,
+            "png_not_mirrored": 0,
+            "png_ok": 49,
+            "png_out_of_contract": 0,
+            "png_window_incomplete": 7,
+            "valid_times_available": 56,
+            "valid_times_warmed": 56
+          }
+        },
+        "prewarm_scope": "full_cycle",
+        "requests_total": 1611,
+        "river_tile_count": 43,
+        "schema": "nhms.node27-mvt-prewarm.v4",
+        "workers": 8,
+        "zooms": [
+          3,
+          4,
+          5
+        ]
+      }
+    },
+    "deployment/rollback.json": {
+      "sha256": "d990263bdd231db11191e904c2e429f19c7be854d3d2c870dcf770244f7cbcb6",
+      "data": {
+        "status": "ROLLED_BACK",
+        "sha": "87236ca540832ab6db6da96267234d00b6c92d61",
+        "effective": {
+          "role": "nhms_display_ro",
+          "statement_timeout": "0",
+          "max_parallel_workers_per_gather": "20"
+        }
+      }
+    },
+    "readonly_failure": {
+      "status": "BLOCKED",
+      "permission_probe_summary": {
+        "blocked_count": 1,
+        "failed_mutating_count": 0,
+        "operation_count": 23,
+        "passed_denial_count": 21,
+        "target_count": 12
+      },
+      "non_pass_operations": [
+        {
+          "target": "hydro.river_timeseries",
+          "column_privilege_allowed": false,
+          "command": "UPDATE hydro.river_timeseries SET run_key = run_key WHERE FALSE",
+          "execution_outcome": "blocked",
+          "message": "canceling statement due to lock timeout",
+          "operation": "UPDATE",
+          "privilege_allowed": false,
+          "reason": "mutating_probe_blocked_by_fixture_or_unexpected_database_error",
+          "rolled_back": true,
+          "schema_privilege_allowed": false,
+          "sequence_privilege_allowed": false,
+          "sqlstate": "55P03",
+          "status": "BLOCKED",
+          "table_privilege_allowed": false
+        },
+        {
+          "target": "hydro.river_timeseries",
+          "column_privilege_allowed": false,
+          "command": "DELETE FROM hydro.river_timeseries WHERE FALSE",
+          "execution_outcome": "blocked",
+          "message": "canceling statement due to lock timeout",
+          "operation": "DELETE",
+          "privilege_allowed": false,
+          "reason": "mutating_probe_blocked_by_fixture_or_unexpected_database_error",
+          "rolled_back": true,
+          "schema_privilege_allowed": false,
+          "sequence_privilege_allowed": false,
+          "sqlstate": "55P03",
+          "status": "BLOCKED",
+          "table_privilege_allowed": false
+        }
+      ],
+      "read_probes": null,
+      "role": {
+        "current_user": "nhms_display_ro",
+        "mutating_privilege_findings": [],
+        "reachable_role_findings": [],
+        "role_name": "nhms_display_ro",
+        "role_type": "readonly_candidate",
+        "session_user": "nhms_display_ro",
+        "transaction_read_only": "off",
+        "unsafe_role_attributes": {}
+      }
+    }
+  },
+  "attempt1": {
+    "status": "ROLLED_BACK",
+    "readonly": "BLOCKED: two hydro.river_timeseries mutating probes returned 55P03; 21/23 denial probes PASS",
+    "concurrent_operation": "nhms-ts-compression compress_chunk(_timescaledb_internal._hyper_9_131_chunk); observed ShareLock/ExclusiveLock on chunk. Exact contemporaneous blocker chain was not captured.",
+    "c4": "NOT_RUN",
+    "rollback": "Exact prior code/env/role/frontend restored; autopipe timer restored active. Compression was not canceled."
+  },
+  "attempt2": {
+    "status": "PASS",
+    "raw_evidence_root": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2",
+    "compression_window": "Stopped only future timer; waited for complete active invocation to finish successfully, never canceled it. Timer restored active after acceptance.",
+    "evidence": {
+      "before.json": {
+        "sha256": "44816117b6d2085aafed8ac4b19e8f8eb690c6e1b292a75bc925d600e6f0de23",
+        "data": {
+          "sha": "87236ca540832ab6db6da96267234d00b6c92d61",
+          "branch": "master",
+          "pid": "3256063",
+          "database": {
+            "max_connections": 100,
+            "reserved": 3,
+            "clients": 15,
+            "other_clients": 1,
+            "role_config": null,
+            "database_role_overrides": null
+          },
+          "effective": {
+            "role": "nhms_display_ro",
+            "statement_timeout": "0",
+            "max_parallel_workers_per_gather": "20"
+          },
+          "budget": 59,
+          "env_sha256": "6cf73372b5146aa753e050a04e6077b3f1cecb39381b5198112754c21df465da"
+        }
+      },
+      "applied.json": {
+        "sha256": "1a3b99cb8f48dee2251c7536f449a80a6dcd75bff7a7eda23292ec4a0c4d9676",
+        "data": {
+          "status": "APPLIED_PENDING_ACCEPTANCE",
+          "sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "pid": "3270965",
+          "argv": [
+            "/home/nwm/NWM/.venv/bin/python",
+            "-m",
+            "uvicorn",
+            "apps.api.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8080",
+            "--workers",
+            "2",
+            ""
+          ],
+          "keys": {
+            "NHMS_DISPLAY_DB_POOL_SIZE": "8",
+            "NHMS_DISPLAY_DB_MAX_OVERFLOW": "8",
+            "NHMS_DISPLAY_MVT_COLD_LIMIT": "8"
+          },
+          "database": {
+            "max_connections": 100,
+            "reserved": 3,
+            "clients": 1,
+            "other_clients": 1,
+            "role_config": [
+              "statement_timeout=30s",
+              "max_parallel_workers_per_gather=2"
+            ],
+            "database_role_overrides": null
+          },
+          "effective": {
+            "role": "nhms_display_ro",
+            "statement_timeout": "30s",
+            "max_parallel_workers_per_gather": "2"
+          },
+          "env_sha256": "776f1b166cfab10055180a370745a4b65f8b53422c342e86bc4913cc1361feba",
+          "frontend_index_sha256": "9f238b491320f1cdfd90b6738df27e3b390a17ad3086dace15b0f5288e56cf59"
+        }
+      },
+      "production-prewarm.json": {
+        "sha256": "fed38317fdf07d1fe519d4a6ed2c87240ea2376d75934dbe1bcc212b8a1ca1f5",
+        "data": {
+          "base_url": "http://127.0.0.1:8080",
+          "bytes": 567847358,
+          "cache_hits": 1604,
+          "deadline_seconds": 540.0,
+          "deadline_skipped": 0,
+          "discharge_zooms": [
+            3,
+            4
+          ],
+          "elapsed_seconds": 8.514,
+          "failed_count": 0,
+          "failures": [],
+          "per_source": {
+            "gfs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "discharge_failed": 0,
+              "discharge_ok": 728,
+              "discharge_requests": 728,
+              "error": null,
+              "png_failed": 0,
+              "png_not_mirrored": 0,
+              "png_ok": 56,
+              "png_out_of_contract": 0,
+              "png_window_incomplete": 0,
+              "valid_times_available": 56,
+              "valid_times_warmed": 56
+            },
+            "ifs": {
+              "cycle": "2026-09-19T00:00:00Z",
+              "discharge_failed": 0,
+              "discharge_ok": 728,
+              "discharge_requests": 728,
+              "error": null,
+              "png_failed": 0,
+              "png_not_mirrored": 0,
+              "png_ok": 49,
+              "png_out_of_contract": 0,
+              "png_window_incomplete": 7,
+              "valid_times_available": 56,
+              "valid_times_warmed": 56
+            }
+          },
+          "prewarm_scope": "full_cycle",
+          "requests_total": 1611,
+          "river_tile_count": 43,
+          "schema": "nhms.node27-mvt-prewarm.v4",
+          "workers": 8,
+          "zooms": [
+            3,
+            4,
+            5
+          ]
+        }
+      },
+      "c1-c4-approval.json": {
+        "sha256": "3df0598c06009bdca516a0e2588760333d039e233609c066608d19dc7bcafec1",
+        "data": {
+          "status": "PASS",
+          "head_sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "reviewed_sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "full_c1_path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c1-approved.json",
+          "full_c1_sha256": "dca65b929774856494b613daba00dc50fdecbd080049197bbfa13726931daf18",
+          "sources": {
+            "GFS": {
+              "identity": {
+                "source": "GFS",
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df"
+              },
+              "job_id": "job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0"
+            },
+            "IFS": {
+              "identity": {
+                "source": "IFS",
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6"
+              },
+              "job_id": "job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23"
+            }
+          }
+        }
+      },
+      "c4/acceptance.json": {
+        "sha256": "ae88dd0b2b06bdb417e81c7bdf4246269f909f5c763426846936157cbc34e71b",
+        "data": {
+          "accepted_at": "2026-09-20T05:38:05.945895Z",
+          "artifact": "nhms-c4-production-acceptance",
+          "binding": {
+            "identity": {
+              "sha256": "090e58e5cc035bf46ab25bb5519d10a805ac9a301c8efd5ac196c30776dbdfca",
+              "st_ctime_ns": 1789882685739783374,
+              "st_dev": 64769,
+              "st_ino": 88101506,
+              "st_mode": 384,
+              "st_mtime_ns": 1789882685735783280,
+              "st_nlink": 1,
+              "st_size": 1382,
+              "st_uid": 1005
+            },
+            "parent": {
+              "st_dev": 64769,
+              "st_ino": 88101498,
+              "st_mode": 448,
+              "st_uid": 1005
+            },
+            "path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/binding.json"
+          },
+          "bracket": {
+            "cmd_end": 1789882685,
+            "cmd_start": 1789882677
+          },
+          "c4": {
+            "identity": {
+              "sha256": "7e9c598d5e1e62d40719c9ffb8c48a6ff72c52fdda32ade083613a7492fc9c9f",
+              "st_ctime_ns": 1789882685395775249,
+              "st_dev": 64769,
+              "st_ino": 88101551,
+              "st_mode": 384,
+              "st_mtime_ns": 1789882685391775155,
+              "st_nlink": 1,
+              "st_size": 2343,
+              "st_uid": 1005
+            },
+            "parent": {
+              "st_dev": 64769,
+              "st_ino": 88101498,
+              "st_mode": 448,
+              "st_uid": 1005
+            },
+            "path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/nhms-frontend-c4-live-evidence-issue2450.json"
+          },
+          "c4_inputs": {
+            "api_origin": "https://test.nwm.ac.cn",
+            "basin_id": "basins_qhh",
+            "frontend_origin": "https://test.nwm.ac.cn",
+            "receipt": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/nhms-frontend-c4-live-evidence-issue2450.json",
+            "segment_id": "basins_qhh_shud_reach_000001"
+          },
+          "freeze": {
+            "identity": {
+              "sha256": "5c5d389419a1a6da44aea036503b7321dff5410eb5dacc4979db8a5d53fcd99d",
+              "st_ctime_ns": 1789882676883573506,
+              "st_dev": 64769,
+              "st_ino": 88101503,
+              "st_mode": 384,
+              "st_mtime_ns": 1789882676883573506,
+              "st_nlink": 1,
+              "st_size": 1028,
+              "st_uid": 1005
+            },
+            "parent": {
+              "st_dev": 64769,
+              "st_ino": 88101498,
+              "st_mode": 448,
+              "st_uid": 1005
+            },
+            "path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/freeze.json"
+          },
+          "reviewed_sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "schema_version": "1.0",
+          "stage": "verify",
+          "status": "PASS"
+        }
+      },
+      "c4/binding.json": {
+        "sha256": "090e58e5cc035bf46ab25bb5519d10a805ac9a301c8efd5ac196c30776dbdfca",
+        "data": {
+          "artifact": "nhms-c4-production-acceptance-binding",
+          "bound_at": "2026-09-20T05:38:05.740306Z",
+          "bracket": {
+            "cmd_end": 1789882685,
+            "cmd_start": 1789882677
+          },
+          "c4": {
+            "identity": {
+              "sha256": "7e9c598d5e1e62d40719c9ffb8c48a6ff72c52fdda32ade083613a7492fc9c9f",
+              "st_ctime_ns": 1789882685395775249,
+              "st_dev": 64769,
+              "st_ino": 88101551,
+              "st_mode": 384,
+              "st_mtime_ns": 1789882685391775155,
+              "st_nlink": 1,
+              "st_size": 2343,
+              "st_uid": 1005
+            },
+            "parent": {
+              "st_dev": 64769,
+              "st_ino": 88101498,
+              "st_mode": 448,
+              "st_uid": 1005
+            },
+            "path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/nhms-frontend-c4-live-evidence-issue2450.json"
+          },
+          "c4_inputs": {
+            "api_origin": "https://test.nwm.ac.cn",
+            "basin_id": "basins_qhh",
+            "frontend_origin": "https://test.nwm.ac.cn",
+            "receipt": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/nhms-frontend-c4-live-evidence-issue2450.json",
+            "segment_id": "basins_qhh_shud_reach_000001"
+          },
+          "freeze": {
+            "identity": {
+              "sha256": "5c5d389419a1a6da44aea036503b7321dff5410eb5dacc4979db8a5d53fcd99d",
+              "st_ctime_ns": 1789882676883573506,
+              "st_dev": 64769,
+              "st_ino": 88101503,
+              "st_mode": 384,
+              "st_mtime_ns": 1789882676883573506,
+              "st_nlink": 1,
+              "st_size": 1028,
+              "st_uid": 1005
+            },
+            "parent": {
+              "st_dev": 64769,
+              "st_ino": 88101498,
+              "st_mode": 448,
+              "st_uid": 1005
+            },
+            "path": "/home/nwm/tmp/issue2450-joint-20260920/deployment-attempt2/c4/freeze.json"
+          },
+          "reviewed_sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "schema_version": "1.0",
+          "stage": "bind"
+        }
+      },
+      "final-audit.json": {
+        "sha256": "e239f68e22ecb5f17e31d83700d56830b4b88a18699159ba90c2c44608d71fc8",
+        "data": {
+          "status": "PASS",
+          "sha": "e0b08f3ebc02c09b14d79ee5520f9dd26dda451e",
+          "pid": "3270965",
+          "api_log_audit": {
+            "http_500": 0,
+            "queuepool_timeout": 0,
+            "sqlalchemy_timeout": 0,
+            "traceback": 0
+          },
+          "api_log_sha256": "408642040e5ac5c5cbab10f8644da2968202c2f28072c390100a1de954456f92",
+          "api_pgoptions": null,
+          "public_checks": {
+            "/": 200,
+            "/api/v1/layers": 200,
+            "/api/v1/tiles/river-network-national/10/797/397.pbf": 200
+          },
+          "load_average": [
+            0.80859375,
+            0.443359375,
+            0.41064453125
+          ],
+          "disk": "Filesystem                         Size  Used Avail Use% Mounted on\n/dev/mapper/ubuntu--vg-ubuntu--lv   98G   47G   47G  51% /\n/dev/mapper/ubuntu--vg-home        1.7T  522G  1.1T  34% /home\n/dev/md0                            15T  1.1T   13T   8% /data/GHDC\n",
+          "timers": "Id=nhms-node27-autopipe.timer\nActiveState=active\n\nId=nhms-node27-timeseries-compression.timer\nActiveState=active\n"
+        }
+      },
+      "after_capacity": {
+        "max_connections": 100,
+        "reserved": 3,
+        "clients": 25,
+        "applications": [
+          {
+            "application_name": "nhms-api-pipeline",
+            "count": 10
+          },
+          {
+            "application_name": "psql",
+            "count": 1
+          },
+          {
+            "application_name": "nhms-display-api",
+            "count": 14
+          }
+        ]
+      },
+      "readonly-gfs": {
+        "sha256": "c0f71cd7112c3f56d3f102b23fd12db0cbacee7a56208dfbe16007ec9475178b",
+        "data": {
+          "status": "PASS",
+          "display_identity": {
+            "cycle_time": "2026-09-19T00:00:00Z",
+            "job_id": "job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0",
+            "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+            "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+            "source": "GFS"
+          },
+          "evidence_dir": "artifacts/issue2450-readonly-e0b08f3e/issue2450-attempt2-gfs/db/readonly-db-boundary",
+          "permission_probe_summary": {
+            "blocked_count": 0,
+            "failed_mutating_count": 0,
+            "operation_count": 23,
+            "passed_denial_count": 23,
+            "target_count": 12
+          },
+          "route_smoke": [
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "health",
+              "path": "/health",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "runtime_config",
+              "path": "/api/v1/runtime/config",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "models",
+              "path": "/api/v1/models?active=all&limit=1",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "stations",
+              "path": "/api/v1/met/stations?model_id=dg_0883c7e9c1006c6fd347df500315e9df&limit=1",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "latest_product",
+              "path": "/api/v1/mvp/qhh/latest-product?source=GFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df&model_id=dg_0883c7e9c1006c6fd347df500315e9df",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "source": "GFS",
+                "source_id": "GFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "jobs",
+              "path": "/api/v1/jobs?source=GFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df&model_id=dg_0883c7e9c1006c6fd347df500315e9df&limit=1",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "source": "GFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "pipeline_status",
+              "path": "/api/v1/pipeline/status?source=GFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df&model_id=dg_0883c7e9c1006c6fd347df500315e9df",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "source": "GFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "pipeline_stages",
+              "path": "/api/v1/pipeline/stages?source=GFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df&model_id=dg_0883c7e9c1006c6fd347df500315e9df",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "source": "GFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "job_logs",
+              "path": "/api/v1/jobs/job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0/logs?source=GFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df&model_id=dg_0883c7e9c1006c6fd347df500315e9df&job_id=job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "job_id": "job_fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df_forecast_reconciled_51630_0",
+                "model_id": "dg_0883c7e9c1006c6fd347df500315e9df",
+                "run_id": "fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df",
+                "source": "GFS"
+              },
+              "status": "PASS"
+            }
+          ],
+          "role": {
+            "current_user": "nhms_display_ro",
+            "mutating_privilege_findings": [],
+            "reachable_role_findings": [],
+            "role_name": "nhms_display_ro",
+            "role_type": "readonly_candidate",
+            "session_user": "nhms_display_ro",
+            "transaction_read_only": "off",
+            "unsafe_role_attributes": {}
+          },
+          "manual_action_probes": [
+            {
+              "database_url_configured": true,
+              "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "http_status": 409,
+              "method": "POST",
+              "name": "display_retry_manual_action",
+              "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "path": "/api/v1/runs/fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df/retry",
+              "status": "PASS",
+              "write_dependency_constructed": false,
+              "write_executed": false
+            },
+            {
+              "database_url_configured": true,
+              "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "http_status": 409,
+              "method": "POST",
+              "name": "display_cancel_manual_action",
+              "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "path": "/api/v1/runs/fcst_gfs_2026091900_dg_0883c7e9c1006c6fd347df500315e9df/cancel",
+              "status": "PASS",
+              "write_dependency_constructed": false,
+              "write_executed": false
+            }
+          ]
+        }
+      },
+      "readonly-ifs": {
+        "sha256": "1ffcac637b17b97ff8d61bf9b18cb30c8a5db635b8f4816bf0c9cec926227f0b",
+        "data": {
+          "status": "PASS",
+          "display_identity": {
+            "cycle_time": "2026-09-19T00:00:00Z",
+            "job_id": "job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23",
+            "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+            "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+            "source": "IFS"
+          },
+          "evidence_dir": "artifacts/issue2450-readonly-e0b08f3e/issue2450-attempt2-ifs/db/readonly-db-boundary",
+          "permission_probe_summary": {
+            "blocked_count": 0,
+            "failed_mutating_count": 0,
+            "operation_count": 23,
+            "passed_denial_count": 23,
+            "target_count": 12
+          },
+          "route_smoke": [
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "health",
+              "path": "/health",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "runtime_config",
+              "path": "/api/v1/runtime/config",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "models",
+              "path": "/api/v1/models?active=all&limit=1",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "stations",
+              "path": "/api/v1/met/stations?model_id=dg_9ccb261a39d51c24f4de9173fb4461b6&limit=1",
+              "reason": "display_read_route_succeeded",
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "latest_product",
+              "path": "/api/v1/mvp/qhh/latest-product?source=IFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "source": "IFS",
+                "source_id": "IFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "jobs",
+              "path": "/api/v1/jobs?source=IFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6&limit=1",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "source": "IFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "pipeline_status",
+              "path": "/api/v1/pipeline/status?source=IFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "source": "IFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "pipeline_stages",
+              "path": "/api/v1/pipeline/stages?source=IFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "source": "IFS"
+              },
+              "status": "PASS"
+            },
+            {
+              "http_status": 200,
+              "method": "GET",
+              "name": "job_logs",
+              "path": "/api/v1/jobs/job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23/logs?source=IFS&cycle_time=2026-09-19T00%3A00%3A00Z&run_id=fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6&model_id=dg_9ccb261a39d51c24f4de9173fb4461b6&job_id=job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23",
+              "reason": "display_read_route_succeeded",
+              "response_identity": {
+                "cycle_time": "2026-09-19T00:00:00Z",
+                "job_id": "job_fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6_forecast_reconciled_51594_23",
+                "model_id": "dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "run_id": "fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6",
+                "source": "IFS"
+              },
+              "status": "PASS"
+            }
+          ],
+          "role": {
+            "current_user": "nhms_display_ro",
+            "mutating_privilege_findings": [],
+            "reachable_role_findings": [],
+            "role_name": "nhms_display_ro",
+            "role_type": "readonly_candidate",
+            "session_user": "nhms_display_ro",
+            "transaction_read_only": "off",
+            "unsafe_role_attributes": {}
+          },
+          "manual_action_probes": [
+            {
+              "database_url_configured": true,
+              "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "http_status": 409,
+              "method": "POST",
+              "name": "display_retry_manual_action",
+              "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "path": "/api/v1/runs/fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6/retry",
+              "status": "PASS",
+              "write_dependency_constructed": false,
+              "write_executed": false
+            },
+            {
+              "database_url_configured": true,
+              "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "http_status": 409,
+              "method": "POST",
+              "name": "display_cancel_manual_action",
+              "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+              "path": "/api/v1/runs/fcst_ifs_2026091900_dg_9ccb261a39d51c24f4de9173fb4461b6/cancel",
+              "status": "PASS",
+              "write_dependency_constructed": false,
+              "write_executed": false
+            }
+          ]
+        }
+      }
+    }
+  },
+  "acceptance_mapping": {
+    "2346_body_step_one": "attempt2 applied.json, before.json, after_capacity and public checks: pool8+8/two workers retained; coldcap8 added",
+    "2346_body_step_two": "1328 targeted regressions plus one-worker same-pool live measurements; hot/river/layers/cycles each189 HTTP200, typed664 overload503, zero pool timeouts",
+    "2346_body_live_receipt": "independent empty contention cache, source-interleaved 4Hz cold axis; admitted cold p95/max2.405214/2.678284s; CPU peak29.490683%; full logs zero500/QueuePool",
+    "2346_body_runbook": "docs/runbooks/display-readonly-live-mvt.md cold-admission capacity/configuration and joint rollback",
+    "2346_comment_explain": "hashed explain-before/ bounded plans: zero parallel workers, execution1934.558/1919.373ms; ceiling2 defensive only",
+    "2346_comment_role_settings": "attempt2 effective settings0/20 before and30s/2 after; no database-role override or API PGOPTIONS",
+    "2346_comment_full_axis_prewarm": "standalone146.792s/567847358bytes/1611requests; bothsources56times and728discharge; retention14days plan deletes0",
+    "2346_comment_playback": "complete-axis672/672 HTTP200/cachehits at4Hz after fill; production browser C4 separately bound on actual source SHA",
+    "2121_A_decisions": "decisions.keep/change; same deployment and rollback batch as2346",
+    "formal_C4": "attempt2 c4/acceptance.json PASS; browser receipt sha2567e9c598d5e1e62d40719c9ffb8c48a6ff72c52fdda32ade083613a7492fc9c9f"
+  },
+  "cleanup": {
+    "removed_throwaway_scripts": [
+      "/home/nwm/tmp/issue2450-joint-20260920/measure.py",
+      "/home/nwm/tmp/issue2450-joint-20260920/deploy.py",
+      "/home/nwm/tmp/issue2450-joint-20260920/deploy-attempt2.py",
+      "/home/nwm/tmp/issue2450-joint-20260920/c4-attempt2.py",
+      "/home/nwm/tmp/issue2450-joint-20260920/wait-compression.py"
+    ],
+    "disposable_test_database": "nwm-2420-test-db stopped",
+    "raw_receipts_logs_cache_namespaces_and_exact_rollback_backups": "retained",
+    "production_cache_purged": false
+  }
+}
