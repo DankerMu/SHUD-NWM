@@ -43,20 +43,33 @@
 
 ### 1.2 publish tick 表（`published > 0`，2026-09-15 起）
 
-[`publish-ticks.log`](publish-ticks.log) §1 原文。`cycles` 列是该 tick 内出现过的 `"cycle"` 值去重结果，
-用来区分「重发陈旧周期」与「发布上游新周期」。「活动树」列由 §1.1 的 master reflog 按 tick 起止时间
+[`publish-ticks.log`](publish-ticks.log) §1 原文。「活动树」列由 §1.1 的 master reflog 按 tick 起止时间
 **程序化套出**（reflog 时间换算为 UTC 后做区间匹配），跨越引用移动的 tick 用 `→` 标出两端。
+
+> **`cycles` 列读法（容易读错，先说清）。** 它**不是**「该 tick 发布了哪些周期」，而是
+> **MVT prewarm 阶段从 display API 拿到的 gfs / ifs 两个 `default_cycle` 快照**，去重后按出现序排列
+> （两个值 = 两源不一致，一个值 = 两源一致，**不是**一趟横跨两个周期）。
+> 链路：`scripts/node27_mvt_prewarm.py:378-379` 把 `discovery.cycle` 写进
+> `per_source[<源>]["cycle"]`，该值来自 `:203` 的 `/api/v1/layers/discharge/cycles?source=…`
+> 的 `default_cycle`，源集合是 `:60` 的 `PREWARM_SOURCES = ("gfs", "ifs")`。
+> 它是 tick **末尾**的 post-publish 状态观测，用来看「展示面现在停在哪个周期」，
+> 不能用来推断该 tick 干了什么。对照：基线 tick #1 的
+> `2026-09-14T00:00:00Z, 2026-09-14T12:00:00Z` 与 #2433 body 的
+> 「最新周期都停在 gfs `2026-09-14T00Z` / IFS `2026-09-14T12Z`」逐字吻合。
+
+另一处同样容易读错的列：
 
 > **`proc` 与 `pub` 不是分子分母。** `processed = len(run_results)`
 > （`scripts/node27_autopipeline.py:2703`）是本 tick 处理的 run 数；
-> `published` 是 `_publish_display_runs()` 里一条**全局** `UPDATE hydro.hydro_run SET
-> status='published' WHERE status='parsed'` 的 `rowcount`（`scripts/node27_autopipeline.py:1449-1461`），
+> `published` 是 `_publish_display_runs()` 里一条**全局**
+> `UPDATE hydro.hydro_run h SET status='published' WHERE h.status='parsed' AND h.parsed_at IS NOT NULL`
+> 的 `rowcount`（`scripts/node27_autopipeline.py:1449-1461`），
 > 统计的是**全库**当时从 `parsed` 迁到 `published` 的行数，与本 tick 的 `processed` 不同总体。
 > 下表里 rc=0 的 tick 两者相等，是因为当时没有 `parsed` 积压；**不能**据此把
 > `published < processed` 读成「只发布了一部分」（见 §3 finding 1）。
 > 下文的每条耗时一律用 `processed` 归一——它才是本 tick 的工作量。
 
-| # | start (UTC) | done (UTC) | rc | elapsed_s | proc/pub | cycles | 活动树（分支 `master`） |
+| # | start (UTC) | done (UTC) | rc | elapsed_s | proc/pub | gfs/ifs `default_cycle` 快照 | 活动树（分支 `master`） |
 |---|---|---|---|---|---|---|---|
 | 0 | `2026-09-15T02:29:22Z` | `02:29:42Z` | 0 | 20 | 0/1 | 09-14T00Z | `415cbd1e` 期（reflog 见 #2017 receipt） |
 | 1 | `2026-09-15T05:51:40Z` | `06:12:02Z` | 0 | **1222** | 38/38 | 09-14T00Z, 09-14T12Z | `415cbd1e`（#2017 的基线） |
@@ -89,7 +102,7 @@ tick #2 起每一个出现在「活动树」列里的 SHA——`7ecc46be`、`258
 而该窗口前后最近的两趟 publish tick 分别在 `07:05:08Z` 结束、`18:29:40Z` 开始，
 **窗口内零 publish tick**（每 10 分钟一趟的 no-op tick 照常在跑，但它们 `published=0`，不在本表内）。
 
-### 1.3 #2433 要的两个值
+### 1.3 #2433 要的值（a），与一个佐证 tick（b）
 
 **（a）master 代码上的第一趟 publish tick** —— tick #2：
 
@@ -99,28 +112,38 @@ tick #2 起每一个出现在「活动树」列里的 SHA——`7ecc46be`、`258
 ```
 
 活动树：分支 `master` @ `7ecc46be`（`origin/master` 上的 Merge PR #2428）。
-它发布的是当时镜像/DB 停留的陈旧周期 `2026-09-14T12Z`（基线 tick #1 已发过该周期，
-故这是一次重发；本 receipt 不推断重发原因）——**规模与基线完全同构（38 条）**，
-因此是 1222 s 的唯一严格可比对象。
+它的 `processed`/`published` 与基线 tick #1 **完全同构（38 条）**，因此是 1222 s 的严格可比对象。
+该 tick 末尾的展示面快照是 gfs 与 ifs 同为 `2026-09-14T12Z`（基线末尾是 gfs `09-14T00Z` /
+ifs `09-14T12Z`）；这只说明展示面前沿在这期间前移了一格，**不**说明该 tick 发布了哪个周期。
 
-**（b）第一趟携带上游新周期的 publish tick** —— tick #9：
+**（b）处理量首次明显跃升的 tick** —— tick #9（`processed` 由 38 跳到 65）：
 
 ```
 [2026-09-17T06:21:40Z] autopipe: start
 [2026-09-17T06:55:45Z] autopipe: done rc=0 elapsed_sec=2045      processed=65 published=65
-cycles = 2026-09-16T00:00:00Z, 2026-09-16T12:00:00Z
 ```
 
 活动树同为 `master` @ `7ecc46be`（tick 在 `07:13:59Z` 的 `c9891c14` 窗口开始前 18 分钟就已结束）。
+**此处的依据是 `processed` 跃升，不是 `cycles` 列**——后者只是展示面的 post-publish 快照（见 §1.2 读法）。
+单趟处理 65 个 run 说明当时有积压在被补齐，但本 receipt 不据此推断上游何时恢复。
 
-> 顺带的事实，不作因果结论：`cycles` 列显示上游从 tick #3（`2026-09-16T17:50:40Z`，周期 09-15T00Z）
-> 起就已逐周期追平，早于 #2439 修复合入的 `2026-09-17T00:40Z`。本 receipt 只记录观测值，
-> 不声称哪一次改动让上游恢复。
+> 上游恢复的时间点本 receipt **不下结论**。`cycles` 快照能说的只有「展示面在各 tick 末尾停在哪个周期」：
+> 基线 tick #1 末尾是 gfs `09-14T00Z` / ifs `09-14T12Z`，master 上第一趟 tick #2 末尾两源都是
+> `09-14T12Z`，其后逐 tick 前移至 `09-19T12Z`（tick #23）。这只是展示面前沿的推进轨迹，
+> 不是「哪一趟发布了哪个周期」，也不对 #2439 的修复与上游恢复之间的因果关系作任何声称。
 
 ### 1.4 判据核对：`rc=0` 且 `elapsed_sec` 与 1222 s 同量级
 
-`master` 上共 11 趟同规模（`processed=38`）tick，按 `elapsed_sec` 升序
-（这 11 趟与基线的 `published` 均等于其 `processed`，故与基线的比较是同工作量比较）：
+`master` 上共 **12** 趟同规模（`processed=38`）tick：#2、#3、#4、#5、#6、#7、#8、#14、#15、
+**#16**、#22、#23。下表列其中 11 趟，**显式排除 tick #16**——它 `rc=1`，2116 s / 55.7 s 每条
+（相对基线 **+73%**），其 11 个 run 在 parse 段撞 statement timeout（见 §3 finding 1），
+量的是失败重试路径而非正常发布路径，不能与基线同框比较。下面的区间与中位数断言**只覆盖这 11 趟**。
+
+口径说明：同规模指 `processed` 相同（= 本 tick 处理的 run 数，§1.2）。
+真正等价的工作量指标应是 `ingested`，但 `publish-ticks.sh` 未采集该字段；
+`published` 因是全局 rowcount（§1.2）**不能**用来论证工作量相等。
+
+按 `elapsed_sec` 升序：
 
 | tick | elapsed_s | 每条耗时 s（`elapsed_sec / processed`） | 相对基线 1222 s |
 |---|---|---|---|
@@ -137,7 +160,9 @@ cycles = 2026-09-16T00:00:00Z, 2026-09-16T12:00:00Z
 | #5 | 1409 | 37.1 | +15.3% |
 | #22 | 1439 | 37.9 | +17.8% |
 
-区间 **1193–1439 s**，中位数 1334 s（+9.2%）；基线 1222 s 落在区间内，在 12 个值里排第 4 低。
+这 11 趟的区间是 **1193–1439 s**，中位数 1334 s（+9.2%）；基线 1222 s 落在区间内，
+在这 11 趟加基线共 12 个值里排第 4 低。（把被排除的 #16 计入则区间上沿变成 2116 s，
+见上方排除理由。）
 跨规模的大 tick 用每条耗时对齐，同样落在同一带宽内：
 
 | tick | proc/pub | elapsed_s | 每条耗时 s（按 `processed`） |
@@ -154,7 +179,9 @@ cycles = 2026-09-16T00:00:00Z, 2026-09-16T12:00:00Z
 
 `publish-ticks.log` §2，取证前最近 6 趟（`2026-09-20T11:10:07Z … 12:02:07Z`）全是
 `rc=0 elapsed_sec≈27` 的 no-op tick——没有新周期可发，不是 lane 停摆；
-最新已发布周期 `2026-09-19T12Z`，与 `/home/ghdc/nwm/object-store/canonical/gfs` 的最新条目 `2026091912` 一致。
+最新已发布周期 `2026-09-19T12Z`（tick #23 末尾的展示面快照）。
+同窗口另做过一次只读 `ls /home/ghdc/nwm/object-store/canonical/gfs`，最新条目为 `2026091912`，与之一致；
+**该次 listing 未随本 receipt 入库**，此处如实标注其来源。
 
 ---
 
@@ -177,7 +204,7 @@ cycles = 2026-09-16T00:00:00Z, 2026-09-16T12:00:00Z
 | B4 | 浏览器 | `http://127.0.0.1:18023/` | `cva_w`（中文注记） | **403** | `301007` **域名不匹配** |
 | B5 | 浏览器 | `https://test.nwm.ac.cn/` | `cva_w`（中文注记） | **200** | image/png 213 B |
 | C1 | 浏览器 | `https://test.nwm.ac.cn/` | `vec_w`，伪造 key | 403 | `301001` 非法 key |
-| C2 | 浏览器 | `https://test.nwm.ac.cn/` | `vec_w`，缺 `tk` | 418 | CloudWAF 拦截页（非 provider 授权面） |
+| C2 | 浏览器 | `https://test.nwm.ac.cn/` | `vec_w`，缺 `tk` | 418 | HTML 拦截页（非 provider 授权面；body 被脚本截断至 120 字符，未保留具体拦截器标识） |
 
 A 组与 C 组是**对照**：A 证明 key 权限类型为浏览器端（非浏览器 UA 一律 `301012`，与来源无关），
 C 证明 key 本身有效（伪造 key 返回的是另一个码 `301001`）。
@@ -231,7 +258,9 @@ PR #2430 观察到的 403 是隔离来源独有的现象，不是公网故障。
   `apps/frontend/playwright.c4-display-lane.ts` 见 `observation.mapSourceError` 即返回
   `HOME_NOT_READY`（观测点 `apps/frontend/src/lib/c4DisplayEvidence/dom.ts:40`），
   与 `openspec/specs/c4-live-display-evidence/spec.md:48`「source error … MUST 阻止 PASS」一致。
-  本单**不放松**这条闸门：C4 的唯一可执行做法是**换到已在白名单内的来源**，而不是改判定。
+  本单**不放松**这条闸门：本单验证过的唯一可执行做法是**换到已在白名单内的来源**，而不是改判定。
+  （§2.1 B1 显示不带 `Referer` 时同一 key 也返回 200，即白名单闸只在带 `Referer` 时生效；
+  但「让浏览器不发 referrer」这条路本单未测，不作为可行做法列出。）
   注意 `VITE_TIANDITU_KEY` 是**构建时**内联（`import.meta.env.*`），不是运行时开关——
   「注入白名单 key」必须连同重新构建并重新部署该来源的 bundle，且先要拿到白名单含该来源的 key；
   #2436 把它列为备选且记了维护成本，本单**未验证**该路径。
@@ -240,7 +269,11 @@ PR #2430 观察到的 403 是隔离来源独有的现象，不是公网故障。
 
 ### 2.5 横幅仍诚实显示真实 source error（#2436 AC4）
 
-两侧都要证据，因为许可来源上横幅按构造不出现，光靠 §2.3 证明不了「还会显示」：
+**先说前件**：AC4 的原文是「**修复或配置变更后**，M11 source-error 横幅仍能诚实显示真实 source error…」。
+本单**没有**做任何修复或配置变更（§2.2 的结论是应用与生产配置都无需改动），故该前件为假，
+AC4 属**继承满足**而非由一份变更后 receipt 满足。下面给出的是支撑这一继承的两侧证据：
+
+两侧都要，因为许可来源上横幅按构造不出现，光靠 §2.3 证明不了「还会显示」：
 
 - **拒绝来源侧（横幅确实会亮）**：`docs/runbooks/receipts/2026-09-16-display-followup-batch-node27/node27-live-viewer-sanitized.log:4,6,8,10,12,14`
   在六个 viewport 全部记录 `providerErrorVisible:true`——同一份应用代码在 provider 拒绝时
@@ -268,6 +301,9 @@ glyph 错误仍降级为 console 警告。C4 判定链
    同段日志 22 条
    `OUTPUT_PARSE_DB_ERROR: … canceling statement due to statement timeout`
    = 11 个失败 run × 2（同一 error 串同时进 `runs.details[]` 与 `runs.failed_runs[]`）。
+   **上述 `ingested` / `failed` 计数与「22 = 11 × 2」不出自随本 receipt 入库的日志**
+   （`publish-ticks.sh` 只采 `processed` / `published`）：它们取自同一窗口对 node-27 原始日志的
+   另一次只读 `grep`，并与 [#2529](https://github.com/DankerMu/SHUD-NWM/issues/2529) 的代码级复核一致。
    已立单：[#2529](https://github.com/DankerMu/SHUD-NWM/issues/2529)。该单确认重试有效但
    **无退避、无计数、无告警**（`infra/systemd/nhms-node27-autopipe.service` 无 `OnFailure=`），
    本次无用户可见损伤；风险在同形状但**不自愈**的那一次。与 #2433 / #2436 无关，报告不修。

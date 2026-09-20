@@ -5,6 +5,10 @@
 - [x] 1.1 在 node-27 只读扫 `/home/nwm/autopipe-logs/autopipe.log`，列出 2026-09-15 起所有
       `published > 0` 的 tick：起止时间戳、`processed` / `published`、`rc`、`elapsed_sec`、
       该 tick 内出现过的 `cycle` 值。脚本随 receipt 入库。
+      **每个字段的口径必须在 receipt 里写清，不得望文生义**：`processed` 是本 tick 处理的 run 数，
+      `published` 是全局 `UPDATE … WHERE status='parsed'` 的 rowcount（两者不同总体），
+      `cycle` 是 MVT prewarm 从 display API 读到的 gfs / ifs `default_cycle` 快照
+      （tick 末尾的 post-publish 状态，**不是**该 tick 发布了哪个周期）。
 - [x] 1.2 用 `git reflog show master --date=iso` 与 `git reflog --date=iso` 程序化套出每个 tick
       运行时活动树的分支与 SHA（reflog 时间换算 UTC 后区间匹配，不手算），并逐个核对该 SHA 在
       `origin/master` 上（`git merge-base --is-ancestor`）。不在 `origin/master` 上的引用窗口
