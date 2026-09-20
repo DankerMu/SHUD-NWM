@@ -1484,6 +1484,7 @@ def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> No
         "apps/api/routes/pipeline.py",
         "apps/api/openapi_patching.py",
         "openapi/nhms.v1.yaml",
+        "services/production_closure/readonly_db_route_smoke.py",
     ):
         assert envelope in set(select_tests([source], repo_root=Path("."))), source
 
@@ -13519,6 +13520,7 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
 def test_canonical_readonly_validator_selects_its_contract() -> None:
     producers = (
         "services/production_closure/readonly_db_validation.py",
+        "services/production_closure/readonly_db_route_smoke.py",
         "scripts/validate_readonly_db_boundary.py",
     )
     for producer in producers:

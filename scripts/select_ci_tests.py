@@ -927,12 +927,14 @@ FORCING_SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 
 
 # Canonical readonly-boundary corpus. The three partitions import the generic
-# validator directly; retired selective-cold acceptance wrappers are not
-# consumers of this surviving contract.
+# validator directly; the identity-envelope suite is the fourth consumer of the
+# route-smoke identity extractor/comparison. Retired selective-cold acceptance
+# wrappers are not consumers of this surviving contract.
 READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
     "tests/test_readonly_db_validation.py",
     "tests/test_readonly_db_validation_probes.py",
     "tests/test_readonly_db_validation_routes.py",
+    "tests/test_pipeline_ops_identity_envelope.py",
 )
 
 
@@ -2438,6 +2440,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "services/production_closure/readonly_db_validation.py",
+        READONLY_DB_VALIDATION_TESTS,
+    ),
+    PathTestRule(
+        "services/production_closure/readonly_db_route_smoke.py",
         READONLY_DB_VALIDATION_TESTS,
     ),
     PathTestRule(
