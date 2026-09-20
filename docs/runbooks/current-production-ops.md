@@ -176,6 +176,13 @@ remains the owner of parse/QC/ingest/display.
 
 #### 3.1.1 Pipeline-job provenance sidecar and recovery (#2420)
 
+Live acceptance on 2026-09-20 passed on reviewed source `87236ca54`:
+GFS/IFS current-job reads, the complete readonly denial matrix, and formal
+public C4 freeze/browser/bind/verify. See the
+[deployment receipt](receipts/2026-09-20-issue2420-job-provenance.json).
+Strict success identities use canonical UTC `Z`, matching latest-product.
+This receipt does not approve the separate #2121-A / #2346 joint deployment.
+
 The DB-free node-22 terminal copyback hook publishes diagnostic provenance
 *before* its existing `copyback_run_trees` call.  It reads only the
 source-owned file journal at `NHMS_SCHEDULER_JOURNAL_ROOT`, validates each
@@ -230,6 +237,20 @@ set +a
   --object-store-root "$OBJECT_STORE_ROOT" \
   --object-store-prefix "${OBJECT_STORE_PREFIX:-}" \
   --published-artifact-root "$NHMS_PUBLISHED_ARTIFACT_ROOT"
+
+# After publication succeeds, copy only the sidecar to the shared object root.
+# The publish-only CLI does not perform this transport itself.
+/scratch/frd_muziyao/NWM/.venv/bin/python -c '
+import os, sys
+from services.orchestrator.run_tree_copyback import copyback_run_trees
+print(copyback_run_trees(
+    object_store_root=os.environ["OBJECT_STORE_ROOT"],
+    copyback_root=os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"],
+    run_ids=[],
+    extra_object_keys=[f"runs/{sys.argv[1]}/input/pipeline_jobs.json"],
+    object_store_prefix=os.environ.get("OBJECT_STORE_PREFIX", "s3://nhms"),
+))
+' '<run_id>'
 
 # node-27: project the already-published sidecar only.
 ssh -p 32099 nwm@210.77.77.27

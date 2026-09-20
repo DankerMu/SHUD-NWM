@@ -23,8 +23,9 @@
 > "Current physical deployment" 段为准。下文 §3.4 权限矩阵、§4 共享表、§5.2 22 compute
 > 启动段都是设计意图描述，**不反映当前生产 host 分配**。
 >
-> **#2420 implementation contract, not a live-deployment receipt:** the
-> DB-free node-22 lane writes only the source-authoritative
+> **#2420 live acceptance passed on 2026-09-20:** see the
+> [reviewed-source receipt](receipts/2026-09-20-issue2420-job-provenance.json).
+> The DB-free node-22 lane writes only the source-authoritative
 > `runs/<run_id>/input/pipeline_jobs.json` sidecar and verified published log
 > artifacts before normal run-tree copyback.  The physical node-27 ingest lane
 > (using `nhms_ingest_rw`) later projects that sidecar into the derived
