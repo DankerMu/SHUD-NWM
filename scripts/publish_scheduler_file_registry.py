@@ -29,8 +29,12 @@ from typing import Any, Callable, Protocol
 
 # `python scripts/publish_scheduler_file_registry.py` (the node-22 bringup
 # runbook invokes it that way) puts `scripts/` on sys.path, not the repository
-# root, so the owner package below is not importable without this. Idempotent,
-# and a no-op under `import scripts.publish_scheduler_file_registry`.
+# root, so the owner package below is not importable without this. The guard
+# compares the resolved absolute path, so it is a no-op whenever the root is
+# already on sys.path in that exact form -- which covers `-m`, `uv run` and
+# pytest. A root present only as an equivalent-but-different string (`''` under
+# `python -c`, `'.'` after a manual insert) does not match and gets a redundant
+# absolute entry appended; harmless, but it is not literal idempotence.
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

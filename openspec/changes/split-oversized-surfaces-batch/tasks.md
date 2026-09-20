@@ -89,7 +89,7 @@
 - [x] 10.2 `.large-file-guard.json` diff 为 10 条删除 + 至多 1 条已记录的非替代新增（见 Evidence Floor 2），`maxLines` 与其余条目逐字节不变
 - [x] 10.3 `uv run ruff check .` 绿
 - [x] 10.4 `openspec validate split-oversized-surfaces-batch --strict --no-interactive` 绿
-- [x] 10.5 node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）覆盖 retention / refresh / publish / entropy 全部分区 —— HEAD `02edba16`，**2059 passed / 0 failed / 0 skipped**，660.67s，receipt 贴在 PR #2534
+- [x] 10.5 node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）覆盖 retention / refresh / publish / entropy 全部分区 —— 最终 head `a5b4e730`，**2059 passed / 0 failed / 0 skipped**（643.06s），另补 #1103 的 5 个 runbook reader 套件 **97 passed**；receipt 贴在 PR #2534
 - [x] 10.6 PR body 声明：CI 定向选择可能降级为 collect-only 冒烟，node-27 为真实 oracle
 
 ## Evidence Floor
