@@ -385,6 +385,87 @@ STATE_INDEX_COPYBACK_REPLAY_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_state_index_copyback_replay_selection.py",
 )
 
+# #1101 partitioned tests/test_scheduler_file_provider_refresh.py (9614 lines,
+# 315 cases) into these fifteen collectible suites plus two non-collectible
+# helpers. The monolith is GONE with no compatibility shim, so the same-name
+# derivation from `scripts/scheduler_file_provider_refresh.py` stopped
+# resolving and EIGHT existing rule sites that named the monolith by hand had to
+# be re-pointed. A rule target that no longer exists is only a WARNING here, so
+# leaving any of them to rot would have degraded the refresh lane to an empty
+# selection -- i.e. the zero-assertion `--collect-only` smoke -- in silence.
+#
+# Two target sets, because the routes are not interchangeable:
+#   * SCHEDULER_REFRESH_TESTS -- the whole corpus. Used by the routes whose
+#     subject is the refresh RUNNER itself (`scripts/scheduler_file_provider_refresh.py`
+#     and the broad `services/orchestrator/**` rule): any of its behaviour can
+#     move under any of the fifteen.
+#   * SCHEDULER_REFRESH_DEPLOYMENT_TESTS -- only the partition that `read_text`s
+#     tracked deployment paths. The two systemd units, the env template and the
+#     two shell wrappers are each read by exactly one test
+#     (`test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`,
+#     the installer lifecycle case and the wrapper execution cases), all of which
+#     live in `tests/test_scheduler_refresh_deployment_contract.py`. Widening
+#     those five rows to the whole corpus would make a unit-only PR pay for 315
+#     cases and would break the exact-set pins in tests/test_select_ci_tests.py.
+#
+# tests/test_select_ci_tests.py closes the corpus against the tracked tree
+# (exactly fifteen suites + two helpers), so a sixteenth partition, a leftover
+# shim or a helper renamed into a `test_*.py` suite reddens instead of falling
+# out of the PR lane.
+SCHEDULER_REFRESH_HELPERS_PATH = "tests/scheduler_refresh_helpers.py"
+SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH = "tests/scheduler_refresh_receipt_helpers.py"
+SCHEDULER_REFRESH_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_refresh_barrier_seam.py",
+    "tests/test_scheduler_refresh_catalog_derivation.py",
+    "tests/test_scheduler_refresh_classification_modes.py",
+    "tests/test_scheduler_refresh_cutover_gate.py",
+    "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    "tests/test_scheduler_refresh_cutover_round2.py",
+    "tests/test_scheduler_refresh_deployment_contract.py",
+    "tests/test_scheduler_refresh_emergency_receipts.py",
+    "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
+    "tests/test_scheduler_refresh_provider_atomic.py",
+    "tests/test_scheduler_refresh_receipt_block_presence.py",
+    "tests/test_scheduler_refresh_retirement_declaration.py",
+    "tests/test_scheduler_refresh_retirement_reconciliation.py",
+    "tests/test_scheduler_refresh_terminability_probes.py",
+    "tests/test_scheduler_refresh_worker_mirror_transactions.py",
+)
+SCHEDULER_REFRESH_DEPLOYMENT_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_refresh_deployment_contract.py",
+)
+# The two helper modules are imported by a SUBSET of the corpus, and the
+# support-module closure guard derives that subset from the tracked tree, so
+# these tuples are the derived sets -- not the whole corpus. The four suites
+# that import neither (barrier seam, catalog derivation, provider atomic,
+# terminability probes) kept their fixtures local because nothing else uses
+# them; listing them here would be a route the guard cannot justify.
+SCHEDULER_REFRESH_HELPER_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_refresh_classification_modes.py",
+    "tests/test_scheduler_refresh_cutover_gate.py",
+    "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    "tests/test_scheduler_refresh_cutover_round2.py",
+    "tests/test_scheduler_refresh_deployment_contract.py",
+    "tests/test_scheduler_refresh_emergency_receipts.py",
+    "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
+    "tests/test_scheduler_refresh_receipt_block_presence.py",
+    "tests/test_scheduler_refresh_retirement_declaration.py",
+    "tests/test_scheduler_refresh_retirement_reconciliation.py",
+    "tests/test_scheduler_refresh_worker_mirror_transactions.py",
+)
+SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_refresh_classification_modes.py",
+    "tests/test_scheduler_refresh_cutover_gate.py",
+    "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    "tests/test_scheduler_refresh_cutover_round2.py",
+    "tests/test_scheduler_refresh_deployment_contract.py",
+    "tests/test_scheduler_refresh_emergency_receipts.py",
+    "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
+    "tests/test_scheduler_refresh_receipt_block_presence.py",
+    "tests/test_scheduler_refresh_retirement_declaration.py",
+    "tests/test_scheduler_refresh_retirement_reconciliation.py",
+)
+
 # #2259 partitioned tests/test_retention_copyback_mutex.py (1119 lines, 25
 # cases) into these two collectible suites and moved its fixture preamble into
 # the #1872 helper; the monolith is GONE with no compatibility shim. Neither
@@ -1308,7 +1389,17 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # `make_directory_with_explicit_mode`, so a helper change moves what
             # its refusal cases actually construct.
             "tests/test_scheduler_journal_root_authority.py",
-            "tests/test_scheduler_file_provider_refresh.py",
+            # #1101: four of the fifteen refresh partitions import this helper at
+            # module scope (the provider-atomic, terminability-probe,
+            # worker-mirror and predicate suites). The other eleven reach it
+            # only through `tests/scheduler_refresh_helpers.py`, and the
+            # support-module closure guard derives DIRECT importers only, so
+            # listing them here would be routing noise the guard cannot justify
+            # -- the helper's own rule below carries them instead.
+            "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
+            "tests/test_scheduler_refresh_provider_atomic.py",
+            "tests/test_scheduler_refresh_terminability_probes.py",
+            "tests/test_scheduler_refresh_worker_mirror_transactions.py",
             "tests/test_scheduler_state_index_repair.py",
             "tests/test_state_manager.py",
             "tests/test_run_tree_copyback.py",
@@ -1324,6 +1415,26 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # importer closure and a helper-only diff must run all four.
         STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
         STATE_INDEX_COPYBACK_REPLAY_TESTS,
+    ),
+    PathTestRule(
+        # #1101: the runtime fixture surface of the fifteen refresh partitions --
+        # the RefreshConfig factory, both provider-pipeline stubs, the four-lane
+        # tracked transaction fixture and the #1080 gate drivers. Eleven of the
+        # fifteen partitions import it at module scope; those eleven are its
+        # derived importer closure and a helper-only diff must run all of them.
+        SCHEDULER_REFRESH_HELPERS_PATH,
+        SCHEDULER_REFRESH_HELPER_TESTS,
+    ),
+    PathTestRule(
+        # #1101: the static receipt/classification corpora the same corpus
+        # shares, including the ONE `_receipt_schema_validator` factory (the
+        # monolith defined that name twice; only the later binding was ever
+        # live). Five partitions import no name from it, so its targets are the
+        # ten derived importers rather than the whole corpus -- the
+        # support-module closure guard derives that set from the tracked tree, so
+        # an eleventh importer reddens there instead of rotting.
+        SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+        SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
     ),
     PathTestRule(
         # A 0-byte package file with a rule looks wrong until you follow the
@@ -2279,7 +2390,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2237: run_tree_copyback.py's backup lifecycle oracle. Sub-second.
             "tests/test_run_tree_copyback_backup_lifecycle.py",
             "tests/test_scheduler_backfill_predecessor.py",
-            "tests/test_scheduler_file_provider_refresh.py",
+            # #1101 partitioned the 9614-line refresh monolith into fifteen
+            # suites and deleted it; this directory rule was one of the eight
+            # sites that named it by hand. The whole corpus rides here because
+            # the rule's subject is every orchestrator module the runner calls.
+            *SCHEDULER_REFRESH_TESTS,
             "tests/test_scheduler_generation.py",
             # #1735: the lineage resolver suite imports `services.orchestrator`
             # (hence `__init__.py`, which has no same-name suite of its own), so
@@ -3449,7 +3564,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
-    # content -- `tests/test_scheduler_file_provider_refresh.py`'s
+    # content -- `tests/test_scheduler_refresh_deployment_contract.py`'s
     # `test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     # `read_text`s `infra/env/compute.scheduler-provider-refresh.env.example`
     # and asserts two groups: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is
@@ -3472,10 +3587,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # probe's `DEFAULT_REFRESH_RECEIPT` -- the receipt the probe grades. A
     # template-only PR that moves the receipt root must run that pin, or the
     # probe watches a path nothing writes and reports `manifest_unavailable`.
+    # #1101 re-pointed this row: the reading case moved to
+    # `tests/test_scheduler_refresh_deployment_contract.py` when the monolith was
+    # partitioned. Only that partition reads the template, so the row stays a
+    # two-target row and the exact-set pin in tests/test_select_ci_tests.py stays
+    # an exact set.
     PathTestRule(
         "infra/env/compute.scheduler-provider-refresh.env.example",
         (
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         ),
     ),
@@ -3596,13 +3716,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # derived from `grep -rln '<script>.sh' tests/` and must track real
     # references. Wrappers with no guard suite intentionally have no rule here
     # and arm the core-smoke fallback via _is_backend_shell_path.
+    # #1101: both wrappers are `read_text`-ed by the deployment-contract
+    # partition (the systemd contract case reads the runner wrapper, the
+    # installer lifecycle case reads the installer), so the split moved these two
+    # targets rather than widening them.
     PathTestRule(
         "scripts/scheduler_file_provider_refresh_once.sh",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     ),
     PathTestRule(
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     ),
     # #2146 round 2: the refresh RUNNER had no explicit row -- only the
     # same-name derivation, which cannot know about a second reader. The probe
@@ -3613,10 +3737,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # kill the whole manifest arm silently. Round 4 adds two more imports: the
     # probe's trusted-outcome set is pinned as a subset of `OUTCOMES`, and its
     # history listing cap as above `MAX_HISTORY`.
+    # #1101: this row was the runner's only surviving named route once the
+    # same-name derivation died with the monolith, so it carries the WHOLE
+    # fifteen-suite corpus -- a runner change can land in any partition.
     PathTestRule(
         "scripts/scheduler_file_provider_refresh.py",
         (
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         ),
     ),
@@ -3662,7 +3789,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # just below with `scripts/node27_download_once.sh`). They sit next to the
     # wrapper/installer rows because they are the same refresh family with the
     # same owner suite.
-    # `tests/test_scheduler_file_provider_refresh.py:3591-3637`
+    # `tests/test_scheduler_refresh_deployment_contract.py`
     # (`test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`)
     # `read_text`s BOTH files: on the `.service` it asserts
     # `ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh`,
@@ -3684,13 +3811,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",
         (
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         ),
     ),
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     ),
     # #2146: the refresh-lane health probe's installer and its two units.
     # `tests/test_node22_refresh_timer_health.py` reads all three by path --

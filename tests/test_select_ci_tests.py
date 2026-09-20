@@ -64,6 +64,12 @@ from scripts.select_ci_tests import (
     REVIEW_GATE_ISSUE_MEMORY_PATH,
     REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
+    SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
+    SCHEDULER_REFRESH_HELPER_TESTS,
+    SCHEDULER_REFRESH_HELPERS_PATH,
+    SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
+    SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+    SCHEDULER_REFRESH_TESTS,
     SELECTOR_META_GUARD_TEST,
     STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
     STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH,
@@ -355,14 +361,17 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     # #2146: the `.service` gained a SECOND literal reader --
     # `tests/test_node22_refresh_timer_health.py` asserts the probe unit's
     # `UnsetEnvironment=` line is byte-equal to this one's.
+    # #1101 partitioned the refresh monolith into fifteen suites; the case that
+    # `read_text`s both units moved to the deployment-contract partition, so the
+    # owner is that partition and NOT the whole corpus.
     "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
         {
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         }
     ),
     "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
-        {"tests/test_scheduler_file_provider_refresh.py"}
+        SCHEDULER_REFRESH_DEPLOYMENT_TESTS
     ),
 }
 
@@ -374,9 +383,13 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
 # it, so bumping the runner's receipt schema merged green on a PR that touched
 # only that file.
 NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
+    # #1101: the runner's same-name derivation died with the monolith, so its
+    # explicit row is the only named route and it carries the whole corpus. The
+    # edge asserts membership, so naming all fifteen is what keeps a partition
+    # from quietly dropping off the runner's route.
     "scripts/scheduler_file_provider_refresh.py": frozenset(
         {
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         }
     ),
@@ -433,7 +446,7 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
 def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
     """#2188 — the node-22 refresh units had NO rule at all, not even a pin.
 
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
     `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
     `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
@@ -942,8 +955,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
     # literal below — not the arithmetic above — is the authority: #2259 split
-    # the copyback-mutex partition in two, so it now lists
-    # 61 targets, the rule's 58 plus three riders that arrive from OUTSIDE the
+    # the copyback-mutex partition in two and #1101 replaced the refresh
+    # monolith with fifteen partitions (+14), so it now lists
+    # 75 targets, the rule's 72 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1044,7 +1058,6 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_scheduler_backfill.py",
         "tests/test_scheduler_backfill_predecessor.py",
-        "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
@@ -1056,6 +1069,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_journal_root_authority.py",
         "tests/test_scheduler_journal_scope_census.py",
         "tests/test_scheduler_lineage.py",
+        # #1101: the fifteen partitions of the deleted refresh monolith. They
+        # sort here, between the lineage and timing suites — the literal is
+        # compared against `select_tests`'s sorted output, so placement matters.
+        *SCHEDULER_REFRESH_TESTS,
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
         # tests/test_retry.py and every same-name source route now schedules it
@@ -1937,7 +1954,7 @@ def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
 
     selected = select_tests(["scripts/scheduler_file_provider_refresh_once.sh"], repo_root=Path("."))
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1950,7 +1967,7 @@ def test_select_tests_sh_plus_docs_change_does_not_dilute_guard_selection() -> N
         repo_root=Path("."),
     )
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1963,7 +1980,7 @@ def test_select_tests_sh_plus_py_change_selects_union_of_guards() -> None:
         repo_root=Path("."),
     )
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert "tests/test_node27_autopipeline_preflight.py" in selected
 
 
@@ -2060,6 +2077,83 @@ def test_replay_partition_tracked_tree_is_exactly_four_suites_and_one_helper() -
     helper_rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
     assert set(owner_rule.tests) == partitions, sorted(set(owner_rule.tests) ^ partitions)
     assert set(helper_rule.tests) == partitions, sorted(set(helper_rule.tests) ^ partitions)
+
+
+def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_two_helpers() -> None:
+    # #1101: fifteen collectible partitions plus two non-collectible helpers is a
+    # floor, not a preference. A sixteenth partition, a leftover compatibility
+    # shim for the deleted 9614-line monolith, or either helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuples, never a glob result — the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in
+    # tests/test_node22_refresh_timer_health.py, a different lane with its own
+    # owner rows.
+    partitions = set(SCHEDULER_REFRESH_TESTS)
+    helpers = {SCHEDULER_REFRESH_HELPERS_PATH, SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH}
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 15, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helpers <= tracked, sorted(helpers - tracked)
+    assert not Path("tests/test_scheduler_file_provider_refresh.py").exists(), (
+        "the pre-#1101 monolith is back; the explicit rows and its same-name "
+        "derivation from scripts/scheduler_file_provider_refresh.py would both fire"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_scheduler_refresh_")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("scheduler_refresh")
+    }
+    assert helper_corpus == helpers, sorted(helper_corpus ^ helpers)
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not any(is_test_suite_path(path) for path in helpers)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the right reach, or
+    # the tracked-tree count above is satisfied by files nothing selects. The
+    # runner and the broad orchestrator directory rule carry the WHOLE corpus;
+    # the five deployment paths carry only the partition that reads them; the two
+    # helper support rules carry their derived importer closures.
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    runner_rule = rule_for("scripts/scheduler_file_provider_refresh.py")
+    directory_rule = rule_for("services/orchestrator/**")
+    assert partitions <= set(runner_rule.tests), sorted(partitions - set(runner_rule.tests))
+    assert partitions <= set(directory_rule.tests), sorted(partitions - set(directory_rule.tests))
+
+    deployment = set(SCHEDULER_REFRESH_DEPLOYMENT_TESTS)
+    assert deployment <= partitions
+    for pattern in (
+        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+        "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+        "infra/env/compute.scheduler-provider-refresh.env.example",
+        "scripts/scheduler_file_provider_refresh_once.sh",
+        "scripts/install_node22_scheduler_file_provider_refresh.sh",
+    ):
+        targets = set(rule_for(pattern).tests)
+        assert deployment <= targets, f"{pattern} lost its reader: {sorted(deployment - targets)}"
+        assert not (partitions - deployment) & targets, (
+            f"{pattern} widened to partitions that never open it: "
+            f"{sorted((partitions - deployment) & targets)}"
+        )
+
+    for helper, expected in (
+        (SCHEDULER_REFRESH_HELPERS_PATH, set(SCHEDULER_REFRESH_HELPER_TESTS)),
+        (SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH, set(SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS)),
+    ):
+        targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+        assert targets == expected, sorted(targets ^ expected)
+        assert expected <= partitions, sorted(expected - partitions)
+        # The rule is only honest if it equals what the tracked tree derives.
+        derived = _derived_support_module_importers([helper])[helper]
+        assert derived == expected, sorted(derived ^ expected)
 
 
 def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
@@ -2633,7 +2727,7 @@ REFRESH_ENV_TEMPLATE = "infra/env/compute.scheduler-provider-refresh.env.example
 def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> None:
     """#2195: the refresh env template must select the suite that reads it.
 
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s this template and asserts its content: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`
     present, and none of `DATABASE_URL=` / `PIPELINE_DATABASE_URL=` / `PGHOST=` / `PGPORT=`
     present. Before the #2195 rule the template matched only the `infra/env/**` rule, whose
@@ -2651,7 +2745,9 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
         "tests/test_node22_refresh_timer_health.py",
-        "tests/test_scheduler_file_provider_refresh.py",
+        # #1101 moved the reading case into this partition; the set stays a
+        # 3-set because only one of the fifteen partitions reads the template.
+        *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
         "tests/test_two_node_docker_runtime.py",
     }
 
@@ -2671,7 +2767,7 @@ def test_scheduler_provider_refresh_template_rule_red_when_removed(
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     selected = select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))
-    assert "tests/test_scheduler_file_provider_refresh.py" not in selected, (
+    assert "tests/test_scheduler_refresh_deployment_contract.py" not in selected, (
         "mutant table without the refresh env template rule still selects its owner suite"
     )
 
@@ -2754,7 +2850,7 @@ def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_read
     """#2195: tie the new rule to the reader that justifies it, derived not asserted.
 
     The rule's whole warrant is that
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s this template. If that line went away the rule would become decorative
     and every other test here would stay green — a non-empty selection with zero readers
     and no zero-assertion warning, which is the exact #2195 failure mode re-armed.
@@ -2777,7 +2873,7 @@ def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_read
     """
     consumers = _literal_path_consumer_index(targets=[REFRESH_ENV_TEMPLATE]).get(REFRESH_ENV_TEMPLATE, set())
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in consumers, (
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in consumers, (
         f"nothing reads {REFRESH_ENV_TEMPLATE} by literal path any more, so its "
         f"path-exact rule is decorative (derived consumers: {sorted(consumers)})"
     )
@@ -10703,6 +10799,17 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_scheduler_backfill.py",
     ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
+    # #1101: the two shared surfaces of the fifteen refresh partitions. The
+    # cutover-gate-audit partition anchors BOTH because it is the only one that
+    # drives a full runner pass through the gate AND validates the resulting
+    # receipt against the JSON Schema, so it necessarily imports a name from
+    # each; an anchor that stops deriving here means the partitions stopped
+    # sharing that surface at all.
+    (SCHEDULER_REFRESH_HELPERS_PATH, "tests/test_scheduler_refresh_cutover_gate_audit.py"),
+    (
+        SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+        "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    ),
     # #1872 (+#2238): the retention partitions' shared helper is imported at
     # module scope by all five collectible partitions; any of them is a valid
     # derivation anchor, pinned on the core suite (which is also the same-name

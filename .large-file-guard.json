@@ -35,7 +35,6 @@
     "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json",
     "scripts/scheduler_file_provider_refresh.py",
     "scripts/publish_scheduler_file_registry.py",
-    "tests/test_scheduler_file_provider_refresh.py",
     "tests/test_publish_scheduler_file_registry.py",
     "docs/runbooks/current-production-ops.md",
     "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md",
