@@ -53,6 +53,8 @@ from scripts.select_ci_tests import (
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    PUBLISH_REGISTRY_OWNER_PATH,
+    PUBLISH_REGISTRY_PACKAGE_MODULES,
     PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
     PUBLISH_SCHEDULER_REGISTRY_TESTS,
     QHH_CYCLE_SBATCH,
@@ -2202,6 +2204,44 @@ def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None
     expected = set(SCHEDULER_REFRESH_RUNNER_TESTS)
     assert set(SCHEDULER_REFRESH_TESTS) < expected
     for pattern in (SCHEDULER_REFRESH_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+
+def test_publish_registry_package_tracked_tree_is_exactly_nine_modules() -> None:
+    # #1100 replaced the 1495-line manual publisher with nine owner modules behind
+    # the attribute-broadcast facade kept at the historical path. Nine is a floor,
+    # not a preference: a tenth module, a stray `__init__.py` (scripts/ is a PEP
+    # 420 namespace tree -- neither scripts/governance/ nor scripts/scheduler_refresh/
+    # has one), the facade reduced to a deleted module or a two-line shim, or a
+    # module deleted out from under its row all redden here. Expected membership is
+    # the selector's own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # measured before the rows landed, each of the nine selected only the generic
+    # core-smoke riders and zero publisher partitions, i.e. an unrouted module
+    # degrades the publisher lane to the zero-assertion `--collect-only` smoke in
+    # silence. That is why the reach is asserted end to end below and not just read
+    # back off the rule table.
+    modules = set(PUBLISH_REGISTRY_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/publish_registry"))
+
+    assert len(modules) == 9, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert Path(PUBLISH_REGISTRY_OWNER_PATH).exists(), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert PUBLISH_REGISTRY_OWNER_PATH not in modules
+    assert not Path("scripts/publish_registry/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    for pattern in (PUBLISH_REGISTRY_OWNER_PATH, *sorted(modules)):
         targets = set(rule_for(pattern).tests)
         assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
         selected = set(select_tests([pattern], repo_root=Path(".")))

@@ -682,6 +682,33 @@ PUBLISH_SCHEDULER_REGISTRY_TESTS: tuple[str, ...] = (
 # so `is_test_suite_path` rejects it and it reaches SUPPORT_MODULE_TEST_RULES.
 PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH = "tests/publish_registry_helpers.py"
 
+# #1100 split the 1495-line manual publisher into this package; the historical
+# path stayed the console entrypoint (it owns argparse + `main`) and an
+# attribute-broadcast facade, so it keeps its own row below and is NOT a member
+# of this tuple. Each module gets an explicit row rather than a
+# `scripts/publish_registry/**` glob, for the reason #1099 recorded for
+# `scripts/scheduler_refresh/`: a glob routes a tenth module nobody reviewed,
+# while an unlisted module reddens the tracked-tree guard in
+# tests/test_select_ci_tests.py instead of silently dropping out of the PR lane.
+# None of these basenames has a `tests/test_<basename>.py`, so there is no
+# same-name derivation to fall back on -- measured before the rows landed, each
+# of the nine selected only the generic core-smoke riders and ZERO publisher
+# partitions. Every module carries the whole seven-suite corpus for the same
+# reason the owner row does: every partition drives
+# `publish_all_basin_scheduler_registry` or `main` through all of them.
+PUBLISH_REGISTRY_OWNER_PATH = "scripts/publish_scheduler_file_registry.py"
+PUBLISH_REGISTRY_PACKAGE_MODULES: tuple[str, ...] = (
+    "scripts/publish_registry/calibration.py",
+    "scripts/publish_registry/cli.py",
+    "scripts/publish_registry/constants.py",
+    "scripts/publish_registry/model_version.py",
+    "scripts/publish_registry/publisher.py",
+    "scripts/publish_registry/radiation.py",
+    "scripts/publish_registry/registry_rows.py",
+    "scripts/publish_registry/selection.py",
+    "scripts/publish_registry/workspace.py",
+)
+
 # #1860: the checked-in calibration declaration is a non-Python producer with no
 # mechanically derivable import closure, so the route must be explicit and test
 # its own continued existence. The three consumers are the package-manifest
@@ -3885,6 +3912,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/publish_scheduler_file_registry.py",
         PUBLISH_SCHEDULER_REGISTRY_TESTS,
     ),
+    # #1100: one row per owner module -- see PUBLISH_REGISTRY_PACKAGE_MODULES for
+    # why these are enumerated rather than globbed, and why each carries the
+    # whole publisher corpus.
+    PathTestRule("scripts/publish_registry/calibration.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/cli.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/constants.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/model_version.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/publisher.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/radiation.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/registry_rows.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/selection.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
+    PathTestRule("scripts/publish_registry/workspace.py", PUBLISH_SCHEDULER_REGISTRY_TESTS),
     # #1611: the state-index copyback replay tool's own suite was partitioned
     # into four files and the 1378-line monolith deleted with no shim, which
     # killed the same-name derivation that had been this script's ONLY route.
