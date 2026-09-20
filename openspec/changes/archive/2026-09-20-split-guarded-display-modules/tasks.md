@@ -319,7 +319,7 @@
       `docs/runbooks/node-27-bringup-checklist.md` C1-C4): real-DB pytest over
       the affected suites, plus `curl` on `/api/v1/layers` and at least one MVT
       tile route showing unchanged response shape.
-- [ ] 4.4 CI on the pushed head is green, including the targeted-test lane
+- [x] 4.4 CI on the pushed head is green, including the targeted-test lane
       selecting the new partitions rather than degrading to `--collect-only`.
 
 ### node-27 live receipt (task 4.3), head 9fd60807ca6289b9a3f60b54f87800ef00db641d
@@ -348,3 +348,13 @@ Live HTTP, new code (:8097) vs production master (:8080):
 - `GET /api/v1/layers/discharge/cycles` with no query params -> 422 on both, error envelope
   identical ignoring `request_id`, `rejected_value` still `[redacted]`.
 - Verification instance log: 9 lines, no traceback; the single WARNING is the deliberate 422 above.
+
+### CI receipt (task 4.4)
+
+Run `35506351966` on head `17702a1e0eb67f2fced8707076dc8112ec3f1077`: completed / success.
+"Unit Tests" (the targeted lane) reported **6383 passed, 23 skipped in 893.46s** — it executed
+assertions and did NOT degrade to the zero-assertion `--collect-only` smoke. Because the diff
+touches `scripts/select_ci_tests.py`, the full-tree collect-only smoke ran *in addition* to the
+targeted selection, which is the selector-development branch of that step, not the degraded one.
+"SQL Migration Dry Run", "Frontend Build", "Markdown Lint", "Detect changed areas" and the
+report-only "Entropy Audit" all passed. Merged as `ffe5388fc`.
