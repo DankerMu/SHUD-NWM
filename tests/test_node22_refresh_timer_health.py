@@ -1336,8 +1336,14 @@ def test_probe_units_declare_the_documented_shape() -> None:
 # R11c -- the watchdog's own liveness, and the comment that used to lie about it
 # ---------------------------------------------------------------------------
 
+# #1103 moved §3.1.2 (the refresh steady state, and with it the probe section)
+# into its own sub-runbook; the index page carries only the section stub.
 RUNBOOK = (
-    Path(__file__).resolve().parents[1] / "docs" / "runbooks" / "current-production-ops.md"
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "runbooks"
+    / "production-ops"
+    / "file-provider-refresh.md"
 )
 PROBE_TIMER_UNIT = (
     Path(__file__).resolve().parents[1]
@@ -1348,11 +1354,16 @@ PROBE_TIMER_UNIT = (
 
 
 def _probe_runbook_section() -> str:
-    """The probe's own section of the runbook, sliced by its headings."""
+    """The probe's own section of the runbook, sliced by its heading.
+
+    #1103: the old terminator `#### 3.1.4` moved to a different sub-runbook, so
+    the probe section now runs to the end of `file-provider-refresh.md`. The
+    start heading is still resolved by `index`, so a missing section raises
+    instead of yielding an empty (vacuously passing) slice.
+    """
     text = RUNBOOK.read_text()
     start = text.index("##### refresh timer 健康探针")
-    end = text.index("#### 3.1.4", start)
-    return text[start:end]
+    return text[start:]
 
 
 def test_r11c_the_probe_timer_claims_no_self_catch_up() -> None:
@@ -2607,7 +2618,7 @@ def test_the_production_path_defaults_match_every_file_that_states_them() -> Non
     """
     repo = Path(__file__).resolve().parents[1]
     probe_installer = (repo / "scripts" / "install_node22_refresh_timer_health.sh").read_text()
-    runbook = (repo / "docs" / "runbooks" / "current-production-ops.md").read_text()
+    runbook = RUNBOOK.read_text()
     env_example = (
         repo / "infra" / "env" / "compute.scheduler-provider-refresh.env.example"
     ).read_text()

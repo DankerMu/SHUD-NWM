@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.production_ops_runbook import combined_text as production_ops_text
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "infra" / "env" / "README.md"
 TEMPLATE = REPO_ROOT / "infra" / "env" / "compute.scheduler-dbfree.env.example"
@@ -174,7 +176,10 @@ def test_the_template_carries_no_database_selector(template_values: dict[str, st
 
 def test_the_runbook_states_the_same_pinned_terminal_stage() -> None:
     """#2075 acceptance: README, runbook and template stay mutually consistent."""
-    runbook = (REPO_ROOT / "docs" / "runbooks" / "current-production-ops.md").read_text()
+    # #1103 split the runbook into an index page plus `production-ops/`
+    # sub-runbooks; the pinned pair lives in a sub-runbook now, so the pin is
+    # taken over the whole tree instead of the (command-free) index page.
+    runbook = production_ops_text()
 
     assert "NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc" in runbook
     assert "NHMS_REQUIRE_FORECAST_WARM_START=true" in runbook

@@ -650,6 +650,28 @@ QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH = "tests/qhh_production_bootstrap_helpers.
 # rides the SUPPORT_MODULE_TEST_RULES entry instead, because the `tests/**` branch
 # handles conftest before PATH_TEST_RULES and a PATH row there would be dead.
 NODE22_ENTRYPOINT_INVARIANT_TEST = "tests/test_node22_entrypoint_invariant.py"
+# #1103 partitioned that owner: at 1003 lines it was three lines over the
+# large-file guard's threshold and had never been excluded, so repointing its
+# runbook readers required splitting it first. Two collectible partitions plus
+# one non-collectible helper. Explicit tuple, never a
+# `tests/test_node22_entrypoint_invariant*.py` glob resolved at import time
+# (same reason as ENTROPY_AUDIT_TESTS / PUBLISH_SCHEDULER_REGISTRY_TESTS): a
+# glob silently adopts a third partition nobody reviewed, while an unlisted one
+# reddens the tracked-tree guard in tests/test_select_ci_tests.py instead of
+# quietly dropping out of the PR lane.
+NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST = (
+    "tests/test_node22_entrypoint_invariant_python_scan.py"
+)
+NODE22_ENTRYPOINT_INVARIANT_TESTS: tuple[str, ...] = (
+    NODE22_ENTRYPOINT_INVARIANT_TEST,
+    NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
+)
+# The helper owns the monolith's module prefix (repo root, the node-22/node-27
+# root constants and the surface reader); both partitions import it at module
+# scope, so the routed set IS the importer closure. Not collectible: the
+# filename is deliberately not `test_*`, so `is_test_suite_path` rejects it and
+# it reaches SUPPORT_MODULE_TEST_RULES.
+NODE22_ENTRYPOINT_HELPERS_PATH = "tests/node22_entrypoint_helpers.py"
 NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
 NODE22_JOURNAL_RETENTION_SERVICE = "infra/systemd/nhms-scheduler-journal-retention.service"
@@ -916,6 +938,30 @@ SLURM_OPENAPI_SECURITY_TEST = "tests/test_slurm_gateway_openapi_security.py"
 # no inline credential). Distinct from SLURM_AUTH_DEPLOYMENT_TEST (bind-guard +
 # preflight behavior).
 SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST = "tests/test_slurm_gateway_deployment_contract.py"
+
+# #1103: `docs/runbooks/current-production-ops.md` is an index landing page now
+# and its body lives in the `docs/runbooks/production-ops/` sub-runbooks. Both
+# halves route to the SAME reader set: every one of these suites `read_text`s
+# the tree (commands, §11 failure codes, the probe section, the §3.2.2 rollout
+# block, the capacity check, the pinned terminal stage, the topology
+# sentences), so a sub-runbook-only diff has to select exactly what an
+# index-only diff selects. Without the second rule the body would be editable
+# with zero readers selected -- the shape #2195 and #2472 were both filed for.
+PRODUCTION_OPS_RUNBOOK_TESTS: tuple[str, ...] = (
+    SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+    "tests/test_env_templates.py",
+    "tests/test_node22_refresh_timer_health.py",
+    "tests/test_node27_coverage_freshness_alert.py",
+    *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+    PYTHON_ENVIRONMENT_TRUTH_TEST,
+    "tests/test_role_boundary_static.py",
+)
+# The helper owns the production-ops surface set (index page plus the
+# sub-runbook tree, pinned by index/tree mutual agreement). Every reader above
+# that scans the whole document imports it, so a helper-only diff must run
+# them. Not collectible: the filename is deliberately not `test_*`.
+PRODUCTION_OPS_RUNBOOK_HELPERS_PATH = "tests/production_ops_runbook.py"
+PRODUCTION_OPS_SUBRUNBOOK_GLOB = "docs/runbooks/production-ops/**"
 
 # The literal rule rows are declared in PATH_TEST_RULES (after the dataclass);
 # these constants are the single names the selector meta-suite pins.
@@ -1442,7 +1488,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_grid_stability_verification.py",
             "tests/test_integration_gate.py",
             "tests/test_node27_docker_collection_gate.py",
-            NODE22_ENTRYPOINT_INVARIANT_TEST,
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
         ),
     ),
     PathTestRule(
@@ -1929,6 +1975,25 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # suite branch.
         ENTROPY_AUDIT_HELPERS_PATH,
         ENTROPY_AUDIT_TESTS,
+    ),
+    PathTestRule(
+        # #1103: the shared surface of the two node-22 entrypoint partitions --
+        # the repo root, the node-22/node-27 root constants and the `_read`
+        # both partitions call on every governed file. Neither partition can
+        # run without it, so a helper-only diff must select both; the filename
+        # is not `test_*` and never reaches the `tests/**` suite branch.
+        NODE22_ENTRYPOINT_HELPERS_PATH,
+        NODE22_ENTRYPOINT_INVARIANT_TESTS,
+    ),
+    PathTestRule(
+        # #1103: the production-ops surface set. It decides WHICH files every
+        # whole-document runbook guard scans, so a change here can silently
+        # shrink six suites' reach to the (command-free) index page -- exactly
+        # the vacuous pass the split had to avoid. Routed to the full reader
+        # set, not just its importers, because the readers that pin a single
+        # sub-runbook by path are governed by the same surface decision.
+        PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
+        PRODUCTION_OPS_RUNBOOK_TESTS,
     ),
 )
 
@@ -3751,17 +3816,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # added here reddens it), the Python environment truth suite pins the
     # `df -h / /home /data/GHDC` capacity check in it, and the role boundary
     # static suite pins its node-27/node-22 topology sentences.
+    # #1103 split this file into an index landing page plus the
+    # `docs/runbooks/production-ops/` sub-runbooks and repointed every reader
+    # above at the whole tree. The two rows below carry the identical reader
+    # set: the index keeps the historical path (and every anchor) alive, the
+    # glob carries the body that moved.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
-        (
-            SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
-            "tests/test_env_templates.py",
-            "tests/test_node22_refresh_timer_health.py",
-            "tests/test_node27_coverage_freshness_alert.py",
-            NODE22_ENTRYPOINT_INVARIANT_TEST,
-            PYTHON_ENVIRONMENT_TRUTH_TEST,
-            "tests/test_role_boundary_static.py",
-        ),
+        PRODUCTION_OPS_RUNBOOK_TESTS,
+    ),
+    PathTestRule(
+        PRODUCTION_OPS_SUBRUNBOOK_GLOB,
+        PRODUCTION_OPS_RUNBOOK_TESTS,
     ),
     PathTestRule(
         "infra/env/compute.example",
@@ -4582,7 +4648,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # clause is asserted by the node-22 owner, so it joins additively
         # alongside the existing Python-environment owner.
         "instructions/agents/shared.md",
-        (PYTHON_ENVIRONMENT_TRUTH_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
+        (PYTHON_ENVIRONMENT_TRUTH_TEST, *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
         # #1571: the two-node Docker runbook is `infra/**`, which already opens
@@ -4603,7 +4669,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # node-22 owner joins additively alongside the existing QHH-static
         # target. Extended AT THE RULE SITE, non-stop: the README keeps both
         # owners and no other producer's selection moves.
-        ("tests/test_qhh_scripts_static.py", NODE22_ENTRYPOINT_INVARIANT_TEST),
+        ("tests/test_qhh_scripts_static.py", *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
         "scripts/local_pg.sh",
@@ -4618,24 +4684,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # contract is asserted by the static deployment suite, which joins the
         # rule alongside the node-22 owner.
         NODE22_SLURM_GATEWAY_UNIT,
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
         # #1571: the evidence-retention unit's single exact ExecStart is
         # uniquely asserted by the node-22 owner.
         NODE22_RETENTION_UNIT,
-        (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+        NODE22_ENTRYPOINT_INVARIANT_TESTS,
     ),
     PathTestRule(
         # The journal archive service and timer jointly define one mutation
         # entrypoint. Each changed unit must run its active-runtime invariant
         # and both archive/retention behavioral partitions.
         NODE22_JOURNAL_RETENTION_SERVICE,
-        (NODE22_ENTRYPOINT_INVARIANT_TEST, *JOURNAL_RETENTION_TESTS),
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS),
     ),
     PathTestRule(
         NODE22_JOURNAL_RETENTION_TIMER,
-        (NODE22_ENTRYPOINT_INVARIANT_TEST, *JOURNAL_RETENTION_TESTS),
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS),
     ),
     PathTestRule(
         # #1571: the repair script's usage string is uniquely asserted by the
@@ -4645,7 +4711,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # would silently drop them. scripts/** adds the #1656 timescale rider
         # supplementally. Owner joins additively, never replacing core smoke.
         NODE22_REPAIR_SCRIPT,
-        (*CORE_SMOKE_TESTS, NODE22_ENTRYPOINT_INVARIANT_TEST),
+        (*CORE_SMOKE_TESTS, *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
         "scripts/ops/node22-run-cycle-once.sh",

@@ -57,6 +57,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.production_ops_runbook import surfaces as production_ops_surfaces
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SECRET_PATH = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
@@ -71,7 +73,9 @@ ACTIVE_PY = "/scratch/frd_muziyao/NWM/.venv/bin/python"
 GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 SCHEDULER_DROPIN = "10-slurm-gateway-token.conf"
 GATEWAY_DROPIN = "10-node22-live.conf"
-RUNBOOK = "docs/runbooks/current-production-ops.md"
+# #1103 moved §3.1.4/§3.2/§3.3/§3.4 into this sub-runbook; §3.2.2 (the rollout
+# block this suite pins) went with them.
+RUNBOOK = "docs/runbooks/production-ops/gateway-and-services.md"
 
 TIMER_START_LINE = "systemctl --user start nhms-compute-scheduler.timer"
 
@@ -921,7 +925,9 @@ def test_no_tracked_producer_file_contains_a_literal_token_value() -> None:
         "infra/env/compute.example",
         "infra/env/compute.scheduler-dbfree.env.example",
         "infra/env/README.md",
-        RUNBOOK,
+        # #1103: the whole production-ops tree, so a literal token written into
+        # any sub-runbook (or the index) still reddens this scan.
+        *production_ops_surfaces(),
     )
     for relative in surfaces:
         text = _read(relative)

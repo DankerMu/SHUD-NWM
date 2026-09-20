@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.production_ops_runbook import combined_text as production_ops_text
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIN_FILE = REPO_ROOT / ".python-version"
 
@@ -304,8 +306,9 @@ def test_capacity_check_covers_the_root_volume() -> None:
         text = (REPO_ROOT / surface).read_text(encoding="utf-8")
         assert "df -h / /home /data/GHDC" in text, surface
 
-    ops_text = (REPO_ROOT / "docs/runbooks/current-production-ops.md").read_text(
-        encoding="utf-8"
-    )
+    # #1103: the capacity line moved into a sub-runbook. The negative pin
+    # below is the vacuity-sensitive half -- read only the index and the
+    # forbidden two-mount spelling is absent for the wrong reason.
+    ops_text = production_ops_text()
     assert "df -h / /home /data/GHDC" in ops_text
     assert "df -h /home /data/GHDC" not in ops_text

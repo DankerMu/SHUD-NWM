@@ -52,11 +52,17 @@ from scripts.select_ci_tests import (
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
     FORCING_SQL_SHAPE_ORACLE_TESTS,
+    NODE22_ENTRYPOINT_HELPERS_PATH,
+    NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
+    NODE22_ENTRYPOINT_INVARIANT_TESTS,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
+    PRODUCTION_OPS_RUNBOOK_TESTS,
+    PRODUCTION_OPS_SUBRUNBOOK_GLOB,
     PUBLISH_REGISTRY_OWNER_PATH,
     PUBLISH_REGISTRY_PACKAGE_MODULES,
     PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
@@ -3392,15 +3398,30 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # node-22 entrypoint invariant suite (scans every `uv run` / `uv sync` line),
     # the Python environment truth suite (`df -h / /home /data/GHDC`) and the role
     # boundary static suite (node-27/node-22 topology sentences).
-    assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
+    # #1103 split the runbook into an index page plus the `production-ops/`
+    # sub-runbooks and partitioned the node-22 entrypoint owner; the index row
+    # and the sub-runbook row carry the identical reader set.
+    expected_runbook_readers = [
         "tests/test_env_templates.py",
         "tests/test_node22_entrypoint_invariant.py",
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
         "tests/test_node22_refresh_timer_health.py",
         "tests/test_node27_coverage_freshness_alert.py",
         "tests/test_python_environment_truth.py",
         "tests/test_role_boundary_static.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
+    assert (
+        select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path("."))
+        == expected_runbook_readers
+    )
+    assert (
+        select_tests(
+            ["docs/runbooks/production-ops/coverage-freshness-alert.md"],
+            repo_root=Path("."),
+        )
+        == expected_runbook_readers
+    )
 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     for path in (
@@ -6278,7 +6299,9 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
         # #2472/#2473 round 1: bare `uv run` / `uv sync` line scanner.
+        # #1103 partitioned it in two; both partitions ride this row.
         "tests/test_node22_entrypoint_invariant.py",
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
         # #2146 round 2: third literal reader -- the node-22 probe suite.
         "tests/test_node22_refresh_timer_health.py",
         # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
@@ -6741,8 +6764,11 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # (`tests/test_node27_coverage_freshness_alert.py` pins that runbook §11
         # names every `COVERAGE_FRESHNESS_*` code). #2472/#2473 round 1 added the
         # three readers the row had been missing (node-22 entrypoint invariant,
-        # Python environment truth, role boundary static), so the count is 7.
-        ("docs/runbooks/current-production-ops.md", "7"),
+        # Python environment truth, role boundary static), so the count was 7.
+        # #1103 partitioned the entrypoint owner in two, taking it to 8, and
+        # gave the sub-runbook tree the identical row.
+        ("docs/runbooks/current-production-ops.md", "8"),
+        ("docs/runbooks/production-ops/service-bringup.md", "8"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
@@ -11098,6 +11124,20 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # top of the path constants every partition carries; an anchor that stops
     # deriving here means the partitions stopped sharing that surface at all.
     (ENTROPY_AUDIT_HELPERS_PATH, "tests/test_entropy_audit_report_contract.py"),
+    # #1103: the shared prefix of the two node-22 entrypoint partitions (repo
+    # root, node-22/node-27 root constants, `_read`). The python-scan partition
+    # anchors it because it is the one whose whole content is the classifier
+    # those constants feed; an anchor that stops deriving here means the
+    # partitions stopped sharing the prefix at all.
+    (
+        NODE22_ENTRYPOINT_HELPERS_PATH,
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
+    ),
+    # #1103: the production-ops surface set. The entrypoint owner anchors it
+    # because it is the reader whose emptiness is silent -- its `remaining ==
+    # []` holds on an empty surface list -- so an anchor that stops deriving
+    # here is the first sign the vacuity guard lost its input.
+    (PRODUCTION_OPS_RUNBOOK_HELPERS_PATH, NODE22_ENTRYPOINT_INVARIANT_TEST),
     # #1872 (+#2238): the retention partitions' shared helper is imported at
     # module scope by all five collectible partitions; any of them is a valid
     # derivation anchor, pinned on the core suite (which is also the same-name
@@ -17427,6 +17467,102 @@ def test_registry_partition_tracked_tree_is_exactly_seven_suites_one_helper() ->
     assert not is_test_suite_path(helper)
     for owner in partitions:
         assert "integration" not in PurePosixPath(owner).name
+
+
+def test_node22_entrypoint_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # #1103: two collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A third partition, a leftover compatibility shim
+    # for the pre-split 1003-line owner, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME, so a future
+    # `tests/test_node22_entrypoint_invariant_<x>.py` that nobody routed is a
+    # failure here rather than a suite that silently leaves the PR lane.
+    partitions = set(NODE22_ENTRYPOINT_INVARIANT_TESTS)
+    helper = NODE22_ENTRYPOINT_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 2, sorted(partitions)
+    assert partitions == {
+        NODE22_ENTRYPOINT_INVARIANT_TEST,
+        NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
+    }
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    suite_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("test_node22_entrypoint_invariant")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("node22_entrypoint")
+    }
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+
+    # Every route that carried the pre-split owner must carry BOTH partitions,
+    # or the split silently halved CI's reach on those producers. The helper
+    # row is separate: it is not same-name derivable and never reaches the
+    # `tests/**` branch, so without it a helper-only diff collapses to the
+    # meta-guard.
+    carriers = [
+        rule
+        for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES)
+        if NODE22_ENTRYPOINT_INVARIANT_TEST in rule.tests
+    ]
+    assert len(carriers) >= 9, [rule.pattern for rule in carriers]
+    for rule in carriers:
+        assert partitions <= set(rule.tests), (
+            f"{rule.pattern} dropped {sorted(partitions - set(rule.tests))}"
+        )
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(helper) == partitions, sorted(
+        partitions ^ support.get(helper, set())
+    )
+
+
+def test_production_ops_tracked_tree_routes_the_index_and_every_subrunbook() -> None:
+    # #1103: `docs/runbooks/current-production-ops.md` is an index landing page
+    # and its body lives in `docs/runbooks/production-ops/`. Both rows must
+    # carry the SAME reader set: a sub-runbook-only diff that selected fewer
+    # readers than an index-only diff is a body editable with its guards
+    # unselected, which is how #2472's bare `uv sync` reached master.
+    index = "docs/runbooks/current-production-ops.md"
+    rules = {rule.pattern: rule for rule in PATH_TEST_RULES}
+    assert index in rules, "the historical runbook path lost its rule"
+    assert PRODUCTION_OPS_SUBRUNBOOK_GLOB in rules, "the sub-runbook tree is unrouted"
+    assert rules[index].tests == PRODUCTION_OPS_RUNBOOK_TESTS
+    assert rules[PRODUCTION_OPS_SUBRUNBOOK_GLOB].tests == PRODUCTION_OPS_RUNBOOK_TESTS
+
+    # The tracked sub-runbooks, and the fact that the index still exists: the
+    # index is the anchor every historical inbound link and `#` anchor resolves
+    # against, and the surface helper fails closed if the directory empties.
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "docs/runbooks/production-ops"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert Path(index).exists(), "the index landing page is gone; every inbound link breaks"
+    assert len(tracked) >= 13, tracked
+    assert all(path.endswith(".md") for path in tracked), tracked
+
+    # Each tracked sub-runbook routes the full reader set on its own, so this
+    # holds for a file added after the rule was written (the glob is the
+    # mechanism; this is the proof it actually fires on the real tree).
+    for path in tracked:
+        assert select_tests([path], repo_root=Path(".")) == sorted(
+            set(PRODUCTION_OPS_RUNBOOK_TESTS)
+        ), path
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(PRODUCTION_OPS_RUNBOOK_HELPERS_PATH) == set(
+        PRODUCTION_OPS_RUNBOOK_TESTS
+    )
 
 
 def _registry_addition_nodes(additions: Sequence[dict[str, Any]]) -> list[str]:

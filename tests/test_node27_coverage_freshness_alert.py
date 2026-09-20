@@ -861,16 +861,25 @@ def test_lazy_display_import_keeps_the_module_import_light() -> None:
 # #2473 — every structured failure code has a documented destination.
 # ---------------------------------------------------------------------------
 
-_RUNBOOK_PATH = Path(__file__).resolve().parents[1] / "docs/runbooks/current-production-ops.md"
+# #1103 moved §11 out of `current-production-ops.md` (now an index page that
+# names no failure code) into its own sub-runbook.
+_RUNBOOK_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "docs/runbooks/production-ops/coverage-freshness-alert.md"
+)
 
 
 def _runbook_section_11(text: str) -> str:
-    """Runbook §11, delimited by its own `## 11.` and `## 12.` headings."""
+    """Runbook §11: its sub-runbook from the `## 11.` heading to end of file.
+
+    The old `## 12.` terminator stayed behind on the index page, so the section
+    now runs to the end of its own file. The `## 11.` start is still resolved,
+    never assumed, so a sub-runbook that loses the heading fails closed.
+    """
 
     lines = text.splitlines()
     start = next(index for index, line in enumerate(lines) if line.startswith("## 11."))
-    end = next(index for index, line in enumerate(lines) if index > start and line.startswith("## 12."))
-    return "\n".join(lines[start:end])
+    return "\n".join(lines[start:])
 
 
 def test_every_structured_failure_code_is_named_in_runbook_section_11() -> None:
