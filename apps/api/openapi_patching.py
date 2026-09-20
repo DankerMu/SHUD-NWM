@@ -349,6 +349,7 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
     )
     _ensure_mvt_live_postgis_unavailable_response(schema)
     _ensure_mvt_national_identity_unavailable_response(schema)
+    _ensure_mvt_cold_generation_busy_response(schema)
     for path in mvt_paths:
         operation = schema.get("paths", {}).get(path, {}).get("get", {})
         # #2153: only the canonical source/cycle route can emit
@@ -359,6 +360,7 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
             else "MvtLivePostgisUnavailable"
         )
         operation.setdefault("responses", {})["424"] = {"$ref": f"#/components/responses/{response_name}"}
+        operation["responses"]["503"] = {"$ref": "#/components/responses/MvtColdGenerationBusy"}
         operation["responses"]["4XX"] = {"$ref": "#/components/responses/Error"}
         operation["responses"]["5XX"] = {"$ref": "#/components/responses/Error"}
         for parameter in operation.get("parameters", []):
@@ -378,9 +380,10 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
                 parameter.setdefault("schema", {})["minimum"] = 0
                 parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
 
+
 def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
     responses = schema.setdefault("components", {}).setdefault("responses", {})
-    responses["MvtLivePostgisUnavailable"] = _mvt_unavailable_response(
+    responses["MvtLivePostgisUnavailable"] = _typed_mvt_error_response(
         "Live PostGIS MVT is unavailable for this canonical tile route.",
         ["MVT_LIVE_POSTGIS_UNAVAILABLE"],
     )
@@ -388,15 +391,30 @@ def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
 
 def _ensure_mvt_national_identity_unavailable_response(schema: dict) -> None:
     responses = schema.setdefault("components", {}).setdefault("responses", {})
-    responses["MvtNationalIdentityUnavailable"] = _mvt_unavailable_response(
+    responses["MvtNationalIdentityUnavailable"] = _typed_mvt_error_response(
         "Live PostGIS MVT is unavailable, or the requested national identity is not "
         "covered by every active river network.",
         ["MVT_LIVE_POSTGIS_UNAVAILABLE", "MVT_NATIONAL_IDENTITY_INCOMPLETE"],
     )
 
 
-def _mvt_unavailable_response(description: str, codes: list[str]) -> dict:
-    return {
+def _ensure_mvt_cold_generation_busy_response(schema: dict) -> None:
+    responses = schema.setdefault("components", {}).setdefault("responses", {})
+    responses["MvtColdGenerationBusy"] = _typed_mvt_error_response(
+        "Cold MVT generation is saturated; retry after the stated delay.",
+        ["MVT_COLD_GENERATION_BUSY"],
+        headers={
+            "Retry-After": {"schema": {"type": "string"}},
+            "Cache-Control": {"schema": {"type": "string"}},
+            "X-Request-ID": {"schema": {"type": "string"}},
+        },
+    )
+
+
+def _typed_mvt_error_response(
+    description: str, codes: list[str], *, headers: dict[str, Any] | None = None
+) -> dict:
+    response = {
         "description": description,
         "content": {
             "application/json": {
@@ -424,6 +442,9 @@ def _mvt_unavailable_response(description: str, codes: list[str]) -> dict:
             }
         },
     }
+    if headers:
+        response["headers"] = headers
+    return response
 
 
 def _patch_met_stations_list_openapi(schema: dict) -> None:

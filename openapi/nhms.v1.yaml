@@ -2227,6 +2227,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -2335,6 +2337,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtNationalIdentityUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -2425,6 +2429,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -2501,6 +2507,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -2583,6 +2591,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -2665,6 +2675,8 @@ paths:
                 format: binary
         '424':
           $ref: '#/components/responses/MvtLivePostgisUnavailable'
+        '503':
+          $ref: '#/components/responses/MvtColdGenerationBusy'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -6012,6 +6024,50 @@ components:
                     enum:
                     - MVT_LIVE_POSTGIS_UNAVAILABLE
                     - MVT_NATIONAL_IDENTITY_INCOMPLETE
+                  message:
+                    type: string
+                  details:
+                    type:
+                    - object
+                    - 'null'
+                    additionalProperties: true
+    MvtColdGenerationBusy:
+      description: Cold MVT generation is saturated; retry after the stated delay.
+      headers:
+        Retry-After:
+          schema:
+            type: string
+        Cache-Control:
+          schema:
+            type: string
+        X-Request-ID:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - request_id
+            - status
+            - error
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum:
+                - error
+              error:
+                type: object
+                required:
+                - code
+                - message
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - MVT_COLD_GENERATION_BUSY
                   message:
                     type: string
                   details:

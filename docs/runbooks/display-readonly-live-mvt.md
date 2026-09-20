@@ -57,6 +57,9 @@ NHMS_SERVICE_ROLE=display_readonly
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 NHMS_DISPLAY_WORKERS=2
+NHMS_DISPLAY_DB_POOL_SIZE=8
+NHMS_DISPLAY_DB_MAX_OVERFLOW=8
+NHMS_DISPLAY_MVT_COLD_LIMIT=8
 DATABASE_URL=postgresql://nhms_display_ro:change-me@127.0.0.1:55432/nhms
 OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 ```
@@ -79,14 +82,13 @@ SIGTERM 既有 uvicorn（10s timeout + SIGKILL 兜底）→
 原先 runbook 引用的 `/tmp/start_display.sh` 不存在于仓库，
 且其 ad-hoc 流程不 source env file，已被本脚本取代。
 
-### Display connection pool (#2346 first step)
+### Display connection pool and cold admission (#2346 step two / #2121-A)
 
 Live display workers consume `NHMS_DISPLAY_DB_POOL_SIZE` and
 `NHMS_DISPLAY_DB_MAX_OVERFLOW` in `apps/api/routes/hydro_display.py`
-(code defaults 4 / 2, hard cap 16). `infra/env/display.example` still
-documents those defaults; production `display.env` may omit the keys.
-That is not template staleness — do not raise the example defaults in
-this batch.
+(code defaults 4 / 2, hard cap 16). `infra/env/display.example` records the
+production node-27 deployment values: pool 8 + overflow 8, two workers, and
+`NHMS_DISPLAY_MVT_COLD_LIMIT=8`.
 
 Admission formula, evaluated at apply time against live
 `max_connections`, `superuser_reserved_connections`, and grouped
@@ -102,25 +104,59 @@ workers × (pool + overflow) + other_demand + reserved + explicit_headroom
 without that application name stay in `other_demand`; do not treat the
 whole readonly role as display. Desired 2 × (8 + 8) = 32 is admitted
 only when workers are actually two and measured headroom includes an
-explicit reserve (this batch uses 8). Snapshot numbers are not a
-substitute for the execution-time check.
+explicit reserve. Snapshot numbers are not a substitute for the
+execution-time check.
 
-This first step only raises the exhaustion threshold. It does **not**
-isolate cold tile generation, prewarm the pool, retune roles, or change
-SQL. #2346 remains open for that second step. Do not claim latency
+Cold generation is isolated per API worker by `NHMS_DISPLAY_MVT_COLD_LIMIT`.
+The limit is derived from the same effective bounded pool as the engine
+(default half of `pool + overflow`, always clamped strictly below capacity;
+capacity 1 admits zero cold work). Production uses cap 8 against capacity 16
+so eight reserved connections remain for cache hits, catalog, and brief
+identity/cache work. Same-key waiters consume a cold permit but intentionally
+hold no DB checkout. Excess distinct cold keys return typed 503
+`MVT_COLD_GENERATION_BUSY` with `Retry-After: 1` and `Cache-Control: no-store`.
+Cache hits do not consume a cold permit. Identity/cache-read transactions are
+released before admission and single-flight waits; admitted generation
+releases its checkout before releasing the permit.
+
+Prewarm knobs stay at the measured receipt values: `--workers` 8,
+`--timeout` 30 s, `--deadline-seconds` 540. Do not claim latency
 improvement from `/health` smoke.
 
-Same-code restart: compare checkout HEAD, porcelain, unit
+Same-window restart: compare checkout HEAD, porcelain, unit
 `WorkingDirectory`, process cwd, `--workers`, and running start time
 against the intended SHA before `systemctl --user restart
 nhms-display-api.service`. Do **not** use
-`scripts/ops/start-display-api.sh` for this pool-only change: that
+`scripts/ops/start-display-api.sh` for a pool/cold-cap-only change: that
 wrapper reinstalls the unit, creates the cache directory, and its
 `UVICORN_PATTERN` can SIGTERM a matching `yd` instance (#2282).
 Key-only update: back up `display.env` privately, refuse symlinks /
-non-0600 / non-uid-1005 / duplicate assignments, append only the two
-pool keys, preserve unrelated lines. Rollback restores those two keys
-from the backup and refuses if someone else changed them.
+non-0600 / non-uid-1005 / duplicate assignments, write the two pool keys
+plus `NHMS_DISPLAY_MVT_COLD_LIMIT=8`, preserve unrelated lines.
+
+Display-role SQL is applied in the same deployment window. Before changing it,
+record the exact current role settings and the query-plan evidence:
+
+```sql
+SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'nhms_display_ro';
+ALTER ROLE nhms_display_ro SET statement_timeout = '30s';
+ALTER ROLE nhms_display_ro SET max_parallel_workers_per_gather = 2;
+SELECT rolname, rolconfig FROM pg_roles WHERE rolname = 'nhms_display_ro';
+```
+
+These are resource ceilings, not a claim of query speedup. Role defaults apply
+only to newly opened connections, so perform the coordinated worker restart
+and verify both settings through a fresh `nhms_display_ro` connection:
+
+```sql
+SHOW statement_timeout;
+SHOW max_parallel_workers_per_gather;
+```
+
+On rollback restore the recorded `rolconfig` values exactly (including `RESET`
+only when that was the prior state), then restore the recorded previous SHA and
+all three env keys together. Display write denial and disabled Slurm stay
+enforced across the cutover.
 
 ### PNG cache-root pairing (#2431) versus PBF retention (#2032) and canonical lock (#2360)
 
@@ -189,34 +225,26 @@ Live receipt for this batch:
 
 node-27 autopipeline 每次 publish/coverage 后调用
 `scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野的以下包络（#2013 起逐源
-cycle-aware）：
+cycle-aware；#2121-A 起默认整周期）：
 
 - 基础河网 `river-network-national` z3/z4/z5（`--zooms`，语义不变——该路由无
   source/cycle 维度），43 张；
 - `gfs` 与 `ifs` **各自**经 `GET /api/v1/layers/discharge/cycles?source=` 发现自己的
-  最新周期，对该周期 `valid-times` 中**落在「该列表最早那个时次」起算
-  `PREWARM_LEAD_HOURS`（12 h）窗口内**的时次预热 z3/z4 全国流量瓦片
-  （`DISCHARGE_ZOOMS`，固定，不随 `--zooms` 变）；3 h 网格上即每源 5 个时次 ×
-  13 张 = 65 张；
-- 窗口内每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`，
-  每源 5 张。
+  最新周期，对该周期 `valid-times` **全部已发布时次**（发现顺序、字面量、重复次数均保留）
+  预热 z3/z4 全国流量瓦片（`DISCHARGE_ZOOMS`，固定，不随 `--zooms` 变）；
+- 每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`，
+  仍受 PNG horizon 约束：horizon 之外的时次不发 PNG、计入 `png_out_of_contract`
+  并置非零退出码，流量瓦片照常预热。
 
-合计每轮 43 + 2 × 70 = **183** 条预热请求；这个**计划条数**有断言钉住（`tests/test_node27_mvt_prewarm.py`
-从 `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS` 起，全程走生产路径现算），动了步长、
-窗口、zoom 集合或源列表都会变红。窗口按**时间戳**截断（`select_lead_window`），
-不是取列表前 N 项——`/valid-times` 的排序与步长都不是本脚本可以假设的事实。窗口锚在
-**该源已发布的首个时次**（`min()` 取最早，不是 `valid_times[0]`，也不是 cycle 起点、更不是
-墙钟）：前端打开时停在的就是这一项（`map-layer-timeline-controls` 的 “lead 0” = 已公告
-`valid_times[]` 的首项），而它只有在覆盖未被裁剪时才等于 cycle 起点——
-`services/tiles/mvt.py:2171` 的 `window_start = max(cycle, max(start …))` 一旦 clamp，
-首项就晚于 cycle。锚在 cycle 的旧口径下，一个首项比 cycle 晚 12 h 以上的源会**一条都预热不到**
-且 rc=0；锚在首项之后，「发布了至少一个时次就至少预热一个」是有断言的代码性质。
-clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同时还在 168 h 的 PNG horizon 之内**
-（`horizon_valid_times` 只列到 `cycle+168h`，见 `services/precip/mirror.py:106-115` 与
-`services/precip/constants.py:30` 的 `PRECIP_FORECAST_HORIZON_HOURS`），就照常有降水 PNG。
+当前 56+56 时次夹具计划约 **1611** 条预热请求（43 河网 + 2 × (56 × 13 流量 + 56 PNG)）。
+这是夹具基数示例，**不是运行时常量或保证**；目录发布长度一变，计划条数就变。
+`tests/test_node27_mvt_prewarm.py` 从 `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
+起全程走生产路径现算计划条数，动了步长、zoom 集合或源列表都会变红。脚本不再做 12 h
+截断，也不做排序/去重/归一化。PNG horizon 仍独立：
+`horizon_valid_times` 只列到 `cycle+168h`（见 `services/precip/mirror.py:106-115` 与
+`services/precip/constants.py:30` 的 `PRECIP_FORECAST_HORIZON_HOURS`）。
 **「在 3 h 网格上」并不蕴含「在 horizon 之内」**：网格没有上界而 horizon 有，`cycle+171h` 就是
-一个在网格上、却在 horizon 之外的时次。真出现这种时次时按下文的越界口径走——该时次的 PNG
-不发、计入 `png_out_of_contract` 并置非零退出码，汇总照常打印，这是**有意的吵闹**，不是脚本 bug。
+一个在网格上、却在 horizon 之外的时次。真出现这种时次时按下文的越界口径走。
 另注：「以 cycle 为原点的 3 h 网格」本身依赖
 `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`（`services/tiles/mvt.py:122`）与
 `PRECIP_STEP_HOURS`（`services/precip/constants.py:28`）这两个各自声明的 3 相等，仓内没有断言把它们锁在一起。
@@ -230,18 +258,21 @@ clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同
 自愈，故保持 rc 不变——**有记录、不告警**（`scripts/node27_autopipe_cron.sh:244` 每 tick
 把整份汇总 JSON 写进 `$LOG`，`:245` 只在失败时另加一行）。发现失败是**另一种**终态，
 按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为
-`nhms.node27-mvt-prewarm.v3`，含 `requests_total`（只计预热请求，不含发现请求）、
-`elapsed_seconds`、`lead_hours`、`workers`（**实际生效**的并发数），以及每源的 `valid_times_available`（目录发布了多少个
-时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
+`nhms.node27-mvt-prewarm.v4`，含 `requests_total`（只计预热请求，不含发现请求）、
+`elapsed_seconds`、`prewarm_scope=full_cycle`、`workers`（**实际生效**的并发数），以及每源的 `valid_times_available`（目录发布了多少个
+时次）与 `valid_times_warmed`（计划纳入请求包络的时次，不是成功完成的时次）。
+全时次模式下二者相等只说明未裁剪目录发布的时次；是否完成仍须核对
+`discharge_ok` / `discharge_failed`、`failed_count` 与 `deadline_skipped`，PNG 缺片独立看对应桶，不能仅凭相等就宣称缓存全热。
+历史 v2/v3 receipt 不改写。
 每源另有 `discharge_requests` / `discharge_ok` / `discharge_failed`：只计**实际发出**的流量瓦片，
 2xx 进 `discharge_ok`，HTTP 非 2xx 与 transport 异常进 `discharge_failed`，恒等
 `discharge_requests == discharge_ok + discharge_failed`。未发出的请求（deadline skip、源无周期、发现失败）
 不进三个桶；该源一条流量瓦片都没发出时三个桶才都是 0，已经发出的结果照常计数。`failures[]` 仍截前 20 条作分类样本，
 完整流量瓦片失败数以 `discharge_failed` 为准（不含 PNG），不从截断样本反推。
-job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
+job 提交顺序是河网优先、之后双源按已发现时次交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
 deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
-由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py::tile_generation_lock`；唯一调用点
-`apps/api/routes/hydro_display.py:689` 在持锁后二次查缓存），多 worker 与预热并发不会
+由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py::tile_generation_lock`；由
+`apps/api/routes/hydro_display.py` 的共享 MVT 边界在持锁后二次查缓存），多 worker 与预热并发不会
 重复执行 PostGIS 生成。该保护有前提：`NHMS_MVT_FILE_CACHE_DIR` 未配置时
 `_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py::_file_cache_lock_path`），
 `tile_generation_lock` 直接 `yield`（`tile_generation_lock` 的 `lock_path is None` 分支），只剩进程内
@@ -260,29 +291,22 @@ prewarm 三个串行阶段的第三个。真跑超时的后果是**下一个 tic
 “previous run still active, skipping tick”、`:188` exit 0；`infra/systemd/nhms-node27-autopipe.service` 是 `Type=oneshot` +
 `TimeoutStartSec=0`，没有任何东西会掐掉长跑），即**有界、有日志的节奏降级**，不是堆积或丢数据。
 
-540 这个数字背后的成本估算是 **UNVERIFIED 的**，只写在这里与 `tasks.md` 设计点 🔟 的 prose 里，
-**不进常量、不进断言**：`(43 × 0.92 + 2 × 70 × 13.26) / (8 / 2) ≈ 474 s`。其中 13.26 s 是
-`docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md` 里 gfs 11.63 /
-ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张里最贵的那张，也不能当成 13 张
-均值的上界）；0.92 s 是 `docs/runbooks/receipts/2026-07-20-node27-display-scaling.md` 的
-「基础河网 **cold SQL** 首次 918.182 ms」，那是 **SQL 阶段**耗时，不是端到端瓦片耗时；冷 PNG
-成本与线程池能否线性伸缩**都没有实测**（8 路线程池打 2 个 uvicorn worker，`infra/systemd/nhms-display-api.service:9`；每个 pool_size 4 + max_overflow 2，`apps/api/routes/hydro_display.py:206-207`），估算按流量瓦片同价、按标称并发的一半计费。而实际并发
-由 cron 的 `--workers`（`AUTOPIPE_MVT_PREWARM_WORKERS`，默认 8）决定，运维改小了本仓测不到——
-所以汇总里有顶层 `workers` 记录**实际生效值**，receipt 必须记它。**这个估算在本仓没有 oracle，
-能 settle 它的只有 node-27 实跑 receipt（task 7.2 / #2017）**；在那之前不得把它写成保证。越界后剩余请求**不再发起**（不是
-取消在途请求），计入汇总的 `deadline_skipped`，退出码非 0；`requests_total` 只计实际发起
-的请求，故 `requests_total + deadline_skipped` 才是本轮计划的请求总数。退出码为 0 当且仅
-当 `failed_count == 0`、所有 `per_source[<s>].error` 为 `null`、所有
+540 这个数字不是整周期能完成的保证；完整成本、冷 PNG 成本和线程池伸缩仍要以 node-27
+同 worker 实跑 receipt 定论。实际并发由 cron 的 `--workers`
+（`AUTOPIPE_MVT_PREWARM_WORKERS`，默认 8）决定，汇总顶层 `workers` 必须记录实际生效值。
+deadline 到达后剩余请求**不再发起**（不是取消在途请求），计入
+`deadline_skipped`，退出码非 0；`requests_total` 只计实际发起的请求，故
+`requests_total + deadline_skipped` 才是本轮计划的请求总数。退出码为 0 当且仅当
+`failed_count == 0`、所有 `per_source[<s>].error` 为 `null`、所有
 `png_out_of_contract == 0` 且 `deadline_skipped == 0`；`rc=2` 只留给进程级失败
 （参数错误一类），此时打印的是一行式失败信封而不是完整汇总。
 
-> **已知代价（不粉饰）**：`PREWARM_LEAD_HOURS` 之外的时次**不预热**，仍是**每张约十秒量级
-> 的冷读**——目录发布 56 个时次，预热只覆盖自首项起 12 h 内的那 5 个。lead 窗口是绕开「单张全国流量瓦片
-> 229.5 ms（`docs/runbooks/receipts/2026-07-20-node27-display-scaling.md`）→ 11.63 s
-> （`docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`）」这个
-> pre-existing 回归的**权宜**，不是修好了它；修那个成本回归超出 #2013 范围。包络自身的成本
-> 估算也只有 node-27 实跑 receipt（task 7.2 / #2017）才能定论：在那之前上面的 474 s 是
-> **UNVERIFIED 的推算值**，不是实测值，本仓也没有任何断言在验它。
+> **已知代价（不粉饰）**：整周期预热请求量显著大于旧 12 h 包络。当前 56+56 时次夹具约
+> 1611 条，只是夹具基数，不是运行时常量。deadline=540 / timeout=30 / workers=8 仍保留；
+> 超时后剩余请求不再发起，计入 `deadline_skipped` 并非零退出，不重试 503、不隐瞒未完成预热。
+> 冷生成隔离后，热瓦片与 `/api/v1/layers` 应继续 200；过载冷请求走声明的 503 策略。
+> PBF retention 仍是 14 天墙钟截止（`NODE27_MVT_CACHE_RETENTION_DAYS=14`），当前新鲜 cache
+> 不会被选中删除。
 
 ### 强制刷新身份（issue #2079）
 
@@ -404,7 +428,7 @@ jq -e '
 **首次安装 / 回滚**：装 env（0600）+ unit + timer → 先跑
 `NODE27_MVT_CACHE_RETENTION_PLAN_ONLY=true` 看 `planned[]`（确认无任何 `precip/` 路径）→
 `systemctl --user enable --now nhms-node27-mvt-cache-retention.timer`。锁改动要
-`bash scripts/ops/start-display-api.sh` 重启 display API 才生效。回滚：
+在已安装 unit 的节点上用 `systemctl --user restart nhms-display-api.service` 重启 display API 才生效；不要调用会按进程模式批量终止 uvicorn 的启动脚本。回滚：
 `systemctl --user disable --now nhms-node27-mvt-cache-retention.timer`，或在 env 里置
 `NODE27_MVT_CACHE_RETENTION_ENABLED=false`。
 

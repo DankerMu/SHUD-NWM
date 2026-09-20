@@ -1147,6 +1147,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # rendered per timeseries store by the whole SQL-shape oracle group, so
         # the group's other five members joined this rule.
         "tests/test_display_coverage_refresh.py",
+        "tests/test_display_mvt_cold_admission.py",
         "tests/test_display_publish_status_only.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
@@ -1698,6 +1699,7 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         "tests/test_api.py",
         "tests/test_api_contract.py",
         "tests/test_api_errors_logging.py",
+        "tests/test_display_mvt_cold_admission.py",
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",

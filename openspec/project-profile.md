@@ -43,6 +43,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Whole-cluster physical relocation: clean stop, complete-copy proof, exact container rebind, and stale rollback after write release
 - Frontend API consumers: a new `unwrapApiData` / `getApi` consumer ships with a malformed-payload test (wrong container, null element, wrong element type).
 - Operator alerting lanes: an observer's run-set/criterion predicates must equal the predicates of the surface it claims to watch, or it reports healthy while the watched surface is dark.
+- Display cold-generation admission: DB checkouts across digest/cache/single-flight waits, per-worker limits versus whole-service capacity, and same-worker hot/cold live-load evidence.
 
 ## Typical evidence
 

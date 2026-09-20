@@ -267,6 +267,9 @@ def test_display_api_engine_adds_identity_and_leaves_pool_parameters_intact(
 
     monkeypatch.delenv("NHMS_DISPLAY_DB_POOL_SIZE", raising=False)
     monkeypatch.delenv("NHMS_DISPLAY_DB_MAX_OVERFLOW", raising=False)
+    # The cold gate now captures the same bounded pool settings as `_engine`;
+    # isolate that process-lifetime state before asserting this default engine.
+    monkeypatch.setattr(hydro_display, "_DISPLAY_POOL_CONFIGURATION", None)
     monkeypatch.setattr(hydro_display, "create_engine", _fake_create_engine)
 
     # __wrapped__ bypasses the lru_cache so the probe never pollutes it.
@@ -295,6 +298,7 @@ def test_display_api_engine_cache_key_stays_database_url_only(
         return f"engine:{len(calls)}"
 
     monkeypatch.setattr(hydro_display, "create_engine", _fake_create_engine)
+    monkeypatch.setattr(hydro_display, "_DISPLAY_POOL_CONFIGURATION", None)
     hydro_display._engine.cache_clear()
     try:
         first = hydro_display._engine(DSN)
