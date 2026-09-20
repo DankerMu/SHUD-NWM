@@ -199,7 +199,7 @@ npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
   tests/test_basins_registry_import_security.py \
   tests/test_shud_runtime.py \
   tests/test_model_registration.py \
-  tests/test_api_contract.py \
+  tests/test_api_contract*.py \
   tests/test_openapi_drift.py \
   tests/test_production_slurm_validation.py
 ```
@@ -468,7 +468,7 @@ openspec validate staging-end-to-end-closure --type spec --strict --no-interacti
 # Ruff does not lint Markdown. docs/ is covered by the CI Markdown Lint form below;
 # progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
 npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
-.venv/bin/pytest -q tests/test_production_e2e_validation.py tests/test_production_slurm_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_output_parser.py tests/test_flood_frequency.py tests/test_api_contract.py
+.venv/bin/pytest -q tests/test_production_e2e_validation.py tests/test_production_slurm_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_output_parser.py tests/test_flood_frequency.py tests/test_api_contract*.py
 ```
 
 The opt-in deterministic production-closure smoke is:

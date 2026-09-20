@@ -199,16 +199,93 @@
     `apps.api.routes.hydro_display` logger name, and was reverted
     (`git status --porcelain apps/` empty).
 
-- [ ] 2.2 Split `tests/test_api_contract.py` (2114 lines, 38 test functions,
+- [x] 2.2 Split `tests/test_api_contract.py` (2114 lines, 38 test functions,
       6 mock store classes) into partitions (#2074 item 3).
   - Module/Scope: mock store classes are the natural seam; partitions <= 1000
     lines with headroom.
+  - Delivered: 2132 lines / 38 cases -> three collectible partitions plus one
+    shared support module. `tests/test_api_contract.py` (524) SURVIVES as the
+    contract-artefact partition (committed `openapi/nhms.v1.yaml` vs runtime
+    `app.openapi()` vs generated `apps/frontend/src/api/types.ts`, display
+    control plane, tile static/runtime pins) because four registries pin that
+    literal string: `OPENAPI_CONTRACT_TESTS` / `PRECIP_SURFACE_TESTS` / the
+    `services/tiles/mvt.py` and `apps/api/routes/hydro_display*.py` rules in
+    `scripts/select_ci_tests.py`, the
+    `apps/api/routes/hydro_display_catalog.py` row of
+    `GUARDED_MODULE_CLOSURES`, `openspec/specs/api-contract-convergence/spec.md`
+    (queue-depth static-vs-runtime code sets) and
+    `tests/test_openapi_31_contract.py`'s function-body import of
+    `OPENAPI_TYPESCRIPT_PACKAGE`. `tests/test_api_contract_pipeline_ops.py`
+    (632) holds the control-plane / job-lifecycle routes;
+    `tests/test_api_contract_resources.py` (478) the registry-backed resource
+    routes; `tests/api_contract_helpers.py` (618) is the single home of the six
+    mock stores, the retry gateway double and the eight private assertion
+    helpers (`_parameter_names` / `_resolve_parameter` included), never
+    duplicated. `_OversizedRiverSegmentStore` stayed with its base class
+    `_ModelRegistryStore`. The pass-A rebinds (`hydro_display_catalog` +
+    both facade names) moved nowhere: they are in the retained base file.
+  - Pure-move oracle: with module docstrings and module-level import statements
+    stripped, the 1905 non-blank body lines of the four new files are a
+    multiset-identical partition of the pre-change file's 1905 — zero residue
+    either way. Test identity: 38 == 38 collected and the sorted case-name lists
+    are byte-identical (no parametrization exists in this corpus, so the only id
+    change is the file prefix).
+  - Fixture reachability: this corpus has NO pytest fixture — every case writes
+    `app.dependency_overrides[...]` directly under `try/finally` — so the oracle
+    reduces to isolated-run evidence. Each partition run alone passes its whole
+    count with zero skips (11 / 12 / 15), and the glob run reports 38 passed;
+    the split reverses the old execution order (the artefact cases ran last,
+    now first) and nothing leaks across it.
   - Registry Update: remove the entry from `.large-file-guard.json`; replace the
     single target with every partition in `OPENAPI_CONTRACT_TESTS` and in the
     `services/tiles/mvt.py` / `hydro_display` `PathTestRule` entries.
+  - Registry Update delivered: `.large-file-guard.json` entry removed, no new
+    entry added. In `scripts/select_ci_tests.py` a new `API_CONTRACT_TESTS`
+    tuple (all three) replaces the single target in `OPENAPI_CONTRACT_TESTS`
+    (all three load `openapi/nhms.v1.yaml` at assertion level) and in the broad
+    `apps/api/**` rule (the only rule that runs the resource-route contracts on
+    a diff to the routes serving them — naming only the base path would drop 27
+    of 38 cases from the PR lane). Three rules are deliberately NOT widened,
+    each with its measured provenance recorded in place: the
+    `services/tiles/mvt.py` and `apps/api/routes/hydro_display*.py` rules
+    (only the base partition imports that family, which is what the
+    guarded-module closure guard derives), `apps/api/openapi_patching*.py` (the
+    #2211 criterion is "reads the patched runtime document"; all four
+    `app.openapi()` call sites are in the base partition) and the shared
+    `PRECIP_SURFACE_TESTS` tuple (only the base partition holds a
+    whole-document comparison, so widening it would make every precip-tree diff
+    pay for 27 cases that cannot red on it). A new
+    `SUPPORT_MODULE_TEST_RULES` entry routes `tests/api_contract_helpers.py` to
+    its derived closure — the three partitions plus
+    `tests/test_openapi_response_conformance.py`, whose module-scope import of
+    `_ModelRegistryStore` / `_RunStore` was repointed from the former monolith —
+    with the matching `SUPPORT_MODULE_ROUTING_ANCHORS` pair. In
+    `tests/test_select_ci_tests.py` the two `INTENTIONAL_RULE_GAP_EXCLUSIONS`
+    rows for `workers/data_adapters/base.py` and
+    `services/orchestrator/production_contract.py` follow their module-scope
+    importer to `..._pipeline_ops.py` (the stale-exclusion guard reds otherwise),
+    five exact-set selection pins gained the two new partitions as literals, and
+    the row-5b explicit-target count moved 3 -> 5.
+  - Spec delta owed and paid: widening the broad `apps/api/**` rule changes
+    three exact-set scenarios of the DEPLOYED `ci-contract-baseline` spec
+    (`apps/api/routes/precip.py`, `apps/api/route_registry.py`,
+    `apps/api/main.py`), so this change now carries a
+    `specs/ci-contract-baseline/spec.md` delta with both owning requirements
+    MODIFIED. The `services/precip/**` tree scenario is unchanged, which is the
+    live proof that `PRECIP_SURFACE_TESTS` itself was not widened.
   - Verification: `uv run pytest -q tests/test_api_contract*.py` (test count
     >= pre-split count); `uv run pytest -q tests/test_openapi_drift.py tests/test_select_ci_tests.py`;
     `uv run ruff check .`.
+  - Verification run (local, 2026-09-20): `--collect-only` 38 collected;
+    `pytest -q tests/test_api_contract*.py` 38 passed; `pytest -q
+    tests/test_select_ci_tests.py` 737 passed; `pytest -q` over the three
+    partitions plus `test_openapi_drift`, `test_openapi_31_contract`,
+    `test_openapi_response_conformance`, `test_monitoring_api`, `test_api`,
+    `test_pipeline_ops_identity_envelope` 263 passed; ruff over every tracked
+    `*.py` plus the new files green; `git diff origin/master --
+    openapi/nhms.v1.yaml` empty; `openspec validate
+    split-guarded-display-modules --strict --no-interactive` valid; the
+    `large-file-guard` hook exits 0 on the staged commit with no exemption.
 
 ## 3. Frontend splits
 

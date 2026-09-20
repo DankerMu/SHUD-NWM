@@ -9,7 +9,7 @@
 
 ```bash
 uv run nhms-production validate-scale --evidence-root artifacts/production-closure --run-id api-latency-check
-uv run pytest -q tests/test_api_contract.py tests/test_production_scale_validation.py
+uv run pytest -q tests/test_api_contract*.py tests/test_production_scale_validation.py
 ```
 
 ## Expected Evidence

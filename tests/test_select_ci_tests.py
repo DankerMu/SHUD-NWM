@@ -463,8 +463,15 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
 
     selected = select_tests(["openapi/nhms.v1.yaml"], repo_root=Path("."))
 
+    # #2074: the API-contract corpus was physically partitioned into three
+    # collectible files and every one of them loads `openapi/nhms.v1.yaml` at
+    # assertion level, so all three replace the single target here (the #1684
+    # rule). Literals on purpose: this is the exact-set anchor for the
+    # `openapi/**` lane, so it must never be derived from OPENAPI_CONTRACT_TESTS.
     assert selected == [
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_openapi_response_conformance.py",
@@ -509,7 +516,14 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     expected = sorted(
         {
             "tests/test_api.py",
+            # #2074: the rule itself names only the retained base path (the one
+            # API-contract partition that reads `app.openapi()`); the other two
+            # arrive through the broad `apps/api/**` rule, which this pattern also
+            # matches, and are named here because this is a SELECTION pin, not the
+            # rule's membership anchor.
             "tests/test_api_contract.py",
+            "tests/test_api_contract_pipeline_ops.py",
+            "tests/test_api_contract_resources.py",
             "tests/test_hydro_display_mvt_scaling_coverage_order.py",
             "tests/test_hydro_display_mvt_scaling_national_routes.py",
             "tests/test_monitoring_api.py",
@@ -1652,7 +1666,13 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
 
     assert select_tests(["apps/api/routes/precip.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: all three API-contract partitions, contributed by the broad
+        # `apps/api/**` rule. `PRECIP_SURFACE_TESTS` itself was NOT widened — it
+        # still names the retained base path only — which is what the tree-rule
+        # pin above continues to prove.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
@@ -1713,7 +1733,11 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
 
     assert select_tests(["apps/api/route_registry.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: the three broad `apps/api/**` suites are now five files — the
+        # API-contract corpus is one of them and was partitioned in three.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_monitoring_api.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
@@ -1741,7 +1765,10 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
 
     assert select_tests(["apps/api/main.py"], repo_root=Path(".")) == [
         "tests/test_api.py",
+        # #2074: as above — the API-contract rider is three files now.
         "tests/test_api_contract.py",
+        "tests/test_api_contract_pipeline_ops.py",
+        "tests/test_api_contract_resources.py",
         "tests/test_api_errors_logging.py",
         "tests/test_display_mvt_cold_admission.py",
         "tests/test_monitoring_api.py",
@@ -5721,7 +5748,10 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
     path = "apps/api/runtime_mode.py"
     same_name_target = "tests/test_runtime_mode.py"
     assert Path(same_name_target).is_file()
-    assert len(_effective_explicit_targets(path)) == 3
+    # #2074: five, not three — the broad rule's "three broad API suites" are five
+    # FILES since the API-contract corpus was partitioned in three. The count is a
+    # non-vacuity floor on the explicit side of the union, so it tracks files.
+    assert len(_effective_explicit_targets(path)) == 5
 
     selected = set(select_tests([path], repo_root=Path(".")))
 
@@ -9192,7 +9222,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # adapter PR. The one importer with NO owning rule anywhere,
     # tests/test_state_clone_cutover_hook.py, is not here: it gets a narrow
     # `workers/data_adapters/base.py` rule instead.
-    ("workers/data_adapters/base.py", "tests/test_api_contract.py"): "edge-consumer",
+    # #2074 partitioned tests/test_api_contract.py; `cycle_id_for` is imported at
+    # module scope by the control-plane partition (it mints the cycle ids behind the
+    # pipeline/ops routes), so the disposition follows that owner.
+    ("workers/data_adapters/base.py", "tests/test_api_contract_pipeline_ops.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_e2e_m3.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal_read_cache.py"): "edge-consumer",
@@ -9319,7 +9352,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
-    ("services/orchestrator/production_contract.py", "tests/test_api_contract.py"): "edge-consumer",
+    # #2074 partitioned tests/test_api_contract.py; the two taxonomy constants are
+    # imported at module scope by the control-plane partition, so the disposition
+    # follows that owner. The retained base path no longer names this module.
+    ("services/orchestrator/production_contract.py", "tests/test_api_contract_pipeline_ops.py"): "edge-consumer",
     ("services/orchestrator/retry.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/scheduler.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     # #1948 moved the only scheduler-facade importer in the QHH bootstrap corpus to the
@@ -10511,6 +10547,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # split's own base file stopped importing the helpers — which would mean the
     # shared surface was duplicated back into the partitions.
     ("tests/hydro_display_mvt_helpers.py", "tests/test_hydro_display_mvt_scaling.py"),
+    # #2074: the shared doubles of the three API-contract partitions. Anchored on
+    # the retained base path for the same reason as the MVT corpus above — three
+    # other registries pin that literal string, so an anchor that stops deriving
+    # here means the base partition stopped importing the shared stores, which
+    # would mean the doubles were duplicated back into the partitions.
+    ("tests/api_contract_helpers.py", "tests/test_api_contract.py"),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),

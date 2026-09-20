@@ -331,6 +331,40 @@ PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
     "apps/**",
 )
 
+# #2074: the API-contract corpus, physically partitioned out of the 2,132-line
+# `tests/test_api_contract.py` monolith (38 cases). The retained base path keeps
+# the cases that read the CONTRACT ARTEFACTS — the committed
+# `openapi/nhms.v1.yaml`, the runtime `app.openapi()` document and the generated
+# `apps/frontend/src/api/types.ts`; the two partitions hold the route-behaviour
+# cases (control plane / job lifecycle, and the registry-backed resource routes).
+# All three load `openapi/nhms.v1.yaml` at assertion level, so all three are
+# oracles of the published document and the #1684 rule applies: every collectible
+# partition replaces the single target wherever the corpus as a whole is the
+# oracle (`openapi/**` and the broad `apps/api/**` consumer rule). Where the
+# oracle is narrower than the corpus the target stays measured, not widened —
+# the `services/tiles/mvt.py`, `apps/api/routes/hydro_display*.py`,
+# `apps/api/openapi_patching*.py` and `PRECIP_SURFACE_TESTS` rules name only the
+# base path, because only the base partition imports the display modules or reads
+# the patched runtime document (the other two never call `app.openapi()`).
+# Explicit sorted tuple, never derived at import time (same reason as
+# MAPPING_BUILDER_TESTS / BASINS_PACKAGE_PUBLICATION_TESTS). The shared doubles
+# live in the non-collectible `tests/api_contract_helpers.py`, routed by
+# SUPPORT_MODULE_TEST_RULES.
+API_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_api_contract.py",
+    "tests/test_api_contract_pipeline_ops.py",
+    "tests/test_api_contract_resources.py",
+)
+# The single home of every mock store, gateway double and private assertion
+# helper the three partitions share. A helper-only diff must run all three plus
+# `tests/test_openapi_response_conformance.py`, which imports `_ModelRegistryStore`
+# and `_RunStore` from it at module scope.
+API_CONTRACT_HELPERS_PATH = "tests/api_contract_helpers.py"
+API_CONTRACT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
+    *API_CONTRACT_TESTS,
+    "tests/test_openapi_response_conformance.py",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -338,8 +372,9 @@ PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
 # #1684 large-file guard repair: the 3.1-contract security half was physically
 # partitioned into tests/test_slurm_gateway_openapi_security.py; every
 # collectible partition replaces the single target.
+# #2074 applied the same rule to the API-contract corpus: see API_CONTRACT_TESTS.
 OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
-    "tests/test_api_contract.py",
+    *API_CONTRACT_TESTS,
     "tests/test_openapi_31_contract.py",
     "tests/test_openapi_drift.py",
     "tests/test_openapi_response_conformance.py",
@@ -1186,6 +1221,24 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         HYDRO_DISPLAY_MVT_SCALING_TESTS,
     ),
     PathTestRule(
+        # #2074: the single home of the six mock stores, the retry gateway double
+        # and the eight private assertion helpers the three API-contract
+        # partitions share. Without this entry the module is a non-collectible
+        # `tests/` support module, so a doubles-only diff would collapse to the
+        # selector meta-guard and none of the 38 cases that depend on these stubs
+        # would run. The stubs decide what the assertions see: `_RunStore` and
+        # `_ModelRegistryStore` are the response shapes three suites compare
+        # against the published schemas, `_assert_success_envelope` is what makes
+        # the envelope claim at all, and `_bounded_qhh_latest_reflected_value` is
+        # the reflected-value bound the QHH-latest identity cases hang on. The
+        # routed set is the derived closure: the three partitions plus
+        # `tests/test_openapi_response_conformance.py`, whose module-scope
+        # `from tests.api_contract_helpers import _ModelRegistryStore, _RunStore`
+        # is the fourth edge.
+        API_CONTRACT_HELPERS_PATH,
+        API_CONTRACT_HELPERS_CONSUMER_TESTS,
+    ),
+    PathTestRule(
         # Pins the modes `provider_atomic`'s two fail-closed gates inspect, for
         # tests that PRE-create a lock parent or a provider destination (#1513).
         # Its whole purpose is to make those tests independent of the ambient
@@ -1559,6 +1612,15 @@ API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
 # (apps/api/route_registry.py, apps/api/main.py), for the same no-drift reason —
 # four rules now name this tuple, so an edit to it moves all four together and
 # the literal-string pins in tests/test_select_ci_tests.py are what catch it.
+# #2074: `tests/test_api_contract.py` here is the RETAINED BASE path of the
+# partitioned API-contract corpus, deliberately not `*API_CONTRACT_TESTS`. This
+# rule's stated role is the hand-maintained-yaml / generated-frontend-types
+# oracle, and every whole-document comparison of the corpus (static vs runtime,
+# generated types vs committed schema, the declared-4XX census over all
+# operations) stayed on the base path. The two partitions assert pipeline and
+# resource route shapes at no precipitation path and never call `app.openapi()`,
+# so widening this shared tuple would make every precip-tree diff pay for 27
+# cases that cannot red on it — the padding the #2211 measurement rejects.
 PRECIP_SURFACE_TESTS: tuple[str, ...] = (
     "tests/test_precip_overlay.py",
     "tests/test_openapi_drift.py",
@@ -2296,6 +2358,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/tiles/mvt.py",
         (
+            # #2074: the RETAINED BASE path of the partitioned API-contract
+            # corpus, not the whole corpus. It is the only partition that imports
+            # `apps.api.routes.hydro_display*` and asserts the tile routes'
+            # published shape, so it is the one this module's derived closure
+            # requires; the other two never reach a tile.
             "tests/test_api_contract.py",
             "tests/test_display_publish_status_only.py",
             "tests/test_migrations.py",
@@ -2428,6 +2495,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # suite below imports the facade, which imports all six owners.
         "apps/api/routes/hydro_display*.py",
         (
+            # #2074: the RETAINED BASE path. Guard-derived, like every other
+            # entry here — it is the API-contract corpus's only direct module-
+            # scope importer of this family (it patches
+            # `hydro_display_catalog` and rebinds two facade names), which is
+            # also why the `apps/api/routes/hydro_display_catalog.py` row of
+            # GUARDED_MODULE_CLOSURES still anchors on this exact path.
             "tests/test_api_contract.py",
             # #1704: guard-derived, not hand-curated — the API error-logging
             # suite imports get_hydro_display_session from this module at file
@@ -3079,6 +3152,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/openapi_patching*.py",
         (
             "tests/test_api.py",
+            # #2074: the RETAINED BASE path. Per the #2211 criterion ("reads the
+            # document this module produces") it is the only API-contract
+            # partition that qualifies: all four `app.openapi()` call sites of
+            # the former monolith are in it. The two route-behaviour partitions
+            # read the committed file only, so naming them here is exactly the
+            # padding this rule's requirement forbids. They still reach this
+            # module through the broad `apps/api/**` rule.
             "tests/test_api_contract.py",
             "tests/test_hydro_display_mvt_scaling_coverage_order.py",
             "tests/test_hydro_display_mvt_scaling_national_routes.py",
@@ -3090,10 +3170,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # The broad fallback for every `apps/api/**` path without a narrower
+        # owner. #2074: the API-contract corpus is named here in FULL. This rule
+        # is the only thing that runs the resource-route contracts (model
+        # lifecycle / active / list / detail, basin version redaction, the
+        # river-segment GeoJSON budget, met stations and data sources) on a diff
+        # to the routes that serve them, so naming only the retained base path
+        # would drop 27 of the corpus's 38 cases out of the PR lane — the #1684
+        # "every collectible partition replaces the single target" failure this
+        # rule cannot afford, since none of those routes has a second oracle here.
         "apps/api/**",
         (
             "tests/test_api.py",
-            "tests/test_api_contract.py",
+            *API_CONTRACT_TESTS,
             "tests/test_monitoring_api.py",
         ),
     ),

@@ -114,8 +114,9 @@ rg --files apps/frontend/e2e | sort
 - Generated type status: present in `apps/frontend/src/api/types.ts:279` as a
   path entry, `apps/frontend/src/api/types.ts:1118` as `QhhLatestProduct`, and
   `apps/frontend/src/api/types.ts:2428` as operation `getQhhLatestProduct`.
-- Backend/test consumers: `tests/test_api_contract.py` covers the success
-  envelope, strict identity, and static OpenAPI operation; `tests/test_forecast_api.py`
+- Backend/test consumers: `tests/test_api_contract_pipeline_ops.py` covers the
+  success envelope and strict identity and `tests/test_api_contract.py` the
+  static OpenAPI operation (#2074 partitioned the one file into three); `tests/test_forecast_api.py`
   covers source-only, basin_id, strict identity, validation, unavailable, and
   unsupported-source behavior; `tests/test_openapi_drift.py` checks runtime vs
   static OpenAPI; `tests/test_readonly_db_validation.py` maps readonly route
