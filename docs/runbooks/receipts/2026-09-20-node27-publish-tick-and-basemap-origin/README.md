@@ -48,7 +48,12 @@
 
 > **`cycles` 列读法（容易读错，先说清）。** 它**不是**「该 tick 发布了哪些周期」，而是
 > **MVT prewarm 阶段从 display API 拿到的 gfs / ifs 两个 `default_cycle` 快照**，去重后按出现序排列
-> （两个值 = 两源不一致，一个值 = 两源一致，**不是**一趟横跨两个周期）。
+> （**不是**一趟横跨两个周期）。两个值 = 两源取值不同；**单个值不必然等于两源一致**——
+> `_new_source_entry()`（`scripts/node27_mvt_prewarm.py:508-510`）把 `cycle` 初始化为 `None`，
+> per-source 的 `except` 分支（`:396`）保持 `None`，序列化成 `"cycle": null`，
+> 而 `publish-ticks.sh:20` 的正则 `"cycle": "[^"]+"` **跳过 null**。
+> 所以单值既可能是「两源同值」，也可能是「一源为 null 或 discovery 失败」，
+> 本 receipt 的产物不足以区分这两种情况。
 > 链路：`scripts/node27_mvt_prewarm.py:378-379` 把 `discovery.cycle` 写进
 > `per_source[<源>]["cycle"]`，该值来自 `:203` 的 `/api/v1/layers/discharge/cycles?source=…`
 > 的 `default_cycle`，源集合是 `:60` 的 `PREWARM_SOURCES = ("gfs", "ifs")`。
@@ -113,8 +118,9 @@ tick #2 起每一个出现在「活动树」列里的 SHA——`7ecc46be`、`258
 
 活动树：分支 `master` @ `7ecc46be`（`origin/master` 上的 Merge PR #2428）。
 它的 `processed`/`published` 与基线 tick #1 **完全同构（38 条）**，因此是 1222 s 的严格可比对象。
-该 tick 末尾的展示面快照是 gfs 与 ifs 同为 `2026-09-14T12Z`（基线末尾是 gfs `09-14T00Z` /
-ifs `09-14T12Z`）；这只说明展示面前沿在这期间前移了一格，**不**说明该 tick 发布了哪个周期。
+该 tick 末尾的展示面快照只有一个非空值 `2026-09-14T12Z`（基线末尾是两个值
+`09-14T00Z`, `09-14T12Z`）；这只说明展示面前沿在这期间前移了一格，
+**不**说明该 tick 发布了哪个周期，也不足以断定两源当时取值相同（见 §1.2 读法的 null 情形）。
 
 **（b）处理量首次明显跃升的 tick** —— tick #9（`processed` 由 38 跳到 65）：
 
@@ -128,16 +134,19 @@ ifs `09-14T12Z`）；这只说明展示面前沿在这期间前移了一格，**
 单趟处理 65 个 run 说明当时有积压在被补齐，但本 receipt 不据此推断上游何时恢复。
 
 > 上游恢复的时间点本 receipt **不下结论**。`cycles` 快照能说的只有「展示面在各 tick 末尾停在哪个周期」：
-> 基线 tick #1 末尾是 gfs `09-14T00Z` / ifs `09-14T12Z`，master 上第一趟 tick #2 末尾两源都是
-> `09-14T12Z`，其后逐 tick 前移至 `09-19T12Z`（tick #23）。这只是展示面前沿的推进轨迹，
+> 基线 tick #1 末尾的两个非空值是 `09-14T00Z`, `09-14T12Z`，master 上第一趟 tick #2 末尾
+> 只剩一个非空值 `09-14T12Z`，其后逐 tick 前移至 `09-19T12Z`（tick #23）。
+> 这只是展示面前沿的推进轨迹，
 > 不是「哪一趟发布了哪个周期」，也不对 #2439 的修复与上游恢复之间的因果关系作任何声称。
 
 ### 1.4 判据核对：`rc=0` 且 `elapsed_sec` 与 1222 s 同量级
 
 `master` 上共 **12** 趟同规模（`processed=38`）tick：#2、#3、#4、#5、#6、#7、#8、#14、#15、
 **#16**、#22、#23。下表列其中 11 趟，**显式排除 tick #16**——它 `rc=1`，2116 s / 55.7 s 每条
-（相对基线 **+73%**），其 11 个 run 在 parse 段撞 statement timeout（见 §3 finding 1），
-量的是失败重试路径而非正常发布路径，不能与基线同框比较。下面的区间与中位数断言**只覆盖这 11 趟**。
+（相对基线 **+73%**），其 7 个 run 在 parse 段撞 statement timeout
+（§3 finding 1 里那一轮共 11 次失败中的第一批；#16 是首次失败的那趟，#17 才是重投）。
+它量的是撞超时后的失败路径而非正常发布路径，不能与基线同框比较。
+下面的区间与中位数断言**只覆盖这 11 趟**。
 
 口径说明：同规模指 `processed` 相同（= 本 tick 处理的 run 数，§1.2）。
 真正等价的工作量指标应是 `ingested`，但 `publish-ticks.sh` 未采集该字段；
@@ -172,14 +181,19 @@ ifs `09-14T12Z`）；这只说明展示面前沿在这期间前移了一格，**
 | #13 | 76/76 | 2463 | 32.4 |
 | #21 | 76/76 | 2258 | 29.7（**快于基线**） |
 
-**结论：`rc=0` 成立；`elapsed_sec` 与 1222 s 同量级（同规模 −2.4% ~ +17.8%，无数量级差），
+**结论：`rc=0` 成立；`elapsed_sec` 与 1222 s 同量级（同规模 −2.4% ~ +17.8%，无数量级差；
+已按上文显式排除 `rc=1` 的 tick #16），
 不构成「明显劣化」，无需另开回归单。** #2017 Evidence Floor 第 7 组 7.2 第 2 条挂账项就此关闭。
 
 ### 1.5 lane 当前仍在跑
 
 `publish-ticks.log` §2，取证前最近 6 趟（`2026-09-20T11:10:07Z … 12:02:07Z`）全是
 `rc=0 elapsed_sec≈27` 的 no-op tick——没有新周期可发，不是 lane 停摆；
-最新已发布周期 `2026-09-19T12Z`（tick #23 末尾的展示面快照）。
+展示面可渲染的最新周期（`default_cycle`）为 `2026-09-19T12Z`（tick #23 末尾的快照）。
+注意 `default_cycle` **不等于**「最新已发布周期」：按
+`services/tiles/mvt.py:2109` 与 `apps/api/routes/hydro_display.py:355-366`，
+它是「**每一个** active river network 都持有 display-ready 覆盖、且落在 12 天回看窗内」的最新周期，
+否则 fail-closed 为 `null`；某个周期已发布但未被全部网络覆盖时不会成为 `default_cycle`。
 同窗口另做过一次只读 `ls /home/ghdc/nwm/object-store/canonical/gfs`，最新条目为 `2026091912`，与之一致；
 **该次 listing 未随本 receipt 入库**，此处如实标注其来源。
 

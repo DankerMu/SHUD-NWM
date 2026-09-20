@@ -14,11 +14,13 @@
       `origin/master` 上（`git merge-base --is-ancestor`）。不在 `origin/master` 上的引用窗口
       必须显式声明该窗口内有无 tick。
 - [x] 1.3 判据核对：`rc=0`，且 `elapsed_sec` 与 `415cbd1e` 上的 1222 s 同量级。
-      比较必须同规模（同 `published` 条数）才成立；跨规模只能比每条耗时。
+      比较必须同规模（同 `processed` 条数——`published` 是全局 rowcount，不能用来论证工作量相等）
+      才成立；跨规模只能比每条耗时。同规模集合里若有 `rc≠0` 的 tick，必须显式排除并写明理由与数值。
       **FAIL 分支**：若 `rc≠0`，或同规模 `elapsed_sec` 出现数量级差（「明显劣化」），
       按 #2433 body 的规定不在本单修，改为另开回归 issue 并把编号写进 receipt 与 #2433 评论。
-- [x] 1.4 把「第一趟 master 代码上的 publish tick」与「第一趟携带上游新周期的 publish tick」
-      分别记入 receipt；对 `docs/runbooks/receipts/2026-09-16-display-v2.md:145` 采取
+- [x] 1.4 把「第一趟 master 代码上的 publish tick」与「处理量首次明显跃升的 tick」分别记入 receipt
+      （原措辞是「第一趟携带上游新周期的 publish tick」，round-1 review 证明 `cycles` 列不支持该认定，
+      故改以 `processed` 跃升为据，并在 receipt 里明写不对上游恢复时点下结论）；对 `docs/runbooks/receipts/2026-09-16-display-v2.md:145` 采取
       **追加不改写**：原「取不到」段落逐字保留（它是当时的事实），在其后追加一个引用块记补记结果
       与新 receipt 链接，并声明 7.2 第 2 条挂账项关闭。
 - [ ] 1.5 把同一结论作为评论贴到 #2433（issue body 指定该处为可接受落点）。
