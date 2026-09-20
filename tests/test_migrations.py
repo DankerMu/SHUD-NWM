@@ -558,8 +558,14 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
             "def _fetch_station_for_series"
         )
     ]
+    # Starts at the per-store forcing map rather than at the `def`: #2517 moved
+    # the forcing entry out of the function body and into a routed constant
+    # above it, and a slice that began at the `def` would no longer contain the
+    # forcing index name it is here to check.
     index_evidence_source = store_source[
-        store_source.index("def _qhh_latest_query_indexes") : store_source.index("def _non_negative_int")
+        store_source.index("_QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE: dict[") : store_source.index(
+            "def _non_negative_int"
+        )
     ]
 
     assert _index_columns_by_name(migration, "hydro_run_qhh_latest_candidate_idx") == (
@@ -704,6 +710,93 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "fst.valid_time <= cr.display_end_time" in query_source
     assert "rt.valid_time >= cr.display_start_time" in query_source
     assert "rt.valid_time <= cr.display_end_time" in query_source
+
+
+def test_forcing_query_index_payloads_name_the_relations_000061_actually_left() -> None:
+    """#2517: every forcing index-evidence entry, checked against the migrations.
+
+    The defect this replaces: the two payloads were hardcoded literals that no
+    check could invalidate, so 000061's rename made both of them false and every
+    pin stayed green — the sibling assertions above only ask whether an index
+    NAME appears somewhere in the evidence source, and a name carries no
+    relation. Both payloads are now read as (table, index, columns) triples and
+    attributed to the migration that creates each index.
+
+    Deliberately migration-sourced rather than catalog-sourced: this is a static
+    descriptor on a read path that must stay cheap and side-effect free, so the
+    payload may not query ``pg_indexes`` and this test may not need a database.
+    The residual gap is therefore "migrations say X, node-27 says Y", which is
+    what the per-change live receipt covers.
+    """
+    from packages.common.forcing_ts_render import FORCING_TABLE, FORCING_TABLE_LEGACY
+    from packages.common.forecast_store import (
+        _QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE,
+        _STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE,
+    )
+
+    migrations = dict(_migration_sql())
+    base = migrations["000005_met.sql"]
+    window_index_migration = migrations["000024_qhh_latest_display_product_indexes.sql"]
+    expand = migrations["000061_forcing_station_timeseries_narrow_expand.sql"]
+
+    # The rename is the whole reason the two routes name two relations: every
+    # index built on the wide table before 000061 travelled with it.
+    assert "ALTER TABLE met.forcing_station_timeseries RENAME TO forcing_station_timeseries_legacy" in expand
+    created_by_expand = set(
+        re.findall(r"CREATE (?:UNIQUE )?INDEX(?: CONCURRENTLY)? IF NOT EXISTS (\w+)", expand)
+    )
+    assert created_by_expand == {"forcing_ts_version_variable_time_key_idx"}, created_by_expand
+    narrow_pkey = re.search(r"CONSTRAINT (\w+)\s+PRIMARY KEY \(([^)]*)\)", expand)
+    assert narrow_pkey is not None
+    narrow_pkey_columns = tuple(column.strip() for column in narrow_pkey.group(2).split(","))
+
+    # 000005's wide table names no primary-key constraint, so PostgreSQL's
+    # implicit `<table>_pkey` is the name that travelled through the rename.
+    legacy_pkey_columns = tuple(
+        column.strip()
+        for column in re.search(
+            r"CREATE TABLE IF NOT EXISTS met\.forcing_station_timeseries \(.*?PRIMARY KEY \(([^)]*)\)",
+            base,
+            re.DOTALL,
+        )
+        .group(1)
+        .split(",")
+    )
+    assert "CONSTRAINT forcing_station_timeseries_pkey" not in base
+
+    latest_narrow = _QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE["narrow"]
+    assert latest_narrow["table"] == FORCING_TABLE
+    assert latest_narrow["index"] in created_by_expand
+    assert tuple(latest_narrow["columns"]) == _index_columns_by_name(expand, latest_narrow["index"])
+
+    latest_legacy = _QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE["legacy"]
+    assert latest_legacy["table"] == FORCING_TABLE_LEGACY
+    assert latest_legacy["index"] not in created_by_expand, (
+        "an index 000061 re-creates under the canonical name is not a legacy-route index"
+    )
+    assert tuple(latest_legacy["columns"]) == _index_columns_by_name(
+        window_index_migration, latest_legacy["index"]
+    )
+
+    readiness_narrow = _STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE["narrow"]
+    assert readiness_narrow["table"] == FORCING_TABLE
+    assert readiness_narrow["index"] == narrow_pkey.group(1)
+    assert tuple(readiness_narrow["columns"]) == narrow_pkey_columns
+
+    readiness_legacy = _STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE["legacy"]
+    assert readiness_legacy["table"] == FORCING_TABLE_LEGACY
+    assert readiness_legacy["index"] == "forcing_station_timeseries_pkey"
+    assert tuple(readiness_legacy["columns"]) == legacy_pkey_columns
+
+    # The two relations are distinct, and neither payload borrows the other's
+    # index: that pairing is exactly what 000061 broke.
+    assert FORCING_TABLE != FORCING_TABLE_LEGACY
+    assert {entry["index"] for entry in _QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE.values()} == {
+        latest_narrow["index"],
+        latest_legacy["index"],
+    }
+    assert latest_narrow["index"] != latest_legacy["index"]
+    assert readiness_narrow["index"] != readiness_legacy["index"]
 
 
 def test_interp_weight_grid_signature_migration_is_historical_column_only_migration() -> None:
