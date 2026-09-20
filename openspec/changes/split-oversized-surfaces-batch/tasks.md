@@ -48,47 +48,49 @@
 
 ## 6. #1100 — `scripts/publish_scheduler_file_registry.py`（1495 行）
 
-- [ ] 6.1 下沉 `package_version_for_model` + helper 与 manifest publisher 薄壳到独立 module；#1097 已 CLOSED，`_normalize_cutover_gate_audit` 按其落地位置复用而非重复实现
-- [ ] 6.2 CLI 保 argparse + main + 结构化 error 序列化；参数/退出码/schema_version/audit 字段语义不变
-- [ ] 6.3 删除该条 exclude，零替代 exclude
-- [ ] 6.4 Evidence：`--help` stdout 与 baseline 逐字节相等；`tests/test_publish_*.py` 全绿
+- [x] 6.1 下沉 `package_version_for_model` + helper 与 manifest publisher 薄壳到独立 module；#1097 已 CLOSED，`_normalize_cutover_gate_audit` 按其落地位置复用而非重复实现
+- [x] 6.2 CLI 保 argparse + main + 结构化 error 序列化；参数/退出码/schema_version/audit 字段语义不变
+- [x] 6.3 删除该条 exclude，零替代 exclude
+- [x] 6.4 Evidence：`--help` stdout 与 baseline 逐字节相等；`tests/test_publish_*.py` 全绿
 
 ## 7. #1823 — `tests/test_entropy_audit_script.py`（9860 行 / 410 用例）
 
-- [ ] 7.1 按测试族拆 `tests/test_entropy_audit_*.py`，每个 < 1000 行；共享 helper 进 `tests/entropy_audit_helpers.py`（非收集）
-- [ ] 7.2 按 D1 处理对 `audit_repo_entropy` 的 module-attribute patch（本组不搬生产侧，patch target 不变）
-- [ ] 7.3 删除该条 exclude，零替代 exclude
-- [ ] 7.4 落盘 #1809 遗留：5 处 expected-command → `tests/test_gateway_reconcile_*.py` glob；删除 `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` 与 `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` 的 "frozen pre-#1809 guard literal" 行
-- [ ] 7.5 治理面全量同步（按字符串 grep 定位，不按行号）：`scripts/select_ci_tests.py` 中 target 为 `tests/test_entropy_audit_script.py` 的三条 PathTestRule 改为显式枚举新分区、`tests/test_select_ci_tests.py` 的 pin、`_ScopedAgentContextConfig` 四处字面量、4 个 scoped `AGENTS.md`、`docs/governance/*_INVENTORY.md` 与 `entropy-burndown-triage.md` 的 verification command 改为 `tests/test_entropy_audit_*.py` glob；并按 D5 新增 tracked-tree 守卫
-- [ ] 7.6 Evidence：suffix 集合与 baseline byte-identical（410）；分区全量 pytest 绿
+- [x] 7.1 按测试族拆 `tests/test_entropy_audit_*.py`，每个 < 1000 行；共享 helper 进 `tests/entropy_audit_helpers.py`（非收集）
+- [x] 7.2 按 D1 处理对 `audit_repo_entropy` 的 module-attribute patch（本组不搬生产侧，patch target 不变）
+- [x] 7.3 删除该条 exclude，零替代 exclude
+- [x] 7.4 落盘 #1809 遗留：5 处 expected-command → `tests/test_gateway_reconcile_*.py` glob；删除 `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` 与 `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` 的 "frozen pre-#1809 guard literal" 行
+- [x] 7.5 治理面全量同步（按字符串 grep 定位，不按行号）：`scripts/select_ci_tests.py` 中 target 为 `tests/test_entropy_audit_script.py` 的三条 PathTestRule 改为显式枚举新分区、`tests/test_select_ci_tests.py` 的 pin、`_ScopedAgentContextConfig` 四处字面量、4 个 scoped `AGENTS.md`、`docs/governance/*_INVENTORY.md` 与 `entropy-burndown-triage.md` 的 verification command 改为 `tests/test_entropy_audit_*.py` glob；并按 D5 新增 tracked-tree 守卫
+- [x] 7.6 Evidence：suffix 集合与 baseline byte-identical（410）；分区全量 pytest 绿
 
 ## 8. #1842 — `scripts/governance/audit_repo_entropy.py`（9000 行）
 
-- [ ] 8.1 按 `_check_*` 家族 + 常量/schema + cli/report 拆模块，每个 < 1000 行；shared support module 承接公共常量/helper
-- [ ] 8.2 按 D1 裁定：被 `tests/test_entropy_audit_*.py` patch 的私有 helper 与其调用点同模块；搬走者同 commit 改 patch target 且原模块不 re-export
-- [ ] 8.3 删除该条 exclude，零替代 exclude
-- [ ] 8.4 selector 与 verification literal 与第 7 组一次性收口（不重复改动）
-- [ ] 8.5 Evidence（D3）：本组拆分**单独**取 before/after `--format json`。`metadata` 只比 8 个稳定键（`schema_version`/`mode`/`check_family_count`/`executed_check_families`/`skipped_path_families`/`max_scanned_text_file_bytes`/`max_artifact_fingerprint_bytes`/`baseline_path`）逐键相等，`generated_at`/`repo_root`/`finding_count`/`budget_counted_count`/`gate_eligible_count`/`baseline_exists`/`baseline_written`/`summary_counts`/`structural_file_budget`/`compatibility_facade_guard`/`scoped_agent_context` 显式排除；`findings[].check_id` 集合、`high_spread_patterns`/`module_heatmap` key 集合、顶层 public 函数集合相等；退出码不变；`findings` 全量 diff 期望为空（baseline 801 条中零条命中 entropy audit 自身路径），出现残差须逐条归因到本次搬运路径并在 PR body 列举，不可归因即回退本组
-- [ ] 8.6 Evidence：`uv run pytest -q tests/test_entropy_audit_*.py` 全绿
+- [x] 8.1 按 `_check_*` 家族 + 常量/schema + cli/report 拆模块，每个 < 1000 行；shared support module 承接公共常量/helper
+- [x] 8.2 按 D1 裁定：被 `tests/test_entropy_audit_*.py` patch 的私有 helper 与其调用点同模块；搬走者同 commit 改 patch target 且原模块不 re-export
+- [x] 8.3 删除该条 exclude，零替代 exclude
+- [x] 8.4 selector 与 verification literal 与第 7 组一次性收口（不重复改动）
+- [x] 8.5 Evidence（D3）：本组拆分**单独**取 before/after `--format json`。`metadata` 只比 8 个稳定键（`schema_version`/`mode`/`check_family_count`/`executed_check_families`/`skipped_path_families`/`max_scanned_text_file_bytes`/`max_artifact_fingerprint_bytes`/`baseline_path`）逐键相等，`generated_at`/`repo_root`/`finding_count`/`budget_counted_count`/`gate_eligible_count`/`baseline_exists`/`baseline_written`/`summary_counts`/`structural_file_budget`/`compatibility_facade_guard`/`scoped_agent_context` 显式排除；`findings[].check_id` 集合、`high_spread_patterns`/`module_heatmap` key 集合、顶层 public 函数集合相等；退出码不变；`findings` 全量 diff 期望为空（baseline 801 条中零条命中 entropy audit 自身路径），出现残差须逐条归因到本次搬运路径并在 PR body 列举，不可归因即回退本组
+- [x] 8.6 Evidence：`uv run pytest -q tests/test_entropy_audit_*.py` 全绿
 
 ## 9. #1103 — `docs/runbooks/current-production-ops.md`（6249 行）
 
-- [ ] 9.1 拆 `docs/runbooks/production-ops/` sub-runbook，每个 < 1000 行；主文件降为索引 landing page 且 < 1000 行
-- [ ] 9.2 命令、jq 表达式、复现步骤逐字保留；已用锚点 `#311-pipeline-job-provenance-sidecar-and-recovery-2420` 仍 resolve
-- [ ] 9.3 删除该条 exclude，零替代 exclude
-- [ ] 9.4 `scripts/select_ci_tests.py` 中 target 为 `docs/runbooks/current-production-ops.md` 的路由（按字符串 grep 定位）同步覆盖 `docs/runbooks/production-ops/**`
-- [ ] 9.5 **阻塞依赖（前置扫描发现，非 issue 原文）**：`tests/test_node22_entrypoint_invariant.py` 用 `_read("docs/runbooks/current-production-ops.md")` 对该文档正文断言（`:89`/`:103` node-22 active 命令无裸 `uv`、`:558`、`:669`）。正文搬进 sub-runbook 后这些断言会**静默空过**（扫不到命令 → `remaining == []` → 绿）。必须让这些 reader 扫 `production-ops/` 全树。该文件 1003 行、未豁免，故本组同时把它拆到 1000 行以下（只超 3 行，按 section 切两半即可）——**不新增豁免**，#2532 的单条额度已用尽。拆分沿用本批 oracle：collection suffix 逐字节相等 + AST 指纹 + 显式 PathTestRule + tracked-tree 守卫
-- [ ] 9.6 空过红证：把一条 node-22 active 命令的裸 `uv` 形式写进某个 sub-runbook，断言 `:103` 一族转红——证明 reader 确实扫到了新位置
-- [ ] 9.5 Evidence：165 处引用文件逐一确认链接/锚点仍 resolve；markdown-lint 绿
+- [x] 9.1 拆 `docs/runbooks/production-ops/` sub-runbook，每个 < 1000 行；主文件降为索引 landing page 且 < 1000 行
+- [x] 9.2 命令、jq 表达式、复现步骤逐字保留；已用锚点 `#311-pipeline-job-provenance-sidecar-and-recovery-2420` 仍 resolve
+- [x] 9.3 删除该条 exclude，零替代 exclude
+- [x] 9.4 `scripts/select_ci_tests.py` 中 target 为 `docs/runbooks/current-production-ops.md` 的路由（按字符串 grep 定位）同步覆盖 `docs/runbooks/production-ops/**`
+- [x] 9.5 **阻塞依赖（前置扫描发现，非 issue 原文）**：`tests/test_node22_entrypoint_invariant.py` 用 `_read("docs/runbooks/current-production-ops.md")` 对该文档正文断言（`:89`/`:103` node-22 active 命令无裸 `uv`、`:558`、`:669`）。正文搬进 sub-runbook 后这些断言会**静默空过**（扫不到命令 → `remaining == []` → 绿）。必须让这些 reader 扫 `production-ops/` 全树。该文件 1003 行、未豁免，故本组同时把它拆到 1000 行以下（只超 3 行，按 section 切两半即可）——**不新增豁免**，#2532 的单条额度已用尽。拆分沿用本批 oracle：collection suffix 逐字节相等 + AST 指纹 + 显式 PathTestRule + tracked-tree 守卫
+- [x] 9.6 空过红证：把一条 node-22 active 命令的裸 `uv` 形式写进某个 sub-runbook，断言 `:103` 一族转红——证明 reader 确实扫到了新位置
+- [x] 9.5 Evidence：165 处引用文件逐一确认链接/锚点仍 resolve；markdown-lint 绿
 
 ## 10. 收口
 
-- [ ] 10.1 `wc -l` 全量核验：本批产出的每个文件 < 1000
-- [ ] 10.2 `.large-file-guard.json` diff 为 10 条删除 + 至多 1 条已记录的非替代新增（见 Evidence Floor 2），`maxLines` 与其余条目逐字节不变
-- [ ] 10.3 `uv run ruff check .` 绿
-- [ ] 10.4 `openspec validate split-oversized-surfaces-batch --strict --no-interactive` 绿
+- [x] 10.0 第 10 组 cleanup commit：修掉本批自身造成的悬空引用（注释/docstring/散文，零可执行改动，AST 对 21 个 .py 逐一相等）；`openspec/specs/**` 的 live requirement 漂移另立 #2533
+
+- [x] 10.1 `wc -l` 全量核验：本批产出的每个文件 < 1000
+- [x] 10.2 `.large-file-guard.json` diff 为 10 条删除 + 至多 1 条已记录的非替代新增（见 Evidence Floor 2），`maxLines` 与其余条目逐字节不变
+- [x] 10.3 `uv run ruff check .` 绿
+- [x] 10.4 `openspec validate split-oversized-surfaces-batch --strict --no-interactive` 绿
 - [ ] 10.5 node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）覆盖 retention / refresh / publish / entropy 全部分区
-- [ ] 10.6 PR body 声明：CI 定向选择可能降级为 collect-only 冒烟，node-27 为真实 oracle
+- [x] 10.6 PR body 声明：CI 定向选择可能降级为 collect-only 冒烟，node-27 为真实 oracle
 
 ## Evidence Floor
 
