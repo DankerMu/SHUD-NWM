@@ -149,7 +149,7 @@
 
 ## 3. Frontend splits
 
-- [ ] 3.1 Split `apps/frontend/src/lib/m11/overviewDataContracts.ts` (1112) and
+- [x] 3.1 Split `apps/frontend/src/lib/m11/overviewDataContracts.ts` (1112) and
       `apps/frontend/src/stores/overviewData.ts` (1268) (#2102).
   - Module/Scope: submodules plus a barrel at each original path; export names
     and signatures unchanged.
