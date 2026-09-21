@@ -112,18 +112,22 @@ def test_execute_deletes_aged_cycles(store: Path) -> None:
 
 
 def test_single_delete_failure_recorded_others_continue(store: Path, monkeypatch) -> None:
-    import services.orchestrator.retention as retention_mod
+    # #2259: `shutil.rmtree` is the primary-root removal, and it moved WITH
+    # `_delete_entry` into the copyback-mutex owner. The patch is on the global
+    # `shutil` module either way, but the attribute walk that finds it has to
+    # start at the module that still imports it.
+    import services.orchestrator.retention_copyback_mutex as retention_mutex_mod
 
     old = _cycle_name(NOW - timedelta(days=20))
     failing_key = f"raw/gfs/{old}"
-    real_rmtree = retention_mod.shutil.rmtree
+    real_rmtree = retention_mutex_mod.shutil.rmtree
 
     def fake_rmtree(path, *args, **kwargs):
         if Path(path).as_posix().endswith(failing_key):
             raise OSError("boom")
         return real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(retention_mod.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setattr(retention_mutex_mod.shutil, "rmtree", fake_rmtree)
     result = run_retention(
         object_store_root=store,
         now=NOW,

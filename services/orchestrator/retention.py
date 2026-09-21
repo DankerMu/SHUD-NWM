@@ -47,8 +47,6 @@ Safety posture (never-break-userspace):
 from __future__ import annotations
 
 import os
-import shutil
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -57,14 +55,15 @@ from typing import Any
 
 from packages.common.copyback_guard import (
     DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
-    CopybackLockBudgetExhausted,
-    CopybackLockError,
-    acquire_copyback_batch_lock,
-    copyback_lock_failure_kind,
     count_copyback_lock_failures,
-    release_copyback_batch_lock,
 )
-from packages.common.safe_fs import SafeFilesystemError, remove_tree_allow_symlinks
+
+# #2259: the mutex lane's three symbols live in the sibling module, and the
+# names they call (`acquire_copyback_batch_lock`, `release_copyback_batch_lock`,
+# `remove_tree_allow_symlinks`, `shutil`) went WITH them -- deliberately not
+# re-exported here, so a `monkeypatch.setattr(retention, ...)` aimed at a moved
+# seam raises instead of patching an attribute nothing reads (design D1).
+from services.orchestrator.retention_copyback_mutex import _CopybackLockBudget, _delete_entry
 from services.orchestrator.run_identity import parse_run_cycle
 
 # Per-cycle prefixes whose second path segment ({source}) contains cycle
@@ -849,24 +848,6 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
     }
 
 
-@dataclass
-class _CopybackLockBudget:
-    """The copyback root under the mutex, plus one pass's remaining wait budget.
-
-    One instance per pass, shared by every copyback-root removal and charged by
-    each acquisition attempt one of them makes: the budget is a *pass*-level
-    bound, so those attempts have to draw on the same counter (design D9). Once
-    it is spent the remaining entries are refused before acquiring, so they
-    leave the counter untouched rather than driving it further negative.
-    ``root`` travels with it because the removal and the acquisition must name
-    the same resolved root.
-    """
-
-    root: Path
-    budget_seconds: float
-    remaining_seconds: float
-
-
 def run_retention(
     *,
     object_store_root: Path | str | None,
@@ -989,119 +970,3 @@ def _resolve_copyback_lock_root(
     if resolved is None or str(resolved) not in extra_roots:
         return None
     return resolved
-
-
-def _delete_entry(
-    entry: dict[str, Any],
-    result: RetentionResult,
-    *,
-    containment_root: Path | None = None,
-    copyback_lock: _CopybackLockBudget | None = None,
-) -> None:
-    """Remove one planned entry, recording failure instead of raising.
-
-    ``containment_root`` is set for additional roots (design D6 / issue #1615):
-    removal goes through ``remove_tree_allow_symlinks`` on the run's parent, so
-    the walk cannot follow a symlink out of the root that is being swept, and a
-    descendant symlink inside a selected, aged run workspace is unlinked as a
-    link instead of refusing the whole tree. The object-store root keeps the
-    historical ``shutil.rmtree``; changing it is out of this change's scope.
-
-    ``copyback_lock`` is set only for entries on the **shared** copyback root
-    (#2238): that removal, and only that removal, is taken under the copyback
-    batch mutex, so it cannot land inside another process's
-    rename-to-backup-then-promote window and destroy that writer's rollback
-    material. It is nested inside the ``containment_root`` branch by
-    construction, so the primary root's ``shutil.rmtree`` can never be locked.
-
-    ``SafeFilesystemError`` and ``CopybackLockError`` (hence its
-    ``CopybackLockTimeout`` subclass) are ``RuntimeError``s, **not**
-    ``OSError``s, so both must be named explicitly here: letting either escape
-    would collapse the pass receipt to ``{"status": "error"}``
-    (scheduler_runtime) and abort the ``cleanup`` CLI mid-sweep (cli.py wraps
-    nothing), both violating this module's "failures never abort the pass"
-    contract. An unavailable mutex is therefore one ``failed`` entry carrying
-    the error text, its class name and its typed ``lock_failure`` shape --
-    never a removal, and never an interrupted sweep.
-    """
-    path = Path(entry["path"])
-    try:
-        if containment_root is not None:
-            if copyback_lock is not None:
-                _remove_tree_under_copyback_mutex(
-                    path,
-                    containment_root=containment_root,
-                    copyback_lock=copyback_lock,
-                )
-            else:
-                remove_tree_allow_symlinks(
-                    path.parent,
-                    path.name,
-                    containment_root=containment_root,
-                    missing_ok=False,
-                )
-        else:
-            shutil.rmtree(path)
-    except CopybackLockError as error:
-        result.failed.append(
-            {
-                **entry,
-                "error": str(error),
-                "error_type": type(error).__name__,
-                "lock_failure": copyback_lock_failure_kind(error),
-            }
-        )
-        return
-    except (OSError, SafeFilesystemError) as error:
-        result.failed.append({**entry, "error": str(error), "error_type": type(error).__name__})
-        return
-    result.deleted.append(entry)
-    result.freed_bytes += int(entry.get("size_bytes", 0))
-
-
-def _remove_tree_under_copyback_mutex(
-    path: Path,
-    *,
-    containment_root: Path,
-    copyback_lock: _CopybackLockBudget,
-) -> None:
-    """Hold the copyback batch mutex for exactly one tree removal (design D2/D9).
-
-    Acquire immediately before the removal and release immediately after, so the
-    held window is one ``remove_tree_allow_symlinks`` and never the pass's
-    planning walk -- which sizes every candidate over NFS and would starve the
-    promoting writers whose acquisition budget this mutex is sized for.
-
-    ``acquire``/``release`` rather than the ``copyback_batch_lock`` context
-    manager, because the *acquisition* has to be measured separately from the
-    hold to be charged against the pass budget, and the context manager exposes
-    no seam between the two. The charged span is the whole
-    ``acquire_copyback_batch_lock`` call -- the guard's own identity syscalls as
-    well as the blocking poll -- but it closes before the removal begins, so
-    only the acquisition is charged, never the removal, and a large uncontended
-    tree cannot consume the budget. An exhausted budget refuses **before**
-    acquiring: the remaining entries on this root must not each add another
-    deadline's wait.
-    """
-    if copyback_lock.remaining_seconds <= 0:
-        raise CopybackLockBudgetExhausted(
-            f"copyback batch lock wait budget of {copyback_lock.budget_seconds}s "
-            f"is exhausted for this retention pass; {path} was not removed"
-        )
-    started = time.monotonic()
-    try:
-        fd = acquire_copyback_batch_lock(
-            copyback_lock.root,
-            timeout_seconds=copyback_lock.remaining_seconds,
-        )
-    finally:
-        copyback_lock.remaining_seconds -= time.monotonic() - started
-    try:
-        remove_tree_allow_symlinks(
-            path.parent,
-            path.name,
-            containment_root=containment_root,
-            missing_ok=False,
-        )
-    finally:
-        release_copyback_batch_lock(fd)

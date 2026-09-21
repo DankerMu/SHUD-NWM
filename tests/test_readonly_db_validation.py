@@ -79,7 +79,7 @@ def _portable_stat_script(script: str) -> str:
     Only the ``%a``→``%Lp`` pair has repo precedent: seven scripts under
     ``scripts/`` already ship ``stat -c '%a' … 2>/dev/null || stat -f '%Lp' …``
     fallbacks, two of which are pinned by
-    tests/test_scheduler_file_provider_refresh.py.  The ``%U``→``%Su`` and
+    tests/test_scheduler_refresh_deployment_contract.py.  The ``%U``→``%Su`` and
     ``%A``→``%Sp`` pairs have no prior occurrence in the repo and are new here,
     justified by the equivalence unit test named below rather than by
     convention.

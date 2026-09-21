@@ -13,14 +13,14 @@ refuses a symlink final component outright, and macOS case-folding aliases are
 two distinct directories on Linux.  The rename pair below is **sequential** --
 one inode seen at two realpaths one after the other -- not concurrent.  The
 guard-level claim is carried by the injection tests in
-tests/test_scheduler_state_index_copyback_replay.py,
+tests/test_scheduler_state_index_copyback_replay_refusals.py,
 tests/test_run_tree_copyback.py, tests/test_tile_publisher.py and
 tests/test_forcing_copyback_backfill.py, plus the POSIX same-superblock
 argument recorded in the change proposal.
 
 The file also carries safe_fs's **directory-mode determinism** cases (#1513) --
 see the section comment below.  Those live here rather than beside the
-provider_atomic coverage in tests/test_scheduler_file_provider_refresh.py
+provider_atomic coverage in tests/test_scheduler_refresh_provider_atomic.py
 because scripts/select_ci_tests.py routes packages/common/safe_fs.py to THIS
 suite and not to that one, so a safe_fs-only change would otherwise never run
 them in the PR lane.
@@ -182,7 +182,7 @@ def test_provider_lock_acquires_under_a_safe_fs_parent_created_at_a_permissive_u
     tmp_path: Path,
 ) -> None:
     # The permissive-side twin of
-    # tests/test_scheduler_file_provider_refresh.py's
+    # tests/test_scheduler_refresh_provider_atomic.py's
     # test_provider_atomic_publishes_shared_mode_under_private_umask, and the
     # end-to-end shape of the bug: the gate is unchanged, the parent's mode is
     # what changed.

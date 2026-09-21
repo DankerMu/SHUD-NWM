@@ -74,21 +74,17 @@ rtk corepack pnpm dlx markdownlint-cli2 --config .markdownlint.yaml docs/governa
 Governance-8 issue #712 guard verification commands:
 
 ```bash
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
 
-The pre-#1809 guard fixture still matches this historical command literal:
-`uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`.
-It is provenance only and MUST NOT be executed after the split; use the glob commands below.
-
 Governance-8 issue #720 scheduler closeout verification commands:
 
 ```bash
 uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -175,7 +171,7 @@ Guard-hook metadata rows required by #712 through #719:
 - `scheduler-state-monkeypatch-bindings`: owner `services.orchestrator.scheduler_state`; retention reason: legacy scheduler monkeypatch bindings; removal condition: migrate monkeypatch callers; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
 - `install_scheduler_state_compat`: owner `services.orchestrator.scheduler_state_compat`; retention reason: legacy scheduler state monkeypatch installer; removal condition: caller migration; verification command: `uv run pytest -q tests/test_production_scheduler.py -k candidate_state_decision_scheduler_monkeypatch`.
 - `candidate-state-reexports`: owner `services.orchestrator.scheduler_state`; retention reason: legacy candidate-state imports; removal condition: callers use owner module/public API; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`.
-- `scheduler-lease-reexports`: owner `services.orchestrator.scheduler_lease`; retention: legacy lease paths; removal condition: callers use owner module; frozen pre-#1809 verification command literal (provenance only, do not execute): `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py`.
+- `scheduler-lease-reexports`: owner `services.orchestrator.scheduler_lease`; retention: legacy lease paths; removal condition: callers use owner module; verification command: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile_*.py`.
 - `scheduler-types-reexport`: owner `services.orchestrator.scheduler_types`;
   retention reason: legacy scheduler type imports; removal condition: callers
   use owner/public API; verification command:

@@ -44,23 +44,53 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
+    ENTROPY_AUDIT_HELPERS_PATH,
+    ENTROPY_AUDIT_OWNER_PATH,
+    ENTROPY_AUDIT_PACKAGE_MODULES,
+    ENTROPY_AUDIT_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
     FORCING_SQL_SHAPE_ORACLE_TESTS,
+    NODE22_ENTRYPOINT_HELPERS_PATH,
+    NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
+    NODE22_ENTRYPOINT_INVARIANT_TESTS,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
+    PRODUCTION_OPS_RUNBOOK_TESTS,
+    PRODUCTION_OPS_SUBRUNBOOK_GLOB,
+    PUBLISH_REGISTRY_OWNER_PATH,
+    PUBLISH_REGISTRY_PACKAGE_MODULES,
+    PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
+    PUBLISH_SCHEDULER_REGISTRY_TESTS,
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
     RELEASED_RESERVATION_RECOVERY_TESTS,
+    RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
+    RETENTION_COPYBACK_MUTEX_OWNER_PATH,
+    RETENTION_COPYBACK_MUTEX_OWNER_TESTS,
+    RETENTION_COPYBACK_MUTEX_TESTS,
     REVIEW_GATE_ISSUE_MEMORY_PATH,
     REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
+    SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
+    SCHEDULER_REFRESH_HELPER_TESTS,
+    SCHEDULER_REFRESH_HELPERS_PATH,
+    SCHEDULER_REFRESH_OWNER_PATH,
+    SCHEDULER_REFRESH_PACKAGE_MODULES,
+    SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
+    SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+    SCHEDULER_REFRESH_RUNNER_TESTS,
+    SCHEDULER_REFRESH_TESTS,
     SELECTOR_META_GUARD_TEST,
+    STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
+    STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH,
+    STATE_INDEX_COPYBACK_REPLAY_TESTS,
     SUPPORT_MODULE_TEST_RULES,
     THREAD_EXCEPTION_POLICY_TESTS,
     TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
@@ -348,14 +378,17 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     # #2146: the `.service` gained a SECOND literal reader --
     # `tests/test_node22_refresh_timer_health.py` asserts the probe unit's
     # `UnsetEnvironment=` line is byte-equal to this one's.
+    # #1101 partitioned the refresh monolith into fifteen suites; the case that
+    # `read_text`s both units moved to the deployment-contract partition, so the
+    # owner is that partition and NOT the whole corpus.
     "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
         {
-            "tests/test_scheduler_file_provider_refresh.py",
+            *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             "tests/test_node22_refresh_timer_health.py",
         }
     ),
     "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
-        {"tests/test_scheduler_file_provider_refresh.py"}
+        SCHEDULER_REFRESH_DEPLOYMENT_TESTS
     ),
 }
 
@@ -367,12 +400,22 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
 # it, so bumping the runner's receipt schema merged green on a PR that touched
 # only that file.
 NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
-    "scripts/scheduler_file_provider_refresh.py": frozenset(
-        {
-            "tests/test_scheduler_file_provider_refresh.py",
-            "tests/test_node22_refresh_timer_health.py",
-        }
-    ),
+    # #1101: the runner's same-name derivation died with the monolith, so its
+    # explicit row is the only named route and it carries the whole corpus. The
+    # edge asserts membership, so naming all fifteen is what keeps a partition
+    # from quietly dropping off the runner's route.
+    # #1099: the path is now a re-export facade, but it is still what the probe
+    # suite IMPORTS (`SCHEMA_VERSION`, `OUTCOMES`, `MAX_HISTORY`), so the edge
+    # survives the split unchanged.
+    "scripts/scheduler_file_provider_refresh.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
+    # #1099: the four literals the probe `read_text`s -- the `run_id` filename
+    # shape, the history directory name, the history receipt name and
+    # `latest.json` -- moved out of the facade into these two owner modules, and
+    # the probe was re-pointed at them in the same commit. Without these rows a
+    # PR renaming the history directory in receipt.py would merge green and
+    # leave the probe permanently at `manifest_unavailable`.
+    "scripts/scheduler_refresh/runner.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
+    "scripts/scheduler_refresh/receipt.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
     # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
     # the probe stdlib-only) and derives both threshold ceilings from it.
     "services/orchestrator/scheduler_file_providers.py": frozenset({"tests/test_node22_refresh_timer_health.py"}),
@@ -426,7 +469,7 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
 def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
     """#2188 — the node-22 refresh units had NO rule at all, not even a pin.
 
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
     `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
     `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
@@ -814,10 +857,11 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # out when the surface is an orchestrator module (see the orchestrator
     # manifest tests); for a shared-library module the baseline legitimately
     # includes them.
-    # `tests/test_retention_copyback_mutex.py` is #2260's at-site addition to the
-    # scheduler_runtime.py stop rule (that stop shadows the orchestrator tree
-    # rule which carries the mutex partition). Additive to the redirect, exactly
-    # like the safe_fs.py and journal importer targets.
+    # The two `tests/test_retention_copyback_mutex_*.py` halves are #2260's
+    # at-site addition to the scheduler_runtime.py stop rule (that stop shadows
+    # the orchestrator tree rule which carries the mutex partition), split in two
+    # by #2259. Additive to the redirect, exactly like the safe_fs.py and journal
+    # importer targets.
     # The scope-disposition node id is #1186 round 2's at-site addition to the
     # same stop rule: scheduler_runtime.py writes most of the evidence keys the
     # closure pin dispositions, and the stop rule's ten pinned node ids did not
@@ -828,7 +872,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py"
             "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             "tests/test_safe_fs.py",
@@ -933,8 +977,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
-    # literal below — not the arithmetic above — is the authority: it now lists
-    # 60 targets, the rule's 57 plus three riders that arrive from OUTSIDE the
+    # literal below — not the arithmetic above — is the authority: #2259 split
+    # the copyback-mutex partition in two, #1101 replaced the refresh
+    # monolith with fifteen partitions (+14) and #1102 replaced the publisher
+    # monolith with seven (+6), so it now lists
+    # 81 targets, the rule's 78 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1005,7 +1052,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_pipeline_ops_identity_envelope.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the seven partitions of the deleted publisher monolith. They
+        # sort into the slot the monolith held -- the literal is compared
+        # against `select_tests`'s sorted output, so placement matters.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
@@ -1019,7 +1069,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # importer derivation re-supplies it there), and no disposition token can
         # mask that -- `select_ci_tests` never reads the exclusion table.
         "tests/test_retention_copyback_lock_signal.py",
-        "tests/test_retention_copyback_mutex.py",
+        "tests/test_retention_copyback_mutex_budget.py",
+        "tests/test_retention_copyback_mutex_protocol.py",
         "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
         "tests/test_retention_pipeline_frontier.py",
@@ -1034,7 +1085,6 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_scheduler_backfill.py",
         "tests/test_scheduler_backfill_predecessor.py",
-        "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
@@ -1046,6 +1096,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_journal_root_authority.py",
         "tests/test_scheduler_journal_scope_census.py",
         "tests/test_scheduler_lineage.py",
+        # #1101: the fifteen partitions of the deleted refresh monolith. They
+        # sort here, between the lineage and timing suites — the literal is
+        # compared against `select_tests`'s sorted output, so placement matters.
+        *SCHEDULER_REFRESH_TESTS,
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
         # tests/test_retry.py and every same-name source route now schedules it
@@ -1927,7 +1981,7 @@ def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
 
     selected = select_tests(["scripts/scheduler_file_provider_refresh_once.sh"], repo_root=Path("."))
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1940,7 +1994,7 @@ def test_select_tests_sh_plus_docs_change_does_not_dilute_guard_selection() -> N
         repo_root=Path("."),
     )
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1953,7 +2007,7 @@ def test_select_tests_sh_plus_py_change_selects_union_of_guards() -> None:
         repo_root=Path("."),
     )
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in selected
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in selected
     assert "tests/test_node27_autopipeline_preflight.py" in selected
 
 
@@ -1994,19 +2048,385 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
     )
 
     # #1656 and #2185: scripts/** is a root of both supplemental scans, so both
-    # suites join the entropy-rule target.
-    assert selected == ["tests/test_entropy_audit_script.py", WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    # suites join the entropy-rule target. #1823 replaced that single target with
+    # the fifteen partitions: EXACT equality against the selector's own tuple, so
+    # a rule that quietly narrows to one partition — or a sixteenth partition that
+    # never reaches the rules — reds here rather than shrinking the PR lane.
+    assert selected == [*ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
-def test_select_tests_maps_script_to_its_same_name_suite_without_core_smoke_fallback() -> None:
-    selected = select_tests(
-        ["scripts/scheduler_state_index_copyback_replay.py"],
-        repo_root=Path("."),
+def test_select_tests_maps_the_replay_script_to_every_partition_without_core_smoke_fallback() -> None:
+    # #1611 replaced this route's same-name derivation with an explicit row:
+    # tests/test_scheduler_state_index_copyback_replay.py was partitioned into
+    # four suites and deleted with no shim, so `tests/test_<stem>.py` stopped
+    # resolving. EXACT equality, not membership: membership would stay green if
+    # the row lost a partition, and an earlier stop-on-match glob padding the
+    # selection would go unnoticed. The live same-name derivation itself is
+    # pinned by test_same_name_victim_pin_is_live_without_fallback.
+    assert Path(STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH).is_file()
+    assert not Path("tests/test_scheduler_state_index_copyback_replay.py").exists(), (
+        "the pre-#1611 monolith is back; the explicit row and the same-name derivation would both fire"
     )
 
-    assert "tests/test_scheduler_state_index_copyback_replay.py" in selected
+    selected = select_tests([STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH], repo_root=Path("."))
+
+    # #1656 and #2185: scripts/** is a root of both supplemental scans.
+    assert selected == sorted(
+        [*STATE_INDEX_COPYBACK_REPLAY_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH]
+    )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_replay_partition_tracked_tree_is_exactly_four_suites_and_one_helper() -> None:
+    # #1611: four collectible suites is a floor, not a choice. A fifth partition, a
+    # leftover compatibility shim for the deleted monolith, or the helper renamed
+    # into a `test_*.py` suite all redden here. The expected membership is the
+    # selector's own tuple, never a glob result — the glob is the MUTANT side.
+    # The corpus filter carries the full stem on purpose: the shorter
+    # `scheduler_state_index` prefix would sweep in the unrelated
+    # tests/test_scheduler_state_index_repair.py corpus.
+    partitions = set(STATE_INDEX_COPYBACK_REPLAY_TESTS)
+    helper = STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 4, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    corpus = {
+        path for path in tracked if "scheduler_state_index_copyback_replay" in PurePosixPath(path).name
+    }
+    assert corpus == partitions | {helper}, sorted(corpus ^ (partitions | {helper}))
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+    # Both routes must carry the whole corpus, or the tracked-tree count above is
+    # satisfied by files nothing selects.
+    owner_rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH)
+    helper_rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
+    assert set(owner_rule.tests) == partitions, sorted(set(owner_rule.tests) ^ partitions)
+    assert set(helper_rule.tests) == partitions, sorted(set(helper_rule.tests) ^ partitions)
+
+
+def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_two_helpers() -> None:
+    # #1101: fifteen collectible partitions plus two non-collectible helpers is a
+    # floor, not a preference. A sixteenth partition, a leftover compatibility
+    # shim for the deleted 9614-line monolith, or either helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuples, never a glob result — the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in
+    # tests/test_node22_refresh_timer_health.py, a different lane with its own
+    # owner rows.
+    partitions = set(SCHEDULER_REFRESH_TESTS)
+    helpers = {SCHEDULER_REFRESH_HELPERS_PATH, SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH}
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 15, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helpers <= tracked, sorted(helpers - tracked)
+    assert not Path("tests/test_scheduler_file_provider_refresh.py").exists(), (
+        "the pre-#1101 monolith is back; the explicit rows and its same-name "
+        "derivation from scripts/scheduler_file_provider_refresh.py would both fire"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_scheduler_refresh_")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("scheduler_refresh")
+    }
+    assert helper_corpus == helpers, sorted(helper_corpus ^ helpers)
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not any(is_test_suite_path(path) for path in helpers)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the right reach, or
+    # the tracked-tree count above is satisfied by files nothing selects. The
+    # runner and the broad orchestrator directory rule carry the WHOLE corpus;
+    # the five deployment paths carry only the partition that reads them; the two
+    # helper support rules carry their derived importer closures.
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    runner_rule = rule_for("scripts/scheduler_file_provider_refresh.py")
+    directory_rule = rule_for("services/orchestrator/**")
+    assert partitions <= set(runner_rule.tests), sorted(partitions - set(runner_rule.tests))
+    assert partitions <= set(directory_rule.tests), sorted(partitions - set(directory_rule.tests))
+
+    deployment = set(SCHEDULER_REFRESH_DEPLOYMENT_TESTS)
+    assert deployment <= partitions
+    for pattern in (
+        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+        "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+        "infra/env/compute.scheduler-provider-refresh.env.example",
+        "scripts/scheduler_file_provider_refresh_once.sh",
+        "scripts/install_node22_scheduler_file_provider_refresh.sh",
+    ):
+        targets = set(rule_for(pattern).tests)
+        assert deployment <= targets, f"{pattern} lost its reader: {sorted(deployment - targets)}"
+        assert not (partitions - deployment) & targets, (
+            f"{pattern} widened to partitions that never open it: "
+            f"{sorted((partitions - deployment) & targets)}"
+        )
+
+    for helper, expected in (
+        (SCHEDULER_REFRESH_HELPERS_PATH, set(SCHEDULER_REFRESH_HELPER_TESTS)),
+        (SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH, set(SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS)),
+    ):
+        targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+        assert targets == expected, sorted(targets ^ expected)
+        assert expected <= partitions, sorted(expected - partitions)
+        # The rule is only honest if it equals what the tracked tree derives.
+        derived = _derived_support_module_importers([helper])[helper]
+        assert derived == expected, sorted(derived ^ expected)
+
+
+def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None:
+    # #1099 replaced the 3639-line refresh runner with ten owner modules behind a
+    # re-export facade kept at the historical path. Ten is a floor, not a
+    # preference: an eleventh module, a stray `__init__.py` (scripts/ is a PEP
+    # 420 namespace tree -- scripts/governance/ has none either), the facade
+    # reduced to a deleted module or a two-line shim, or a module deleted out
+    # from under its row all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # an unrouted module selects nothing and degrades the refresh lane to the
+    # zero-assertion `--collect-only` smoke in silence. That is why the reach is
+    # asserted end to end below and not just read back off the rule table.
+    modules = set(SCHEDULER_REFRESH_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/scheduler_refresh"))
+
+    assert len(modules) == 10, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert Path(SCHEDULER_REFRESH_OWNER_PATH).exists(), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert SCHEDULER_REFRESH_OWNER_PATH not in modules
+    assert not Path("scripts/scheduler_refresh/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(SCHEDULER_REFRESH_RUNNER_TESTS)
+    assert set(SCHEDULER_REFRESH_TESTS) < expected
+    for pattern in (SCHEDULER_REFRESH_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+
+def test_publish_registry_package_tracked_tree_is_exactly_nine_modules() -> None:
+    # #1100 replaced the 1495-line manual publisher with nine owner modules behind
+    # the attribute-broadcast facade kept at the historical path. Nine is a floor,
+    # not a preference: a tenth module, a stray `__init__.py` (scripts/ is a PEP
+    # 420 namespace tree -- neither scripts/governance/ nor scripts/scheduler_refresh/
+    # has one), the facade reduced to a deleted module or a two-line shim, or a
+    # module deleted out from under its row all redden here. Expected membership is
+    # the selector's own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # measured before the rows landed, each of the nine selected only the generic
+    # core-smoke riders and zero publisher partitions, i.e. an unrouted module
+    # degrades the publisher lane to the zero-assertion `--collect-only` smoke in
+    # silence. That is why the reach is asserted end to end below and not just read
+    # back off the rule table.
+    modules = set(PUBLISH_REGISTRY_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/publish_registry"))
+
+    assert len(modules) == 9, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert Path(PUBLISH_REGISTRY_OWNER_PATH).exists(), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert PUBLISH_REGISTRY_OWNER_PATH not in modules
+    assert not Path("scripts/publish_registry/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    for pattern in (PUBLISH_REGISTRY_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+
+def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> None:
+    # #1842 replaced the 9000-line audit enforcer with twenty-one owner modules
+    # behind the attribute-broadcast facade kept at the historical path.
+    # Twenty-one is a floor, not a preference: a twenty-second module, a stray
+    # `__init__.py` (scripts/ is a PEP 420 namespace tree -- neither
+    # scripts/governance/ nor scripts/publish_registry/ has one), the facade
+    # reduced to a deleted module or a two-line shim, or a module deleted out
+    # from under its row all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # None of these basenames has a `tests/test_<basename>.py`, so unlike an
+    # ordinary backend module there is NO same-name derivation to fall back on:
+    # measured before the rows landed, each of the twenty-one selected only the
+    # five generic core-smoke riders plus the two `scripts/**` supplemental-scan
+    # suites and zero entropy partitions, i.e. an unrouted module degrades the
+    # entropy lane to the zero-assertion `--collect-only` smoke in silence. That
+    # is why the reach is asserted end to end below and not just read back off
+    # the rule table.
+    modules = set(ENTROPY_AUDIT_PACKAGE_MODULES)
+    tracked = set(_tracked_python_files("scripts/governance/entropy_audit"))
+
+    assert len(modules) == 21, sorted(modules)
+    assert tracked == modules, sorted(tracked ^ modules)
+    assert ENTROPY_AUDIT_OWNER_PATH in set(_tracked_python_files("scripts/governance")), (
+        "the historical path must stay an executable entrypoint and attribute facade"
+    )
+    assert ENTROPY_AUDIT_OWNER_PATH not in modules
+    assert not Path("scripts/governance/entropy_audit/__init__.py").exists()
+
+    def rule_for(pattern: str) -> PathTestRule:
+        return next(rule for rule in PATH_TEST_RULES if rule.pattern == pattern)
+
+    expected = set(ENTROPY_AUDIT_TESTS)
+    for pattern in (ENTROPY_AUDIT_OWNER_PATH, *sorted(modules)):
+        targets = set(rule_for(pattern).tests)
+        assert targets == expected, f"{pattern}: {sorted(targets ^ expected)}"
+        selected = set(select_tests([pattern], repo_root=Path(".")))
+        assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
+
+    # Exact equality for one owner module, mirroring the owner-path assertion in
+    # test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback:
+    # `scripts/**` is a root of both supplemental scans, so those two suites join
+    # the fifteen partitions and nothing else does. A rule that quietly narrows to
+    # one partition -- or a core-smoke fallback creeping back in -- reds here.
+    assert select_tests(
+        ["scripts/governance/entropy_audit/report.py"], repo_root=Path(".")
+    ) == [*ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    assert not set(CORE_SMOKE_TESTS) & set(
+        select_tests(["scripts/governance/entropy_audit/report.py"], repo_root=Path("."))
+    )
+
+
+def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_helper() -> None:
+    # #1823: fifteen collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A sixteenth partition, a leftover compatibility
+    # shim for the deleted 9860-line monolith, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's own
+    # tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in nothing
+    # today but would silently adopt any future `tests/*entropy_audit*` file.
+    partitions = set(ENTROPY_AUDIT_TESTS)
+    helper = ENTROPY_AUDIT_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 15, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_entropy_audit_script.py").exists(), (
+        "the pre-#1823 monolith is back; it would be collected alongside the "
+        "partitions and double every one of the 410 node ids"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_entropy_audit_")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("entropy_audit")}
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+
+    # Every route that used to carry the 410-case monolith must still carry all
+    # fifteen, or the split silently narrowed CI's reach. The helper row is the
+    # fourth: it is not same-name derivable and does not reach the `tests/**`
+    # branch, so without it a helper-only diff collapses to the meta-guard.
+    carriers = {
+        "scripts/governance/audit_repo_entropy.py",
+        "scripts/governance/write_entropy_baseline.py",
+        "scripts/ops/start-display-api.sh",
+    }
+    routed = {
+        rule.pattern: set(rule.tests)
+        for rule in PATH_TEST_RULES
+        if rule.pattern in carriers
+    }
+    assert set(routed) == carriers, sorted(carriers - set(routed))
+    for pattern, tests in routed.items():
+        assert partitions <= tests, f"{pattern} dropped {sorted(partitions - tests)}"
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(helper) == partitions, sorted(
+        partitions ^ support.get(helper, set())
+    )
+
+
+def test_publish_registry_partition_tracked_tree_is_exactly_seven_suites_and_one_helper() -> None:
+    # #1102: seven collectible partitions plus one non-collectible helper is a floor,
+    # not a preference. An eighth partition, a leftover compatibility shim for the
+    # deleted 3218-line monolith, or the helper renamed into a `test_*.py` suite all
+    # redden here. Expected membership is the selector's own tuple, never a glob
+    # result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME: `in` would sweep in nothing today
+    # but would silently adopt any future `tests/*publish_registry*` file.
+    partitions = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    helper = PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 7, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_publish_scheduler_file_registry.py").exists(), (
+        "the pre-#1102 monolith is back; the explicit rows and its same-name "
+        "derivation from scripts/publish_scheduler_file_registry.py would both fire"
+    )
+    suite_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("test_publish_registry_")}
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {path for path in tracked if PurePosixPath(path).name.startswith("publish_registry")}
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the right reach, or the
+    # tracked-tree count above is satisfied by files nothing selects. The publisher
+    # owner row and the two directory rules carry the WHOLE corpus; the narrow routes
+    # carry only the partitions that actually open their surface.
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    owner = "scripts/publish_scheduler_file_registry.py"
+    assert set(rule_for(owner).tests) == partitions, sorted(set(rule_for(owner).tests) ^ partitions)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert partitions <= selected, sorted(partitions - selected)
+    for pattern in (BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN, "services/orchestrator/**"):
+        targets = set(rule_for(pattern).tests)
+        assert partitions <= targets, f"{pattern} lost partitions: {sorted(partitions - targets)}"
+
+    # The two narrow routes are exact, not supersets: a partition that never opens the
+    # surface must NOT ride it, or the route stops meaning anything.
+    mode_gated = {
+        "tests/test_publish_registry_manifest_audit.py",
+        "tests/test_publish_registry_manual_cli.py",
+    }
+    mode_targets = set(rule_for("tests/provider_mode_helpers.py", SUPPORT_MODULE_TEST_RULES).tests)
+    assert partitions & mode_targets == mode_gated, sorted((partitions & mode_targets) ^ mode_gated)
+    declaration_targets = set(rule_for(CALIBRATION_OVERRIDES_PATH).tests)
+    assert partitions & declaration_targets == {"tests/test_publish_registry_calibration_overrides.py"}
+
+    # The helper's support rule must equal what the tracked tree derives: the autouse
+    # source-identity stub is module-wide, so all seven import it and a partition that
+    # stopped would be a behaviour change, not a routing one.
+    helper_targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+    assert helper_targets == partitions, sorted(helper_targets ^ partitions)
+    derived = _derived_support_module_importers([helper])[helper]
+    assert derived == partitions, sorted(derived ^ partitions)
 
 
 def test_select_tests_maps_subdirectory_script_to_same_name_suite_by_basename(tmp_path: Path) -> None:
@@ -2299,7 +2719,11 @@ def test_calibration_declaration_selects_exactly_its_three_consumers() -> None:
 
     assert selected == [
         "tests/test_basins_package.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: of the seven publisher partitions only this one reads the
+        # checked-in declaration (default-load fixture + exact-content pin);
+        # the other six pass `_NO_DECLARATION` or write their own file, so the
+        # route stays exactly three consumers.
+        "tests/test_publish_registry_calibration_overrides.py",
         "tests/test_select_ci_tests.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -2353,7 +2777,7 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
     assert select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path(".")) == []
 
     # Leg 2: the rule kept but a consumer removed from its targets.
-    for removed in ("tests/test_basins_package.py", "tests/test_publish_scheduler_file_registry.py"):
+    for removed in ("tests/test_basins_package.py", "tests/test_publish_registry_calibration_overrides.py"):
         patched = tuple(
             PathTestRule(
                 rule.pattern,
@@ -2580,7 +3004,7 @@ REFRESH_ENV_TEMPLATE = "infra/env/compute.scheduler-provider-refresh.env.example
 def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> None:
     """#2195: the refresh env template must select the suite that reads it.
 
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s this template and asserts its content: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`
     present, and none of `DATABASE_URL=` / `PIPELINE_DATABASE_URL=` / `PGHOST=` / `PGPORT=`
     present. Before the #2195 rule the template matched only the `infra/env/**` rule, whose
@@ -2598,7 +3022,9 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
         "tests/test_node22_refresh_timer_health.py",
-        "tests/test_scheduler_file_provider_refresh.py",
+        # #1101 moved the reading case into this partition; the set stays a
+        # 3-set because only one of the fifteen partitions reads the template.
+        *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
         "tests/test_two_node_docker_runtime.py",
     }
 
@@ -2618,7 +3044,7 @@ def test_scheduler_provider_refresh_template_rule_red_when_removed(
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     selected = select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))
-    assert "tests/test_scheduler_file_provider_refresh.py" not in selected, (
+    assert "tests/test_scheduler_refresh_deployment_contract.py" not in selected, (
         "mutant table without the refresh env template rule still selects its owner suite"
     )
 
@@ -2701,7 +3127,7 @@ def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_read
     """#2195: tie the new rule to the reader that justifies it, derived not asserted.
 
     The rule's whole warrant is that
-    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s this template. If that line went away the rule would become decorative
     and every other test here would stay green — a non-empty selection with zero readers
     and no zero-assertion warning, which is the exact #2195 failure mode re-armed.
@@ -2724,7 +3150,7 @@ def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_read
     """
     consumers = _literal_path_consumer_index(targets=[REFRESH_ENV_TEMPLATE]).get(REFRESH_ENV_TEMPLATE, set())
 
-    assert "tests/test_scheduler_file_provider_refresh.py" in consumers, (
+    assert "tests/test_scheduler_refresh_deployment_contract.py" in consumers, (
         f"nothing reads {REFRESH_ENV_TEMPLATE} by literal path any more, so its "
         f"path-exact rule is decorative (derived consumers: {sorted(consumers)})"
     )
@@ -2972,15 +3398,30 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # node-22 entrypoint invariant suite (scans every `uv run` / `uv sync` line),
     # the Python environment truth suite (`df -h / /home /data/GHDC`) and the role
     # boundary static suite (node-27/node-22 topology sentences).
-    assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
+    # #1103 split the runbook into an index page plus the `production-ops/`
+    # sub-runbooks and partitioned the node-22 entrypoint owner; the index row
+    # and the sub-runbook row carry the identical reader set.
+    expected_runbook_readers = [
         "tests/test_env_templates.py",
         "tests/test_node22_entrypoint_invariant.py",
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
         "tests/test_node22_refresh_timer_health.py",
         "tests/test_node27_coverage_freshness_alert.py",
         "tests/test_python_environment_truth.py",
         "tests/test_role_boundary_static.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
+    assert (
+        select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path("."))
+        == expected_runbook_readers
+    )
+    assert (
+        select_tests(
+            ["docs/runbooks/production-ops/coverage-freshness-alert.md"],
+            repo_root=Path("."),
+        )
+        == expected_runbook_readers
+    )
 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     for path in (
@@ -5858,7 +6299,9 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
         # #2472/#2473 round 1: bare `uv run` / `uv sync` line scanner.
+        # #1103 partitioned it in two; both partitions ride this row.
         "tests/test_node22_entrypoint_invariant.py",
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
         # #2146 round 2: third literal reader -- the node-22 probe suite.
         "tests/test_node22_refresh_timer_health.py",
         # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
@@ -6321,8 +6764,11 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # (`tests/test_node27_coverage_freshness_alert.py` pins that runbook §11
         # names every `COVERAGE_FRESHNESS_*` code). #2472/#2473 round 1 added the
         # three readers the row had been missing (node-22 entrypoint invariant,
-        # Python environment truth, role boundary static), so the count is 7.
-        ("docs/runbooks/current-production-ops.md", "7"),
+        # Python environment truth, role boundary static), so the count was 7.
+        # #1103 partitioned the entrypoint owner in two, taking it to 8, and
+        # gave the sub-runbook tree the identical row.
+        ("docs/runbooks/current-production-ops.md", "8"),
+        ("docs/runbooks/production-ops/service-bringup.md", "8"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
@@ -9887,7 +10333,9 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
             # #2238 EF-16 (retention.py leg): the partition joins the floor row,
             # because the pin below only counts as "the positive floor above
             # proves each partition IS selected" if the floor actually names it.
-            "tests/test_retention_copyback_mutex.py",
+            # #2259 split it into two halves; both belong here for the same
+            # reason.
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             # harden-copyback-mutex-residuals EF-20: the typed lock-failure signal.
             "tests/test_retention_copyback_lock_signal.py",
             "tests/test_retention_extra_roots.py",
@@ -9900,6 +10348,10 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/run_tree_copyback.py",
         ("tests/test_run_tree_copyback.py", "tests/test_run_tree_copyback_backup_lifecycle.py"),
     ),
+    # #2259: the extracted copyback-mutex owner. Its same-name derivation points
+    # at the deleted monolith, so the explicit owner row is its only named route;
+    # the floor is that row's whole target set.
+    (RETENTION_COPYBACK_MUTEX_OWNER_PATH, RETENTION_COPYBACK_MUTEX_OWNER_TESTS),
     ("scripts/node27_raw_retention.py", ("tests/test_node27_raw_retention_copyback_mutex.py",)),
 )
 
@@ -9951,14 +10403,14 @@ def test_river_expand_sources_open_the_database_lane(module_path: str, suite: st
 # production owner route for a `services/orchestrator/retention.py` change.
 RETENTION_PARTITIONS: tuple[str, ...] = (
     "tests/test_retention.py",
-    "tests/test_retention_copyback_mutex.py",
+    *RETENTION_COPYBACK_MUTEX_TESTS,
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
 )
 RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
-# Four partitions — #1872's three moved ones plus #2238's copyback-mutex
-# partition, which was born outside the monolith — are reached ONLY through the
+# Five partitions — #1872's three moved ones plus the two halves #2259 split
+# #2238's copyback-mutex partition into — are reached ONLY through the
 # owner rule: the retained same-name core also arrives via same-name suite
 # derivation, so it is not a fracture pin for the rule literal (removing it from
 # the rule stays green via derivation — which is correct, not a gap). The
@@ -9967,8 +10419,15 @@ RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
 # `retention.py`-only change never reaches, so it fractures here too. That
 # membership is the per-partition fracture pin #2238 EF-16 names for the
 # `retention.py` leg.
+#
+# #2259 deliberately did NOT give `services/orchestrator/retention.py` its own
+# path-exact row: a second route carrying the same partitions would re-supply
+# every one this fracture pin strips from the broad rule, and the pin would go
+# green on a dead route. The extracted owner module gets the explicit row (it
+# has no working same-name derivation); retention.py keeps riding the directory
+# rule that this pin holds load-bearing.
 RETENTION_RULE_ONLY_PARTITIONS: tuple[str, ...] = (
-    "tests/test_retention_copyback_mutex.py",
+    *RETENTION_COPYBACK_MUTEX_TESTS,
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
@@ -10024,6 +10483,56 @@ def test_retention_owner_reds_when_a_partition_is_removed(
     selected = select_tests(["services/orchestrator/retention.py"], repo_root=Path("."))
 
     assert removed not in selected
+
+
+def test_retention_copyback_mutex_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # #2259: two collectible halves is a floor, not a preference. A third
+    # partition, a leftover compatibility shim for the deleted 1119-line
+    # monolith, or the shared helper renamed into a `test_*.py` suite all redden
+    # here. Expected membership is the selector's own tuple, never a glob result
+    # — the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file name, not a substring: `in`
+    # would sweep in the unrelated tests/test_node27_raw_retention_copyback_mutex.py
+    # corpus (a different lane, its own owner rule).
+    partitions = set(RETENTION_COPYBACK_MUTEX_TESTS)
+    helper = RETENTION_COPYBACK_MUTEX_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 2, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_retention_copyback_mutex.py").exists(), (
+        "the pre-#2259 monolith is back; the owner row and its same-name derivation would both fire"
+    )
+    corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("test_retention_copyback_mutex")
+    }
+    assert corpus == partitions, sorted(corpus ^ partitions)
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    # Every route that used to carry the monolith must carry the whole corpus,
+    # or the tracked-tree count above is satisfied by files nothing selects.
+    # The production owner `services/orchestrator/retention.py` rides the broad
+    # directory rule on purpose (see RETENTION_RULE_ONLY_PARTITIONS above), so
+    # that rule is checked here rather than a path-exact row of its own.
+    owner_rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == RETENTION_COPYBACK_MUTEX_OWNER_PATH
+    )
+    directory_rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == "services/orchestrator/**"
+    )
+    helper_rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
+    assert partitions <= set(owner_rule.tests), sorted(partitions - set(owner_rule.tests))
+    assert set(owner_rule.tests) == set(RETENTION_COPYBACK_MUTEX_OWNER_TESTS)
+    assert partitions <= set(directory_rule.tests), sorted(partitions - set(directory_rule.tests))
+    assert partitions <= set(helper_rule.tests), sorted(partitions - set(helper_rule.tests))
+    assert Path(RETENTION_COPYBACK_MUTEX_OWNER_PATH).is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -10204,7 +10713,8 @@ def test_basins_publication_owner_rule_preserves_its_pre_existing_targets() -> N
         "tests/test_direct_grid_variant_registration.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_production_object_store_validation.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the publisher monolith literal expands to its seven partitions.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_qhh_production_bootstrap.py",
         "tests/test_qhh_scripts_static.py",
     )
@@ -10330,7 +10840,9 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # constant-only form: every route and selection pin in this file stayed
     # green, and the only reds were the directory-rule disposition audit plus
     # the four guards that derive from its gap set -- all five naming the one
-    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py`.
+    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py` (#2259
+    # repointed that at-site target to `RETENTION_COPYBACK_MUTEX_TESTS`, i.e. the
+    # `..._budget.py` / `..._protocol.py` partitions; the measurement predates the split).
     # And that audit is satisfiable by a token: adding a single `runtime-budget`
     # exclusion for that pair put the file back to all-green with the route
     # still gone. One token away from losing the requirement oracle for
@@ -10350,7 +10862,7 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/cli.py",
         (
             *ORCHESTRATOR_CLI_IMPORTER_TESTS,
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_journal_root_lane_adoption.py",
             "tests/test_file_journal_full_tree_budget_contract.py",
             "tests/test_operator_reentry_confirmation.py",
@@ -10369,14 +10881,15 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
     # redirect, pinned by the file-journal selection test), so only the at-site
     # target is named — the same "pin what the extension added" shape as the
-    # other rows. The exact 23-element selection is pinned below.
+    # other rows. The exact 24-element selection is pinned below (#2259 split the
+    # mutex partition in two, so 23 -> 24).
     # #1186 round 2 added a second at-site target to this same rule: one node id
     # of the scope-dimension closure pin, because this module publishes most of a
     # pass payload's top-level keys.
     (
         "services/orchestrator/scheduler_runtime.py",
         (
-            "tests/test_retention_copyback_mutex.py",
+            *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         ),
     ),
@@ -10424,7 +10937,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     # 22 -> 23: the stop rule for scheduler_runtime.py shadows the orchestrator
     # tree rule, so the mutex suite arrives only through the at-site extension.
     # 23 -> 24 (#1186 round 2): the scope-dimension closure pin rides the same
-    # rule as a single node id. This module writes most of a pass payload's
+    # rule as a single node id; 24 -> 25 (#2259) split the mutex partition in
+    # two. This module writes most of a pass payload's
     # top-level keys, and that pin is what turns "a new key nobody dispositioned"
     # from a silent false exit 0 into a red test.
     assert Path("services/orchestrator/scheduler_runtime.py").is_file()
@@ -10451,7 +10965,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
         "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
-        "tests/test_retention_copyback_mutex.py",
+        *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         "tests/test_scheduler_journal_retention_archive.py",
@@ -10468,6 +10982,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # suite and the four lane suites that read its new names.
     # 15 -> 16 (#1627): packages/** is a path-canonicalisation family-guard root,
     # so the guard accumulates here as a third supplemental rider.
+    # 16 -> 17 (#2259): the mutex partition became two collectible halves.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
@@ -10482,7 +10997,8 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_path_canonicalization_family_guard.py",
         "tests/test_production_scheduler.py",
         "tests/test_retention_copyback_lock_signal.py",
-        "tests/test_retention_copyback_mutex.py",
+        "tests/test_retention_copyback_mutex_budget.py",
+        "tests/test_retention_copyback_mutex_protocol.py",
         "tests/test_river_segment_write_surface_scan.py",
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_select_ci_tests.py",
@@ -10494,15 +11010,22 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     "module_path",
     (
         "services/orchestrator/retention.py",
+        # #2259: the extracted mutex owner. Every seam these suites monkeypatch
+        # by name lives in THIS module now, so a diff to it that did not select
+        # them would be the exact blind spot this pin exists for.
+        RETENTION_COPYBACK_MUTEX_OWNER_PATH,
         "services/orchestrator/cli.py",
         "services/orchestrator/__init__.py",
-        "tests/retention_test_helpers.py",
+        RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
     ),
 )
 def test_copyback_mutex_routing_keeps_the_mutex_suite(module_path: str) -> None:
+    # #2259: BOTH halves, not either. The split is only invisible to CI routing
+    # if every route that used to carry the monolith carries the whole corpus.
     selected = select_tests([module_path], repo_root=Path("."))
 
-    assert "tests/test_retention_copyback_mutex.py" in selected, module_path
+    missing = sorted(set(RETENTION_COPYBACK_MUTEX_TESTS) - set(selected))
+    assert not missing, f"{module_path}: lost {missing}"
 
 
 # --------------------------------------------------------------------------
@@ -10576,6 +11099,47 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_scheduler_backfill.py",
     ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
+    # #1101: the two shared surfaces of the fifteen refresh partitions. The
+    # cutover-gate-audit partition anchors BOTH because it is the only one that
+    # drives a full runner pass through the gate AND validates the resulting
+    # receipt against the JSON Schema, so it necessarily imports a name from
+    # each; an anchor that stops deriving here means the partitions stopped
+    # sharing that surface at all.
+    (SCHEDULER_REFRESH_HELPERS_PATH, "tests/test_scheduler_refresh_cutover_gate_audit.py"),
+    (
+        SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+        "tests/test_scheduler_refresh_cutover_gate_audit.py",
+    ),
+    # #1102: the shared fixture surface of the seven publisher partitions. The
+    # calibration-overrides partition anchors it because it is the one that names
+    # the most of that surface (the declaration builders, both published-bytes
+    # readers and the source-calibration text) on top of the module-wide autouse
+    # stub every partition carries; an anchor that stops deriving here means the
+    # partitions stopped sharing that surface at all.
+    (
+        PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
+        "tests/test_publish_registry_calibration_overrides.py",
+    ),
+    # #1823: the shared surface of the fifteen entropy-audit partitions. The
+    # report-contract partition anchors it because it is the one that names the
+    # memoized whole-repository `build_report` accessor AND both CLI runners on
+    # top of the path constants every partition carries; an anchor that stops
+    # deriving here means the partitions stopped sharing that surface at all.
+    (ENTROPY_AUDIT_HELPERS_PATH, "tests/test_entropy_audit_report_contract.py"),
+    # #1103: the shared prefix of the two node-22 entrypoint partitions (repo
+    # root, node-22/node-27 root constants, `_read`). The python-scan partition
+    # anchors it because it is the one whose whole content is the classifier
+    # those constants feed; an anchor that stops deriving here means the
+    # partitions stopped sharing the prefix at all.
+    (
+        NODE22_ENTRYPOINT_HELPERS_PATH,
+        "tests/test_node22_entrypoint_invariant_python_scan.py",
+    ),
+    # #1103: the production-ops surface set. The entrypoint owner anchors it
+    # because it is the reader whose emptiness is silent -- its `remaining ==
+    # []` holds on an empty surface list -- so an anchor that stops deriving
+    # here is the first sign the vacuity guard lost its input.
+    (PRODUCTION_OPS_RUNBOOK_HELPERS_PATH, NODE22_ENTRYPOINT_INVARIANT_TEST),
     # #1872 (+#2238): the retention partitions' shared helper is imported at
     # module scope by all five collectible partitions; any of them is a valid
     # derivation anchor, pinned on the core suite (which is also the same-name
@@ -10621,6 +11185,16 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # A/B/C suites are explicit extra route edges (they import D, not this helper),
     # so they are not this derivation's anchors.
     ("tests/basins_registry_import_helpers.py", "tests/test_basins_registry_import.py"),
+    # #1611: the shared fixture surface of the four state-index copyback replay
+    # partitions. All four import it at module scope, so any of them is a valid
+    # anchor; the selection partition is named because it owns the dry-run and
+    # enforce happy paths — the cases that exercise the `fixture` factory most
+    # directly, so an anchor that stops deriving here means the partitions
+    # stopped sharing the factory at all.
+    (
+        STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
+        "tests/test_scheduler_state_index_copyback_replay_selection.py",
+    ),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -15175,8 +15749,17 @@ def _qhh_owner_rule_contract(rule: PathTestRule, baseline_rule: Sequence[str]) -
     unrelated future consumer added to this rule must not false-red the QHH contract, and
     the baseline transcription is provenance for the pre-#1948 content, not a ceiling.
     """
-    baseline_non_qhh = set(baseline_rule) - {_qhh_partitions()[0]}
+    # #1102 deleted `tests/test_publish_scheduler_file_registry.py` and replaced it with
+    # the seven-partition publisher corpus, which this rule carries in its place. The
+    # baseline transcription is pre-#1948 provenance, not a ceiling, so the replaced path
+    # is subtracted here -- and its replacement is asserted present, because a bare
+    # subtraction would let the rule lose the publisher lane entirely in silence.
+    replaced = {"tests/test_publish_scheduler_file_registry.py"}
+    assert replaced <= set(baseline_rule), "the #1102 replacement note no longer describes the baseline"
+    baseline_non_qhh = set(baseline_rule) - {_qhh_partitions()[0]} - replaced
     tests = set(rule.tests)
+    publisher = set(PUBLISH_SCHEDULER_REGISTRY_TESTS)
+    assert publisher <= tests, f"publisher partitions dropped: {sorted(publisher - tests)}"
     qhh_in_rule = tests & set(_qhh_partitions())
 
     assert qhh_in_rule == set(_qhh_partitions()), sorted(qhh_in_rule ^ set(_qhh_partitions()))
@@ -16789,8 +17372,11 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
     assert counts["helper_classes"] == 1
     assert counts["helper_constants"] == 4
     assert counts["partition_count"] == 7
-    assert counts["direct_collectible_importer_count"] == 8
-    assert counts["helper_route_test_count"] == 11
+    # #1102: the publisher monolith entry became four partitions on the direct side
+    # (+3) and five on the routed side (+4, the fifth arriving through the new
+    # `tests/publish_registry_helpers.py` support bridge).
+    assert counts["direct_collectible_importer_count"] == 11
+    assert counts["helper_route_test_count"] == 15
     assert counts["database_authority_count"] == len(oracle["database_authority"]["exact_paths"]) == 8
     assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
     assert len(rows) == 94
@@ -16883,6 +17469,102 @@ def test_registry_partition_tracked_tree_is_exactly_seven_suites_one_helper() ->
     assert not is_test_suite_path(helper)
     for owner in partitions:
         assert "integration" not in PurePosixPath(owner).name
+
+
+def test_node22_entrypoint_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # #1103: two collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A third partition, a leftover compatibility shim
+    # for the pre-split 1003-line owner, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # The corpus filter is a PREFIX on the file NAME, so a future
+    # `tests/test_node22_entrypoint_invariant_<x>.py` that nobody routed is a
+    # failure here rather than a suite that silently leaves the PR lane.
+    partitions = set(NODE22_ENTRYPOINT_INVARIANT_TESTS)
+    helper = NODE22_ENTRYPOINT_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 2, sorted(partitions)
+    assert partitions == {
+        NODE22_ENTRYPOINT_INVARIANT_TEST,
+        NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
+    }
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    suite_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("test_node22_entrypoint_invariant")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("node22_entrypoint")
+    }
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+
+    # Every route that carried the pre-split owner must carry BOTH partitions,
+    # or the split silently halved CI's reach on those producers. The helper
+    # row is separate: it is not same-name derivable and never reaches the
+    # `tests/**` branch, so without it a helper-only diff collapses to the
+    # meta-guard.
+    carriers = [
+        rule
+        for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES)
+        if NODE22_ENTRYPOINT_INVARIANT_TEST in rule.tests
+    ]
+    assert len(carriers) >= 9, [rule.pattern for rule in carriers]
+    for rule in carriers:
+        assert partitions <= set(rule.tests), (
+            f"{rule.pattern} dropped {sorted(partitions - set(rule.tests))}"
+        )
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(helper) == partitions, sorted(
+        partitions ^ support.get(helper, set())
+    )
+
+
+def test_production_ops_tracked_tree_routes_the_index_and_every_subrunbook() -> None:
+    # #1103: `docs/runbooks/current-production-ops.md` is an index landing page
+    # and its body lives in `docs/runbooks/production-ops/`. Both rows must
+    # carry the SAME reader set: a sub-runbook-only diff that selected fewer
+    # readers than an index-only diff is a body editable with its guards
+    # unselected, which is how #2472's bare `uv sync` reached master.
+    index = "docs/runbooks/current-production-ops.md"
+    rules = {rule.pattern: rule for rule in PATH_TEST_RULES}
+    assert index in rules, "the historical runbook path lost its rule"
+    assert PRODUCTION_OPS_SUBRUNBOOK_GLOB in rules, "the sub-runbook tree is unrouted"
+    assert rules[index].tests == PRODUCTION_OPS_RUNBOOK_TESTS
+    assert rules[PRODUCTION_OPS_SUBRUNBOOK_GLOB].tests == PRODUCTION_OPS_RUNBOOK_TESTS
+
+    # The tracked sub-runbooks, and the fact that the index still exists: the
+    # index is the anchor every historical inbound link and `#` anchor resolves
+    # against, and the surface helper fails closed if the directory empties.
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "docs/runbooks/production-ops"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert Path(index).exists(), "the index landing page is gone; every inbound link breaks"
+    assert len(tracked) >= 13, tracked
+    assert all(path.endswith(".md") for path in tracked), tracked
+
+    # Each tracked sub-runbook routes the full reader set on its own, so this
+    # holds for a file added after the rule was written (the glob is the
+    # mechanism; this is the proof it actually fires on the real tree).
+    for path in tracked:
+        assert select_tests([path], repo_root=Path(".")) == sorted(
+            set(PRODUCTION_OPS_RUNBOOK_TESTS)
+        ), path
+    support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
+    assert support.get(PRODUCTION_OPS_RUNBOOK_HELPERS_PATH) == set(
+        PRODUCTION_OPS_RUNBOOK_TESTS
+    )
 
 
 def _registry_addition_nodes(additions: Sequence[dict[str, Any]]) -> list[str]:
@@ -17775,12 +18457,18 @@ def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
     assert derived == expected, (
         f"registry helper direct importer set drifted: derived={sorted(derived)} expected={sorted(expected)}"
     )
-    assert len(derived) == 8
+    # #1102 moved this from 8 to 11: the single publisher monolith entry became the
+    # four partitions that name `_write_registry_fixture` / `_make_valid_model` at
+    # module scope. The set itself stays DERIVED, never frozen -- only the count is.
+    assert len(derived) == 11
     assert expected <= set(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS)
 
 
 def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> None:
-    # D is the sole support-to-support importer; A/B/C import D, never the registry helper.
+    # D is the support-to-support importer this case is scoped to; A/B/C import D, never the
+    # registry helper.  Since #1102 D is one of TWO such bridges -- `tests/publish_registry_helpers.py`
+    # imports `_make_valid_model` for `_write_healthy_basin_pair` -- so "exactly one" in the name
+    # means the one QHH edge, not the only support-to-support edge in the tree.
     oracle = _registry_partition_oracle()
     helper_module = REGISTRY_PARTITION_HELPER_MODULE
     support = oracle["helper_consumers"]["support_importer"]
@@ -17801,12 +18489,16 @@ def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> N
     assert len(all_helper_imports) == 2, "D must carry exactly its two retargeted imports"
     imported_names = {alias.name for node in all_helper_imports for alias in node.names}
     assert imported_names == {"_write_registry_fixture", "_package_manifest_for_model"}, sorted(imported_names)
-    # No tracked suite outside the derived direct eight may import the registry helper,
-    # and the three QHH partitions must import D rather than the registry helper.
+    # No tracked suite outside the derived direct importer set (eight before #1102, eleven now)
+    # may import the registry helper, and the three QHH partitions must import D rather than
+    # the registry helper.
     d_module = "tests.qhh_production_bootstrap_helpers"
-    direct_eight = set(_registry_partitions()) | {"tests/test_publish_scheduler_file_registry.py"}
+    # #1102: read the oracle rather than re-spelling the set here -- the publisher side of
+    # it is four partitions now, and the derivation guard above already proves the oracle
+    # equals the tracked-AST derivation.
+    direct_importers = set(oracle["helper_consumers"]["direct_collectible_importers"])
     for suite in _tracked_test_suites():
-        if suite in direct_eight:
+        if suite in direct_importers:
             continue
         names = _top_level_imported_module_names(suite, _parse_tracked(suite))
         assert helper_module not in names, f"{suite} is an unexpected direct helper importer"
@@ -17825,7 +18517,8 @@ def test_registry_partition_no_consumer_imports_the_retained_collectible_core() 
     oracle = _registry_partition_oracle()
     consumers = [
         *_registry_partitions(),
-        "tests/test_publish_scheduler_file_registry.py",
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+        PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH,
         oracle["helper_consumers"]["support_importer"],
         *oracle["helper_consumers"]["qhh_partitions_via_support"],
     ]
@@ -17885,7 +18578,8 @@ def test_registry_partition_owner_route_selects_all_seven_with_a_non_same_name_p
         "tests/test_direct_grid_variant_registration.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_production_object_store_validation.py",
-        "tests/test_publish_scheduler_file_registry.py",
+        # #1102: the publisher monolith literal expands to its seven partitions.
+        *PUBLISH_SCHEDULER_REGISTRY_TESTS,
         "tests/test_qhh_scripts_static.py",
         *BASINS_PACKAGE_PUBLICATION_TESTS,
         "tests/test_qhh_production_bootstrap.py",
@@ -17965,14 +18659,17 @@ def test_registry_partition_owner_rule_permits_an_unrelated_future_target(
     assert set(_registry_partitions()) <= set(future_rule.tests)
 
 
-def test_registry_partition_helper_route_selects_exactly_the_eleven_consumers() -> None:
-    # A helper-only diff must run the eight direct collectible importers plus QHH A/B/C —
-    # the support bridge is NOT transitively expanded, so the QHH trio must ride the exact
-    # rule — plus the selector's own meta-guard rider (added by the support-module branch,
-    # deliberately not duplicated inside the rule).
+def test_registry_partition_helper_route_selects_exactly_the_fifteen_consumers() -> None:
+    # A helper-only diff must run the eleven direct collectible importers plus the
+    # collectible reach of the TWO support bridges — QHH A/B/C behind
+    # `tests/qhh_production_bootstrap_helpers.py`, and (#1102) the publisher
+    # skip-refusals partition behind `tests/publish_registry_helpers.py`. Neither bridge
+    # is transitively expanded, so both reaches must ride the exact rule — plus the
+    # selector's own meta-guard rider (added by the support-module branch, deliberately
+    # not duplicated inside the rule).
     oracle = _registry_partition_oracle()
     expected = set(oracle["helper_consumers"]["helper_route_tests"])
-    assert len(expected) == 11
+    assert len(expected) == 15
     assert sorted(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS) == sorted(expected)
 
     selected = set(select_tests([REGISTRY_PARTITION_HELPER], repo_root=Path(".")))

@@ -12,10 +12,12 @@ from apps.api import runtime_mode
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.slurm_gateway.app import create_gateway_app
 from services.slurm_gateway.config import SlurmGatewaySettings
+from tests.production_ops_runbook import combined_text as production_ops_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROLE_BOUNDARY_DOC = REPO_ROOT / "docs/governance/ROLE_BOUNDARY.md"
-CURRENT_PRODUCTION_OPS_DOC = REPO_ROOT / "docs/runbooks/current-production-ops.md"
+# #1103: the topology sentences moved into `production-ops/overview.md`; the
+# pin is over the index page plus every sub-runbook.
 TWO_NODE_DEPLOYMENT_OVERVIEW_DOC = REPO_ROOT / "docs/runbooks/two-node-deployment-overview.md"
 PROJECT_PROFILE_DOC = REPO_ROOT / "openspec/project-profile.md"
 NODE22_RETIREMENT_RUNBOOK = REPO_ROOT / "docs/runbooks/node22-db-retirement-runbook.md"
@@ -325,7 +327,7 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
 
 def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() -> None:
     role_boundary = ROLE_BOUNDARY_DOC.read_text(encoding="utf-8")
-    current_ops = CURRENT_PRODUCTION_OPS_DOC.read_text(encoding="utf-8")
+    current_ops = production_ops_text()
     two_node_overview = TWO_NODE_DEPLOYMENT_OVERVIEW_DOC.read_text(encoding="utf-8")
     project_profile = PROJECT_PROFILE_DOC.read_text(encoding="utf-8")
 

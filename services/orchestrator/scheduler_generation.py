@@ -44,7 +44,7 @@ Design constraints
   declaration change cannot corrupt an in-flight candidate.
 - The generation token is derived deterministically from the
   ``package_checksum`` following the ``manifest-<12hex>`` convention mirrored
-  from ``scripts/scheduler_file_provider_refresh._prospective_registry_generation``
+  from ``scripts.scheduler_refresh.cutover_declaration._prospective_registry_generation``
   (D8.2); scheduler evidence records the full checksum plus the short form.
 - ``NHMS_REQUIRE_FORECAST_WARM_START=false`` continues to affect only optional
   warm-start hints (D-must-preserve): this module never admits a

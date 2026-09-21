@@ -1336,8 +1336,14 @@ def test_probe_units_declare_the_documented_shape() -> None:
 # R11c -- the watchdog's own liveness, and the comment that used to lie about it
 # ---------------------------------------------------------------------------
 
+# #1103 moved §3.1.2 (the refresh steady state, and with it the probe section)
+# into its own sub-runbook; the index page carries only the section stub.
 RUNBOOK = (
-    Path(__file__).resolve().parents[1] / "docs" / "runbooks" / "current-production-ops.md"
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "runbooks"
+    / "production-ops"
+    / "file-provider-refresh.md"
 )
 PROBE_TIMER_UNIT = (
     Path(__file__).resolve().parents[1]
@@ -1348,11 +1354,16 @@ PROBE_TIMER_UNIT = (
 
 
 def _probe_runbook_section() -> str:
-    """The probe's own section of the runbook, sliced by its headings."""
+    """The probe's own section of the runbook, sliced by its heading.
+
+    #1103: the old terminator `#### 3.1.4` moved to a different sub-runbook, so
+    the probe section now runs to the end of `file-provider-refresh.md`. The
+    start heading is still resolved by `index`, so a missing section raises
+    instead of yielding an empty (vacuously passing) slice.
+    """
     text = RUNBOOK.read_text()
     start = text.index("##### refresh timer 健康探针")
-    end = text.index("#### 3.1.4", start)
-    return text[start:end]
+    return text[start:]
 
 
 def test_r11c_the_probe_timer_claims_no_self_catch_up() -> None:
@@ -1968,7 +1979,8 @@ def _history_root(tmp_path: Path) -> Path:
 
 
 def _history_name(hour: int, marker: int = 0) -> str:
-    """The runner's own name shape (`scheduler_file_provider_refresh.py:611`):
+    """The runner's own name shape (the ``run_id`` built in
+    ``scripts/scheduler_refresh/runner.py``):
     ``refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json``."""
     return f"refresh_202609{11:02d}T{hour:02d}0000Z_{marker:012x}.json"
 
@@ -2475,9 +2487,17 @@ def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
     packages; it says nothing about this test, so the comparison is against the
     runner's live constant rather than a restated literal.
     """
-    runner = (
-        Path(__file__).resolve().parents[1] / "scripts" / "scheduler_file_provider_refresh.py"
-    ).read_text()
+    # #1099 split the 3639-line runner into `scripts/scheduler_refresh/`; the
+    # historical path is now a re-export facade and holds none of the literals
+    # below.  The two owner modules are named EXPLICITLY rather than globbed:
+    # the `history_dirs` pin below is an exact-list equality, so a glob would
+    # quietly change what "the runner's source" means whenever the package gains
+    # a module, and a literal moving to a third module must red here.
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    runner = "\n".join(
+        (scripts_dir / "scheduler_refresh" / name).read_text()
+        for name in ("runner.py", "receipt.py")
+    )
 
     assert (
         "run_id = f\"refresh_{started.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:12]}\""
@@ -2599,7 +2619,7 @@ def test_the_production_path_defaults_match_every_file_that_states_them() -> Non
     """
     repo = Path(__file__).resolve().parents[1]
     probe_installer = (repo / "scripts" / "install_node22_refresh_timer_health.sh").read_text()
-    runbook = (repo / "docs" / "runbooks" / "current-production-ops.md").read_text()
+    runbook = RUNBOOK.read_text()
     env_example = (
         repo / "infra" / "env" / "compute.scheduler-provider-refresh.env.example"
     ).read_text()

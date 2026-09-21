@@ -601,7 +601,10 @@ def test_failed_removal_on_an_extra_root_is_isolated(tmp_path: Path, monkeypatch
     an uncaught one collapses the pass receipt and aborts the CLI mid-sweep.
     The injected failure targets the actual removal primitive retention uses
     for additional-root run trees (``remove_tree_allow_symlinks``)."""
-    import services.orchestrator.retention as retention_mod
+    # #2259: `remove_tree_allow_symlinks` is called from `_delete_entry`, which
+    # now lives in the copyback-mutex owner; `retention` no longer binds the
+    # name, so patching it there would raise rather than reach the removal.
+    import services.orchestrator.retention_copyback_mutex as retention_mutex_mod
     from packages.common.safe_fs import SafeFilesystemError
 
     store = tmp_path / "object-store"
@@ -609,14 +612,14 @@ def test_failed_removal_on_an_extra_root_is_isolated(tmp_path: Path, monkeypatch
     workspace = tmp_path / "workspace"
     doomed_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
     survivor_key = _seed_run_workspace(workspace, NOW - timedelta(days=50))
-    real_remove = retention_mod.remove_tree_allow_symlinks
+    real_remove = retention_mutex_mod.remove_tree_allow_symlinks
 
     def failing_remove(parent, name, **kwargs):
         if Path(parent) / name == Path(workspace) / doomed_key:
             raise SafeFilesystemError(f"boom on {Path(parent) / name}", kind=kind)
         return real_remove(parent, name, **kwargs)
 
-    monkeypatch.setattr(retention_mod, "remove_tree_allow_symlinks", failing_remove)
+    monkeypatch.setattr(retention_mutex_mod, "remove_tree_allow_symlinks", failing_remove)
 
     result = run_retention(
         object_store_root=store,

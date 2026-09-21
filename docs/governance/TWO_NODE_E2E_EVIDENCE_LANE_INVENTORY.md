@@ -57,7 +57,7 @@ Governance-8 issue #732 shared-contract guard verification commands:
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "producer or source_artifact or strict_identity"
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs or log_uri or redaction or evidence_root or path_safety or stale"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -66,7 +66,7 @@ Governance-8 issue #733 metadata lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "metadata or strict_identity or source_scope"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -76,7 +76,7 @@ commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_preflight"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -85,7 +85,7 @@ Governance-8 issue #735 Docker security lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "docker_security or docker_display"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -94,7 +94,7 @@ Governance-8 issue #736 readonly DB lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "readonly_db"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -105,7 +105,7 @@ Governance-8 issue #737 simple-live lane extraction verification commands:
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or slurm"
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or compute_summary"
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "simple_lane or display_summary"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -114,7 +114,7 @@ Governance-8 issue #738 API proof lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "api"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -123,7 +123,7 @@ Governance-8 issue #739 browser proof lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "browser"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -132,7 +132,7 @@ Governance-8 issue #740 logs lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "logs"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -141,7 +141,7 @@ Governance-8 issue #741 manual ops lane extraction verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "manual_ops"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```
@@ -151,7 +151,7 @@ verification commands:
 
 ```bash
 uv run pytest -q tests/test_two_node_e2e_evidence.py -k "cross_plane or source_scope or reduced_scope"
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate governance-8-module-deepening --strict --no-interactive
 git diff --check
 ```

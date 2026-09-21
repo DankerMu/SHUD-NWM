@@ -92,7 +92,7 @@ frontend scoped context:
 ```bash
 (cd apps/frontend && pnpm test)
 (cd apps/frontend && pnpm build)
-uv run pytest -q tests/test_entropy_audit_script.py
+uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 
