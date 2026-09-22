@@ -144,6 +144,11 @@ Allowed mutations:
   object-store mirror through `OBJECT_STORE_ROOT` for display-only station
   forcing CSV reads. `OBJECT_STORE_ROOT` is a required/audited display runtime
   env for that read path and does not grant write or producer capability.
+- Proxy Tianditu basemap tiles (`/api/v1/basemap/tianditu/*`, #2550): an
+  outbound read-only GET to the provider with the server-side
+  `NHMS_TIANDITU_KEY`, cached as files under
+  `NHMS_MVT_FILE_CACHE_DIR/basemap/`. This is a display-local tile cache, not a
+  database write, producer output, or control-plane capability.
 
 Forbidden capabilities:
 

@@ -1256,6 +1256,9 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # per the procedure below — a one-hop importer through
         # apps/api/routes/hydro_display.py.
         "tests/test_api_errors_logging.py",
+        # #2550: guard-derived — imports apps.api.routes.basemap, which takes
+        # MVT_FILE_CACHE_DIR_ENV from services.tiles.mvt.
+        "tests/test_basemap_proxy.py",
         # #1597: the closure guard (direct UNION one hop over
         # services.tiles.mvt) put these eight in the rule. This pin is the
         # complement of the guard — the guard forbids missing suites, the pin

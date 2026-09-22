@@ -2932,6 +2932,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # rule is deliberately left alone.
             "tests/test_mvt_tile_generation_lock.py",
             "tests/test_node27_mvt_cache_retention.py",
+            # #2550: guard-derived — the basemap proxy suite imports
+            # apps.api.routes.basemap, which takes MVT_FILE_CACHE_DIR_ENV from
+            # this module: both caches share one root, so renaming the env here
+            # must red the proxy's cache-path assertions in the PR lane.
+            "tests/test_basemap_proxy.py",
             # #2013: same guard-derived provenance — the prewarm suite imports
             # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt
             # at file level (issue #2013's planned-envelope assertion steps the
@@ -3120,6 +3125,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # beside the broad rule is the same shape the hydro_display.py rule uses.
         "apps/api/routes/precip.py",
         PRECIP_SURFACE_TESTS,
+    ),
+    PathTestRule(
+        # #2550: the Tianditu basemap proxy route. Same shape as the precip
+        # route rule: `apps/api/**` buys only the broad API suites, none of
+        # which calls this route, so the exact entry adds its behavioural oracle
+        # plus the public-contract suites its OpenAPI entry is pinned by.
+        "apps/api/routes/basemap.py",
+        (
+            "tests/test_basemap_proxy.py",
+            "tests/test_openapi_drift.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_api_contract.py",
+        ),
     ),
     PathTestRule(
         "services/production_closure/readonly_db_validation.py",

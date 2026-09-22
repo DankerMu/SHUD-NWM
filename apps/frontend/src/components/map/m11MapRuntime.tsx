@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import type { MapRef, MapStyle } from 'react-map-gl/maplibre'
 
+import { buildApiTileUrlTemplate } from '@/api/base'
+
 import type { M11Bbox } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap } from '@/lib/m11/queryState'
 
@@ -45,16 +47,21 @@ export const m11MapStyleUrls: Record<M11Basemap, string> = {
   vector: 'm11://basemaps/vector',
 }
 
-// 天地图（Tianditu）WMTS 栅格底图。key 由 VITE_TIANDITU_KEY 覆盖，缺省用部署 key。
-// 每种底图叠「底图 + 中文注记」两层；t0..t7 子域由 MapLibre 在 tiles 数组间轮询负载均衡。
-const TIANDITU_KEY = (import.meta.env.VITE_TIANDITU_KEY as string | undefined) ?? '25475cca5080dc60cb126b94fd6358d3'
+// 天地图（Tianditu）栅格底图，经同源代理 `/api/v1/basemap/tianditu/*` 取瓦片：key 只在服务端
+// （NHMS_TIANDITU_KEY），瓦片在服务端文件缓存，访问量不再逐人消耗 key 配额（天地图限流即 429）。
+// 每种底图叠「底图 + 中文注记」两层；最底下垫一层纯色 background，瓦片失败时地图不会是空洞。
 const TIANDITU_ATTRIBUTION = '© 天地图'
+const M11_BASEMAP_BACKGROUND_COLOR = '#eef1f4'
+export const M11_BASEMAP_UNAVAILABLE_NOTICE =
+  '底图服务暂时不可用（天地图限流或网络异常），河网与预报图层不受影响，底图稍后自动恢复。'
 
 export const m11MapStyles: Record<M11Basemap, MapStyle> = {
-  terrain: tiandituStyle('ter', 'cta'),
-  satellite: tiandituStyle('img', 'cia'),
-  vector: tiandituStyle('vec', 'cva'),
+  terrain: tiandituStyle('ter', 'cta', 14),
+  satellite: tiandituStyle('img', 'cia', 18),
+  vector: tiandituStyle('vec', 'cva', 18),
 }
+
+const m11BasemapSourceIds = new Set(Object.values(m11MapStyles).flatMap((style) => Object.keys(style.sources)))
 
 export function useM11MapCamera({
   fitTo,
@@ -118,7 +125,13 @@ export function useM11MapSourceError(resetKey: string) {
     setMapSourceError(null)
   }, [resetKey])
 
-  const handleMapError = useCallback((event: { error?: { message?: string } }) => {
+  const handleMapError = useCallback((event: { error?: { message?: string }; sourceId?: string }) => {
+    // 底图瓦片失败每张一个 error 事件：收敛为一条固定提示（同值 setState 不触发重渲染），
+    // 且不覆盖已显示的业务图层错误。
+    if (event.sourceId && m11BasemapSourceIds.has(event.sourceId)) {
+      setMapSourceError((current) => (current && current !== M11_BASEMAP_UNAVAILABLE_NOTICE ? current : M11_BASEMAP_UNAVAILABLE_NOTICE))
+      return
+    }
     const message = event.error?.message ?? ''
     // 天地图栅格 style 无 glyphs：symbol 文本层（如代站 cluster 计数）的 style 校验错误
     // 只影响该层文字渲染，不影响其它图层——降级为 console 警告，不弹错误横幅。
@@ -206,21 +219,24 @@ function M11MapStatusNotice({
   )
 }
 
-function tiandituTiles(layer: string): string[] {
-  return ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7'].map(
-    (sub) => `https://${sub}.tianditu.gov.cn/DataServer?T=${layer}_w&x={x}&y={y}&l={z}&tk=${TIANDITU_KEY}`,
-  )
-}
-
-// base = 底图图层码（vec/img/ter），annotation = 对应中文注记码（cva/cia/cta）。
-function tiandituStyle(base: string, annotation: string): MapStyle {
+// base = 底图图层码（vec/img/ter），annotation = 对应中文注记码（cva/cia/cta）；maxzoom 与天地图
+// 各图层发布级别一致（ter/cta 到 14，其余到 18），更高级别由 MapLibre 放大上一级瓦片，不再请求。
+function tiandituStyle(base: string, annotation: string, maxzoom: number): MapStyle {
+  const source = (layer: string) => ({
+    type: 'raster' as const,
+    tiles: [buildApiTileUrlTemplate(`/api/v1/basemap/tianditu/${layer}/{z}/{x}/{y}`)],
+    tileSize: 256,
+    maxzoom,
+    attribution: TIANDITU_ATTRIBUTION,
+  })
   return {
     version: 8,
     sources: {
-      [`${base}-base`]: { type: 'raster', tiles: tiandituTiles(base), tileSize: 256, attribution: TIANDITU_ATTRIBUTION },
-      [`${annotation}-anno`]: { type: 'raster', tiles: tiandituTiles(annotation), tileSize: 256, attribution: TIANDITU_ATTRIBUTION },
+      [`${base}-base`]: source(base),
+      [`${annotation}-anno`]: source(annotation),
     },
     layers: [
+      { id: 'basemap-background', type: 'background', paint: { 'background-color': M11_BASEMAP_BACKGROUND_COLOR } },
       { id: `${base}-base`, type: 'raster', source: `${base}-base` },
       { id: `${annotation}-anno`, type: 'raster', source: `${annotation}-anno` },
     ],
