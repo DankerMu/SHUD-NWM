@@ -669,6 +669,28 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
+**回填窗必须落在 node-27 压缩截止之内（2026-09-22 onboarding-19 事故）。**
+node-22 的回填深度是 `NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE_LAG_HOURS`
+（`services/orchestrator/scheduler_discovery.py` 的 `discover_cycles`：
+`start = floor(now - lag - lookback)`）；node-27 压缩 `range_end < 展示水位 MAX(cycle_time)
+- NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` 的 chunk（`scripts/node27_timeseries_compression.py`
+`_classify`，生产 lag 172800 s = 48 h）。二者之和必须 ≤ 压缩 lag：生产取
+`LOOKBACK=32` + `LAG=16` = 48 h。旧值 96 + 16 = 112 h 时，新流域冷启动从 ~4.7 天前的
+cycle 开始逐 cycle 追赶，旧 cycle 的河段时序落进已压缩 chunk，parser guard 以
+`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 拒写，autopipe 每 tick 重试并 `rc=1`；同时全国径流
+图层按交集规则（`services/tiles/mvt.py::national_discharge_cycles`）在新河网追平前整体熄灭。
+
+收窄 lookback 的时机：**不得在有模型处于追赶中途时收窄**。warm start 只认精确前驱
+（`scheduler_generation_gate.py::legacy_strict_warm_start_evidence`），§8.6 前驱补齐每 pass
+只合成一跳且不递归；追赶模型的下一个未完成 cycle 一旦落到窗外，会以
+`state_snapshot_index_prior_checkpoint_missing_after_history` / `BLOCK_PREDECESSOR_PENDING`
+永久阻塞并占住该 source 的单一回填槽。先让追赶完成，再改值。
+
+代价：超过 48 h 的计算中断不再能由调度器自行补回（与 node-27 侧“超过 lag 的中断必须先
+解压”同一边界，见 `tier-node27-timeseries-storage.md` §4.3.2.1）。恢复时按该节先解压受影响
+chunk，再临时调大 `NHMS_SCHEDULER_LOOKBACK_HOURS` 覆盖中断跨度，追平后改回 32，并在追平前
+保持 `nhms-node27-timeseries-compression.timer` 停止。
+
 #### 3.1.3 DB-free scheduler 的受支持回滚/前滚
 
 > 编号非单调是**故意**的：本节曾是 3.1.1，#1699 插入新的 3.1.1 后本应顺推为 3.1.2，
