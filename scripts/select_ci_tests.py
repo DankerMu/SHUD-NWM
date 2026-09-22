@@ -1236,6 +1236,14 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # real journals through the real lifecycle and is named after neither file.
     # DB-free, 7 tests in ~13s.
     "tests/test_quarantine_identity_authority.py",
+    # #2385/#2387: the read-blocked sentinel's coupling pin. Its whole subject is
+    # this module -- the `_blocked_query_job` row shape across all five query
+    # lanes, the one `_is_blocked_query_job` discriminator both retry-lane
+    # consumer ends key on, the manual-retry source selector's refusal and the
+    # two runtime-root provenance readers' degrade. Every import is
+    # function-local, so no importer derivation reaches it; this stop-rule site
+    # is its route for the journal. DB-free, 17 tests in ~1s.
+    "tests/test_file_journal_read_blocked_consumers.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -2687,6 +2695,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # owned and named after none of them, so this directory rule is its
             # route. DB-free, sub-second.
             "tests/test_chain_cross_stage_state.py",
+            # #2387: the read-blocked sentinel's chain consumer end. The suite
+            # drives `chain_forecast_execution._retry_job_for_stage_result`
+            # through its real caller `_schedule_cycle_stage_retry`
+            # (chain_forecast_orchestrator_cycle.py) to prove the classified
+            # refusal precedes `handle_failed_job` -- neither module is
+            # stop-rule owned and it is named after neither, so this directory
+            # rule is its route for them. Its journal pair IS stop-rule owned
+            # and rides FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS, per this
+            # rule's #1455 note above. Every import is function-local, so no
+            # importer derivation can reach it. DB-free, 17 tests in ~1s.
+            "tests/test_file_journal_read_blocked_consumers.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL
@@ -5145,7 +5164,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_pipeline_ops_identity_envelope.py",
+            # #2385/#2387: the read-blocked sentinel suite drives
+            # `POST /runs/{run_id}/retry` through TestClient for both consumer
+            # ends -- the 409 `RETRY_EVIDENCE_INVALID` refusal body and the
+            # recorded-failure delta on the provenance walk -- so a change to
+            # this route's except table or its 503 assembly must run it.
+            "tests/test_file_journal_read_blocked_consumers.py",
         ),
+    ),
+    PathTestRule(
+        # #2385: the manual-retry source selector's THIRD caller. `_preview`
+        # runs outside `main()`'s try, so the selector's new refusal has to be
+        # turned into a receipt entry here; the sentinel suite is the only
+        # oracle for that receipt shape and exit code.
+        "scripts/node22_manual_retry_failed_runs.py",
+        ("tests/test_file_journal_read_blocked_consumers.py",),
     ),
     *(
         PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)

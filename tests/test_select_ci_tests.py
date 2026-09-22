@@ -913,6 +913,32 @@ def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() ->
     assert "tests/test_retry_mint_floor.py" in selected
 
 
+def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
+    """#2385/#2387: one suite pins BOTH consumer ends of one sentinel family.
+
+    Its whole point is that a later change cannot satisfy one end and silently
+    break the other, so every source it pins has to route to it -- the journal
+    (producer row, discriminator, selector, provenance readers), the chain
+    classifier, the operator CLI that consumes the selector's new refusal, and
+    the retry route whose 409 and 503 bodies it drives. Every import in the
+    suite is function-local, so no importer derivation reaches it and these four
+    rules are its only routes.
+    """
+
+    suite = "tests/test_file_journal_read_blocked_consumers.py"
+    for source in (
+        "services/orchestrator/file_orchestration_journal.py",
+        "services/orchestrator/chain_forecast_execution.py",
+        "scripts/node22_manual_retry_failed_runs.py",
+        "apps/api/routes/pipeline.py",
+    ):
+        assert suite in select_tests([source], repo_root=Path(".")), source
+
+    # The operator CLI's own same-name suite is not displaced by the new rule.
+    cli_selected = select_tests(["scripts/node22_manual_retry_failed_runs.py"], repo_root=Path("."))
+    assert "tests/test_node22_manual_retry_failed_runs.py" in cli_selected
+
+
 def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_suites() -> None:
     expected = {
         "tests/test_scheduler_journal_retention_planning.py",
@@ -1007,10 +1033,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 85 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # 86 targets (#2401/#2397 added the terminal-recency and identity-authority
     # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s; #2416 the
-    # cross-stage state-residue suite, sub-second), the
-    # rule's 82 plus three riders that arrive from OUTSIDE the
+    # cross-stage state-residue suite, sub-second; #2385/#2387 the read-blocked
+    # sentinel coupling pin, ~1s), the
+    # rule's 83 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1035,6 +1062,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and chain_runtime_utils.py.
         "tests/test_file_journal_full_tree_budget_contract.py",
+        # #2385/#2387: the read-blocked sentinel's coupling pin rides the broad
+        # orchestrator directory rule for its chain consumer end
+        # (chain_forecast_execution.py / chain_forecast_orchestrator_cycle.py),
+        # neither of which any narrow or stop rule owns. Its journal end rides
+        # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, 17 tests in ~1s.
+        "tests/test_file_journal_read_blocked_consumers.py",
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",

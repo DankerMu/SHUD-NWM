@@ -33,6 +33,7 @@ from services.orchestrator.chain_types import OrchestratorError  # noqa: E402
 from services.orchestrator.file_orchestration_journal import (  # noqa: E402
     FileJournalRetryService,
     FileOrchestrationJournalRepository,
+    RetryEvidenceInvalidError,
 )
 from services.orchestrator.journal_root_authority import (  # noqa: E402
     journal_root_refusal_line,
@@ -47,9 +48,26 @@ def _preview(service: FileJournalRetryService, run_id: str) -> dict[str, Any]:
     every model in the cycle, and a marker aimed at that row would restart the whole
     cohort.  The preview names the row so the operator sees which one it is before
     anything is written.
+
+    #2385: the selector now REFUSES a run whose by-run journal read was blocked
+    instead of reporting it as "no retryable failed job".  This call sits at
+    ``main``'s ``:100``, OUTSIDE its ``try``, so the refusal has to be turned into
+    a receipt entry here or the operator would get a traceback and no receipt at
+    all.  ``RetryEvidenceInvalidError`` is the one carrying the journal's own
+    ``reason``/``field``, so it is caught by that type rather than as a bare
+    ``RetryError``.
     """
 
-    failed_job, active_job = service._manual_retry_source_for_run(run_id)
+    try:
+        failed_job, active_job = service._manual_retry_source_for_run(run_id)
+    except RetryEvidenceInvalidError as error:
+        details = error.details if isinstance(error.details, dict) else {}
+        return {
+            "decision": "refused",
+            "reason": "journal_read_blocked",
+            "journal_reason": str(details.get("journal_reason") or ""),
+            "journal_field": str(details.get("journal_field") or ""),
+        }
     if active_job is not None:
         return {"decision": "refused", "reason": "run_active", "job_id": str(active_job.get("job_id") or "")}
     if failed_job is None:
