@@ -27,6 +27,10 @@ from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
 MAX_DISCOVERED_CYCLES = 10000
+#: The typed ``source_cycles`` entry naming the discovery leg a pass executed
+#: (#2443).  One authority, read back by ``scheduler_runtime`` into
+#: ``backfill.mode``; nothing recomputes ``backfill_enabled and models``.
+BACKFILL_LEG_EVIDENCE_TYPE = "backfill_leg"
 
 # Verdict-path-only classification (#1775).  The shared helper's value domain
 # stays exactly {match, absent, conflict}; ``unverifiable`` is produced by
@@ -785,6 +789,15 @@ def discover_cycles(
                         reason="backfill_deferred_waiting_for_global_prior_cycle",
                     )
                 )
+    # #2443: the leg this call actually executed, recorded ONCE per call (not per
+    # source, unlike ``backfill_audit``) and on BOTH legs -- ``backfill_enabled``
+    # in the pass evidence records config intent, and the zero-model pass runs the
+    # legacy leg with that flag true.  ``scheduler_runtime`` copies ``mode`` from
+    # here rather than recomputing the predicate, so the evidence can only ever
+    # name the leg that ran.  No ``status``/``selection_status``: the progress
+    # guard does not count it, ``operator_action_listing._pass_actions`` and the
+    # bounded breaker-released projection skip it, exactly like ``backfill_audit``.
+    evidence.append({"type": BACKFILL_LEG_EVIDENCE_TYPE, "mode": "backfill" if backfill_mode else "legacy"})
     return source_cycles, evidence
 
 

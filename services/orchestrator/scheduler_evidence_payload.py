@@ -65,6 +65,22 @@ _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] 
     ("refused_restart_stage", ("operator_reentry_sink_refusal", "refused_restart_stage")),
 )
 _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
+#: #1905: the mode recorded by the non-blocking summary tier.  The reader keys
+#: "this is NOT a size fallback" on the absence of ``limit``, so the mode is an
+#: operator/diagnostic marker, not a status.
+_NON_BLOCKING_SUMMARY_MODE = "non_blocking_summary"
+#: #2402: the reader's own key spellings for a breaker-released source cycle
+#: (``operator_action_listing._pass_actions``).  ``cycle_time_utc`` rather than
+#: ``cycle_time``: that is the only spelling the released leg is read by.
+_BOUNDED_SOURCE_CYCLE_KEYS = (
+    "source_id",
+    "cycle_time_utc",
+    "selection_status",
+    "selection_reason",
+)
+#: The per-model keys of the same leg: the identity, the occurrence count and the
+#: re-entry token ``confirm-operator-reentry`` requires.
+_BOUNDED_SOURCE_CYCLE_MODEL_KEYS = ("model_id", "occurrences", "recorded_init_state_id")
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
 # and either can be the only one present, so the compact block must keep both.
 _BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
@@ -177,6 +193,32 @@ def _serialized_evidence_within_limit(
         if serialized is not None:
             return admission_compacted, serialized
 
+    # #1905: candidate detail is what makes a NORMAL pass overflow, and rewriting
+    # such a pass's status to ``resource_limit_blocked`` costs far more than the
+    # detail does: the size-fallback product is non-evaluating for
+    # ``list-operator-actions``, so a whole window of healthy oversized passes
+    # answers ``exit 3`` (undecidable) instead of ``exit 0``.  This tier keeps the
+    # TRUE status and every other top-level key verbatim -- ``source_cycles``,
+    # ``counts``, the scope keys and ``model_run_evidence`` included (the
+    # readiness reader validates those rows) -- and replaces only the three
+    # candidate lists with the SAME bounded summary rows the fallback uses, which
+    # is why a summarized pass lists exactly what the full pass lists.  It starts
+    # from the admission projection when that ran, so terminal skipped rows are
+    # already projected, and it records the admission record nested rather than
+    # overwriting it.  If it still does not fit, the fail-closed fallback below
+    # remains authoritative.
+    summarized_payload = _non_blocking_summary_payload(
+        admission_compacted if admission_compacted is not None else payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if summarized_payload is not None:
+        serialized = _serialize_evidence_json_if_within_limit(
+            summarized_payload,
+            max_evidence_bytes=context.max_evidence_bytes,
+        )
+        if serialized is not None:
+            return summarized_payload, serialized
+
     bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
     bounded_payload = _fit_bounded_evidence_payload(
         bounded_payload,
@@ -244,6 +286,11 @@ def _fit_bounded_evidence_payload(
         # emptying an already-empty list drops nothing, so the marker stays "summarized".
         if field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS and emptied_non_empty:
             _mark_bounded_candidate_lists(bounded_payload, "dropped")
+        # #2402: the same rule for the breaker-released source-cycle projection.
+        # Clearing rows that were there means the artifact can no longer show a
+        # release, and ``dropped`` says exactly that.
+        if field_name == "source_cycles" and emptied_non_empty:
+            _mark_bounded_source_cycles(bounded_payload, "dropped")
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
 
@@ -295,6 +342,11 @@ def _fit_bounded_evidence_payload(
     for field_name in _scheduler_evidence._DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
             continue
+        # Removing the key is the same loss as clearing it (#2402).  Reached with
+        # a non-empty list only if a caller supplies its own bounded shape: the
+        # empty-assign tier above always runs first on the ladder's own product.
+        if field_name == "source_cycles" and bounded_payload[field_name]:
+            _mark_bounded_source_cycles(bounded_payload, "dropped")
         bounded_payload.pop(field_name)
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
@@ -312,6 +364,44 @@ def _fit_bounded_evidence_payload(
             return bounded_payload
 
     return bounded_payload
+
+
+def _non_blocking_summary_payload(
+    payload: Mapping[str, Any],
+    *,
+    max_evidence_bytes: int,
+) -> dict[str, Any] | None:
+    """Summarize the candidate lists WITHOUT touching the pass status (#1905).
+
+    ``None`` when the payload carries no candidate list at all: there is nothing
+    to summarize, so the tier would only add a marker and still not fit.  No
+    ``limit`` block is written -- this is not a size fallback, and the reader
+    must keep reading such a pass as evaluating.
+    """
+
+    summarized_fields = [
+        field_name for field_name in _scheduler_evidence._BOUNDED_CANDIDATE_LIST_FIELDS if field_name in payload
+    ]
+    if not summarized_fields:
+        return None
+    summarized = dict(payload)
+    for field_name in summarized_fields:
+        summarized[field_name] = _bounded_candidate_summary_rows(payload[field_name])
+    evidence_compaction: dict[str, Any] = {
+        "status": "applied",
+        "reason": "evidence_size_limit_exceeded",
+        "mode": _NON_BLOCKING_SUMMARY_MODE,
+        "max_evidence_bytes": max_evidence_bytes,
+        "pre_compaction_status": payload.get("status"),
+        "summarized_fields": summarized_fields,
+    }
+    admission = payload.get("evidence_compaction")
+    if isinstance(admission, Mapping):
+        # Nested, never overwritten: both projections ran on this pass and the
+        # admission record is the only statement of what the FIRST one dropped.
+        evidence_compaction["admission"] = dict(admission)
+    summarized["evidence_compaction"] = evidence_compaction
+    return summarized
 
 
 def _compact_admissible_pass_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -455,6 +545,76 @@ def _nested_mapping_value(value: Any, path: Sequence[str]) -> Any:
             return None
         value = value.get(key)
     return value
+
+
+def _bounded_breaker_released_source_cycles(value: Any) -> tuple[list[dict[str, Any]], int]:
+    """The capped breaker-released projection and the released TOTAL (#2402).
+
+    Only ``not_selected`` entries carrying the breaker-released
+    ``selection_reason`` are kept, in the READER's key spellings
+    (``operator_action_listing._pass_actions``): everything else -- selected
+    cycles, deferred cycles, the ``backfill_audit`` entry -- is dropped, because
+    the fallback exists to bound the artifact and only this leg carries an
+    operator action.  The total is counted before the cap, so an overflow shows
+    up as ``retained < breaker_released_total``.
+    """
+
+    rows: list[dict[str, Any]] = []
+    released_total = 0
+    for item in _bounded_sequence(value):
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("selection_status") != "not_selected":
+            continue
+        if item.get("selection_reason") != _scheduler_evidence._BREAKER_RELEASED_SELECTION_REASON:
+            continue
+        released_total += 1
+        if len(rows) >= _scheduler_evidence._BOUNDED_SOURCE_CYCLE_PROJECTION_LIMIT:
+            continue
+        row = _present_bounded_summary_keys(item, _BOUNDED_SOURCE_CYCLE_KEYS)
+        quarantine = item.get("journal_predecessor_identity_quarantine")
+        models = quarantine.get("models") if isinstance(quarantine, Mapping) else None
+        row["journal_predecessor_identity_quarantine"] = {
+            "models": [
+                _present_bounded_summary_keys(model, _BOUNDED_SOURCE_CYCLE_MODEL_KEYS)
+                for model in _bounded_sequence(models)
+                if isinstance(model, Mapping)
+            ]
+        }
+        rows.append(row)
+    return rows, released_total
+
+
+def _bounded_sequence(value: Any) -> Sequence[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return value
+    return ()
+
+
+def _mark_bounded_source_cycles(payload: dict[str, Any], state: str) -> None:
+    """Set ``limit.source_cycles.status``; ``dropped`` is never downgraded (#2402)."""
+
+    limit = payload.get("limit")
+    if not isinstance(limit, Mapping):
+        return
+    marker = limit.get("source_cycles")
+    marker = dict(marker) if isinstance(marker, Mapping) else {}
+    if marker.get("status") == "dropped":
+        return
+    marker["status"] = state
+    if state == "dropped":
+        # The rows are gone, so a retained count from the summarize tier would
+        # be a lie; the released TOTAL stays, it is what was lost.
+        marker["retained"] = 0
+    payload["limit"] = {**limit, "source_cycles": marker}
+
+
+def _bounded_source_cycles_state(payload: Mapping[str, Any]) -> Any:
+    limit = payload.get("limit")
+    if not isinstance(limit, Mapping):
+        return None
+    marker = limit.get("source_cycles")
+    return marker.get("status") if isinstance(marker, Mapping) else None
 
 
 def _bounded_candidate_lists_state(payload: Mapping[str, Any]) -> Any:
@@ -1078,6 +1238,8 @@ def _bounded_limit_block(
     *,
     reason: str,
     max_evidence_bytes: int,
+    source_cycle_projection: Sequence[Mapping[str, Any]] = (),
+    breaker_released_total: int = 0,
 ) -> dict[str, Any]:
     """Limit block for the fallback shape: fail-closed reason plus observability keys."""
 
@@ -1085,6 +1247,15 @@ def _bounded_limit_block(
         "reason": reason,
         "max_evidence_bytes": max_evidence_bytes,
         "candidate_lists": "summarized",
+    }
+    # #2402: the projection marker rides the same block.  ``dropped`` on the
+    # SOURCE payload is never downgraded: summarizing an already-dropped fallback
+    # product a second time may not claim the released cycles are still shown.
+    source_cycles_state = "summarized" if _bounded_source_cycles_state(payload) != "dropped" else "dropped"
+    limit["source_cycles"] = {
+        "status": source_cycles_state,
+        "breaker_released_total": breaker_released_total,
+        "retained": len(source_cycle_projection) if source_cycles_state == "summarized" else 0,
     }
     pre_limit_status = payload.get("status")
     if pre_limit_status is not None:
@@ -1098,6 +1269,13 @@ def bounded_evidence_payload(
     reason: str,
     max_evidence_bytes: int = _scheduler_evidence.MAX_EVIDENCE_BYTES,
 ) -> dict[str, Any]:
+    source_cycle_projection, breaker_released_total = _bounded_breaker_released_source_cycles(
+        payload.get("source_cycles")
+    )
+    if _bounded_source_cycles_state(payload) == "dropped":
+        # The source is itself a fallback product whose rows were already cut:
+        # whatever it still carries can not be presented as the whole release set.
+        source_cycle_projection = []
     bounded_payload = {
         "schema_version": payload.get(
             "schema_version",
@@ -1129,7 +1307,13 @@ def bounded_evidence_payload(
                 "can_claim_final_production_readiness": False,
             },
         ),
-        "limit": _bounded_limit_block(payload, reason=reason, max_evidence_bytes=max_evidence_bytes),
+        "limit": _bounded_limit_block(
+            payload,
+            reason=reason,
+            max_evidence_bytes=max_evidence_bytes,
+            source_cycle_projection=source_cycle_projection,
+            breaker_released_total=breaker_released_total,
+        ),
         "counts": payload.get("counts", _scheduler_evidence.empty_counts()),
         "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
         "runtime_config": payload.get("runtime_config"),
@@ -1140,7 +1324,10 @@ def bounded_evidence_payload(
         "blocked_candidates": _bounded_candidate_summary_rows(payload.get("blocked_candidates")),
         "skipped_candidates": _bounded_candidate_summary_rows(payload.get("skipped_candidates")),
         "duplicate_exclusions": payload.get("duplicate_exclusions", []),
-        "source_cycles": [],
+        # #2402: NOT ``[]`` any more -- a breaker-released cycle is the only
+        # place a released quarantine appears, and emptying the list made every
+        # size-fallback pass unable to show that nothing else was released.
+        "source_cycles": source_cycle_projection,
         "model_discovery": _scheduler_evidence.empty_model_discovery(),
         "artifact_path": payload.get("artifact_path"),
         "execution_boundary": payload.get("execution_boundary", "planning_only"),
@@ -1182,6 +1369,7 @@ def bounded_evidence_payload(
 
 
 __all__ = [
+    "_bounded_breaker_released_source_cycles",
     "_bounded_candidate_lists_state",
     "_bounded_candidate_summary",
     "_bounded_candidate_summary_rows",
@@ -1206,8 +1394,10 @@ __all__ = [
     "_is_required_bounded_field",
     "_mapping_status",
     "_mark_bounded_candidate_lists",
+    "_mark_bounded_source_cycles",
     "_minimal_bounded_retained_field_summary",
     "_nested_mapping_value",
+    "_non_blocking_summary_payload",
     "_payload_fits",
     "_present_bounded_summary_keys",
     "_serialized_evidence_within_limit",

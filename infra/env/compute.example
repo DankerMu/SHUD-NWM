@@ -10,6 +10,12 @@
 # `compute.host.env` (compute-api + slurm-gateway). See the
 # "node-22 unit -> EnvironmentFile authority" table in infra/env/README.md.
 # Do not quote values from this file as the production scheduler's config.
+# #2399: the scratch root spelled here is /scratch/frd_muziyao/nhms-prod -- the
+# directory that actually exists on node-22 and the one
+# compute.scheduler-dbfree.env (the live scheduler authority) has always used.
+# The earlier nhms-production spelling in this file was drift: it resolved to
+# nothing on disk, and a reader who copied it got an empty tree rather than an
+# error.
 
 NHMS_APP_IMAGE=nhms-app
 NHMS_IMAGE_TAG=m22-placeholder
@@ -35,8 +41,8 @@ UV_CACHE_DIR=/tmp/nhms-uv-cache
 # and is not an active business DB.
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms
 
-WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace
-OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-prod/workspace
+OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
 # Compute consumer/config identity. Node-27 ingest is the producer of those DB
 # rows and uses its own s3://nhms identity.
 OBJECT_STORE_PREFIX=s3://nhms-prod
@@ -55,27 +61,27 @@ NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 # plan-production remains dry-run/no-mutation. The legacy run_qhh_* scripts are
 # diagnostic-only bring-up fallbacks (M24 §5 / #293), not driven by these vars.
 # The NHMS_SCHEDULER_* keys configure that daemon's lock/evidence/roots + cohort.
-NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/locks
+NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/locks
 NHMS_SCHEDULER_DB_FREE_REQUIRED=true
 NHMS_SCHEDULER_STATE_BACKEND=file
 NHMS_SCHEDULER_LOCK_BACKEND=file
 NHMS_SCHEDULER_REGISTRY_BACKEND=file
-NHMS_SCHEDULER_REGISTRY_MANIFEST=/scratch/frd_muziyao/nhms-production/object-store/scheduler/registry/manifest-last.json
+NHMS_SCHEDULER_REGISTRY_MANIFEST=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/registry/manifest-last.json
 NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
-NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/canonical-readiness/index-last.json
+NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/canonical-readiness/index-last.json
 NHMS_SCHEDULER_JOURNAL_BACKEND=file
 # Must be a realpath (`readlink -f` equals this value): every component a real
 # directory, none a symlink. An alias ANCESTOR passes the db-free preflight and
 # then fails the scheduler at start with FILE_JOURNAL_INVALID_ROOT; a symlink
 # leaf, a symlink loop or a missing root never gets that far -- the preflight's
 # own redacted blocker stops the pass first (#1943, 8.10).
-NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/journal
+NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal
 NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
-NHMS_SCHEDULER_STATE_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/state-index/index-last.json
-NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
-NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
-NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp
-NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scratch/frd_muziyao/nhms-production/object-store:/scratch/frd_muziyao/nhms-production/runtime:/scratch/frd_muziyao/nhms-production/tmp:/ghdc/data/nwm/object-store:/var/lib/nhms/published
+NHMS_SCHEDULER_STATE_INDEX=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
+NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence
+NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-prod/runtime
+NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-prod/tmp
+NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-prod/workspace:/scratch/frd_muziyao/nhms-prod/object-store:/scratch/frd_muziyao/nhms-prod/runtime:/scratch/frd_muziyao/nhms-prod/tmp:/ghdc/data/nwm/object-store:/var/lib/nhms/published
 NHMS_SCHEDULER_SOURCES=gfs,IFS
 # Scheduler hard gate for business candidate/backfill selection.
 NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12
@@ -173,7 +179,7 @@ NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
 # node-27 NFS raw into the compute-visible OBJECT_STORE_ROOT before submitting
 # convert/forcing/forecast stages.
 NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true
-NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+NHMS_SCHEDULER_NFS_RAW_STAGE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
 NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX=s3://nhms-prod
 # Node-22 compute must not probe or download external GFS/IFS sources. External
 # download adapter env belongs in infra/env/node27-download.env; this scheduler
@@ -195,15 +201,19 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # (read-only check 2026-09-02; receipt
 # .workplans/pr-1956/node22-compute-env-receipt.log:84, :96, :110).
 # NHMS_MODEL_ASSET_ROOT is a compose-lane placeholder following this template's
-# /scratch/frd_muziyao/nhms-production/* scheme. It WAS checked on the node-22
-# login host on 2026-09-02 and does not exist there (same receipt, :82 and :112:
-# "MISSING /scratch/frd_muziyao/nhms-production/model-assets"). A directory
-# with the near-identical nhms-prod spelling does exist (receipt :83, EXISTS
-# /scratch/frd_muziyao/nhms-prod/model-assets); no tracked env template binds
-# NHMS_MODEL_ASSET_ROOT to it, so do not assume it is the intended value.
+# /scratch/frd_muziyao/nhms-prod/* scheme. The 2026-09-02 read-only check of the
+# node-22 login host found the OLD spelling of this template's root absent
+# (same receipt, :82 and :112: "MISSING
+# /scratch/frd_muziyao/nhms-production/model-assets") while the real one exists
+# (receipt :83, EXISTS /scratch/frd_muziyao/nhms-prod/model-assets). #2399 has
+# since retired the nhms-production spelling from this whole file -- it was the
+# drift that made that check read as MISSING -- so the path below now points at
+# the directory the receipt found. It is still a placeholder: no tracked env
+# template binds NHMS_MODEL_ASSET_ROOT to it, and the live scheduler unit reads
+# compute.scheduler-dbfree.env, not this file.
 # Set this key to a real path when you instantiate this file (#1694).
 NHMS_BASINS_ROOT=/volume/nwm/Basins
-NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets
+NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-prod/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud
 
 # Slurm gateway = the production submit path. The generic daemon (above) renders
@@ -226,7 +236,7 @@ SLURM_GATEWAY_BACKEND=slurm
 # accepted-submit reconcile uses this same configured path for all three.
 SLURM_GATEWAY_SLURM_BIN_PATH=
 SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch
-SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
+SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-prod/workspace
 # Optional comma-separated unhealthy compute nodes to avoid at submit time.
 # Example: SLURM_GATEWAY_EXCLUDE_NODES=cn24
 SLURM_GATEWAY_EXCLUDE_NODES=

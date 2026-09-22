@@ -14,10 +14,15 @@ models are read from the not-selected ``source_cycles`` entry instead.
 Evidence only, never the journal: the journal carries no decisions.  A pass
 only answers "nothing waits" when candidate construction ran in it and its
 evidence is whole: its status must be in :data:`EVALUATING_PASS_STATUSES`, and
-it must not be a size-fallback artifact -- ``bounded_evidence_payload`` empties
-``source_cycles``, the only place a breaker-released cycle appears, so such a
-pass can still LIST its summarized blocked candidates but can never prove none
-waits.  Nor may an OLDER decidable pass answer for a newer pass that may have
+it must not be a size-fallback artifact -- ``bounded_evidence_payload`` keeps at
+most a CAPPED projection of the breaker-released ``source_cycles`` entries
+(#2402) and drops every other one, so such a pass can still LIST what that
+projection and its summarized blocked candidates hold but can never prove none
+waits.  A pass written by the NON-BLOCKING SUMMARY tier (#1905: true status,
+``evidence_compaction.mode: non_blocking_summary``, no ``limit`` block) is not a
+size fallback at all -- its rows carry every field read below and every other
+top-level key is verbatim -- so it is read exactly like the same pass written in
+full.  Nor may an OLDER decidable pass answer for a newer pass that may have
 evaluated candidates it can not show (rounds 3/4 r3-01, r4-02): the breaker may
 have engaged after the decidable pass.  Only a TRANSPARENT pass
 (:data:`TRANSPARENT_PASS_STATUSES`) is known to hide nothing; any other
@@ -40,10 +45,13 @@ the ``last_seen_pass``: the newest pass wins, because the operator feeds
 stale token is refused.  Exit codes: ``1`` actions listed, ``0`` none, ``3`` none
 but undecidable (a scanned pass dropped its candidate lists, a pass file vanished
 mid-scan, no scanned pass is readable, evaluating and scope-complete -- including
-an empty root --, or a pass that is neither evaluating-and-scope-complete, nor
+an empty root --, a pass that is neither evaluating-and-scope-complete, nor
 transparent, nor merely narrowed is newer than the newest evaluating and
-scope-complete pass), ``2`` evidence root missing or unreadable, or ``--passes``
-misused.
+scope-complete pass, or a pre-execution reservation is ORPHANED: #2405, a pass
+that reserved its evidence slot, started after the newest answering pass and
+never wrote its terminal artifact, whose lease can no longer be shown alive --
+see :func:`_orphan_reservations`), ``2`` evidence root missing or unreadable, or
+``--passes`` misused.
 """
 
 from __future__ import annotations
@@ -51,7 +59,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +84,9 @@ BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_bre
 #: tell which, so it is non-evaluating too.  A size-fallback artifact (status
 #: ``resource_limit_blocked`` with summarized/dropped candidate lists) is
 #: non-evaluating whatever ``limit.pre_limit_status`` it kept: its
-#: ``source_cycles`` were emptied (reason ``size_fallback_source_cycles_absent``).
+#: ``source_cycles`` were either summarized to the capped breaker-released
+#: projection (:data:`SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON`) or lost
+#: entirely (:data:`SIZE_FALLBACK_NON_EVALUATING_REASON`).
 #: Recency (round 4): a decidable pass clears the hidden-pass flag, a
 #: :data:`TRANSPARENT_PASS_STATUSES` pass leaves it, every other pass arms it.
 EVALUATING_PASS_STATUSES = frozenset(
@@ -116,12 +128,26 @@ EVALUATING_PASS_STATUSES = frozenset(
 #: with the full candidate lists and ``source_cycles`` (1328-1343).  NOT here:
 #: ``lease_lost`` (988) and the exception-path ``resource_limit_blocked`` (1473)
 #: run after construction and empty the lists; a size-fallback product keeps
-#: status ``resource_limit_blocked`` and emptied ``source_cycles``.
+#: status ``resource_limit_blocked`` and at most the capped breaker-released
+#: ``source_cycles`` projection.
 TRANSPARENT_PASS_STATUSES = frozenset(("lock_contended", "preflight_blocked"))
 _SIZE_FALLBACK_STATUS = "resource_limit_blocked"
 _SIZE_FALLBACK_CANDIDATE_LISTS = frozenset(("summarized", "dropped"))
 STATUS_NOT_EVALUATING_REASON = "status_not_evaluating"
 SIZE_FALLBACK_NON_EVALUATING_REASON = "size_fallback_source_cycles_absent"
+#: #2402: the size fallback no longer empties ``source_cycles`` wholesale -- it
+#: keeps a CAPPED projection of the breaker-released not-selected entries and
+#: marks ``limit.source_cycles`` ``summarized``.  Those entries are listed from
+#: the projection exactly as from a full pass, so such a pass can ANSWER for the
+#: released cycles it kept; it still can not prove that nothing else was
+#: released (every other source cycle is gone, and the projection may itself have
+#: overflowed its cap -- visible as ``retained < breaker_released_total``), so it
+#: stays non-evaluating and arms the hidden-pass flag, with its own reason.  A
+#: fallback product whose marker is ABSENT (written before this projection
+#: existed) or ``dropped`` keeps :data:`SIZE_FALLBACK_NON_EVALUATING_REASON`:
+#: absent is read as dropped, never as "nothing was released".
+SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON = "size_fallback_source_cycles_summarized"
+_SIZE_FALLBACK_SOURCE_CYCLES_SUMMARIZED = "summarized"
 #: Round 5 r5-01.  A pass the operator narrowed (backfill off, filters naming a
 #: subset of models/basins/an expression, ``--source`` naming less than
 #: :data:`SCOPE_COMPLETE_SOURCES`, a ``cycle_window.lookback_hours`` of ``0``,
@@ -156,12 +182,33 @@ SCOPE_UNKNOWN_REASON = "scope_unknown"
 #: identity) lands in the same place with the registry still ``ready``.  Only
 #: ``registry.status == "blocked"`` takes the early ``preflight_blocked`` exit,
 #: which is transparent and therefore safe; zero models does not.  The evidence
-#: still reports ``backfill.enabled: true`` on such a pass because the writer
-#: records the CONFIGURED leg, not the executed one
-#: (``scheduler_runtime.py:1395`` vs ``scheduler_discovery.py:700``, where
-#: ``backfill_mode`` also requires a non-empty model set) -- that writer-side half
-#: is tracked by #2443; this is the read side.
+#: still reports ``backfill.enabled: true`` on such a pass -- that key records the
+#: CONFIGURED leg -- while ``backfill.mode`` (the write-side half of #2443, closed
+#: by the same change as this reason) reports the leg ``discover_cycles``
+#: executed, which here is ``legacy``: ``backfill_mode`` also requires a non-empty
+#: model set.  The two disagreeing IS the signature of this pass; the shape that
+#: is unreadable instead is the one below.
 NO_MODELS_EVALUATED_REASON = "no_models_evaluated"
+#: #2443 write side, closed by the same change: ``backfill.mode`` is the leg
+#: ``discover_cycles`` reported executing, so ``enabled: true`` with
+#: ``mode: legacy`` is reachable ONLY on the zero-model pass above (which keeps
+#: its own reason).  The same claim with models selected is a shape no writer can
+#: produce, which means the evidence can not be read as it stands -- the same
+#: class of uncertainty as a missing scope key, so it arms via
+#: :data:`SCOPE_UNKNOWN_REASON`.  A pass carrying no ``mode`` at all was written
+#: before that key existed and is read exactly as before.
+_BACKFILL_LEGACY_MODE = "legacy"
+
+#: #2405.  A ``*.pre_execution.json`` whose pass never wrote its terminal
+#: artifact, is newer than the newest evaluating and scope-complete pass, and
+#: whose lease can not be shown to be alive.  ``lease_stale``: the mtime its
+#: pass's heartbeat refreshes is older than twice the ttl the reservation itself
+#: records (the rule ``scheduler_lease._existing_lock_state`` uses for a lock).
+#: ``lease_absent``: written before the ``lease`` block existed, so freshness is
+#: unprovable and the fail-safe answer is "undecidable".
+ORPHAN_REASON_LEASE_STALE = "lease_stale"
+ORPHAN_REASON_LEASE_ABSENT = "lease_absent"
+_LEASE_STALE_TTL_MULTIPLIER = 2
 
 #: Every decision the db-free scheduler writes ``manual_retry_required: True`` on.
 #: Literals rather than an alias -- unlike :data:`SCOPE_COMPLETE_SOURCES` below,
@@ -225,9 +272,15 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "scope_unknown, no_models_evaluated) makes the window undecidable from where it "
     "sits. The reason is reported per pass under non_evaluating_passes / "
     "unreadable_passes and is one of status_not_evaluating, "
-    "size_fallback_source_cycles_absent, scope_narrowed, scope_unknown, "
-    "no_models_evaluated; an empty root counts, a size-fallback pass never counts as "
-    "evaluating because its source_cycles were dropped, and a pass file that vanished "
+    "size_fallback_source_cycles_absent, size_fallback_source_cycles_summarized, "
+    "scope_narrowed, scope_unknown, "
+    "no_models_evaluated; a pass whose backfill.enabled is true, backfill.mode is "
+    "legacy and counts.selected_model_count is non-zero is a shape the writer can "
+    "not produce and is reported scope_unknown. An empty root counts, a size-fallback pass never counts as "
+    "evaluating because it keeps at most a capped projection of its breaker-released "
+    "source_cycles (limit.source_cycles summarized -- those models are still listed, "
+    "and an overflow shows as retained < breaker_released_total) and drops every other "
+    "one, while a marker that is dropped or absent means it kept none, and a pass file that vanished "
     "between the directory scan and its stat is reported under unreadable_passes and "
     "vetoes exit 0 wherever it sat). A pass the operator narrowed -- backfill "
     "disabled, --model-id/--basin-id filters, --source naming less than the whole "
@@ -282,6 +335,15 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "backfill.enabled is True. Unlike (2), (4) has no exemption for "
     "blocked_journal_predecessor_identity_quarantine: the breaker release reads the "
     "already hour-filtered discoveries, so a retracted cycle is invisible to it too. "
+    "Exit 3 also when a pre-execution reservation is ORPHANED: its pass wrote no "
+    "terminal <pass_id>.json, its reserved_at is newer than the payload started_at "
+    "of the newest evaluating and scope-complete pass, and its modification time -- "
+    "which that pass's lease heartbeat refreshes while it lives -- is older than "
+    "twice the ttl its own lease block records, or it records no lease at all "
+    "(a reservation written before that block existed; freshness is unprovable, so "
+    "it is reported). Such reservations are listed under orphan_reservations with "
+    f"reason {ORPHAN_REASON_LEASE_STALE} or {ORPHAN_REASON_LEASE_ABSENT}; an "
+    "in-flight pass's reservation is fresh and changes nothing. "
     "Exit 2 when the root is missing or unreadable, or --passes is not an integer "
     ">= 1. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
 )
@@ -305,6 +367,11 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     unreadable: list[str] = []
     dropped: list[str] = []
     non_evaluating: list[dict[str, Any]] = []
+    # #2405: the payload ``started_at`` of the NEWEST (by the scan's mtime order)
+    # evaluating and scope-complete pass.  Reservations are ordered against this
+    # writer clock, never against file mtimes -- the heartbeat moves a live
+    # reservation's mtime, so mtimes no longer say when it was reserved.
+    newest_evaluating_started_at: str | None = None
     actions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     # r3-01/r4-02: a pass that is neither decidable nor transparent seen after
     # (newer than) the newest decidable pass.  Transparent passes leave it as is.
@@ -321,6 +388,8 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
         non_evaluating_entry = _non_evaluating_entry(name, payload)
         if non_evaluating_entry is None:
             hidden_after_decidable = False
+            started_at = payload.get("started_at")
+            newest_evaluating_started_at = started_at if isinstance(started_at, str) else None
         else:
             non_evaluating.append(non_evaluating_entry)
             status = payload.get("status")
@@ -360,6 +429,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
             }
 
     listed = [actions[key] for key in sorted(actions)]
+    orphans = _orphan_reservations(root, newest_evaluating_started_at)
     receipt = {
         "schema_version": LIST_OPERATOR_ACTIONS_SCHEMA_VERSION,
         "evidence_root": str(root),
@@ -373,6 +443,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
         "operator_actions": listed,
         "candidate_lists_dropped_passes": sorted(dropped),
         "non_evaluating_passes": sorted(non_evaluating, key=lambda item: item["pass"]),
+        "orphan_reservations": orphans,
     }
     evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:
@@ -381,9 +452,105 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     # selected pass: its mtime was never read, so it can not be placed in the time
     # order at all.  A pass whose position is unknown can not arm the flag
     # positionally, and the only honest answer left is "undecidable".
-    if dropped or vanished or evaluating_count < 1 or hidden_after_decidable:
+    if dropped or vanished or evaluating_count < 1 or hidden_after_decidable or orphans:
         return receipt, 3
     return receipt, 0
+
+
+def _orphan_reservations(root: Path, newest_evaluating_started_at: str | None) -> list[dict[str, Any]]:
+    """Reservations of passes that started after the newest answer and never finished (#2405).
+
+    Root-local and top-level only, exactly like the pass scan: ``os.scandir`` of
+    ``root`` itself, no walk up and no walk down.
+
+    Three tests, in this order.  (1) The terminal artifact: a reservation whose
+    pass wrote its ``<pass_id>.json`` is history and is dropped before its payload
+    is even read.  The name is derived from the RESERVATION FILENAME rather than
+    the payload's ``final_evidence_artifact``, because under
+    ``scheduler_db_free_required`` -- which is how node-22 runs -- that field is
+    redacted to ``[local-path]`` (``scheduler_evidence.artifact_path_evidence``)
+    and would match nothing, making every completed pass's lingering reservation
+    an orphan.  The writer names both files from the same ``pass_id``
+    (``scheduler_evidence.reserve_pre_execution_evidence``), so the derivation is
+    exact; the payload spelling is honoured too when it is a real filename.
+    (2) Order: ``reserved_at`` against the newest evaluating and scope-complete
+    pass's payload ``started_at``.  A reservation that can not be placed -- no
+    readable payload, no parsable ``reserved_at``, or no evaluating pass to order
+    it against -- is NOT reported: the rule is about a pass newer than the one
+    that answered, and an unplaceable reservation makes no such claim.  (3)
+    Freshness: the pass's heartbeat refreshes the mtime, so an age over twice the
+    ttl the reservation itself records means the toucher is gone.  No ``lease``
+    block at all (a pre-#2405 writer) is fail-safe: reported.
+    """
+
+    if newest_evaluating_started_at is None:
+        return []
+    newest_started_at = _parse_utc(newest_evaluating_started_at)
+    if newest_started_at is None:
+        return []
+    orphans: list[dict[str, Any]] = []
+    now = time.time()
+    try:
+        with os.scandir(root) as iterator:
+            entries = [entry.name for entry in iterator if entry.name.endswith(_PRE_EXECUTION_SUFFIX)]
+    except OSError:
+        return []
+    for name in entries:
+        if not is_scheduler_pass_evidence_filename(name):
+            continue
+        path = root / name
+        if (root / f"{name[: -len(_PRE_EXECUTION_SUFFIX)]}.json").exists():
+            continue
+        payload = _read_pass(path)
+        if payload is None:
+            continue
+        final_artifact = payload.get("final_evidence_artifact")
+        if isinstance(final_artifact, str) and is_scheduler_pass_evidence_filename(os.path.basename(final_artifact)):
+            if (root / os.path.basename(final_artifact)).exists():
+                continue
+        reserved_at_text = payload.get("reserved_at")
+        reserved_at = _parse_utc(reserved_at_text) if isinstance(reserved_at_text, str) else None
+        if reserved_at is None or reserved_at <= newest_started_at:
+            continue
+        lease = payload.get("lease")
+        ttl_seconds = lease.get("ttl_seconds") if isinstance(lease, Mapping) else None
+        if type(ttl_seconds) is not int or ttl_seconds < 1:
+            reason = ORPHAN_REASON_LEASE_ABSENT
+        else:
+            try:
+                age_seconds = now - path.stat().st_mtime
+            except OSError:
+                # Deleted under the scan (the retention timer): nothing to report.
+                continue
+            if age_seconds <= _LEASE_STALE_TTL_MULTIPLIER * ttl_seconds:
+                continue
+            reason = ORPHAN_REASON_LEASE_STALE
+        pass_id = payload.get("pass_id")
+        orphans.append(
+            {
+                "reservation": name,
+                "pass_id": pass_id if isinstance(pass_id, str) and pass_id else None,
+                "reserved_at": reserved_at_text,
+                "reason": reason,
+            }
+        )
+    return sorted(orphans, key=lambda item: item["reservation"])
+
+
+def _parse_utc(value: str) -> datetime | None:
+    """Parse one writer timestamp, or ``None``.
+
+    Compared as datetimes, never as strings: the writer's ``_format_utc`` emits
+    fractional seconds only when they are non-zero, and ``"...:00.5Z" < "...:00Z"``
+    lexicographically -- the wrong order, and exactly across the boundary this
+    comparison decides.
+    """
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def _non_evaluating_entry(name: str, payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -402,10 +569,19 @@ def _non_evaluating_entry(name: str, payload: Mapping[str, Any]) -> dict[str, An
     limit = limit if isinstance(limit, Mapping) else {}
     if status == _SIZE_FALLBACK_STATUS and limit.get("candidate_lists") in _SIZE_FALLBACK_CANDIDATE_LISTS:
         kept = limit.get("pre_limit_status")
+        source_cycles_marker = limit.get("source_cycles")
+        summarized = (
+            isinstance(source_cycles_marker, Mapping)
+            and source_cycles_marker.get("status") == _SIZE_FALLBACK_SOURCE_CYCLES_SUMMARIZED
+        )
         return {
             "pass": name,
             "status": str(kept) if kept not in (None, "") else _SIZE_FALLBACK_STATUS,
-            "reason": SIZE_FALLBACK_NON_EVALUATING_REASON,
+            "reason": (
+                SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON
+                if summarized
+                else SIZE_FALLBACK_NON_EVALUATING_REASON
+            ),
         }
     if not (isinstance(status, str) and status in EVALUATING_PASS_STATUSES):
         return {
@@ -584,6 +760,12 @@ def _scope_reason(payload: Mapping[str, Any]) -> str | None:
     # can only produce ``0``.
     if counts["selected_model_count"] <= 0:
         return NO_MODELS_EVALUATED_REASON
+    # #2443 write side: with models selected, ``enabled: true`` can only have run
+    # the backfill leg.  A pass claiming otherwise carries evidence its own writer
+    # can not produce, so its scope is unreadable rather than narrowed.  A pass
+    # with no ``mode`` key predates it and falls straight through.
+    if backfill["enabled"] is True and backfill.get("mode") == _BACKFILL_LEGACY_MODE:
+        return SCOPE_UNKNOWN_REASON
     if backfill["enabled"] is not True:
         return SCOPE_NARROWED_REASON
     if operator_filters["basin_ids"] or operator_filters["model_ids"]:

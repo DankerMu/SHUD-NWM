@@ -278,7 +278,9 @@ def _write_pass(
     }
     if candidate_lists is not None:
         # The size fallback rewrites the status, keeps the pass's own one, and
-        # empties ``source_cycles`` exactly like ``bounded_evidence_payload``.
+        # empties ``source_cycles``.  These hand-written fixtures carry NO
+        # ``limit.source_cycles`` marker on purpose: that is the legacy shape,
+        # read as ``dropped`` (#2402).
         payload["status"] = "resource_limit_blocked"
         payload["limit"].update({"candidate_lists": candidate_lists, "pre_limit_status": status})
         payload["source_cycles"] = []
@@ -1029,7 +1031,8 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
     """round 1 cand-03 (c): non-evaluating neighbours do not taint an evaluating pass.
 
     P7 F-1: the size-fallback neighbour used to count as evaluating by the status
-    it kept; it is non-evaluating now (its ``source_cycles`` were emptied).
+    it kept; it is non-evaluating now (it can show at most its breaker-released
+    ``source_cycles`` projection, never that nothing else was released).
     Round 3 r3-01: the clean ``planned`` pass decides 0 only because it is NEWER
     than the fallback -- see the next test for the other order.
     """
@@ -1061,7 +1064,7 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
         {
             "pass": "scheduler_2026052112_cccccccccccc.json",
             "status": "submitted",
-            "reason": "size_fallback_source_cycles_absent",
+            "reason": "size_fallback_source_cycles_summarized",
         },
     ]
 
@@ -1069,22 +1072,24 @@ def test_one_clean_evaluating_pass_in_the_window_decides_zero(
 def test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Round 3 r3-01: the breaker may engage after the decidable pass; the newer fallback hid it."""
+    """Round 3 r3-01: the breaker may engage after the decidable pass; the newer fallback hid it.
+
+    #2402 retarget: what the fallback still loses is every source cycle outside
+    the breaker-released projection, so the hidden cycle here is a deferred one.
+    """
 
     _write_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, status="planned")
     _write_pass(tmp_path, "scheduler_2026052112_bbbbbbbbbbbb.json", mtime=2_000, status="lock_contended")
     original = {
         "pass_id": "scheduler_2026052112_cccccccccccc",
         "status": "blocked",
-        "source_cycles": [_breaker_released_source_cycle()],
+        "source_cycles": [_dropped_source_cycle()],
         "blocked_candidates": [_unrelated_blocked_row()],
     }
     newest = tmp_path / "scheduler_2026052112_cccccccccccc.json"
-    # Unbounded, the newest pass WOULD list the breaker release.
-    _write_pass(tmp_path, newest.name, mtime=3_000, **_as_write_pass_kwargs(original))
-    assert _run(["--evidence-root", str(tmp_path)], capsys)[0] == 1
-    newest.unlink()
-    _write_real_size_fallback_pass(tmp_path, newest.name, mtime=3_000, original=original)
+    bounded = _write_real_size_fallback_pass(tmp_path, newest.name, mtime=3_000, original=original)
+    # The source cycle the unbounded pass carried is gone from the artifact.
+    assert bounded["source_cycles"] == []
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
@@ -1093,7 +1098,7 @@ def test_a_size_fallback_pass_newer_than_the_newest_decidable_pass_is_undecidabl
     assert payload["operator_actions"] == []
     assert [(item["pass"], item["reason"]) for item in payload["non_evaluating_passes"]] == [
         ("scheduler_2026052112_bbbbbbbbbbbb.json", "status_not_evaluating"),
-        ("scheduler_2026052112_cccccccccccc.json", "size_fallback_source_cycles_absent"),
+        ("scheduler_2026052112_cccccccccccc.json", "size_fallback_source_cycles_summarized"),
     ]
 
 
@@ -1210,17 +1215,18 @@ def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
     transparent (``lease_lost``, exception-path ``resource_limit_blocked``, an unknown
     or non-string status); a transparent ``lock_contended`` / ``preflight_blocked``
     pass neither arms nor clears that; no decidable pass at all is 3.  Every size-fallback pass is the
-    REAL ``bounded_evidence_payload`` of a pass that, unbounded, would list a
-    breaker release, and every unreadable pass is a half-written file.
+    REAL ``bounded_evidence_payload`` of a pass whose source cycle the fallback
+    drops (#2402: a deferred entry, outside the breaker-released projection the
+    fallback keeps), and every unreadable pass is a half-written file.
 
     Round 5 adds the scope rows (design.md D3): a pass the operator narrowed is
     non-evaluating and LEAVES the flag, a pass whose scope keys are missing arms
     it positionally, and a size fallback arms whatever status it kept.
     """
 
-    breaker_hiding_original = {
+    source_cycle_hiding_original = {
         "status": "blocked",
-        "source_cycles": [_breaker_released_source_cycle()],
+        "source_cycles": [_dropped_source_cycle()],
         "blocked_candidates": [_unrelated_blocked_row()],
     }
     for index, kind in enumerate(oldest_to_newest):
@@ -1293,7 +1299,11 @@ def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
             assert written["backfill"] == {}
             assert "expression" in written["operator_filters"]
         elif kind == _SIZE_FALLBACK_FROM_PREFLIGHT:
-            original = {**breaker_hiding_original, "pass_id": name.removesuffix(".json"), "status": "preflight_blocked"}
+            original = {
+                **source_cycle_hiding_original,
+                "pass_id": name.removesuffix(".json"),
+                "status": "preflight_blocked",
+            }
             bounded = _write_real_size_fallback_pass(tmp_path, name, mtime=mtime, original=original)
             assert bounded["status"] == "resource_limit_blocked"
             assert bounded["limit"]["pre_limit_status"] == "preflight_blocked"
@@ -1312,11 +1322,11 @@ def test_pass_kind_orderings_decide_by_the_hidden_pass_recency_rule(
             path.write_text(json.dumps(non_string), encoding="utf-8")
             os.utime(path, (mtime, mtime))
         elif kind == _SIZE_FALLBACK:
-            original = {"pass_id": name.removesuffix(".json"), **breaker_hiding_original}
+            original = {"pass_id": name.removesuffix(".json"), **source_cycle_hiding_original}
             bounded = _write_real_size_fallback_pass(tmp_path, name, mtime=mtime, original=original)
             assert bounded["source_cycles"] == []
         else:
-            whole = json.dumps({"pass_id": name.removesuffix(".json"), **breaker_hiding_original})
+            whole = json.dumps({"pass_id": name.removesuffix(".json"), **source_cycle_hiding_original})
             path = tmp_path / name
             path.write_text(whole[: len(whole) // 2] if kind == _UNREADABLE_TRUNCATED else "", encoding="utf-8")
             os.utime(path, (mtime, mtime))
@@ -1372,25 +1382,51 @@ def _breaker_released_source_cycle() -> dict[str, Any]:
     }
 
 
+def _dropped_source_cycle() -> dict[str, Any]:
+    """A not-selected cycle the bounded projection does NOT keep (#2402).
+
+    The fallback keeps only the breaker-released leg, so a deferred entry like
+    this one is exactly what a size-fallback pass still loses -- which is why
+    such a pass stays non-evaluating even when ``limit.source_cycles`` is
+    ``summarized``: it can show the releases it kept, never that nothing else
+    was released.  Producer literal: ``scheduler_discovery.py``
+    ``_backfill_deferred_evidence``.
+    """
+
+    return {
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026052100",
+        "cycle_time_utc": "2026-05-21T00:00:00Z",
+        "selection_status": "not_selected",
+        "selection_reason": "backfill_deferred_waiting_for_prior_cycle",
+    }
+
+
 def test_a_window_of_size_fallback_passes_is_undecidable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """P7 F-1: the size fallback drops ``source_cycles``, which hid a breaker-released cycle behind exit 0."""
+    """P7 F-1: the size fallback drops every source cycle it does not project, so it can not answer 0.
+
+    Retargeted by #2402: the fallback now KEEPS the breaker-released entries, so
+    the window that stays undecidable is the one whose lost cycles are the other
+    ones -- here a deferred entry.  The breaker-released leg has its own test
+    below (it is listed and exits 1).
+    """
 
     original = {
         "pass_id": "scheduler_2026052112_aaaaaaaaaaaa",
         "status": "blocked",
-        "source_cycles": [_breaker_released_source_cycle()],
+        "source_cycles": [_dropped_source_cycle()],
         "blocked_candidates": [_unrelated_blocked_row()],
     }
-    # The whole pass (unbounded) WOULD list the breaker action.
-    _write_pass(tmp_path, "scheduler_2026052112_000000000000.json", mtime=1_000, **_as_write_pass_kwargs(original))
-    assert _run(["--evidence-root", str(tmp_path)], capsys)[0] == 1
-    (tmp_path / "scheduler_2026052112_000000000000.json").unlink()
-
     bounded = _write_real_size_fallback_pass(
         tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, original=original
     )
     assert bounded["source_cycles"] == []
     assert bounded["limit"]["candidate_lists"] == "summarized"
+    assert bounded["limit"]["source_cycles"] == {
+        "status": "summarized",
+        "breaker_released_total": 0,
+        "retained": 0,
+    }
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
@@ -1401,8 +1437,49 @@ def test_a_window_of_size_fallback_passes_is_undecidable(tmp_path: Path, capsys:
         {
             "pass": "scheduler_2026052112_aaaaaaaaaaaa.json",
             "status": "blocked",
-            "reason": "size_fallback_source_cycles_absent",
+            "reason": "size_fallback_source_cycles_summarized",
         }
+    ]
+
+
+def test_a_size_fallback_pass_lists_the_breaker_release_its_projection_kept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2402: the projection is the whole point -- the release survives the fallback and is listed."""
+
+    original = {
+        "pass_id": "scheduler_2026052112_aaaaaaaaaaaa",
+        "status": "blocked",
+        "source_cycles": [_breaker_released_source_cycle(), _dropped_source_cycle()],
+        "blocked_candidates": [_unrelated_blocked_row()],
+    }
+    # The whole pass (unbounded) lists the breaker action.
+    _write_pass(tmp_path, "scheduler_2026052112_000000000000.json", mtime=1_000, **_as_write_pass_kwargs(original))
+    full_code, full_payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+    assert full_code == 1
+    assert full_payload is not None
+    (tmp_path / "scheduler_2026052112_000000000000.json").unlink()
+
+    bounded = _write_real_size_fallback_pass(
+        tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, original=original
+    )
+    assert bounded["limit"]["source_cycles"] == {
+        "status": "summarized",
+        "breaker_released_total": 1,
+        "retained": 1,
+    }
+    # Only the breaker-released leg is kept; the deferred entry is gone.
+    assert [item["selection_reason"] for item in bounded["source_cycles"]] == [
+        "journal_predecessor_identity_quarantine_breaker_engaged"
+    ]
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    assert code == 1
+    assert payload is not None
+    assert _action_projection(payload) == _action_projection(full_payload)
+    assert [item["reason"] for item in payload["non_evaluating_passes"]] == [
+        "size_fallback_source_cycles_summarized"
     ]
 
 
@@ -1414,7 +1491,7 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
     original = {
         "pass_id": "scheduler_2026052112_aaaaaaaaaaaa",
         "status": "blocked",
-        "source_cycles": [_breaker_released_source_cycle()],
+        "source_cycles": [_dropped_source_cycle()],
         "blocked_candidates": [_budget_row(), _unrelated_blocked_row()],
     }
     _write_real_size_fallback_pass(tmp_path, "scheduler_2026052112_aaaaaaaaaaaa.json", mtime=1_000, original=original)
@@ -1434,7 +1511,9 @@ def test_a_size_fallback_pass_still_lists_its_summarized_blocked_candidates(
             None,
         ),
     ]
-    assert [item["reason"] for item in payload["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
+    assert [item["reason"] for item in payload["non_evaluating_passes"]] == [
+        "size_fallback_source_cycles_summarized"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1762,7 +1841,7 @@ def test_a_narrowed_pass_does_not_clear_a_flag_a_size_fallback_armed(
         original={
             "pass_id": "scheduler_2026052112_bbbbbbbbbbbb",
             "status": "blocked",
-            "source_cycles": [_breaker_released_source_cycle()],
+            "source_cycles": [_dropped_source_cycle()],
             "blocked_candidates": [_unrelated_blocked_row()],
         },
     )
@@ -1781,7 +1860,7 @@ def test_a_narrowed_pass_does_not_clear_a_flag_a_size_fallback_armed(
     assert payload is not None
     assert payload["operator_actions"] == []
     assert [(item["pass"], item["reason"]) for item in payload["non_evaluating_passes"]] == [
-        ("scheduler_2026052112_bbbbbbbbbbbb.json", "size_fallback_source_cycles_absent"),
+        ("scheduler_2026052112_bbbbbbbbbbbb.json", "size_fallback_source_cycles_summarized"),
         ("scheduler_2026052112_cccccccccccc.json", "scope_narrowed"),
     ]
 
@@ -2050,40 +2129,19 @@ def test_a_window_of_submission_failed_passes_without_actions_decides_zero(
     assert payload["non_evaluating_passes"] == []
 
 
-def test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set() -> None:
-    """Membership pin: every status here is written only after ``_build_candidates`` ran."""
-
-    from services.orchestrator import operator_action_listing
-
-    assert operator_action_listing.EVALUATING_PASS_STATUSES == {
-        "planned",
-        "blocked",
-        "unavailable",
-        "submitted",
-        "submitted_partial",
-        "slurm_status_synced",
-        "slurm_status_sync_failed",
-        "slurm_cancelled",
-        "slurm_partially_cancelled",
-        "slurm_cancellation_blocked",
-        "restart_reconciled",
-        "restart_reconcile_unknown",
-        "submission_failed",
-        "skipped_duplicate_submission",
-        "reconciling",
-        "submit_result_ambiguous",
-        "reconcile_unverified",
-        "cancelled",
-        "complete",
-        "succeeded",
-        "parsed_partial",
-        "forcing_ready_partial",
-        "forcing_ready",
-        "already_done",
-    }
-    # Written before (or without) candidate construction, or ambiguous: never evaluating.
-    for status in ("lock_contended", "preflight_blocked", "lease_lost", "resource_limit_blocked", None):
-        assert status not in operator_action_listing.EVALUATING_PASS_STATUSES
+# #2442: the 24-literal self-copy that used to stand here
+# (``test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set``)
+# is GONE.  It asserted ``EVALUATING_PASS_STATUSES == {the same 24 literals}``,
+# which froze the module constant against a careless edit and said nothing about
+# the writers: changing a writer reddened no test.  Its replacement is
+# ``tests/test_operator_action_status_closure.py``, which reads the writer
+# sources with ``ast`` and binds each literal either to a write site or to the
+# declared execution-evidence passthrough -- including the negative half this one
+# carried (``lock_contended`` / ``preflight_blocked`` / ``lease_lost`` /
+# ``resource_limit_blocked`` are never evaluating), which is now the partition
+# assertion ``statuses - evaluating == transparent | {lease_lost,
+# resource_limit_blocked}``.  Deliberately not two unrelated copies of the same
+# 24 lines.
 
 
 def test_bounded_candidate_summary_retains_every_retry_policy_key_including_false_and_zero() -> None:
@@ -2422,6 +2480,9 @@ def test_the_help_text_names_every_decision_and_every_non_evaluating_reason() ->
         operator_action_listing.SCOPE_UNKNOWN_REASON,
         operator_action_listing.STATUS_NOT_EVALUATING_REASON,
         operator_action_listing.SIZE_FALLBACK_NON_EVALUATING_REASON,
+        # #2402: the second size-fallback reason -- an operator holding
+        # ``size_fallback_source_cycles_summarized`` must be able to look it up.
+        operator_action_listing.SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON,
         operator_action_listing.NO_MODELS_EVALUATED_REASON,
     ):
         assert reason in help_text, reason

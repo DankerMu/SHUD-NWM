@@ -2313,6 +2313,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2259: both halves of the split copyback-mutex partition.
             *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+            # #1905/#2402 adds the third at-site target. scheduler_runtime.py is
+            # the pass writer that reaches the evidence-size ladder (it hands the
+            # payload to `_write_evidence` and takes the post-write status back
+            # into SchedulerPassResult), and the non-blocking summary tier is
+            # exactly what keeps that status TRUE instead of rewriting it to
+            # `resource_limit_blocked`. The decidability suite is the oracle for
+            # that agreement, and being module-scope-import-free it has no
+            # importer derivation, so this stop rule is its only route for this
+            # module. DB-free, ~20 tests in ~20s.
+            "tests/test_scheduler_evidence_decidability.py",
+            # #2405 adds the fourth at-site target on the same grounds: this
+            # module registers the lease heartbeat's touch path on the
+            # reservation it just reserved, and the reservation-lease suite is
+            # the oracle for "registered only after `reserved`". Also
+            # module-scope-import-free, so this stop rule is its only route for
+            # this module. DB-free, 15 tests in ~1s.
+            "tests/test_operator_action_reservation_lease.py",
+            # #2442 adds the fifth at-site target. This module is the PASS
+            # WRITER whose `run_once` status literals the closure pin reads with
+            # `ast`: a status added or moved here is exactly what the pin has to
+            # go red on, and the pin imports nothing at module scope, so this
+            # stop rule is its only route for this module. DB-free, 4 tests in
+            # ~0.3s.
+            "tests/test_operator_action_status_closure.py",
         ),
         stop_on_match=True,
     ),
@@ -2676,6 +2700,37 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # drives through the CLI rather than importing. DB-free, 75 tests in
             # 0.34s.
             "tests/test_operator_action_listing.py",
+            # #1905/#2402: the evidence-size decidability suite is the oracle for
+            # the non-blocking summary tier and the bounded breaker-released
+            # source-cycle projection. It imports NOTHING at module scope (every
+            # `services.*`/`tests.*` import is function-local, so the frozen
+            # `tests.test_production_scheduler` importer closure does not move),
+            # which means no importer derivation can reach it: this directory
+            # rule is its route for scheduler_evidence_payload.py,
+            # scheduler_evidence.py, scheduler_discovery.py, scheduler_lease.py
+            # and its reader subject operator_action_listing.py. Its sixth
+            # module, scheduler_runtime.py, is stop-rule owned and rides THAT
+            # site, per this rule's #1455 note above. DB-free, ~20 tests in ~20s
+            # (one real breaker `run_once()` pass, module-scoped).
+            "tests/test_scheduler_evidence_decidability.py",
+            # #2405: the reservation-lease suite, on the same footing and for the
+            # same reason -- named after none of its modules and importing
+            # nothing at module scope. This directory rule is its route for
+            # scheduler_lease.py (the heartbeat touch), scheduler_evidence.py
+            # (the reservation `lease` block) and operator_action_listing.py (the
+            # orphan rule); scheduler_runtime.py rides the stop rule above.
+            # DB-free, 15 tests in ~1s.
+            "tests/test_operator_action_reservation_lease.py",
+            # #2442: the writer-bound status closure pin. It reads five writer
+            # sources as TEXT (it must not import them), so it has no importer
+            # derivation at all: this directory rule is its route for
+            # scheduler_candidate_runtime.py, scheduler_evidence_proofs.py,
+            # scheduler_candidate_execution_evidence.py,
+            # scheduler_evidence_payload.py and the reader whose exit code the
+            # whitelist decides, operator_action_listing.py. Its fifth writer,
+            # scheduler_runtime.py, is stop-rule owned and rides THAT site, per
+            # this rule's #1455 note above. DB-free, 4 tests in ~0.3s.
+            "tests/test_operator_action_status_closure.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list
@@ -3905,6 +3960,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         PRODUCTION_OPS_SUBRUNBOOK_GLOB,
         PRODUCTION_OPS_RUNBOOK_TESTS,
+    ),
+    # #2426 fix pass 1: the manual-recovery runbook has a literal reader on the
+    # same footing as the rows above. `tests/test_operator_reentry_confirmation
+    # .py::test_the_refusal_reasons_are_exactly_the_reachable_ones_the_runbook_lists`
+    # `read_text`s this file and asserts the `<!-- reentry-refusal-reasons -->`
+    # anchored block names exactly the `_refused` literals the CLI can still
+    # emit, so a runbook-side edit to that list is precisely what the pin exists
+    # to redden. Exact and additive. Same lane caveat as the rows above:
+    # `docs/**` does not open the ci.yml backend lane, so the selection takes
+    # effect only when the lane opens for another reason; a runbook-only PR
+    # relies on the master full run.
+    PathTestRule(
+        "docs/runbooks/node22-control-plane-manual-recovery.md",
+        ("tests/test_operator_reentry_confirmation.py",),
     ),
     PathTestRule(
         "infra/env/compute.example",

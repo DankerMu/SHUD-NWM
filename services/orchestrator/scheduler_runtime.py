@@ -18,6 +18,7 @@ from services.orchestrator.file_orchestration_journal import (
     reset_journal_read_counters,
 )
 from services.orchestrator.retention import RetentionConfig, run_retention
+from services.orchestrator.scheduler_lease import lease_heartbeat_interval_seconds
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
 
@@ -737,7 +738,7 @@ def run_once(self) -> SchedulerPassResult:
                 artifact_path=artifact_path,
             )
 
-        heartbeat = _LeaseHeartbeat(lock, pass_id, max(1, self.config.lock_ttl_seconds // 3))
+        heartbeat = _LeaseHeartbeat(lock, pass_id, lease_heartbeat_interval_seconds(self.config.lock_ttl_seconds))
         heartbeat.start()
         try:
             rollback_fence_reader = getattr(
@@ -1016,6 +1017,14 @@ def run_once(self) -> SchedulerPassResult:
                         pass_id,
                         started_at,
                         mutation_candidate_count,
+                    )
+                if evidence_reservation["status"] == "reserved":
+                    # #2405: only now does the file exist.  From here the pass's
+                    # own heartbeat keeps its reservation's mtime fresh, which is
+                    # how `list-operator-actions` tells an in-flight submit pass
+                    # from one that crashed before writing its terminal artifact.
+                    heartbeat.register_touch_path(
+                        Path(self.config.evidence_dir) / f"{pass_id}.pre_execution.json"
                     )
                 progress_guard.checkpoint(
                     "evidence_reservation",
@@ -1395,6 +1404,19 @@ def run_once(self) -> SchedulerPassResult:
                 evidence["evidence_pre_execution"] = evidence_reservation
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
+            # #2443: ``enabled`` keeps its config meaning; ``mode`` is the leg
+            # ``discover_cycles`` reported executing (the two disagree on a pass
+            # whose registry selected no models).  Read, never recomputed -- and
+            # omitted when discovery never ran or was replaced by a double, so an
+            # older-writer pass and a pass that reached no discovery read alike.
+            backfill_leg = next(
+                (
+                    item
+                    for item in source_cycle_evidence
+                    if item.get("type") == _scheduler_discovery.BACKFILL_LEG_EVIDENCE_TYPE
+                ),
+                None,
+            )
             if self.config.backfill_enabled:
                 evidence["backfill"] = {
                     "enabled": True,
@@ -1403,6 +1425,8 @@ def run_once(self) -> SchedulerPassResult:
                 }
             else:
                 evidence["backfill"] = {"enabled": False}
+            if backfill_leg is not None:
+                evidence["backfill"]["mode"] = backfill_leg.get("mode")
             retention_force_reason = None
             if evidence_reservation.get("status") == "blocked":
                 retention_force_reason = "evidence_preflight_blocked"
@@ -1453,6 +1477,16 @@ def run_once(self) -> SchedulerPassResult:
             # CLI statuses agree. That fallback keeps the pre-fallback status
             # readable as ``limit.pre_limit_status`` on the artifact, so the
             # overwrite loses no diagnosis (issue #1168).
+            #
+            # #1905: the fallback is no longer the first answer to an oversized
+            # payload. The non-blocking summary tier
+            # (``scheduler_evidence_payload._non_blocking_summary_payload``) runs
+            # first and KEEPS this status, summarizing only the candidate lists
+            # and recording ``evidence_compaction.mode: non_blocking_summary``
+            # with no ``limit`` block, so a candidate-heavy healthy pass no
+            # longer reads as blocked to ``list-operator-actions``. Only when
+            # that summary still does not fit does the status rewrite above
+            # happen.
             _finalize_timing_into_evidence(evidence, collector, pass_status)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)

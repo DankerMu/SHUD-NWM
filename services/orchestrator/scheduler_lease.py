@@ -83,6 +83,24 @@ def _compat_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
     return probe(payload)
 
 
+def lease_heartbeat_interval_seconds(ttl_seconds: int) -> int:
+    """The heartbeat interval a pass holding a ``ttl_seconds`` lease renews at.
+
+    One formula, two call sites (#2405): ``run_once`` starts the heartbeat with
+    it and ``reserve_pre_execution_evidence`` publishes it inside the
+    reservation's ``lease`` block, where ``list-operator-actions`` reads it back.
+    A reader that judged freshness against a number the writer never used would
+    be judging a lease that does not exist.
+
+    Deliberately NOT in ``__all__``: that tuple is this module's compatibility
+    re-export contract with the ``services.orchestrator.scheduler`` facade (which
+    asserts set equality against it), and a helper imported directly by its two
+    callers is not a compatibility re-export.
+    """
+
+    return max(1, int(ttl_seconds) // 3)
+
+
 class _LeaseHeartbeat:
     """Background daemon thread that renews a lease until stopped or lost."""
 
@@ -92,7 +110,47 @@ class _LeaseHeartbeat:
         self._interval = max(0.001, float(interval_seconds))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._touch_path: Path | None = None
         self.lost = False
+
+    def register_touch_path(self, path: Path | str) -> None:
+        """Also refresh ``path``'s mtime on every successful renewal (#2405).
+
+        OPT-IN, and default off: the other two users of this class
+        (``file_orchestration_migration.py``, ``scripts/m24_lease_nfs_proof.py``)
+        hold no reservation to refresh.  ``run_once`` registers the pass's
+        ``*.pre_execution.json`` only AFTER the reservation is ``reserved`` --
+        the heartbeat starts at pass start, when no such file exists yet.
+        """
+
+        self._touch_path = Path(path)
+
+    def _touch(self) -> None:
+        """Best effort, and deliberately silent.
+
+        The touch is observability for a READER (a fresh mtime means "this pass
+        is still alive"); it is not part of holding the lease.  A failure --
+        retention deleted the reservation, the NFS mount went read-only -- must
+        therefore neither raise out of the thread nor set :attr:`lost`, which
+        ends the pass.  The worst it can cause is a stale-looking reservation,
+        which the reader answers with ``exit 3``, never with a false ``exit 0``.
+
+        The catch is ANY exception, not just ``OSError``: the docstring's promise
+        is unconditional, and the sibling :meth:`_run` already swallows
+        ``Exception`` around ``renew`` for the same reason.  A narrower catch
+        would let a non-``OSError`` raise (a patched/instrumented ``os.utime``, a
+        ``ValueError`` out of a path conversion) kill the heartbeat thread, which
+        stops RENEWING too and ends the pass -- the exact outcome this method is
+        written to prevent.
+        """
+
+        path = self._touch_path
+        if path is None:
+            return
+        try:
+            os.utime(path)
+        except Exception:
+            return
 
     def start(self) -> None:
         if self._thread is not None:
@@ -107,8 +165,12 @@ class _LeaseHeartbeat:
             except Exception:
                 renewed = False
             if not renewed:
+                # Lease lost: the thread exits and stops touching, so an
+                # in-flight pass that lost its lease reads as an orphan.  A
+                # false ``exit 3``, never a false ``exit 0`` (design D4).
                 self.lost = True
                 return
+            self._touch()
 
     def stop(self) -> None:
         self._stop.set()
