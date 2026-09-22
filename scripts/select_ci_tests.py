@@ -3961,6 +3961,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         PRODUCTION_OPS_SUBRUNBOOK_GLOB,
         PRODUCTION_OPS_RUNBOOK_TESTS,
     ),
+    # #2426 fix pass 1: the manual-recovery runbook has a literal reader on the
+    # same footing as the rows above. `tests/test_operator_reentry_confirmation
+    # .py::test_the_refusal_reasons_are_exactly_the_reachable_ones_the_runbook_lists`
+    # `read_text`s this file and asserts the `<!-- reentry-refusal-reasons -->`
+    # anchored block names exactly the `_refused` literals the CLI can still
+    # emit, so a runbook-side edit to that list is precisely what the pin exists
+    # to redden. Exact and additive. Same lane caveat as the rows above:
+    # `docs/**` does not open the ci.yml backend lane, so the selection takes
+    # effect only when the lane opens for another reason; a runbook-only PR
+    # relies on the master full run.
+    PathTestRule(
+        "docs/runbooks/node22-control-plane-manual-recovery.md",
+        ("tests/test_operator_reentry_confirmation.py",),
+    ),
     PathTestRule(
         "infra/env/compute.example",
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),

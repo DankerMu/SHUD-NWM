@@ -26,6 +26,19 @@ from services.production_closure import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# The `${VAR:-default}` dynamic-identity cases below are only about IDENTITY: the
+# mount they build must still RESOLVE to the same path the canonical
+# `${WORKSPACE_ROOT}` mount resolves to, because `_require_mount` matches the
+# mount by its resolved source/target first and only then judges how it was
+# spelled. A default that resolves anywhere else makes the checker report
+# `COMPUTE_WORKSPACE_MOUNT_MISSING` and the case silently stops covering the
+# identity rule it is named after. Derived from the env file rather than written
+# out, so renaming the real node-22 root (#2399: `nhms-production` ->
+# `nhms-prod`) retargets these cases instead of rotting them.
+COMPUTE_EXAMPLE_WORKSPACE_ROOT = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")[
+    "WORKSPACE_ROOT"
+]
+
 
 @pytest.fixture(autouse=True)
 def _clear_audited_compose_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3058,12 +3071,12 @@ def test_static_checker_rejects_compute_required_mount_literal_identity(
         ("type", "${COMPUTE_WORKSPACE_MOUNT_TYPE:-bind}", "COMPUTE_WORKSPACE_MOUNT_TYPE_INVALID"),
         (
             "source",
-            "${COMPUTE_WORKSPACE_MOUNT_SOURCE:-/scratch/frd_muziyao/nhms-production/workspace}",
+            f"${{COMPUTE_WORKSPACE_MOUNT_SOURCE:-{COMPUTE_EXAMPLE_WORKSPACE_ROOT}}}",
             "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
         ),
         (
             "target",
-            "${COMPUTE_WORKSPACE_MOUNT_TARGET:-/scratch/frd_muziyao/nhms-production/workspace}",
+            f"${{COMPUTE_WORKSPACE_MOUNT_TARGET:-{COMPUTE_EXAMPLE_WORKSPACE_ROOT}}}",
             "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
         ),
     ],
@@ -3085,6 +3098,11 @@ def test_static_checker_rejects_compute_required_mount_dynamic_identity(
     result = _run_compute_static_check(compute_compose)
 
     assert result.status == "FAIL"
+    # Precondition, asserted rather than assumed: the mutated mount must still be
+    # FOUND (it resolves to the same source/target as the canonical one), or the
+    # checker is reporting a missing mount and this case says nothing about
+    # identity. A rename of the real node-22 root breaks exactly this first.
+    assert "COMPUTE_WORKSPACE_MOUNT_MISSING" not in _codes(result)
     assert expected_code in _codes(result)
 
 

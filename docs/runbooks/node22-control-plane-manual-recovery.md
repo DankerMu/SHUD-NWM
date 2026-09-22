@@ -156,7 +156,12 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
   判活看预留文件的 mtime：pass 活着时它的 lease 心跳会一直刷新该 mtime，所以
   `reason` 只有两种——`lease_stale`（mtime 老过该预留自己 `lease.ttl_seconds` 的 **2 倍**）与
   `lease_absent`（预留里根本没有 `lease` 块，#2405 之前的写入器，新鲜度无从证明，按 fail-safe 报）。
-  在飞的 pass 其预留 mtime 是新的，**不会**被报，`exit 0` 的日常不受影响。处置：确认该 pass_id 的
+  **`lease_absent` 在 #2405 的滚动部署窗口里有一个无需修复的成因**：新码部署时，一趟由**旧码**起的
+  pass 可能还在飞，它的预留天生没有 `lease` 块，因此**活着也会**读成 `lease_absent`——这一条不要按下面
+  的处置去修，等下一趟由新码写完的 pass 再跑本命令即可；把部署赶在下一次 timer tick 之前，这种一过性
+  `exit 3` 窗口最多出现一次。
+  由**新码**写下预留的在飞 pass 其 mtime 是新的，**不会**被报，`exit 0` 的日常不受影响。处置（`lease_stale`，
+  以及部署窗口之外的 `lease_absent`）：确认该 pass_id 的
   进程/作业确实已经死了（`systemctl --user status nhms-compute-scheduler.service`、看那趟的日志），
   再按第二步处置它可能留下的半截状态；有待办时 `exit 1` 优先，孤儿预留不会盖掉待办。
   node-22 的 pass 文件接近 5 MB 上限，size fallback 现实中会出现。

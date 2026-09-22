@@ -463,6 +463,44 @@ def test_a_touch_failure_neither_raises_nor_marks_the_lease_lost(tmp_path: Path)
     assert not path.exists()
 
 
+def test_a_non_oserror_touch_failure_neither_raises_nor_marks_the_lease_lost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1 (N1): the promise is unconditional, so the catch must be too.
+
+    ``_touch`` used to swallow only ``OSError`` while its docstring promised it
+    would never raise out of the heartbeat thread nor set ``lost``.  Anything
+    else -- a ``ValueError`` out of a path conversion, an instrumented
+    ``os.utime`` -- killed the thread, which stops RENEWING as well, so the pass
+    loses its lease over a failure of pure observability.
+    """
+
+    from services.orchestrator.scheduler_lease import _LeaseHeartbeat
+
+    path = tmp_path / f"scheduler_2026052112_raising00001{_RESERVATION_SUFFIX}"
+    path.write_text("{}", encoding="utf-8")
+    attempts = {"count": 0}
+
+    def _raise_runtime_error(*args: Any, **kwargs: Any) -> None:
+        attempts["count"] += 1
+        raise RuntimeError("utime is instrumented and angry")
+
+    lease = _AlwaysRenewingLease()
+    heartbeat = _LeaseHeartbeat(lease, "pass-1", 0.01)
+    heartbeat.register_touch_path(path)
+    monkeypatch.setattr(os, "utime", _raise_runtime_error)
+    heartbeat.start()
+    try:
+        assert _wait_for(lambda: attempts["count"] >= 2)
+        renewals_after_raise = lease.renewals
+        assert _wait_for(lambda: lease.renewals >= renewals_after_raise + 5)
+    finally:
+        heartbeat.stop()
+
+    assert heartbeat.lost is False
+
+
 def test_run_once_registers_the_touch_path_only_after_the_reservation_is_reserved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -19365,3 +19365,17 @@ def test_status_closure_suite_is_selected_by_every_writer_it_reads() -> None:
     ):
         assert Path(module).is_file(), module
         assert "tests/test_operator_action_status_closure.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_manual_recovery_runbook_selects_the_reentry_confirmation_pin() -> None:
+    # #2426 fix pass 1: `tests/test_operator_reentry_confirmation.py` is a
+    # LITERAL reader of this runbook -- its anti-drift pin `read_text`s the file
+    # and asserts the `<!-- reentry-refusal-reasons -->` anchored block names
+    # exactly the `_refused` literals the CLI can still emit. Without this row a
+    # PR that edits only the runbook's reason list never runs the pin that exists
+    # to go red on exactly that edit. `docs/**` does not open the ci.yml backend
+    # lane, so the selection takes effect only when the lane opens for another
+    # reason; a runbook-only PR relies on the master full run.
+    runbook = "docs/runbooks/node22-control-plane-manual-recovery.md"
+    assert Path(runbook).is_file(), runbook
+    assert "tests/test_operator_reentry_confirmation.py" in select_tests([runbook], repo_root=Path("."))

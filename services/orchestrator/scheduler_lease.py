@@ -134,6 +134,14 @@ class _LeaseHeartbeat:
         therefore neither raise out of the thread nor set :attr:`lost`, which
         ends the pass.  The worst it can cause is a stale-looking reservation,
         which the reader answers with ``exit 3``, never with a false ``exit 0``.
+
+        The catch is ANY exception, not just ``OSError``: the docstring's promise
+        is unconditional, and the sibling :meth:`_run` already swallows
+        ``Exception`` around ``renew`` for the same reason.  A narrower catch
+        would let a non-``OSError`` raise (a patched/instrumented ``os.utime``, a
+        ``ValueError`` out of a path conversion) kill the heartbeat thread, which
+        stops RENEWING too and ends the pass -- the exact outcome this method is
+        written to prevent.
         """
 
         path = self._touch_path
@@ -141,7 +149,7 @@ class _LeaseHeartbeat:
             return
         try:
             os.utime(path)
-        except OSError:
+        except Exception:
             return
 
     def start(self) -> None:
