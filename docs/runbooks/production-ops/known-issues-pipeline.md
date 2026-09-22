@@ -359,6 +359,24 @@ Exact-cycle missing-forcing regeneration (node-22 only):
      reservation, and moves the count exactly once. Whether the retention frontier
      pins blocked or confirmed candidates is **not measured**; do not assume
      either way. That design gap is tracked as #2412.
+
+   A second by-design refusal sits right after it:
+   `journal_predecessor_quarantine_present` (#2408) means this **unconfirmed**
+   blocker descends from a §8.7 journal-predecessor quarantine retry
+   (`retry_journal_predecessor_identity_mismatch`) that landed on the stable
+   missing-forcing blocker. It is a real re-run of the stale lineage;
+   reclassified, it would restart at `forcing`, where no quarantine provenance
+   is ever stamped (the same forecast-cohort reservation argument as r2-01), so
+   a failing forcing stage would submit without moving the breaker count.
+   Triage fields: `missing_forcing_repair.recorded_init_state_id`
+   (the stale predecessor token) and `missing_forcing_repair.expected_init_state_id`
+   (the token the journal expects), mirroring `journal_predecessor_identity`.
+
+   Remedy: same as r2-01 — **do not** use `--repair-missing-forcing` for it;
+   restore that model's own forcing (`scripts/node22_backfill_forcing_for_model_ids.py`
+   when the rename set is non-empty, otherwise out of band as described above).
+   The quarantine retry then restarts at `forecast`, is stamped at the
+   reservation, and is counted.
 4. Submit the same exact cycle only after the preview admits the intended set:
 
    ```bash

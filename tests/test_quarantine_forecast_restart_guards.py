@@ -126,6 +126,7 @@ def _db_free_strict_build(
     own_forcing: bool,
     quarantine: bool = True,
     repair_missing_forcing: bool = True,
+    policy_calls: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]], dict[str, str]]:
     """2.0: the db-free STRICT lane driven through the real ``_build_candidates``.
 
@@ -145,6 +146,11 @@ def _db_free_strict_build(
 
     ``quarantine=False``: an ordinary succeeded-forcing resume state, the
     non-quarantine missing-forcing shape the repair policy already authorizes.
+
+    ``policy_calls``: when given, a pass-through spy on the dispatch's
+    module-global ``_apply_explicit_missing_forcing_repair_policy`` records the
+    exact ``config`` / ``candidate`` / ``raw_state`` / pre-policy ``decision`` /
+    ``strict_warm_start`` / ``result`` of every call.  Behaviour is unchanged.
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -167,6 +173,34 @@ def _db_free_strict_build(
     )
     from tests.test_scheduler_generation import _state_index_entry
     from workers.data_adapters.base import CycleDiscovery
+
+    if policy_calls is not None:
+        from services.orchestrator import scheduler_candidates
+
+        real_policy = scheduler_candidates._apply_explicit_missing_forcing_repair_policy
+
+        def _spy(
+            config: Any,
+            candidate: Any,
+            raw_state: Any,
+            decision: Any,
+            *,
+            strict_warm_start: Any,
+        ) -> Any:
+            result = real_policy(config, candidate, raw_state, decision, strict_warm_start=strict_warm_start)
+            policy_calls.append(
+                {
+                    "config": config,
+                    "candidate": candidate,
+                    "raw_state": raw_state,
+                    "decision": decision,
+                    "strict_warm_start": strict_warm_start,
+                    "result": result,
+                }
+            )
+            return result
+
+        monkeypatch.setattr(scheduler_candidates, "_apply_explicit_missing_forcing_repair_policy", _spy)
 
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
@@ -310,13 +344,38 @@ def test_strict_lane_quarantine_without_own_forcing_and_no_repair_window_blocks(
     assert _decision_is_stable_missing_forcing_blocker(_decision_of(blocker))
 
 
+def _refused_quarantine_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[Any], list[Any], dict[str, str], dict[str, Any]]:
+    """The #2408 refusal fixture, plus the repair policy's real inputs for it.
+
+    Shared by the refusal test and its reachability twin so both are pinned to
+    the same build.  Returns the policy call that refused the quarantine blocker.
+    """
+
+    policy_calls: list[dict[str, Any]] = []
+    candidates, blocked, _skipped, tokens = _db_free_strict_build(
+        tmp_path, monkeypatch, own_forcing=False, policy_calls=policy_calls
+    )
+    refusing = [
+        call
+        for call in policy_calls
+        if call["result"] is not None
+        and call["result"].evidence.get("missing_forcing_repair", {}).get("reason")
+        == "journal_predecessor_quarantine_present"
+    ]
+    assert refusing, policy_calls
+    return candidates, blocked, tokens, refusing[0]
+
+
 def test_strict_lane_unconfirmed_quarantine_blocker_is_refused_by_the_repair_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """2.1/2.2 (#2408): the repair window must not reclassify a quarantine-descended blocker."""
 
-    candidates, blocked, _skipped, tokens = _db_free_strict_build(tmp_path, monkeypatch, own_forcing=False)
+    candidates, blocked, tokens, _policy_call = _refused_quarantine_build(tmp_path, monkeypatch)
 
     # No re-run of the stale lineage is emitted at all.
     assert candidates == []
@@ -334,6 +393,58 @@ def test_strict_lane_unconfirmed_quarantine_blocker_is_refused_by_the_repair_pol
     _assert_quarantine_identity(state_evidence, tokens["stale"], tokens["expected"])
     # Still drainable by the forcing backfill (#1846 contract).
     assert _decision_is_stable_missing_forcing_blocker(_decision_of(blocker))
+
+
+def test_refused_quarantine_blocker_would_otherwise_reach_the_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5.1 (#2408 reachability): the refusal is the ONLY thing stopping the repair.
+
+    The D2 refusal fires before the exact-cycle, direct-grid, stable-contract,
+    ``unsafe_reason``, warm-state and raw-manifest checks, so the refusal test
+    alone cannot show the fixture satisfies them.  Strip both descent predicates
+    from the REAL quarantine blocker the refusal build handed the policy, replay
+    it with that build's own config / candidate / raw state / strict evidence,
+    and the repair must authorize.
+    """
+
+    _candidates, _blocked, _tokens, call = _refused_quarantine_build(tmp_path, monkeypatch)
+    decision: CandidateStateDecision = call["decision"]
+    # The replayed input really is the quarantine-descended stable blocker.
+    assert decision.action == "blocked"
+    assert decision.evidence["journal_predecessor_identity"]["quarantined_skip_reason"] == (
+        "terminal_completed_cycle"
+    )
+    assert decision.evidence["artifact_guard"]["planned_retry_decision"] == (
+        "retry_journal_predecessor_identity_mismatch"
+    )
+    assert call["strict_warm_start"] is not None
+    assert call["strict_warm_start"]["ready"] is True
+
+    evidence = dict(decision.evidence)
+    evidence.pop("journal_predecessor_identity")
+    evidence["artifact_guard"] = {
+        **dict(evidence["artifact_guard"]),
+        "planned_retry_decision": "retry_terminal_run_manifest_missing",
+    }
+    stripped = CandidateStateDecision(decision.action, decision.reason, evidence)
+    assert _decision_is_stable_missing_forcing_blocker(stripped)
+
+    result = _apply_explicit_missing_forcing_repair_policy(
+        call["config"],
+        call["candidate"],
+        call["raw_state"],
+        stripped,
+        strict_warm_start=call["strict_warm_start"],
+    )
+
+    assert result is not None
+    repair = result.evidence["missing_forcing_repair"]
+    assert repair["status"] == "authorized", repair.get("reason")
+    assert result.action == "retry"
+    assert result.evidence["decision"] == "retry_repair_missing_forcing"
+    assert result.evidence["restart_stage"] == "forcing"
 
 
 def test_ordinary_missing_forcing_blocker_is_still_repaired(

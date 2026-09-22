@@ -38,7 +38,7 @@ refusal, which is evaluated first. Such a reclassification
 would restart at `forcing`, where no quarantine provenance can be stamped. A
 real re-run of the stale lineage could then submit without moving the breaker
 count. A refused candidate SHALL stay in the stable missing-forcing blocker,
-drainable by forcing backfill. Missing-forcing blockers that do not descend from
+drained by restoring the model's own forcing. Missing-forcing blockers that do not descend from
 a quarantine retry SHALL keep the existing repair behaviour.
 
 #### Scenario: Quarantine retry without own forcing blocks
