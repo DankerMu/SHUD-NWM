@@ -155,7 +155,7 @@
 - [x] 8.1 `uv run ruff check .` — All checks passed (orchestrator, at each commit).
 - [x] 8.2 Local (all green; `tests/test_production_scheduler.py` 2083 passed): `uv run pytest -q tests/test_scheduler_evidence_decidability.py tests/test_operator_action_status_closure.py tests/test_operator_action_listing.py tests/test_operator_reentry_confirmation.py tests/test_scheduler_backfill.py tests/test_select_ci_tests.py` and `tests/test_production_scheduler.py -k "evidence or backfill or pre_execution or reservation"`.
 - [x] 8.3 `openspec validate operator-action-decidability --strict --no-interactive` — valid.
-- [ ] 8.4 node-27 (oracle): the 8.2 files + full `tests/test_production_scheduler.py tests/test_scheduler_generation.py` at PR head.
+- [x] 8.4 node-27 (oracle) @840ee246b: 4015 passed / 4 skipped / 1 failed = known env-coupled #2403 (red on node-27 master too). the 8.2 files + full `tests/test_production_scheduler.py tests/test_scheduler_generation.py` at PR head.
 
 ## 9. Review round 1 fixes
 

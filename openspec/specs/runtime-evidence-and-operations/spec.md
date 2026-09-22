@@ -133,12 +133,22 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - THEN the writer MAY summarize terminal `skipped_candidates` to their bounded identity/reason rows and replace retention entry lists with their existing count/frontier summary
 - AND non-terminal skipped candidates retain their complete evidence
 - AND the pass status remains its computed non-blocked status, no `limit` block is introduced, and `evidence_compaction` records the normal-detail projection
-- AND if that projection still exceeds the bound, the existing fail-closed bounded fallback applies unchanged.
+- AND if that projection still exceeds the bound, the non-blocking summary tier applies, and only if that still exceeds the bound does the existing fail-closed bounded fallback apply unchanged.
 
 #### Scenario: terminal limit compaction remains the fail-closed floor
 
 - WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
-- THEN `limit.pre_limit_status` and `limit.candidate_lists` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
+- THEN `limit.pre_limit_status`, `limit.candidate_lists` and `limit.source_cycles` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
+
+#### Scenario: Candidate-heavy evidence is summarized before fail-closed fallback
+
+- WHEN a submitted pass's candidate detail exceeds `max_evidence_bytes` after the admission projection but its non-blocking summary fits
+- THEN the candidate lists (including non-terminal skipped candidates) are replaced by the bounded candidate summary rows, every other top-level field (including `status`, `source_cycles` and `model_run_evidence`) is kept verbatim, `evidence_compaction.mode` is `non_blocking_summary` with the admission record nested under `admission` when present, no `limit` block is introduced, and the artifact is within the bound
+
+#### Scenario: A summary that still exceeds the bound falls back fail-closed
+
+- WHEN the non-blocking summary still exceeds the bound
+- THEN the bounded fallback applies with `status: resource_limit_blocked`, `limit.reason: evidence_size_limit_exceeded` and `limit.pre_limit_status`
 
 ### Requirement: No-progress convergence facts SHALL be readable from scheduler evidence
 
@@ -582,4 +592,18 @@ An explicitly authorized scheduler recovery SHALL deploy only reviewed changes w
 
 - **WHEN** unreviewed source drift, active code readers, missing active interpreter, identity mismatch or a later-stage independent failure prevents safe progression
 - **THEN** the operation does not bypass the failing guard and records exact blocker evidence; recovery is not claimed complete
+
+### Requirement: The bounded fallback SHALL keep a marked projection of breaker-released source cycles
+
+The bounded fallback SHALL keep a capped projection of `source_cycles` entries whose `selection_status` is `not_selected` and whose `selection_reason` is `journal_predecessor_identity_quarantine_breaker_engaged`, one row each carrying the keys `list-operator-actions` reads (`source_id`, `cycle_time_utc`, `selection_status`, `selection_reason`, and `journal_predecessor_identity_quarantine.models` with each model's `model_id`, `occurrences` and `recorded_init_state_id`), and SHALL mark `limit.source_cycles` as `summarized` with the breaker-released total and the retained count. A later fit tier that clears or removes a non-empty `source_cycles` SHALL mark it `dropped`, and `dropped` SHALL never be downgraded; only the terminal limit compaction floor may remove the marker.
+
+#### Scenario: A breaker-released cycle survives the fallback
+
+- **WHEN** an oversized pass's `source_cycles` holds a breaker-released not-selected entry and other entries
+- **THEN** the fallback SHALL keep only the breaker-released entry's compact row and mark `limit.source_cycles.status: summarized`
+
+#### Scenario: A cleared list is marked dropped
+
+- **WHEN** a fit tier clears or removes a non-empty `source_cycles`
+- **THEN** `limit.source_cycles.status` SHALL be `dropped`
 
