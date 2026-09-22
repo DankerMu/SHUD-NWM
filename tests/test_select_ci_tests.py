@@ -19187,3 +19187,14 @@ def test_node27_raw_retention_split_scripts_select_their_readers(path: str, owne
 
     assert owners <= selected, f"{path} lost reader suite(s): {sorted(owners - selected)}"
     assert not set(CORE_SMOKE_TESTS) & selected, f"{path} still degrades to core smoke"
+
+
+def test_terminal_recency_modules_select_their_requirement_suite() -> None:
+    # #2401: the newest-truth terminal guard and its consumer are named after
+    # neither file of the requirement suite, so only the per-file rows reach it.
+    for module in (
+        "services/orchestrator/scheduler_state_terminal_recency.py",
+        "services/orchestrator/scheduler_state_decision.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_scheduler_terminal_recency.py" in select_tests([module], repo_root=Path("."))

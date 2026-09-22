@@ -57601,20 +57601,39 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
     assert new_stamped_statuses == {"failed"}
     assert reopened.quarantine_rerun_count(**live_query) == 2
 
-    # The old success rows survive the failure, so the candidate stays on the
-    # completed-class path: the breaker blocks, the confirmation no longer matches.
+    # #2401 (intentional behaviour change, not a weakening): the failed rerun is
+    # NEWER than the old success rows, so the candidate-side decision no longer
+    # re-reads them as a completed-type skip (which the §8.7 quarantine would
+    # rewrite).  Called directly -- bypassing discovery -- it is the ordinary
+    # failure path, and it carries no re-entry confirmation.
     candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
-    assert candidates == []
-    (entry,) = blocked
-    assert entry.state_evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert blocked == []
+    (entry,) = candidates
+    assert entry.state_evidence["decision"] == "retry_failed"
+    assert entry.state_evidence["reason"] == "retry_failed_candidate"
     assert "operator_reentry_confirmation" not in entry.state_evidence
 
+    # The semantic invariant of this test is unchanged and still enforced on the
+    # REAL pass: the breaker (discovery-side, completed stamped masters) releases
+    # the slot, nothing is submitted, the orchestrator is never called, the
+    # confirmation is not restored, and no new stamped master appears.
+    confirmations_before = reopened.operator_reentry_confirmations(
+        **live_query, decision="blocked_journal_predecessor_identity_quarantine"
+    )
     for _ in range(2):
         later, later_orchestrator = _reentry_pass(tmp_path, root)
         assert _breaker_released_cycles(later) == [BREAKER_CYCLE]
         assert later.evidence["counts"]["submitted_count"] == 0
+        assert later.evidence["candidates"] == []
         assert later_orchestrator.calls == []
     assert stamped_master_ids(root) - seeded_stamped == new_stamped
+    assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 2
+    assert (
+        FileOrchestrationJournalRepository(root).operator_reentry_confirmations(
+            **live_query, decision="blocked_journal_predecessor_identity_quarantine"
+        )
+        == confirmations_before
+    )
 
 
 def test_breaker_reentry_confirms_only_the_named_model_of_a_mixed_cycle(

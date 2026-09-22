@@ -4116,6 +4116,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "services/orchestrator/scheduler_config/path_modes.py",
         ("tests/test_preserve_final_component_loop_spelling.py",),
     ),
+    # #2401: the newest-truth guard on the completed-type terminal skips lives in
+    # its own module and is consumed by the candidate-state decision.  Its
+    # requirement suite (real-journal loops + decision-level recency rules) is
+    # named after neither file, so same-name derivation cannot reach it. Per-file
+    # rows, not a widening of the broad `services/orchestrator/**` list.
+    # DB-free, 21 tests in ~10s.
+    PathTestRule(
+        "services/orchestrator/scheduler_state_terminal_recency.py",
+        ("tests/test_scheduler_terminal_recency.py",),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_state_decision.py",
+        ("tests/test_scheduler_terminal_recency.py",),
+    ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;
     # `infra/systemd/**` is a different surface, and the wrapper run resumes

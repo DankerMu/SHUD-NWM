@@ -64,11 +64,15 @@ def real_rerun(
     slurm_client: Any | None = None,
     job_timeout_seconds: float = 120.0,
     terminal_stage: str | None = None,
+    retry_service: Any | None = None,
 ) -> Any:
     """Run a scheduler handoff through the REAL forecast orchestrator + reservation path on ``root``.
 
     Each basin re-selects ``recorded_tokens[model_id]`` (default: its stale token),
     which is what the non-convergent §8.7 geometry does.  Only Slurm is faked.
+    ``retry_service`` (default none, the historical shape) wires the chain's
+    inline stage-retry minting, as the production db-free orchestrator does
+    with a ``FileJournalRetryService`` (``scheduler_core`` #2401).
     """
 
     from tests.test_orchestration_chain import FakeCycleSlurmClient, _orchestrator
@@ -96,6 +100,7 @@ def real_rerun(
         client,
         job_timeout_seconds=job_timeout_seconds,
         terminal_stage=terminal_stage,
+        retry_service=retry_service,
     )
     return orchestrator.orchestrate_cycle("gfs", _dt(BREAKER_CYCLE), handoff)
 
