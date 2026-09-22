@@ -74,7 +74,13 @@ All 4.x tests: FileJournal lane (complete `cohort_members` + matched-bound field
 
 ## 5. Verification
 
-- [ ] 5.1 `uv run ruff check .`
-- [ ] 5.2 Local: `uv run pytest -q tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`
-- [ ] 5.3 Spec delta supersedes #1201 D2 "继承保留"; `openspec validate chain-cross-stage-state-residue --strict --no-interactive`
-- [ ] 5.4 node-27 (oracle): `tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py tests/test_operator_reentry_confirmation.py` green at the PR head.
+- [x] 5.1 `uv run ruff check .`
+- [x] 5.2 Local: `uv run pytest -q tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`
+- [x] 5.3 Spec delta supersedes #1201 D2 "继承保留"; `openspec validate chain-cross-stage-state-residue --strict --no-interactive`
+- [ ] 5.4 node-27 (oracle): `tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py tests/test_operator_reentry_confirmation.py tests/test_forcing_submit_ambiguity.py tests/test_file_orchestration_journal.py tests/test_forced_resubmit_veto.py tests/test_retry_mint_floor.py tests/test_select_ci_tests.py tests/test_entropy_audit_facade_guard_forwarders.py tests/test_entropy_audit_facade_guard_aliases.py` green at the PR head.
+
+## 6. Review round 1 fixes
+
+- [x] 6.1 (F1) Nested partial-array retry after D2 exclusion: floor the nested retry id at the stage snapshot's next free suffix; tests `test_reentry_after_nested_partial_retry_mints_past_the_excluded_subset_row[succeeded|failed]` and `test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably` (red on 27a65b12e with `RetryError AUTO_RETRY_JOB_CONFLICT`, green after). Same-snapshot concurrency tests still green.
+- [x] 6.2 (F2) node-27 list gains `tests/test_retry_mint_floor.py`; #2540 failing id recorded in the PR; node-27 green on `tests/test_forcing_submit_ambiguity.py` (Linux).
+- [x] 6.3 (N1/N2) Spec wording for the manifest fallback canonicalizer; job-retry-mechanism MODIFIED delta drops the retired missing-raw download door; inventory removal condition no longer mentions download retry.

@@ -300,7 +300,11 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
 
                     if result.status in {"failed", "submission_failed", "reservation_lost", "permanently_failed"}:
                         retry_attempts += 1
-                        retry_pipeline_job_id = self._schedule_cycle_stage_retry(result, retry_attempts)
+                        retry_pipeline_job_id = self._schedule_cycle_stage_retry(
+                            result,
+                            retry_attempts,
+                            attempt_floor=_stage_retry_attempt_floor(context, stage, existing_jobs),
+                        )
                         if retry_pipeline_job_id is not None:
                             existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
                             continue
@@ -359,6 +363,7 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                             had_partial_before_stage,
                             last_partial_before_stage,
                             confirmed_master=confirmed_master,
+                            attempt_floor=_stage_retry_attempt_floor(context, stage, existing_jobs),
                         )
                         if retried is not None:
                             result, aggregation = retried
@@ -548,6 +553,26 @@ def _mint_cycle_stage_retry_job_id(
 
     job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
     return _floored_cycle_stage_retry_job_id(self, context, stage, existing_jobs, job_id) or job_id
+
+
+def _stage_retry_attempt_floor(
+    context: CycleOrchestrationContext,
+    stage: StageDefinition,
+    existing_jobs: Sequence[Mapping[str, Any]],
+) -> int:
+    """The next free ``_retry_N`` of this run's stage base id in the selecting snapshot.
+
+    An automatic retry of the selected row derives its attempt from that row
+    alone; a same-run nested partial retry row that ``find_existing_stage_job``
+    excluded as another model set's (#1845 D2, its subset ``cohort_members``)
+    still owns its id, so the derived attempt is raised to at least this floor.
+    Read from the stage-selection snapshot only, never re-queried: concurrent
+    passes on one snapshot derive one replacement id.
+    """
+
+    return _chain._next_retry_attempt_for_stage(
+        existing_jobs, base_job_id=_pipeline_job_id(context.run_id, stage.stage), stage=stage
+    )
 
 
 def _stage_base_job_id_occupied(
@@ -755,7 +780,9 @@ def _populate_stage_span_counters(
         span.set_failed_count(basin_count_at_entry)
 
 
-def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | None:
+def _retry_job_for_stage_result(
+    self, result: StageRunResult, *, attempt_floor: int | None = None
+) -> PipelineJob | None:
     service = self.retry_service
     if service is None:
         return None
@@ -796,6 +823,14 @@ def _retry_job_for_stage_result(self, result: StageRunResult) -> PipelineJob | N
     # count on master rows, so the durable attempt lives in the job-id suffix.
     # This value is never persisted back onto a reservation.
     job.retry_count = effective_retry_attempt(job.job_id, record.get("retry_count"))
+    if attempt_floor is not None and attempt_floor - 1 > job.retry_count:
+        # #1845 x nested partial retry: a D2-excluded same-run subset row
+        # already holds ``_retry_<retry_count + 1>``; count it so the minted
+        # replacement (either retry branch) lands past it.  Repository-record
+        # path only: store-backed (DB) rows return above unbumped -- they carry
+        # no ``cohort_members``, so D2 never excludes them, and must not be
+        # mutated.
+        job.retry_count = attempt_floor - 1
     job.error_code = record.get("error_code") or result.error_code
     job.error_message = record.get("error_message") or result.error_message
     return job
@@ -810,6 +845,7 @@ def _retry_partial_array_stage(
     had_partial_before_stage: bool,
     last_partial_before_stage: str | None,
     confirmed_master: _ConfirmedMasterOwner | None = None,
+    attempt_floor: int | None = None,
 ) -> tuple[StageRunResult, ArrayAggregation | None] | None:
     if self.retry_service is None:
         return None
@@ -835,7 +871,9 @@ def _retry_partial_array_stage(
     try:
         while pending_task_ids:
             retry_attempts += 1
-            retry_pipeline_job_id = self._schedule_cycle_stage_retry(latest_result, retry_attempts)
+            retry_pipeline_job_id = self._schedule_cycle_stage_retry(
+                latest_result, retry_attempts, attempt_floor=attempt_floor
+            )
             if not retry_pipeline_job_id:
                 break
 

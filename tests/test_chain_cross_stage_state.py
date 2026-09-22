@@ -483,9 +483,12 @@ def _forcing_round(
     models: tuple[int, ...],
     *,
     orchestration_run_id: str | None = None,
+    retry_service: Any | None = None,
 ) -> Any:
     basins = _cohort_basins(models, orchestration_run_id=orchestration_run_id)
-    orchestrator = _orchestrator(tmp_path / label, repository, client, terminal_stage="forcing")
+    orchestrator = _orchestrator(
+        tmp_path / label, repository, client, terminal_stage="forcing", retry_service=retry_service
+    )
     return orchestrator.orchestrate_cycle("gfs", _CYCLE, basins)
 
 
@@ -689,3 +692,88 @@ def test_overlapping_unresolved_sibling_forcing_row_still_blocks(tmp_path: Path)
     assert existing is not None
     assert existing["job_id"] == sibling["job_id"]
     assert existing["status"] == "running"
+
+
+@pytest.mark.parametrize("nested_outcome", ["succeeded", "failed"])
+def test_reentry_after_nested_partial_retry_mints_past_the_excluded_subset_row(
+    tmp_path: Path, nested_outcome: str
+) -> None:
+    """D2 x same-run nested partial retry: the excluded subset row still owns its id.
+
+    Pass 1: forcing for {model_0, model_1} ends ``partially_failed`` (model_1
+    failed) and the nested ``_forcing_retry_1`` records the SUBSET {model_1} as
+    its ``cohort_members`` under the same run id. Pass 2 (markerless, no convert
+    refresh) excludes that subset row (D2), resumes the bare master and re-enters
+    the nested retry: the new id is derived from the stage-selection snapshot --
+    which still holds ``_retry_1`` -- so it is ``_retry_2``, never a colliding
+    ``_retry_1`` that reservation would turn into ``skipped_duplicate_submission``.
+    The pending subset {model_1} is recomputed in pass 2 even when ``_retry_1``
+    already succeeded for it: the bare master's own aggregation is the
+    stage's truth (accepted design outcome). ``_retry_1`` counts against the
+    budget exactly as it did when selection still picked it, so pass 2 runs
+    with one more retry allowed (a re-run granted budget); under the pass-1
+    budget the stage declines durably instead of colliding.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    client = FakeCycleSlurmClient(
+        array_results_by_stage={"forcing": [["succeeded", "failed"], [nested_outcome], ["succeeded"]]}
+    )
+    first = _forcing_round(tmp_path, "round-1", repository, client, (0, 1), retry_service=retry_service)
+    assert _stage_result(first, "forcing").pipeline_job_id.startswith(_SHARED_FORCING)
+    nested = _journal_master(repository, f"{_SHARED_FORCING}_retry_1")
+    assert _member_models(nested) == {"model_1"}
+    assert nested["status"] in ({"succeeded"} if nested_outcome == "succeeded" else {"failed", "permanently_failed"})
+    assert _journal_master(repository, _SHARED_FORCING)["status"] == "partially_failed"
+    assert [_task_models(submission) for submission in client.submissions] == [["model_0", "model_1"], ["model_1"]]
+
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    second = _forcing_round(tmp_path, "round-2", repository, client, (0, 1), retry_service=retry_service)
+
+    forcing = _stage_result(second, "forcing")
+    assert "skipped_duplicate_submission" not in {stage.status for stage in second.stages}
+    assert forcing.pipeline_job_id == f"{_SHARED_FORCING}_retry_2"
+    assert forcing.status == "succeeded"
+    assert second.status == "succeeded"
+    assert [_task_models(submission) for submission in client.submissions][2:] == [["model_1"]]
+    assert _member_models(_journal_master(repository, f"{_SHARED_FORCING}_retry_2")) == {"model_1"}
+    # The pass-1 subset row is left exactly as its own attempt finished it.
+    assert _journal_master(repository, f"{_SHARED_FORCING}_retry_1") == nested
+
+
+def test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably(tmp_path: Path) -> None:
+    """Same residue, budget already spent by ``_retry_1``: pass 2 neither collides
+    with the excluded subset row (``AUTO_RETRY_JOB_CONFLICT`` pre-fix) nor submits;
+    it lands the durable permanent-failure decline on the resumed bare master.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": [["succeeded", "failed"], ["failed"]]})
+    _forcing_round(tmp_path, "round-1", repository, client, (0, 1), retry_service=retry_service)
+    nested = _journal_master(repository, f"{_SHARED_FORCING}_retry_1")
+
+    second = _forcing_round(tmp_path, "round-2", repository, client, (0, 1), retry_service=retry_service)
+
+    forcing = _stage_result(second, "forcing")
+    assert forcing.pipeline_job_id == _SHARED_FORCING
+    assert forcing.status == "partially_failed"
+    assert len(client.submissions) == 2
+    assert _journal_master(repository, _SHARED_FORCING)["status"] == "permanently_failed"
+    assert _journal_master(repository, f"{_SHARED_FORCING}_retry_1") == nested
+    assert f"{_SHARED_FORCING}_retry_2" not in {
+        row["job_id"] for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)
+    }
