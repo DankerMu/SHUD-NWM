@@ -60113,6 +60113,11 @@ _SCOPE_DIMENSION_DISPOSITIONS: dict[str, str] = {
     "sources": _SCOPE_DIMENSION_JUDGED,  # the production source set must be covered
     "backfill": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
     "backfill.enabled": _SCOPE_DIMENSION_JUDGED,  # off ⇒ the breaker leg never ran
+    # #2443 write side: the leg discovery actually executed.  Judged as a
+    # CONSISTENCY guard rather than as a narrowing -- ``enabled`` true with
+    # ``mode`` legacy and models selected is a shape the writer can not produce,
+    # so the reader answers ``scope_unknown`` instead of trusting it.
+    "backfill.mode": _SCOPE_DIMENSION_JUDGED,
     "operator_filters": _SCOPE_DIMENSION_JUDGED,  # container: presence is a required field
     "operator_filters.model_ids": _SCOPE_DIMENSION_JUDGED,  # non-empty ⇒ operator narrowed
     "operator_filters.basin_ids": _SCOPE_DIMENSION_JUDGED,  # non-empty ⇒ operator narrowed
@@ -60538,6 +60543,9 @@ def test_the_judged_dispositions_are_exactly_what_the_listing_surface_reads() ->
             "sources",
             "backfill",
             "backfill.enabled",
+            # #2443: read by the same ``_scope_reason`` as the two above, as the
+            # writer-impossible-shape guard rather than as a narrowing knob.
+            "backfill.mode",
             "operator_filters",
             "cycle_window",
             "counts",

@@ -11,7 +11,11 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from services.orchestrator.production_contract import production_contract_matrix
-from services.orchestrator.scheduler_lease import UnsafeSchedulerLockError, _open_lock_parent_directory
+from services.orchestrator.scheduler_lease import (
+    UnsafeSchedulerLockError,
+    _open_lock_parent_directory,
+    lease_heartbeat_interval_seconds,
+)
 from services.orchestrator.scheduler_state import _evidence_safe, _format_utc
 from workers.data_adapters.base import cycle_id_for
 
@@ -147,6 +151,7 @@ class SchedulerEvidenceConfig(Protocol):
     object_store_root: Path | str
     published_artifact_root: Path | str
     lock_path: Path | str
+    lock_ttl_seconds: int
     runtime_root: Path | str
     temp_root: Path | str
     require_runtime_roots: bool
@@ -344,6 +349,25 @@ def write_prelock_blocked_evidence(
         return None
 
 
+def _reservation_lease(config: SchedulerEvidenceConfig) -> dict[str, Any] | None:
+    """The self-describing lease block ``list-operator-actions`` reads back (#2405).
+
+    A reservation whose pass is still running has its mtime refreshed by that
+    pass's ``_LeaseHeartbeat``; the reader calls a reservation an orphan when the
+    mtime is older than twice THIS ttl.  The block is omitted rather than guessed
+    when the config carries no usable ttl: the reader reads a missing block
+    fail-safe (orphan), and a fabricated ttl would do the opposite.
+    """
+
+    ttl_seconds = getattr(config, "lock_ttl_seconds", None)
+    if type(ttl_seconds) is not int or ttl_seconds < 1:
+        return None
+    return {
+        "ttl_seconds": ttl_seconds,
+        "heartbeat_interval_seconds": lease_heartbeat_interval_seconds(ttl_seconds),
+    }
+
+
 def reserve_pre_execution_evidence(
     context: SchedulerEvidenceWriteContext,
     pass_id: str,
@@ -368,6 +392,9 @@ def reserve_pre_execution_evidence(
         "final_evidence_artifact": artifact_path_evidence(context.config, evidence_dir / final_artifact_name),
         "proof": "scheduler_evidence_directory_write_before_production_mutation",
     }
+    lease = _reservation_lease(context.config)
+    if lease is not None:
+        payload["lease"] = lease
     try:
         validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
         validate_evidence_artifact_name(final_artifact_name, artifact_path=evidence_dir / final_artifact_name)

@@ -725,3 +725,162 @@ def test_a_dropped_or_absent_source_cycle_marker_reads_as_dropped(tmp_path: Path
 
     assert exit_code == 3
     assert [item["reason"] for item in receipt["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
+
+
+# ---------------------------------------------------------------------------
+# 4.x -- the executed backfill leg (#2443, design D3, write side)
+# ---------------------------------------------------------------------------
+
+
+def _backfill_pass(tmp_path: Path, *, backfill_enabled: bool, models: list[Any] | None = None) -> Any:
+    """A REAL ``run_once()`` pass over one source with backfill configured either way."""
+
+    from tests.test_production_scheduler import _dt
+    from tests.test_scheduler_backfill import CompletionByCycleRepository, _build_scheduler
+
+    return _build_scheduler(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        cycle_times=["2026-05-21T06:00:00Z", "2026-05-21T00:00:00Z"],
+        backfill_enabled=backfill_enabled,
+        max_cycles_per_source=1,
+        models=models,
+        active_repository=CompletionByCycleRepository(set()),
+    ).run_once()
+
+
+@pytest.mark.parametrize(
+    ("backfill_enabled", "models", "expected_mode"),
+    [
+        pytest.param(True, None, "backfill", id="enabled_with_models"),
+        pytest.param(True, [], "legacy", id="enabled_without_models"),
+        pytest.param(False, None, "legacy", id="disabled"),
+    ],
+)
+def test_run_once_records_the_backfill_leg_discovery_executed(
+    tmp_path: Path,
+    backfill_enabled: bool,
+    models: list[Any] | None,
+    expected_mode: str,
+) -> None:
+    """4.1: ``backfill.enabled`` is config intent; ``backfill.mode`` is the leg that ran.
+
+    The zero-model row is the defect #2443 names: ``discover_cycles`` takes the
+    LEGACY leg there (``backfill_enabled and models``) while the evidence claimed
+    ``enabled: true`` and nothing else, so the artifact could not say which leg
+    produced its ``source_cycles``.
+    """
+
+    result = _backfill_pass(tmp_path, backfill_enabled=backfill_enabled, models=models)
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.evidence["backfill"]["enabled"] is backfill_enabled
+    assert result.evidence["backfill"]["mode"] == expected_mode
+    assert persisted["backfill"]["mode"] == expected_mode
+
+
+def test_a_zero_model_backfill_pass_records_legacy_and_stays_undecidable(tmp_path: Path) -> None:
+    """4.1: the read side (already armed) and the new write side on one artifact."""
+
+    result = _backfill_pass(tmp_path, backfill_enabled=True, models=[])
+    evidence = json.loads(json.dumps(result.evidence))
+    evidence["sources"] = ["gfs", "IFS"]
+    root = _write_evidence(tmp_path / "zero_model", evidence)
+
+    receipt, exit_code = _listing(root)
+
+    assert evidence["backfill"]["enabled"] is True
+    assert evidence["backfill"]["mode"] == "legacy"
+    assert evidence["counts"]["selected_model_count"] == 0
+    assert exit_code == 3
+    assert [item["reason"] for item in receipt["non_evaluating_passes"]] == ["no_models_evaluated"]
+
+
+def test_a_normal_backfill_pass_still_answers_zero(tmp_path: Path) -> None:
+    """4.2: the 188/188 live shape gains one key and nothing else moves."""
+
+    result = _backfill_pass(tmp_path, backfill_enabled=True)
+    evidence = json.loads(json.dumps(result.evidence))
+    evidence["sources"] = ["gfs", "IFS"]
+    root = _write_evidence(tmp_path / "normal", evidence)
+
+    receipt, exit_code = _listing(root)
+
+    assert evidence["backfill"]["mode"] == "backfill"
+    assert set(evidence["backfill"]) == {"enabled", "mode", "lookback_hours", "audit"}
+    assert (exit_code, receipt["operator_actions"], receipt["non_evaluating_passes"]) == (0, [], [])
+
+
+def test_a_writer_impossible_backfill_shape_is_scope_unknown(tmp_path: Path) -> None:
+    """4.3: ``enabled`` true + ``mode`` legacy + models selected is a shape no writer emits.
+
+    Only the zero-model pass runs the legacy leg with ``enabled`` true, and that
+    pass keeps its own arming reason.  Anything else claiming it is unreadable
+    evidence, so the scope arms rather than answering.
+    """
+
+    result = _backfill_pass(tmp_path, backfill_enabled=True)
+    base = json.loads(json.dumps(result.evidence))
+    base["sources"] = ["gfs", "IFS"]
+    assert base["counts"]["selected_model_count"] > 0
+
+    impossible = json.loads(json.dumps(base))
+    impossible["backfill"]["mode"] = "legacy"
+    receipt, exit_code = _listing(_write_evidence(tmp_path / "impossible", impossible))
+
+    assert exit_code == 3
+    assert [item["reason"] for item in receipt["non_evaluating_passes"]] == ["scope_unknown"]
+
+    # An older writer's pass carries no ``mode`` at all and is read exactly as before.
+    legacy = json.loads(json.dumps(base))
+    legacy["backfill"].pop("mode")
+    legacy_receipt, legacy_exit = _listing(_write_evidence(tmp_path / "no_mode", legacy))
+
+    assert (legacy_exit, legacy_receipt["non_evaluating_passes"]) == (0, [])
+
+
+def test_the_backfill_leg_entry_is_appended_once_per_call_on_both_legs(tmp_path: Path) -> None:
+    """4.4: one typed entry per ``discover_cycles`` call, not per source, and inert.
+
+    ``backfill_audit`` is per source; this entry is per call, which is what makes
+    it an answer about the LEG.  It carries neither ``status`` nor
+    ``selection_status``, so the progress guard does not count it, ``_pass_actions``
+    skips it and the #2402 bounded projection does not retain it -- exactly like
+    ``backfill_audit``, with which it shares the top-level ``source_cycles`` list.
+    """
+
+    from services.orchestrator import scheduler_runtime
+    from services.orchestrator.operator_action_listing import _pass_actions
+    from services.orchestrator.scheduler_evidence_payload import _bounded_breaker_released_source_cycles
+    from tests.test_production_scheduler import FakeAdapter, FakeRegistry, ProductionScheduler, _config, _dt, _model
+
+    for backfill_enabled, model_rows, expected_mode in (
+        (True, [_model("model_a", "basin_a")], "backfill"),
+        (True, [], "legacy"),
+        (False, [_model("model_a", "basin_a")], "legacy"),
+    ):
+        root = tmp_path / f"{expected_mode}_{backfill_enabled}_{len(model_rows)}"
+        root.mkdir(parents=True, exist_ok=True)
+        scheduler = ProductionScheduler(
+            _config(
+                root,
+                now=_dt("2026-05-21T12:00:00Z"),
+                sources=("gfs", "IFS"),
+                backfill_enabled=backfill_enabled,
+                max_cycles_per_source=1,
+            ),
+            registry=FakeRegistry(model_rows),
+            adapters={
+                "gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)]),
+                "IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)]),
+            },
+        )
+        models = scheduler._discover_models()[0] if model_rows else ()
+        _cycles, evidence = scheduler._discover_cycles(_dt("2026-05-21T12:00:00Z"), models=models)
+        legs = [item for item in evidence if item.get("type") == "backfill_leg"]
+
+        assert legs == [{"type": "backfill_leg", "mode": expected_mode}], (backfill_enabled, model_rows)
+        assert len({item.get("source_id") for item in evidence if item.get("type") == "backfill_audit"}) in (0, 2)
+        assert scheduler_runtime._source_cycle_evidence_progressed(legs) is False
+        assert _pass_actions({"source_cycles": legs}) == []
+        assert _bounded_breaker_released_source_cycles(legs) == ([], 0)

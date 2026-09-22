@@ -881,6 +881,11 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # and it has no module-scope imports, so no importer derivation can
             # reach it.
             "tests/test_scheduler_evidence_decidability.py",
+            # #2405's at-site addition to the same stop rule: the
+            # reservation-lease suite is the oracle for the touch-path
+            # registration this module performs, and is equally
+            # module-scope-import-free.
+            "tests/test_operator_action_reservation_lease.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -1053,6 +1058,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # and is the only route that reaches it for a PR touching its own subject
         # module, operator_action_listing.py.
         "tests/test_operator_action_listing.py",
+        # #2405: the reservation-lease suite rides the broad orchestrator
+        # directory rule for scheduler_lease.py, scheduler_evidence.py and its
+        # reader subject operator_action_listing.py; scheduler_runtime.py is
+        # stop-rule owned and is extended at THAT site.
+        "tests/test_operator_action_reservation_lease.py",
         # #1555/#1768: the operator re-entry confirmation suite rides the broad
         # orchestrator directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and journal_root_authority.py, and
@@ -10991,6 +11001,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_migration.py",
+        "tests/test_operator_action_reservation_lease.py",
         "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
         "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows",
         "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
@@ -11013,10 +11024,12 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
-        # 25 -> 26 (#1905/#2402): the evidence-size decidability suite is the
-        # oracle for the non-blocking summary tier that keeps THIS module's pass
-        # status true instead of rewriting it to resource_limit_blocked; it has
-        # no module-scope imports, so the at-site extension is its only route.
+        # 25 -> 27 (#1905/#2402, then #2405): the evidence-size decidability
+        # suite is the oracle for the non-blocking summary tier that keeps THIS
+        # module's pass status true instead of rewriting it to
+        # resource_limit_blocked, and the reservation-lease suite is the oracle for
+        # the touch-path registration it performs after reserving; neither has
+        # module-scope imports, so the at-site extension is their only route.
         "tests/test_scheduler_evidence_decidability.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
@@ -19299,3 +19312,23 @@ def test_evidence_decidability_suite_is_selected_by_every_writer_and_reader_it_p
     ):
         assert Path(module).is_file(), module
         assert "tests/test_scheduler_evidence_decidability.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_reservation_lease_suite_is_selected_by_every_writer_and_reader_it_pins() -> None:
+    # #2405: the reservation-lease suite is named after none of its modules
+    # either -- the lease heartbeat and its touch path (scheduler_lease.py), the
+    # reservation writer that publishes the lease block (scheduler_evidence.py),
+    # the pass that registers the touch (scheduler_runtime.py) and the reader
+    # whose exit code the orphan rule decides (operator_action_listing.py).  Same
+    # two routes as the decidability suite: scheduler_runtime.py is stop-rule
+    # owned and is extended AT ITS SITE, the other three ride the broad
+    # orchestrator directory rule.  Module-scope-import-free, so no importer
+    # derivation can reach it.
+    for module in (
+        "services/orchestrator/scheduler_lease.py",
+        "services/orchestrator/scheduler_evidence.py",
+        "services/orchestrator/scheduler_runtime.py",
+        "services/orchestrator/operator_action_listing.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_operator_action_reservation_lease.py" in select_tests([module], repo_root=Path("."))

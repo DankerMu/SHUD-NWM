@@ -2323,6 +2323,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # importer derivation, so this stop rule is its only route for this
             # module. DB-free, ~20 tests in ~20s.
             "tests/test_scheduler_evidence_decidability.py",
+            # #2405 adds the fourth at-site target on the same grounds: this
+            # module registers the lease heartbeat's touch path on the
+            # reservation it just reserved, and the reservation-lease suite is
+            # the oracle for "registered only after `reserved`". Also
+            # module-scope-import-free, so this stop rule is its only route for
+            # this module. DB-free, 15 tests in ~1s.
+            "tests/test_operator_action_reservation_lease.py",
         ),
         stop_on_match=True,
     ),
@@ -2699,6 +2706,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # site, per this rule's #1455 note above. DB-free, ~20 tests in ~20s
             # (one real breaker `run_once()` pass, module-scoped).
             "tests/test_scheduler_evidence_decidability.py",
+            # #2405: the reservation-lease suite, on the same footing and for the
+            # same reason -- named after none of its modules and importing
+            # nothing at module scope. This directory rule is its route for
+            # scheduler_lease.py (the heartbeat touch), scheduler_evidence.py
+            # (the reservation `lease` block) and operator_action_listing.py (the
+            # orphan rule); scheduler_runtime.py rides the stop rule above.
+            # DB-free, 15 tests in ~1s.
+            "tests/test_operator_action_reservation_lease.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list

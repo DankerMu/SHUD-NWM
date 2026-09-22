@@ -910,7 +910,10 @@ def test_run_once_backfill_disabled_evidence(tmp_path: Path) -> None:
         active_repository=CompletionByCycleRepository(set()),
     )
     result = scheduler.run_once()
-    assert result.evidence["backfill"] == {"enabled": False}
+    # #2443: ``mode`` joins the disabled leg too -- it names the leg
+    # ``discover_cycles`` executed, which the reader needs on BOTH legs to tell a
+    # configured-off pass from one whose registry selected no models.
+    assert result.evidence["backfill"] == {"enabled": False, "mode": "legacy"}
 
 
 # ---------------------------------------------------------------------------

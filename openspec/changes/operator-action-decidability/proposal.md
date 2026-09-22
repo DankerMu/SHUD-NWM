@@ -36,7 +36,7 @@
 - Code: `services/orchestrator/scheduler_evidence_payload.py`, `scheduler_evidence.py`, `scheduler_runtime.py`, `scheduler_discovery.py`, `scheduler_lease.py` (heartbeat touch), `operator_action_listing.py`, `operator_reentry_confirmation.py`, `scripts/node22_scheduler_evidence_retention.py` (orphan logging only if needed).
 - Tests: new `tests/test_scheduler_evidence_decidability.py` (≤1000 lines); #2442 pin in a new `tests/test_operator_action_status_closure.py`; `tests/test_operator_reentry_confirmation.py` leg; self-copy removal in `tests/test_operator_action_listing.py`.
 - Docs: `docs/runbooks/node22-control-plane-manual-recovery.md` (one coherent exit-code edit), `infra/env/compute.example`.
-- Runtime: node-22 db-free scheduler (writer), operator read surface; evidence format gains optional keys only (older readers ignore them).
+- Runtime: the db-free scheduler control plane on node-22 (compute/Slurm/artifact producer only; active DB writes and ingest validation stay on node-27) and the operator read surface. Evidence format gains optional keys only (older readers ignore them).
 
 ## Triage
 
