@@ -14,7 +14,7 @@
 
 ## 0. Setup
 
-- [ ] 0.1 Branch `feat/issue-2393-1845-2416-2394-chain-cross-stage-state-residue` from `origin/master`. Locate code by symbol, not by issue line numbers (all stale).
+- [x] 0.1 Branch `feat/issue-2393-1845-2416-2394-chain-cross-stage-state-residue` from `origin/master`. Locate code by symbol, not by issue line numbers (all stale).
 - [x] 0.2 New regressions go in `tests/test_chain_cross_stage_state.py` (≤1000 lines), importing helpers from `tests.test_orchestration_chain` / `tests.test_production_scheduler` rather than copying. Confirm `scripts/select_ci_tests.py` routes the new file from the touched sources (add a rule if needed, with its test).
 - [x] 0.3 Every new-behaviour test is shown red on pre-change source, then green.
 
@@ -77,7 +77,7 @@ All 4.x tests: FileJournal lane (complete `cohort_members` + matched-bound field
 - [x] 5.1 `uv run ruff check .`
 - [x] 5.2 Local: `uv run pytest -q tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`
 - [x] 5.3 Spec delta supersedes #1201 D2 "继承保留"; `openspec validate chain-cross-stage-state-residue --strict --no-interactive`
-- [ ] 5.4 node-27 (oracle): `tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py tests/test_operator_reentry_confirmation.py tests/test_forcing_submit_ambiguity.py tests/test_file_orchestration_journal.py tests/test_forced_resubmit_veto.py tests/test_retry_mint_floor.py tests/test_select_ci_tests.py tests/test_entropy_audit_facade_guard_forwarders.py tests/test_entropy_audit_facade_guard_aliases.py` green at the PR head.
+- [x] 5.4 node-27 (oracle): `tests/test_chain_cross_stage_state.py tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_warm_start_chaining.py tests/test_operator_reentry_confirmation.py tests/test_forcing_submit_ambiguity.py tests/test_file_orchestration_journal.py tests/test_forced_resubmit_veto.py tests/test_retry_mint_floor.py tests/test_select_ci_tests.py tests/test_entropy_audit_facade_guard_forwarders.py tests/test_entropy_audit_facade_guard_aliases.py` green at the PR head.
 
 ## 6. Review round 1 fixes
 
