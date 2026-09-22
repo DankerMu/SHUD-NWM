@@ -42,7 +42,7 @@ def upstream(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(basemap, "_http_client", lambda: fake)
         return fake
 
-    monkeypatch.setattr(basemap, "_throttled_until", 0.0)
+    monkeypatch.setattr(basemap, "_throttled_until", {})
     return install
 
 
@@ -121,7 +121,7 @@ def test_upstream_throttle_is_not_cached_and_opens_a_cooldown(
     fake = upstream(throttled)
 
     first = client.get(TILE_PATH)
-    second = client.get("/api/v1/basemap/tianditu/cva/3/5/2")
+    second = client.get("/api/v1/basemap/tianditu/vec/3/4/2")
 
     for response in (first, second):
         assert response.status_code == 503
@@ -133,13 +133,28 @@ def test_upstream_throttle_is_not_cached_and_opens_a_cooldown(
     assert not (cache_root / "basemap").exists() or not any(p.is_file() for p in (cache_root / "basemap").rglob("*"))
 
 
+def test_one_layers_throttle_does_not_block_other_layers(client: TestClient, upstream: Any, cache_root: Path) -> None:
+    """Tianditu throttles per layer: `vec` 429 while `img` still serves."""
+    fake = upstream(httpx.Response(429), httpx.Response(200, content=JPEG_TILE))
+
+    assert client.get(TILE_PATH).status_code == 503
+    satellite = client.get("/api/v1/basemap/tianditu/img/3/5/2")
+
+    assert satellite.status_code == 200
+    assert satellite.headers["x-tile-cache"] == "miss"
+    assert [call["params"]["T"] for call in fake.calls] == ["vec_w", "img_w"]
+    # vec stays in cooldown: no third upstream call.
+    assert client.get("/api/v1/basemap/tianditu/vec/3/4/2").status_code == 503
+    assert len(fake.calls) == 2
+
+
 def test_upstream_is_asked_again_once_the_cooldown_expires(
     client: TestClient, upstream: Any, cache_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = upstream(httpx.Response(429), httpx.Response(200, content=PNG_TILE))
     assert client.get(TILE_PATH).status_code == 503
 
-    monkeypatch.setattr(basemap, "_throttled_until", 0.0)
+    monkeypatch.setattr(basemap, "_throttled_until", {})
     response = client.get(TILE_PATH)
 
     assert response.status_code == 200

@@ -14,9 +14,12 @@ This route turns visitor traffic into per-TILE upstream traffic:
   serve a half-written body) and served from disk afterwards;
 - an upstream failure is NEVER cached, and is answered with `no-store`, so
   neither our disk nor the browser holds on to it;
-- after an upstream 429 this worker stops asking upstream for
-  `THROTTLE_COOLDOWN_SECONDS` and answers misses with 503 at once, instead of
-  forwarding every miss into a key that is already throttled.
+- after an upstream 429 for a LAYER this worker stops asking upstream for that
+  layer for `THROTTLE_COOLDOWN_SECONDS` and answers its misses with 503 at once,
+  instead of forwarding every miss into a key that is already throttled.
+  Tianditu throttles per layer (observed 2026-09-22: `vec`/`cva` 429 while
+  `img`/`cia`/`ter`/`cta` served 200), so one layer's cooldown must never
+  block the others.
 
 The `basemap/` subtree is outside the MVT retention runner's reach by
 construction (`scripts/node27_mvt_cache_retention.py` only enumerates
@@ -69,7 +72,8 @@ UPSTREAM_USER_AGENT = (
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _JPEG_SIGNATURE = b"\xff\xd8\xff"
 
-_throttled_until = 0.0
+# layer -> monotonic deadline of that layer's cooldown, per worker process.
+_throttled_until: dict[str, float] = {}
 _client: httpx.AsyncClient | None = None
 
 
@@ -160,8 +164,7 @@ async def tianditu_tile(
 
 
 async def _fetch_upstream(layer: str, z: int, x: int, y: int) -> bytes:
-    global _throttled_until
-    if time.monotonic() < _throttled_until:
+    if time.monotonic() < _throttled_until.get(layer, 0.0):
         raise _throttled_error()
     subdomain = TIANDITU_SUBDOMAINS[(x + y) % len(TIANDITU_SUBDOMAINS)]
     url = f"https://{subdomain}.tianditu.gov.cn/DataServer"
@@ -171,7 +174,7 @@ async def _fetch_upstream(layer: str, z: int, x: int, y: int) -> bytes:
     except httpx.HTTPError as exc:
         raise _unavailable_error(reason="network", detail=type(exc).__name__) from exc
     if upstream.status_code == 429:
-        _throttled_until = time.monotonic() + THROTTLE_COOLDOWN_SECONDS
+        _throttled_until[layer] = time.monotonic() + THROTTLE_COOLDOWN_SECONDS
         raise _throttled_error()
     if upstream.status_code != 200 or _image_media_type(upstream.content) is None:
         # Deliberately not echoing the upstream body: it can carry the key.
