@@ -48391,6 +48391,286 @@ def test_slurm_array_budget_stays_global_when_more_cohorts_than_control_workers(
 
 
 # ---------------------------------------------------------------------------
+# Issue #2543: split cohorts by gateway resource-profile key so a per-model
+# ``overrides`` entry in config/resource_profiles.yaml is task 0 of its own array.
+# ---------------------------------------------------------------------------
+
+_RESOURCE_PROFILE_DEFAULT_YAML = """\
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 4
+    memory_gb: 8
+    walltime: "14:00:00"
+    max_concurrent: 32
+    shud_threads: 4
+"""
+
+
+def _write_profiles(tmp_path: Path, overrides: str = "") -> Path:
+    path = tmp_path / "resource_profiles.yaml"
+    path.write_text(_RESOURCE_PROFILE_DEFAULT_YAML + overrides, encoding="utf-8")
+    return path
+
+
+def _use_profiles(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    # The split only applies when the gateway backend is the real ``slurm`` one,
+    # the only backend that sizes arrays from the profile file.
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+    monkeypatch.setenv("SLURM_GATEWAY_RESOURCE_PROFILES_PATH", path)
+
+
+def _override_block(*model_ids: str) -> str:
+    lines = ["  overrides:"]
+    for model_id in model_ids:
+        lines += [f"    {model_id}:", "      cpus_per_task: 12", "      memory_gb: 48", "      shud_threads: 12"]
+    return "\n".join(lines) + "\n"
+
+
+def _profile_split_scheduler(tmp_path: Path, **config: Any) -> ProductionScheduler:
+    return ProductionScheduler(
+        _config(tmp_path, **config),
+        registry=FakeRegistry([_model("model_00", "basin_00")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    )
+
+
+def _expected_cohort_run_id(candidates: Sequence[Any]) -> str:
+    # Independent restatement of the pre-#2543 cohort id contract: stage + a
+    # 12-hex sha256 digest over the sorted "model_id NUL candidate_id" members.
+    identity = "\0".join(sorted(f"{c.model_id}\0{c.candidate_id}" for c in candidates))
+    return f"cycle_gfs_2026052106_full_cohort_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _profile_split_units(scheduler: ProductionScheduler, candidates: Sequence[Any]) -> list[Any]:
+    grouped: dict[tuple[str, datetime], list[Any]] = {}
+    for candidate in candidates:
+        grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
+    return scheduler_execution_module._execution_units(scheduler._scheduler_execution_context(), grouped)
+
+
+def _unit_members(units: Sequence[Any]) -> list[list[str]]:
+    return [[candidate.model_id for candidate in unit.execution_candidates] for unit in units]
+
+
+def test_resource_profile_override_model_gets_its_own_cohort_as_task_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_profiles(
+        monkeypatch,
+        str(_write_profiles(tmp_path, _override_block("hlj_dg"))),
+    )
+    scheduler = _profile_split_scheduler(tmp_path)
+    candidates = [
+        _concurrency_candidate("gfs", model_id, f"basin_{model_id}")
+        for model_id in ("model_a", "model_b", "hlj_dg", "model_c")
+    ]
+
+    units = _profile_split_units(scheduler, candidates)
+
+    assert _unit_members(units) == [["model_a", "model_b", "model_c"], ["hlj_dg"]]
+    default_members = [c for c in candidates if c.model_id != "hlj_dg"]
+    assert units[0].cohort_run_id == _expected_cohort_run_id(default_members)
+    assert units[1].cohort_run_id == "cycle_gfs_2026052106_full_hlj_dg"
+    assert len({unit.cohort_run_id for unit in units}) == 2
+
+    # The gateway sizes each array from its task 0: the split makes the override
+    # model task 0 of its own array, and the default array keeps the default profile.
+    from services.slurm_gateway.config import SlurmGatewaySettings
+    from services.slurm_gateway.real_backend import RealSlurmGateway
+
+    gateway = RealSlurmGateway(SlurmGatewaySettings())
+    task_zero_cpus = [
+        gateway.resolve_resource_profile(unit.execution_candidates[0].model_id)["cpus_per_task"] for unit in units
+    ]
+    assert task_zero_cpus == [4, 12]
+
+
+def test_resource_profile_split_is_identity_without_override_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidates = [
+        _concurrency_candidate("gfs", model_id, f"basin_{model_id}")
+        for model_id in ("model_a", "model_b", "model_c")
+    ]
+    expected_run_id = _expected_cohort_run_id(candidates)
+
+    for overrides in ("", "  overrides:\n", _override_block("yangtze_shud_v12", "m24_smoke")):
+        _use_profiles(monkeypatch, str(_write_profiles(tmp_path, overrides)))
+        units = _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+        assert _unit_members(units) == [["model_a", "model_b", "model_c"]]
+        assert [unit.cohort_run_id for unit in units] == [expected_run_id]
+        assert [candidate.candidate_id for candidate in units[0].execution_candidates] == [
+            candidate.candidate_id for candidate in candidates
+        ]
+
+
+def test_resource_profile_split_orders_multiple_override_models_deterministically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_profiles(
+        monkeypatch,
+        str(_write_profiles(tmp_path, _override_block("zz_big", "hlj_dg"))),
+    )
+    scheduler = _profile_split_scheduler(tmp_path)
+    candidates = [
+        _concurrency_candidate("gfs", model_id, f"basin_{model_id}")
+        for model_id in ("zz_big", "model_a", "hlj_dg", "model_b")
+    ]
+
+    forward = _profile_split_units(scheduler, candidates)
+    reverse = _profile_split_units(scheduler, list(reversed(candidates)))
+
+    assert _unit_members(forward) == [["model_a", "model_b"], ["hlj_dg"], ["zz_big"]]
+    assert [unit.cohort_run_id for unit in forward] == [
+        _expected_cohort_run_id([c for c in candidates if c.model_id in {"model_a", "model_b"}]),
+        "cycle_gfs_2026052106_full_hlj_dg",
+        "cycle_gfs_2026052106_full_zz_big",
+    ]
+    assert [unit.cohort_run_id for unit in reverse] == [unit.cohort_run_id for unit in forward]
+
+
+def test_resource_profile_split_only_override_members_leaves_no_empty_default_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_profiles(
+        monkeypatch,
+        str(_write_profiles(tmp_path, _override_block("hlj_dg"))),
+    )
+    candidates = [_concurrency_candidate("gfs", "hlj_dg", "basin_hlj")]
+
+    units = _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+    assert _unit_members(units) == [["hlj_dg"]]
+
+
+def test_resource_profile_split_array_budgets_stay_within_global_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    override_models = ("big_a", "big_b", "big_c")
+    _use_profiles(
+        monkeypatch,
+        str(_write_profiles(tmp_path, _override_block(*override_models))),
+    )
+    candidates = [
+        _concurrency_candidate(source, model_id, f"basin_{model_id}")
+        for source in ("gfs", "IFS")
+        for model_id in (*override_models, *(f"model_{index:02d}" for index in range(30)))
+    ]
+
+    for worker_bound in (32, 4):
+        scheduler = _profile_split_scheduler(
+            tmp_path,
+            sources=("gfs", "IFS"),
+            concurrent_submit_bound=worker_bound,
+            slurm_array_concurrency_bound=32,
+        )
+        units = _profile_split_units(scheduler, candidates)
+
+        assert len(units) == 8
+        assert sorted(len(unit.execution_candidates) for unit in units) == [1] * 6 + [30, 30]
+        budgets = [unit.array_max_concurrent for unit in units]
+        assert all(budget >= 1 for budget in budgets)
+        active_slots = min(len(units), worker_bound)
+        assert sum(sorted(budgets, reverse=True)[:active_slots]) <= 32
+        for unit in units:
+            assert {c.slurm_array_max_concurrent for c in unit.execution_candidates} == {unit.array_max_concurrent}
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (None, "does not exist"),
+        ("resource_profiles: [unclosed\n", "not valid YAML"),
+        ("- just\n- a list\n", "default section"),
+        ("resource_profiles:\n  overrides: {}\n", "default section"),
+        (_RESOURCE_PROFILE_DEFAULT_YAML + "  overrides: [hlj_dg]\n", "overrides must be a mapping"),
+    ],
+)
+def test_resource_profile_split_fails_closed_like_gateway_on_bad_profile_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str | None,
+    message: str,
+) -> None:
+    from services.slurm_gateway.config import SlurmGatewaySettings
+    from services.slurm_gateway.gateway import ConfigurationError
+    from services.slurm_gateway.real_backend import RealSlurmGateway
+
+    profiles = tmp_path / "resource_profiles.yaml"
+    if content is not None:
+        profiles.write_text(content, encoding="utf-8")
+    _use_profiles(monkeypatch, str(profiles))
+    candidates = [_concurrency_candidate("gfs", "model_a", "basin_a")]
+
+    with pytest.raises(ConfigurationError, match=message):
+        _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+    orchestrate_calls: list[str] = []
+
+    class _RecordingOrchestrator:
+        object_store = None
+
+        def orchestrate_cycle(self, source: str, *_args: Any, **_kwargs: Any) -> PipelineResult:
+            orchestrate_calls.append(source)
+            raise AssertionError("no cohort may be submitted when the profile file is unusable")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path),
+        registry=FakeRegistry([_model("model_00", "basin_00")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        orchestrator_factory=lambda _source_id: _RecordingOrchestrator(),
+    )
+    with pytest.raises(ConfigurationError, match=message):
+        scheduler._execute_candidates(candidates)
+    assert orchestrate_calls == []
+
+    with pytest.raises(ConfigurationError, match=message):
+        RealSlurmGateway(SlurmGatewaySettings(resource_profiles_path=str(profiles))).resolve_resource_profile("model_a")
+
+
+def test_resource_profile_split_is_skipped_for_mock_gateway_backend_which_never_reads_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "mock")
+    monkeypatch.setenv("SLURM_GATEWAY_RESOURCE_PROFILES_PATH", str(tmp_path / "missing.yaml"))
+    candidates = [
+        _concurrency_candidate("gfs", model_id, f"basin_{model_id}") for model_id in ("model_a", "hlj_dg")
+    ]
+
+    units = _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+    assert _unit_members(units) == [["model_a", "hlj_dg"]]
+    assert [unit.cohort_run_id for unit in units] == [_expected_cohort_run_id(candidates)]
+
+
+def test_resource_profile_split_reads_gateway_default_path_relative_to_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.slurm_gateway.gateway import ConfigurationError
+
+    monkeypatch.delenv("SLURM_GATEWAY_RESOURCE_PROFILES_PATH", raising=False)
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+    workdir = tmp_path / "checkout"
+    (workdir / "config").mkdir(parents=True)
+    _write_profiles(workdir / "config", _override_block("hlj_dg"))
+    monkeypatch.chdir(workdir)
+    candidates = [
+        _concurrency_candidate("gfs", model_id, f"basin_{model_id}") for model_id in ("model_a", "hlj_dg")
+    ]
+
+    units = _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+    assert _unit_members(units) == [["model_a"], ["hlj_dg"]]
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ConfigurationError, match="does not exist"):
+        _profile_split_units(_profile_split_scheduler(tmp_path), candidates)
+
+
+# ---------------------------------------------------------------------------
 # Issue #292 §4.2: lease heartbeat / renewal + CAS-on-reclaim + liveness reconcile
 # ---------------------------------------------------------------------------
 

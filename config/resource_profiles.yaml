@@ -5,11 +5,18 @@ resource_profiles:
     ntasks: 1
     cpus_per_task: 4
     memory_gb: 8
-    # Forecast cohorts submit as ONE array whose walltime is resolved from task 0's
-    # model only (real_backend._normalize_array_request -> resolve_resource_profile),
-    # so a per-basin override cannot protect a slow member: this default is the
-    # effective ceiling for every member. HHe's SHUD wall-clock swings with forcing
-    # intensity (7 min .. >5h50m observed) and 06:00:00 killed IFS 2026071012
+    # A cohort submits as ONE array whose resources are resolved from task 0's model
+    # only (real_backend._normalize_array_request -> resolve_resource_profile). Since
+    # #2543 the scheduler splits each cohort by this file's override keys, so every
+    # model listed under `overrides` is task 0 of its own array and its override
+    # applies; every other model shares this default. To give a large basin more
+    # cores, add an override for EACH of its direct-grid model_ids (cpus_per_task,
+    # memory_gb, shud_threads) and set the registry rows' resource_profile.shud_threads
+    # to the same value -- SHUD threads come from the registry, not from this file.
+    # See docs/runbooks/production-ops/service-bringup.md.
+    # This walltime stays the ceiling for every default-group member: HHe's SHUD
+    # wall-clock swings with forcing intensity (7 min .. >5h50m observed) and
+    # 06:00:00 killed IFS 2026071012
     # (job 24081_1, FAILED at 05:50:38). Registry already declares walltime_minutes=720
     # for these basins; 14h keeps margin above that.
     walltime: "14:00:00"

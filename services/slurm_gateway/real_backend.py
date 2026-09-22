@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import yaml
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
@@ -79,6 +78,7 @@ from services.slurm_gateway.models import (
     SlurmLogsResponse,
     SubmitJobRequest,
 )
+from services.slurm_gateway.resource_profiles import load_resource_profiles
 from services.slurm_gateway.resource_validation import (
     ResourceProfileValidationError,
     validate_directive_path,
@@ -614,22 +614,7 @@ class RealSlurmGateway(SlurmGateway):
         )
 
     def load_resource_profiles(self) -> dict[str, Any]:
-        path = Path(self.settings.resource_profiles_path).expanduser()
-        if not path.exists():
-            raise ConfigurationError(
-                "Resource profile configuration file does not exist.",
-                {"resource_profiles_path": str(path)},
-            )
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        profiles = data.get("resource_profiles", data)
-        if not isinstance(profiles, dict) or not isinstance(profiles.get("default"), dict):
-            raise ConfigurationError("Resource profile configuration must include a default section.")
-        overrides = profiles.get("overrides", {})
-        if overrides is None:
-            profiles["overrides"] = {}
-        elif not isinstance(overrides, dict):
-            raise ConfigurationError("Resource profile overrides must be a mapping.")
-        return profiles
+        return load_resource_profiles(self.settings.resource_profiles_path)
 
     def resolve_resource_profile(self, model_id: str | None) -> dict[str, Any]:
         profiles = self.load_resource_profiles()
