@@ -244,9 +244,9 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "all decided and not defects: (1) time window -- exit 0 asserts only that the "
     "pass found nothing pending inside ITS OWN window "
     "[cycle_window.start_time_utc, cycle_window.end_time_utc]; production runs "
-    "lookback_hours=96 with cycle_lag_hours=16, so cycles newer than the 16h lag sit "
+    "lookback_hours=32 with cycle_lag_hours=16, so cycles newer than the 16h lag sit "
     "in no window at all, and there is no repo-internal authority for a 'complete' "
-    "window (production 96, code default 24); (2) single slot -- the backfill leg "
+    "window (production 32, code default 24); (2) single slot -- the backfill leg "
     "evaluates only the OLDEST unfinished cycle per source per pass, newer gaps are "
     "recorded as backfill_deferred_waiting_for_prior_cycle. That is narrower than it "
     "sounds: an unresolved action keeps its own cycle in the gap set, so it holds the "
@@ -519,7 +519,7 @@ def _scope_reason(payload: Mapping[str, Any]) -> str | None:
     to a required field would couple the presence check to the ``enabled`` test
     below in order-dependent ways.  ``lookback_hours > 0`` in general is NOT
     judged: there is no repo-internal authority for a "complete" window
-    (production 96, code default 24), so that is a documented boundary of exit 0
+    (production 32, code default 24), so that is a documented boundary of exit 0
     (see :data:`LIST_OPERATOR_ACTIONS_HELP`), not a narrowing.
 
     ``runtime_config.allowed_cycle_hours_utc`` is the fifth, and the last door:
