@@ -232,6 +232,10 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                         and not self._terminal_stage_needs_manual_retry(context, existing_job)
                     ):
                         result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
+                        # A resumed row's retry derives its attempt from the
+                        # stage-selection snapshot (the ``existing_jobs`` it was
+                        # selected from; not re-queried on this branch).
+                        attempt_floor = _stage_retry_attempt_floor(context, stage, existing_jobs)
                     else:
                         pipeline_job_id = retry_pipeline_job_id
                         if pipeline_job_id is None and existing_job is not None:
@@ -272,6 +276,12 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                             pipeline_job_id=pipeline_job_id,
                         )
                         retry_pipeline_job_id = None
+                        # A fresh submit's id was already minted past every
+                        # snapshot row; the post-submit read below may hold a
+                        # concurrent pass's reservation and must not advance the
+                        # replacement suffix (job-retry-mechanism: selected stage
+                        # snapshot), so no floor applies.
+                        attempt_floor = None
                         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
                     if stage_results and len(stage_results) > stage_index:
@@ -303,7 +313,7 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                         retry_pipeline_job_id = self._schedule_cycle_stage_retry(
                             result,
                             retry_attempts,
-                            attempt_floor=_stage_retry_attempt_floor(context, stage, existing_jobs),
+                            attempt_floor=attempt_floor,
                         )
                         if retry_pipeline_job_id is not None:
                             existing_jobs = [job for job in existing_jobs if not self._job_matches_stage(job, stage)]
@@ -363,7 +373,7 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                             had_partial_before_stage,
                             last_partial_before_stage,
                             confirmed_master=confirmed_master,
-                            attempt_floor=_stage_retry_attempt_floor(context, stage, existing_jobs),
+                            attempt_floor=attempt_floor,
                         )
                         if retried is not None:
                             result, aggregation = retried

@@ -748,10 +748,16 @@ def test_reentry_after_nested_partial_retry_mints_past_the_excluded_subset_row(
     assert _journal_master(repository, f"{_SHARED_FORCING}_retry_1") == nested
 
 
-def test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably(tmp_path: Path) -> None:
+@pytest.mark.parametrize("nested_outcome", ["succeeded", "failed"])
+def test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably(
+    tmp_path: Path, nested_outcome: str
+) -> None:
     """Same residue, budget already spent by ``_retry_1``: pass 2 neither collides
     with the excluded subset row (``AUTO_RETRY_JOB_CONFLICT`` pre-fix) nor submits;
     it lands the durable permanent-failure decline on the resumed bare master.
+    Identical whether ``_retry_1`` succeeded or failed for its subset: the bare
+    master's own aggregation is the stage's truth, and the budget ``_retry_1``
+    charged is spent either way.
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -762,9 +768,10 @@ def test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably(t
 
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
-    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": [["succeeded", "failed"], ["failed"]]})
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": [["succeeded", "failed"], [nested_outcome]]})
     _forcing_round(tmp_path, "round-1", repository, client, (0, 1), retry_service=retry_service)
     nested = _journal_master(repository, f"{_SHARED_FORCING}_retry_1")
+    assert nested["status"] == ("succeeded" if nested_outcome == "succeeded" else "permanently_failed")
 
     second = _forcing_round(tmp_path, "round-2", repository, client, (0, 1), retry_service=retry_service)
 
@@ -777,3 +784,64 @@ def test_reentry_after_nested_partial_retry_with_spent_budget_declines_durably(t
     assert f"{_SHARED_FORCING}_retry_2" not in {
         row["job_id"] for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)
     }
+
+
+@pytest.mark.parametrize(
+    "array_results",
+    [pytest.param(["succeeded", "failed"], id="nested-partial"), pytest.param(["failed", "failed"], id="top-level")],
+)
+def test_concurrent_retry_reservation_after_fresh_submit_does_not_advance_the_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, array_results: list[str]
+) -> None:
+    """job-retry-mechanism "Automatic public-cycle retry identity uses the selected
+    stage snapshot": between this pass's failed fresh forcing submit and its
+    post-submit re-query, a concurrent pass reserves ``_retry_1``. That later read
+    must not push this pass to ``_retry_2`` (a second gateway submission); it
+    derives ``_retry_1`` from its own attempt and meets the concurrent owner.
+    ``max_retries=2`` so a floor-advanced ``_retry_2`` would be within budget.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import ForecastOrchestratorCycleMixin
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig, RetryError
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": [array_results]})
+    concurrent_id = f"{_SHARED_FORCING}_retry_1"
+    original_query = ForecastOrchestratorCycleMixin._query_pipeline_jobs_for_cycle_context
+
+    def query_with_concurrent_reservation(self: Any, context: Any) -> Any:
+        rows = {row["job_id"]: row for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)}
+        master = rows.get(_SHARED_FORCING)
+        if master is not None and master.get("finished_at") and concurrent_id not in rows:
+            repository.upsert_pipeline_job(
+                {
+                    **master,
+                    "job_id": concurrent_id,
+                    "status": "running",
+                    "slurm_job_id": "9999",
+                    "finished_at": None,
+                    "error_code": None,
+                    "error_message": None,
+                }
+            )
+        return original_query(self, context)
+
+    monkeypatch.setattr(
+        ForecastOrchestratorCycleMixin, "_query_pipeline_jobs_for_cycle_context", query_with_concurrent_reservation
+    )
+    with pytest.raises(RetryError) as conflict:
+        _forcing_round(tmp_path, "race", repository, client, (0, 1), retry_service=retry_service)
+
+    # The existing exact-key conflict (the concurrent owner's live ``_retry_1``
+    # cannot be reset), never a fresh ``_retry_2`` identity.
+    assert conflict.value.code == "AUTO_RETRY_JOB_CONFLICT"
+    assert conflict.value.details["retry_job_id"] == concurrent_id
+    assert len(client.submissions) == 1
+    job_ids = {row["job_id"] for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)}
+    assert job_ids == {_SHARED_FORCING, concurrent_id}
+    assert _journal_master(repository, concurrent_id)["status"] == "running"
