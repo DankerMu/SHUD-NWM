@@ -6,6 +6,7 @@ the client receives and how many times Tianditu would have been asked.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -213,3 +214,34 @@ def test_out_of_contract_requests_never_reach_upstream(
 
     assert response.status_code == status
     assert fake.calls == []
+
+
+def test_mvt_retention_prunes_beside_the_basemap_cache_without_touching_it(tmp_path: Path) -> None:
+    """The basemap cache shares `NHMS_MVT_FILE_CACHE_DIR` with the MVT cache.
+    The retention timer must keep pruning MVT tiles next to `basemap/` and must
+    neither delete nor trip over that subtree (no blocker, no enumeration failure)."""
+    from datetime import UTC, datetime
+
+    from scripts import node27_mvt_cache_retention as retention
+
+    now = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
+    aged = datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC).timestamp()
+    root = tmp_path / "cache"
+    (root / retention.LOCKS_DIR_NAME).mkdir(parents=True)
+    aged_mvt_tile = root / "ab" / ("a" + "0" * 63 + ".pbf")
+    basemap_tile = root / "basemap" / "tianditu" / "vec" / "1" / "0" / "0"
+    basemap_tmp = basemap_tile.with_name(".0.123.456.deadbeef.tmp")
+    for path in (aged_mvt_tile, basemap_tile, basemap_tmp):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(PNG_TILE)
+        os.utime(path, (aged, aged))
+
+    config = retention.MvtCacheRetentionConfig(
+        cache_root=root, retention_days=retention.DEFAULT_RETENTION_DAYS, summary_path=None
+    )
+    payload = retention.run_retention(config, now=now)
+
+    assert payload["status"] == "completed"
+    assert [entry["path"] for entry in payload["deleted"]] == [str(aged_mvt_tile)]
+    assert payload["counts"] == {"planned": 1, "deleted": 1, "skipped": 0, "failed": 0}
+    assert basemap_tile.exists() and basemap_tmp.exists()

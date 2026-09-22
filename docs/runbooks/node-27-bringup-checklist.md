@@ -376,12 +376,14 @@ oracle 仍由上述 C4 lane live 执行。
   C4 lane 仍然把任何 `mapSourceError` 判为不可 PASS（`c4DisplayEvidence/dom.ts:40`），
   这道闸不放松：底图限流期间取不到 C4 PASS 是如实的结果。
 - **缓存容量**：`basemap/` 子树不在 MVT retention 的清理范围内（retention 只枚举两位十六进制目录），
-  也没有自动淘汰机制；按访问到的瓦片集合增长。容量核查按根 `CLAUDE.md` 用 `df -h` 实测；
+  也没有自动淘汰机制；按访问到的瓦片集合增长。node-27 的缓存根在 `/home` 卷
+  （2026-09-16 receipt 记为 `/home/nwm/.cache/nhms/mvt`）。容量核查按根 `CLAUDE.md` 用 `df -h` 实测；
   需要回收时可以整棵删除 `basemap/`，删除后只会重新回源。
 - **复核 provider** 时，curl 必须带浏览器 `User-Agent`；key **不得**出现在 receipt、日志、截图
   或 issue 评论里。live 复核 display 时直接请求同源代理即可：
   `curl -sI https://test.nwm.ac.cn/api/v1/basemap/tianditu/vec/1/1/0`
   （预期 200 + `X-Tile-Cache: miss|hit`；key 限流期间预期 503 + `no-store` + `Retry-After`）。
+  首次 loopback smoke 见 [`receipts/2026-09-22-issue-2550-basemap-proxy-node27/README.md`](receipts/2026-09-22-issue-2550-basemap-proxy-node27/README.md)。
 
 #### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
 
