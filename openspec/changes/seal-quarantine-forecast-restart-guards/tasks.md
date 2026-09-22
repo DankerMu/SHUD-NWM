@@ -46,7 +46,7 @@
 
 - [x] 4.1 `uv run ruff check .`
 - [x] 4.2 Local: `uv run pytest -q tests/test_quarantine_forecast_restart_guards.py tests/test_operator_reentry_confirmation.py tests/test_forced_resubmit_veto.py` and `tests/test_scheduler_generation.py tests/test_production_scheduler.py -k "quarantine or forcing or repair or manifest or reentry"`.
-- [ ] 4.3 node-27 (oracle): `tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_operator_reentry_confirmation.py tests/test_warm_start_chaining.py tests/test_forced_resubmit_veto.py tests/test_quarantine_forecast_restart_guards.py` all green at the PR head.
+- [x] 4.3 node-27 (oracle): `tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_operator_reentry_confirmation.py tests/test_warm_start_chaining.py tests/test_forced_resubmit_veto.py tests/test_quarantine_forecast_restart_guards.py` all green at the PR head.
 - [x] 4.4 `openspec validate seal-quarantine-forecast-restart-guards --strict --no-interactive`
 
 ## 5. Review round 1 fixes
@@ -54,3 +54,7 @@
 - [x] 5.1 (T1) Keep a #2408 reachability assertion in the suite: take the real quarantine blocker from the strict no-repair baseline build, strip both descent predicates, pass it through `_apply_explicit_missing_forcing_repair_policy` with that build's config, candidate, raw state and strict evidence, and assert it is authorized into `retry_repair_missing_forcing` (proves every later precondition holds for the refused fixture).
 - [x] 5.2 (T2) Restore the spliced #2397 comment in `tests/test_select_ci_tests.py`.
 - [x] 5.3 (I1) Runbooks `docs/runbooks/production-ops/known-issues-pipeline.md` and `docs/runbooks/node22-control-plane-manual-recovery.md` document `journal_predecessor_quarantine_present` beside the r2-01 exception: what it means, the remedy (restore the model's own forcing; rename backfill when the rename set is non-empty, otherwise out of band), and the triage fields `missing_forcing_repair.{recorded,expected}_init_state_id`. Audit `current-production-ops.md` for the strict-lane `--repair-missing-forcing` procedure.
+
+## 6. Re-review 1 note
+
+- [x] 6.1 (R1, P3) `docs/runbooks/production-ops/service-bringup.md` drain table names the #2408 `journal_predecessor_quarantine_present` exception beside r2-01.
