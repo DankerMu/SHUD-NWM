@@ -12,6 +12,7 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_generation as _scheduler_generation
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
+from services.orchestrator.accepted_submit_identity import JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION
 from services.orchestrator.chain_source_cycle import (
     RAW_MANIFEST_READY_CYCLE_STATUSES,
     _raw_manifest_uri_matches_source_cycle,
@@ -627,6 +628,18 @@ def build_candidates(
                         "terminal_run_manifest_missing",
                         _terminal_run_manifest_retry_evidence(state_decision.evidence),
                     )
+                    # Emitting point for a ``forecast`` restart: consult the
+                    # per-model forcing witness before it leaves (#2396, #1843).
+                    # Unconditional because this leg is reachable only when
+                    # ``strict_warm_start is None`` -- the first strict branch
+                    # above consumes every not-None x
+                    # ``_STRICT_WARM_START_TERMINAL_SKIP_REASONS`` shape -- and no
+                    # later consultation runs on that lane.
+                    state_decision = _strict_warm_start_forcing_witness_decision(
+                        candidate,
+                        raw_candidate_state,
+                        state_decision,
+                    )
                 else:
                     identity_quarantine = _journal_predecessor_identity_quarantine(
                         context,
@@ -672,9 +685,13 @@ def build_candidates(
                 # here, after it returns.
                 #
                 # Scoped to the strict warm-start lane, exactly like the upgrade it
-                # follows (that helper is a no-op when ``strict_evidence is None``):
-                # every other retry reaching this line was already consulted by
-                # ``scheduler_state_decision`` at its own emitting return point.
+                # follows (that helper is a no-op when ``strict_evidence is None``).
+                # A None-lane retry reaching this line is never consulted here, so
+                # every None-lane emitting point of a ``forecast`` restart consults
+                # the witness itself: ``scheduler_state_decision`` at its own
+                # emitting return points, the ``terminal_run_manifest_missing``
+                # leg (#2396) and the journal-predecessor quarantine leg (#1844)
+                # of the terminal-skip dispatch above.
                 state_decision = _strict_warm_start_forcing_witness_decision(
                     candidate,
                     raw_candidate_state,
@@ -1904,7 +1921,9 @@ def _apply_explicit_missing_forcing_repair_policy(
     other blocker and retry decision remains owned by the normal state machine.
 
     A candidate carrying an operator re-entry confirmation is refused outright
-    (r2-01), ahead of every other precondition -- see the refusal below.
+    (r2-01), ahead of every other precondition -- see the refusal below.  An
+    unconfirmed blocker that descends from a §8.7 quarantine retry is refused
+    right after it (#2408).
     """
 
     if not bool(getattr(config, "repair_missing_forcing", False)):
@@ -1971,6 +1990,31 @@ def _apply_explicit_missing_forcing_repair_policy(
                 "decision": confirmation.get("decision"),
                 "request_id": confirmation.get("request_id"),
             },
+        )
+
+    # §8.7 extension of r2-01 to UNCONFIRMED candidates (#2408, owner decision
+    # (b)): a blocker that descends from a journal-predecessor quarantine retry
+    # is a real re-run of the stale lineage.  Reclassified here it would restart
+    # at ``forcing``, where no quarantine provenance can ever be stamped (same
+    # ``accepted_submit_row_kind`` reasoning as above), so a failing forcing
+    # stage would submit without moving the breaker count.  Refuse instead: the
+    # candidate stays on the stable missing-forcing blocker, the operator drains
+    # it by restoring the model's own forcing, and the quarantine retry then
+    # restarts at ``forecast`` and is stamped at the reservation.  Either
+    # predicate marks the descent: the identity block survives the blocker via
+    # the guard's ``**base_evidence``, and the guard records the planned retry's
+    # decision literal.  A blocker carrying neither keeps today's behaviour.
+    quarantine_identity = decision.evidence.get("journal_predecessor_identity")
+    descent_guard = decision.evidence.get("artifact_guard")
+    if isinstance(quarantine_identity, Mapping) or (
+        isinstance(descent_guard, Mapping)
+        and descent_guard.get("planned_retry_decision") == JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION
+    ):
+        identity = quarantine_identity if isinstance(quarantine_identity, Mapping) else {}
+        return rejected(
+            "journal_predecessor_quarantine_present",
+            recorded_init_state_id=identity.get("recorded_init_state_id"),
+            expected_init_state_id=identity.get("expected_init_state_id"),
         )
 
     if not isinstance(target_cycle, datetime) or _format_utc(target_cycle) != _format_utc(

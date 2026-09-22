@@ -2641,6 +2641,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # pair is stop-rule owned and rides FILE_ORCHESTRATION_JOURNAL_
             # IMPORTER_TESTS. DB-free, 7 tests in ~13s.
             "tests/test_quarantine_identity_authority.py",
+            # #2396/#2407/#2408: the forecast-restart guard suite top-level-imports
+            # only scheduler_candidates.py (the terminal-skip dispatch and repair
+            # policy it drives) and scheduler_state_types.py — neither stop-rule
+            # owned — so this directory rule is its route. Its scheduler-suite
+            # helpers are imported function-locally. DB-free, 10 tests in ~3s.
+            "tests/test_quarantine_forecast_restart_guards.py",
             # #2404: the retry-mint-floor suite drives the strict warm-start
             # budget (scheduler_candidates.py), the chain's cycle-stage mint
             # (chain_forecast_execution.py), the shared floor field
