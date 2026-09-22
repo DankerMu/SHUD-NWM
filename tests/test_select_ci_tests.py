@@ -875,6 +875,12 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py"
             "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+            # #1905/#2402's at-site addition to the same scheduler_runtime.py
+            # stop rule: the evidence-size decidability suite is the oracle for
+            # the non-blocking summary tier this module's pass status depends on,
+            # and it has no module-scope imports, so no importer derivation can
+            # reach it.
+            "tests/test_scheduler_evidence_decidability.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -1113,6 +1119,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_scheduler_backfill.py",
         "tests/test_scheduler_backfill_predecessor.py",
+        # #1905/#2402: the evidence-size decidability suite rides the broad
+        # orchestrator directory rule (named after none of its modules, and
+        # module-scope-import-free, so no importer derivation reaches it).
+        "tests/test_scheduler_evidence_decidability.py",
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
@@ -11003,6 +11013,11 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
+        # 25 -> 26 (#1905/#2402): the evidence-size decidability suite is the
+        # oracle for the non-blocking summary tier that keeps THIS module's pass
+        # status true instead of rewriting it to resource_limit_blocked; it has
+        # no module-scope imports, so the at-site extension is its only route.
+        "tests/test_scheduler_evidence_decidability.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
         "tests/test_source_cycle_raw_manifest.py",
@@ -19263,3 +19278,24 @@ def test_quarantine_identity_authority_suite_is_selected_by_the_journal() -> Non
     module = "services/orchestrator/file_orchestration_journal.py"
     assert Path(module).is_file(), module
     assert "tests/test_quarantine_identity_authority.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_evidence_decidability_suite_is_selected_by_every_writer_and_reader_it_pins() -> None:
+    # #1905/#2402: the evidence-size decidability suite is named after none of
+    # the modules it drives -- the summary tier and the bounded source-cycle
+    # projection (scheduler_evidence_payload.py / scheduler_evidence.py), the
+    # pass writers that reach them (scheduler_runtime.py, scheduler_discovery.py,
+    # scheduler_lease.py) and the reader whose exit codes they decide
+    # (operator_action_listing.py). scheduler_runtime.py is stop-rule owned, so
+    # it is extended AT ITS SITE; the other five ride the broad orchestrator
+    # directory rule.
+    for module in (
+        "services/orchestrator/scheduler_evidence_payload.py",
+        "services/orchestrator/scheduler_evidence.py",
+        "services/orchestrator/scheduler_runtime.py",
+        "services/orchestrator/scheduler_discovery.py",
+        "services/orchestrator/scheduler_lease.py",
+        "services/orchestrator/operator_action_listing.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_scheduler_evidence_decidability.py" in select_tests([module], repo_root=Path("."))

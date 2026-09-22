@@ -22,8 +22,10 @@ The scheduler CLI SHALL provide a read-only `list-operator-actions` subcommand t
 - **THEN** the command SHALL list those passes under `unreadable_passes` or `non_evaluating_passes` and exit `3`, never `0`
 
 #### Scenario: A window of size-fallback passes is undecidable
-- **WHEN** every scanned pass is a size-fallback product whose original payload had a breaker-released not-selected source cycle and no other listed decision
+- **WHEN** every scanned pass is a size-fallback product whose breaker-released source-cycle projection was dropped (marker `dropped` or absent) and which carries no other listed decision
 - **THEN** the command SHALL report those passes under `non_evaluating_passes` and exit `3`, never `0`
+- **AND WHEN** such a pass instead carries a `summarized` projection holding a breaker-released cycle
+- **THEN** each of its models SHALL be listed and the command SHALL exit `1`
 - **AND WHEN** such a pass still carries a summarized blocked candidate of a listed decision
 - **THEN** that candidate SHALL be listed and the command SHALL exit `1`
 

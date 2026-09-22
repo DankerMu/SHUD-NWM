@@ -14,10 +14,15 @@ models are read from the not-selected ``source_cycles`` entry instead.
 Evidence only, never the journal: the journal carries no decisions.  A pass
 only answers "nothing waits" when candidate construction ran in it and its
 evidence is whole: its status must be in :data:`EVALUATING_PASS_STATUSES`, and
-it must not be a size-fallback artifact -- ``bounded_evidence_payload`` empties
-``source_cycles``, the only place a breaker-released cycle appears, so such a
-pass can still LIST its summarized blocked candidates but can never prove none
-waits.  Nor may an OLDER decidable pass answer for a newer pass that may have
+it must not be a size-fallback artifact -- ``bounded_evidence_payload`` keeps at
+most a CAPPED projection of the breaker-released ``source_cycles`` entries
+(#2402) and drops every other one, so such a pass can still LIST what that
+projection and its summarized blocked candidates hold but can never prove none
+waits.  A pass written by the NON-BLOCKING SUMMARY tier (#1905: true status,
+``evidence_compaction.mode: non_blocking_summary``, no ``limit`` block) is not a
+size fallback at all -- its rows carry every field read below and every other
+top-level key is verbatim -- so it is read exactly like the same pass written in
+full.  Nor may an OLDER decidable pass answer for a newer pass that may have
 evaluated candidates it can not show (rounds 3/4 r3-01, r4-02): the breaker may
 have engaged after the decidable pass.  Only a TRANSPARENT pass
 (:data:`TRANSPARENT_PASS_STATUSES`) is known to hide nothing; any other
@@ -74,7 +79,9 @@ BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_bre
 #: tell which, so it is non-evaluating too.  A size-fallback artifact (status
 #: ``resource_limit_blocked`` with summarized/dropped candidate lists) is
 #: non-evaluating whatever ``limit.pre_limit_status`` it kept: its
-#: ``source_cycles`` were emptied (reason ``size_fallback_source_cycles_absent``).
+#: ``source_cycles`` were either summarized to the capped breaker-released
+#: projection (:data:`SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON`) or lost
+#: entirely (:data:`SIZE_FALLBACK_NON_EVALUATING_REASON`).
 #: Recency (round 4): a decidable pass clears the hidden-pass flag, a
 #: :data:`TRANSPARENT_PASS_STATUSES` pass leaves it, every other pass arms it.
 EVALUATING_PASS_STATUSES = frozenset(
@@ -116,12 +123,26 @@ EVALUATING_PASS_STATUSES = frozenset(
 #: with the full candidate lists and ``source_cycles`` (1328-1343).  NOT here:
 #: ``lease_lost`` (988) and the exception-path ``resource_limit_blocked`` (1473)
 #: run after construction and empty the lists; a size-fallback product keeps
-#: status ``resource_limit_blocked`` and emptied ``source_cycles``.
+#: status ``resource_limit_blocked`` and at most the capped breaker-released
+#: ``source_cycles`` projection.
 TRANSPARENT_PASS_STATUSES = frozenset(("lock_contended", "preflight_blocked"))
 _SIZE_FALLBACK_STATUS = "resource_limit_blocked"
 _SIZE_FALLBACK_CANDIDATE_LISTS = frozenset(("summarized", "dropped"))
 STATUS_NOT_EVALUATING_REASON = "status_not_evaluating"
 SIZE_FALLBACK_NON_EVALUATING_REASON = "size_fallback_source_cycles_absent"
+#: #2402: the size fallback no longer empties ``source_cycles`` wholesale -- it
+#: keeps a CAPPED projection of the breaker-released not-selected entries and
+#: marks ``limit.source_cycles`` ``summarized``.  Those entries are listed from
+#: the projection exactly as from a full pass, so such a pass can ANSWER for the
+#: released cycles it kept; it still can not prove that nothing else was
+#: released (every other source cycle is gone, and the projection may itself have
+#: overflowed its cap -- visible as ``retained < breaker_released_total``), so it
+#: stays non-evaluating and arms the hidden-pass flag, with its own reason.  A
+#: fallback product whose marker is ABSENT (written before this projection
+#: existed) or ``dropped`` keeps :data:`SIZE_FALLBACK_NON_EVALUATING_REASON`:
+#: absent is read as dropped, never as "nothing was released".
+SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON = "size_fallback_source_cycles_summarized"
+_SIZE_FALLBACK_SOURCE_CYCLES_SUMMARIZED = "summarized"
 #: Round 5 r5-01.  A pass the operator narrowed (backfill off, filters naming a
 #: subset of models/basins/an expression, ``--source`` naming less than
 #: :data:`SCOPE_COMPLETE_SOURCES`, a ``cycle_window.lookback_hours`` of ``0``,
@@ -225,9 +246,13 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "scope_unknown, no_models_evaluated) makes the window undecidable from where it "
     "sits. The reason is reported per pass under non_evaluating_passes / "
     "unreadable_passes and is one of status_not_evaluating, "
-    "size_fallback_source_cycles_absent, scope_narrowed, scope_unknown, "
+    "size_fallback_source_cycles_absent, size_fallback_source_cycles_summarized, "
+    "scope_narrowed, scope_unknown, "
     "no_models_evaluated; an empty root counts, a size-fallback pass never counts as "
-    "evaluating because its source_cycles were dropped, and a pass file that vanished "
+    "evaluating because it keeps at most a capped projection of its breaker-released "
+    "source_cycles (limit.source_cycles summarized -- those models are still listed, "
+    "and an overflow shows as retained < breaker_released_total) and drops every other "
+    "one, while a marker that is dropped or absent means it kept none, and a pass file that vanished "
     "between the directory scan and its stat is reported under unreadable_passes and "
     "vetoes exit 0 wherever it sat). A pass the operator narrowed -- backfill "
     "disabled, --model-id/--basin-id filters, --source naming less than the whole "
@@ -402,10 +427,19 @@ def _non_evaluating_entry(name: str, payload: Mapping[str, Any]) -> dict[str, An
     limit = limit if isinstance(limit, Mapping) else {}
     if status == _SIZE_FALLBACK_STATUS and limit.get("candidate_lists") in _SIZE_FALLBACK_CANDIDATE_LISTS:
         kept = limit.get("pre_limit_status")
+        source_cycles_marker = limit.get("source_cycles")
+        summarized = (
+            isinstance(source_cycles_marker, Mapping)
+            and source_cycles_marker.get("status") == _SIZE_FALLBACK_SOURCE_CYCLES_SUMMARIZED
+        )
         return {
             "pass": name,
             "status": str(kept) if kept not in (None, "") else _SIZE_FALLBACK_STATUS,
-            "reason": SIZE_FALLBACK_NON_EVALUATING_REASON,
+            "reason": (
+                SIZE_FALLBACK_SUMMARIZED_NON_EVALUATING_REASON
+                if summarized
+                else SIZE_FALLBACK_NON_EVALUATING_REASON
+            ),
         }
     if not (isinstance(status, str) and status in EVALUATING_PASS_STATUSES):
         return {

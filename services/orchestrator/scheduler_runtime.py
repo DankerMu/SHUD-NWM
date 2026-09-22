@@ -1453,6 +1453,16 @@ def run_once(self) -> SchedulerPassResult:
             # CLI statuses agree. That fallback keeps the pre-fallback status
             # readable as ``limit.pre_limit_status`` on the artifact, so the
             # overwrite loses no diagnosis (issue #1168).
+            #
+            # #1905: the fallback is no longer the first answer to an oversized
+            # payload. The non-blocking summary tier
+            # (``scheduler_evidence_payload._non_blocking_summary_payload``) runs
+            # first and KEEPS this status, summarizing only the candidate lists
+            # and recording ``evidence_compaction.mode: non_blocking_summary``
+            # with no ``limit`` block, so a candidate-heavy healthy pass no
+            # longer reads as blocked to ``list-operator-actions``. Only when
+            # that summary still does not fit does the status rewrite above
+            # happen.
             _finalize_timing_into_evidence(evidence, collector, pass_status)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)

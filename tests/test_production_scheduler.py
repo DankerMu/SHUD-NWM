@@ -20705,6 +20705,10 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
         "max_evidence_bytes": 2_000,
         "pre_limit_status": "submitted",
         "candidate_lists": "dropped",
+        # #2402: the breaker-released source-cycle marker rides the same
+        # block. This payload has no source cycle at all, so nothing was
+        # released and nothing was retained.
+        "source_cycles": {"status": "summarized", "breaker_released_total": 0, "retained": 0},
     }
     assert shim_payload["pass_id"] == "scheduler_20260521120000_bounded_shim"
     assert "artifact_path" in shim_payload
@@ -21525,18 +21529,19 @@ def test_bounded_evidence_drops_candidate_lists_before_restart_reconcile() -> No
 
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_droppable_order")
 
-    # Measured for this payload (budget scan 2_300..7_000 step 10): 5_230-5_680 is the
-    # contiguous band where the drop loop stops after `candidates`, so `blocked_candidates`
-    # keeps its summary row and `restart_reconcile` keeps its compact block. 5_400 is an
-    # interior point of that band.
+    # Re-measured after #2402 added the `limit.source_cycles` marker (~85 bytes,
+    # budget scan 2_300..8_000 step 10): 5_430-5_960 is the contiguous band where
+    # the drop loop stops after `candidates`, so `blocked_candidates` keeps its
+    # summary row and `restart_reconcile` keeps its compact block. 5_700 is an
+    # interior point of that band (it was 5_230-5_680 / 5_400 before the marker).
     bounded = scheduler_module._bounded_evidence_payload(
         payload,
         reason="evidence_size_limit_exceeded",
-        max_evidence_bytes=5_400,
+        max_evidence_bytes=5_700,
     )
     rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
 
-    assert len(rendered.encode("utf-8")) <= 5_400
+    assert len(rendered.encode("utf-8")) <= 5_700
     assert bounded["limit"]["candidate_lists"] == "dropped"
     assert bounded["candidates"] == []
     assert bounded["blocked_candidates"] == [_expected_bounded_blocked_candidate_summary()]
@@ -22291,7 +22296,12 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
         config=config,
         require_safe_directory_final_component=scheduler_module._require_safe_directory_final_component,
         require_under_workspace=scheduler_module._require_under_workspace,
-        max_evidence_bytes=1_500,
+        # 1_500 -> 1_700 (#2402): the `limit.source_cycles` marker adds ~85
+        # bytes to the fallback's limit block, so at 1_500 this payload now
+        # reaches the terminal `_compact_limit` floor (reason only) instead of
+        # the observability floor this test is about. The budget moves; the
+        # asserted shape does not.
+        max_evidence_bytes=1_700,
         bounded_evidence_payload=scheduler_evidence.bounded_evidence_payload,
         write_new_regular_file=scheduler_evidence.write_new_regular_file,
         require_evidence_artifact_available=scheduler_evidence.require_evidence_artifact_available,
@@ -22335,12 +22345,13 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
     assert persisted_reservation["status"] == "reserved"
     assert persisted_reservation["proof"] == "scheduler_evidence_directory_write_before_production_mutation"
     assert persisted_final["status"] == "resource_limit_blocked"
-    assert len(Path(artifact_path or "").read_bytes()) <= 1_500
+    assert len(Path(artifact_path or "").read_bytes()) <= 1_700
     assert persisted_final["limit"] == {
         "reason": "evidence_size_limit_exceeded",
-        "max_evidence_bytes": 1_500,
+        "max_evidence_bytes": 1_700,
         "pre_limit_status": "submitted",
         "candidate_lists": "dropped",
+        "source_cycles": {"status": "summarized", "breaker_released_total": 0, "retained": 0},
     }
     assert persisted_final["evidence_pre_execution"]["status"] == "reserved"
     assert evidence["status"] == "resource_limit_blocked"

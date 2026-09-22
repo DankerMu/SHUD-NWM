@@ -93,6 +93,20 @@ _EMPTY_MAPPING_DROPPABLE_BOUNDED_EVIDENCE_FIELDS = frozenset(
         "restart_reconcile",
     )
 )
+#: #2402: how many breaker-released ``source_cycles`` entries the bounded
+#: fallback keeps.  A breaker-released cycle is the ONLY place a released
+#: quarantine appears -- it never reaches candidate construction -- so emptying
+#: ``source_cycles`` wholesale made every size-fallback pass unable to show that
+#: nothing else was released.  Each projected row is four scalars plus one model
+#: list, so 64 rows stay well inside the byte budget while covering far more
+#: released cycles than a pass can produce (the backfill leg releases
+#: consecutive cycles from the oldest of ONE discovery window per source).
+#: Overflow beyond the cap stays visible: ``limit.source_cycles`` reports both
+#: the released total and the retained count.
+_BOUNDED_SOURCE_CYCLE_PROJECTION_LIMIT = 64
+#: The one ``selection_reason`` the projection keeps, written by
+#: ``scheduler_discovery.py`` on a breaker-released not-selected cycle.
+_BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_breaker_engaged"
 _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "finished_at",
     "duplicate_exclusions",
