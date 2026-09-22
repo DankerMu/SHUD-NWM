@@ -19198,3 +19198,11 @@ def test_terminal_recency_modules_select_their_requirement_suite() -> None:
     ):
         assert Path(module).is_file(), module
         assert "tests/test_scheduler_terminal_recency.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_quarantine_identity_authority_suite_is_selected_by_the_journal() -> None:
+    # #2397: the identity-authority requirement suite is named after neither the
+    # journal nor its consumers, so only the per-file row reaches it.
+    module = "services/orchestrator/file_orchestration_journal.py"
+    assert Path(module).is_file(), module
+    assert "tests/test_quarantine_identity_authority.py" in select_tests([module], repo_root=Path("."))

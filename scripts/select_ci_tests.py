@@ -1220,6 +1220,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # #2420: the provenance publisher reads the source-owned publication view
     # and fail-closes on blocked journal rows, so a journal-only PR must run it.
     "tests/test_pipeline_job_provenance_publisher.py",
+    # #2397: the §8.7 identity authority (completed hydro_run vs a newer
+    # accepted-submit master) lives in this module; its requirement suite drives
+    # real journals through the real lifecycle and is named after neither file.
+    # DB-free, 7 tests in ~13s.
+    "tests/test_quarantine_identity_authority.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (

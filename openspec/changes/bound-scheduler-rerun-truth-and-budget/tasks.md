@@ -26,10 +26,10 @@
 
 ## 2. #2397 — newest truth wins for §8.7 identity authority
 
-- [ ] 2.1 Red first: through the real `create_hydro_run_from_basin` and pipeline terminal writes, complete run 1 recording X, then a same-run_id rerun with quarantine provenance recording Y. `completed_pipeline_init_state_identity` returns X (red).
-- [ ] 2.2 Fix per design D2. Green: it returns Y, and the report names the `hydro_run` comparison key and shows it survives `update_hydro_run_status`.
-- [ ] 2.3 After a rerun recording the correct lineage, `_journal_predecessor_identity_quarantine` returns `None` and the breaker does not engage. When the rerun records the stale X again, the breaker engages exactly as before.
-- [ ] 2.4 Legacy shape (no accepted-submit master, identity only on `hydro_run`) returns the same identity as before. The discovery-side §8.7 scoring reads the new authority, with one assertion through `scheduler_discovery`.
+- [x] 2.1 Red first: through the real `create_hydro_run_from_basin` and pipeline terminal writes, complete run 1 recording X, then a same-run_id rerun with quarantine provenance recording Y. `completed_pipeline_init_state_identity` returns X (red).
+- [x] 2.2 Fix per design D2. Green: it returns Y, and the report names the `hydro_run` comparison key and shows it survives `update_hydro_run_status`.
+- [x] 2.3 After a rerun recording the correct lineage, `_journal_predecessor_identity_quarantine` returns `None` and the breaker does not engage. When the rerun records the stale X again, the breaker engages exactly as before.
+- [x] 2.4 Legacy shape (no accepted-submit master, identity only on `hydro_run`) returns the same identity as before. The discovery-side §8.7 scoring reads the new authority, with one assertion through `scheduler_discovery`.
 
 ## 3. #2404 — retry mint shares the budget read
 
