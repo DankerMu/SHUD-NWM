@@ -12087,6 +12087,23 @@ class FileJournalRetryService:
         job = self.repository.get_pipeline_job(job_id)
         if job is None:
             return None
+        if _is_blocked_query_job(job):
+            # #2387: degrade like the sibling ``submission_runtime_root_resolution``.
+            # Without this branch ``_source_id_from_job`` raises
+            # ``file_journal_missing_identity`` on the sentinel's empty
+            # ``cycle_id``, and because the whole provenance walk runs inside
+            # ``attempt_manual_retry``'s ``except Exception`` -- AFTER the pending
+            # retry row is minted -- that fault is recorded as a
+            # ``submission_failed`` row carrying a fabricated
+            # ``SBATCH_SUBMISSION_FAILED`` blamed on a gateway that was never
+            # called.  The warning is the discriminator, as it is for the sibling.
+            reason, field = _blocked_query_job_fault(job)
+            LOGGER.warning(
+                "manual retry predecessor lookup blocked: reason=%s field=%s",
+                reason,
+                field,
+            )
+            return None
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")
@@ -12126,9 +12143,14 @@ class FileJournalRetryService:
 
         NO second redaction.  The evidence was already reduced by
         ``_runtime_root_resolution_evidence`` (``redact_payload`` over the whole
-        mapping plus bounded per-value redaction) and persisted through
-        ``_public_evidence``, which additionally renders ``*_path``/``*_root``
-        keys as ``[local-path]``.  The database lane re-applies
+        mapping plus bounded per-value redaction) and rendered at the journal's
+        own event boundary by ``_public_pipeline_event_payload``, which
+        additionally renders ``*_path``/``*_root`` keys as ``[local-path]`` and
+        URI values as ``[uri]``/``[object-uri]``.  That rendering is the WRITER's
+        single pass (#2306): the writers hand ``insert_pipeline_event`` an
+        unrendered mapping so the caller-boundary anti-laundering strip cannot
+        meet -- and null -- the journal's own placeholders.  The database lane
+        re-applies
         ``_redacted_mapping`` on read only because its stored mapping never
         passed that public scrub.  Returning the persisted mapping unchanged is
         what makes "response equals persisted event details" provable.
@@ -12211,6 +12233,16 @@ class FileJournalRetryService:
     ) -> _RuntimeRootCandidateBatch:
         job = self.repository.get_pipeline_job(job_id)
         if job is None:
+            return _RuntimeRootCandidateBatch(candidates=[])
+        if _is_blocked_query_job(job):
+            # #2387: same degrade as ``_file_retry_previous_job_id`` above -- an
+            # unreadable candidate is skipped and the walk continues on the rest.
+            reason, field = _blocked_query_job_fault(job)
+            LOGGER.warning(
+                "manual retry runtime-root event scan blocked: reason=%s field=%s",
+                reason,
+                field,
+            )
             return _RuntimeRootCandidateBatch(candidates=[])
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
@@ -12329,10 +12361,15 @@ class FileJournalRetryService:
             "slurm_job_id": written.get("slurm_job_id"),
             "gateway_status": str(payload.get("status")) if payload.get("status") is not None else None,
         }
+        # #2306: unrendered, for the same reason as the sibling failure writer
+        # (``_manual_retry_submission_failure_details``).  Both events of one
+        # manual retry go through ``_public_pipeline_event_payload`` after the
+        # caller-boundary strip, so the two cannot persist the same root in two
+        # shapes.
         if runtime_root_resolution is not None:
-            details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
+            details["runtime_root_resolution"] = runtime_root_resolution
         if runtime_root_contract is not None:
-            details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
+            details["runtime_root_contract"] = runtime_root_contract
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=job_id,
@@ -12375,12 +12412,31 @@ class FileJournalRetryService:
         return written
 
     def _manual_retry_source_for_run(self, run_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Select the row a manual retry would act on, or refuse a read it could not make.
+
+        #2385: a refused by-run read used to be DISCARDED here by a ``job_id``
+        comparison, which emptied the candidate list and made both callers answer
+        "this run has nothing to retry" (404 ``RETRY_NOT_FOUND``).  The refusal
+        now precedes every use of ``safe_jobs`` and surfaces as the existing 409
+        ``RETRY_EVIDENCE_INVALID`` carrying the journal's own reason and field,
+        so genuinely-empty (404), active (409 ``RETRY_CONFLICT``) and unreadable
+        (409 ``RETRY_EVIDENCE_INVALID``) stay three distinguishable answers.
+
+        The durable run read is wrapped for the same reason: it had no ``except``
+        at all, so a fault that also hit the cycle replay escaped this lane
+        untyped.  No new lock -- both callers already hold the cycle write lock.
+        """
+
         jobs = self.repository.query_pipeline_jobs_by_run(run_id)
-        safe_jobs = sorted(
-            (job for job in jobs if str(job.get("job_id") or "") != "file_journal_read_blocked"),
-            key=_file_retry_job_truth_sort_key,
-        )
-        durable_run = self.repository._hydro_run_for(run_id)
+        for job in jobs:
+            if _is_blocked_query_job(job):
+                reason, field = _blocked_query_job_fault(job)
+                raise RetryEvidenceInvalidError(run_id, reason=reason, field=field)
+        safe_jobs = sorted(jobs, key=_file_retry_job_truth_sort_key)
+        try:
+            durable_run = self.repository._hydro_run_for(run_id)
+        except FileOrchestrationJournalError as error:
+            raise RetryEvidenceInvalidError(run_id, reason=str(error.reason), field=str(error.field)) from error
         durable_status = str(durable_run.get("status") or "") if durable_run is not None else None
         if durable_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
             return None, None
@@ -13190,12 +13246,23 @@ def _manual_retry_submission_failure_details(
         "error_code": error_code,
         "error_message": error_message,
     }
+    # #2306: handed over UNRENDERED.  ``insert_pipeline_event`` routes through
+    # ``_append_validated_record_unlocked``, which strips caller-supplied
+    # ``[object-uri]``/``[uri]`` placeholders FIRST and only then renders the
+    # whole ``details`` tree through ``_public_pipeline_event_payload``.
+    # Pre-rendering here inverted that layering: the strip met the journal's own
+    # deliberate placeholders and nulled them, so a URI-shaped runtime root
+    # reached the 503 as ``present: true, value: null`` while the database lane
+    # sent ``[object-uri]``/``[uri]``.  ``_runtime_root_resolution_from_error`` /
+    # ``_runtime_root_contract_from_error`` already return ``_redacted_mapping``
+    # output (secrets and URL credentials gone, roots otherwise raw), which is
+    # exactly the input the strip is meant to see.
     runtime_root_resolution = _runtime_root_resolution_from_error(error)
     if runtime_root_resolution is not None:
-        details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
+        details["runtime_root_resolution"] = runtime_root_resolution
     runtime_root_contract = _runtime_root_contract_from_error(error)
     if runtime_root_contract is not None:
-        details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
+        details["runtime_root_contract"] = runtime_root_contract
     return details
 
 
@@ -13704,11 +13771,14 @@ def _blocked_query_job(
     #1953: the status names the blocked read instead of borrowing the vocabulary
     of a job that is actually running.  Everything else is unchanged -- the
     ``job_id`` defaults, the ``file_journal`` marker, the reason token, the field
-    and the identifiers -- because the readers that key on the marker, and
-    ``_manual_retry_source_for_run``'s filter by ``job_id``, depend on exactly
-    those.  The row stays PRESENT and non-terminal: the duplicate-submission and
-    active-cycle guards read it as an in-flight job, which is what keeps them
-    refusing to schedule against a journal nobody could read.
+    and the identifiers -- because every reader that decides on this row keys on
+    the marker through :func:`_is_blocked_query_job` and reports the fault
+    through :func:`_blocked_query_job_fault` (#2385/#2387: the retry-lane
+    consumers that used to compare ``job_id`` no longer do; no identity field
+    discriminates all five lanes).  The row stays PRESENT and non-terminal: the
+    duplicate-submission and active-cycle guards read it as an in-flight job,
+    which is what keeps them refusing to schedule against a journal nobody could
+    read.
     """
 
     return _public_evidence(
@@ -13729,6 +13799,45 @@ def _blocked_query_job(
             },
         }
     )
+
+
+def _is_blocked_query_job(job: Any) -> bool:
+    """True only for the synthetic row :func:`_blocked_query_job` mints.
+
+    Shape-keyed on the marker, never on ``job_id`` and never on the status
+    literal (#2385/#2387 design D1).  No identity field discriminates all five
+    query lanes: by-run and by-cycle keep the real ``run_id``/``cycle_id`` and
+    the DEFAULT ``job_id``, while by-id keeps the real ``job_id``.  Only the
+    marker covers every lane.
+
+    Accepts ``Any`` and answers ``False`` for anything that is not a Mapping
+    carrying the marker, because ``chain_forecast_execution``'s classifier
+    duck-types its repository: when there is no ``get_pipeline_job`` it reads a
+    plain ``repository.jobs`` mapping, and such a row must read as a normal one.
+
+    ``pipeline_job_provenance`` deliberately keys on the status literal instead:
+    its input is the publication projection, whose closed field allowlist drops
+    ``file_journal`` entirely, so the marker is not available there at all.
+    """
+
+    if not isinstance(job, Mapping):
+        return False
+    marker = job.get("file_journal")
+    return isinstance(marker, Mapping) and marker.get("status") == "blocked"
+
+
+def _blocked_query_job_fault(job: Mapping[str, Any]) -> tuple[str, str]:
+    """The journal's own ``(reason, field)`` off a row :func:`_is_blocked_query_job` accepted.
+
+    Every consumer surfaces exactly these two tokens -- in a classified error or
+    in a warning -- so the operator sees the journal's refusal rather than a
+    fault the consumer derived from the unreadable row.
+    """
+
+    marker = job.get("file_journal")
+    if not isinstance(marker, Mapping):
+        return "", ""
+    return str(marker.get("reason") or ""), str(marker.get("field") or "")
 
 
 def _job_is_active(job: Mapping[str, Any]) -> bool:

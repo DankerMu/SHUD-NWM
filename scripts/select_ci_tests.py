@@ -1236,6 +1236,47 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # real journals through the real lifecycle and is named after neither file.
     # DB-free, 7 tests in ~13s.
     "tests/test_quarantine_identity_authority.py",
+    # #2385/#2387: the read-blocked sentinel's coupling pin. Its whole subject is
+    # this module -- the `_blocked_query_job` row shape across all five query
+    # lanes, the one `_is_blocked_query_job` discriminator both retry-lane
+    # consumer ends key on, the manual-retry source selector's refusal and the
+    # two runtime-root provenance readers' degrade. Every import is
+    # function-local, so no importer derivation reaches it; this stop-rule site
+    # is its route for the journal. DB-free, 17 tests in ~1s.
+    "tests/test_file_journal_read_blocked_consumers.py",
+    # #2306: the file lane's manual-retry root evidence is rendered ONCE, in
+    # this module -- `_manual_retry_submission_failure_details` and
+    # `_record_manual_retry_submission_success` -- and its oracles outside the
+    # journal's own same-name suite are these six tests in tests/test_retry.py,
+    # whose bare name appears solely on the broad `services/orchestrator/**`
+    # rule that this stop rule shadows. The suite has no top-level journal
+    # import either, so no importer derivation reaches it: this at-site tuple is
+    # the journal's only route to them.
+    # Not all six discriminate the render.
+    # `..._db_free_runtime_evidence_values_survive_the_single_render` stays
+    # GREEN under a pure revert of the #2306 writer-side pre-render -- its
+    # values are `[local-path]`/`file`/`true`, which the anti-laundering strip
+    # never touched -- so it rides as the requirement oracle for the
+    # `db_free_runtime.resolved.*.value` clause rewritten in the same commit,
+    # not as a render-once discriminator; likewise
+    # `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
+    # byte-identity guard whose literal was captured from pre-change source and
+    # is green on both sides by construction (fixture task 5.1b). They route
+    # because a journal-only PR must run the clause's oracles, not because they
+    # bite on the revert.
+    # Node ids rather than the whole file -- not a runtime argument (the whole
+    # suite is DB-free, 175 tests in 2.23s; these six run in 0.86s) but a
+    # subject one: the other 169 are the retry route's own contract and already
+    # route through `services/orchestrator/retry.py`'s same-name row, so the
+    # journal's rule stays at what the journal decides. The
+    # `test_production_scheduler.py::` node ids on the scheduler_runtime.py rule
+    # are the same shape.
+    "tests/test_retry.py::test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane",
+    "tests/test_retry.py::test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery",
+    "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
+    "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
+    "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
+    "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -2687,6 +2728,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # owned and named after none of them, so this directory rule is its
             # route. DB-free, sub-second.
             "tests/test_chain_cross_stage_state.py",
+            # #2387: the read-blocked sentinel's chain consumer end. The suite
+            # drives `chain_forecast_execution._retry_job_for_stage_result`
+            # through its real caller `_schedule_cycle_stage_retry`
+            # (chain_forecast_orchestrator_cycle.py) to prove the classified
+            # refusal precedes `handle_failed_job` -- neither module is
+            # stop-rule owned and it is named after neither, so this directory
+            # rule is its route for them. Its journal pair IS stop-rule owned
+            # and rides FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS, per this
+            # rule's #1455 note above. Every import is function-local, so no
+            # importer derivation can reach it. DB-free, 17 tests in ~1s.
+            "tests/test_file_journal_read_blocked_consumers.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL
@@ -5145,7 +5197,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_pipeline_ops_identity_envelope.py",
+            # #2385/#2387: the read-blocked sentinel suite drives
+            # `POST /runs/{run_id}/retry` through TestClient for both consumer
+            # ends -- the 409 `RETRY_EVIDENCE_INVALID` refusal body and the
+            # recorded-failure delta on the provenance walk -- so a change to
+            # this route's except table or its 503 assembly must run it.
+            "tests/test_file_journal_read_blocked_consumers.py",
         ),
+    ),
+    PathTestRule(
+        # #2385: the manual-retry source selector's THIRD caller. `_preview`
+        # runs outside `main()`'s try, so the selector's new refusal has to be
+        # turned into a receipt entry here; the sentinel suite is the only
+        # oracle for that receipt shape and exit code.
+        "scripts/node22_manual_retry_failed_runs.py",
+        ("tests/test_file_journal_read_blocked_consumers.py",),
     ),
     *(
         PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)

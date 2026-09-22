@@ -166,9 +166,12 @@ def test_blocked_read_does_not_claim_the_job_is_running(tmp_path: Path) -> None:
 def test_get_pipeline_job_blocked_row_keeps_the_real_job_id(tmp_path: Path) -> None:
     """``job_id`` defaults are unchanged by #1953 (design D7).
 
-    ``_manual_retry_source_for_run`` filters the sentinel by ``job_id``, and the
-    retry route's 503 pin depends on ``get_pipeline_job`` keeping the REAL id, so
-    only the status literal moves.
+    The retry route's 503 pin depends on ``get_pipeline_job`` keeping the REAL
+    id, so only the status literal moves.  #2385/#2387: the retry-lane consumers
+    no longer compare ``job_id`` at all -- they key on the ``file_journal``
+    marker through ``_is_blocked_query_job``, because the by-run and by-cycle
+    lanes keep the DEFAULT id while this lane keeps the real one, so no identity
+    field discriminates all five lanes.
     """
 
     budgeted = _budgeted(tmp_path)

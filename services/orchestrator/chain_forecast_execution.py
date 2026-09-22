@@ -21,6 +21,10 @@ from services.orchestrator.accepted_submit_identity import (
 from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_identity_is_valid as _forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.file_orchestration_journal import (
+    _blocked_query_job_fault,
+    _is_blocked_query_job,
+)
 from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
     publish_runs_pipeline_job_provenance,
@@ -818,6 +822,25 @@ def _retry_job_for_stage_result(
         record = repository_jobs.get(result.pipeline_job_id) if isinstance(repository_jobs, Mapping) else None
     if record is None:
         return None
+    # #2387: the journal's read-blocked sentinel is not an answer about the job.
+    # Built into a ``PipelineJob`` it would carry the journal's refusal reason as
+    # ``error_code``, which ``should_auto_retry`` reads as non-transient and turns
+    # into ``mark_permanently_failed`` on a job nobody could read.  Refuse with a
+    # classified error rather than ``None``: the caller reads ``None`` as "no
+    # retry decision" and continues silently, which is strictly worse.  The check
+    # sits after the ``store.get_job`` short-circuit above so the database lane
+    # is untouched, and a plain ``repository.jobs`` mapping reads as not-blocked.
+    if _is_blocked_query_job(record):
+        reason, field = _blocked_query_job_fault(record)
+        raise _chain.OrchestratorError(
+            "FILE_JOURNAL_READ_BLOCKED",
+            f"pipeline job read blocked by file journal state: {reason}",
+            {
+                "pipeline_job_id": str(result.pipeline_job_id),
+                "journal_reason": reason,
+                "journal_field": field,
+            },
+        )
 
     job = PipelineJob(
         job_id=str(record.get("job_id") or result.pipeline_job_id),

@@ -913,6 +913,75 @@ def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() ->
     assert "tests/test_retry_mint_floor.py" in selected
 
 
+def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_oracles() -> None:
+    """#2306: the file lane's manual-retry root evidence is rendered in the JOURNAL.
+
+    `_manual_retry_submission_failure_details` and
+    `_record_manual_retry_submission_success` own the single render at the event
+    boundary, and its oracles outside the journal's own same-name suite are six
+    tests in `tests/test_retry.py` -- a file the journal's stop rule shadows (the
+    broad `services/orchestrator/**` rule is the only place that name appears)
+    and which has no top-level journal import, so neither routing nor importer
+    derivation reached them.
+
+    Not all six discriminate the render.
+    `..._db_free_runtime_evidence_values_survive_the_single_render` is the
+    requirement oracle for the fixture's `db_free_runtime.resolved.*.value`
+    clause and is green on BOTH sides of the #2306 production edit -- its values
+    are `[local-path]`/`file`/`true`, which the anti-laundering strip never
+    touched -- so it rides as the clause's oracle, not as a render-once
+    discriminator; the same holds for
+    `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
+    byte-identity guard whose literal was captured from pre-change source
+    (fixture task 5.1b). A journal-only PR must run the clause's oracles
+    regardless of which of them bite on a revert.
+
+    Node ids, not the whole file: the other 169 tests there are the retry
+    route's own subject and already route through `services/orchestrator/retry.py`'s
+    same-name row. The negative half of this pin is what keeps that true.
+    """
+
+    selected = select_tests(["services/orchestrator/file_orchestration_journal.py"], repo_root=Path("."))
+
+    for node_id in (
+        "tests/test_retry.py::test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane",
+        "tests/test_retry.py::test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery",
+        "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
+        "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
+        "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
+        "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
+    ):
+        assert node_id in selected, node_id
+
+    assert "tests/test_retry.py" not in selected
+
+
+def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
+    """#2385/#2387: one suite pins BOTH consumer ends of one sentinel family.
+
+    Its whole point is that a later change cannot satisfy one end and silently
+    break the other, so every source it pins has to route to it -- the journal
+    (producer row, discriminator, selector, provenance readers), the chain
+    classifier, the operator CLI that consumes the selector's new refusal, and
+    the retry route whose 409 and 503 bodies it drives. Every import in the
+    suite is function-local, so no importer derivation reaches it and these four
+    rules are its only routes.
+    """
+
+    suite = "tests/test_file_journal_read_blocked_consumers.py"
+    for source in (
+        "services/orchestrator/file_orchestration_journal.py",
+        "services/orchestrator/chain_forecast_execution.py",
+        "scripts/node22_manual_retry_failed_runs.py",
+        "apps/api/routes/pipeline.py",
+    ):
+        assert suite in select_tests([source], repo_root=Path(".")), source
+
+    # The operator CLI's own same-name suite is not displaced by the new rule.
+    cli_selected = select_tests(["scripts/node22_manual_retry_failed_runs.py"], repo_root=Path("."))
+    assert "tests/test_node22_manual_retry_failed_runs.py" in cli_selected
+
+
 def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_suites() -> None:
     expected = {
         "tests/test_scheduler_journal_retention_planning.py",
@@ -1007,10 +1076,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 85 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # 86 targets (#2401/#2397 added the terminal-recency and identity-authority
     # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s; #2416 the
-    # cross-stage state-residue suite, sub-second), the
-    # rule's 82 plus three riders that arrive from OUTSIDE the
+    # cross-stage state-residue suite, sub-second; #2385/#2387 the read-blocked
+    # sentinel coupling pin, ~1s), the
+    # rule's 83 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1035,6 +1105,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and chain_runtime_utils.py.
         "tests/test_file_journal_full_tree_budget_contract.py",
+        # #2385/#2387: the read-blocked sentinel's coupling pin rides the broad
+        # orchestrator directory rule for its chain consumer end
+        # (chain_forecast_execution.py / chain_forecast_orchestrator_cycle.py),
+        # neither of which any narrow or stop rule owns. Its journal end rides
+        # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, 17 tests in ~1s.
+        "tests/test_file_journal_read_blocked_consumers.py",
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
