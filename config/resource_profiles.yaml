@@ -23,6 +23,17 @@ resource_profiles:
     max_concurrent: 32
     shud_threads: 4
   overrides:
+    # basins_hlj (27650 river segments): SHUD forecast ~30 min on 4 cores vs <=6 min
+    # for every other basin (2026-09-22, jobs 53388_2 / 53374_6, MaxRSS ~1.3 GB,
+    # CPU-bound). GFS and IFS direct-grid variants; registry rows carry shud_threads=12.
+    dg_3b091cccc163690de93cddd9c4c32472:
+      cpus_per_task: 12
+      memory_gb: 8
+      shud_threads: 12
+    dg_8a34ed2ba8f8dd22f2716405569628a9:
+      cpus_per_task: 12
+      memory_gb: 8
+      shud_threads: 12
     yangtze_shud_v12:
       cpus_per_task: 64
       memory_gb: 256
