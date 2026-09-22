@@ -3258,6 +3258,8 @@ def _run_wiring_a_build_candidates(
     journal_identity_field: str = "init_state_id",
     manifest_init_state_id: Any = _MANIFEST_MIRRORS_JOURNAL,
     repository_factory: Any | None = None,
+    seed_forcing_package: bool = True,
+    write_run_manifest: bool = True,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive ``_build_candidates`` over one journal-recognised completed cycle T.
 
@@ -3268,6 +3270,9 @@ def _run_wiring_a_build_candidates(
     seeded so the pre-existing
     ``strict_warm_start_successor_checkpoint_missing`` /
     ``terminal_run_manifest_missing`` legs cannot fire first.
+    ``write_run_manifest=False`` drops the run manifest so that leg IS the one
+    under test, and ``seed_forcing_package`` passes straight through to
+    ``_write_db_free_file_provider_fixtures`` (#2396).
 
     Returns ``_build_candidates``' full 5-tuple.
     """
@@ -3297,6 +3302,7 @@ def _run_wiring_a_build_candidates(
         cycle_time=cycle_time,
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
+        seed_forcing_package=seed_forcing_package,
     )
     _write_db_free_state_index_fixture(
         roots,
@@ -3351,12 +3357,13 @@ def _run_wiring_a_build_candidates(
         if manifest_init_state_id is _MANIFEST_MIRRORS_JOURNAL
         else manifest_init_state_id
     )
-    run_manifest = Path(roots["object_store_root"]) / "runs" / run_id / "input" / "manifest.json"
-    run_manifest.parent.mkdir(parents=True, exist_ok=True)
-    run_manifest.write_text(
-        json.dumps({"initial_state": {"quality": "fresh", "state_id": manifest_state_id}}),
-        encoding="utf-8",
-    )
+    if write_run_manifest:
+        run_manifest = Path(roots["object_store_root"]) / "runs" / run_id / "input" / "manifest.json"
+        run_manifest.parent.mkdir(parents=True, exist_ok=True)
+        run_manifest.write_text(
+            json.dumps({"initial_state": {"quality": "fresh", "state_id": manifest_state_id}}),
+            encoding="utf-8",
+        )
 
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),

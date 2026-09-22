@@ -366,6 +366,18 @@ run 在飞或不存在时拒绝）：
   （retention 的删除前沿是否钉住 blocked / 带确认物的候选**尚未实测**，两个方向都不要断言；
   设计缺口记在 #2412。）
 
+- **§8.7 quarantine 后代与 `--repair-missing-forcing` 互斥**（#2408；未带确认物的候选）：
+  strict warm-start 车道上，§8.7 journal-predecessor quarantine 重试
+  （`retry_journal_predecessor_identity_mismatch`）落到 missing-forcing blocked 后，修复策略
+  同样拒绝改判：`state_evidence.missing_forcing_repair = {status: rejected, reason:
+  journal_predecessor_quarantine_present, recorded_init_state_id, expected_init_state_id}`
+  （两个 id 即 `journal_predecessor_identity` 里的陈旧前驱 token 与 journal 期望的 token，排查
+  用这两个字段），候选留在 missing-forcing blocked 上、不提交。理由同 r2-01：改判后从 `forcing`
+  重启，而 quarantine provenance 只在 forecast cohort 的 reservation 处写，forcing 失败就是
+  「真提交了、断路器计数没动」。**处置同上**：不用 `--repair-missing-forcing`，先把该模型自己的
+  forcing 补回来——改名集非空用 `scripts/node22_backfill_forcing_for_model_ids.py`，否则按上面的
+  升级路径带外修复；之后 quarantine 重试从 `forecast` 重启、在 reservation 处被戳并计数。
+
 - **sink 拒绝 `blocked_operator_reentry_restart_stage_refused`**（#1555 round 4）：确认物匹配，
   但候选实际会重启的阶段不是 `forecast`（典型是 canonical 不 ready + raw manifest 就绪触发的
   `convert` 改写）。判定在候选清单构建完成后统一做一次，读候选自己的 `state_evidence`，正向比较

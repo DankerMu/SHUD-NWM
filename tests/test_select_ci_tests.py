@@ -1069,6 +1069,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort into the slot the monolith held -- the literal is compared
         # against `select_tests`'s sorted output, so placement matters.
         *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+        # #2396/#2407/#2408: the forecast-restart guard suite rides the broad
+        # orchestrator directory rule (scheduler_candidates.py importer gap).
+        "tests/test_quarantine_forecast_restart_guards.py",
         # #2397: the §8.7 identity-authority suite rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py`, scheduler_candidates.py,
@@ -19226,6 +19229,14 @@ def test_terminal_recency_modules_select_their_requirement_suite() -> None:
     ):
         assert Path(module).is_file(), module
         assert "tests/test_scheduler_terminal_recency.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_quarantine_forecast_restart_guard_suite_is_selected_by_scheduler_candidates() -> None:
+    # #2396/#2407/#2408: the guard suite is named after neither module it drives,
+    # so only the broad orchestrator directory rule reaches it.
+    module = "services/orchestrator/scheduler_candidates.py"
+    assert Path(module).is_file(), module
+    assert "tests/test_quarantine_forecast_restart_guards.py" in select_tests([module], repo_root=Path("."))
 
 
 def test_quarantine_identity_authority_suite_is_selected_by_the_journal() -> None:

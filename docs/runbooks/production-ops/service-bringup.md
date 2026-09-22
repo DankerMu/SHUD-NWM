@@ -416,7 +416,7 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 
 | 来源 | 车道 | 排空通道 |
 |---|---|---|
-| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本**（仅当改名集非空，见下）**；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`）——**除非该候选带 operator 重入确认物**，那种候选会被修复策略拒绝，见下面的块注；改名集为空时两条都不是通道，按块注里的升级路径带外修输入 |
+| #1843 strict warm-start 见证 | strict warm-start 车道（候选带 strict warm-start 证据） | 下面的回补脚本**（仅当改名集非空，见下）**；或 8.5 的运维授权单 cycle 修复（`--repair-missing-forcing`）——**除非该候选带 operator 重入确认物**，那种候选会被修复策略拒绝，见下面的块注；**或该 blocker 是未确认的 §8.7 quarantine 重试降下来的**（`missing_forcing_repair.reason = journal_predecessor_quarantine_present`，#2408，处置同块注，详见 [known-issues-pipeline.md](known-issues-pipeline.md) 的 exact-cycle 修复段）；改名集为空时两条都不是通道，按块注里的升级路径带外修输入 |
 | #1844 journal 前驱身份 quarantine 见证（blocker 带 `state_evidence.journal_predecessor_identity`，且 `artifact_guard.planned_retry_reason = journal_predecessor_identity_mismatch`） | 非 strict 车道 | 下面的回补脚本**（仅当改名集非空）**，否则走块注里的升级路径。8.5 的单 cycle 修复在这条车道上**不会改判这类候选**——但原因不是"策略没被调用"：策略有**两个**调用点，`scheduler_candidates.py:674`（在 `:657` 的 `if strict_warm_start is not None:` 之内）和 `:1860`（在 `_candidate_warm_admission_decision`，def 在 `:1838`），后者**无条件调用、且早于 `:1867-1871` 的 `strict_warm_start is None` 判断**，所以非 strict 车道上策略确实被求值。挡住它的是策略自己的第二个 early return（`:1903-1908`）：这条车道递进去的 decision 是 `skip` / `terminal_hydro_success`，不在 `_MISSING_FORCING_BLOCKER_REASONS` 里，于是原样返回、不写任何证据。净结果对 operator 不变：`--plan` 里这类候选**不会出现** `missing_forcing_repair` / `missing_forcing_repair_status` 证据（由 `tests/test_production_scheduler.py::test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_flag_on` 钉住，该测试用 spy 实测了"策略被调用、拿到的是 skip、没写证据"） |
 
 > **`--repair-missing-forcing` 与 operator 重入确认物互斥（r2-01）**：这个候选如果是靠
