@@ -913,6 +913,35 @@ def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() ->
     assert "tests/test_retry_mint_floor.py" in selected
 
 
+def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_oracles() -> None:
+    """#2306: the file lane's manual-retry root evidence is rendered in the JOURNAL.
+
+    `_manual_retry_submission_failure_details` and
+    `_record_manual_retry_submission_success` own the single render at the event
+    boundary, but their only oracles are five tests in `tests/test_retry.py` --
+    a file the journal's stop rule shadows (the broad `services/orchestrator/**`
+    rule is the only place that name appears) and which has no top-level journal
+    import, so neither routing nor importer derivation reached them.
+
+    Node ids, not the whole file: the other 170 tests there are the retry
+    route's own subject and already route through `services/orchestrator/retry.py`'s
+    same-name row. The negative half of this pin is what keeps that true.
+    """
+
+    selected = select_tests(["services/orchestrator/file_orchestration_journal.py"], repo_root=Path("."))
+
+    for node_id in (
+        "tests/test_retry.py::test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane",
+        "tests/test_retry.py::test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery",
+        "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
+        "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
+        "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
+    ):
+        assert node_id in selected, node_id
+
+    assert "tests/test_retry.py" not in selected
+
+
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
     """#2385/#2387: one suite pins BOTH consumer ends of one sentinel family.
 

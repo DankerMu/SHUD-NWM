@@ -615,12 +615,31 @@ def test_chain_classifier_refuses_a_blocked_by_id_read_with_a_classified_error(
 
 
 def test_chain_classifier_leaves_the_store_backed_database_lane_untouched(tmp_path: Path) -> None:
-    """Task 3.2: the guard sits AFTER the ``store.get_job`` short-circuit."""
+    """Task 3.2: the guard sits AFTER the ``store.get_job`` short-circuit.
+
+    The store's answer is the REAL sentinel row -- minted by the journal's own
+    ``_blocked_query_job``, marker and all -- precisely so this pin can fail for
+    the reason it names: hoist the discriminator above the short-circuit and the
+    classifier raises ``FILE_JOURNAL_READ_BLOCKED`` here instead of returning the
+    database lane's answer.  A marker-free stand-in would be green on both sides,
+    because ``_is_blocked_query_job`` answers False for anything unmarked.
+
+    The store lane owns its own answer whatever it looks like: this row can only
+    reach the classifier from a DATABASE-backed store, where the journal's
+    refusal vocabulary means nothing, so the guard must not read it.
+    """
 
     from services.orchestrator import chain_forecast_execution
 
+    journal = _journal()
     _root, repository, service = _seeded_journal(tmp_path)
-    store_job = object()
+    store_job = journal._blocked_query_job(_blocked_fault(), job_id=_JOB_ID)
+    assert store_job["file_journal"]["status"] == "blocked"
+    assert store_job["file_journal"]["reason"] == _BLOCK_REASON
+    assert store_job["file_journal"]["field"] == _BLOCK_FIELD
+    # The precondition that makes the hoist detectable: the discriminator the
+    # guard keys on says YES to this row.
+    assert journal._is_blocked_query_job(store_job)
 
     class _Store:
         def __init__(self) -> None:
