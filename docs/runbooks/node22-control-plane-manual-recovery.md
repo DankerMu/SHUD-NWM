@@ -33,39 +33,60 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 列出），并额外列出 breaker 释放了执行槽的 backfill cycle 的每个模型——这类 cycle 不构造候选，
 只出现在 not-selected `source_cycles` 里。
 
-- **evidence root 取值**（#2399）：`NHMS_SCHEDULER_EVIDENCE_ROOT` 必须取自 systemd unit
-  `nhms-compute-scheduler.service` 实际加载的 `infra/env/compute.scheduler-dbfree.env`。
-  node-22 checkout 里的 `infra/env/compute.env` 已漂移，**不要**用它。下面的命令若报 exit 2 或
-  `passes_scanned: 0`，说明 root 取错或该 root 下没有 pass——结论无效，先核对 root。
+- **evidence root 取值**（#2399）：**不要**引用登录 shell 里的 `$NHMS_SCHEDULER_EVIDENCE_ROOT`——
+  交互 shell 不加载 unit 的 EnvironmentFile，那个变量多半**根本没设**（空串 → `--evidence-root ""`
+  → 命令回落到同名环境变量 → 仍是空 → exit 2），更糟的情况是它被谁 export 成了别的路径，于是
+  命令在**错的目录**上干净地返回 `exit 0`——"没有待办"其实是"这里一份 pass 都没有"。
+  权威是 systemd unit `nhms-compute-scheduler.service` 实际加载的那份 env 文件；node-22 checkout
+  里的 `infra/env/compute.env` 是另一份、已漂移，**不要**用它。下面第一条命令把 root 从该文件里
+  显式取出来（`sed`，不 source，避免把整份 env 灌进当前 shell）：
 
 ```bash
 cd /scratch/frd_muziyao/NWM
+# 0) unit 到底加载了哪些 env 文件（核对下一行写死的路径就是其中之一）
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles
+# 1) 从那份文件里取 root（最后一次赋值生效，与 systemd 一致）
+EVIDENCE_ROOT="$(sed -n 's/^NHMS_SCHEDULER_EVIDENCE_ROOT=//p' \
+  /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env | tail -n 1)"
+echo "evidence_root=${EVIDENCE_ROOT:?未取到 root：核对上一条命令列出的 EnvironmentFiles}"
+# 2) 只有拿到非空 root 才跑列举
 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
   list-operator-actions \
-  --evidence-root "$NHMS_SCHEDULER_EVIDENCE_ROOT" \
+  --evidence-root "$EVIDENCE_ROOT" \
   --passes 6
 echo "exit=$?"
 ```
 
-`--evidence-root` 省略时取 `$NHMS_SCHEDULER_EVIDENCE_ROOT`；`--passes` 默认 6，必须是 ≥ 1 的整数
+- **receipt 必须自证跑对了地方**（#2399，两条都要看，缺一条结论作废）：
+  - `evidence_root` 字段 == 上面第 1 步取到的 `$EVIDENCE_ROOT`（命令把**实际扫描的** root 回显在
+    receipt 里，正是为了让这条核对不依赖记忆）；
+  - `passes_scanned > 0`。`passes_scanned: 0` 表示该 root 下一份终态 pass 文件都没有——这时的
+    `exit 3` 是"无从判定"，而**不能**读成"没有待办"；先回到第 0 步核对 root，再看 scheduler
+    timer 是否在跑。
+
+`--evidence-root` 省略时才回落到 `$NHMS_SCHEDULER_EVIDENCE_ROOT`（上面按口径显式传，不走这条）；
+`--passes` 默认 6，必须是 ≥ 1 的整数
 （否则 exit 2，与 root 取错同码）。输出是一行 sorted-key JSON receipt，退出码带语义：
 
 | exit | 含义 | 处置 |
 |---|---|---|
 | `1` | 列出了至少一条待办（`operator_actions` 非空） | 按第二步逐条处置 |
 | `0` | 扫过的窗口里**没有在册的五类待办，且窗口本身可信** | 不用动手；但它不是健康检查，见下 |
-| `3` | **无法判定**——命令本身跑成功了，只是这批 pass 不足以下结论 | 读 receipt 定位原因，等下一趟范围完整的 pass 再跑；**不得**当成 `0` |
+| `3` | **无法判定**——命令本身跑成功了，只是这批 pass（或一份掉队的 pre-execution 预留）不足以下结论 | 读 receipt 定位原因（`non_evaluating_passes` / `unreadable_passes` / `candidate_lists_dropped_passes` / `orphan_reservations`），等下一趟范围完整的 pass 再跑；**不得**当成 `0` |
 | `2` | **root 级**用法错误：evidence root 缺失/不可读（多半是 root 取错），或 `--passes` 不是 ≥ 1 的整数 | 核对上面的 root 口径与 `--passes` 后重跑 |
 
 **`2` 只表示 root 级失败。** 单个 pass 文件读不了——半写、超 5 MB、扫描过程中被 retention
 删掉——都**不是** `2`：它们计入 `unreadable_passes`，扫描继续，其余 pass 照常列出，结果最差是 `3`。
 所以看到 `2` 就去查 root 与 `--passes`，不要去查单个文件。
 
-receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candidate_id`、`source_id`、
+receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自证）、`passes_scanned`（实际扫到的
+终态 pass 份数，按上面那条自证 > 0）、`operator_actions` / `operator_action_count`（每条带
+`candidate_id`、`source_id`、
 `cycle_time`、`model_id`、`decision`、`reason`、`attempt`、`retry_limit`、`occurrences`、
 `recorded_init_state_id`、`first_seen_pass` / `last_seen_pass` / `seen_in_passes`）、
 `unreadable_passes`、`candidate_lists_dropped_passes`、`non_evaluating_passes`（每条带
-`pass` / `status` / `reason`）。
+`pass` / `status` / `reason`）、`orphan_reservations`（#2405，每条带 `reservation` / `pass_id` /
+`reserved_at` / `reason`，见下面 `3` 的最后一条）。
 
 - **合并了多趟的条目，值来自哪一趟**：同一候选在窗口里出现多趟时只列一条，除
   `first_seen_pass` / `seen_in_passes` 外**所有值字段都取 `last_seen_pass` 那一趟**（`candidate_id`
@@ -80,9 +101,21 @@ receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candi
     `preflight_blocked`、`lease_lost`、异常路径的 `resource_limit_blocked`，以及任何未来新增的
     未知 status 一律落在这一侧）。**凡是不在该白名单里的 status，一律按不可判定处理并升级上报，
     不是只向前等**：白名单是闭合集合，将来新增的候选构造后终态 status 若不在表里且成为常态，
-    本面会**持续** `3`，向前等永远等不到；口径与下面 `scope_unknown` 一致；
-  - `size_fallback_source_cycles_absent`——超 5 MB 预算的 size fallback 产物，写入器清空了
-    `source_cycles`，breaker 释放的 cycle 因此看不见（它自己摘要里的 blocked 候选仍会被列出）；
+    本面会**持续** `3`，向前等永远等不到；口径与下面 `scope_unknown` 一致。该白名单与写入方的机械
+    对账见 `tests/test_operator_action_status_closure.py`（#2442：从 writer 源码反算 status 字面量；
+    注意它盖不住"已有 status 的落盘时机挪到候选构造之前"这半边——那半边表现为**静默的 `exit 0`**，
+    不是 `3`）；
+  - `size_fallback_source_cycles_summarized`（#2402）——超 5 MB 预算的 size fallback 产物，但写入器
+    **保留了** breaker 释放条目的一份**有上限的**投影（`limit.source_cycles` 为
+    `{status: summarized, breaker_released_total, retained}`）：这些释放的模型**照常列在
+    `operator_actions` 里**（有待办即 `exit 1`），所以这条 reason 不等于"什么都看不见"。它仍然算
+    非可求值：投影之外的 source cycle 全丢了，且投影本身可能溢出——`retained <
+    breaker_released_total` 就是溢出的现场证据。处置：**先按列出的待办办**；没有待办时按
+    `3` 向前等；
+  - `size_fallback_source_cycles_absent`——同样是 size fallback 产物，但 `limit.source_cycles`
+    标记为 `dropped` **或整个不在**（后者是 #2402 之前的写入器写的旧文件，一律按 `dropped` 读，
+    绝不读成"没有释放"）：这趟 pass 一条 breaker 释放都留不下，因此看不见（它自己摘要里的 blocked
+    候选仍会被列出）；
   - `scope_narrowed`——这趟 pass 的范围被收窄了，见下一条；
   - `scope_unknown`——status 可求值，但 pass 文件里下面这些字段**有任一不在**，范围无从判断，
     按"可能只看了一部分"处理：
@@ -116,6 +149,16 @@ receipt 字段：`operator_actions` / `operator_action_count`（每条带 `candi
 
   另外 `candidate_lists_dropped_passes` 非空（`limit.candidate_lists == "dropped"`）也是 `3`：
   丢了候选列表的 pass 既不能列出待办，也不能证明没有待办；`unreadable_passes` 同理。
+  **`orphan_reservations` 非空同样是 `3`**（#2405，且与 pass 的 reason 表并列，不在
+  `non_evaluating_passes` 里）：某趟 pass 写下了 `<pass_id>.pre_execution.json` 预留，却
+  **从来没写出终态 `<pass_id>.json`**，而它的 `reserved_at` 比"最新那趟可求值且范围完整的 pass"的
+  `started_at` 还新——也就是说，回答"没有待办"的那趟 pass 比它旧，管不了它提交出去的东西。
+  判活看预留文件的 mtime：pass 活着时它的 lease 心跳会一直刷新该 mtime，所以
+  `reason` 只有两种——`lease_stale`（mtime 老过该预留自己 `lease.ttl_seconds` 的 **2 倍**）与
+  `lease_absent`（预留里根本没有 `lease` 块，#2405 之前的写入器，新鲜度无从证明，按 fail-safe 报）。
+  在飞的 pass 其预留 mtime 是新的，**不会**被报，`exit 0` 的日常不受影响。处置：确认该 pass_id 的
+  进程/作业确实已经死了（`systemctl --user status nhms-compute-scheduler.service`、看那趟的日志），
+  再按第二步处置它可能留下的半截状态；有待办时 `exit 1` 优先，孤儿预留不会盖掉待办。
   node-22 的 pass 文件接近 5 MB 上限，size fallback 现实中会出现。
   `unreadable_passes` 里还会出现**扫描期被删掉**的文件（retention timer
   `nhms-scheduler-evidence-retention.timer` 与本命令并发时的正常现象）：这类文件连 mtime 都没读到，
@@ -293,10 +336,21 @@ run 在飞或不存在时拒绝）：
   provenance 戳在 accepted-submit（reservation）时写入 cohort master，对应计数当场 +1
   （无论 rerun 之后成功、失败，断路器也无论记录了哪个 token，预算也无论 rerun 落在哪个 job-id
   前缀下）。fail-stop 自行重新接管，不需要撤销。
-- 拒绝时不写任何字节、打印 `decision=refused` receipt 并 exit 2。`reason` 取值：
-  `required_argument_blank`、`decision_not_reentry_eligible`、`cycle_time_invalid`、
-  `pin_invalid`（pin 为负）、`completed_identity_absent`、`recorded_init_state_id_mismatch`、
-  `breaker_not_engaged`、`pin_mismatch`。`recorded_init_state_id_mismatch` 与
+- 拒绝时不写任何字节、打印 `decision=refused` receipt 并 exit 2。`reason` 的全部取值如下
+  （#2426：这张表 = **可达**的拒绝，与代码里的 `_refused` 字面量逐字相等，由
+  `tests/test_operator_reentry_confirmation.py::test_the_refusal_reasons_are_exactly_the_reachable_ones_the_runbook_lists`
+  机械对账；改代码不改这里就会红）：
+
+  <!-- reentry-refusal-reasons:begin -->
+  `required_argument_blank`、`cycle_time_invalid`、`pin_invalid`、`completed_identity_absent`、
+  `recorded_init_state_id_mismatch`、`breaker_not_engaged`、`pin_mismatch`
+  <!-- reentry-refusal-reasons:end -->
+
+  `cycle_time_invalid` = `--cycle-time` 非空但既不是 `YYYYMMDDHH` 也不是 ISO-8601；这条拒绝发生在
+  target 构造之前，receipt 只有 `decision` 与 `reason`，**不带** `target` / `pin`（其余各条都带）。
+  `pin_invalid` = pin 为负。`--decision` 传了两类之外的值由两个入口的
+  `choices` / `click.Choice` 在命令自身之前拒掉（argparse/click 的用法错误，不是本 receipt），
+  所以**没有** `decision_not_reentry_eligible` 这条 reason。`recorded_init_state_id_mismatch` 与
   `breaker_not_engaged` 只适用于断路器；`pin_mismatch` 两类都适用（断路器比
   `quarantine_rerun_count`，预算比 `budget_reentry_count`）。断路器的检查顺序为 `breaker_not_engaged` →
   `recorded_init_state_id_mismatch` → `pin_mismatch`，拒绝 receipt 的 `live` 同样带

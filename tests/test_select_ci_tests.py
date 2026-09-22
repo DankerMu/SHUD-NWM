@@ -886,6 +886,10 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # registration this module performs, and is equally
             # module-scope-import-free.
             "tests/test_operator_action_reservation_lease.py",
+            # #2442's at-site addition to the same stop rule: the status closure
+            # pin READS this module's `run_once` with `ast` (it must not import
+            # it), so a pass-status literal added or moved here has to run it.
+            "tests/test_operator_action_status_closure.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -1063,6 +1067,13 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # reader subject operator_action_listing.py; scheduler_runtime.py is
         # stop-rule owned and is extended at THAT site.
         "tests/test_operator_action_reservation_lease.py",
+        # #2442: the status closure pin rides the same directory rule for the
+        # four writers it reads as text besides the pass writer
+        # (scheduler_candidate_runtime.py, scheduler_evidence_proofs.py,
+        # scheduler_candidate_execution_evidence.py, scheduler_evidence_payload.py)
+        # and for its reader subject operator_action_listing.py; it imports
+        # nothing at module scope, so no importer derivation reaches it.
+        "tests/test_operator_action_status_closure.py",
         # #1555/#1768: the operator re-entry confirmation suite rides the broad
         # orchestrator directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and journal_root_authority.py, and
@@ -11002,6 +11013,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_migration.py",
         "tests/test_operator_action_reservation_lease.py",
+        "tests/test_operator_action_status_closure.py",
         "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
         "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows",
         "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
@@ -11024,11 +11036,12 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
-        # 25 -> 27 (#1905/#2402, then #2405): the evidence-size decidability
-        # suite is the oracle for the non-blocking summary tier that keeps THIS
-        # module's pass status true instead of rewriting it to
-        # resource_limit_blocked, and the reservation-lease suite is the oracle for
-        # the touch-path registration it performs after reserving; neither has
+        # 25 -> 28 (#1905/#2402, then #2405, then #2442): the evidence-size
+        # decidability suite is the oracle for the non-blocking summary tier that
+        # keeps THIS module's pass status true instead of rewriting it to
+        # resource_limit_blocked, the reservation-lease suite is the oracle for
+        # the touch-path registration it performs after reserving, and the status
+        # closure pin reads this module's `run_once` status literals; none has
         # module-scope imports, so the at-site extension is their only route.
         "tests/test_scheduler_evidence_decidability.py",
         "tests/test_scheduler_journal_retention_archive.py",
@@ -19332,3 +19345,23 @@ def test_reservation_lease_suite_is_selected_by_every_writer_and_reader_it_pins(
     ):
         assert Path(module).is_file(), module
         assert "tests/test_operator_action_reservation_lease.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_status_closure_suite_is_selected_by_every_writer_it_reads() -> None:
+    # #2442: the status closure pin reads its five writer sources as TEXT rather
+    # than importing them (the listing surface is importer-free on purpose), so
+    # NO importer derivation can reach it -- routing is the only way a PR that
+    # edits a writer runs the pin that exists to go red on exactly that edit.
+    # scheduler_runtime.py is stop-rule owned and is extended AT ITS SITE; the
+    # other four writers and the reader whose whitelist they close ride the broad
+    # orchestrator directory rule.
+    for module in (
+        "services/orchestrator/scheduler_runtime.py",
+        "services/orchestrator/scheduler_candidate_runtime.py",
+        "services/orchestrator/scheduler_evidence_proofs.py",
+        "services/orchestrator/scheduler_candidate_execution_evidence.py",
+        "services/orchestrator/scheduler_evidence_payload.py",
+        "services/orchestrator/operator_action_listing.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_operator_action_status_closure.py" in select_tests([module], repo_root=Path("."))

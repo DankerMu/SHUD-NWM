@@ -2330,6 +2330,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # module-scope-import-free, so this stop rule is its only route for
             # this module. DB-free, 15 tests in ~1s.
             "tests/test_operator_action_reservation_lease.py",
+            # #2442 adds the fifth at-site target. This module is the PASS
+            # WRITER whose `run_once` status literals the closure pin reads with
+            # `ast`: a status added or moved here is exactly what the pin has to
+            # go red on, and the pin imports nothing at module scope, so this
+            # stop rule is its only route for this module. DB-free, 4 tests in
+            # ~0.3s.
+            "tests/test_operator_action_status_closure.py",
         ),
         stop_on_match=True,
     ),
@@ -2714,6 +2721,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orphan rule); scheduler_runtime.py rides the stop rule above.
             # DB-free, 15 tests in ~1s.
             "tests/test_operator_action_reservation_lease.py",
+            # #2442: the writer-bound status closure pin. It reads five writer
+            # sources as TEXT (it must not import them), so it has no importer
+            # derivation at all: this directory rule is its route for
+            # scheduler_candidate_runtime.py, scheduler_evidence_proofs.py,
+            # scheduler_candidate_execution_evidence.py,
+            # scheduler_evidence_payload.py and the reader whose exit code the
+            # whitelist decides, operator_action_listing.py. Its fifth writer,
+            # scheduler_runtime.py, is stop-rule owned and rides THAT site, per
+            # this rule's #1455 note above. DB-free, 4 tests in ~0.3s.
+            "tests/test_operator_action_status_closure.py",
             # #1581 (+#1999): the hydro-status parity lock top-level-imports
             # eight modules of this package plus `services.orchestrator` itself,
             # so nine importer pairs land here. Seven close on this list

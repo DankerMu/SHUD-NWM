@@ -356,6 +356,11 @@ def test_budget_confirmation_is_recorded_without_a_token(
 @pytest.mark.parametrize(
     ("leg", "expected_reason"),
     [
+        # #2426: the one reachable refusal that had no coverage at all.  It sits
+        # BEFORE ``target`` is built (the cycle time is what ``target`` would
+        # carry), so unlike every other leg below its receipt names no target and
+        # no pin -- that shape is asserted, not just the reason.
+        ("cycle_time_malformed", "cycle_time_invalid"),
         ("no_completed_identity", "completed_identity_absent"),
         ("pin_differs_from_live_occurrences", "pin_mismatch"),
         ("token_differs_from_live_token", "recorded_init_state_id_mismatch"),
@@ -372,7 +377,12 @@ def test_refused_preconditions_exit_two_and_write_nothing(
     expected_reason: str,
 ) -> None:
     root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=leg != "breaker_not_engaged")
-    if leg == "no_completed_identity":
+    if leg == "cycle_time_malformed":
+        # Non-blank (``required_argument_blank`` would win) and not parsable by
+        # ``parse_cycle_time``: neither YYYYMMDDHH nor ISO-8601.
+        argv = breaker_confirm_argv(root)
+        argv[argv.index(BREAKER_CYCLE)] = "not-a-time"
+    elif leg == "no_completed_identity":
         argv = breaker_confirm_argv(root)
         argv[argv.index(BREAKER_CYCLE)] = "2026-05-21T06:00:00Z"
     elif leg == "pin_differs_from_live_occurrences":
@@ -395,7 +405,60 @@ def test_refused_preconditions_exit_two_and_write_nothing(
     assert receipt["reason"] == expected_reason
     if leg == "budget_pin_differs_from_live_reentry_count":
         assert receipt["live"] == {"budget_reentry_count": 0}
+    if leg == "cycle_time_malformed":
+        # #2426: refused before the target exists, so the receipt is reason-only.
+        assert receipt == {"decision": "refused", "reason": "cycle_time_invalid"}
+    else:
+        # Every other refusal is decided after the target is built and names it.
+        assert set(receipt["target"]) == {"source_id", "cycle_time", "model_id", "decision"}
     assert _tree_bytes(root) == before
+
+
+def test_the_refusal_reasons_are_exactly_the_reachable_ones_the_runbook_lists() -> None:
+    """#2426: the runbook's refusal list is the operator's index; unreachable rows cost lookups.
+
+    ``decision_not_reentry_eligible`` was in both the code and the list while
+    neither entrypoint could reach it (``click.Choice(REENTRY_DECISIONS)`` and
+    argparse ``choices=REENTRY_DECISIONS`` reject the value first, and there is
+    no programmatic caller), so an operator who went looking for it found a row
+    describing a receipt this command can not print.  Source text + ``ast``: the
+    ``_refused`` literals ARE the reachable set, and the runbook has to carry
+    each one and nothing extra.
+    """
+
+    import ast
+
+    module = Path("services/orchestrator/operator_reentry_confirmation.py")
+    reasons = {
+        node.args[0].value
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_refused"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+
+    assert reasons == {
+        "required_argument_blank",
+        "cycle_time_invalid",
+        "pin_invalid",
+        "completed_identity_absent",
+        "recorded_init_state_id_mismatch",
+        "breaker_not_engaged",
+        "pin_mismatch",
+    }
+    assert "decision_not_reentry_eligible" not in module.read_text(encoding="utf-8")
+
+    runbook = Path("docs/runbooks/node22-control-plane-manual-recovery.md").read_text(encoding="utf-8")
+    block = runbook.split("<!-- reentry-refusal-reasons:begin -->")[1].split(
+        "<!-- reentry-refusal-reasons:end -->"
+    )[0]
+
+    # The anchored block is the list an operator reads off; the prose around it
+    # still NAMES the removed reason, on purpose, to say where that value went.
+    assert set(re.findall(r"`([a-z_]+)`", block)) == reasons
+    assert "decision_not_reentry_eligible" not in block
 
 
 @pytest.mark.parametrize("blank_flag", ["--operator", "--reason", "--model-id", "--recorded-init-state-id"])

@@ -2129,40 +2129,19 @@ def test_a_window_of_submission_failed_passes_without_actions_decides_zero(
     assert payload["non_evaluating_passes"] == []
 
 
-def test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set() -> None:
-    """Membership pin: every status here is written only after ``_build_candidates`` ran."""
-
-    from services.orchestrator import operator_action_listing
-
-    assert operator_action_listing.EVALUATING_PASS_STATUSES == {
-        "planned",
-        "blocked",
-        "unavailable",
-        "submitted",
-        "submitted_partial",
-        "slurm_status_synced",
-        "slurm_status_sync_failed",
-        "slurm_cancelled",
-        "slurm_partially_cancelled",
-        "slurm_cancellation_blocked",
-        "restart_reconciled",
-        "restart_reconcile_unknown",
-        "submission_failed",
-        "skipped_duplicate_submission",
-        "reconciling",
-        "submit_result_ambiguous",
-        "reconcile_unverified",
-        "cancelled",
-        "complete",
-        "succeeded",
-        "parsed_partial",
-        "forcing_ready_partial",
-        "forcing_ready",
-        "already_done",
-    }
-    # Written before (or without) candidate construction, or ambiguous: never evaluating.
-    for status in ("lock_contended", "preflight_blocked", "lease_lost", "resource_limit_blocked", None):
-        assert status not in operator_action_listing.EVALUATING_PASS_STATUSES
+# #2442: the 24-literal self-copy that used to stand here
+# (``test_evaluating_pass_statuses_are_the_closed_post_candidate_construction_set``)
+# is GONE.  It asserted ``EVALUATING_PASS_STATUSES == {the same 24 literals}``,
+# which froze the module constant against a careless edit and said nothing about
+# the writers: changing a writer reddened no test.  Its replacement is
+# ``tests/test_operator_action_status_closure.py``, which reads the writer
+# sources with ``ast`` and binds each literal either to a write site or to the
+# declared execution-evidence passthrough -- including the negative half this one
+# carried (``lock_contended`` / ``preflight_blocked`` / ``lease_lost`` /
+# ``resource_limit_blocked`` are never evaluating), which is now the partition
+# assertion ``statuses - evaluating == transparent | {lease_lost,
+# resource_limit_blocked}``.  Deliberately not two unrelated copies of the same
+# 24 lines.
 
 
 def test_bounded_candidate_summary_retains_every_retry_policy_key_including_false_and_zero() -> None:

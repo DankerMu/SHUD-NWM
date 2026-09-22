@@ -304,7 +304,16 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
 
 - `systemctl --user is-active nhms-scheduler-evidence-retention.timer` → `active`。
 - `systemctl --user list-timers | grep nhms-scheduler-evidence-retention` → 显示下一次触发时间在 24h 内。
-- 首次触发后，`ls $NHMS_SCHEDULER_EVIDENCE_ROOT/retention/retention-*.json` 应能看到 receipt 文件（首跑时脚本自建 `retention/` 子目录）。
+- 首次触发后，receipt 文件应出现在 evidence root 的 `retention/` 子目录下（首跑时脚本自建该子目录）。
+  **root 取自 unit 的 EnvironmentFile，不要用登录 shell 里的 `$NHMS_SCHEDULER_EVIDENCE_ROOT`**（#2399：
+  交互 shell 不加载 EnvironmentFile，该变量多半是空的，`ls` 于是去列 `/retention/`，或者更糟——被谁
+  export 成别的路径后干净地列出一个空目录，读成"timer 没跑"）：
+
+  ```bash
+  EVIDENCE_ROOT="$(sed -n 's/^NHMS_SCHEDULER_EVIDENCE_ROOT=//p' \
+    /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env | tail -n 1)"
+  ls "${EVIDENCE_ROOT:?未取到 root}"/retention/retention-*.json
+  ```
 
 **rollback 独立性**：`systemctl --user disable --now nhms-scheduler-evidence-retention.timer` 只停 retention，**不影响** `nhms-compute-scheduler.timer`。
 两者是独立 unit 文件、无共享依赖，scheduler 继续照常提交 pass，只是 evidence 目录不再有上限。

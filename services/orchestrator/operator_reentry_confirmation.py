@@ -90,8 +90,13 @@ def confirm_operator_reentry(
     blank = sorted(name for name, value in required.items() if not str(value or "").strip())
     if blank:
         return _refused("required_argument_blank", fields=blank), 2
-    if decision not in REENTRY_DECISIONS:
-        return _refused("decision_not_reentry_eligible", decision=decision), 2
+    # #2426: no ``decision not in REENTRY_DECISIONS`` refusal here.  Both
+    # entrypoints constrain the flag to that very tuple before this function is
+    # reached (``click.Choice(REENTRY_DECISIONS)`` and argparse
+    # ``choices=REENTRY_DECISIONS``), there is no programmatic caller, and an
+    # unreachable refusal in the runbook's reason list costs an operator a
+    # lookup that can never pay off.  Add the guard back the day a third caller
+    # appears.
     try:
         parsed_cycle_time = parse_cycle_time(cycle_time)
     except (TypeError, ValueError):
@@ -103,7 +108,10 @@ def confirm_operator_reentry(
         "model_id": model_id,
         "decision": decision,
     }
-    if type(pin) is not int or pin < 0:
+    # #2426: the NEGATIVE half only. ``type(pin) is not int`` was unreachable for
+    # the same reason as the decision guard above -- both entrypoints declare
+    # ``type=int`` and parse the flag before this function sees it.
+    if pin < 0:
         return _refused("pin_invalid", target=target, pin=pin), 2
 
     repository = FileOrchestrationJournalRepository(verified_root)
