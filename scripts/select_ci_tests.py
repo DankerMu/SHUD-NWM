@@ -1211,6 +1211,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # budget, lane or sentinel edit must run it. DB-free, 11 tests in 1.85s,
     # hence a rule rather than a rule-gap exclusion.
     "tests/test_file_journal_full_tree_budget_contract.py",
+    # #2404: the retry-mint-floor suite asserts what this module's cohort
+    # reconcile write charges each member (the per-model reconciled row's
+    # ``retry_count``), and its imports are all function-local, so no importer
+    # derivation reaches it. DB-free, ~4s, hence a rule not an exclusion.
+    "tests/test_retry_mint_floor.py",
     # #1555/#1768: the operator re-entry confirmation suite seeds REAL file
     # journals through this repository and reads the one-shot confirmation event
     # back through it, so its whole precondition geometry rests on this module's

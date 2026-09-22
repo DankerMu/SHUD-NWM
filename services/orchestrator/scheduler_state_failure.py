@@ -22,6 +22,7 @@ from packages.common.object_store import (
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import validate_object_path
 from services.orchestrator.retry import classify_failure
+from services.orchestrator.retry_identity import RETRY_ATTEMPT_FLOOR_FIELD
 from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_state_common import (
     _evidence_safe,
@@ -1947,7 +1948,7 @@ def _retry_failure_evidence(
         if failed_stage in NATIVE_SHUD_STAGE_ALIASES or cold_start_quarantined
         else _canonical_downstream_stage(failed_stage)
     )
-    return {
+    evidence = {
         **base_evidence,
         "decision": "retry_failed",
         "reason": "retry_failed_candidate",
@@ -1971,6 +1972,15 @@ def _retry_failure_evidence(
             "run_id": candidate.run_id,
         },
     }
+    # #2404: the chain mints this forecast restart past the attempt just charged,
+    # whatever run_id prefix it runs under.  Forecast only: it is the one
+    # candidate-scoped, budget-charged stage whose run_id prefix switches
+    # (``_full_`` -> ``_forecast_``, cohort digests); and only when the charged
+    # attempt was read on that same stage (``failure["stage"]``), never a
+    # cohort-only or cold-start geometry whose attempt names another axis.
+    if restart_stage == "forecast" and failure.get("stage") in NATIVE_SHUD_STAGE_ALIASES:
+        evidence[RETRY_ATTEMPT_FLOOR_FIELD] = {"stage": "forecast", "attempt": int(failure["attempt"])}
+    return evidence
 
 def _permanent_failure_evidence(
     candidate: SchedulerCandidateLike,

@@ -135,6 +135,102 @@ def test_terminal_run_manifest_missing_stops_refiring_after_a_newer_failure(
     assert all(reasons == ["retry_limit_exhausted"] for reasons in blocked[1:]), blocked
 
 
+def test_failing_reruns_without_inline_retry_stay_within_the_forecast_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-E2: the #2401 loop with NO inline retry service; the scheduler owns every attempt.
+
+    Same prefix throughout (``cycle_..._forecast_model_a``), so this is the
+    bounded-by-construction shape: after the forced quarantine rerun fails, the
+    failure lane's ``retry_failed`` restart (floor 0, not a forced-resubmit
+    decision) finds that terminal failed row and resumes it instead of minting a
+    new id -- no further Slurm forecast is ever submitted.  It does NOT reach a
+    budget block: without an inline retry nothing charges a new attempt, so the
+    candidate is re-selected as a no-op every pass.  Production's db-free
+    scheduler always wires a ``FileJournalRetryService`` (the loop above).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
+
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    slurm_forecast = 0
+    trace: list[list[tuple[str, str | None]]] = []
+    for _ in range(_RETRY_LIMIT + 3):
+        result, orchestrator = _pass(tmp_path, root)
+        trace.append(_decisions(result))
+        if not orchestrator.calls:
+            continue
+        (call,) = orchestrator.calls
+        client = _wallclock_slurm_client(**_FORECAST_FAILURE)
+        rerun = real_rerun(tmp_path, root, [dict(basin) for basin in call["basins"]], slurm_client=client)
+        assert rerun.status == "failed"
+        slurm_forecast += sum(1 for item in client.submissions if item.get("stage") == "forecast")
+
+    assert slurm_forecast <= 1 + _RETRY_LIMIT, (slurm_forecast, trace)
+    assert slurm_forecast == 1, trace
+    assert trace[0] == [("candidates", "retry_journal_predecessor_identity_mismatch")], trace
+    assert all(decisions == [("candidates", "retry_failed")] for decisions in trace[1:]), trace
+    forecast_masters = [
+        row["job_id"]
+        for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("gfs_2026052100")
+        if row.get("stage") == "forecast" and str(row["job_id"]).startswith("job_cycle_gfs_2026052100_forecast_")
+    ]
+    assert forecast_masters == ["job_cycle_gfs_2026052100_forecast_model_a_forecast"], forecast_masters
+
+
+def test_mixed_outcome_cohort_splits_into_terminal_skip_and_the_failure_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-E1: one cohort array, model_a's task succeeds and model_b's fails.
+
+    Each member's newest truth is its own reconciled task row: model_a's is a
+    success (a terminal skip, neither ``None`` nor a retry), model_b's a failure
+    newer than its old success (the ordinary failure path).
+    """
+
+    from tests.test_operator_reentry_confirmation import (
+        breaker_scheduler,
+        real_rerun,
+        seed_breaker_journal,
+        stale_token,
+    )
+    from tests.test_production_scheduler import FakeProductionOrchestrator
+
+    models = ("model_a", "model_b")
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, breaker_engaged=False)
+
+    def _cohort_pass() -> tuple[Any, list[tuple[str, str | None, str | None, str | None]]]:
+        orchestrator = FakeProductionOrchestrator()
+        result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=models, retry_limit=_RETRY_LIMIT).run_once()
+        rows = [
+            (key, item.get("model_id"), (item.get("state_evidence") or {}).get("decision"), item.get("reason"))
+            for key in ("candidates", "blocked_candidates", "skipped_candidates")
+            for item in result.evidence.get(key) or []
+        ]
+        return orchestrator, sorted(rows, key=lambda row: str(row[1]))
+
+    orchestrator, rows = _cohort_pass()
+    assert [row[2] for row in rows] == ["retry_journal_predecessor_identity_mismatch"] * 2
+    (call,) = orchestrator.calls
+    rerun = real_rerun(
+        tmp_path,
+        root,
+        [dict(basin) for basin in call["basins"]],
+        recorded_tokens={model_id: stale_token(model_id, lead_hours=6) for model_id in models},
+        slurm_client=_wallclock_slurm_client(array_results_by_stage={"forecast": ["succeeded", "failed"]}),
+    )
+    assert rerun.status == "parsed_partial"
+
+    _orchestrator, rows = _cohort_pass()
+    assert rows == [
+        ("skipped_candidates", "model_a", "skip_terminal", "terminal_hydro_success"),
+        ("candidates", "model_b", "retry_failed", None),
+    ]
+
+
 def _completion_row(stage: str) -> dict[str, Any]:
     return {
         "job_id": f"job_fcst_gfs_2026052100_model_a_{stage}",

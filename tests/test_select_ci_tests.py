@@ -887,6 +887,17 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     assert "tests/test_production_scheduler.py" in selected
 
 
+def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() -> None:
+    """#2404: the cohort reconcile write's per-member charge is pinned by that suite.
+
+    Its imports are function-local, so only the at-site stop-rule tuple routes it.
+    """
+
+    selected = select_tests(["services/orchestrator/file_orchestration_journal.py"], repo_root=Path("."))
+
+    assert "tests/test_retry_mint_floor.py" in selected
+
+
 def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_suites() -> None:
     expected = {
         "tests/test_scheduler_journal_retention_planning.py",

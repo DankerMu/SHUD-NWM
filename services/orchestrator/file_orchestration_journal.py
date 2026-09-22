@@ -13887,55 +13887,57 @@ def _newer_master_identity_than_hydro(
     same-run_id rerun cannot rewrite a succeeded hydro row, so a newer master
     is the only journal truth of that rerun.  Among masters whose identity map
     names this model (model-less cohort masters otherwise match every model of
-    the cycle), the newest is selected first and only then qualified (terminal-success for this model, exactly one
-    identity entry naming it and carrying an id), so an older success cannot
-    hide a newer running or failed rerun.  Any unreadable shape -> ``None``,
-    which keeps the hydro identity (fails toward legacy).
+    the cycle), only the QUALIFIED ones compete -- terminal-success for this
+    model and exactly one identity entry naming it and carrying an id -- and the
+    newest of those is taken.  A later failed or still-running rerun carries no
+    converged identity, so it neither wins nor hides the newest successful one
+    (IS-01).  Any unreadable shape -> ``None``, which keeps the hydro identity
+    (fails toward legacy).
     """
 
     unknown = datetime.min.replace(tzinfo=UTC)
     hydro_created = _datetime_sort_key(hydro_run.get("created_at"))
     if hydro_created == unknown:
         return None
-    def _entries_for_model(job: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    def _self_bound_identity(job: Mapping[str, Any]) -> dict[str, Any] | None:
         identities = job.get(INIT_STATE_IDENTITY_FIELD)
         if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
-            return []
-        return [
+            return None
+        entries = [
             entry
             for entry in identities
             if isinstance(entry, Mapping) and str(entry.get("model_id") or "") == model_id
         ]
+        if len(entries) != 1:
+            return None
+        identity = {key: value for key, value in entries[0].items() if value not in (None, "")}
+        if not any(identity.get(key) not in (None, "") for key in _INIT_STATE_ALIAS_KEYS):
+            return None
+        return identity
 
     try:
         # Model-less cohort masters match every candidate of the cycle, so only
         # submissions that carried THIS model compete: a sibling model's later
-        # submission must not hide this model's converged rerun.
-        masters = [
-            job
+        # submission must not hide this model's converged rerun.  Qualification
+        # (success + self-bound identity) comes BEFORE recency (IS-01).
+        qualified = [
+            (job, identity)
             for job in rows.pipeline_jobs.values()
             if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             and accepted_submit_contract_is_current(job)
             and accepted_submit_row_kind(job) == "master"
-            and _entries_for_model(job)
+            and _job_is_breaker_terminal_success(job, model_id=model_id)
+            and (identity := _self_bound_identity(job)) is not None
         ]
-        if not masters:
+        if not qualified:
             return None
-        latest = max(
-            masters,
-            key=lambda job: (_datetime_sort_key(job.get("created_at")), _pipeline_job_truth_sort_key(job)),
+        latest, identity = max(
+            qualified,
+            key=lambda item: (_datetime_sort_key(item[0].get("created_at")), _pipeline_job_truth_sort_key(item[0])),
         )
         if _datetime_sort_key(latest.get("created_at")) <= hydro_created:
             return None
-        if not _job_is_breaker_terminal_success(latest, model_id=model_id):
-            return None
-        entries = _entries_for_model(latest)
     except (AcceptedSubmitEvidenceError, AttributeError, TypeError, ValueError):
-        return None
-    if len(entries) != 1:
-        return None
-    identity = {key: value for key, value in entries[0].items() if value not in (None, "")}
-    if not any(identity.get(key) not in (None, "") for key in _INIT_STATE_ALIAS_KEYS):
         return None
     return identity
 

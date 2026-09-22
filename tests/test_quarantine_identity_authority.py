@@ -215,9 +215,40 @@ def test_failed_rerun_does_not_override_the_completed_hydro_row(
         tmp_path, monkeypatch, token=_correct(), slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE)
     )
     assert status == "failed"
-    # The newest master is selected first and is not terminal-success, so the
-    # completed hydro row keeps priority: an older success cannot win either.
+    # Only terminal-success masters with a self-bound identity compete (IS-01);
+    # the failed rerun does not qualify and no earlier qualifying success is
+    # newer than the completed hydro row, so the hydro row keeps priority.
     assert _identity(root) == {"init_state_id": _stale()}
+
+
+def test_later_failed_rerun_does_not_hide_the_newest_converged_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IS-01: qualify first, then take the newest -- a later failure must not unseat Y with X."""
+    from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
+    from tests.test_scheduler_terminal_recency import _FORECAST_FAILURE, _wallclock_slurm_client
+
+    x, y = _stale(), _correct()
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    result, orchestrator = _pass(tmp_path, root)
+    assert _decisions(result) == [("candidates", QUARANTINE_DECISION)]
+    (call,) = orchestrator.calls
+    basins = [dict(basin) for basin in call["basins"]]
+    assert real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": y}).status == "complete"
+    assert _identity(root)["init_state_id"] == y  # type: ignore[index]
+
+    failed = real_rerun(
+        tmp_path,
+        root,
+        basins,
+        recorded_tokens={"model_a": y},
+        slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE),
+    )
+    assert failed.status == "failed"
+    masters = sorted(_masters(root).values(), key=lambda job: job["created_at"])
+    assert masters[-1]["status"] != "succeeded"
+    identity = _identity(root)
+    assert identity is not None and identity["init_state_id"] == y, (identity, x)
 
 
 def test_sibling_model_later_submission_does_not_hide_the_converged_rerun(

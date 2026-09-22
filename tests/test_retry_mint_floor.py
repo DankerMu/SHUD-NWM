@@ -563,3 +563,128 @@ def test_mixed_floor_cohort_mints_past_every_member_and_charges_the_shared_attem
     _candidates, after = _pass_decisions(scheduler(models))
     blocked = (_BLOCKED_DECISION, _BUDGET_RETRY_LIMIT)
     assert after == {"model_a": blocked, "model_b": blocked}
+
+
+# ---------------------------------------------------------------------------
+# F-A: the ordinary failure lane (``retry_failed_candidate``) carries the floor too
+# ---------------------------------------------------------------------------
+
+
+
+def _spent_failure_row(model_id: str) -> dict[str, Any]:
+    """Attempt 1 spent (and failed) under the per-model ``fcst_..._<model>`` prefix."""
+
+    from tests.test_production_scheduler import _budget_attempt_row
+
+    return {
+        **_budget_attempt_row(1, status="failed"),
+        "job_id": f"job_fcst_gfs_2026052100_{model_id}_forecast_retry_1",
+        "run_id": f"fcst_gfs_2026052100_{model_id}",
+        "model_id": model_id,
+        "error_code": "NODE_FAILURE",
+    }
+
+
+def _failing_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: Path, scheduler: Any, candidates: list[Any]
+) -> int:
+    """Production-shaped failing rerun (inline ``FileJournalRetryService``); returns Slurm forecast submissions."""
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+    from tests.test_production_scheduler import _BUDGET_RETRY_LIMIT
+
+    client = FakeCycleSlurmClient(
+        fail_stage="forecast", array_results_by_stage={"forecast": ["failed"] * len(candidates)}
+    )
+    _basins, result = _rerun(
+        tmp_path,
+        monkeypatch,
+        root,
+        scheduler,
+        candidates,
+        slurm_client=client,
+        retry_service=FileJournalRetryService(
+            FileOrchestrationJournalRepository(root),
+            RetryConfig(max_retries=_BUDGET_RETRY_LIMIT, backoff_schedule=[0]),
+        ),
+    )
+    assert result.status == "failed"
+    return sum(1 for item in client.submissions if item.get("stage") == "forecast")
+
+
+@pytest.mark.parametrize(
+    ("strict", "decision"),
+    [(False, "retry_failed"), (True, "retry_strict_warm_start_retry_run_manifest_mismatch")],
+    ids=["retry_failed", "strict_upgrade"],
+)
+def test_failure_lane_prefix_switch_stays_within_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool, decision: str
+) -> None:
+    """F-A single model: attempt 1 spent under ``fcst_..._model_a``; retry_limit 2.
+
+    The failure-lane retry restarts at ``forecast`` under ``cycle_..._forecast_model_a``.
+    Pre-fix it minted bare, then the inline service ``_retry_1``, ``_retry_2`` --
+    three forecasts on top of the spent one.  Now it mints ``_retry_2`` and the
+    whole remaining budget is one submission.
+    """
+
+    from tests.test_production_scheduler import _BUDGET_RETRY_LIMIT, _seed_budget_journal
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, [_spent_failure_row("model_a")])
+    if not strict:
+        monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    built = scheduler()
+    candidates, decisions = _pass_decisions(built)
+    (candidate,) = candidates
+    assert candidate.state_evidence["reason"] == (
+        "retry_failed_candidate" if not strict else "strict_warm_start_retry_run_manifest_mismatch"
+    )
+    before = {str(row["job_id"]) for row in _forecast_rows(root)}
+    submitted = _failing_rerun(tmp_path, monkeypatch, root, built, candidates)
+
+    minted = [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")]
+    assert (submitted, minted) == (_BUDGET_RETRY_LIMIT - 1, [f"{_FORECAST_BASE}_retry_2"])
+    assert decisions == {"model_a": (decision, {"stage": "forecast", "attempt": 1})}
+    for _ in range(2):
+        later, decisions = _pass_decisions(scheduler())
+        assert later == []
+        assert decisions["model_a"][0] == "permanent_failure"
+
+
+def test_failure_lane_cohort_digest_change_stays_within_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-A cohort: abc fails through the failure lane, then ab (a new digest) must be blocked.
+
+    Pre-fix the abc cohort minted bare + two inline retries whose members were
+    never charged, and the ab cohort started over under its own digest.
+    """
+
+    from tests.test_production_scheduler import _BUDGET_RETRY_LIMIT
+
+    models = ("model_a", "model_b", "model_c")
+    root, scheduler = _seed_cohort_budget_journal(
+        monkeypatch, tmp_path, models, [_spent_failure_row(model_id) for model_id in models]
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    built = scheduler(models)
+    candidates, decisions = _pass_decisions(built)
+    before = {str(row["job_id"]) for row in _forecast_rows(root)}
+    submitted = _failing_rerun(tmp_path, monkeypatch, root, built, candidates)
+    minted = [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")]
+    assert (submitted, minted) == (_BUDGET_RETRY_LIMIT - 1, [f"job_{_cohort_run_id(models)}_forecast_retry_2"])
+    assert decisions == {model_id: ("retry_failed", {"stage": "forecast", "attempt": 1}) for model_id in models}
+
+    later, decisions = _pass_decisions(scheduler(("model_a", "model_b")))
+    assert later == []
+    assert {model_id: entry[0] for model_id, entry in decisions.items()} == {
+        "model_a": "permanent_failure",
+        "model_b": "permanent_failure",
+    }
