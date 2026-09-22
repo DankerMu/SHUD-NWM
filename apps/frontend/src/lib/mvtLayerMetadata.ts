@@ -1,4 +1,4 @@
-import { apiFetch, buildApiUrl } from '@/api/base'
+import { apiFetch, buildApiTileUrlTemplate } from '@/api/base'
 import type { components } from '@/api/types'
 
 export type MvtLayerMetadata = components['schemas']['LayerMetadata'] & {
@@ -43,18 +43,7 @@ export function buildMvtTileUrlTemplate(metadata: MvtLayerMetadata, replacements
   for (const [key, value] of Object.entries(replacements)) {
     template = template.replaceAll(`{${key}}`, encodeURIComponent(value))
   }
-  const url = buildApiUrl(template)
-    .replaceAll('%7Bz%7D', '{z}')
-    .replaceAll('%7Bx%7D', '{x}')
-    .replaceAll('%7By%7D', '{y}')
-  // MapLibre 在 Web Worker 内 fetch 瓦片，相对 URL（无 VITE_API_BASE_URL 时）在 worker 里
-  // 没有 document base，`new Request('/api/...')` 抛 "Failed to parse URL"。这里把仍为相对的
-  // 模板用 location.origin 绝对化（不能用 new URL，会把 {z}/{x}/{y} 占位再次百分号编码）。
-  const absoluteUrl =
-    url.startsWith('/') && typeof window !== 'undefined' && window.location?.origin
-      ? `${window.location.origin}${url}`
-      : url
-  return appendMvtCacheVersion(absoluteUrl, metadata)
+  return appendMvtCacheVersion(buildApiTileUrlTemplate(template), metadata)
 }
 
 export async function fetchLayerCatalogMetadata(

@@ -2867,6 +2867,194 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/basemap/tianditu/{layer}/{z}/{x}/{y}:
+    get:
+      tags:
+      - basemap
+      summary: Tianditu Tile
+      description: One Tianditu basemap tile, fetched once through the server-side key
+        and file-cached.
+      operationId: tianditu_tile_api_v1_basemap_tianditu__layer___z___x___y__get
+      parameters:
+      - name: layer
+        in: path
+        required: true
+        schema:
+          enum:
+          - vec
+          - cva
+          - img
+          - cia
+          - ter
+          - cta
+          type: string
+          title: Layer
+      - name: z
+        in: path
+        required: true
+        schema:
+          type: integer
+          maximum: 18
+          minimum: 0
+          title: Z
+      - name: x
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+          title: X
+      - name: y
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+          title: Y
+      responses:
+        '200':
+          description: One Tianditu web-mercator raster tile (PNG or JPEG, as upstream
+            serves the layer).
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum:
+                - hit
+                - miss
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: The tile coordinate is outside the zoom level's tile grid.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - request_id
+                - status
+                - error
+                properties:
+                  request_id:
+                    type: string
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  error:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                        - BASEMAP_TILE_OUT_OF_RANGE
+                      message:
+                        type: string
+                      details:
+                        type:
+                        - object
+                        - 'null'
+                        additionalProperties: true
+        '502':
+          description: Tianditu did not return a tile image; nothing was cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - request_id
+                - status
+                - error
+                properties:
+                  request_id:
+                    type: string
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  error:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                        - BASEMAP_UPSTREAM_UNAVAILABLE
+                      message:
+                        type: string
+                      details:
+                        type:
+                        - object
+                        - 'null'
+                        additionalProperties: true
+        '503':
+          description: Tianditu throttled the configured key; retry after the Retry-After
+            interval. Nothing was cached.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - request_id
+                - status
+                - error
+                properties:
+                  request_id:
+                    type: string
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  error:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                        - BASEMAP_UPSTREAM_THROTTLED
+                      message:
+                        type: string
+                      details:
+                        type:
+                        - object
+                        - 'null'
+                        additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/runtime/config:
     get:
       tags:

@@ -760,6 +760,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/basemap/tianditu/{layer}/{z}/{x}/{y}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tianditu Tile
+         * @description One Tianditu basemap tile, fetched once through the server-side key and file-cached.
+         */
+        get: operations["tianditu_tile_api_v1_basemap_tianditu__layer___z___x___y__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime/config": {
         parameters: {
             query?: never;
@@ -3883,6 +3903,109 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tianditu_tile_api_v1_basemap_tianditu__layer___z___x___y__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer: "vec" | "cva" | "img" | "cia" | "ter" | "cta";
+                z: number;
+                x: number;
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One Tianditu web-mercator raster tile (PNG or JPEG, as upstream serves the layer). */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                    "image/jpeg": string;
+                };
+            };
+            /** @description The tile coordinate is outside the zoom level's tile grid. */
+            404: {
+                headers: {
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        request_id: string;
+                        /** @enum {string} */
+                        status: "error";
+                        error: {
+                            /** @enum {string} */
+                            code: "BASEMAP_TILE_OUT_OF_RANGE";
+                            message: string;
+                            details?: {
+                                [key: string]: unknown;
+                            } | null;
+                        };
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Tianditu did not return a tile image; nothing was cached. */
+            502: {
+                headers: {
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        request_id: string;
+                        /** @enum {string} */
+                        status: "error";
+                        error: {
+                            /** @enum {string} */
+                            code: "BASEMAP_UPSTREAM_UNAVAILABLE";
+                            message: string;
+                            details?: {
+                                [key: string]: unknown;
+                            } | null;
+                        };
+                    };
+                };
+            };
+            /** @description Tianditu throttled the configured key; retry after the Retry-After interval. Nothing was cached. */
+            503: {
+                headers: {
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        request_id: string;
+                        /** @enum {string} */
+                        status: "error";
+                        error: {
+                            /** @enum {string} */
+                            code: "BASEMAP_UPSTREAM_THROTTLED";
+                            message: string;
+                            details?: {
+                                [key: string]: unknown;
+                            } | null;
+                        };
+                    };
                 };
             };
         };

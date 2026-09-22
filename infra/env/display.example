@@ -59,6 +59,12 @@ NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true
 NHMS_MVT_FILE_CACHE_DIR=/tmp/nhms-mvt-cache
 
+# #2550: server-side Tianditu key for the same-origin basemap proxy
+# (/api/v1/basemap/tianditu/*); tiles are file-cached under
+# $NHMS_MVT_FILE_CACHE_DIR/basemap/. Unset falls back to the historical
+# browser-type key. Never commit the real value.
+# NHMS_TIANDITU_KEY=
+
 # #2010: read-only mirror root for the canonical precipitation products the
 # node-22 copyback writes onto the shared NFS tree. Display-side name on purpose:
 # the display_readonly profile refuses to start when the compute-side

@@ -353,54 +353,35 @@ Issue #389 的 station popup/bbox/framing 与 #342
 station-MVT 是独立缺口，不挂在本 C4 checkbox 下。#1970 已交付的河段 click
 oracle 仍由上述 C4 lane live 执行。
 
-#### 外部底图 provider 的受支持来源（#2436）
+#### 外部底图 provider：同源缓存代理（#2436 → #2550）
 
-单页地图的底图是天地图（Tianditu）WMTS，key 见
-`apps/frontend/src/components/map/m11MapRuntime.tsx:50`。注意 `VITE_TIANDITU_KEY` 是
-**构建时**覆盖（`import.meta.env.*` 由 Vite 在打包时静态内联），**不是运行时开关**——
-对着已部署的 bundle 导这个环境变量不会有任何效果。
-该 key 的权限类型是**浏览器端**且带**域名白名单**，因此「同一个 built app 在哪个 origin 上跑」
-直接决定 provider 返回 200 还是 403。做 live browser 证据前先认准这条：
+单页地图的底图是天地图（Tianditu）。自 #2550 起，浏览器**不再直连** `t*.tianditu.gov.cn`：
+瓦片 URL 是同源的 `/api/v1/basemap/tianditu/{layer}/{z}/{x}/{y}`，由 display API
+（`apps/api/routes/basemap.py`）在服务端带 key 取回，并写入文件缓存
+`<NHMS_MVT_FILE_CACHE_DIR>/basemap/tianditu/`。
 
-| 验证来源 | provider 行为 | `m11-map-source-error` 横幅 |
-|---|---|---|
-| 公网 `https://test.nwm.ac.cn` | 底图层与中文注记层均 **200**（2026-09-20 实测，三种底图 × 15 瓦片全绿） | **不应出现**；出现即为真回归 |
-| 隔离 loopback `http://127.0.0.1:<port>` | **403**，provider 码 `301007 域名不匹配` | **按设计出现**，不是应用回归 |
-| 任何非浏览器 UA（curl/脚本） | **403**，provider 码 `301012 权限类型错误`（见下注） | 不适用（无浏览器） |
-
-> 非浏览器 UA 那一行的实测值取自 node-27 出站。从别的出口用 curl 可能拿到的是
-> CloudWAF 的 **418** 拦截页而不是 `301012`（#2436 的 2026-09-16 评论从 Mac 上就是 418，
-> 本单在 node-27 上用「缺 `tk` 参数」那条对照也复现了 418）。两者都不是域名白名单闸，
-> 分诊时都要先补浏览器 `User-Agent` 再看结果。
-
-因此：
-
-- **C4 lane 必须跑在 provider 白名单来源上。** `test:e2e:live-c4-display`
-  （`apps/frontend/package.json:18`，来源由 `PLAYWRIGHT_LIVE_BASE_URL` 决定）在 loopback 来源上
-  **按构造必挂**：`apps/frontend/playwright.c4-display-lane.ts` 一见
-  `observation.mapSourceError` 就返回 `HOME_NOT_READY`（"home map source error contradicts
-  readiness"），观测点是 `apps/frontend/src/lib/c4DisplayEvidence/dom.ts:40`。
-  这与 `openspec/specs/c4-live-display-evidence/spec.md:48`「source error … MUST 阻止 PASS」一致，
-  **不得为了在 loopback 上取 C4 证据而放松该闸门**——正确做法是换来源，不是改闸门。
-- **非 C4 的隔离 smoke 不得把这条横幅读成应用回归**。可行做法只有一条：让该 smoke 直接断言
-  这条预期横幅存在（仅限**不**宣称 C4 PASS 的 smoke）。
-- **「换一个白名单含 loopback 的 key」是未验证的备选，不是现成步骤。** 因为 `VITE_TIANDITU_KEY`
-  是构建时内联，走这条路必须**同时**做到两件事：(1) 向 provider 申请到一个白名单包含该 loopback
-  来源的 key；(2) 用该 key **重新构建并重新部署** `PLAYWRIGHT_LIVE_BASE_URL` 所指来源上的 bundle。
-  #2436 把它列为「备选」并记了额外的 key/origin 生命周期维护成本，本次**未验证**该路径。
-  在它被验证之前，C4 的唯一可执行做法是**换到已在白名单内的来源**。
-- 上述做法都不允许为了让截图干净而改 `m11-map-source-error` 的错误处理——
-  它必须继续诚实回显真实 source error。
-- **只有公网来源的 receipt 能声称外部底图健康**；loopback-only 结果既不能升级为公网健康结论，
-  也不能升级为公网故障结论。
-- 用 curl 复核 provider 时必须带浏览器 `User-Agent`，否则拿到的是 `301012`（权限类型闸），
-  与域名白名单无关，会把分诊带偏。
-- provider key 是客户端可见凭据，但**不得**出现在 receipt、日志、截图或 issue 评论里；
-  取证脚本从源码读取后对所有输出做 redact。
-
-授权矩阵、公网来源的真实浏览器 receipt 与复现脚本见
-[`receipts/2026-09-20-node27-publish-tick-and-basemap-origin/README.md`](receipts/2026-09-20-node27-publish-tick-and-basemap-origin/README.md) §2。
-本节不要求任何生产 provider 配置变更。
+- **key 只放在服务端**：运行时读 `NHMS_TIANDITU_KEY`（写在 `infra/env/display.env`），缺省沿用原来的浏览器端 key；
+  前端 bundle 里不再有 key，`VITE_TIANDITU_KEY` 已删除。换 key 只需改 env 并重启 display，不用重新构建前端。
+- **上游请求形态**：带浏览器 UA、**不带 Referer**。该 key 的权限类型是「浏览器端」且带域名白名单：
+  非浏览器 UA 返回 `301012`，白名单外的 Referer 返回 `301007`，浏览器 UA 且不带 Referer 返回 200
+  （[2026-09-20 receipt](receipts/2026-09-20-node27-publish-tick-and-basemap-origin/README.md) §2.1 B1）。
+  所以任何 serving origin（`test.nwm.ac.cn`、`nwm.ac.cn`、loopback）拿到的都是同一个结果，
+  #2436 那种「loopback 按设计 403」的来源差异已经不存在。
+- **失败语义**：上游 429（`302010 该tk已限流`）时，display 返回 503 `BASEMAP_UPSTREAM_THROTTLED`，
+  带 `Retry-After: 60` 和 `no-store`，该 worker 60 秒内不再请求上游；其它上游失败返回 502
+  `BASEMAP_UPSTREAM_UNAVAILABLE` + `no-store`。失败**从不**写入缓存。天地图原本给 429 带的是
+  `max-age=432000`，这个头不再到达浏览器。
+- **前端兜底**：style 最底层是纯色 `background`；底图 source 出错时，`m11-map-source-error`
+  横幅显示一条固定中文提示（不含 URL、不含 key），并且**不覆盖**业务图层的错误。
+  C4 lane 仍然把任何 `mapSourceError` 判为不可 PASS（`c4DisplayEvidence/dom.ts:40`），
+  这道闸不放松：底图限流期间取不到 C4 PASS 是如实的结果。
+- **缓存容量**：`basemap/` 子树不在 MVT retention 的清理范围内（retention 只枚举两位十六进制目录），
+  也没有自动淘汰机制；按访问到的瓦片集合增长。容量核查按根 `CLAUDE.md` 用 `df -h` 实测；
+  需要回收时可以整棵删除 `basemap/`，删除后只会重新回源。
+- **复核 provider** 时，curl 必须带浏览器 `User-Agent`；key **不得**出现在 receipt、日志、截图
+  或 issue 评论里。live 复核 display 时直接请求同源代理即可：
+  `curl -sI https://test.nwm.ac.cn/api/v1/basemap/tianditu/vec/1/1/0`
+  （预期 200 + `X-Tile-Cache: miss|hit`；key 限流期间预期 503 + `no-store` + `Retry-After`）。
 
 #### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
 

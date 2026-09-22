@@ -1,5 +1,6 @@
 from fastapi import APIRouter, FastAPI
 
+from apps.api.routes.basemap import router as basemap_router
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
 from apps.api.routes.forecast import router as forecast_router
@@ -20,6 +21,7 @@ _BUSINESS_ROUTERS: tuple[APIRouter, ...] = (
     pipeline_router,
     hydro_display_router,
     precip_router,
+    basemap_router,
 )
 
 
