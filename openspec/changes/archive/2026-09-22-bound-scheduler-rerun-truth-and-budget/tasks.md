@@ -43,7 +43,7 @@
 
 - [x] 4.1 `uv run ruff check .`
 - [x] 4.2 Local: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or budget or quarantine or breaker"`, plus the new test files, `tests/test_orchestration_chain.py -k "retry"`, and `tests/test_file_orchestration_journal.py -k "identity or hydro_run"`.
-- [ ] 4.3 node-27 (oracle): `tests/test_production_scheduler.py tests/test_file_orchestration_journal.py tests/test_scheduler_generation.py tests/test_orchestration_chain.py tests/test_retry.py tests/test_scheduler_state*.py` + new test files all green at the PR head.
+- [x] 4.3 node-27 (oracle): `tests/test_production_scheduler.py tests/test_file_orchestration_journal.py tests/test_scheduler_generation.py tests/test_orchestration_chain.py tests/test_retry.py tests/test_scheduler_state*.py` + new test files all green at the PR head.
 - [x] 4.4 `openspec validate bound-scheduler-rerun-truth-and-budget --strict --no-interactive`
 
 ## 5. Review round 1 fixes
