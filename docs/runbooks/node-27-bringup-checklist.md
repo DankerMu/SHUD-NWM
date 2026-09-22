@@ -368,7 +368,7 @@ oracle 仍由上述 C4 lane live 执行。
   所以任何 serving origin（`test.nwm.ac.cn`、`nwm.ac.cn`、loopback）拿到的都是同一个结果，
   #2436 那种「loopback 按设计 403」的来源差异已经不存在。
 - **失败语义**：上游 429（`302010 该tk已限流`）时，display 返回 503 `BASEMAP_UPSTREAM_THROTTLED`，
-  带 `Retry-After: 60` 和 `no-store`，该 worker 60 秒内不再请求上游；其它上游失败返回 502
+  带 `Retry-After: 60` 和 `no-store`，该 worker 在 60 秒内不再为**该图层**请求上游（天地图按图层限流，别的图层照常取）；其它上游失败返回 502
   `BASEMAP_UPSTREAM_UNAVAILABLE` + `no-store`。失败**从不**写入缓存。天地图原本给 429 带的是
   `max-age=432000`，这个头不再到达浏览器。
 - **前端兜底**：style 最底层是纯色 `background`；底图 source 出错时，`m11-map-source-error`
