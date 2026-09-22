@@ -1,0 +1,73 @@
+## Change surface
+
+Writer: `scheduler_evidence_payload._serialized_evidence_within_limit` tier ladder and `bounded_evidence_payload` / `_bounded_limit_block` / fit-tier drop loop (#1905, #2402); `scheduler_discovery.discover_cycles` evidence + `scheduler_runtime` backfill evidence write (#2443); `scheduler_evidence.reserve_pre_execution_evidence` payload + `scheduler_lease._LeaseHeartbeat` + `scheduler_runtime` registration (#2405). Reader: `operator_action_listing` (all). CLI: `operator_reentry_confirmation` (#2426). Docs: `docs/runbooks/node22-control-plane-manual-recovery.md`, `infra/env/compute.example` (#2399). Locate by symbol; issue line numbers are stale.
+
+## Governing invariant
+
+`list-operator-actions` answers `exit 0` only when every scanned pass newer than the newest evaluating-and-scope-complete pass is transparent or narrowed, and an evaluating pass exposes every field the reader needs to enumerate the five action classes. No writer change may make a pass "evaluating" while hiding an action, and no reader change may read outside the evidence root or import scheduler modules (the reader stays db-free and importer-free).
+
+## D1 (#1905) — non_blocking_summary tier
+
+Tier order in `_serialized_evidence_within_limit`: full → strip `no_progress_circuit` (#1118) → `_compact_admissible_pass_payload` (existing, keeps status, writes `evidence_compaction = {status: applied, reason: pre_write_size_pressure, ...}`) → **non_blocking_summary** (new) → bounded fallback (`resource_limit_blocked`, unchanged) → `_compact_limit` floor → `SchedulerEvidenceWriteError`. Each tier re-serializes and rechecks the byte bound.
+The new tier starts from the payload AFTER admission compaction (so terminal skipped rows are already projected). It replaces `candidates`, `blocked_candidates` and the remaining (non-terminal) `skipped_candidates` rows with the SAME row projection the bounded fallback uses (`_bounded_candidate_summary_rows`, which retains `retry_policy` attempt/retry_limit/occurrences/manual_retry_required and `journal_predecessor_identity.recorded_init_state_id` per #1186). Every other top-level key stays verbatim — including `status`, `source_cycles`, `counts`, `operator_filters`, `sources`, `backfill`, `restart_reconcile`, and `model_run_evidence` / `slurm_cancellation_evidence` (left verbatim on purpose: `readiness_scheduler_evidence` validates `model_run_evidence` identity/count rows for passed statuses such as `submitted`; summarizing them would break that consumer — deviation from the issue text, which also listed them; if those rows alone overflow, the fallback applies as today).
+`evidence_compaction` becomes `{status: applied, reason: evidence_size_limit_exceeded, mode: non_blocking_summary, max_evidence_bytes, pre_compaction_status, summarized_fields, admission: <the admission-tier record, when present>}` — the admission record is nested, not overwritten. No `limit` block.
+Reader consequence (the coupling): a non_blocking_summary pass is evaluating (true status, no `limit`). Safe only because its rows carry every field the reader consumes (`_pass_actions`: `decision`, `candidate_id`, `source_id`, `cycle_time_utc`/`cycle_time`, `model_id`, `reason`, `retry_policy.*`, `journal_predecessor_identity.recorded_init_state_id`; scope keys are top-level and untouched). Pinned by an equivalence table test built from WRITER-produced rows (`candidate.to_dict()` / `run_once()`), one row per listed decision class, rows with 0/False retry values, plus a breaker-released source cycle: full vs the same pass forced into the tier → identical `operator_actions`, `non_evaluating_passes`, exit code. Readiness: one test that a summary-tier `submitted` pass still passes `readiness_scheduler_evidence` (model_run_evidence verbatim).
+The runtime-evidence "completed audit detail" scenario is MODIFIED (its "fallback applies unchanged" clause now reads "the non-blocking summary tier, then the fallback").
+Rejected: reader-only change to read `limit.pre_limit_status` (every consumer would change; pass still looks blocked).
+
+## D2 (#2402) — source_cycles bounded projection and marker
+
+`bounded_evidence_payload` keeps, instead of `[]`, a projection of `source_cycles` entries with `selection_status == "not_selected"` and `selection_reason == "journal_predecessor_identity_quarantine_breaker_engaged"`, one row each using the READER's key spellings: `source_id`, `cycle_time_utc`, `selection_status`, `selection_reason`, `journal_predecessor_identity_quarantine: {models: [{model_id, occurrences, recorded_init_state_id}]}` (plus any other key `_pass_actions` reads for that leg — implementer confirms by reading `_pass_actions`), capped at `_BOUNDED_SOURCE_CYCLE_PROJECTION_LIMIT` (new constant in `scheduler_evidence.py`, e.g. 64 rows). Marker `limit.source_cycles = {status: "summarized", breaker_released_total: <count of such entries in the source payload>, retained: <rows kept>}`; overflow beyond the cap is visible as `retained < breaker_released_total`.
+Fit tiers: both `_DROPPABLE_BOUNDED_EVIDENCE_FIELDS` loops (the empty-assign loop and the pop loop) that clear or remove a non-empty `source_cycles` set `status: "dropped"`; `dropped` is never downgraded — EXCEPT the terminal `_compact_limit` floor, which keeps only `limit.reason` and may drop the marker together with the rest of the `limit` block (same exception the existing "terminal limit compaction remains the fail-closed floor" scenario grants `candidate_lists`).
+Reader: under `summarized`, breaker-released models are listed from the projection; the pass stays non-evaluating with new reason `size_fallback_source_cycles_summarized` (non-evaluating ⇒ still vetoes exit 0 when newer than the newest evaluating pass; with a listed action the command exits 1). A size-fallback product whose marker is absent or `dropped` keeps `size_fallback_source_cycles_absent` (legacy files fail-closed). Writer-produced projection is run through `list_operator_actions` in a test.
+
+## D3 (#2443) — executed backfill leg (write side only)
+
+Current tree already arms the read side: `_scope_reason` returns `no_models_evaluated` (arming, outranks narrowed) when `counts.selected_model_count == 0` (spec production-scheduler-orchestration "counts.selected_model_count" paragraph; module comment names it #2443's read side). The remaining defect is the write side: `backfill.enabled` records config intent, not the leg `discover_cycles` executed, so the evidence cannot say which leg ran.
+Fix: `discover_cycles` appends a typed evidence entry `{"type": "backfill_leg", "mode": "backfill"|"legacy"}` from its own `backfill_mode` (the `backfill_audit` pattern); the runtime reads it (no recomputed predicate) and writes `backfill = {enabled: <config>, mode: <leg>, lookback_hours, audit}` (or `{enabled: False, mode: "legacy"}`). The entry is appended exactly once per `discover_cycles` call, outside the per-source loop, on both legs (the zero-model pass runs the legacy leg). It is not counted by `_source_cycle_evidence_progressed` (it has no `status`/`selection_status`), and — like `backfill_audit` today — it appears in the top-level `source_cycles` list unfiltered, which is harmless: `_pass_actions` and the D2 projection both key on `selection_status`/`selection_reason` and skip it. `enabled` keeps its config meaning (188/188 live shape unchanged apart from the added key).
+Reader: consistency guard only — `backfill.enabled is True and mode == "legacy"` with `counts.selected_model_count > 0` (a shape the writer cannot produce) → `scope_unknown` (arming). The zero-model case keeps `no_models_evaluated`. A pass without `mode` (older writer) is read as today. No new reason literal.
+
+## D4 (#2405) — reservation lease (option L2)
+
+Options considered:
+- L1 static `expires_at = reserved_at + TTL`: needs a pass-duration bound that config does not have; a slow healthy pass false-arms exit 3.
+- L2 heartbeat (chosen): the reservation payload embeds `lease = {ttl_seconds: config.lock_ttl_seconds, heartbeat_interval_seconds}`; the existing `_LeaseHeartbeat` (started at pass start, interval `lock_ttl_seconds // 3`) also refreshes the registered reservation file's mtime (`os.utime`, best-effort; a touch failure never marks the lease lost). Reader judges staleness exactly as `scheduler_lease._existing_lock_state` does: mtime age > 2×ttl → orphan. Self-describing, no new config, no cross-root read.
+- L3 pid liveness: breaks when the reader runs on another host (NFS).
+- Alternative A (issue): any newer reservation without a terminal file → exit 3: noisy during every in-flight submit pass.
+Registration: opt-in on `_LeaseHeartbeat` (a `register_touch_path(path)` method, default none), called by `run_once` only after `reserve_pre_execution_evidence` returns `reserved` (the heartbeat starts at pass start, before any reservation exists). Other `_LeaseHeartbeat` users (`file_orchestration_migration.py`, `scripts/m24_lease_nfs_proof.py`) are unchanged. Once `heartbeat.lost` is set the thread exits and stops touching: an in-flight pass that lost its lease then reads as an orphan — a false exit 3, never a false exit 0 (accepted).
+Reader rule: for each `*.pre_execution.json` whose `final_evidence_artifact` basename is absent in the root, whose `reserved_at` is newer than the newest evaluating-and-scope-complete pass's payload `started_at` (same writer clock as `reserved_at`; NOT file mtime — reservation mtime is now the heartbeat, and `retention_frontier._select_latest_receipt` chose `started_at` for the same reason), and whose mtime age exceeds 2×`lease.ttl_seconds` or which has no `lease` block (legacy writer, fail-safe) → report under `orphan_reservations` and veto exit 0 (exit 3). A fresh reservation changes nothing; one whose terminal file exists produces nothing. Test with a pass whose mtime and `started_at` disagree.
+Deployment: reservations written by the old code (no `lease`) that are newer than the newest evaluating pass read as orphans → transient exit 3 until the node-22 unit's next pass on new code completes (its terminal file then exists or a newer evaluating pass supersedes). Order: deploy code on node-22 before the next timer tick; expect at most one transient exit 3 window. The retention script's age pass and its size pass (deletes oldest-mtime first) both see heartbeat-shifted reservation mtimes; an in-flight reservation is newest by mtime and so deleted last — noted, no change.
+Retention script: unchanged deletion policy; out of scope beyond noting that an orphan older than the retention age is deleted (exposure bounded: systemd restarts the unit and the next pass re-shows breaker state).
+Spec: the `.pre_execution.json` exclusion from the pass scan stays; a new requirement adds the orphan veto.
+
+## D5 (#2442) — writer-bound status closure pin
+
+New test module reads writer sources as text + `ast` (no import): `scheduler_runtime.py`, `scheduler_candidate_runtime.py`, `scheduler_evidence_proofs.py`, `scheduler_candidate_execution_evidence.py`, plus `scheduler_evidence_payload.py` (`resource_limit_blocked` in `bounded_evidence_payload`) and the `_evidence_status(evidence, "<literal>")` / `scheduler_evidence.evidence_status` fallback arguments (where most runtime statuses are written); collects statically resolvable pass-status literals; unresolved write sites fail loud unless enumerated with a reason. The passthrough `str(execution_evidence[-1].get("status") or "planned")` is a declared dynamic source (docstring names why the pin cannot cover it). Asserts the reconciliation between writer literals and `EVALUATING_PASS_STATUSES ∪ TRANSPARENT_PASS_STATUSES ∪ declared non-evaluating`. Docstring records the asymmetry (moving an existing status before candidate construction is a control-flow change this pin cannot see). Mutation check executed for real and recorded. The 24-literal self-copy in `tests/test_operator_action_listing.py` is removed (that file and `scheduler_discovery.py` exceed the large-file guard; they are added to `.large-file-guard.json` `exclude`, recorded as a deviation, since splitting them is out of scope).
+
+## D6 (#2399) — evidence root provenance
+
+Runbook step 1 derives the root from the unit's EnvironmentFile (`compute.scheduler-dbfree.env`) with an explicit command, and the receipt check requires `evidence_root` equal to the expected production root and `passes_scanned > 0`. `infra/env/compute.example` `nhms-production` → `nhms-prod` (real path). Live node-22 `compute.env`: first check read-only whether any unit/cron sources it; if none, align the scheduler-root keys to the dbfree values with a dated backup (mode 600) and fix the header, receipt in the PR; if something live sources it, leave it and mark that criterion oracle-blocked. No `uv` on node-22.
+
+## D7 (#2426) — reentry refusals
+
+Remove `decision_not_reentry_eligible` and the `type(pin) is not int` half (zero programmatic callers; `click.Choice`/argparse `choices` and `type=int` share the source). Add the `cycle_time_invalid` parametrize leg (value `not-a-time`; no `target`/`pin` in that receipt). Runbook reason list = reachable receipts. Both legal decisions' dry-run/attest receipts unchanged.
+
+## Sibling surfaces
+
+Other `MAX_EVIDENCE_BYTES` readers: `retention_frontier.py` (not changed; a non_blocking_summary pass stays under the bound so it remains a frontier source). `readiness_scheduler_evidence.py` reads top-level status AND validates `model_run_evidence` rows (kept verbatim by D1); `production_contract.py` reads top-level status (now the true status under the new tier — intended; distinguishable via `evidence_compaction`). `scripts/node22_scheduler_evidence_retention.py` (reservation deletion). `docs/runbooks/qhh-22-business-bringup.md` bare-variable dereference (same fix pattern).
+
+## Seams under test
+
+`scheduler_evidence.write_evidence` + on-disk bytes; `run_once()` with test doubles; `list_operator_actions` / CLI `list-operator-actions` exit codes; `cli.main(["confirm-operator-reentry", ...])`.
+
+## Non-goals
+
+`MAX_EVIDENCE_BYTES` value; `SchedulerResourceLimitError` branch; `backfill_mode = bool(enabled and models)` fallback itself; retention deletion policy; `select_ci_tests.py` blind spot for `scheduler_runtime.py` → listing tests (noted, not fixed unless trivial).
+
+## Review focus
+
+1. Equivalence: a non_blocking_summary pass lists exactly what the full pass lists (no false exit 0).
+2. `dropped` never downgraded; absent marker read as dropped.
+3. Lease heartbeat touch cannot mark a lease lost or raise; reader ordering by `reserved_at`, not mtime.
+4. Zero-model arming does not flip the normal 188/188 shape.
+5. Reader stays importer-free and root-local.
