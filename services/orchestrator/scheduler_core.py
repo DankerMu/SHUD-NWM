@@ -432,6 +432,7 @@ class ProductionScheduler:
             evidence_safe=_scheduler._evidence_safe,
             candidate_execution_evidence=_scheduler._candidate_execution_evidence,
             unknown_after_attempt=_scheduler.UNKNOWN_AFTER_ATTEMPT,
+            resource_profile_override_model_ids=_scheduler._scheduler_execution.resource_profile_override_model_ids,
             # SUB-2 wiring for scheduler-pass-timing-instrumentation (#860):
             # ``run_once`` stashes the per-pass collector on ``self`` before
             # dispatching execution; SUB-3 / SUB-4 read it from the context.

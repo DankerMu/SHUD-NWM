@@ -1319,10 +1319,16 @@ class FileOrchestrationJournalRepository:
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         except FileOrchestrationJournalError:
             return True
+        # #2543: a model-less row of a sibling execution cohort (same cycle,
+        # disjoint recorded membership) is not this candidate's pipeline.
+        non_member_run_ids = _cohort_run_ids_excluding_model(
+            rows.pipeline_jobs.values(), source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+        )
         candidate_jobs = [
             job
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
             if _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+            and not (job.get("model_id") in (None, "") and str(job.get("run_id") or "") in non_member_run_ids)
         ]
         # Visibility stays WIDE (candidate_jobs still includes the foreign
         # named exact cycle-run row, keeping duplicate-submission scans broad),
@@ -14096,6 +14102,54 @@ def _compact_cycle_scope_job(job: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     return {key: job[key] for key in _CYCLE_SCOPE_JOB_PROJECTION_KEYS if key in job}
+
+
+def _cohort_run_ids_excluding_model(
+    jobs: Iterable[Mapping[str, Any]], *, source_id: str, cycle_time: datetime, model_id: str
+) -> frozenset[str]:
+    """Suffixed cohort run ids whose recorded membership provably excludes ``model_id`` (#2543).
+
+    Since #2543 one restart-compatible cohort can be split into several execution
+    cohorts of the same cycle (a default group plus one per resource-profile
+    override), each with its own ``cycle_<source>_<stamp>_<stage>_...`` run id.  The
+    model-less arm of ``_job_matches_candidate`` makes every such row visible to
+    every candidate of the cycle, so a running sibling cohort would block a
+    candidate that is not one of its members.  Only forcing and forecast rows
+    record ``cohort_members``; the union over all rows of a run id is that run's
+    membership (a cohort run id is a digest of its membership, so it never
+    changes).  A run id is returned only when at least one row records a complete,
+    untruncated member list and the model is in none of them; runs without any
+    recorded membership (e.g. before their forcing/forecast row exists) and the
+    bare ``cycle_<source>_<stamp>`` run id stay cycle-wide, as before.
+    """
+
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    members_by_run: dict[str, set[str]] = {}
+    incomplete_runs: set[str] = set()
+    for job in jobs:
+        run_id = str(job.get("run_id") or "")
+        if job.get("model_id") not in (None, "") or not run_id.startswith(f"{cycle_run_id}_"):
+            continue
+        raw_members = job.get("cohort_members")
+        if raw_members in (None, "", [], ()):
+            continue
+        members = ordered_cohort_members(raw_members)
+        member_model_ids = {str(member.get("model_id") or "") for member in members}
+        if (
+            not members
+            or not isinstance(raw_members, Sequence)
+            or len(members) != len(raw_members)
+            or len(members) >= MAX_FORECAST_COHORT_MEMBERS
+            or "" in member_model_ids
+        ):
+            incomplete_runs.add(run_id)
+            continue
+        members_by_run.setdefault(run_id, set()).update(member_model_ids)
+    return frozenset(
+        run_id
+        for run_id, member_model_ids in members_by_run.items()
+        if run_id not in incomplete_runs and model_id not in member_model_ids
+    )
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

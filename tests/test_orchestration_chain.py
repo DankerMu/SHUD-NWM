@@ -20643,3 +20643,125 @@ def test_canonical_precip_mirror_lock_timeout_still_advances_the_cycle_stage(
     assert mirror["error_type"] == "CopybackLockTimeout"
     assert repository.cycle_statuses == [_PRECIP_CONVERT_STAGE.success_cycle_status]
     assert not (copyback_root / "canonical").exists()
+
+
+# ---------------------------------------------------------------------------
+# #2543: a cycle split into a default cohort plus a resource-profile override
+# unit must not block itself through the file journal's model-less cohort rows.
+# ---------------------------------------------------------------------------
+
+_SPLIT_DEFAULT_RUN_ID = "cycle_gfs_2026071200_forecast_cohort_aaaaaaaaaaaa"
+
+
+def _split_unit_basins(indices: list[int], orchestration_run_id: str) -> list[dict[str, Any]]:
+    basins = _basins(max(indices) + 1)
+    selected = []
+    for index in indices:
+        basin = basins[index]
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "orchestration_run_id": orchestration_run_id,
+                "restart_stage": "forecast",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "state_evidence": {"restart_stage": "forecast"},
+            }
+        )
+        selected.append(basin)
+    return selected
+
+
+def _journal_with_active_default_cohort(tmp_path: Path) -> Any:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    default_client = FakeCycleSlurmClient(never_terminal_stage="forecast")
+    default_orchestrator = _orchestrator(
+        tmp_path / "default",
+        repository,
+        default_client,
+        terminal_stage="forecast",
+        job_timeout_seconds=0.5,
+    )
+    default_orchestrator.orchestrate_cycle(
+        "gfs", "2026071200", _split_unit_basins([0, 1], _SPLIT_DEFAULT_RUN_ID)
+    )
+    active = [
+        job
+        for job in repository.query_pipeline_jobs_by_cycle("gfs_2026071200")
+        if job.get("run_id") == _SPLIT_DEFAULT_RUN_ID
+    ]
+    assert [(job.get("model_id"), job.get("stage"), job.get("status")) for job in active] == [
+        (None, "forecast", "reconcile_unverified")
+    ]
+    return repository
+
+
+def test_split_override_unit_submits_while_sibling_default_cohort_is_active(tmp_path: Path) -> None:
+    repository = _journal_with_active_default_cohort(tmp_path)
+    override_client = FakeCycleSlurmClient()
+    override_client.next_job = 5000
+    override_orchestrator = _orchestrator(tmp_path / "override", repository, override_client, terminal_stage="forecast")
+
+    result = override_orchestrator.orchestrate_cycle(
+        "gfs", "2026071200", _split_unit_basins([2], "cycle_gfs_2026071200_forecast_model_2")
+    )
+
+    assert result.status == "succeeded"
+    assert len(override_client.submissions) == 1
+    assert override_client.submissions[0]["stage"] == "forecast"
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=_dt("2026-07-12T00:00:00Z"), model_id="model_0")
+
+
+def test_split_cohort_member_is_still_blocked_by_its_own_active_cohort(tmp_path: Path) -> None:
+    repository = _journal_with_active_default_cohort(tmp_path)
+    duplicate_client = FakeCycleSlurmClient()
+    duplicate_client.next_job = 5000
+    duplicate_orchestrator = _orchestrator(
+        tmp_path / "duplicate", repository, duplicate_client, terminal_stage="forecast"
+    )
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        duplicate_orchestrator.orchestrate_cycle(
+            "gfs", "2026071200", _split_unit_basins([0], "cycle_gfs_2026071200_forecast_model_0")
+        )
+
+    assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert duplicate_client.submissions == []
+
+
+def test_cohort_run_membership_exclusion_only_trusts_complete_recorded_members() -> None:
+    from services.orchestrator.file_orchestration_journal import _cohort_run_ids_excluding_model
+
+    def members(*model_ids: str) -> list[dict[str, Any]]:
+        return [{"model_id": model_id, "array_task_id": index} for index, model_id in enumerate(model_ids)]
+
+    jobs = [
+        # Default cohort: forecast row records members, its parse row does not.
+        {"run_id": "cycle_gfs_2026071200_full_cohort_aaa", "model_id": None, "cohort_members": members("m0", "m1")},
+        {"run_id": "cycle_gfs_2026071200_full_cohort_aaa", "model_id": None, "stage": "parse"},
+        # A cohort with no recorded membership yet stays cycle-wide.
+        {"run_id": "cycle_gfs_2026071200_full_cohort_bbb", "model_id": None, "stage": "convert"},
+        # A row with an unreadable member entry makes the whole run untrusted.
+        {"run_id": "cycle_gfs_2026071200_full_cohort_ccc", "model_id": None, "cohort_members": members("m3")},
+        {"run_id": "cycle_gfs_2026071200_full_cohort_ccc", "model_id": None, "cohort_members": [{"model_id": ""}]},
+        # A member list at the storage cap may be truncated.
+        {
+            "run_id": "cycle_gfs_2026071200_full_cohort_ddd",
+            "model_id": None,
+            "cohort_members": members(*(f"x{index}" for index in range(256))),
+        },
+        # The bare cycle run id and named model rows are never narrowed.
+        {"run_id": "cycle_gfs_2026071200", "model_id": None, "cohort_members": members("m0")},
+        {"run_id": "cycle_gfs_2026071200_full_m5", "model_id": "m5", "cohort_members": members("m5")},
+    ]
+
+    def excluded(model_id: str) -> frozenset[str]:
+        return _cohort_run_ids_excluding_model(
+            jobs, source_id="gfs", cycle_time=_dt("2026-07-12T00:00:00Z"), model_id=model_id
+        )
+
+    assert excluded("hlj") == frozenset({"cycle_gfs_2026071200_full_cohort_aaa"})
+    assert excluded("m0") == frozenset()
+    assert excluded("m1") == frozenset()

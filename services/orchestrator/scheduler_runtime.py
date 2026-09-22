@@ -1386,6 +1386,9 @@ def run_once(self) -> SchedulerPassResult:
                 # into the durable pass artifact (not just memory) so
                 # "receipt shows overlapping submits" has on-disk proof.
                 evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
+                resource_profile_split = getattr(overlap_receipt, "resource_profile_split", None)
+                if resource_profile_split is not None:
+                    evidence["resource_profile_split"] = resource_profile_split
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
             if evidence_reservation["status"] != "not_required":

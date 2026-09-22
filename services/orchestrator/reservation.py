@@ -135,6 +135,9 @@ class SubmitOverlapReceipt:
     """
 
     submissions: list[dict[str, Any]] = field(default_factory=list)
+    # #2543: resource-profile cohort split outcome for this pass; archived as the
+    # top-level ``resource_profile_split`` pass evidence key, not in ``to_dict``.
+    resource_profile_split: dict[str, Any] | None = None
 
     def record(
         self,

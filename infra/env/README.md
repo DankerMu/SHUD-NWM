@@ -356,6 +356,11 @@ NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
 # must stop before parse/publish. `forecast` is NOT an acceptable value.
 NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc
 NHMS_REQUIRE_FORECAST_WARM_START=true
+
+# Slurm gateway backend (#2543). The scheduler reads the same selector as the
+# gateway: only `slurm` makes it split cohorts by the gateway's
+# config/resource_profiles.yaml override keys (the default `mock` never does).
+SLURM_GATEWAY_BACKEND=slurm
 ```
 
 <!-- /nhms-required-keys -->

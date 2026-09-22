@@ -10,6 +10,13 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from services.orchestrator import source_cycle_raw_manifest
+from services.orchestrator.scheduler_cohort_split import (
+    RESOURCE_PROFILE_DEFAULT_KEY,
+    _array_concurrency_budgets,
+    resource_profile_candidate_groups,
+    resource_profile_override_model_ids,  # noqa: F401 - wired by scheduler_core via this module
+    resource_profile_split_evidence,
+)
 from services.orchestrator.scheduler_timing import set_current_scheduler_pass_timing
 
 # Epic #961 SUB-10 (#971) §4.2(a): named blocked-candidate reason + error_code
@@ -121,6 +128,11 @@ class SchedulerExecutionContext:
     evidence_safe: Callable[[Any], Any]
     candidate_execution_evidence: Callable[..., list[dict[str, Any]]]
     unknown_after_attempt: str
+    # #2543: gateway resource-profile override key set (same yaml the gateway
+    # reads), or ``None`` when the gateway backend is not ``slurm`` and the split
+    # is inactive.  Called once per pass execution; raises fail-closed when the
+    # profile file is missing or malformed.
+    resource_profile_override_model_ids: Callable[[], frozenset[str] | None]
     # SUB-2 wiring for scheduler-pass-timing-instrumentation (#860): SUB-3
     # (scheduler_execution stage spans) and SUB-4 (chain_forecast_execution
     # candidate spans) consume the per-pass ``SchedulerPassTiming`` via this
@@ -315,6 +327,7 @@ class _CohortUnit:
     execution_candidates: list[SchedulerExecutionCandidate]
     cohort_run_id: str | None
     array_max_concurrent: int
+    profile_key: str = RESOURCE_PROFILE_DEFAULT_KEY
 
 
 def execute_candidates(
@@ -356,8 +369,11 @@ def _execute_candidate_units(
     for candidate in candidates:
         grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
 
-    units = _execution_units(context, grouped)
+    override_model_ids = context.resource_profile_override_model_ids() if grouped else None
+    units = _execution_units(context, grouped, override_model_ids=override_model_ids)
     receipt = context.submit_overlap_receipt_factory()
+    if grouped:
+        receipt.resource_profile_split = resource_profile_split_evidence(units, override_model_ids)
     context.set_last_submit_overlap_receipt(receipt)
 
     def _submitter(
@@ -415,8 +431,11 @@ def _execute_candidate_units(
 def _execution_units(
     context: SchedulerExecutionContext,
     grouped: Mapping[tuple[str, datetime], Sequence[SchedulerExecutionCandidate]],
+    *,
+    override_model_ids: frozenset[str] | None,
 ) -> list[_CohortUnit]:
     source_order = {source_id.lower(): index for index, source_id in enumerate(context.config.sources)}
+    split_keys = override_model_ids or frozenset()
     units: list[_CohortUnit] = []
     for (source_id, cycle_time), cycle_candidates in sorted(
         grouped.items(),
@@ -428,25 +447,31 @@ def _execution_units(
         ),
     ):
         cycle_id = context.cycle_id_for(source_id, cycle_time)
-        for cohort_key, cohort_candidates in context.restart_compatible_candidate_cohorts(
+        for cohort_key, restart_candidates in context.restart_compatible_candidate_cohorts(
             _unique_execution_candidates(cycle_candidates)
         ):
-            for execution_candidates, cohort_run_id in context.candidate_execution_cohorts(
-                source_id,
-                cycle_time,
-                cohort_key,
-                cohort_candidates,
-            ):
-                units.append(
-                    _CohortUnit(
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                        cycle_id=cycle_id,
-                        execution_candidates=list(execution_candidates),
-                        cohort_run_id=cohort_run_id,
-                        array_max_concurrent=1,
+            for cohort_candidates in resource_profile_candidate_groups(restart_candidates, split_keys):
+                for execution_candidates, cohort_run_id in context.candidate_execution_cohorts(
+                    source_id,
+                    cycle_time,
+                    cohort_key,
+                    cohort_candidates,
+                ):
+                    units.append(
+                        _CohortUnit(
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                            cycle_id=cycle_id,
+                            execution_candidates=list(execution_candidates),
+                            cohort_run_id=cohort_run_id,
+                            array_max_concurrent=1,
+                            profile_key=(
+                                cohort_candidates[0].model_id
+                                if cohort_candidates[0].model_id in split_keys
+                                else RESOURCE_PROFILE_DEFAULT_KEY
+                            ),
+                        )
                     )
-                )
     budgets = _array_concurrency_budgets(
         units,
         global_bound=context.config.slurm_array_concurrency_bound,
@@ -463,47 +488,6 @@ def _execution_units(
         )
         for unit, budget in zip(units, budgets, strict=True)
     ]
-
-
-def _array_concurrency_budgets(
-    units: Sequence[_CohortUnit],
-    *,
-    global_bound: int,
-    worker_bound: int,
-) -> list[int]:
-    """Allocate a strict cross-cohort Slurm array budget.
-
-    When every unit can start immediately, round-robin water filling preserves
-    small cohorts and uses the entire global budget whenever enough tasks
-    exist.  If units must queue behind the control-thread bound, every active
-    slot receives the same conservative ceiling; any combination of running
-    slots therefore remains within ``global_bound`` as queued units advance.
-    """
-
-    if not units:
-        return []
-    global_bound = max(int(global_bound), 1)
-    active_slots = min(len(units), max(int(worker_bound), 1), global_bound)
-    task_counts = [max(len(unit.execution_candidates), 1) for unit in units]
-    if len(units) > active_slots:
-        per_slot_bound = max(global_bound // active_slots, 1)
-        return [min(task_count, per_slot_bound) for task_count in task_counts]
-
-    budgets = [0] * len(units)
-    remaining = global_bound
-    while remaining > 0:
-        advanced = False
-        for index, task_count in enumerate(task_counts):
-            if budgets[index] >= task_count:
-                continue
-            budgets[index] += 1
-            remaining -= 1
-            advanced = True
-            if remaining == 0:
-                break
-        if not advanced:
-            break
-    return [max(budget, 1) for budget in budgets]
 
 
 def _candidate_with_array_concurrency_budget(

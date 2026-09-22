@@ -649,14 +649,40 @@ file registry 决定全量自动计算；只在定向 rollback/drill 时临时�
 生产并发由 scheduler 的全局 Slurm 数组预算
 `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` 和 resource profile 的
 `max_concurrent=32` 共同约束。scheduler 登录节点
-只按“数据源 × 时次 × restart-compatible stage”构造 cohort、提交和轮询，不执行
-direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
+只按“数据源 × 时次 × restart-compatible stage × 网关资源 profile 键”构造 cohort、
+提交和轮询，不执行 direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
 生成 `--array=0-(N-1)%min(cohort预算,resource profile上限,N)`；同一 pass 同时运行的
 cohort 预算总和不超过 32。GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
 只在 pass 收尾时汇总全部 cohort。`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 仅限制少量
 cohort 提交/轮询控制线程，不能作为流域计算并发口径，也不能替代 Slurm `%N`。
 cohort run id 包含排序后 candidate membership 的稳定摘要；同一成员集合重启时复用，
 定向过滤或新增/移除流域时生成新 idempotency key，禁止把子集数组误认成全量数组。
+
+**大流域加核（#2543）**：Gateway 只按数组 task 0 的 model_id 解析
+`config/resource_profiles.yaml`（`default` + `overrides[model_id]`），因此 scheduler 在
+restart-compatible cohort 内再按 profile 键拆分：`overrides` 里有条目的 model_id 各自单独
+成一个数组（自己就是 task 0），其余模型仍同在一个 `default` 数组。拆分只在 scheduler 环境
+`SLURM_GATEWAY_BACKEND=slurm` 时生效（与 gateway 选后端的判据相同；mock 后端不读该文件，
+cohort 不拆）。scheduler 与 gateway 读
+同一份 yaml（`SLURM_GATEWAY_RESOURCE_PROFILES_PATH`，默认相对 `WorkingDirectory` 的
+`config/resource_profiles.yaml`；node-22 两个 unit 的 WorkingDirectory 都是
+`/scratch/frd_muziyao/NWM`）。文件缺失、不是合法 YAML 或缺 `default` 段时，scheduler 在
+构造 cohort 阶段抛 `ConfigurationError`、整趟 pass 失败退出，零提交（fail closed）。要给某个大流域更多
+核，需同时做两件事：
+
+1. 在 `resource_profiles.overrides` 下为该流域**每个** direct-grid model_id（GFS/IFS 各一个）
+   加条目，写 `cpus_per_task`、`memory_gb`、`shud_threads`（必要时加 `walltime`）；
+2. 把 registry 中这些行的 `resource_profile.shud_threads` 设成同一个值。SHUD 线程数取自
+   registry 行（`services/orchestrator/chain_manifests.py` 的 `threads`：`shud_threads`
+   优先，其次 `cpus_per_task`），不读 yaml；只改 yaml 会分到更多核，但 SHUD 仍按旧线程数跑。
+
+核验：每趟执行 pass 的 evidence 顶层 `resource_profile_split` 记录 `active`（非 `slurm` 后端时为
+`false`、`inactive_reason=gateway_backend_not_slurm`）、配置的 `override_model_ids`、实际单独成组的
+`applied_override_model_ids`，以及每个数组的 `cohort_run_id`/`profile_key`/`task_count`/`array_max_concurrent`。
+同一 cycle 拆出的兄弟数组互不阻塞：file journal 的 active 判定只把 cohort 行算给其已记录成员
+（forcing/forecast 行上的 `cohort_members`），尚未记录成员的 cohort 行仍按整 cycle 保守阻塞。
+没有任何 override 成员时 cohort 拆分结果、membership 与 cohort run id 与旧行为逐字节一致；
+新增 override 只会让该模型离开 default 数组，default 数组因成员变化得到新的 cohort run id。
 
 `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 是生产硬门禁：publisher 不能用 legacy/IDW
 行覆盖 canonical，consumer 读到任一非 direct-grid 行也会整体阻断。每日
