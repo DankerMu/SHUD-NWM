@@ -16,6 +16,7 @@ from services.orchestrator.chain_types import (
 )
 from services.orchestrator.forcing_submit_identity import (
     basin_model_ids,
+    forcing_member_identity_is_complete,
     forcing_member_model_ids,
     forcing_members_overlap,
     is_forcing_array_stage,
@@ -31,7 +32,6 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 __all__ = (
     "apply_cohort_warm_start",
-    "cycle_download_success_missing_raw_manifest",
     "find_existing_stage_job",
     "job_matches_stage",
     "job_needs_submission",
@@ -81,10 +81,6 @@ def _stage_job_sort_key(*args: Any, **kwargs: Any) -> Any:
 
 def _terminal_job_statuses() -> set[str]:
     return getattr(_chain, "TERMINAL_JOB_STATUSES")
-
-
-def _terminal_pipeline_success_statuses() -> set[str]:
-    return getattr(_chain, "TERMINAL_PIPELINE_SUCCESS_STATUSES")
 
 
 def _validate_safe_id(*args: Any, **kwargs: Any) -> Any:
@@ -509,6 +505,19 @@ def find_existing_stage_job(
     matches = [dict(job) for job in jobs if self._job_matches_stage(job, stage)]
     if is_forcing_array_stage(stage):
         current_models = basin_model_ids(context.active_basins)
+        # #1845 (D2): a row with complete member identity is this cohort's
+        # forcing only when its member model set equals the current cohort's.
+        # Another model set's row (the unscoped run_id is shared by every
+        # cohort of the cycle) is neither resumed nor polled as ours; an
+        # overlapping unresolved one still blocks through ``blockers`` below.
+        # Rows without complete identity (pre-identity / DB lanes) keep the
+        # model-blind stage match.
+        matches = [
+            job
+            for job in matches
+            if not forcing_member_identity_is_complete(job)
+            or forcing_member_model_ids(job) == current_models
+        ]
         active_matches = [
             job for job in matches if str(job.get("status")) not in _terminal_job_statuses()
         ]
@@ -535,22 +544,6 @@ def find_existing_stage_job(
         return None
     active_matches = [job for job in matches if str(job.get("status")) not in _terminal_job_statuses()]
     return dict(max(active_matches or matches, key=lambda job: _stage_job_sort_key(job, stage)))
-
-
-def cycle_download_success_missing_raw_manifest(
-    self: Any,
-    stage: StageDefinition,
-    context: CycleOrchestrationContext,
-    job: Mapping[str, Any],
-) -> bool:
-    if stage.stage != "download":
-        return False
-    if str(job.get("status") or "") not in _terminal_pipeline_success_statuses():
-        return False
-    manifest_uri = self.object_store.uri_for_key(
-        f"raw/{context.source_id}/{format_cycle_time(context.cycle_time)}/manifest.json"
-    )
-    return not self.object_store.exists(manifest_uri)
 
 
 def job_matches_stage(job: Mapping[str, Any], stage: StageDefinition) -> bool:

@@ -609,7 +609,7 @@ def _veto_cycle_basin(
     decision: str,
     restart_stage: str | None = "forecast",
 ) -> dict[str, Any]:
-    return {
+    basin: dict[str, Any] = {
         "model_id": model_id,
         "basin_id": f"basin_{model_id}",
         "basin_version_id": "bv",
@@ -623,6 +623,11 @@ def _veto_cycle_basin(
             "restart_from_stage": restart_stage,
         },
     }
+    # #2416: the chain reads the cohort restart stage ONLY from the top-level
+    # key the run manifest writes, so the hand-built basin carries it too.
+    if restart_stage:
+        basin["restart_stage"] = restart_stage
+    return basin
 
 
 def test_real_cycle_resume_mixed_cohort_produces_veto_receipt_in_candidate_outcomes(

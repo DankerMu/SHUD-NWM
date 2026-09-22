@@ -198,6 +198,9 @@ class ForecastOrchestratorCycleMixin:
         stage: _chain.StageDefinition,
         existing_jobs: _chain.Sequence[_chain.Mapping[str, _chain.Any]],
     ) -> str:
+        # ``context.retry_attempt`` here is the invocation claim only (#2393): the
+        # stage loop resets it at every stage entry, so another stage's
+        # reservation attempt never short-circuits this stage's own derivation.
         base_job_id = _chain._pipeline_job_id(context.run_id, stage.stage)
         attempt = context.retry_attempt or _chain._next_retry_attempt_for_stage(
             existing_jobs, base_job_id=base_job_id, stage=stage
@@ -241,10 +244,20 @@ class ForecastOrchestratorCycleMixin:
         terminal_time = _chain._pipeline_job_terminal_time(job)
         return terminal_time is None or terminal_time <= refreshed_upstream_finished_at
 
-    def _schedule_cycle_stage_retry(self, result: _chain.StageRunResult, failure_number: int) -> str | None:
+    def _schedule_cycle_stage_retry(
+        self,
+        result: _chain.StageRunResult,
+        failure_number: int,
+        *,
+        attempt_floor: int | None = None,
+    ) -> str | None:
+        # ``attempt_floor``: the next free ``_retry_N`` of this stage's base id in
+        # the snapshot that selected the failed row (#1845 x nested partial
+        # retry).  Never re-read here: concurrent passes on one snapshot must
+        # derive one replacement id.
         if self.retry_service is None:
             return None
-        job = self._retry_job_for_stage_result(result)
+        job = self._retry_job_for_stage_result(result, attempt_floor=attempt_floor)
         if job is None:
             return None
         retry_count = int(getattr(job, "retry_count", 0) or 0)
@@ -362,10 +375,12 @@ class ForecastOrchestratorCycleMixin:
         if callable(commit):
             commit()
 
-    def _retry_job_for_stage_result(self, result: _chain.StageRunResult) -> _chain.PipelineJob | None:
+    def _retry_job_for_stage_result(
+        self, result: _chain.StageRunResult, *, attempt_floor: int | None = None
+    ) -> _chain.PipelineJob | None:
         from services.orchestrator import chain_forecast_execution
 
-        return chain_forecast_execution._retry_job_for_stage_result(self, result)
+        return chain_forecast_execution._retry_job_for_stage_result(self, result, attempt_floor=attempt_floor)
 
     def _retry_partial_array_stage(
         self,
@@ -376,6 +391,7 @@ class ForecastOrchestratorCycleMixin:
         had_partial_before_stage: bool,
         last_partial_before_stage: str | None,
         confirmed_master: Any = None,
+        attempt_floor: int | None = None,
     ) -> tuple[_chain.StageRunResult, _chain.ArrayAggregation | None] | None:
         from services.orchestrator import chain_forecast_execution
 
@@ -388,6 +404,7 @@ class ForecastOrchestratorCycleMixin:
             had_partial_before_stage,
             last_partial_before_stage,
             confirmed_master=confirmed_master,
+            attempt_floor=attempt_floor,
         )
 
     @staticmethod
@@ -976,14 +993,6 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext,
     ) -> dict[str, _chain.Any] | None:
         return _chain.chain_forecast_cycle.find_existing_stage_job(self, jobs, stage, context=context)
-
-    def _cycle_download_success_missing_raw_manifest(
-        self,
-        stage: _chain.StageDefinition,
-        context: _chain.CycleOrchestrationContext,
-        job: _chain.Mapping[str, _chain.Any],
-    ) -> bool:
-        return _chain.chain_forecast_cycle.cycle_download_success_missing_raw_manifest(self, stage, context, job)
 
     @staticmethod
     def _job_matches_stage(job: _chain.Mapping[str, _chain.Any], stage: _chain.StageDefinition) -> bool:

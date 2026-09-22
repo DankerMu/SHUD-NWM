@@ -366,6 +366,8 @@ def submit_and_wait_cycle_stage(
         # A reclaimed durable reservation increments the authoritative attempt.
         # Runtime manifests/placeholders must carry that exact attempt so a
         # later accepted-submit ambiguity releases the current, not stale, rows.
+        # #2393: stage-scoped -- the stage loop restores the invocation claim
+        # before the next stage is entered.
         context.retry_attempt = reservation.submission_attempt
     durable_submit_ambiguity = bool(
         getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
