@@ -79,6 +79,9 @@ DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS = 168
 MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH = 64
 MAX_STATE_SNAPSHOT_INDEX_JSON_NODES = 300_000
 STATE_INDEX_CONTROL_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products", "runs"})
+# One validation pass's ``LocalObjectStore`` per (root, prefix); see
+# ``_state_index_object_store``.
+_StateIndexStoreCache = dict[tuple[str, str], LocalObjectStore]
 STATE_INDEX_CONTROL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum"})
@@ -3504,6 +3507,10 @@ def _validate_state_snapshot_index(
         )
     entries: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     state_ids: set[str] = set()
+    # #2541: every entry resolves against the same one or two configured roots, so
+    # the root is walked once per pass, not once per entry (the per-entry walk was
+    # ~75% of the in-lock cost on the NFS-backed production index).
+    store_cache: _StateIndexStoreCache = {}
     for index, item in enumerate(entries_value):
         if not isinstance(item, Mapping):
             raise _state_index_error("state_snapshot_index_entry_not_object", field=f"entries[{index}]")
@@ -3514,6 +3521,7 @@ def _validate_state_snapshot_index(
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             verify_object=verify_objects,
+            store_cache=store_cache,
         )
         key = _state_index_identity_key(
             model_id=str(entry["model_id"]),
@@ -3556,6 +3564,7 @@ def _normalize_state_index_entry(
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
     verify_object: bool,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> dict[str, Any]:
     row = dict(item)
     required = ("state_id", "model_id", "run_id", "source_id", "valid_time", "state_uri", "checksum", "usable_flag")
@@ -3585,6 +3594,7 @@ def _normalize_state_index_entry(
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             field=f"entries[{index}].state_uri",
+            store_cache=store_cache,
         )
     else:
         _require_supported_state_object_reference(
@@ -3593,6 +3603,7 @@ def _normalize_state_index_entry(
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             field=f"entries[{index}].state_uri",
+            store_cache=store_cache,
         )
         object_evidence = None
     lead_hours = _optional_state_index_int(row.get("lead_hours"), field=f"entries[{index}].lead_hours")
@@ -3916,6 +3927,7 @@ def _verify_state_index_object(
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
     field: str,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> dict[str, Any]:
     _require_supported_state_object_reference(
         uri,
@@ -3923,6 +3935,7 @@ def _verify_state_index_object(
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
         field=field,
+        store_cache=store_cache,
     )
     try:
         content = _read_state_object_bytes(
@@ -3931,6 +3944,7 @@ def _verify_state_index_object(
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             max_bytes=MAX_STATE_IC_BYTES,
+            store_cache=store_cache,
         )
     except FileNotFoundError as error:
         raise _state_index_error("state_snapshot_index_object_missing", field=field) from error
@@ -3960,6 +3974,7 @@ def _require_supported_state_object_reference(
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
     field: str,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> None:
     parsed = urlparse(str(uri))
     scheme = str(parsed.scheme or "").lower()
@@ -3975,6 +3990,7 @@ def _require_supported_state_object_reference(
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
             field=field,
+            store_cache=store_cache,
         )
         return
     if scheme == "published":
@@ -3985,6 +4001,7 @@ def _require_supported_state_object_reference(
             published_artifact_root=published_artifact_root,
             source_uri=uri,
             field=field,
+            store_cache=store_cache,
         )
         return
     if scheme:
@@ -4000,6 +4017,7 @@ def _require_supported_state_object_reference(
         object_store_prefix=object_store_prefix,
         published_artifact_root=published_artifact_root,
         field=field,
+        store_cache=store_cache,
     )
 
 
@@ -4011,6 +4029,7 @@ def _validate_state_object_key_with_store(
     published_artifact_root: str | Path | None,
     field: str,
     source_uri: str | None = None,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> None:
     try:
         store = _state_index_object_store(
@@ -4018,6 +4037,7 @@ def _validate_state_object_key_with_store(
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
+            store_cache=store_cache,
         )
         store.resolve_path(key_or_uri)
     except (ObjectStoreError, ValueError) as error:
@@ -4140,6 +4160,7 @@ def _read_state_object_bytes(
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
     max_bytes: int,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> bytes:
     parsed = urlparse(str(uri))
     if parsed.scheme in {"s3", "published"}:
@@ -4148,6 +4169,7 @@ def _read_state_object_bytes(
             object_store_root=object_store_root,
             object_store_prefix=object_store_prefix,
             published_artifact_root=published_artifact_root,
+            store_cache=store_cache,
         ).read_bytes_limited(_state_index_object_key(str(uri)), max_bytes=max_bytes)
     if parsed.scheme:
         raise ValueError("Unsupported state object URI scheme.")
@@ -4170,6 +4192,7 @@ def _state_index_object_store(
     object_store_root: str | Path | None,
     object_store_prefix: str | None,
     published_artifact_root: str | Path | None,
+    store_cache: _StateIndexStoreCache | None = None,
 ) -> LocalObjectStore:
     parsed = urlparse(str(uri))
     if parsed.scheme == "published":
@@ -4180,7 +4203,17 @@ def _state_index_object_store(
         prefix = object_store_prefix or os.getenv("OBJECT_STORE_PREFIX", "")
     if root in (None, ""):
         raise ObjectStoreError("object store root is required for file state index object URI reads")
-    return LocalObjectStore(root, object_store_prefix=prefix or "")
+    if store_cache is None:
+        return LocalObjectStore(root, object_store_prefix=prefix or "")
+    # Constructing the store walks ``root`` no-follow from ``/``; a failed walk
+    # raises before anything is cached, so an unsafe root still fails on the first
+    # entry that needs it, with that entry's field.
+    cache_key = (str(root), prefix or "")
+    store = store_cache.get(cache_key)
+    if store is None:
+        store = LocalObjectStore(root, object_store_prefix=prefix or "")
+        store_cache[cache_key] = store
+    return store
 
 
 def _state_index_control_object_path(
