@@ -1855,7 +1855,7 @@ def _assert_public_runtime_root_resolution(
     mapping: Any,
     *,
     forbidden_roots: tuple[str, ...],
-    expected_placeholders: dict[str, str | None] | None = None,
+    expected_placeholders: dict[str, str] | None = None,
 ) -> None:
     """The one wire shape both retry lanes must render for ``runtime_root_resolution``.
 
@@ -1872,14 +1872,22 @@ def _assert_public_runtime_root_resolution(
     fields and takes precedence over the default classification: a local root
     field whose configured value is itself a scheme-anchored URI (accepted by
     ``_resolve_runtime_root_candidate`` without local-path safety, #1976)
-    renders ``[uri]``/``[object-uri]``, never ``[local-path]``.  ``None`` pins the
-    file lane's durable withholding: its write boundary
-    (``_strip_redaction_placeholders``) stores an exact ``[uri]``/``[object-uri]``
-    placeholder as ``None``.  Callers that do not pass it keep the default
-    assertions unchanged.
+    renders ``[uri]``/``[object-uri]``, never ``[local-path]``.  Callers that do
+    not pass it keep the default assertions unchanged.
+
+    #2306 REMOVED the lane-specific allowance that used to live here: a ``None``
+    expectation stood for the file lane's durable withholding, where a
+    writer-side pre-render met the caller-boundary anti-laundering strip
+    (``_strip_redaction_placeholders``) and an exact ``[uri]``/``[object-uri]``
+    became ``null``.  The file lane now renders once at the journal's own event
+    boundary, so a withheld value is a defect on BOTH lanes and the oracle is
+    lane-independent again.  The expectation type is ``str``, and the explicit
+    non-``None`` assertion below keeps that removal from being re-weakened by a
+    caller passing ``None`` through an untyped dict.
     """
 
     expected_placeholders = expected_placeholders or {}
+    assert all(isinstance(value, str) for value in expected_placeholders.values()), expected_placeholders
 
     assert isinstance(mapping, dict)
     resolved = mapping["resolved"]
@@ -1888,6 +1896,10 @@ def _assert_public_runtime_root_resolution(
         assert isinstance(entry, dict), f"{field_name} must stay a mapping, got {entry!r}"
         assert entry["present"] is True
         assert isinstance(entry["source"], str) and entry["source"]
+        # #2306: "present, but withheld" is no longer a shape either lane may
+        # answer with.  Stated separately from the placeholder comparisons so
+        # the removed allowance cannot creep back as a ``None`` expectation.
+        assert entry["value"] is not None, f"{field_name} was withheld: {entry!r}"
         if field_name in expected_placeholders:
             assert entry["value"] == expected_placeholders[field_name], f"{field_name} value={entry['value']!r}"
         elif field_name in _LOCAL_RUNTIME_ROOT_FIELDS:
@@ -3566,24 +3578,414 @@ def test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole(
     assert details["error_message"] == _PUBLIC_SBATCH_OPEN_ERROR
     evidence = details["runtime_root_resolution"]
     assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root", "object_store_prefix"}
-    # The renderer classifies each value whole ([uri]/[object-uri]); the file
-    # lane's durable write boundary then withholds exact URI placeholders as
-    # ``None`` (``_strip_redaction_placeholders``, pre-existing, also for
-    # whitespace-free URI roots).  Before #1976 the partial rendering
-    # ``"[uri] data/ws"`` was not an exact placeholder, so the tail was persisted
-    # and served.
+    # The renderer classifies each value whole ([uri]/[object-uri]).  Before
+    # #1976 the partial rendering ``"[uri] data/ws"`` was not an exact
+    # placeholder, so the tail was persisted and served.  #2306 then removed the
+    # lane-specific ``None`` expectation this test used to carry: the file lane
+    # pre-rendered before ``insert_pipeline_event``, so the caller-boundary
+    # anti-laundering strip met the journal's own placeholders and nulled them.
+    # These are now the SAME three literals the database lane's R15 pin asserts.
     _assert_public_runtime_root_resolution(
         evidence,
         forbidden_roots=("data/ws", "prod/objects", "pre fix", " fix"),
         expected_placeholders={
-            "workspace_dir": None,
-            "object_store_root": None,
-            "object_store_prefix": None,
+            "workspace_dir": "[uri]",
+            "object_store_root": "[object-uri]",
+            "object_store_prefix": "[object-uri]",
         },
     )
     rendered = json.dumps(response.json())
     for tail in ("data/ws", "prod/objects", "pre fix", " fix"):
         assert tail not in rendered, tail
+
+
+# --- #2306: one rendering, at the journal's own event boundary --------------
+#
+# The file lane's two manual-retry submission event writers used to call
+# ``_public_evidence`` themselves, BEFORE ``insert_pipeline_event``.  The
+# caller-boundary anti-laundering strip inside ``_append_validated_record_unlocked``
+# then met the journal's own deliberate ``[object-uri]``/``[uri]`` output and
+# replaced it with ``null`` -- the strip exists to stop a CALLER laundering a
+# display placeholder into durable state, not to erase the journal's own
+# rendering.  Dropping the writer-side wrappers lets
+# ``_public_pipeline_event_payload`` render the whole ``details`` tree exactly
+# once, after the strip.
+
+_FILE_LANE_ORIGINAL_JOB_ID = "job_fcst_gfs_2026072000_model_a_forecast"
+_SHARED_URI_ROOT = "s3://nhms-prod/shared-root"
+_URI_RUNTIME_ROOT_ENV = {
+    "WORKSPACE_ROOT": "file:///srv/nhms/ws",
+    "OBJECT_STORE_ROOT": "s3://nhms-prod/objects",
+    "OBJECT_STORE_PREFIX": "s3://nhms-prod/prefix",
+    "NHMS_PUBLISHED_ARTIFACT_ROOT": "https://cdn.example.com/published",
+    "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX": "https://cdn.example.com/published/prefix",
+}
+_URI_RUNTIME_ROOT_PLACEHOLDERS = {
+    "workspace_dir": "[uri]",
+    "object_store_root": "[object-uri]",
+    "object_store_prefix": "[object-uri]",
+    "published_artifact_root": "[uri]",
+    "published_artifact_uri_prefix": "[uri]",
+}
+# ``runtime_root_contract`` is the flat manifest mapping, so the renderer's KEY
+# rule reaches it: a SCALAR under a ``*_root``/``*_path`` key renders
+# ``[local-path]`` whatever the value's own shape, which is why the two
+# ``*_root`` entries stay ``[local-path]`` for URI values (spec: "``runtime_root_contract.object_store_root``
+# is still the scalar ``[local-path]``").  The other three keys are classified
+# by value and are the ones this change moves off ``null``.
+_URI_RUNTIME_ROOT_CONTRACT = {
+    "workspace_dir": "[uri]",
+    "object_store_root": "[local-path]",
+    "object_store_prefix": "[object-uri]",
+    "published_artifact_root": "[local-path]",
+    "published_artifact_uri_prefix": "[uri]",
+}
+
+
+def _set_uri_runtime_root_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in _URI_RUNTIME_ROOT_ENV.items():
+        monkeypatch.setenv(name, value)
+
+
+def _insert_file_lane_predecessor_contract_event(fixture: dict[str, Any], contract: dict[str, str]) -> None:
+    """A predecessor ``submission`` event the runtime-root walk will read.
+
+    Written through the repository's normal event writer, so the PUBLIC event
+    carries the rendered contract and the private recovery record carries the
+    real values -- which is where the walk actually reads its candidate from.
+    """
+
+    fixture["repository"].insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=_FILE_LANE_ORIGINAL_JOB_ID,
+        event_type="submission",
+        status_from="pending",
+        status_to="submitted",
+        details={"runtime_root_contract": dict(contract)},
+    )
+
+
+def _db_lane_uri_root_resolved(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The database lane's ``resolved`` mapping for the same five URI roots.
+
+    Environment-only on purpose: with no submission event inserted, BOTH lanes
+    resolve from ``runtime_config:environment``, so the two mappings are
+    comparable key for key -- ``source`` and ``same_as_workspace`` included --
+    rather than only value for value.
+    """
+
+    with _store() as store:
+        _create_db_lane_download_job(store)
+        response = _post_db_lane_retry(store, _RecordingGateway(error=RuntimeError("no execution path")))
+        assert response.status_code == 503
+        return response.json()["error"]["details"]["runtime_root_resolution"]["resolved"]
+
+
+def _journal_public_text(journal_root: Path) -> str:
+    """Every durable byte the journal wrote EXCEPT the private recovery tree.
+
+    Reading the tree rather than the parsed event catches ``latest/`` materialized
+    projections and direct row files too, so "no raw root in the public event"
+    cannot be satisfied by the one file the reader happens to look at.
+    """
+
+    private_dir = journal_root / "private"
+    chunks: list[str] = []
+    for path in sorted(journal_root.rglob("*")):
+        if not path.is_file() or path.suffix == ".lock":
+            continue
+        if private_dir == path or private_dir in path.parents:
+            continue
+        chunks.append(path.read_bytes().decode("utf-8", errors="replace"))
+    assert chunks, journal_root
+    return "\n".join(chunks)
+
+
+def _private_runtime_root_recovery_records(journal_root: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((journal_root / "private" / "runtime-root-recovery").rglob("*.json"))
+    ]
+
+
+class _FileLaneSuccessGateway:
+    """Gateway whose ``submit_job`` succeeds, so the SUCCESS writer runs.
+
+    ``submit_job_array`` is deliberately absent: ``_submit_file_manual_retry_job``
+    prefers it for ``run_shud_forecast_array`` and the route's execution-path
+    probe checks ``submit_job``.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    def submit_job(self, request: Any) -> Any:
+        self.requests.append(request)
+        return {"job_id": "slurm_file_lane_1", "status": "submitted"}
+
+
+def test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2306 task 5.1 — a URI-shaped root is a placeholder on the file lane too.
+
+    Five URI roots (``file://``, two ``s3://``, two ``https://``) plus a
+    predecessor candidate that is REJECTED on a URI value, so ``rejected[].value``
+    is exercised and not merely present-and-empty.  Before the fix every one of
+    those entries reached the 503 as ``present: true, value: null`` while the
+    database lane sent ``[uri]``/``[object-uri]`` for the same configuration.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_uri_runtime_root_env(monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    # ``object_store_root`` aliased onto ``workspace_dir`` makes this candidate
+    # fail ``resolves_to_workspace_dir`` with a URI-valued rejection; the walk
+    # then falls through to the environment candidate, which resolves.
+    _insert_file_lane_predecessor_contract_event(
+        fixture,
+        {"workspace_dir": _SHARED_URI_ROOT, "object_store_root": _SHARED_URI_ROOT},
+    )
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    evidence = details["runtime_root_resolution"]
+    assert evidence["previous_job_id"] == _FILE_LANE_ORIGINAL_JOB_ID
+    assert evidence["missing"] == []
+    _assert_public_runtime_root_resolution(
+        evidence,
+        forbidden_roots=(*_URI_RUNTIME_ROOT_ENV.values(), _SHARED_URI_ROOT),
+        expected_placeholders=dict(_URI_RUNTIME_ROOT_PLACEHOLDERS),
+    )
+    assert {name: entry["value"] for name, entry in evidence["resolved"].items()} == _URI_RUNTIME_ROOT_PLACEHOLDERS
+
+    assert len(evidence["rejected"]) == 1
+    rejection = evidence["rejected"][0]
+    assert rejection["field"] == "object_store_root"
+    assert rejection["reason"] == "resolves_to_workspace_dir"
+    assert rejection["value"] == "[object-uri]"
+    assert rejection["source"].startswith(f"file_journal_event:{_FILE_LANE_ORIGINAL_JOB_ID}:")
+
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    assert len(persisted) == 1
+    assert persisted[0]["details"]["runtime_root_contract"] == _URI_RUNTIME_ROOT_CONTRACT
+    # The file lane's standing invariant: what the route answers IS what the
+    # journal recorded, no read-side rendering.
+    assert evidence == persisted[0]["details"]["runtime_root_resolution"]
+
+    # Same five roots, same public shape, same sources: the lane-specific
+    # allowance is gone rather than weakened.
+    assert evidence["resolved"] == _db_lane_uri_root_resolved(monkeypatch)
+
+
+# Captured from PRE-CHANGE source (commit ed382ce91) by dumping the persisted
+# event, then asserted unchanged after the fix: task 5.1b requires that one
+# render at the event boundary be byte-identical to the two renders it replaces,
+# MEASURED rather than argued.  The fixture is deliberately local-roots-only --
+# ``NHMS_PUBLISHED_ARTIFACT_ROOT`` would pull in the ``published://`` default for
+# ``published_artifact_uri_prefix``, which is URI-shaped and therefore one of the
+# entries this change intentionally moves off ``null`` (covered by 5.1).
+_FILE_LANE_LOCAL_ROOT_EVENT_DETAILS = {
+    "error_code": "SBATCH_SUBMISSION_FAILED",
+    "error_message": "no execution path",
+    "runtime_root_contract": {
+        "object_store_prefix": "",
+        "object_store_root": "[local-path]",
+        "workspace_dir": "[local-path]",
+    },
+    "runtime_root_resolution": {
+        "candidate_counts": {
+            "event_candidate_limit": 32,
+            "event_candidates_omitted": 0,
+            "event_candidates_returned": 0,
+            "event_candidates_total": 0,
+            "event_row_scan_limit": 64,
+            "event_rows_omitted": 0,
+            "event_rows_scanned": 0,
+            "event_rows_total": 0,
+            "manual_retry_event_rows_ignored": 0,
+        },
+        "cycle_id": "gfs_2026072000",
+        "db_free_runtime": {"missing": [], "required": False, "resolved": {}, "slurm_env": {}},
+        "job_type": "run_shud_forecast_array",
+        "missing": [],
+        "previous_job_id": _FILE_LANE_ORIGINAL_JOB_ID,
+        "published_fields_available": [],
+        "rejected": [],
+        "rejected_limit": 16,
+        "rejected_omitted_count": 0,
+        "rejected_total_count": 0,
+        "required": ["workspace_dir", "object_store_root"],
+        "resolved": {
+            "object_store_prefix": {
+                "present": True,
+                "source": "runtime_config:environment:OBJECT_STORE_PREFIX.default_empty",
+                "value": "",
+            },
+            "object_store_root": {
+                "present": True,
+                "same_as_workspace": False,
+                "source": "runtime_config:environment",
+                "value": "[local-path]",
+            },
+            "workspace_dir": {
+                "present": True,
+                "source": "runtime_config:environment",
+                "value": "[local-path]",
+            },
+        },
+        "retry_job_id": "fcst_gfs_2026072000_model_a_retry_active",
+    },
+    "trigger": "manual",
+}
+
+
+def test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2306 task 5.1b — the silent-regression pin, green on BOTH sides.
+
+    ``[local-path]`` survived the old double render only because it is not in
+    ``_PERSISTED_REDACTION_PLACEHOLDERS``; whether rendering it once produces the
+    same bytes is a property of the renderer's idempotence, not something the
+    rest of this change proves.  So the whole persisted ``details`` mapping is
+    pinned to a literal captured from pre-change source: no token drift, no
+    double bracketing, no dropped provenance key.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    assert len(persisted) == 1
+    assert persisted[0]["details"] == _FILE_LANE_LOCAL_ROOT_EVENT_DETAILS
+    assert persisted[0]["message"] == "Manual retry submission failed: no execution path"
+    assert details["runtime_root_resolution"] == _FILE_LANE_LOCAL_ROOT_EVENT_DETAILS["runtime_root_resolution"]
+
+
+def test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2306 task 5.3 — no raw root in the public tree, real roots in the private one.
+
+    Two halves of one durable-shape claim.  The public half scans every journal
+    file outside ``private/`` (jsonl segments, ``latest/``, direct row files), so
+    a leak into a materialized projection cannot hide behind the event reader.
+    The private half pins the INTENDED consequence design D4 names: the
+    runtime-root recovery record is captured post-strip / pre-render, so it used
+    to snapshot the writer's already-rendered values -- a recovery record with
+    nothing to recover -- and now carries the real roots it exists for.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_uri_runtime_root_env(monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    _assert_file_lane_submission_failed_503(response)
+    public_text = _journal_public_text(fixture["journal_root"])
+    rendered = json.dumps(response.json(), sort_keys=True)
+    for raw in _URI_RUNTIME_ROOT_ENV.values():
+        assert raw not in public_text, raw
+        assert raw not in rendered, raw
+    assert "s3://" not in public_text
+    assert "https://" not in public_text
+    assert "file:///" not in public_text
+
+    records = _private_runtime_root_recovery_records(fixture["journal_root"])
+    assert len(records) == 1
+    assert [candidate["path"] for candidate in records[0]["candidates"]] == [["runtime_root_contract"]]
+    assert records[0]["candidates"][0]["value"] == {
+        "workspace_dir": _URI_RUNTIME_ROOT_ENV["WORKSPACE_ROOT"],
+        "object_store_root": _URI_RUNTIME_ROOT_ENV["OBJECT_STORE_ROOT"],
+        "object_store_prefix": _URI_RUNTIME_ROOT_ENV["OBJECT_STORE_PREFIX"],
+        "published_artifact_root": _URI_RUNTIME_ROOT_ENV["NHMS_PUBLISHED_ARTIFACT_ROOT"],
+        "published_artifact_uri_prefix": _URI_RUNTIME_ROOT_ENV["NHMS_PUBLISHED_ARTIFACT_URI_PREFIX"],
+    }
+
+
+def test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2306 task 5.2, second call site — the SUCCESS writer had the same defect.
+
+    ``_record_manual_retry_submission_success`` pre-rendered the same two keys as
+    the failure writer.  Fixed in the same pass so the two events of one manual
+    retry cannot persist the same root in two shapes, and pinned here because the
+    failure-path tests above never reach this writer.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_uri_runtime_root_env(monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    gateway = _FileLaneSuccessGateway()
+    fixture["gateway"] = gateway
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "submitted"
+    assert gateway.requests
+    persisted = _persisted_submission_events(fixture["journal_root"], str(data["job_id"]))
+    assert len(persisted) == 1
+    assert persisted[0]["status_to"] == "submitted"
+    event_details = persisted[0]["details"]
+    assert event_details["runtime_root_contract"] == _URI_RUNTIME_ROOT_CONTRACT
+    assert {
+        name: entry["value"] for name, entry in event_details["runtime_root_resolution"]["resolved"].items()
+    } == _URI_RUNTIME_ROOT_PLACEHOLDERS
+    public_text = _journal_public_text(fixture["journal_root"])
+    for raw in _URI_RUNTIME_ROOT_ENV.values():
+        assert raw not in public_text, raw
+    records = _private_runtime_root_recovery_records(fixture["journal_root"])
+    assert len(records) == 1
+    assert records[0]["candidates"][0]["value"]["object_store_root"] == _URI_RUNTIME_ROOT_ENV["OBJECT_STORE_ROOT"]
+
+
+def test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2306 task 5.1, ``db_free_runtime.resolved.*.value`` — same render, no withholding.
+
+    Measured limit, stated rather than faked: a URI-shaped DB-free selector is
+    unreachable.  ``_resolve_db_free_runtime_candidate`` forces the three backend
+    fields to ``file`` and gates the three path selectors on
+    ``scheduler_allowed_roots``, so every value that can RESOLVE there is a local
+    path or a fixed token -- none of which the anti-laundering strip ever
+    touched.  This subtree is therefore pinned as unchanged (never ``null``),
+    which is the assertion the fixture's clause can actually support.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_db_free_retry_env(monkeypatch)
+    _set_uri_runtime_root_env(monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    db_free = details["runtime_root_resolution"]["db_free_runtime"]
+    assert db_free["required"] is True
+    assert db_free["missing"] == []
+    assert {name: entry["value"] for name, entry in db_free["resolved"].items()} == {
+        "scheduler_allowed_roots": "[local-path]",
+        "scheduler_canonical_readiness_backend": "file",
+        "scheduler_canonical_readiness_index": "[local-path]",
+        "scheduler_db_free_required": "true",
+        "scheduler_registry_backend": "file",
+        "scheduler_registry_manifest": "[local-path]",
+        "scheduler_state_index": "[local-path]",
+        "scheduler_state_index_backend": "file",
+    }
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    assert persisted[0]["details"]["runtime_root_resolution"]["db_free_runtime"] == db_free
 
 
 def test_retry_api_file_lane_legacy_bare_string_root_entry_passes_through(

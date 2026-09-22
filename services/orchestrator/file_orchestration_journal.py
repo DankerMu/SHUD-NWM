@@ -12143,9 +12143,14 @@ class FileJournalRetryService:
 
         NO second redaction.  The evidence was already reduced by
         ``_runtime_root_resolution_evidence`` (``redact_payload`` over the whole
-        mapping plus bounded per-value redaction) and persisted through
-        ``_public_evidence``, which additionally renders ``*_path``/``*_root``
-        keys as ``[local-path]``.  The database lane re-applies
+        mapping plus bounded per-value redaction) and rendered at the journal's
+        own event boundary by ``_public_pipeline_event_payload``, which
+        additionally renders ``*_path``/``*_root`` keys as ``[local-path]`` and
+        URI values as ``[uri]``/``[object-uri]``.  That rendering is the WRITER's
+        single pass (#2306): the writers hand ``insert_pipeline_event`` an
+        unrendered mapping so the caller-boundary anti-laundering strip cannot
+        meet -- and null -- the journal's own placeholders.  The database lane
+        re-applies
         ``_redacted_mapping`` on read only because its stored mapping never
         passed that public scrub.  Returning the persisted mapping unchanged is
         what makes "response equals persisted event details" provable.
@@ -12356,10 +12361,15 @@ class FileJournalRetryService:
             "slurm_job_id": written.get("slurm_job_id"),
             "gateway_status": str(payload.get("status")) if payload.get("status") is not None else None,
         }
+        # #2306: unrendered, for the same reason as the sibling failure writer
+        # (``_manual_retry_submission_failure_details``).  Both events of one
+        # manual retry go through ``_public_pipeline_event_payload`` after the
+        # caller-boundary strip, so the two cannot persist the same root in two
+        # shapes.
         if runtime_root_resolution is not None:
-            details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
+            details["runtime_root_resolution"] = runtime_root_resolution
         if runtime_root_contract is not None:
-            details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
+            details["runtime_root_contract"] = runtime_root_contract
         self.repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=job_id,
@@ -13236,12 +13246,23 @@ def _manual_retry_submission_failure_details(
         "error_code": error_code,
         "error_message": error_message,
     }
+    # #2306: handed over UNRENDERED.  ``insert_pipeline_event`` routes through
+    # ``_append_validated_record_unlocked``, which strips caller-supplied
+    # ``[object-uri]``/``[uri]`` placeholders FIRST and only then renders the
+    # whole ``details`` tree through ``_public_pipeline_event_payload``.
+    # Pre-rendering here inverted that layering: the strip met the journal's own
+    # deliberate placeholders and nulled them, so a URI-shaped runtime root
+    # reached the 503 as ``present: true, value: null`` while the database lane
+    # sent ``[object-uri]``/``[uri]``.  ``_runtime_root_resolution_from_error`` /
+    # ``_runtime_root_contract_from_error`` already return ``_redacted_mapping``
+    # output (secrets and URL credentials gone, roots otherwise raw), which is
+    # exactly the input the strip is meant to see.
     runtime_root_resolution = _runtime_root_resolution_from_error(error)
     if runtime_root_resolution is not None:
-        details["runtime_root_resolution"] = _public_evidence(runtime_root_resolution)
+        details["runtime_root_resolution"] = runtime_root_resolution
     runtime_root_contract = _runtime_root_contract_from_error(error)
     if runtime_root_contract is not None:
-        details["runtime_root_contract"] = _public_evidence(runtime_root_contract)
+        details["runtime_root_contract"] = runtime_root_contract
     return details
 
 
