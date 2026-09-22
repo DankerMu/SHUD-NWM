@@ -389,7 +389,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       }),
     [basinIdToActiveVersionId, basinVersionToBasinId, basins, sourceSelection?.resolvedSource, state.basinVersionId, state.cycle],
   )
-  // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
+  // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE，按中国 bounds fit）；
   // fit 到流域并集会把视野错误地收窄到测试流域（qhh/heihe）区域。
 
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。

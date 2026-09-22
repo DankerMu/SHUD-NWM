@@ -40,6 +40,7 @@ import { m11SelectionDataAttributes, resolveM11SelectedSegmentMapState } from '@
 import {
   M11MapStatusOverlays,
   m11MapSourceErrorResetKey,
+  M11_MAP_MIN_ZOOM,
   m11MapStyles,
   m11MapStyleUrls,
   useM11MapCamera,
@@ -312,6 +313,7 @@ export function M11MapLibreSurface({
       <Map
         ref={mapRef}
         initialViewState={initialViewState}
+        minZoom={M11_MAP_MIN_ZOOM}
         mapStyle={m11MapStyles[state.basemap]}
         interactiveLayerIds={interactiveLayerIds}
         onMouseMove={handleMouseMove}

@@ -2,9 +2,12 @@ import { act, render, renderHook, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import {
+  CHINA_BOUNDS,
   M11_BASEMAP_UNAVAILABLE_NOTICE,
+  M11_MAP_MIN_ZOOM,
   M11MapStatusOverlays,
   m11MapStyles,
+  useM11MapCamera,
   useM11MapSourceError,
 } from '@/components/map/m11MapRuntime'
 
@@ -95,5 +98,27 @@ describe('useM11MapSourceError', () => {
     act(() => result.current.handleMapError({ sourceId: 'hydro-mvt', error: { message: 'hydro tile failed' } }))
 
     expect(result.current.mapSourceError).toBe('hydro tile failed')
+  })
+})
+
+describe('useM11MapCamera initial view', () => {
+  it('fits the China bounds instead of a fixed zoom, so every viewport starts on the same extent', () => {
+    const mapRef = { current: null }
+    const { result } = renderHook(() => useM11MapCamera({ mapRef }))
+
+    expect(result.current).toEqual({ bounds: CHINA_BOUNDS, fitBoundsOptions: { padding: 32 } })
+    expect(result.current).not.toHaveProperty('zoom')
+  })
+
+  it('still starts on a known basin fit when one is available at mount', () => {
+    const mapRef = { current: null }
+    const fitTo = { bounds: [[100, 30], [101, 31]] as [[number, number], [number, number]], padding: 36 }
+    const { result } = renderHook(() => useM11MapCamera({ fitTo, mapRef }))
+
+    expect(result.current).toEqual({ bounds: fitTo.bounds, fitBoundsOptions: { padding: 36 } })
+  })
+
+  it('never lets the map zoom below the first Tianditu level', () => {
+    expect(M11_MAP_MIN_ZOOM).toBe(1)
   })
 })
