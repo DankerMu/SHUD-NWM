@@ -8,7 +8,7 @@ The candidate decision SHALL classify a candidate as `terminal_pipeline_success`
 - **GIVEN** a completed cycle with a stale recorded init-state token, no operator confirmation, and no completed quarantine-stamped master
 - **WHEN** the scheduler emits `retry_journal_predecessor_identity_mismatch`, the rerun fails at `forecast`, and the scheduler runs more passes than the retry limit
 - **THEN** no later pass emits a quarantine retry derived from a completed-type skip; the candidate state decides the budgeted failure path (`retry_failed_candidate`, or `permanent_failure` once the inline retry service has declined at the retry limit)
-- **AND** the total number of forecast submissions does not exceed one plus the retry limit, and the candidate ends blocked rather than still submitting
+- **AND** the total number of forecast submissions does not exceed one plus the retry limit; with the production inline retry service wired, the candidate ends blocked rather than still submitting
 
 #### Scenario: An older failure does not demote a newer success
 - **WHEN** a candidate's newest terminal-success completion-stage row is newer than or equal in time to its latest failure row

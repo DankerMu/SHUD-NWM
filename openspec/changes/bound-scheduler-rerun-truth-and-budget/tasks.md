@@ -42,7 +42,7 @@
 ## 4. Verification
 
 - [x] 4.1 `uv run ruff check .`
-- [ ] 4.2 Local: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or budget or quarantine or breaker"`, plus the new test files, `tests/test_orchestration_chain.py -k "retry"`, and `tests/test_file_orchestration_journal.py -k "identity or hydro_run"`.
+- [x] 4.2 Local: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or budget or quarantine or breaker"`, plus the new test files, `tests/test_orchestration_chain.py -k "retry"`, and `tests/test_file_orchestration_journal.py -k "identity or hydro_run"`.
 - [ ] 4.3 node-27 (oracle): `tests/test_production_scheduler.py tests/test_file_orchestration_journal.py tests/test_scheduler_generation.py tests/test_orchestration_chain.py tests/test_retry.py tests/test_scheduler_state*.py` + new test files all green at the PR head.
 - [x] 4.4 `openspec validate bound-scheduler-rerun-truth-and-budget --strict --no-interactive`
 
@@ -52,4 +52,4 @@
 - [x] 5.2 The #2397 master is chosen filter-first (terminal-success, self-bound, names the model), then newest. A later failed rerun does not undo a converged Y.
 - [x] 5.3 `tests/test_retry_mint_floor.py` is routed from the `file_orchestration_journal.py` stop rule.
 - [x] 5.4 Coverage: the mixed-outcome cohort splits into terminal skip and the failure path; a failing rerun without inline retry stays within the forecast budget.
-- [x] 5.5 Mixed-floor cohort over-charge is kept as shared charging (fail-closed). Per-member charging is deferred to a follow-up issue.
+- [x] 5.5 Mixed-floor cohort over-charge is kept as shared charging (fail-closed). Per-member charging is deferred to #2542.
