@@ -16,6 +16,7 @@ from services.orchestrator.chain_source_cycle import (
     RAW_MANIFEST_READY_CYCLE_STATUSES,
     _raw_manifest_uri_matches_source_cycle,
 )
+from services.orchestrator.retry_identity import RETRY_ATTEMPT_FLOOR_FIELD
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
@@ -2818,7 +2819,9 @@ def _strict_warm_start_terminal_mismatch_decision(
                 "strict_warm_start_terminal_init_state_mismatch",
                 _evidence_safe(
                     {
-                        **_strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence),
+                        **_strict_warm_start_terminal_retry_evidence(
+                            terminal_evidence, strict_evidence, attempt=attempt
+                        ),
                         "operator_reentry_confirmation": (
                             _scheduler_generation.operator_reentry_confirmation_evidence(confirmation)
                         ),
@@ -2838,7 +2841,7 @@ def _strict_warm_start_terminal_mismatch_decision(
     return CandidateStateDecision(
         "retry",
         "strict_warm_start_terminal_init_state_mismatch",
-        _strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence),
+        _strict_warm_start_terminal_retry_evidence(terminal_evidence, strict_evidence, attempt=attempt),
     )
 
 
@@ -2879,7 +2882,17 @@ def _strict_warm_start_terminal_blocked_evidence(
 def _strict_warm_start_terminal_retry_evidence(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
+    *,
+    attempt: int,
 ) -> dict[str, Any]:
+    """Retry evidence; ``attempt`` is the stage-scoped attempt the budget just charged.
+
+    It rides the evidence as the chain's mint floor (#2404): the chain mints this
+    retry at ``attempt + 1`` or later whatever run_id prefix it runs under.  It
+    is deliberately NOT a basin ``retry_attempt`` (that pins
+    ``context.retry_attempt``, #1201 / #2393) and never reaches a run manifest.
+    """
+
     payload = {
         **dict(terminal_evidence),
         "decision": "retry_strict_warm_start_terminal_init_state_mismatch",
@@ -2889,6 +2902,7 @@ def _strict_warm_start_terminal_retry_evidence(
         "strict_warm_start": _evidence_safe(dict(strict_evidence)),
         "native_shud_resubmitted": True,
         "durable_output_reused": False,
+        RETRY_ATTEMPT_FLOOR_FIELD: {"stage": _STRICT_WARM_START_TERMINAL_RESTART_STAGE, "attempt": int(attempt)},
     }
     selected = strict_evidence.get("candidate_state")
     if isinstance(selected, Mapping):

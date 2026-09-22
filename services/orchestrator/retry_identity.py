@@ -24,6 +24,13 @@ RETRY_JOB_ID_MARKER = "_retry_"
 
 MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN = "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED"
 
+#: Retry decision evidence field carrying the stage-scoped attempt the scheduler's
+#: budget read has already charged, ``{"stage": <canonical stage>, "attempt": <n>}``
+#: (#2404).  The chain mints that stage's retry at ``attempt + 1`` or later, so a
+#: run_id prefix switch cannot restart the numbering.  Evidence-only: it never
+#: becomes ``context.retry_attempt`` (#1201 / #2393).
+RETRY_ATTEMPT_FLOOR_FIELD = "retry_attempt_floor"
+
 
 def split_retry_job_identity(job_id: str | None) -> tuple[str, int]:
     """Split ``job_id`` into its retry base and the last ``_retry_<n>`` attempt.
@@ -51,6 +58,20 @@ def effective_retry_attempt(job_id: str | None, recorded_count: Any = None) -> i
     """Return the effective attempt for a job: recorded count or id suffix, whichever is higher."""
 
     return max(_coerce_attempt(recorded_count), retry_suffix_attempt(job_id))
+
+
+def retry_attempt_floor(state_evidence: Any, stage: str) -> int | None:
+    """Return the charged attempt ``state_evidence`` carries for ``stage``, or ``None``."""
+
+    if not isinstance(state_evidence, Mapping):
+        return None
+    floor = state_evidence.get(RETRY_ATTEMPT_FLOOR_FIELD)
+    if not isinstance(floor, Mapping) or floor.get("stage") != stage:
+        return None
+    attempt = floor.get("attempt")
+    if type(attempt) is not int or attempt < 0:
+        return None
+    return attempt
 
 
 def _coerce_attempt(value: Any) -> int:

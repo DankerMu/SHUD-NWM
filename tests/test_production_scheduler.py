@@ -57601,20 +57601,39 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
     assert new_stamped_statuses == {"failed"}
     assert reopened.quarantine_rerun_count(**live_query) == 2
 
-    # The old success rows survive the failure, so the candidate stays on the
-    # completed-class path: the breaker blocks, the confirmation no longer matches.
+    # #2401 (intentional behaviour change, not a weakening): the failed rerun is
+    # NEWER than the old success rows, so the candidate-side decision no longer
+    # re-reads them as a completed-type skip (which the §8.7 quarantine would
+    # rewrite).  Called directly -- bypassing discovery -- it is the ordinary
+    # failure path, and it carries no re-entry confirmation.
     candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
-    assert candidates == []
-    (entry,) = blocked
-    assert entry.state_evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert blocked == []
+    (entry,) = candidates
+    assert entry.state_evidence["decision"] == "retry_failed"
+    assert entry.state_evidence["reason"] == "retry_failed_candidate"
     assert "operator_reentry_confirmation" not in entry.state_evidence
 
+    # The semantic invariant of this test is unchanged and still enforced on the
+    # REAL pass: the breaker (discovery-side, completed stamped masters) releases
+    # the slot, nothing is submitted, the orchestrator is never called, the
+    # confirmation is not restored, and no new stamped master appears.
+    confirmations_before = reopened.operator_reentry_confirmations(
+        **live_query, decision="blocked_journal_predecessor_identity_quarantine"
+    )
     for _ in range(2):
         later, later_orchestrator = _reentry_pass(tmp_path, root)
         assert _breaker_released_cycles(later) == [BREAKER_CYCLE]
         assert later.evidence["counts"]["submitted_count"] == 0
+        assert later.evidence["candidates"] == []
         assert later_orchestrator.calls == []
     assert stamped_master_ids(root) - seeded_stamped == new_stamped
+    assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 2
+    assert (
+        FileOrchestrationJournalRepository(root).operator_reentry_confirmations(
+            **live_query, decision="blocked_journal_predecessor_identity_quarantine"
+        )
+        == confirmations_before
+    )
 
 
 def test_breaker_reentry_confirms_only_the_named_model_of_a_mixed_cycle(
@@ -57964,10 +57983,10 @@ def test_budget_reentry_confirmation_pinned_to_the_budget_reentry_count_runs_onc
     assert after_candidates == []
     (after,) = after_blocked
     assert after.state_evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
-    # Exactly the limit: the re-entry minted under the ``cycle_<src>_<stamp>_forecast_``
-    # prefix does not move the stage attempt (#2404, known and out of scope); the
-    # live budget re-entry count is what moved.
-    assert after.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT
+    # #2404: the re-entry is minted past the charged attempt even under the
+    # ``cycle_<src>_<stamp>_forecast_`` prefix, so the stage attempt moved to
+    # limit + 1; the live budget re-entry count moved past the pin as well.
+    assert after.state_evidence["retry_policy"]["attempt"] == _BUDGET_RETRY_LIMIT + 1
     assert "operator_reentry_confirmation" not in after.state_evidence
     assert _budget_live_reentry_count(root, capsys) == live_pin + 1
 
@@ -58101,9 +58120,9 @@ def test_budget_reentry_confirmation_is_consumed_even_when_the_rerun_mints_under
 
     The budget was spent by the full chain's automatic retries
     (``cycle_..._full_model_a`` prefix, attempt 2 == limit).  A re-entry reserves
-    under the scheduler's ``cycle_..._forecast_model_a`` prefix, whose retry
-    suffix starts over (bare, ``_retry_1``, ``_retry_2``), so the stage-scoped
-    attempt does not move; the confirmation must be consumed anyway.
+    under the scheduler's ``cycle_..._forecast_model_a`` prefix; since #2404 its
+    suffix is minted past the charged attempt (``_retry_3``) instead of starting
+    over, and the confirmation must be consumed either way.
     """
 
     from tests.test_operator_reentry_confirmation import run_confirm
@@ -58131,7 +58150,7 @@ def test_budget_reentry_confirmation_is_consumed_even_when_the_rerun_mints_under
     result = _budget_real_reentry(tmp_path, monkeypatch, root, confirmed, candidates)
     assert result.status == "succeeded"
     masters = _budget_forecast_masters(root)
-    assert "job_cycle_gfs_2026052100_forecast_model_a_forecast" in masters
+    assert f"job_cycle_gfs_2026052100_forecast_model_a_forecast_retry_{_BUDGET_RETRY_LIMIT + 1}" in masters
     # Accepted for submission: the live count moved past the pin, and the
     # consumed pin is refused on the write side too.
     assert _budget_live_reentry_count(root, capsys) == pin + 1

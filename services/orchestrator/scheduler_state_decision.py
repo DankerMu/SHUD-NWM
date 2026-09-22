@@ -41,6 +41,11 @@ from services.orchestrator.scheduler_state_rows import (
     _state_output_uri,
     _state_status,
 )
+from services.orchestrator.scheduler_state_terminal_recency import (
+    _completed_cycle_terminal_supersedes_failure,
+    _forecast_resume_reads_superseded_hydro_truth,
+    _pipeline_terminal_success_supersedes_failure,
+)
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_HYDRO_STATUSES,
     ACTIVE_PIPELINE_STATUSES,
@@ -245,7 +250,11 @@ def _candidate_state_decision_evaluated(
             },
         )
 
-    if completed_cycle_terminal is not None:
+    if completed_cycle_terminal is not None and _completed_cycle_terminal_supersedes_failure(
+        candidate,
+        decision_state,
+        _terminal_stage_or_copyback_evidence(candidate, decision_state),
+    ):
         return CandidateStateDecision("skip", "terminal_completed_cycle", completed_cycle_terminal)
 
     missing_upstream_artifact, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
@@ -265,7 +274,10 @@ def _candidate_state_decision_evaluated(
     if completed_stage_retry is not None:
         return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 
-    if terminal_pipeline_success_is_candidate_scoped:
+    if terminal_pipeline_success_is_candidate_scoped and _pipeline_terminal_success_supersedes_failure(
+        candidate,
+        decision_state,
+    ):
         return CandidateStateDecision(
             "skip",
             "terminal_pipeline_success",
@@ -288,6 +300,8 @@ def _candidate_state_decision_evaluated(
         )
 
     downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)
+    if _forecast_resume_reads_superseded_hydro_truth(decision_state, downstream_retry):
+        downstream_retry = None
     missing_upstream_artifact, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
         candidate,
         decision_state,

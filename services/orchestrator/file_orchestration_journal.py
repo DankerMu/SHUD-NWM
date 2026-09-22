@@ -1428,7 +1428,18 @@ class FileOrchestrationJournalRepository:
         Authority order (design D2):
 
         1. A matching completed ``hydro_run`` row carrying any init-state
-           identity alias wins, preserving legacy per-basin semantics.
+           identity alias wins, preserving legacy per-basin semantics -- unless
+           a same-run_id rerun superseded it (#2397): the retriable-only write
+           path never rewrites a succeeded row, so when the newest (by
+           ``created_at``) contract-current accepted-submit MASTER whose
+           identity map names this model was accepted strictly after the hydro row's ``created_at``,
+           is terminal-success for this model and records exactly one identity
+           entry naming it, that entry wins.  Both keys are set once:
+           ``update_hydro_run_status`` and every other post-hoc rewrite only
+           refresh ``updated_at``.  The master of the submission that created
+           the hydro row is accepted before it, so an ordinary run keeps the
+           hydro identity; a newer master that is still running or failed
+           leaves the hydro row in charge.
         2. Otherwise the current accepted-submit contract candidate rows of the
            internal (untruncated, public-redaction-free) pipeline-jobs view are
            scanned; the LATEST canonical-truth-order row is chosen FIRST and
@@ -1466,7 +1477,14 @@ class FileOrchestrationJournalRepository:
         ) and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
             recorded = _init_state_identity_from_hydro(hydro_run)
             if recorded is not None:
-                return recorded
+                newer = _newer_master_identity_than_hydro(
+                    rows,
+                    hydro_run,
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+                return newer if newer is not None else recorded
         try:
             candidates = [
                 job
@@ -5392,6 +5410,12 @@ class FileOrchestrationJournalRepository:
                         ),
                         "restart_stage": projection.get("restart_stage"),
                         "native_shud_resubmitted": False,
+                        # #2404: the member's charged forecast attempt is its
+                        # master's.  The model-less master proves no candidate
+                        # authority (#1586) and this id carries no ``_retry_<n>``
+                        # suffix, so without it a cohort member's stage budget
+                        # never advanced.
+                        "retry_count": effective_retry_attempt(existing.get("job_id"), existing.get("retry_count")),
                     }
                 )
                 payloads.append(("pipeline_job", candidate_job, model_id))
@@ -13846,6 +13870,76 @@ def _candidate_row_self_bound_identity(
     if str(entry.get("model_id") or "") != model_id:
         return None
     return {key: value for key, value in entry.items() if value not in (None, "")}
+
+
+def _newer_master_identity_than_hydro(
+    rows: Any,
+    hydro_run: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+) -> dict[str, Any] | None:
+    """Identity of a master accepted strictly after the completed hydro row, else ``None`` (#2397).
+
+    Keys: the hydro row's ``created_at`` against the master's ``created_at``
+    (its accepted-submit time).  Neither is refreshed by a later write, and a
+    same-run_id rerun cannot rewrite a succeeded hydro row, so a newer master
+    is the only journal truth of that rerun.  Among masters whose identity map
+    names this model (model-less cohort masters otherwise match every model of
+    the cycle), only the QUALIFIED ones compete -- terminal-success for this
+    model and exactly one identity entry naming it and carrying an id -- and the
+    newest of those is taken.  A later failed or still-running rerun carries no
+    converged identity, so it neither wins nor hides the newest successful one
+    (IS-01).  Any unreadable shape -> ``None``, which keeps the hydro identity
+    (fails toward legacy).
+    """
+
+    unknown = datetime.min.replace(tzinfo=UTC)
+    hydro_created = _datetime_sort_key(hydro_run.get("created_at"))
+    if hydro_created == unknown:
+        return None
+    def _self_bound_identity(job: Mapping[str, Any]) -> dict[str, Any] | None:
+        identities = job.get(INIT_STATE_IDENTITY_FIELD)
+        if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
+            return None
+        entries = [
+            entry
+            for entry in identities
+            if isinstance(entry, Mapping) and str(entry.get("model_id") or "") == model_id
+        ]
+        if len(entries) != 1:
+            return None
+        identity = {key: value for key, value in entries[0].items() if value not in (None, "")}
+        if not any(identity.get(key) not in (None, "") for key in _INIT_STATE_ALIAS_KEYS):
+            return None
+        return identity
+
+    try:
+        # Model-less cohort masters match every candidate of the cycle, so only
+        # submissions that carried THIS model compete: a sibling model's later
+        # submission must not hide this model's converged rerun.  Qualification
+        # (success + self-bound identity) comes BEFORE recency (IS-01).
+        qualified = [
+            (job, identity)
+            for job in rows.pipeline_jobs.values()
+            if _job_matches_candidate(job, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            and accepted_submit_contract_is_current(job)
+            and accepted_submit_row_kind(job) == "master"
+            and _job_is_breaker_terminal_success(job, model_id=model_id)
+            and (identity := _self_bound_identity(job)) is not None
+        ]
+        if not qualified:
+            return None
+        latest, identity = max(
+            qualified,
+            key=lambda item: (_datetime_sort_key(item[0].get("created_at")), _pipeline_job_truth_sort_key(item[0])),
+        )
+        if _datetime_sort_key(latest.get("created_at")) <= hydro_created:
+            return None
+    except (AcceptedSubmitEvidenceError, AttributeError, TypeError, ValueError):
+        return None
+    return identity
 
 
 def _quarantine_rerun_masters(

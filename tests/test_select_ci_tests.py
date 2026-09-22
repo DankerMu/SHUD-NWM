@@ -887,6 +887,17 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     assert "tests/test_production_scheduler.py" in selected
 
 
+def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() -> None:
+    """#2404: the cohort reconcile write's per-member charge is pinned by that suite.
+
+    Its imports are function-local, so only the at-site stop-rule tuple routes it.
+    """
+
+    selected = select_tests(["services/orchestrator/file_orchestration_journal.py"], repo_root=Path("."))
+
+    assert "tests/test_retry_mint_floor.py" in selected
+
+
 def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_suites() -> None:
     expected = {
         "tests/test_scheduler_journal_retention_planning.py",
@@ -981,7 +992,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 81 targets, the rule's 78 plus three riders that arrive from OUTSIDE the
+    # 84 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s), the
+    # rule's 81 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1056,6 +1069,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort into the slot the monolith held -- the literal is compared
         # against `select_tests`'s sorted output, so placement matters.
         *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+        # #2397: the §8.7 identity-authority suite rides the broad orchestrator
+        # directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py`, scheduler_candidates.py,
+        # scheduler_discovery.py and scheduler_state_types.py. 7 tests in ~13s.
+        "tests/test_quarantine_identity_authority.py",
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
@@ -1077,6 +1095,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_retention_root_admission.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
+        # #2404: the retry-mint-floor suite rides the broad orchestrator
+        # directory rule (its imports are all function-local). 6 tests in ~3s.
+        "tests/test_retry_mint_floor.py",
         # #2185: services/** is a river-segment write-surface root, so the scan
         # rides every source under it — a supplemental rider, not a rule target.
         WRITE_SURFACE_SCAN_PATH,
@@ -1100,6 +1121,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort here, between the lineage and timing suites — the literal is
         # compared against `select_tests`'s sorted output, so placement matters.
         *SCHEDULER_REFRESH_TESTS,
+        # #2401: the newest-truth terminal-skip suite rides the broad
+        # orchestrator directory rule — that route closes the importer gap of
+        # `services/orchestrator/__init__.py`. 21 tests in ~10s.
+        "tests/test_scheduler_terminal_recency.py",
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
         # tests/test_retry.py and every same-name source route now schedules it
@@ -19187,3 +19212,22 @@ def test_node27_raw_retention_split_scripts_select_their_readers(path: str, owne
 
     assert owners <= selected, f"{path} lost reader suite(s): {sorted(owners - selected)}"
     assert not set(CORE_SMOKE_TESTS) & selected, f"{path} still degrades to core smoke"
+
+
+def test_terminal_recency_modules_select_their_requirement_suite() -> None:
+    # #2401: the newest-truth terminal guard and its consumer are named after
+    # neither file of the requirement suite, so only the per-file rows reach it.
+    for module in (
+        "services/orchestrator/scheduler_state_terminal_recency.py",
+        "services/orchestrator/scheduler_state_decision.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_scheduler_terminal_recency.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_quarantine_identity_authority_suite_is_selected_by_the_journal() -> None:
+    # #2397: the identity-authority requirement suite is named after neither the
+    # journal nor its consumers, so only the per-file row reaches it.
+    module = "services/orchestrator/file_orchestration_journal.py"
+    assert Path(module).is_file(), module
+    assert "tests/test_quarantine_identity_authority.py" in select_tests([module], repo_root=Path("."))
