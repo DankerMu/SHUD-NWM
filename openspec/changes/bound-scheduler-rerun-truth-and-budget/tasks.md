@@ -33,11 +33,11 @@
 
 ## 3. #2404 — retry mint shares the budget read
 
-- [ ] 3.1 Red first: single model. After attempt M is spent under the `..._full_<model>` prefix, a strict warm-start retry minted via the public `orchestrate_cycle` under `..._forecast_<model>` gets a suffix ≤ M (red). Record the output.
-- [ ] 3.2 Fix per design D3. Green: the minted suffix is > M, and the budget blocks (`blocked_strict_warm_start_init_state_mismatch`) on the pass where the cumulative attempt reaches `retry_limit`, with no extra submission. The floor travels in retry decision evidence only, and the emitted run manifest still validates against `schemas/run_manifest.schema.json`.
-- [ ] 3.3 Cohort geometry (D4): run evidence for `..._forecast_cohort_<digest>`, including a digest change. Either a fix plus regression test, or a test that proves the budget advances. Audit the auto-retry minter at `file_orchestration_journal.py:11289` and record the verdict.
-- [ ] 3.4 Model isolation: #1845 is still OPEN, so no existing regression covers it. Add an assertion that a sibling model's `_retry_<n>` rows (same source/cycle, including cohort geometry) do not raise this model's floor.
-- [ ] 3.5 Must-preserve: the #2254 block (`tests/test_orchestration_chain.py` "#2254" section), the #1201 occupied-row tests (`tests/test_production_scheduler.py`), and the existing strict warm-start/budget tests stay green. The floor never flows through `context.retry_attempt` (asserted, or evident in the diff).
+- [x] 3.1 Red first: single model. After attempt M is spent under the `..._full_<model>` prefix, a strict warm-start retry minted via the public `orchestrate_cycle` under `..._forecast_<model>` gets a suffix ≤ M (red). Record the output.
+- [x] 3.2 Fix per design D3. Green: the minted suffix is > M, and the budget blocks (`blocked_strict_warm_start_init_state_mismatch`) on the pass where the cumulative attempt reaches `retry_limit`, with no extra submission. The floor travels in retry decision evidence only, and the emitted run manifest still validates against `schemas/run_manifest.schema.json`.
+- [x] 3.3 Cohort geometry (D4): run evidence for `..._forecast_cohort_<digest>`, including a digest change. Either a fix plus regression test, or a test that proves the budget advances. Audit the auto-retry minter at `file_orchestration_journal.py:11289` and record the verdict.
+- [x] 3.4 Model isolation: #1845 is still OPEN, so no existing regression covers it. Add an assertion that a sibling model's `_retry_<n>` rows (same source/cycle, including cohort geometry) do not raise this model's floor.
+- [x] 3.5 Must-preserve: the #2254 block (`tests/test_orchestration_chain.py` "#2254" section), the #1201 occupied-row tests (`tests/test_production_scheduler.py`), and the existing strict warm-start/budget tests stay green. The floor never flows through `context.retry_attempt` (asserted, or evident in the diff).
 
 ## 4. Verification
 

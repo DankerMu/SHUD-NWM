@@ -5410,6 +5410,12 @@ class FileOrchestrationJournalRepository:
                         ),
                         "restart_stage": projection.get("restart_stage"),
                         "native_shud_resubmitted": False,
+                        # #2404: the member's charged forecast attempt is its
+                        # master's.  The model-less master proves no candidate
+                        # authority (#1586) and this id carries no ``_retry_<n>``
+                        # suffix, so without it a cohort member's stage budget
+                        # never advanced.
+                        "retry_count": effective_retry_attempt(existing.get("job_id"), existing.get("retry_count")),
                     }
                 )
                 payloads.append(("pipeline_job", candidate_job, model_id))

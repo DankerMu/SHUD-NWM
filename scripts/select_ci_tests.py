@@ -2636,6 +2636,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # pair is stop-rule owned and rides FILE_ORCHESTRATION_JOURNAL_
             # IMPORTER_TESTS. DB-free, 7 tests in ~13s.
             "tests/test_quarantine_identity_authority.py",
+            # #2404: the retry-mint-floor suite drives the strict warm-start
+            # budget (scheduler_candidates.py), the chain's cycle-stage mint
+            # (chain_forecast_execution.py), the shared floor field
+            # (retry_identity.py) and the cohort reconcile write
+            # (file_orchestration_journal.py) end to end. All its imports are
+            # function-local, so no importer derivation can reach it; this
+            # directory rule is its route. DB-free, 6 tests in ~3s.
+            "tests/test_retry_mint_floor.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL

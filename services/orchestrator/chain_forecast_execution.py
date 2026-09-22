@@ -25,7 +25,7 @@ from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
     publish_runs_pipeline_job_provenance,
 )
-from services.orchestrator.retry_identity import effective_retry_attempt
+from services.orchestrator.retry_identity import effective_retry_attempt, retry_attempt_floor, retry_suffix_attempt
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from services.orchestrator.scheduler_timing import (
     current_scheduler_pass_timing,
@@ -92,6 +92,7 @@ Mapping = _chain.Mapping
 PipelineJob = _chain.PipelineJob
 PipelineResult = _chain.PipelineResult
 RetryService = _chain.RetryService
+Sequence = _chain.Sequence
 StageDefinition = _chain.StageDefinition
 StageRunResult = _chain.StageRunResult
 TERMINAL_JOB_STATUSES = _chain.TERMINAL_JOB_STATUSES
@@ -120,6 +121,10 @@ def _parse_gateway_time(*args, **kwargs):
 
 def _pipeline_job_id(*args, **kwargs):
     return getattr(_chain, "_pipeline_job_id")(*args, **kwargs)
+
+
+def _pipeline_retry_job_id(*args, **kwargs):
+    return getattr(_chain, "_pipeline_retry_job_id")(*args, **kwargs)
 
 
 def _record_array_task_outcomes(*args, **kwargs):
@@ -209,7 +214,7 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                         and retry_pipeline_job_id is None
                         and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
                     ):
-                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
+                        retry_pipeline_job_id = _mint_cycle_stage_retry_job_id(self, context, stage, existing_jobs)
                     if (
                         existing_job is not None
                         and retry_pipeline_job_id is None
@@ -218,7 +223,7 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                             refreshed_upstream_finished_at=refreshed_upstream_finished_at,
                         )
                     ):
-                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
+                        retry_pipeline_job_id = _mint_cycle_stage_retry_job_id(self, context, stage, existing_jobs)
                     if (
                         existing_job is not None
                         and retry_pipeline_job_id is None
@@ -243,10 +248,17 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                                 str(existing_job["job_id"])
                                 if _operator_verified_absence_recovery(existing_job)
                                 else (
-                                    self._retry_cycle_stage_job_id(context, stage, existing_jobs)
+                                    _mint_cycle_stage_retry_job_id(self, context, stage, existing_jobs)
                                     if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
                                     else str(existing_job["job_id"])
                                 )
+                            )
+                        elif pipeline_job_id is None:
+                            # #2404: no row under THIS run_id yet, but the budget
+                            # may already have charged attempts under another
+                            # prefix; ``None`` keeps the bare first submission.
+                            pipeline_job_id = _floored_cycle_stage_retry_job_id(
+                                self, context, stage, existing_jobs, None
                             )
                         result, aggregation = self._submit_and_wait_cycle_stage(
                             stage,
@@ -518,6 +530,57 @@ class _ConfirmedMasterOwner:
         if not _nonempty_master_id(self.value) or _nonempty_master_id(raw.slurm_job_id):
             return raw
         return replace(raw, slurm_job_id=self.value)
+
+
+def _mint_cycle_stage_retry_job_id(
+    self: Any,
+    context: CycleOrchestrationContext,
+    stage: StageDefinition,
+    existing_jobs: Sequence[Mapping[str, Any]],
+) -> str:
+    """The stage's retry identity: the prefix-scoped mint, raised to the budget floor (#2404)."""
+
+    job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
+    return _floored_cycle_stage_retry_job_id(self, context, stage, existing_jobs, job_id) or job_id
+
+
+def _floored_cycle_stage_retry_job_id(
+    self: Any,
+    context: CycleOrchestrationContext,
+    stage: StageDefinition,
+    existing_jobs: Sequence[Mapping[str, Any]],
+    job_id: str | None,
+) -> str | None:
+    """Raise ``job_id`` past the attempt the scheduler's budget already charged for ``stage``.
+
+    The retry suffix is derived from the current run_id prefix only, while the
+    strict warm-start budget counts the candidate's stage attempt across every
+    prefix; a prefix switch (``..._full_<model>`` -> ``..._forecast_<model>``,
+    or a cohort digest change) used to restart the suffix, so the budget stopped
+    advancing.  The floor is read from each active basin's retry decision
+    evidence (``retry_attempt_floor``), never from ``context.retry_attempt``
+    (#1201 / #2393); a cohort takes its members' maximum, so every member's next
+    charged attempt exceeds its own floor.  A floor-derived id that is already
+    in the journal is skipped forward, never reused (#1201).  Without a binding
+    floor ``job_id`` is returned unchanged (``None`` stays ``None``).
+    """
+
+    floors = [
+        floor
+        for basin in context.active_basins
+        if (floor := retry_attempt_floor(basin.get("state_evidence"), stage.stage)) is not None
+    ]
+    if not floors or (job_id is not None and retry_suffix_attempt(job_id) > max(floors)):
+        return job_id
+    base_job_id = _pipeline_job_id(context.run_id, stage.stage)
+    occupied = {str(job.get("job_id") or "") for job in existing_jobs}
+    get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+    attempt = max(floors) + 1
+    while True:
+        candidate = _pipeline_retry_job_id(base_job_id, attempt)
+        if candidate not in occupied and not (callable(get_pipeline_job) and get_pipeline_job(candidate) is not None):
+            return candidate
+        attempt += 1
 
 
 def _nonempty_master_id(value: str | None) -> bool:

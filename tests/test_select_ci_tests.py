@@ -981,8 +981,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 83 targets (#2401/#2397 added the terminal-recency and identity-authority
-    # suites, ~23s together), the rule's 80 plus three riders that arrive from OUTSIDE the
+    # 84 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s), the
+    # rule's 81 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1083,6 +1084,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_retention_root_admission.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
+        # #2404: the retry-mint-floor suite rides the broad orchestrator
+        # directory rule (its imports are all function-local). 6 tests in ~3s.
+        "tests/test_retry_mint_floor.py",
         # #2185: services/** is a river-segment write-surface root, so the scan
         # rides every source under it — a supplemental rider, not a rule target.
         WRITE_SURFACE_SCAN_PATH,
