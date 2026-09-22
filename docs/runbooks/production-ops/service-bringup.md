@@ -672,8 +672,9 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 **回填窗必须落在 node-27 压缩截止之内（2026-09-22 onboarding-19 事故）。**
 node-22 的回填深度是 `NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE_LAG_HOURS`
 （`services/orchestrator/scheduler_discovery.py` 的 `discover_cycles`：
-`start = floor(now - lag - lookback)`）；node-27 压缩 `range_end < 展示水位 MAX(cycle_time)
-- NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` 的 chunk（`scripts/node27_timeseries_compression.py`
+`start = floor(now - lag - lookback)`）；node-27 压缩满足
+`range_end < MAX(cycle_time) - NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` 的 chunk，
+其中 `MAX(cycle_time)` 是展示水位（`scripts/node27_timeseries_compression.py` 的
 `_classify`，生产 lag 172800 s = 48 h）。二者之和必须 ≤ 压缩 lag：生产取
 `LOOKBACK=32` + `LAG=16` = 48 h。旧值 96 + 16 = 112 h 时，新流域冷启动从 ~4.7 天前的
 cycle 开始逐 cycle 追赶，旧 cycle 的河段时序落进已压缩 chunk，parser guard 以
