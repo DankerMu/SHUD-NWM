@@ -981,7 +981,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 81 targets, the rule's 78 plus three riders that arrive from OUTSIDE the
+    # 83 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # suites, ~23s together), the rule's 80 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1056,6 +1057,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort into the slot the monolith held -- the literal is compared
         # against `select_tests`'s sorted output, so placement matters.
         *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+        # #2397: the §8.7 identity-authority suite rides the broad orchestrator
+        # directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py`, scheduler_candidates.py,
+        # scheduler_discovery.py and scheduler_state_types.py. 7 tests in ~13s.
+        "tests/test_quarantine_identity_authority.py",
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
@@ -1100,6 +1106,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort here, between the lineage and timing suites — the literal is
         # compared against `select_tests`'s sorted output, so placement matters.
         *SCHEDULER_REFRESH_TESTS,
+        # #2401: the newest-truth terminal-skip suite rides the broad
+        # orchestrator directory rule — that route closes the importer gap of
+        # `services/orchestrator/__init__.py`. 21 tests in ~10s.
+        "tests/test_scheduler_terminal_recency.py",
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
         # tests/test_retry.py and every same-name source route now schedules it

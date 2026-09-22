@@ -1133,6 +1133,12 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # itself a test file (`select_ci_tests.py:3809-3811`), and a production module
     # path is routed by PATH_TEST_RULES alone.
     "tests/test_operator_action_listing.py",
+    # #2401: the newest-truth terminal-skip suite top-level-imports
+    # `services.orchestrator.scheduler`, drives full `ProductionScheduler`
+    # passes through it and observes the decision at the facade's
+    # `_candidate_state_decision` seam, so a facade or seam edit must run it.
+    # DB-free, 21 tests in ~10s: a rule, not a rule-gap exclusion.
+    "tests/test_scheduler_terminal_recency.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -2612,6 +2618,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # confirmation.py, which the suite drives through the CLI rather
             # than importing. DB-free, 23 tests in 46.71s.
             "tests/test_operator_reentry_confirmation.py",
+            # #2401: the newest-truth terminal-skip suite top-level-imports
+            # `services.orchestrator` itself (via `scheduler`), a module no stop
+            # rule owns, so the directory rule is where that importer gap closes.
+            # Its `scheduler.py` pair is stop-rule owned and rides THAT site
+            # (SCHEDULER_IMPORTER_TESTS), per this rule's #1455 note above; its
+            # subject modules route it through their own per-file rows. DB-free,
+            # 21 tests in ~10s.
+            "tests/test_scheduler_terminal_recency.py",
+            # #2397: the §8.7 identity-authority suite top-level-imports
+            # `services.orchestrator` itself, scheduler_candidates.py (the
+            # journal-predecessor quarantine it drives), scheduler_discovery.py
+            # (the discovery-side §8.7 scoring it asserts through) and
+            # scheduler_state_types.py (the decision type it builds) — none
+            # stop-rule owned, so those four importer gaps close here, the same
+            # disposition the re-entry confirmation suite above uses. Its journal
+            # pair is stop-rule owned and rides FILE_ORCHESTRATION_JOURNAL_
+            # IMPORTER_TESTS. DB-free, 7 tests in ~13s.
+            "tests/test_quarantine_identity_authority.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL
