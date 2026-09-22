@@ -26,12 +26,13 @@
 
 ## 2. #2393 — per-stage `context.retry_attempt` scope (design D1)
 
-- [ ] 2.1 Red first (DB-legacy lane, `orchestrate_cycle`, the issue's two-round recipe: `RetryService(store, RetryConfig(max_retries=3, backoff_schedule=[0]))`, `FakeCycleSlurmClient` forecast failing x3 then succeeding, parse failing once, `StoreBackedCycleRepository`, `_marker_claim_basins(decision="retry_missing_forecast_output", claim=None)`). Round 2: parse targets its own next free attempt (`..._parse_retry_2` or whatever its own rows derive), really submits, no `skipped_duplicate_submission`, `result.status == "complete"`.
-- [ ] 2.2 FileJournal lane (`supports_accepted_submit_reconcile=True`) same shape: upstream forecast reserves N+1; the downstream reservation's `submission_attempt` and job id derive from the downstream stage's own rows, not N+1.
-- [ ] 2.3 Confirmed budget re-entry (#2393 comment): `retry_strict_warm_start_terminal_init_state_mismatch` re-entry runs forecast, then `state_save_qc` takes its own attempt and really submits.
-- [ ] 2.4 Must-preserve: #1201 E1(a)/(b), `test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity`, accepted-submit ambiguity release, stacked-suffix (#2254) downstream derivation stay green; within one stage the manifest/placeholder `submission_attempt` still equals the reservation attempt.
-- [ ] 2.5 Sibling pin: markerless non-whitelisted decision with a downstream terminal failed row → downstream resumes (the `retry_attempt is None` gate is no longer opened by upstream residue).
-- [ ] 2.6 Implement D1.
+- [x] 2.1 Red first (DB-legacy lane, `orchestrate_cycle`, the issue's two-round recipe: `RetryService(store, RetryConfig(max_retries=3, backoff_schedule=[0]))`, `FakeCycleSlurmClient` forecast failing x3 then succeeding, parse failing once, `StoreBackedCycleRepository`, `_marker_claim_basins(decision="retry_missing_forecast_output", claim=None)`). Round 2: parse targets its own next free attempt (`..._parse_retry_2` or whatever its own rows derive), really submits, no `skipped_duplicate_submission`, `result.status == "complete"`.
+- [x] 2.2 FileJournal lane (`supports_accepted_submit_reconcile=True`) same shape: upstream forecast reserves N+1; the downstream reservation's `submission_attempt` and job id derive from the downstream stage's own rows, not N+1.
+  - 2.2 shape recorded: the FileJournal reservation computes `submission_attempt` from `context.retry_attempt` only for the forcing and forecast-cohort stages (parse/state_save_qc reserve with no evidence), so the test restarts at `forcing` (`retry_repair_missing_forcing`): forcing reserves `_forcing_retry_1` / attempt 2; forecast must be `_forecast_retry_1` / attempt 2 (pre-fix `_forecast_retry_2` / 3), parse `_parse_retry_1`. The 2.4 in-stage pin (staged forecast runtime manifest `submission_attempt` == forecast reservation attempt) lives in the same test.
+- [x] 2.3 Confirmed budget re-entry (#2393 comment): `retry_strict_warm_start_terminal_init_state_mismatch` re-entry runs forecast, then `state_save_qc` takes its own attempt and really submits.
+- [x] 2.4 Must-preserve: #1201 E1(a)/(b), `test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity`, accepted-submit ambiguity release, stacked-suffix (#2254) downstream derivation stay green; within one stage the manifest/placeholder `submission_attempt` still equals the reservation attempt.
+- [x] 2.5 Sibling pin: markerless non-whitelisted decision with a downstream terminal failed row → downstream resumes (the `retry_attempt is None` gate is no longer opened by upstream residue).
+- [x] 2.6 Implement D1.
 
 ## 3. #2416 — manifest is the single source of the cohort restart stage (design D3)
 

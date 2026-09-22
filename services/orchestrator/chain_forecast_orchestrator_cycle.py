@@ -198,6 +198,9 @@ class ForecastOrchestratorCycleMixin:
         stage: _chain.StageDefinition,
         existing_jobs: _chain.Sequence[_chain.Mapping[str, _chain.Any]],
     ) -> str:
+        # ``context.retry_attempt`` here is the invocation claim only (#2393): the
+        # stage loop resets it at every stage entry, so another stage's
+        # reservation attempt never short-circuits this stage's own derivation.
         base_job_id = _chain._pipeline_job_id(context.run_id, stage.stage)
         attempt = context.retry_attempt or _chain._next_retry_attempt_for_stage(
             existing_jobs, base_job_id=base_job_id, stage=stage

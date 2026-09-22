@@ -188,9 +188,16 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
     # safe under ``concurrent_submit_bound > 1``. ``None`` in the ``trigger_forecast``
     # / test-fixture code paths that never enter a scheduler pass.
     collector = current_scheduler_pass_timing()
+    # #2393: ``context.retry_attempt`` is the invocation claim (operator/API field or
+    # an active manual marker; markerless -> ``None``). A stage reservation writes
+    # its own attempt back for that stage's in-stage consumers only; every stage
+    # enters with the claim restored, so no stage targets an attempt another
+    # stage reserved.
+    invocation_claim = context.retry_attempt
     for stage_index, stage in enumerate(self.stages):
         if stage_index < start_stage_index:
             continue
+        context.retry_attempt = invocation_claim
         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
         had_partial_before_stage = context.had_partial
         last_partial_before_stage = context.last_partial_status
