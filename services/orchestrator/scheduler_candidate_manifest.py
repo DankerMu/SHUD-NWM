@@ -10,6 +10,7 @@ from services.orchestrator.retry_identity import (
     has_active_manual_retry_decision,
     log_ignored_manual_retry_attempt_claim,
 )
+from services.orchestrator.scheduler_state import _canonical_downstream_stage
 
 CycleDiscovery = _scheduler.CycleDiscovery
 RegisteredSchedulerModel = _scheduler.RegisteredSchedulerModel
@@ -232,9 +233,12 @@ def _candidate_basin_manifest(
     if candidate.state_evidence:
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
-        restart_stage = state_evidence.get("restart_stage") if isinstance(state_evidence, Mapping) else None
+        restart_stage = _manifest_restart_stage(state_evidence)
         # Defense in depth: fresh full-chain ingestion never carries a basin
         # restart_stage even if a residual marker survived upstream merges.
+        # This top-level key is the chain's ONLY restart source (#2416): the
+        # chain no longer falls back to ``state_evidence``, so the marker
+        # stripped here stays stripped.
         if restart_stage and not _candidate_is_fresh_full_chain(candidate):
             manifest["restart_stage"] = restart_stage
         if state_evidence.get("durable_shud_output_reused") is True:
@@ -262,6 +266,29 @@ def _candidate_basin_manifest(
     if source_inventory_checksum not in (None, ""):
         manifest["source_inventory_checksum"] = str(source_inventory_checksum)
     return manifest
+
+
+def _manifest_restart_stage(state_evidence: Any) -> Any:
+    """The raw restart stage the manifest's top-level ``restart_stage`` carries (#2416).
+
+    ``restart_stage`` wins verbatim; otherwise ``restart_from_stage`` is used
+    when it names a downstream restart stage. The chain canonicalizes on read.
+    The ``restart_from_stage`` fallback is filtered because the raw-repair
+    emitters write the retired stage ``"download"`` there with no
+    ``restart_stage``: carried raw, it would reach the uncanonicalized readers
+    of this key (the forecast cohort projections validated against
+    ``ACCEPTED_RESTART_STAGES``) instead of their ``"forecast"`` default.
+    """
+
+    if not isinstance(state_evidence, Mapping):
+        return None
+    restart_stage = state_evidence.get("restart_stage")
+    if restart_stage:
+        return restart_stage
+    restart_from_stage = state_evidence.get("restart_from_stage")
+    if restart_from_stage and _canonical_downstream_stage(str(restart_from_stage)) is not None:
+        return restart_from_stage
+    return None
 
 
 def _candidate_manual_retry_attempt(candidate: SchedulerCandidate) -> int | None:

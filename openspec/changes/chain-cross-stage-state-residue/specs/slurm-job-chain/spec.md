@@ -76,7 +76,7 @@ identity (pre-identity legacy) SHALL keep the prior stage-name match.
 The chain SHALL derive a cycle's restart stage only from each basin payload's
 top-level `restart_stage`; it SHALL NOT fall back to `state_evidence`. The
 candidate manifest builder SHALL write that field from the candidate's
-evidence (`restart_stage`, else `restart_from_stage`), except for fresh
+evidence (`restart_stage`, else `restart_from_stage` when it names a downstream restart stage), except for fresh
 full-chain candidates, which carry none. The cohort start stage SHALL be the
 earliest stage among members that carry one.
 
@@ -90,8 +90,8 @@ earliest stage among members that carry one.
 #### Scenario: An ordinary restart candidate keeps its restart
 
 - **WHEN** a non-fresh candidate's evidence carries only `restart_from_stage`
-- **THEN** its manifest SHALL carry that value as the top-level `restart_stage`
-  (raw), and the chain SHALL canonicalize it on read and start there
+- **THEN** its manifest SHALL carry that value as the top-level `restart_stage`,
+  and the chain SHALL canonicalize it on read and start there
 
 ### Requirement: The chain SHALL NOT carry a raw-manifest guard for a retired download stage
 

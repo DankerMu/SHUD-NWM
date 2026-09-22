@@ -59702,12 +59702,11 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
     The retro's rule for this pass is that "unreachable by reading" is not a
     verdict, so the shapes the guard's effective-stage rule rests on are measured
     here against the real manifest builder -- and, since B-2, against the real
-    chain-side resolver ``_restart_stage_from_basins``
-    (``chain_runtime_utils.py:319``), which is what
-    ``chain_forecast_control.py:148`` feeds into the cycle context and
-    ``chain_forecast_execution.py:173`` turns into the start index.  Measuring
-    only the manifest is what let the false "blanked key means stage index 0"
-    mechanism ship.
+    chain-side resolver ``_restart_stage_from_basins``, which
+    ``chain_forecast_control`` feeds into the cycle context and
+    ``_run_cycle_chain_stages`` turns into the start index.  Since #2416 that
+    resolver reads ONLY the manifest's top-level key, so a blanked key does mean
+    stage index 0.
     """
 
     from dataclasses import replace as _dataclass_replace
@@ -59740,11 +59739,10 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
 
     # 2. ``fresh_ingestion.mode == "full_chain"`` STRIPS the manifest's top-level
     #    key, which is why the guard's effective stage is ``None`` for such a
-    #    candidate.  It does NOT make the chain start at stage 0: the embedded
-    #    ``state_evidence`` the manifest also carries still names ``forecast``,
-    #    and ``_restart_stage_from_basins`` falls back to it
-    #    (``chain_runtime_utils.py:326-331``).  The guard refuses the candidate
-    #    before the chain can act on that disagreement.
+    #    candidate.  Since #2416 the chain agrees: the embedded ``state_evidence``
+    #    still names ``forecast``, but ``_restart_stage_from_basins`` no longer
+    #    falls back to it, so the chain starts at stage 0.  The guard refuses the
+    #    confirmed candidate all the same (positive ``== "forecast"``).
     full_chain = _dataclass_replace(
         base,
         state_evidence={
@@ -59755,7 +59753,7 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
     assert full_chain.state_evidence["restart_stage"] == "forecast"
     assert "restart_stage" not in _manifest(full_chain)
     assert _manifest(full_chain)["state_evidence"]["restart_stage"] == "forecast"
-    assert _chain_start_stage(full_chain) == "forecast"
+    assert _chain_start_stage(full_chain) is None
     assert scheduler_candidates_module._candidate_effective_restart_stage(full_chain) is None
     admitted_list = [full_chain]
     blocked_list: list[Any] = []
@@ -59763,11 +59761,11 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
     assert admitted_list == []
     _assert_sink_refusal(blocked_list[0], refused_stage="forecast", fresh_full_chain=True)
 
-    # 3. ``restart_from_stage`` gets no top-level manifest key, and the chain's
-    #    fallback reads it only through ``restart_stage or restart_from_stage``
-    #    (``chain_runtime_utils.py:329``), which short-circuits while the
-    #    top-level key is present.  So a disagreeing value cannot move where the
-    #    chain starts -- which is why the guard does not consult it.
+    # 3. ``restart_from_stage`` gets no top-level manifest key of its own: the
+    #    manifest writes ``restart_stage or restart_from_stage``, which
+    #    short-circuits while ``restart_stage`` is truthy.  So a disagreeing
+    #    value cannot move where the chain starts -- which is why the guard does
+    #    not consult it.
     disagreeing = _dataclass_replace(
         base,
         state_evidence={**dict(base.state_evidence), "restart_from_stage": "convert"},
@@ -59777,13 +59775,12 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
     assert "restart_from_stage" not in manifest
     assert _chain_start_stage(disagreeing) == "forecast"
 
-    # 4. The other divergence (#2416): once ``restart_stage`` is FALSY the
-    #    chain's fallback does read ``restart_from_stage``
-    #    (``chain_runtime_utils.py:329``), so the guard's stage and the chain's
-    #    are not equal here.  The contract is not equality -- it is that every
-    #    divergence refuses: the guard computes ``None`` and the positive
-    #    comparison blocks the candidate before the chain can start at
-    #    ``convert``.
+    # 4. The remaining divergence: once ``restart_stage`` is FALSY the manifest
+    #    carries ``restart_from_stage`` as its top-level key (#2416), so the
+    #    chain would start at ``convert`` while the guard's stage is ``None``.
+    #    The contract is not equality -- it is that every divergence refuses:
+    #    the positive comparison blocks the candidate before the chain can
+    #    start at ``convert``.
     falsy_stage = _dataclass_replace(
         base,
         state_evidence={
@@ -59792,7 +59789,7 @@ def test_the_stage_the_sink_guards_is_the_stage_the_run_manifest_carries(
             "restart_from_stage": "convert",
         },
     )
-    assert "restart_stage" not in _manifest(falsy_stage)
+    assert _manifest(falsy_stage)["restart_stage"] == "convert"
     assert _chain_start_stage(falsy_stage) == "convert"
     assert scheduler_candidates_module._candidate_effective_restart_stage(falsy_stage) is None
     falsy_admitted = [falsy_stage]

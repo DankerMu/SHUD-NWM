@@ -1564,46 +1564,33 @@ OPERATOR_REENTRY_SINK_REFUSAL_REASON = "operator_reentry_restart_stage_not_forec
 
 
 def _candidate_effective_restart_stage(candidate: SchedulerCandidateLike) -> str | None:
-    """The restart stage the RUN MANIFEST's own top-level key would carry.
+    """The restart stage the RUN MANIFEST's own top-level key carries, or ``None``.
 
     Not the raw evidence key: ``_candidate_basin_manifest``
-    (``scheduler_candidate_manifest.py:232-239``) writes the manifest's top-level
-    ``restart_stage`` from ``state_evidence["restart_stage"]`` and ONLY when the
-    candidate is not a fresh full-chain ingestion -- the same expression and the
-    same exclusion used here.  So a ``full_chain`` marker is an effective stage
-    of ``None`` however the evidence key reads.
+    (``scheduler_candidate_manifest._manifest_restart_stage``) writes the
+    manifest's top-level ``restart_stage`` from ``state_evidence["restart_stage"]``
+    (else a downstream-stage ``restart_from_stage``) and ONLY when the candidate
+    is not a fresh full-chain ingestion.  So a ``full_chain`` marker is an
+    effective stage of ``None`` however the evidence key reads.
 
-    What this value is NOT is a prediction of where the chain starts.  The chain
-    resolves its start with ``_restart_stage_from_basins``
-    (``chain_runtime_utils.py:319-336``), built into the cycle context at
-    ``chain_forecast_control.py:148`` and consumed by ``_run_cycle_chain_stages``
-    at ``chain_forecast_execution.py:173``; that helper reads the basin's
-    top-level ``restart_stage`` first and FALLS BACK to the basin's embedded
-    ``state_evidence["restart_stage"] or ["restart_from_stage"]``
-    (``chain_runtime_utils.py:326-331``), which the manifest also carries
-    (``scheduler_candidate_manifest.py:234``).  A blanked top-level key therefore
-    does not mean stage index 0.
-
-    The contract is NOT that this function equals the stage the chain would
-    resolve.  It is that every divergence points in the REFUSING direction --
-    stated as a property rather than a case list, because the case list is what
-    keeps turning out to be incomplete here:
+    Since #2416 the chain resolves its start (``_restart_stage_from_basins``)
+    from that top-level key ONLY -- no ``state_evidence`` fallback -- so the
+    manifest key is exactly where the chain starts.  The contract here is still
+    NOT equality with it; it is that every divergence points in the REFUSING
+    direction:
 
     * Truthy ``state_evidence["restart_stage"]`` and no fresh-full-chain marker:
-      the manifest's top-level key carries that value, the chain reads the same
-      value, and the two agree.
+      the manifest carries that value, the chain reads it, and the two agree.
     * Falsy key, or blanked by the fresh-full-chain exclusion: this function
       returns ``None`` and the sink's positive ``== "forecast"`` comparison
-      refuses, WHATEVER the chain would have resolved from the embedded
-      ``state_evidence`` -- including from ``restart_from_stage``, which
-      ``chain_runtime_utils.py:329`` does read once ``restart_stage`` is falsy.
+      refuses -- including when the manifest carries a ``restart_from_stage``
+      fallback the chain WOULD start at.
 
-    So a confirmed candidate can be refused for a stage the chain would not have
-    started at, but never admitted for one it would.  ``restart_from_stage`` is
-    deliberately not consulted here (the manifest has no top-level key of that
-    name); that asymmetry is what makes the divergence fail-closed, so it must
-    not be "fixed" by teaching this function the fallback.  #2416 tracks the
-    chain-side fallback itself, which stays out of scope.
+    So a confirmed candidate can be refused for a stage the chain would have
+    started at, but never admitted for one it would not.  ``restart_from_stage``
+    is deliberately not consulted here; that asymmetry is what keeps the
+    divergence fail-closed, so it must not be "fixed" by teaching this function
+    the fallback.
     """
 
     state_evidence = candidate.state_evidence

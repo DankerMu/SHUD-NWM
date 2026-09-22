@@ -992,9 +992,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 84 targets (#2401/#2397 added the terminal-recency and identity-authority
-    # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s), the
-    # rule's 81 plus three riders that arrive from OUTSIDE the
+    # 85 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s; #2416 the
+    # cross-stage state-residue suite, sub-second), the
+    # rule's 82 plus three riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard by the services/**
@@ -1009,6 +1010,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     selected = select_tests(["services/orchestrator/retry.py"], repo_root=Path("."))
 
     assert selected == [
+        # #2393/#1845/#2416/#2394: the cross-stage state-residue suite rides the
+        # broad orchestrator directory rule (named after none of its modules).
+        "tests/test_chain_cross_stage_state.py",
         "tests/test_cli_cleanup_frontier.py",
         "tests/test_cli_publish_qdown.py",
         "tests/test_e2e_m3.py",
@@ -19237,6 +19241,20 @@ def test_quarantine_forecast_restart_guard_suite_is_selected_by_scheduler_candid
     module = "services/orchestrator/scheduler_candidates.py"
     assert Path(module).is_file(), module
     assert "tests/test_quarantine_forecast_restart_guards.py" in select_tests([module], repo_root=Path("."))
+
+
+def test_chain_cross_stage_state_suite_is_selected_by_the_modules_it_drives() -> None:
+    # #2393/#1845/#2416/#2394: the suite is named after none of the modules it
+    # drives, so only the broad orchestrator directory rule reaches it.
+    for module in (
+        "services/orchestrator/chain_forecast_execution.py",
+        "services/orchestrator/chain_forecast_cycle.py",
+        "services/orchestrator/chain_forecast_orchestrator_cycle.py",
+        "services/orchestrator/chain_runtime_utils.py",
+        "services/orchestrator/scheduler_candidate_manifest.py",
+    ):
+        assert Path(module).is_file(), module
+        assert "tests/test_chain_cross_stage_state.py" in select_tests([module], repo_root=Path("."))
 
 
 def test_quarantine_identity_authority_suite_is_selected_by_the_journal() -> None:

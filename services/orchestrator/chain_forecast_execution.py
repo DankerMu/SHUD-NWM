@@ -212,12 +212,6 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                     if (
                         existing_job is not None
                         and retry_pipeline_job_id is None
-                        and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
-                    ):
-                        retry_pipeline_job_id = _mint_cycle_stage_retry_job_id(self, context, stage, existing_jobs)
-                    if (
-                        existing_job is not None
-                        and retry_pipeline_job_id is None
                         and self._terminal_stage_can_retry_after_upstream_refresh(
                             existing_job,
                             refreshed_upstream_finished_at=refreshed_upstream_finished_at,

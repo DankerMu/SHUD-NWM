@@ -2802,7 +2802,7 @@ def test_cycle_stage_submission_events_record_runtime_root_contract(tmp_path: Pa
     assert forecast_event["details"]["runtime_root_contract"] == expected_contract
 
 
-def test_cycle_download_success_without_raw_manifest_is_not_resubmitted(tmp_path: Path) -> None:
+def test_cycle_legacy_download_success_row_is_ignored_and_not_resubmitted(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     repository.jobs["job_cycle_ifs_2026050100_download"] = {
         "job_id": "job_cycle_ifs_2026050100_download",

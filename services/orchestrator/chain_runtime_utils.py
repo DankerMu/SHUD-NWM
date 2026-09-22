@@ -333,19 +333,26 @@ def _is_unsubmitted_retry_placeholder(job: Mapping[str, Any]) -> bool:
 
 
 def _restart_stage_from_basins(basins: Sequence[Mapping[str, Any]]) -> str | None:
+    """The cohort's restart stage, read ONLY from each basin's top-level ``restart_stage``.
+
+    The run manifest (``scheduler_candidate_manifest._candidate_basin_manifest``)
+    is the single source: it writes this key from the candidate's evidence and
+    deliberately withholds it for fresh full-chain candidates.  Falling back to
+    the embedded ``state_evidence`` would read that stripped marker straight
+    back and skip convert/forcing for the whole cohort (#2416, m23-255).
+
+    ``min`` is intentional: the cohort starts at the EARLIEST claim among the
+    members that carry a marker (the fail-safe direction -- run more, never
+    less).  A markerless member does not force stage 0: scheduler cohorts are
+    grouped by restart stage, so a restart cohort's members agree and a
+    ``(0, "full")`` cohort carries no marker at all.
+    """
+
     restart_stages: list[str] = []
     for basin in basins:
         restart_stage = _canonical_restart_stage(basin.get("restart_stage"))
         if restart_stage is not None:
             restart_stages.append(restart_stage)
-            continue
-        state_evidence = basin.get("state_evidence")
-        if isinstance(state_evidence, Mapping):
-            restart_stage = _canonical_restart_stage(
-                state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage")
-            )
-            if restart_stage is not None:
-                restart_stages.append(restart_stage)
     if not restart_stages:
         return None
     stage_order = {stage.stage: index for index, stage in enumerate(STAGES)}

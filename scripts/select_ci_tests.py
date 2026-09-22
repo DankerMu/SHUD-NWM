@@ -2655,6 +2655,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # function-local, so no importer derivation can reach it; this
             # directory rule is its route. DB-free, 6 tests in ~3s.
             "tests/test_retry_mint_floor.py",
+            # #2393/#1845/#2416/#2394: the cross-stage state-residue suite drives
+            # the forecast chain stage loop (chain_forecast_execution.py,
+            # chain_forecast_cycle.py, chain_forecast_orchestrator_cycle.py), the
+            # cohort restart read (chain_runtime_utils.py) and the run-manifest
+            # restart write (scheduler_candidate_manifest.py) -- none stop-rule
+            # owned and named after none of them, so this directory rule is its
+            # route. DB-free, sub-second.
+            "tests/test_chain_cross_stage_state.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL

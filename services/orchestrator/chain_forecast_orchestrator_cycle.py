@@ -977,14 +977,6 @@ class ForecastOrchestratorCycleMixin:
     ) -> dict[str, _chain.Any] | None:
         return _chain.chain_forecast_cycle.find_existing_stage_job(self, jobs, stage, context=context)
 
-    def _cycle_download_success_missing_raw_manifest(
-        self,
-        stage: _chain.StageDefinition,
-        context: _chain.CycleOrchestrationContext,
-        job: _chain.Mapping[str, _chain.Any],
-    ) -> bool:
-        return _chain.chain_forecast_cycle.cycle_download_success_missing_raw_manifest(self, stage, context, job)
-
     @staticmethod
     def _job_matches_stage(job: _chain.Mapping[str, _chain.Any], stage: _chain.StageDefinition) -> bool:
         return _chain.chain_forecast_cycle.job_matches_stage(job, stage)
