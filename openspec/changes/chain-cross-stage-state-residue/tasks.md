@@ -60,15 +60,17 @@
 
 All 4.x tests: FileJournal lane (complete `cohort_members` + matched-bound fields as #2447 writes them), direct `orchestrate_cycle` without `orchestration_run_id`, multi-model cohort (unscoped path).
 
-- [ ] 4.0 Record reachability in the PR: `scheduler_execution` always stamps `orchestration_run_id`, so production never takes the unscoped path (latent hardening).
-- [ ] 4.1 Red first: a sibling model set's terminal succeeded forcing row under the shared run's base id → the chain really submits forcing for the current cohort, with a non-colliding id (`_retry_N`), not `skipped_duplicate_submission`, and does not resume the sibling row. If it does not go red on current code, stop and report the evidence.
-- [ ] 4.1b Red first: a disjoint in-flight sibling forcing row → submit for the current cohort, the sibling row is not polled as ours.
-- [ ] 4.2 Must-preserve: terminal forcing row whose members equal the current cohort → resume verbatim, no new submission.
-- [ ] 4.3 Lane limitation: DB-legacy (`StoreBackedCycleRepository`) forcing row without complete member identity → today's model-blind resume is kept; test + comment pin it.
-- [ ] 4.4 Overlapping unresolved sibling row (members intersect current models) still blocks, no fresh submission.
-- [ ] 4.4b Accepted consequence pin: terminal succeeded row whose complete members overlap but are not equal → forcing resubmitted for the current cohort (design D2).
-- [ ] 4.5 `test_candidate_scoped_full_cycle_ignores_sibling_cycle_jobs` and the unscoped resume tests (`test_crash_recovery_resumes_after_last_completed_stage`, `test_resume_array_status_override_*`) stay green unchanged.
-- [ ] 4.6 Implement D2.
+- [x] 4.0 Record reachability in the PR: `scheduler_execution` always stamps `orchestration_run_id`, so production never takes the unscoped path (latent hardening).
+  - Reachability evidence: the only production `orchestrate_cycle` caller is `services/orchestrator/scheduler_execution.py:_execute_candidate_cohort_impl` (`orchestrator.orchestrate_cycle(source_id, cycle_time, basins)`); every basin there comes from `context.candidate_basin_manifest(candidate, ..., orchestration_run_id=orchestration_run_id)`, and `scheduler_candidate_manifest.py:_candidate_basin_manifest` stamps `manifest["orchestration_run_id"]` when non-empty. The value is `_CohortUnit.cohort_run_id`, produced only by `scheduler_execution.py:candidate_execution_cohorts`, whose two arms return a `str` (`candidate_execution_cohort_run_id_for_candidate` -> `cycle_<src>_<stamp>_<stage>_<model>`, `candidate_execution_cohort_run_id` -> `cycle_<src>_<stamp>_<stage>_cohort_<digest>`), never `None`. So `chain_runtime_utils.py:_candidate_scoped_cycle_execution` is True and `chain_forecast_cycle.py:query_pipeline_jobs_for_cycle_context` takes the by-run branch; the unscoped cycle-wide query (shared `cycle_<src>_<stamp>` run id) is reached only by direct `orchestrate_cycle` calls without `orchestration_run_id` (trigger/test paths). #1845 is latent hardening, not a live defect.
+- [x] 4.1 Red first: a sibling model set's terminal succeeded forcing row under the shared run's base id → the chain really submits forcing for the current cohort, with a non-colliding id (`_retry_N`), not `skipped_duplicate_submission`, and does not resume the sibling row. If it does not go red on current code, stop and report the evidence.
+- [x] 4.1b Red first: a disjoint in-flight sibling forcing row → submit for the current cohort, the sibling row is not polled as ours.
+- [x] 4.2 Must-preserve: terminal forcing row whose members equal the current cohort → resume verbatim, no new submission.
+- [x] 4.3 Lane limitation: DB-legacy (`StoreBackedCycleRepository`) forcing row without complete member identity → today's model-blind resume is kept; test + comment pin it.
+- [x] 4.4 Overlapping unresolved sibling row (members intersect current models) still blocks, no fresh submission.
+  - On the unscoped FileJournal path such a sibling is already refused at admission (`_active_orchestration_conflicts` -> `has_active_pipeline` sees the shared model active -> `PIPELINE_ALREADY_ACTIVE`), so the blocker branch is pinned at the `find_existing_stage_job` seam in addition to the public refusal.
+- [x] 4.4b Accepted consequence pin: terminal succeeded row whose complete members overlap but are not equal → forcing resubmitted for the current cohort (design D2).
+- [x] 4.5 `test_candidate_scoped_full_cycle_ignores_sibling_cycle_jobs` and the unscoped resume tests (`test_crash_recovery_resumes_after_last_completed_stage`, `test_resume_array_status_override_*`) stay green unchanged.
+- [x] 4.6 Implement D2.
 
 ## 5. Verification
 

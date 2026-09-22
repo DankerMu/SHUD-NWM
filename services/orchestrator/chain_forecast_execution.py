@@ -258,8 +258,13 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
                             # #2404: no row under THIS run_id yet, but the budget
                             # may already have charged attempts under another
                             # prefix; ``None`` keeps the bare first submission.
-                            pipeline_job_id = _floored_cycle_stage_retry_job_id(
-                                self, context, stage, existing_jobs, None
+                            pipeline_job_id = (
+                                # #1845 (D2): a forcing row excluded as another
+                                # model set's may hold this run's bare id; mint
+                                # the next free ``_retry_N`` instead of colliding.
+                                _mint_cycle_stage_retry_job_id(self, context, stage, existing_jobs)
+                                if _stage_base_job_id_occupied(self, context, stage, existing_jobs)
+                                else _floored_cycle_stage_retry_job_id(self, context, stage, existing_jobs, None)
                             )
                         result, aggregation = self._submit_and_wait_cycle_stage(
                             stage,
@@ -543,6 +548,27 @@ def _mint_cycle_stage_retry_job_id(
 
     job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
     return _floored_cycle_stage_retry_job_id(self, context, stage, existing_jobs, job_id) or job_id
+
+
+def _stage_base_job_id_occupied(
+    self: Any,
+    context: CycleOrchestrationContext,
+    stage: StageDefinition,
+    existing_jobs: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Whether a row of ``stage`` already holds this run's bare stage id.
+
+    Reached only when no existing stage job was selected.  Any stage row under
+    the bare id would have been selected, except a forcing row that
+    ``find_existing_stage_job`` excluded as another model set's (#1845), so
+    this is exactly the "excluded row occupies the base id" signal.
+    """
+
+    base_job_id = _pipeline_job_id(context.run_id, stage.stage)
+    return any(
+        str(job.get("job_id") or "") == base_job_id and self._job_matches_stage(job, stage)
+        for job in existing_jobs
+    )
 
 
 def _floored_cycle_stage_retry_job_id(

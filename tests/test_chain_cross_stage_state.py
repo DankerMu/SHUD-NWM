@@ -441,3 +441,251 @@ def test_markerless_non_whitelisted_downstream_terminal_row_resumes_after_upstre
     assert _submitted_stages(client) == ["forecast"]
     assert f"{parse_id}_retry_1" not in repository.jobs
     assert result.status == "failed"
+
+
+# --- #1845: forcing resume matches the cohort's exact model set ---------------
+#
+# Unscoped path: a direct ``orchestrate_cycle`` whose basins carry no
+# ``orchestration_run_id`` shares the run id ``cycle_gfs_<stamp>`` with every
+# other unscoped cohort of the cycle (production always stamps a run id, so this
+# is latent hardening; see tasks.md 4.0). FileJournal lane: forcing rows carry
+# complete ``cohort_members`` as #2447 writes them. Every round stops after
+# forcing, so model-blind downstream stages (a non-goal) never enter the result.
+
+_SHARED_FORCING = f"job_cycle_gfs_{_CYCLE}_forcing"
+
+
+def _cohort_basins(models: tuple[int, ...], *, orchestration_run_id: str | None = None) -> list[dict[str, Any]]:
+    basins = []
+    for index in models:
+        basin = _basins(index + 1)[index]
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{_CYCLE}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "restart_stage": "forcing",
+                "state_evidence": {"restart_stage": "forcing"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+        if orchestration_run_id is not None:
+            basin["orchestration_run_id"] = orchestration_run_id
+        basins.append(basin)
+    return basins
+
+
+def _forcing_round(
+    tmp_path: Path,
+    label: str,
+    repository: Any,
+    client: FakeCycleSlurmClient,
+    models: tuple[int, ...],
+    *,
+    orchestration_run_id: str | None = None,
+) -> Any:
+    basins = _cohort_basins(models, orchestration_run_id=orchestration_run_id)
+    orchestrator = _orchestrator(tmp_path / label, repository, client, terminal_stage="forcing")
+    return orchestrator.orchestrate_cycle("gfs", _CYCLE, basins)
+
+
+def _member_models(row: dict[str, Any]) -> set[str]:
+    return {member["model_id"] for member in row["cohort_members"]}
+
+
+def _task_models(submission: dict[str, Any]) -> list[str]:
+    return [task["model_id"] for task in submission["tasks"]]
+
+
+def _sibling_forcing_row(
+    tmp_path: Path, repository: Any, models: tuple[int, ...], *, run_id: str | None = None, status: str | None = None
+) -> dict[str, Any]:
+    """A sibling cohort's forcing row, written by a real forcing round (#2447 identity)."""
+
+    from services.orchestrator.forcing_submit_identity import forcing_member_identity_is_complete
+
+    client = FakeCycleSlurmClient()
+    result = _forcing_round(tmp_path, "sibling", repository, client, models, orchestration_run_id=run_id)
+    assert result.status == "succeeded"
+    row = _journal_master(repository, f"job_{run_id}_forcing" if run_id else _SHARED_FORCING)
+    assert forcing_member_identity_is_complete(row)
+    assert _member_models(row) == {f"model_{index}" for index in models}
+    if status is not None:
+        # Only the lifecycle status is moved (the sibling is still in flight);
+        # every identity field stays exactly as the forcing round wrote it.
+        repository.upsert_pipeline_job({**row, "status": status, "finished_at": None})
+        row = _journal_master(repository, row["job_id"])
+    return row
+
+
+@pytest.mark.parametrize(
+    "sibling_models",
+    [pytest.param((2, 3), id="disjoint-4.1"), pytest.param((1, 2), id="overlapping-terminal-4.4b")],
+)
+def test_sibling_model_set_terminal_forcing_row_under_shared_base_id_is_not_resumed(
+    tmp_path: Path, sibling_models: tuple[int, ...]
+) -> None:
+    """4.1 / 4.4b: another model set's terminal succeeded forcing row holds the bare id.
+
+    The current cohort {model_0, model_1} really submits forcing under the next
+    free ``_retry_1`` (no ``skipped_duplicate_submission``) and the sibling row is
+    neither resumed nor touched. 4.4b (members overlap but differ, i.e. the
+    cohort changed) is the accepted consequence: forcing is recomputed.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    sibling = _sibling_forcing_row(tmp_path, repository, sibling_models)
+    assert chain_runtime_utils._candidate_scoped_cycle_execution(_cohort_basins((0, 1))) is False
+    client = FakeCycleSlurmClient()
+    client.next_job = 3000
+
+    result = _forcing_round(tmp_path, "current", repository, client, (0, 1))
+
+    forcing = _stage_result(result, "forcing")
+    assert forcing.pipeline_job_id == f"{_SHARED_FORCING}_retry_1"
+    assert forcing.status == "succeeded"
+    assert result.status == "succeeded"
+    assert "skipped_duplicate_submission" not in {stage.status for stage in result.stages}
+    assert [_task_models(submission) for submission in client.submissions] == [["model_0", "model_1"]]
+    assert forcing.slurm_job_id == "3001"
+    assert _member_models(_journal_master(repository, f"{_SHARED_FORCING}_retry_1")) == {"model_0", "model_1"}
+    assert _journal_master(repository, _SHARED_FORCING) == sibling
+
+
+def test_disjoint_in_flight_sibling_forcing_row_is_not_polled_as_ours(tmp_path: Path) -> None:
+    """4.1b: a disjoint sibling cohort's forcing is still running under its own run id.
+
+    The #2543 admission gate already lets the disjoint cohort in; the forcing
+    stage must then submit for the current cohort under the bare id instead of
+    adopting (polling) the sibling's in-flight array.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.forcing_submit_identity import is_unresolved_forcing_attempt
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    sibling_run_id = f"cycle_gfs_{_CYCLE}_forcing_cohort_sibling"
+    sibling = _sibling_forcing_row(tmp_path, repository, (2,), run_id=sibling_run_id, status="running")
+    assert is_unresolved_forcing_attempt(sibling)
+    client = FakeCycleSlurmClient()
+    client.next_job = 3000
+
+    result = _forcing_round(tmp_path, "current", repository, client, (0, 1))
+
+    forcing = _stage_result(result, "forcing")
+    assert forcing.pipeline_job_id == _SHARED_FORCING
+    assert forcing.status == "succeeded"
+    assert forcing.slurm_job_id == "3001"
+    assert result.status == "succeeded"
+    assert [_task_models(submission) for submission in client.submissions] == [["model_0", "model_1"]]
+    assert set(client.poll_counts) == {"3001"}
+    assert _journal_master(repository, sibling["job_id"]) == sibling
+
+
+def test_own_model_set_terminal_forcing_row_is_resumed_verbatim(tmp_path: Path) -> None:
+    """4.2 must-preserve: equal member set (any basin order) -> resume, no new submission."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    first = _forcing_round(tmp_path, "round-1", repository, client, (0, 1))
+    own = _journal_master(repository, _SHARED_FORCING)
+    assert first.status == "succeeded"
+
+    second = _forcing_round(tmp_path, "round-2", repository, client, (1, 0))
+
+    forcing = _stage_result(second, "forcing")
+    assert forcing.pipeline_job_id == _SHARED_FORCING
+    assert forcing.status == "succeeded"
+    assert forcing.slurm_job_id == own["slurm_job_id"]
+    assert second.status == "succeeded"
+    assert len(client.submissions) == 1
+    assert [row["job_id"] for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID)] == [_SHARED_FORCING]
+
+
+def test_db_legacy_forcing_row_without_member_identity_keeps_model_blind_resume(tmp_path: Path) -> None:
+    """4.3 lane limitation: DB-legacy rows never carry ``cohort_members`` (only the
+    FileJournal lane writes them), so D2 cannot tell whose forcing it is and the
+    stage-name match resumes it -- even though it ran for another model set.
+    """
+
+    from tests.test_orchestration_chain import StoreBackedCycleRepository, _pipeline_store
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    store.create_job(
+        job_id=_SHARED_FORCING,
+        run_id=f"cycle_gfs_{_CYCLE}",
+        cycle_id=_CYCLE_ID,
+        job_type="produce_forcing_array",
+        slurm_job_id="4001",
+        model_id=None,
+        stage="forcing",
+        status="succeeded",
+        idempotency_key=f"cycle_gfs_{_CYCLE}:forcing",
+    )
+    client = FakeCycleSlurmClient()
+    client.jobs["4001"] = {
+        "job_id": "4001",
+        "run_id": f"cycle_gfs_{_CYCLE}",
+        "model_id": None,
+        "stage": "forcing",
+        "status": "succeeded",
+        "submitted_at": "2026-05-01T00:01:00Z",
+        "payload": {"tasks": [{"model_id": "model_9"}, {"model_id": "model_8"}]},
+        "stage_attempt": 0,
+    }
+
+    result = _forcing_round(tmp_path, "legacy", repository, client, (0, 1))
+
+    forcing = _stage_result(result, "forcing")
+    assert forcing.pipeline_job_id == _SHARED_FORCING
+    assert forcing.slurm_job_id == "4001"
+    assert client.submissions == []
+
+
+def test_overlapping_unresolved_sibling_forcing_row_still_blocks(tmp_path: Path) -> None:
+    """4.4: members intersect the current cohort and are still in flight.
+
+    Public seam: the admission gate refuses the cohort (the shared model is
+    active), so nothing is submitted. Identity seam: were the chain reached,
+    ``find_existing_stage_job`` still hands back the overlapping row through the
+    blocker branch instead of letting D2's exclusion open a fresh submission.
+    """
+
+    from services.orchestrator.chain import CycleOrchestrationContext, OrchestratorError
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    sibling_run_id = f"cycle_gfs_{_CYCLE}_forcing_cohort_overlap"
+    sibling = _sibling_forcing_row(tmp_path, repository, (1, 2), run_id=sibling_run_id, status="running")
+    client = FakeCycleSlurmClient()
+
+    with pytest.raises(OrchestratorError) as refused:
+        _forcing_round(tmp_path, "current", repository, client, (0, 1))
+    assert refused.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+    assert client.submissions == []
+
+    orchestrator = _orchestrator(tmp_path / "seam", repository, client, terminal_stage="forcing")
+    cycle_time = datetime(2026, 5, 1, tzinfo=UTC)
+    basins = orchestrator._normalize_cycle_basins(_cohort_basins((0, 1)), "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id=_CYCLE_ID,
+        run_id=f"cycle_gfs_{_CYCLE}",
+        all_basins=basins,
+        active_basins=list(basins),
+        restart_stage="forcing",
+    )
+    forcing_stage = next(stage for stage in orchestrator.stages if stage.stage == "forcing")
+    jobs = orchestrator._query_pipeline_jobs_for_cycle_context(context)
+
+    existing = orchestrator._find_existing_stage_job(jobs, forcing_stage, context=context)
+
+    assert existing is not None
+    assert existing["job_id"] == sibling["job_id"]
+    assert existing["status"] == "running"
