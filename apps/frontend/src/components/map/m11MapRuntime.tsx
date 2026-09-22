@@ -28,18 +28,25 @@ export function bboxToMapFit(bbox: M11Bbox | null | undefined): M11MapCameraFit 
   }
 }
 
-type M11InitialViewState =
-  | typeof CHINA_VIEW_STATE
-  | {
-      bounds: M11MapCameraFit['bounds']
-      fitBoundsOptions: { padding: number }
-    }
-
-export const CHINA_VIEW_STATE = {
-  longitude: 104,
-  latitude: 35,
-  zoom: 3.35,
+type M11InitialViewState = {
+  bounds: M11MapCameraFit['bounds']
+  fitBoundsOptions: { padding: number }
 }
+
+// 全国初始视野按中国范围 fit，而非固定 zoom：固定 zoom 下可见范围随视口 CSS 像素变化
+// （大屏外接显示器能看到非洲到太平洋，笔记本只到中国周边）；fit 让任何视口初始都正好框住中国。
+export const CHINA_BOUNDS: M11MapCameraFit['bounds'] = [
+  [73, 17],
+  [135, 54],
+]
+
+export const CHINA_VIEW_STATE: M11InitialViewState = {
+  bounds: CHINA_BOUNDS,
+  fitBoundsOptions: { padding: 32 },
+}
+
+// 天地图 `_w` 瓦片从 l=1 起发布；不允许缩到 0 级，也就不会请求不存在的 z0 瓦片。
+export const M11_MAP_MIN_ZOOM = 1
 
 export const m11MapStyleUrls: Record<M11Basemap, string> = {
   terrain: 'm11://basemaps/terrain',
