@@ -676,6 +676,11 @@ cohort 不拆）。scheduler 与 gateway 读
    registry 行（`services/orchestrator/chain_manifests.py` 的 `threads`：`shud_threads`
    优先，其次 `cpus_per_task`），不读 yaml；只改 yaml 会分到更多核，但 SHUD 仍按旧线程数跑。
 
+核验：每趟执行 pass 的 evidence 顶层 `resource_profile_split` 记录 `active`（非 `slurm` 后端时为
+`false`、`inactive_reason=gateway_backend_not_slurm`）、配置的 `override_model_ids`、实际单独成组的
+`applied_override_model_ids`，以及每个数组的 `cohort_run_id`/`profile_key`/`task_count`/`array_max_concurrent`。
+同一 cycle 拆出的兄弟数组互不阻塞：file journal 的 active 判定只把 cohort 行算给其已记录成员
+（forcing/forecast 行上的 `cohort_members`），尚未记录成员的 cohort 行仍按整 cycle 保守阻塞。
 没有任何 override 成员时 cohort 拆分结果、membership 与 cohort run id 与旧行为逐字节一致；
 新增 override 只会让该模型离开 default 数组，default 数组因成员变化得到新的 cohort run id。
 

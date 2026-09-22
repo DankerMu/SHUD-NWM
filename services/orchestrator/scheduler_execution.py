@@ -10,6 +10,13 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from services.orchestrator import source_cycle_raw_manifest
+from services.orchestrator.scheduler_cohort_split import (
+    RESOURCE_PROFILE_DEFAULT_KEY,
+    _array_concurrency_budgets,
+    resource_profile_candidate_groups,
+    resource_profile_override_model_ids,  # noqa: F401 - wired by scheduler_core via this module
+    resource_profile_split_evidence,
+)
 from services.orchestrator.scheduler_timing import set_current_scheduler_pass_timing
 
 # Epic #961 SUB-10 (#971) §4.2(a): named blocked-candidate reason + error_code
@@ -122,9 +129,10 @@ class SchedulerExecutionContext:
     candidate_execution_evidence: Callable[..., list[dict[str, Any]]]
     unknown_after_attempt: str
     # #2543: gateway resource-profile override key set (same yaml the gateway
-    # reads).  Called once per ``_execution_units``; raises fail-closed when the
+    # reads), or ``None`` when the gateway backend is not ``slurm`` and the split
+    # is inactive.  Called once per pass execution; raises fail-closed when the
     # profile file is missing or malformed.
-    resource_profile_override_model_ids: Callable[[], frozenset[str]]
+    resource_profile_override_model_ids: Callable[[], frozenset[str] | None]
     # SUB-2 wiring for scheduler-pass-timing-instrumentation (#860): SUB-3
     # (scheduler_execution stage spans) and SUB-4 (chain_forecast_execution
     # candidate spans) consume the per-pass ``SchedulerPassTiming`` via this
@@ -319,6 +327,7 @@ class _CohortUnit:
     execution_candidates: list[SchedulerExecutionCandidate]
     cohort_run_id: str | None
     array_max_concurrent: int
+    profile_key: str = RESOURCE_PROFILE_DEFAULT_KEY
 
 
 def execute_candidates(
@@ -360,8 +369,11 @@ def _execute_candidate_units(
     for candidate in candidates:
         grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
 
-    units = _execution_units(context, grouped)
+    override_model_ids = context.resource_profile_override_model_ids() if grouped else None
+    units = _execution_units(context, grouped, override_model_ids=override_model_ids)
     receipt = context.submit_overlap_receipt_factory()
+    if grouped:
+        receipt.resource_profile_split = resource_profile_split_evidence(units, override_model_ids)
     context.set_last_submit_overlap_receipt(receipt)
 
     def _submitter(
@@ -419,9 +431,11 @@ def _execute_candidate_units(
 def _execution_units(
     context: SchedulerExecutionContext,
     grouped: Mapping[tuple[str, datetime], Sequence[SchedulerExecutionCandidate]],
+    *,
+    override_model_ids: frozenset[str] | None,
 ) -> list[_CohortUnit]:
     source_order = {source_id.lower(): index for index, source_id in enumerate(context.config.sources)}
-    override_model_ids = context.resource_profile_override_model_ids() if grouped else frozenset()
+    split_keys = override_model_ids or frozenset()
     units: list[_CohortUnit] = []
     for (source_id, cycle_time), cycle_candidates in sorted(
         grouped.items(),
@@ -436,7 +450,7 @@ def _execution_units(
         for cohort_key, restart_candidates in context.restart_compatible_candidate_cohorts(
             _unique_execution_candidates(cycle_candidates)
         ):
-            for cohort_candidates in resource_profile_candidate_groups(restart_candidates, override_model_ids):
+            for cohort_candidates in resource_profile_candidate_groups(restart_candidates, split_keys):
                 for execution_candidates, cohort_run_id in context.candidate_execution_cohorts(
                     source_id,
                     cycle_time,
@@ -451,6 +465,11 @@ def _execution_units(
                             execution_candidates=list(execution_candidates),
                             cohort_run_id=cohort_run_id,
                             array_max_concurrent=1,
+                            profile_key=(
+                                cohort_candidates[0].model_id
+                                if cohort_candidates[0].model_id in split_keys
+                                else RESOURCE_PROFILE_DEFAULT_KEY
+                            ),
                         )
                     )
     budgets = _array_concurrency_budgets(
@@ -469,93 +488,6 @@ def _execution_units(
         )
         for unit, budget in zip(units, budgets, strict=True)
     ]
-
-
-def resource_profile_candidate_groups(
-    candidates: Sequence[SchedulerExecutionCandidate],
-    override_model_ids: frozenset[str] | set[str],
-) -> list[list[SchedulerExecutionCandidate]]:
-    """Split one restart-compatible cohort by gateway resource-profile key (#2543).
-
-    The gateway sizes a whole Slurm array from task 0's profile, so every model
-    with an ``overrides`` entry gets its own group (and is task 0 there); all
-    other models stay together in one ``default`` group, in their original
-    order.  With no override member this returns the input as the single group,
-    keeping membership and cohort run ids unchanged.
-    """
-
-    default_group: list[SchedulerExecutionCandidate] = []
-    override_groups: dict[str, list[SchedulerExecutionCandidate]] = {}
-    for candidate in candidates:
-        if candidate.model_id in override_model_ids:
-            override_groups.setdefault(candidate.model_id, []).append(candidate)
-        else:
-            default_group.append(candidate)
-    groups = [default_group] if default_group else []
-    groups.extend(override_groups[model_id] for model_id in sorted(override_groups))
-    return groups
-
-
-def resource_profile_override_model_ids() -> frozenset[str]:
-    """Override keys of the gateway's resource profile file (fail closed).
-
-    Resolves the path exactly like the gateway (``SLURM_GATEWAY_RESOURCE_PROFILES_PATH``,
-    default ``config/resource_profiles.yaml`` relative to the working directory)
-    and loads it through the gateway's own loader.  Only the real ``slurm``
-    backend reads that file; the mock backend never sizes arrays from it, so
-    there is no profile to split by and the cohort stays whole.
-    """
-
-    from services.slurm_gateway.config import SlurmGatewaySettings
-    from services.slurm_gateway.resource_profiles import (
-        resource_profile_override_model_ids as _override_model_ids,
-    )
-
-    settings = SlurmGatewaySettings()
-    if settings.backend != "slurm":  # same selector as services.slurm_gateway.gateway.create_gateway
-        return frozenset()
-    return _override_model_ids(settings.resource_profiles_path)
-
-
-def _array_concurrency_budgets(
-    units: Sequence[_CohortUnit],
-    *,
-    global_bound: int,
-    worker_bound: int,
-) -> list[int]:
-    """Allocate a strict cross-cohort Slurm array budget.
-
-    When every unit can start immediately, round-robin water filling preserves
-    small cohorts and uses the entire global budget whenever enough tasks
-    exist.  If units must queue behind the control-thread bound, every active
-    slot receives the same conservative ceiling; any combination of running
-    slots therefore remains within ``global_bound`` as queued units advance.
-    """
-
-    if not units:
-        return []
-    global_bound = max(int(global_bound), 1)
-    active_slots = min(len(units), max(int(worker_bound), 1), global_bound)
-    task_counts = [max(len(unit.execution_candidates), 1) for unit in units]
-    if len(units) > active_slots:
-        per_slot_bound = max(global_bound // active_slots, 1)
-        return [min(task_count, per_slot_bound) for task_count in task_counts]
-
-    budgets = [0] * len(units)
-    remaining = global_bound
-    while remaining > 0:
-        advanced = False
-        for index, task_count in enumerate(task_counts):
-            if budgets[index] >= task_count:
-                continue
-            budgets[index] += 1
-            remaining -= 1
-            advanced = True
-            if remaining == 0:
-                break
-        if not advanced:
-            break
-    return [max(budget, 1) for budget in budgets]
 
 
 def _candidate_with_array_concurrency_budget(

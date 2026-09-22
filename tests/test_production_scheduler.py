@@ -48448,7 +48448,10 @@ def _profile_split_units(scheduler: ProductionScheduler, candidates: Sequence[An
     grouped: dict[tuple[str, datetime], list[Any]] = {}
     for candidate in candidates:
         grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
-    return scheduler_execution_module._execution_units(scheduler._scheduler_execution_context(), grouped)
+    context = scheduler._scheduler_execution_context()
+    return scheduler_execution_module._execution_units(
+        context, grouped, override_model_ids=context.resource_profile_override_model_ids()
+    )
 
 
 def _unit_members(units: Sequence[Any]) -> list[list[str]]:
@@ -48561,7 +48564,7 @@ def test_resource_profile_split_array_budgets_stay_within_global_bound(
         for model_id in (*override_models, *(f"model_{index:02d}" for index in range(30)))
     ]
 
-    for worker_bound in (32, 4):
+    for worker_bound, default_width in ((32, 13), (4, 15)):
         scheduler = _profile_split_scheduler(
             tmp_path,
             sources=("gfs", "IFS"),
@@ -48578,6 +48581,42 @@ def test_resource_profile_split_array_budgets_stay_within_global_bound(
         assert sum(sorted(budgets, reverse=True)[:active_slots]) <= 32
         for unit in units:
             assert {c.slurm_array_max_concurrent for c in unit.execution_candidates} == {unit.array_max_concurrent}
+        # Locked widths: the two 30-task default arrays keep most of the global
+        # budget; the six 1-task override arrays take one slot each.
+        assert sorted(budgets) == [1] * 6 + [default_width, default_width]
+
+
+def test_slurm_array_budget_queued_units_weight_by_member_count() -> None:
+    import itertools
+
+    from services.orchestrator import scheduler_execution
+
+    def unit(size: int) -> Any:
+        return scheduler_execution._CohortUnit(
+            source_id="gfs",
+            cycle_time=_dt("2026-07-05T12:00:00Z"),
+            cycle_id="gfs_2026070512",
+            execution_candidates=[object()] * size,
+            cohort_run_id=None,
+            array_max_concurrent=1,
+        )
+
+    sizes = [30, 1, 1, 1, 30, 1, 1, 1]
+    budgets = scheduler_execution._array_concurrency_budgets(
+        [unit(size) for size in sizes], global_bound=32, worker_bound=4
+    )
+
+    # Before the weighting every unit got 32 // 4 = 8, shrinking each big
+    # default array to 8 while a 1-task array could not use its share.
+    assert budgets == [15, 1, 1, 1, 15, 1, 1, 1]
+    assert max(sum(combo) for combo in itertools.combinations(budgets, 4)) <= 32
+
+    mixed = [20, 3, 12, 1, 7, 20]
+    mixed_budgets = scheduler_execution._array_concurrency_budgets(
+        [unit(size) for size in mixed], global_bound=32, worker_bound=3
+    )
+    assert all(1 <= budget <= size for budget, size in zip(mixed_budgets, mixed, strict=True))
+    assert max(sum(combo) for combo in itertools.combinations(mixed_budgets, 3)) <= 32
 
 
 @pytest.mark.parametrize(
@@ -48630,6 +48669,60 @@ def test_resource_profile_split_fails_closed_like_gateway_on_bad_profile_file(
 
     with pytest.raises(ConfigurationError, match=message):
         RealSlurmGateway(SlurmGatewaySettings(resource_profiles_path=str(profiles))).resolve_resource_profile("model_a")
+
+
+def test_resource_profile_split_is_recorded_in_pass_submission_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _NoopOrchestrator:
+        object_store = None
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(),
+                candidate_outcomes=(),
+            )
+
+    def split_evidence(backend: str) -> dict[str, Any]:
+        monkeypatch.setenv("SLURM_GATEWAY_BACKEND", backend)
+        monkeypatch.setenv(
+            "SLURM_GATEWAY_RESOURCE_PROFILES_PATH",
+            str(_write_profiles(tmp_path, _override_block("hlj_dg", "unused_big"))),
+        )
+        scheduler = ProductionScheduler(
+            _config(tmp_path),
+            registry=FakeRegistry([_model("model_00", "basin_00")]),
+            adapters={"gfs": FakeAdapter("gfs", [])},
+            orchestrator_factory=lambda _source_id: _NoopOrchestrator(),
+        )
+        scheduler._execute_candidates(
+            [_concurrency_candidate("gfs", model_id, f"basin_{model_id}") for model_id in ("model_a", "hlj_dg")]
+        )
+        return scheduler._last_submit_overlap_receipt.resource_profile_split
+
+    active = split_evidence("slurm")
+    assert active["active"] is True
+    assert active["inactive_reason"] is None
+    assert active["override_model_ids"] == ["hlj_dg", "unused_big"]
+    assert active["applied_override_model_ids"] == ["hlj_dg"]
+    assert [(unit["profile_key"], unit["task_count"]) for unit in active["units"]] == [
+        ("default", 1),
+        ("hlj_dg", 1),
+    ]
+    assert [unit["cohort_run_id"] for unit in active["units"]] == [
+        "cycle_gfs_2026052106_full_model_a",
+        "cycle_gfs_2026052106_full_hlj_dg",
+    ]
+
+    inactive = split_evidence("mock")
+    assert inactive["active"] is False
+    assert inactive["inactive_reason"] == "gateway_backend_not_slurm"
+    assert inactive["override_model_ids"] == []
+    assert inactive["applied_override_model_ids"] == []
+    assert [(unit["profile_key"], unit["task_count"]) for unit in inactive["units"]] == [("default", 2)]
 
 
 def test_resource_profile_split_is_skipped_for_mock_gateway_backend_which_never_reads_profiles(
@@ -49669,6 +49762,9 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
     run_id = str(record["run_id"])
     cycle_time = _dt("2026-07-12T00:00:00Z")
+    # #2543: the wedged candidate is ``model_0``, a recorded member of the wedged
+    # cohort -- the production geometry.  A model the cohort's ``cohort_members``
+    # provably exclude is no longer blocked by that cohort's model-less rows.
     # The production wedge needs a candidate that survives the pass-level
     # duplicate-pipeline skip, i.e. a candidate-scoped retry: a retryable failed
     # forecast member with recorded forcing provenance. Without it the pass never
@@ -49683,22 +49779,22 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
         tmp_path / "journal",
         source_id="GFS",
         cycle_time=cycle_time,
-        model_id="model_a",
-        forcing_package_uri="forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
+        model_id="model_0",
+        forcing_package_uri="forcing/gfs/2026071200/basin_0_v1/model_0/forcing_package.json",
     )
     _seed_recorded_forcing_packages(
         monkeypatch,
         tmp_path / "recorded-forcing-object-store",
-        "forcing/gfs/2026071200/basin_a_v1/model_a/forcing_package.json",
+        "forcing/gfs/2026071200/basin_0_v1/model_0/forcing_package.json",
     )
     repository.upsert_pipeline_job(
         {
-            "job_id": "job_fcst_gfs_2026071200_model_a_forecast",
-            "run_id": "fcst_gfs_2026071200_model_a",
+            "job_id": "job_fcst_gfs_2026071200_model_0_forecast",
+            "run_id": "fcst_gfs_2026071200_model_0",
             "cycle_id": "gfs_2026071200",
             "job_type": "run_shud_forecast",
             "stage": "forecast",
-            "model_id": "model_a",
+            "model_id": "model_0",
             "status": "failed",
             "slurm_job_id": "9001",
             "error_code": "SLURM_JOB_TIMEOUT",
@@ -49742,7 +49838,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
                 database_url=None,
                 database_url_configured=False,
             ),
-            registry=FakeRegistry([_model("model_a", "basin_a")]),
+            registry=FakeRegistry([_model("model_0", "basin_0")]),
             adapters={"gfs": FakeAdapter("gfs", [("2026-07-12T00:00:00Z", True)])},
             active_repository=repository,
             canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
@@ -60111,6 +60207,11 @@ _SCOPE_DIMENSION_DISPOSITIONS: dict[str, str] = {
     # unjudged.
     "evidence_pre_execution": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
     "submit_overlap_receipt": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
+    # #2543: how the submission lane grouped the already-selected candidates into
+    # Slurm arrays (resource-profile split on/off, per-array profile key and
+    # width).  It regroups, never drops, a candidate, so it records what the pass
+    # did with the lane, not what it was allowed to look at.
+    "resource_profile_split": _SCOPE_DIMENSION_NOT_A_SCOPE_DIMENSION,
     # The third sibling of those two, and the one that went undispositioned for a
     # whole review round because no fixture leg opened it (round-3 C1).  It is a
     # readiness PROOF for the submission lane -- DATABASE_URL reachability, the
