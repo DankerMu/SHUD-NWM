@@ -2901,7 +2901,7 @@ The explicit context retry-attempt precedence, existing stage/prefix/suffix hand
 
 #### Scenario: Explicit retry and sibling retry doors retain their semantics
 
-- **WHEN** a valid explicit context retry attempt is present, or the caller retries a missing-raw download or a terminal stage after upstream refresh
+- **WHEN** a valid explicit context retry attempt is present, or the caller retries a terminal stage after upstream refresh (the chain carries no raw-manifest download door; raw-manifest repair belongs to scheduler admission)
 - **THEN** explicit attempt precedence and existing retry eligibility/suffix rules are preserved, while automatic suffix computation uses the same selected jobs snapshot
 - **AND** operator-demoted recovery continues reusing its old master key through the existing reclaim transition
 
