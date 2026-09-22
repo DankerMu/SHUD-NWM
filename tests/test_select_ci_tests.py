@@ -918,12 +918,25 @@ def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_or
 
     `_manual_retry_submission_failure_details` and
     `_record_manual_retry_submission_success` own the single render at the event
-    boundary, but their only oracles are five tests in `tests/test_retry.py` --
-    a file the journal's stop rule shadows (the broad `services/orchestrator/**`
-    rule is the only place that name appears) and which has no top-level journal
-    import, so neither routing nor importer derivation reached them.
+    boundary, and its oracles outside the journal's own same-name suite are six
+    tests in `tests/test_retry.py` -- a file the journal's stop rule shadows (the
+    broad `services/orchestrator/**` rule is the only place that name appears)
+    and which has no top-level journal import, so neither routing nor importer
+    derivation reached them.
 
-    Node ids, not the whole file: the other 170 tests there are the retry
+    Not all six discriminate the render.
+    `..._db_free_runtime_evidence_values_survive_the_single_render` is the
+    requirement oracle for the fixture's `db_free_runtime.resolved.*.value`
+    clause and is green on BOTH sides of the #2306 production edit -- its values
+    are `[local-path]`/`file`/`true`, which the anti-laundering strip never
+    touched -- so it rides as the clause's oracle, not as a render-once
+    discriminator; the same holds for
+    `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
+    byte-identity guard whose literal was captured from pre-change source
+    (fixture task 5.1b). A journal-only PR must run the clause's oracles
+    regardless of which of them bite on a revert.
+
+    Node ids, not the whole file: the other 169 tests there are the retry
     route's own subject and already route through `services/orchestrator/retry.py`'s
     same-name row. The negative half of this pin is what keeps that true.
     """
@@ -936,6 +949,7 @@ def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_or
         "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
         "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
         "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
+        "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
     ):
         assert node_id in selected, node_id
 

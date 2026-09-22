@@ -1246,14 +1246,27 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_journal_read_blocked_consumers.py",
     # #2306: the file lane's manual-retry root evidence is rendered ONCE, in
     # this module -- `_manual_retry_submission_failure_details` and
-    # `_record_manual_retry_submission_success` -- but its only oracles are
-    # these five tests in tests/test_retry.py, whose bare name appears solely on
-    # the broad `services/orchestrator/**` rule that this stop rule shadows. The
-    # suite has no top-level journal import either, so no importer derivation
-    # reaches it: this at-site tuple is the journal's only route to them.
+    # `_record_manual_retry_submission_success` -- and its oracles outside the
+    # journal's own same-name suite are these six tests in tests/test_retry.py,
+    # whose bare name appears solely on the broad `services/orchestrator/**`
+    # rule that this stop rule shadows. The suite has no top-level journal
+    # import either, so no importer derivation reaches it: this at-site tuple is
+    # the journal's only route to them.
+    # Not all six discriminate the render.
+    # `..._db_free_runtime_evidence_values_survive_the_single_render` stays
+    # GREEN under a pure revert of the #2306 writer-side pre-render -- its
+    # values are `[local-path]`/`file`/`true`, which the anti-laundering strip
+    # never touched -- so it rides as the requirement oracle for the
+    # `db_free_runtime.resolved.*.value` clause rewritten in the same commit,
+    # not as a render-once discriminator; likewise
+    # `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
+    # byte-identity guard whose literal was captured from pre-change source and
+    # is green on both sides by construction (fixture task 5.1b). They route
+    # because a journal-only PR must run the clause's oracles, not because they
+    # bite on the revert.
     # Node ids rather than the whole file -- not a runtime argument (the whole
-    # suite is DB-free, 175 tests in 2.23s; these five run in 0.68s) but a
-    # subject one: the other 170 are the retry route's own contract and already
+    # suite is DB-free, 175 tests in 2.23s; these six run in 0.86s) but a
+    # subject one: the other 169 are the retry route's own contract and already
     # route through `services/orchestrator/retry.py`'s same-name row, so the
     # journal's rule stays at what the journal decides. The
     # `test_production_scheduler.py::` node ids on the scheduler_runtime.py rule
@@ -1263,6 +1276,7 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
     "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
     "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
+    "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
