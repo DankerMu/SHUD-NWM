@@ -85,6 +85,11 @@ _DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
     "blocked_candidates",
     "skipped_candidates",
     "restart_reconcile",
+    # #2570: APPENDED last on purpose -- no pre-existing field's shed position
+    # moves.  The failure-cause projection is the diagnostic floor: the executor
+    # writes the crash site only into the artifact, so it is shed after model
+    # discovery, the source cycles, the candidate lists and the reconcile block.
+    "model_run_failures",
 )
 _BOUNDED_CANDIDATE_LIST_FIELDS = (
     "candidates",
@@ -111,6 +116,19 @@ _BOUNDED_SOURCE_CYCLE_PROJECTION_LIMIT = 64
 #: The one ``selection_reason`` the projection keeps, written by
 #: ``scheduler_discovery.py`` on a breaker-released not-selected cycle.
 _BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_breaker_engaged"
+#: #2570: how many failed ``model_run_evidence`` rows the bounded fallback
+#: projects.  The dispatch catch-all (``scheduler_execution.py:738-754``) writes
+#: the crash site ONLY into the artifact -- that module imports no logging and
+#: never prints -- while the fallback rebuilds the payload without
+#: ``model_run_evidence`` at all, so four node-22 incidents landed as
+#: ``resource_limit_blocked`` artifacts with no recoverable cause.  Same cap as
+#: the source-cycle projection: a row is a few identity scalars plus the
+#: producer-bounded tail (``ERROR_TRACEBACK_TAIL_MAX_CHARS = 2000``), so 64 rows
+#: are ~128 KB against ``MAX_EVIDENCE_BYTES`` = 5 MB, and a pass cannot submit
+#: more candidates than that without overflowing far earlier anyway.  Overflow
+#: stays visible: ``limit.model_run_failures`` reports the failed total and the
+#: retained count.
+_BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT = 64
 _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "finished_at",
     "duplicate_exclusions",
