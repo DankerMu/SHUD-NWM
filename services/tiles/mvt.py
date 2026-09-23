@@ -2037,6 +2037,10 @@ def national_discharge_valid_times(
       cannot render is exactly what the clamp and the fail-closed rule prevent.
     * no arguments -- the pre-#2009 behaviour, preserved for the legacy
       source-less callers: each active network's OVERALL latest run, intersected.
+      Fails closed to ``[]`` unless the SET of networks holding a display-ready
+      run EQUALS the helper's active set (#2458) -- the per-cycle rule, so an
+      active network with no display-ready run empties the list instead of
+      silently leaving the intersection.
 
     ``run_display_coverage`` may define the hourly grid only when its sample count
     proves a complete segment × lead-time rectangle; incomplete or inconsistent
@@ -2068,7 +2072,7 @@ def national_discharge_valid_times(
     # one cycle by `:cycle`, and the no-argument branch must keep including a network
     # whose newest display-ready run is older than the window -- dropping it would
     # shrink the intersection and change a result master publishes today.
-    rows, _active_networks = _national_discharge_coverage_rows(session, source=None, cycle=None, since=None)
+    rows, active_networks = _national_discharge_coverage_rows(session, source=None, cycle=None, since=None)
 
     latest_by_network: dict[Any, Mapping[str, Any]] = {}
     for row in rows:
@@ -2076,7 +2080,17 @@ def national_discharge_valid_times(
         current = latest_by_network.get(network)
         if current is None or _national_run_rank(row) > _national_run_rank(current):
             latest_by_network[network] = row
+    # The empty guard stays even though the set rule below covers rows = {} with
+    # any active network: rows = {} and active = {} compare equal, and an empty
+    # `coverage` list would reach `max()` and raise.
     if not latest_by_network:
+        return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+    # SETS, the rule of `national_discharge_cycles` and `NationalCycleCoverage`
+    # (#2458): the denominator is the helper's active set, never the rows'
+    # networks, so a zero-coverage active network fails the list closed. Judged
+    # BEFORE the per-row window validation, so the verdict for a non-intersecting
+    # active set does not depend on row contents.
+    if frozenset(latest_by_network) != active_networks:
         return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
 
     coverage: list[tuple[datetime, datetime]] = []
@@ -2326,13 +2340,22 @@ def _national_discharge_coverage_rows(
 
       Neither table has a production ``DELETE`` (the only ones in the tree are
       test teardown and a one-off cutover-rehearsal script removing its own
-      seeded run). The residual is accepted because
-      no TWO-statement design can close both classes -- a numerator shrink is
-      invisible to any re-read of the denominator -- so the choice is which class
-      to close, not whether to close both. Closing both means merging these two
-      statements into one, which changes the returned row shape (zero-coverage
-      networks become all-NULL rows) and rewrites one of the four run-selection
-      sites the module header requires to stay identical.
+      seeded run). No TWO-statement design can close both classes -- a
+      numerator shrink is invisible to any re-read of the denominator -- so the
+      choice is which class to close, not whether to close both. Closing both
+      means merging these two statements into one: a LEFT JOIN changes the
+      returned row shape (zero-coverage networks become all-NULL rows) and
+      rewrites one of the four run-selection sites the module header requires to
+      stay identical; even the shape-preserving UNION ALL form breaks both test
+      fakes' statement dispatch and loses the two-statement race models.
+      RULED by #2457: the two statements stay, in this order, and the shrink
+      residual is accepted -- its frequency is unmeasurable from the database
+      (no run-status transition record), and it is render-safe (a tile request
+      re-reads the pair and refuses) and self-healing within the catalog cache.
+      Reopen when a run-status transition record makes the shrink class
+      measurable and shows it routine, or when a consumer renders from the
+      listing without its own coverage re-check. Full criteria: design D1 of the
+      OpenSpec change ``national-discharge-intersection-closure``.
     * Deactivation is not symmetric between the orders, and the difference is a
       race-path behaviour delta rather than a regression: a network deactivated
       between the reads that HAS coverage rows still fails closed (it is in the T1

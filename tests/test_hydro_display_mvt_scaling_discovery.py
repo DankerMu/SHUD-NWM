@@ -492,6 +492,39 @@ def test_no_argument_national_valid_times_rank_a_null_cycle_first_like_the_tile_
     assert [entry["cycle_time"] for entry in listed] == ["2026-09-02T12:00:00Z"]
 
 
+@pytest.mark.parametrize(
+    ("case", "covering", "active"),
+    [
+        ("partial", ("rn-a", "rn-b"), ["rn-a", "rn-b", "rn-c"]),
+        ("equal-size-mismatch", ("rn-a", "rn-c1", "rn-c2"), ["rn-b", "rn-c1", "rn-c2"]),
+        ("covered-superset", ("rn-a", "rn-b", "rn-c"), ["rn-a", "rn-b"]),
+    ],
+)
+def test_no_argument_national_valid_times_fail_closed_unless_the_covered_set_equals_the_active_set(
+    case: str, covering: tuple[str, ...], active: list[str]
+) -> None:
+    """#2458: the no-argument branch judges the helper's ACTIVE set, as a SET.
+
+    Before #2458 the branch discarded the active set and intersected whoever had
+    rows, so an active network with no display-ready run was invisible (partial),
+    and so was every other membership difference. The three shapes are the three
+    ways a set comparison can differ: subset, equal size with different members
+    (a cardinality compare would pass it), and strict superset (a "covers at least
+    the active set" compare would pass it).
+    """
+    rows = _full_coverage_rows(_CYCLE, networks=covering)
+
+    discovery = national_discharge_valid_times(_NationalDiscoverySession(rows, active_networks=active))
+
+    # Non-vacuity: the very same rows judged against their OWN networks yield a
+    # timeline, so the empty answer below is the set rule and not the rows.
+    assert national_discharge_valid_times(_NationalDiscoverySession(rows)).valid_times, case
+    assert frozenset(covering) != frozenset(active), case
+    assert discovery.valid_times == [], case
+    assert discovery.observed_count == 0, case
+    assert discovery.truncated is False, case
+
+
 def test_national_valid_times_reject_half_an_identity() -> None:
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
 

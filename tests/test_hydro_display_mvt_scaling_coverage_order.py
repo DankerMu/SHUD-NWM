@@ -98,6 +98,30 @@ def test_canonical_national_tile_refuses_an_equal_size_membership_mismatch(monke
     assert "tile" not in _statement_kinds(session)
 
 
+def test_canonical_national_tile_refuses_a_covered_superset_of_the_active_set(monkeypatch: Any, tmp_path: Any) -> None:
+    """#2459: covered is a strict SUPERSET of active -> 424, the `complete` equality's route oracle.
+
+    The shape a network deactivated between the two reads leaves behind while it
+    still holds a display-ready run. A "covers at least the active set" relaxation
+    of `NationalCycleCoverage.complete` (`>=`) would serve this tile.
+    """
+    session = _NationalRouteSession(active_networks=("rn-a", "rn-b"), coverage_networks=("rn-a", "rn-b", "rn-c"))
+    built: list[bytes] = []
+
+    response, _captured = _request_national_identity_tile(
+        _PARTIAL_IDENTITY_URL, session, monkeypatch, tmp_path, built=built
+    )
+
+    # Non-vacuity: covered really contains every active network and one more.
+    assert set(session.coverage_networks) > set(session.active_networks)
+    assert response.status_code == 424, response.text
+    error = response.json()["error"]
+    assert error["code"] == _INCOMPLETE_CODE
+    assert (error["details"]["covered_network_count"], error["details"]["active_network_count"]) == (3, 2)
+    assert "tile" not in _statement_kinds(session)
+    assert built == []
+
+
 def test_canonical_national_tile_keeps_the_no_run_verdict_for_an_uncovered_identity(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
@@ -220,6 +244,7 @@ def test_valid_times_and_the_tile_route_read_one_coverage_helper(monkeypatch: An
         ("full", ("rn-a", "rn-b", "rn-c"), ["rn-a", "rn-b", "rn-c"], True),
         ("empty", (), ["rn-a", "rn-b"], False),
         ("equal-size-mismatch", ("rn-a", "rn-c1", "rn-c2"), ["rn-b", "rn-c1", "rn-c2"], False),
+        ("covered-superset", ("rn-a", "rn-b", "rn-c"), ["rn-a", "rn-b"], False),
     ],
 )
 def test_national_cycle_coverage_helper_compares_sets_like_the_per_cycle_valid_times(
@@ -579,10 +604,12 @@ def test_national_cycles_close_when_a_covered_network_is_deactivated() -> None:
     Mutation killed: relaxing the comparison in `national_discharge_cycles` from
     equality to "covers at least the active set"
     (`if not covered_networks >= active_networks: continue`). Every other case in
-    this file has `covered` a subset of `active` (equality included) or
-    incomparable with it, and on all three shapes `>=` and `==` return the same
-    verdict; this is the only case where `covered` is a strict SUPERSET, the one
-    shape where they differ, so that mutation is green everywhere except here.
+    this file that reaches `national_discharge_cycles` has `covered` a subset of
+    `active` (equality included) or incomparable with it, and on all three shapes
+    `>=` and `==` return the same verdict; this is the only one where `covered`
+    is a strict SUPERSET, the one shape where they differ, so that mutation is
+    green everywhere except here. (The #2459 superset cases added to this file
+    judge `NationalCycleCoverage.complete`, never `national_discharge_cycles`.)
     """
     session = _covered_deactivation_session()
 
@@ -655,10 +682,11 @@ def test_national_cycles_still_list_a_cycle_whose_covered_run_stopped_being_disp
     `rn-c` is display-ready at T1 and not at T2 while the active set stays
     `{rn-b, rn-c}`, so `covered == active` and the cycle is listed although the
     run painting `rn-c` is gone. The old order caught this one; no TWO-statement
-    design can close it and the growth class at once, so it is accepted here and
-    the fix (merging the two statements) is tracked separately. This test exists
-    so the residual is VISIBLE to the suite -- if a later change closes it, this
-    case goes red and must be rewritten deliberately rather than silently.
+    design can close it and the growth class at once, and #2457 RULED to keep
+    the two statements and accept it (criteria and reopen triggers: design D1 of
+    the OpenSpec change `national-discharge-intersection-closure`). This test
+    exists so the residual is VISIBLE to the suite -- if a later change closes
+    it, this case goes red and must be rewritten deliberately rather than silently.
 
     Reachable in production, each writer read in the tree:
       * `mark_run_failed` (`workers/output_parser/parser.py`) -- its
