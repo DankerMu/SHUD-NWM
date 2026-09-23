@@ -2,16 +2,16 @@
 
 ## Risk Packs
 
-- [ ] Public API / CLI / script entry — **selected**: retention/raw-retention/refresh/alert CLIs, two shell wrappers, display route `source` params. Covered by 1–7.
-- [ ] Config / project setup — **selected**: retention env toggle precedence, shared retention-window resolver, new unit/timer/env example. Covered by 1.x, 5.x, 6.x.
-- [ ] File IO / path safety / overwrite — **selected**: summary overwrite (#2284), observer state file atomic replace. Covered by 3.x, 5.x.
-- [ ] Error handling / rollback / partial outputs — **selected**: traversal failure localisation + summary always written (#2309), typed exit 2 in the observer. Covered by 2.x, 5.x.
-- [ ] Schema / columns / field names — **selected**: retention receipt `mode/outcome`, raw-retention `skipped[]` fields, alert `reason=unsupported-source`, audit JSON, observer report. Covered by 1.2, 2.2, 5.x, 6.4, 7.x.
-- [ ] Legacy compatibility — **selected**: #1446 in-window guard, alert exit codes, `--enforce`/env semantics, OpenAPI unchanged by the alias. Covered by 1.3, 6.3, 7.3.
-- [ ] Concurrency / shared state / ordering — **selected**: same-second concurrent summaries; retention × parse overlap evidence (receipt). Covered by 3.x, 5.6.
-- [ ] Documentation / migration notes — **selected**: env examples, runbook pages, #2529 receipt, archived coverage-alert design pointer. Covered by 1.4, 2.4, 5.7, 6.6, 7.4.
+- [x] Public API / CLI / script entry — **selected**: retention/raw-retention/refresh/alert CLIs, two shell wrappers, display route `source` params. Covered by 1–7.
+- [x] Config / project setup — **selected**: retention env toggle precedence, shared retention-window resolver, new unit/timer/env example. Covered by 1.x, 5.x, 6.x.
+- [x] File IO / path safety / overwrite — **selected**: summary overwrite (#2284), observer state file atomic replace. Covered by 3.x, 5.x.
+- [x] Error handling / rollback / partial outputs — **selected**: traversal failure localisation + summary always written (#2309), typed exit 2 in the observer. Covered by 2.x, 5.x.
+- [x] Schema / columns / field names — **selected**: retention receipt `mode/outcome`, raw-retention `skipped[]` fields, alert `reason=unsupported-source`, audit JSON, observer report. Covered by 1.2, 2.2, 5.x, 6.4, 7.x.
+- [x] Legacy compatibility — **selected**: #1446 in-window guard, alert exit codes, `--enforce`/env semantics, OpenAPI unchanged by the alias. Covered by 1.3, 6.3, 7.3.
+- [x] Concurrency / shared state / ordering — **selected**: same-second concurrent summaries; retention × parse overlap evidence (receipt). Covered by 3.x, 5.6.
+- [x] Documentation / migration notes — **selected**: env examples, runbook pages, #2529 receipt, archived coverage-alert design pointer. Covered by 1.4, 2.4, 5.7, 6.6, 7.4.
 - [ ] Auth / permissions — not selected beyond: the observer uses a read-only DSN (documented in 5.5).
-- [ ] Resource limits — **selected**: the audit is bounded (valid-time-bounded EXISTS, per-probe transaction, statement/lock timeouts); the expired `--skip-fresh` selection is rescan-bounded (`expired_rescan_interval`); the observer report is line-capped. Covered by 5.2, 6.2, 6.3, 6.4.
+- [x] Resource limits — **selected**: the audit is bounded (valid-time-bounded EXISTS, per-probe transaction, statement/lock timeouts); the expired `--skip-fresh` selection is rescan-bounded (`expired_rescan_interval`); the observer report is line-capped. Covered by 5.2, 6.2, 6.3, 6.4.
 - [ ] Release / packaging — not selected.
 
 ## Execution plan
@@ -149,6 +149,9 @@ Two serial implementer passes on this branch, each committed before the next: **
   - Pass B (local): `All checks passed!`; `Change 'node27-ops-scripts-fail-closed' is valid`.
 - [x] 8.2 Focused suites green locally: retention, raw retention, mvt cache retention, autopipeline preflight/handoff, refresh coverage (+ CLI, parallel), coverage-freshness alert, hydro display/API/OpenAPI tests touched by the alias, new observer module, `tests/test_select_ci_tests.py`.
   - Pass B (local, no integration opt-in): the 24 pass-B-touched / production-ops-runbook reader suites → `1472 passed, 60 skipped` (skips = integration cases + two node-22-host cases); `tests/test_select_ci_tests.py` → `791 passed`; `tests/test_node27_resource_governance.py tests/test_node27_raw_retention.py tests/test_node27_mvt_cache_retention.py` → `203 passed, 1 skipped`; `infra/env/README.md` readers → `488 passed, 2 skipped`. With a local disposable `timescale/timescaledb-ha:pg15-latest` + `NHMS_RUN_INTEGRATION=1` over every suite that reads `display_coverage` / the refresh CLI / `packages.common.storage` / the retention runner, plus the observer suite (41 modules) → `4617 passed, 1 skipped`. This does not replace 8.3's node-27 oracle.
-- [ ] 8.3 (orchestrator) node-27 isolated oracle at the PR head (scratch PG, `NHMS_RUN_INTEGRATION=1`) for the same suites incl. the integration-marked coverage tests.
-- [ ] 8.5 PR body carries the design §PR-body checklist items.
-- [ ] 8.4 CI green on the PR head (or red with the cause recorded).
+- [x] 8.3 (orchestrator) node-27 isolated oracle at the PR head (scratch PG, `NHMS_RUN_INTEGRATION=1`) for the same suites incl. the integration-marked coverage tests.
+  - @`4a72f7f13` (89 suites): `8422 passed, 3 skipped`. @`552601624` (fix pass 1, 90 suites, Python 3.11.15, disposable scratch PG from the nhms-db image on :55547): `8426 passed, 3 skipped in 1614.38s`, rc=0; skips = `test_forcing_read_path_store_routing.py:1114` (a DELETE projects nothing) + two `test_two_node_docker_runtime.py` node-22-host cases. Final head `f47510f` is docs/openspec-only on top of it.
+- [x] 8.5 PR body carries the design §PR-body checklist items.
+  - PR #2588 description: #2355 AC5 observation split, #2504 AC2 window-scoped reinterpretation + legacy-cohort convergence, #2529 alert-shape decision and D5r verdict, claimed blind spot → #2590.
+- [x] 8.4 CI green on the PR head (or red with the cause recorded).
+  - Run 35857131273 @`f47510f`: Markdown Lint / Unit Tests / SQL Migration Dry Run / Entropy Audit pass (the prior run at `552601624` was red on two markdownlint errors, MD058 + MD018, fixed in `f47510f`). Merged as `0c2ad466e`.
