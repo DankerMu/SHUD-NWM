@@ -86,15 +86,41 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   source 的是 `infra/env/node27-ingest.env`，2026-09-23 实测它**没有**这个变量（它在
   `node27-timeseries-retention.env`，现网值 21）——没设就与 #2504 之前完全一致。启用是部署动作：把
   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` 以与 retention env **相同的值**写进 `node27-ingest.env`
-  （更小的值会放开 retention 还没 drop 的那段）。第一次带窗口的 `--all --skip-fresh` 会把当时的过期
-  populated 行各重扫一次（2026-09-23 有界只读探针：约 2716 行中 2616 行无事实），空的降到 0 后离开选集。
+  （更小的值会放开 retention 还没 drop 的那段）。
+- **部署顺序：先在 autopipe flock 之外手跑一次首轮收敛，再往 `node27-ingest.env` 写窗口变量。**
+  第一次带窗口的 `--all --skip-fresh` 要把当时所有过期 populated 行各重扫一次（2026-09-23 只读审计
+  receipt：窗口外 populated 2666 行、其中 2616 行无事实，见
+  [`../receipts/2026-09-23-issue-2504-populated-empty-audit/README.md`](../receipts/2026-09-23-issue-2504-populated-empty-audit/README.md)）。
+  若直接让 cron backstop 做，这一轮在 autopipe flock 之内跑（`--workers ${AUTOPIPE_COVERAGE_WORKERS:-1}`，
+  现网 2），重扫多久就把下一趟 tick 推迟多久。所以先手跑（窗口只在这条命令里内联设置，不持
+  flock，不挡 tick；`--workers 1` 是有意压低与 tick 并发时的库负载；同样避开 retention 06:36 UTC / compression 04:25 UTC 窗口，重扫语句持 chunk 锁会让
+  `drop_chunk` 55P03）：
+
+  ```bash
+  cd /home/nwm/NWM
+  set -a; . infra/env/node27-ingest.env; set +a   # 写库 DSN + refresh 语句预算，与 cron 同源
+  grep -n '^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=' infra/env/node27-timeseries-retention.env
+  W=<上一行显示的值>   # 必须就是 retention 现网值（2026-09-23 为 21）
+  { NODE27_TIMESERIES_RETENTION_WINDOW_DAYS="$W" setsid nohup .venv/bin/python \
+      scripts/node27_refresh_coverage.py --all --skip-fresh --workers 1 \
+      > /home/nwm/autopipe-logs/coverage-2504-first-convergence.json \
+      2> /home/nwm/autopipe-logs/coverage-2504-first-convergence.err & }
+  ```
+
+  完成后（JSON 报告 `expired_cutoff` 非 `null`、`failed` 为 0）用下面的只读审计确认
+  `out_of_window.empty` 降到 0，**然后**再把同一个值写进 `node27-ingest.env`（0600）。此后 backstop
+  看到的过期行都在 24 h 内刷新过，不会重选；日常只剩每天新越过 cutoff 的行和事实还没被 drop 的过期行。
 - **只读审计**：`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=<同 retention> .venv/bin/python
   scripts/node27_refresh_coverage.py --audit-populated-empty` 打印
   `{in_window: {total, empty, probe_failed, sample_empty_run_ids}, out_of_window: {…}, null_end: {total},
   watermark, cutoff}`；逐行 `EXISTS` 探针限定在该行存储的 valid-time 区间、每个探针一条 autocommit 语句、
   设 `statement_timeout` + `lock_timeout`，不跨 chunk 持 AccessShareLock 堵 retention 的 `drop_chunk`。
   仍应避开 retention（06:36 UTC）与 compression（04:25 UTC）窗口跑。部署后预期 `out_of_window.empty`
-  在第一次带窗口的 backstop tick 后归零。
+  在首轮收敛后归零（2026-09-23 基线 2616 → 0，receipt 同上；那次审计 6755 个探针串行 101 s）。
+- **retention 停摆的残余**：retention 被禁用或连续多天被拒（如 09-19 的 55P03）时，事实没被 drop 的过期
+  行会越积越多，每行每 24 h 在 autopipe flock 内被重扫一次（它们重扫后保留计数，所以一直留在选集里）。
+  retention 超过一天没有 drop chunk 时，盯 `autopipe.log` 里的
+  `phase=coverage_backstop elapsed_sec=`：它随这批行增长；先恢复 retention，而不是调 rescan 间隔。
 - 被拒的 run 保留旧 `refreshed_at`——**只在它本来就 stale（`refreshed_at < hydro_run.updated_at`）
   时**，cron 的 `--all --skip-fresh` 每个 tick 才会重扫它一次；被拒但 fresh 的 run 不会被重扫。运维确认后
   可显式 `--run-id <run> --force` 把该 run 归零（单个 run，推荐的人工方式）。`--force` 也可与 `--all`

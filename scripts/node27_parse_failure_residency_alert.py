@@ -11,20 +11,37 @@ exists for.
 
 Criterion — RESIDENCY, not a tick's rc:
 
-- **watched set**: ``hydro.hydro_run`` rows with ``status = 'failed'``, an
-  ``OUTPUT_PARSE_`` error code, and ``updated_at`` inside the retry-liveness
-  bound (default 6 h). The autopipe re-queues a failed run every tick and
-  ``mark_run_failed`` renews ``updated_at`` on every retry, so the bound keeps
-  exactly the runs still being retried. An abandoned historical failure (the two
-  ``OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`` rows last touched 2026-08-28) is not
-  a residency signal; without the bound it would mail every re-alert interval
-  forever. Residual: a tick hung for longer than the bound ages its failures out
-  of the set — the 4 h frontier-stall lane owns that geometry.
+- **watched set**: ``hydro.hydro_run`` rows with ``status = 'failed'`` — ANY
+  ``error_code`` — and ``updated_at`` inside the retry-liveness bound (default
+  6 h). On node-27 the output parser is the only writer of ``status='failed'``
+  (``mark_run_failed``: ``OUTPUT_PARSE_*`` codes AND the bare
+  ``OutputParsingError`` codes such as ``RIVQDOWN_NOT_FOUND`` or
+  ``MODEL_RIVER_FILE_MALFORMED`` — the deterministic, never-healing #1781 shape
+  this lane exists for). The other writers that can set ``failed``
+  (``workers/shud_runtime/runtime.py``, ``services/orchestrator/chain_repository.py``)
+  are the node-22 compute plane, which connects to no live DB; the register
+  upsert preserves status, the forcing stage does not write ``hydro_run``,
+  publish only writes ``published``. So no code filter is needed, and a prefix
+  filter would drop exactly the permanent failures.
+- **renewal**: the autopipe re-queues a failed run every tick, and the FIRST step
+  of ``_process_run`` is the register upsert (``scripts/node27_ingest_run.py``
+  ``upsert_hydro_run``), whose ``ON CONFLICT DO UPDATE`` keeps the status and
+  sets ``updated_at = now()``. That — not the parser — is what renews
+  ``updated_at``: ``mark_run_failed`` is a no-op on an already-failed run
+  (``FAILABLE_RUN_STATUSES`` excludes ``failed``), so ``error_code`` stays the
+  code of the FIRST failure; the current error is in ``autopipe.log``. The bound
+  therefore keeps exactly the runs the autopipe still retries. An abandoned
+  historical failure (the two ``OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`` rows
+  last touched 2026-08-28, the only ``failed`` rows on node-27 on 2026-09-23) is
+  not a residency signal; without the bound it would mail every re-alert
+  interval forever. Residual: a tick hung for longer than the bound ages its
+  failures out of the set — the 4 h frontier-stall lane owns that geometry.
 - **state**: ``{run_id: {first_observed_failing_at, last_alerted_at}}``; a run
   absent from an observation (it parsed, or aged out) is dropped, so a run that
-  fails again later starts a fresh clock. The parser never writes an
-  intermediate status — a retried run goes straight back to ``failed`` or to
-  ``parsed`` — so presence across consecutive observations IS "still failing".
+  fails again later starts a fresh clock. A retried run never leaves
+  ``failed`` for an intermediate status — the register keeps the status and
+  ``mark_run_failed`` no-ops, until ``mark_run_parsed`` moves it to ``parsed``
+  — so presence across consecutive observations IS "still failing".
 - **verdict**: a run is *resident* once ``now - first_observed_failing_at >=
   threshold`` (default 2 h; ``0`` makes every watched run resident, the
   live-receipt setting). Exit 1 iff some resident run was never alerted or was
@@ -99,14 +116,14 @@ CODE_OBSERVATION_FAILED = "PARSE_FAILURE_RESIDENCY_OBSERVATION_FAILED"
 
 RUNBOOK_REFERENCE = "docs/runbooks/production-ops/parse-failure-residency-alert.md"
 
-# `\_` because `_` is a LIKE wildcard; `%%` because the statement is executed
-# with a parameter mapping. The liveness floor is bound from the tick's own
+# Every `failed` run, whatever its code (see the module docstring: on node-27
+# the parser is the only `failed` writer, and its bare OutputParsingError codes
+# are the permanent shape). The liveness floor is bound from the tick's own
 # clock, so the SQL bound and the in-process re-check are the same instant.
-OBSERVATION_QUERY = r"""
+OBSERVATION_QUERY = """
 SELECT run_id, run_key, error_code, updated_at
 FROM hydro.hydro_run
 WHERE status = 'failed'
-  AND error_code LIKE 'OUTPUT\_PARSE\_%%'
   AND updated_at > %(liveness_floor)s
 ORDER BY run_id
 """
@@ -138,7 +155,9 @@ class ResidencyConfig:
 class FailingRun:
     run_id: str
     run_key: int
-    error_code: str
+    # The code of the run's FIRST failure: `mark_run_failed` never rewrites an
+    # already-failed row, so later retries' errors are only in autopipe.log.
+    first_error_code: str
     updated_at: datetime
 
 
@@ -286,7 +305,12 @@ def default_observe(config: ResidencyConfig, liveness_floor: datetime) -> list[F
     finally:
         connection.close()
     return [
-        FailingRun(run_id=str(run_id), run_key=int(run_key), error_code=str(code), updated_at=_utc(updated_at))
+        FailingRun(
+            run_id=str(run_id),
+            run_key=int(run_key),
+            first_error_code="" if code is None else str(code),
+            updated_at=_utc(updated_at),
+        )
         for run_id, run_key, code, updated_at in rows
     ]
 
@@ -462,7 +486,7 @@ def build_report(residents: list[Resident], *, watched: int, now: datetime, conf
     for item in residents[: config.report_runs]:
         residency = (now - item.first_observed).total_seconds() / 3600
         lines.append(
-            f"resident run_id={item.run.run_id} error_code={item.run.error_code} "
+            f"resident run_id={item.run.run_id} first_error_code={item.run.first_error_code} "
             f"first_observed={_iso(item.first_observed)} residency_h={residency:.1f} "
             f"alert={'due' if item.due else 'within-realert'}"
         )
@@ -488,8 +512,8 @@ def _fail(code: str, reason: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="node-27 parse-stage failure residency alert (#2529): exit 1 when a run stays "
-        "failed with an OUTPUT_PARSE_* code for at least the threshold"
+        description="node-27 parse-stage failure residency alert (#2529): exit 1 when a run the "
+        "autopipe still retries stays status='failed' (any error code) for at least the threshold"
     )
     parser.add_argument("--threshold-hours", help=f"residency threshold (env {ENV_THRESHOLD}, default 2; 0 allowed)")
     parser.add_argument("--realert-hours", help=f"re-alert interval (env {ENV_REALERT}, default 24)")

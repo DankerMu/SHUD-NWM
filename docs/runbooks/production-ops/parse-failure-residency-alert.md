@@ -16,20 +16,34 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
 
 ### 13.1 判据（驻留型，不看单 tick 的 rc）
 
-- **被观察集**：`hydro.hydro_run` 中 `status='failed'`、`error_code LIKE 'OUTPUT\_PARSE\_%'`、
-  且 `updated_at` 落在**重试存活界**（默认 6 h）内的行。autopipe 每 tick 都把 `failed` 的 run
-  原样重投，`mark_run_failed` 每次都刷新 `updated_at`，所以这个界只留下"仍在被重试"的 run。
+- **被观察集**：`hydro.hydro_run` 中 `status='failed'`（**任何** `error_code`）、且 `updated_at`
+  落在**重试存活界**（默认 6 h）内的行。
+- **谁续期 `updated_at`**：autopipe 每 tick 都把 `failed` 的 run 原样重投，`_process_run` 的**第一步**
+  就是 register upsert（`scripts/node27_ingest_run.py` 的 `upsert_hydro_run`：`ON CONFLICT DO UPDATE`
+  保留 status、写 `updated_at = now()`）——是它、不是解析器在续期。`mark_run_failed` 对已经 `failed`
+  的行是空操作（`FAILABLE_RUN_STATUSES` 不含 `failed`），所以 `error_code` 始终是**第一次**失败的码
+  （报告里标作 `first_error_code`），之后每次重试的真实错误只在 `autopipe.log` 里。存活界因此只留下
+  "仍在被重试"的 run。
 - **状态**：`{run_id: {first_observed_failing_at, last_alerted_at}}`（JSON，原子替换，旁边一把
   `fcntl` 锁）。某次观察里不再出现的 run（已 `parsed`，或老出存活界）被删掉；它以后再失败从头计时。
-  解析器不写中间状态——重试后的 run 要么回到 `failed`、要么变 `parsed`——所以"连续观察都在集合里"
-  就是"一直在失败"。
+  重试期间 run 不离开 `failed`（register 保留 status、`mark_run_failed` 空操作），直到
+  `mark_run_parsed` 把它改成 `parsed`，中间没有别的状态——所以"连续观察都在集合里"就是"一直在失败"。
 - **驻留**：`now - first_observed_failing_at >= 阈值`（默认 2 h）。
 - **退出码**：存在「从未告警过」或「上次告警已 ≥ 重告间隔（默认 24 h）」的驻留 run → **退 1**
   （这些 run 的 `last_alerted_at` 先写进状态再退出）；否则退 0（报告里照样列出已告警过的驻留 run）；
   配置 / 数据库 / 状态文件错误 → **退 2**（一行带类型码的说明，无 traceback）。另一个实例持锁 →
   退 0，打一行 `tick skipped`（跳过一个 tick 不是告警）。
-- **只按 `OUTPUT_PARSE_` 前缀、不拆码**：`OUTPUT_PARSE_DB_ERROR` 把 57014 / 锁类 / 永久 schema 错误
-  折叠成一个码，但重试路径不读 `error_code`，拆码不改变任何行为；本车道按前缀判驻留，不需要拆。
+- **不按码过滤、也不拆码**：解析器除了 `OUTPUT_PARSE_*`，还经 `mark_run_failed` 写**裸**
+  `OutputParsingError` 码（`RIVQDOWN_NOT_FOUND`、`RIVQDOWN_EMPTY`、`MODEL_RIVER_FILE_MALFORMED` 等，
+  见 `workers/output_parser/`）——这些确定性失败恰恰是 #1781 那种永不自愈的形状，按
+  `OUTPUT_PARSE_` 前缀过滤会正好把它们漏掉。node-27 上 `status='failed'` 的唯一写入者就是解析器：
+  另外能写 `failed` 的两处（`workers/shud_runtime/runtime.py`、
+  `services/orchestrator/chain_repository.py`）属 node-22 计算面，它不连任何活库；register 保留
+  status、forcing 段不写 `hydro_run`、publish 只写 `published`。所以被观察集不需要码过滤；
+  2026-09-23 实测全库 `failed` 只有 2 行、都在存活界外（见 receipt
+  [`backlog-probe-all-failed.txt`](../receipts/2026-09-23-issue-2529-parse-timeout-root-cause/backlog-probe-all-failed.txt)），
+  放宽后今天不多一封信。`OUTPUT_PARSE_DB_ERROR` 把 57014 / 锁类 / 永久 schema 错误折叠成一个码，
+  但重试路径不读 `error_code`，拆码不改变任何行为，本车道也不需要拆。
 
 ### 13.2 邮件怎么读
 
@@ -38,12 +52,14 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
 
 ```text
 parse-failure-residency now=… watched=<N> resident=<R> newly_alerted=<A> already_alerted=<K> threshold=2h realert=24h liveness=6h runbook=…
-resident run_id=<run> error_code=OUTPUT_PARSE_DB_ERROR first_observed=<UTC> residency_h=<h> alert=due
+resident run_id=<run> first_error_code=<第一次失败的码> first_observed=<UTC> residency_h=<h> alert=due
 … 至多 10 行 resident …
 ... and <M> more
 ```
 
 `alert=due` 是本次触发告警的 run，`alert=within-realert` 是已在重告间隔内告过警、仍在驻留的 run。
+`first_error_code` 是该 run **第一次**失败时写下的码（`mark_run_failed` 不改写已 `failed` 的行），
+不一定是当前的错误——当前错误看 `autopipe.log`（§13.3 第 1 步）。
 退 2 时正文是一行 `PARSE_FAILURE_RESIDENCY_{CONFIG_INVALID|STATE_CORRUPT|OBSERVATION_FAILED} reason=…`。
 **退 2 每个 tick 都会发信、不去重**——坏掉的观察者本身就是要人处理的事（与 §11 同一口径）。
 
@@ -51,12 +67,20 @@ resident run_id=<run> error_code=OUTPUT_PARSE_DB_ERROR first_observed=<UTC> resi
 
 退 1（有驻留 run）：
 
-1. 看这些 run 的最新错误与失败时间：
+1. 看这些 run **当前**的错误：DB 里的 `error_code` / `error_message` 是第一次失败时写的，之后的重试
+   不改写它，所以当前错误要从 `autopipe.log` 里找该 run 最近几趟 tick 的输出：
+
+   ```bash
+   grep -n '<run_id>' /home/nwm/autopipe-logs/autopipe.log | tail -20
+   ```
+
+   DB 侧（第一次失败的码 + 最近一次被 register 续期的时间）：
 
    ```sql
-   SELECT run_id, error_code, left(error_message, 200) AS error_message, updated_at
+   SELECT run_id, error_code AS first_error_code, left(error_message, 200) AS first_error_message,
+          updated_at AS last_registered_at
    FROM hydro.hydro_run
-   WHERE status = 'failed' AND error_code LIKE 'OUTPUT\_PARSE\_%'
+   WHERE status = 'failed'
    ORDER BY updated_at DESC;
    ```
 
@@ -83,7 +107,8 @@ resident run_id=<run> error_code=OUTPUT_PARSE_DB_ERROR first_observed=<UTC> resi
 `/home/nwm/node27-parse-failure-residency-alert/state.json`，下一 tick 从空状态开始。
 
 **被放弃的历史失败**（不在存活界内，因此**不告警**）：2026-09-23 实测有 2 行
-`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`，最后触碰于 2026-08-28，7 天内触碰 0 行。清理它们是运维动作，
+`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`（也是全库仅有的 2 行 `failed`，任何码），最后触碰于
+2026-08-28，7 天内触碰 0 行。清理它们是运维动作，
 不是告警。先查 autopipe 为什么不再重投——#1781 的 decline 记录会让同一产物（`init_state_id` +
 `product_mtime`）不再重试：
 
@@ -91,7 +116,7 @@ resident run_id=<run> error_code=OUTPUT_PARSE_DB_ERROR first_observed=<UTC> resi
 SELECT h.run_id, h.error_code, h.updated_at, d.reason_code, d.init_state_id, d.product_mtime
 FROM hydro.hydro_run h
 LEFT JOIN ops.ingest_recompute_decline d ON d.run_id = h.run_id
-WHERE h.status = 'failed' AND h.error_code LIKE 'OUTPUT\_PARSE\_%'
+WHERE h.status = 'failed'
   AND h.updated_at <= now() - interval '6 hours';
 ```
 

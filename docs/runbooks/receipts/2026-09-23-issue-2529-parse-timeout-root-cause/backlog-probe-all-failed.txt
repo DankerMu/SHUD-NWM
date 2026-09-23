@@ -1,0 +1,3 @@
+code|total|live_6h|touched_7d|max
+OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED|2|0|0|2026-08-28 08:42:56.636219+00
+(1 row)

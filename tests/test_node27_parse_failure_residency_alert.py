@@ -1,8 +1,9 @@
 """``scripts/node27_parse_failure_residency_alert.py`` (#2529 design D5).
 
-The lane alerts on RESIDENCY, not on a tick's rc: a run that stays
-``failed`` with an ``OUTPUT_PARSE_*`` code across observations for at least the
-threshold (default 2 h) makes the unit exit 1 — the existing
+The lane alerts on RESIDENCY, not on a tick's rc: a run the autopipe still
+retries that stays ``failed`` (any error code — on node-27 the parser is the
+only ``failed`` writer) across observations for at least the threshold
+(default 2 h) makes the unit exit 1 — the existing
 ``OnFailure=nhms-node27-unit-failure-alert@%n.service`` handler mails the
 journal tail, so the report on stdout IS the mail body. A burst that heals
 within the threshold (the 2026-09-19 57014 shape: failing for one or two ticks,
@@ -48,7 +49,7 @@ SYSTEMD_FRAMING_LINES = 5
 
 
 def _row(run_id: str, *, code: str = "OUTPUT_PARSE_DB_ERROR", touched: datetime | None = None) -> Any:
-    return alert.FailingRun(run_id=run_id, run_key=1, error_code=code, updated_at=touched or T0)
+    return alert.FailingRun(run_id=run_id, run_key=1, first_error_code=code, updated_at=touched or T0)
 
 
 class _Observer:
@@ -104,7 +105,7 @@ def test_a_run_failing_across_observations_for_the_threshold_alerts_and_is_named
     assert lines[0].startswith("parse-failure-residency ")
     assert "resident=1 newly_alerted=1 already_alerted=0" in lines[0]
     assert any(
-        line.startswith("resident run_id=run-perm error_code=OUTPUT_PARSE_DB_ERROR ")
+        line.startswith("resident run_id=run-perm first_error_code=OUTPUT_PARSE_DB_ERROR ")
         and "first_observed=2026-09-19T05:55:00Z" in line
         and "residency_h=2.0" in line
         for line in lines
@@ -113,6 +114,39 @@ def test_a_run_failing_across_observations_for_the_threshold_alerts_and_is_named
         "first_observed_failing_at": "2026-09-19T05:55:00Z",
         "last_alerted_at": "2026-09-19T07:55:00Z",
     }
+
+
+def test_a_deterministic_parser_code_without_the_output_parse_prefix_alerts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The permanent #1781 shape wears a BARE OutputParsingError code
+    (``MODEL_RIVER_FILE_MALFORMED``, ``RIVQDOWN_NOT_FOUND``, …, written by
+    ``mark_run_failed``), not an ``OUTPUT_PARSE_*`` one: it must alert exactly
+    like any other failure once it has stayed failing for the threshold."""
+    for step in range(4):
+        rc, _ = _tick(
+            tmp_path,
+            capsys,
+            T0 + step * TICK,
+            [_row("run-malformed", code="MODEL_RIVER_FILE_MALFORMED", touched=T0 + step * TICK)],
+        )
+        assert rc == 0, step
+
+    rc, lines = _tick(
+        tmp_path,
+        capsys,
+        T0 + 4 * TICK,
+        [_row("run-malformed", code="MODEL_RIVER_FILE_MALFORMED", touched=T0 + 4 * TICK)],
+    )
+
+    assert rc == 1
+    assert "watched=1 resident=1 newly_alerted=1" in lines[0]
+    assert any(
+        line.startswith("resident run_id=run-malformed first_error_code=MODEL_RIVER_FILE_MALFORMED ")
+        and "residency_h=2.0" in line
+        and line.endswith("alert=due")
+        for line in lines
+    ), lines
 
 
 def test_the_self_healing_burst_of_2026_09_19_never_alerts_and_is_dropped(
@@ -440,7 +474,12 @@ def test_the_autopipe_unit_still_has_no_on_failure() -> None:
 
 
 @pytest.mark.integration
-def test_the_observation_query_selects_live_output_parse_failures_only(throwaway_database_url: str) -> None:
+def test_the_observation_query_selects_every_live_failed_run_whatever_its_code(throwaway_database_url: str) -> None:
+    """Every ``failed`` run still being retried is watched, whatever its code —
+    ``OUTPUT_PARSE_*``, a bare OutputParsingError code, anything (#2529 fix
+    pass 1: a prefix filter dropped the permanent #1781 shape). Excluded: a
+    failed run outside the liveness bound (abandoned) and any run that is not
+    ``failed`` (parsed, published)."""
     from tests.integration_helpers import apply_migrations_from_zero
 
     apply_migrations_from_zero(throwaway_database_url)
@@ -468,10 +507,16 @@ def test_the_observation_query_selects_live_output_parse_failures_only(throwaway
                 ("run-live", "failed", "OUTPUT_PARSE_DB_ERROR", "10 minutes"),
                 ("run-live-blocked", "failed", "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED", "5 hours"),
                 ("run-abandoned", "failed", "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED", "26 days"),
+                # Bare OutputParsingError codes (workers/output_parser/): the
+                # deterministic, never-healing failures.
+                ("run-rivqdown-missing", "failed", "RIVQDOWN_NOT_FOUND", "30 minutes"),
+                ("run-river-malformed", "failed", "MODEL_RIVER_FILE_MALFORMED", "2 hours"),
+                # Formerly excluded by the prefix term; now in the set.
                 ("run-other-stage", "failed", "FORCING_HANDOFF_FAILED", "10 minutes"),
-                # `_` is a LIKE wildcard: this code must not match 'OUTPUT_PARSE\_%'.
                 ("run-lookalike", "failed", "OUTPUT_PARSEXDB", "10 minutes"),
+                ("run-abandoned-bare", "failed", "RIVQDOWN_EMPTY", "7 days"),
                 ("run-healed", "parsed", "OUTPUT_PARSE_DB_ERROR", "10 minutes"),
+                ("run-published", "published", None, "10 minutes"),
             ):
                 cursor.execute(
                     "INSERT INTO hydro.hydro_run (run_id, run_type, scenario_id, model_id, basin_version_id, "
@@ -487,8 +532,12 @@ def test_the_observation_query_selects_live_output_parse_failures_only(throwaway
     floor = datetime.now(UTC) - timedelta(hours=6)
     rows = alert.default_observe(config, floor)
 
-    assert sorted((row.run_id, row.error_code) for row in rows) == [
+    assert sorted((row.run_id, row.first_error_code) for row in rows) == [
         ("run-live", "OUTPUT_PARSE_DB_ERROR"),
         ("run-live-blocked", "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"),
+        ("run-lookalike", "OUTPUT_PARSEXDB"),
+        ("run-other-stage", "FORCING_HANDOFF_FAILED"),
+        ("run-river-malformed", "MODEL_RIVER_FILE_MALFORMED"),
+        ("run-rivqdown-missing", "RIVQDOWN_NOT_FOUND"),
     ]
     assert all(isinstance(row.run_key, int) and row.updated_at.tzinfo is not None for row in rows)

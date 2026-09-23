@@ -1,7 +1,7 @@
 [Unit]
 Description=NHMS node-27 parse-stage failure residency alert
-# #2529 (design D5): the ALERT IS the non-zero exit. Exit 1 = a run has stayed
-# `failed` with an OUTPUT_PARSE_* code for >= the residency threshold and is due
+# #2529 (design D5): the ALERT IS the non-zero exit. Exit 1 = a run the autopipe
+# still retries has stayed `failed` (any error code) for >= the residency threshold and is due
 # (never alerted, or last alerted >= the re-alert interval ago); exit 2 = the
 # observer itself is broken (config / database / state). Delivery is the
 # already-live handler, unchanged; `%n` expands to the FULL unit name

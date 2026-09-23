@@ -13,7 +13,8 @@
 # hydro.hydro_run). A DATABASE_URL line in this file would override it, which
 # is only for a scratch-DB receipt, never for production.
 #
-# Residency threshold, hours (>= 0). A run failing with an OUTPUT_PARSE_* code
+# Residency threshold, hours (>= 0). A watched run (status='failed', any error
+# code -- on node-27 the output parser is the only writer of 'failed') present
 # in every observation for at least this long is resident. 0 = every watched
 # run is resident at once (live-receipt setting only).
 # NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS=2
@@ -22,7 +23,10 @@
 # NHMS_PARSE_RESIDENCY_REALERT_HOURS=24
 #
 # Retry liveness, hours (> 0): only failed runs whose updated_at is within this
-# bound are watched (every autopipe retry renews updated_at). Abandoned
+# bound are watched. Every autopipe tick re-registers a failed run first
+# (scripts/node27_ingest_run.py upsert: status kept, updated_at = now()); the
+# parser's mark_run_failed does NOT touch an already-failed row, so error_code
+# stays the first failure's code (reported as first_error_code). Abandoned
 # historical failures fall outside it and never alert; clearing them is an
 # operator action (runbook). A tick hung for longer than this ages its failures
 # out of the watched set — the 4 h frontier-stall lane covers that.

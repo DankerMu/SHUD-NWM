@@ -2393,8 +2393,10 @@ def test_cancelled_ingest_statement_fails_its_run_and_the_next_tick_is_normal(
     driver's `QueryCanceled` travels the ordinary handoff-failure path, so the
     run is marked `failed`, the tick's return code is non-zero (it lands in
     `autopipe.log`; the autopipe unit deliberately has NO `OnFailure=`, #2529 —
-    a run that STAYS failed is seen by the frontier-stall lane and, for an
-    `OUTPUT_PARSE_*` code, by `nhms-node27-parse-failure-residency-alert`), and
+    a run that STAYS failed is seen by the frontier-stall lane and, once the
+    parser has set its `hydro_run.status = 'failed'` (any error code; this
+    forcing-stage failure leaves the status alone), by
+    `nhms-node27-parse-failure-residency-alert`), and
     the next tick — the whole point of bounding it — runs normally instead of
     finding the flock still held.
     """

@@ -113,3 +113,24 @@ Two failed `OUTPUT_PARSE_*` rows exist, both `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOC
 touched 2026-08-28, none touched in 7 days. They lie outside the residency observer's 6 h
 retry-liveness bound and do not alert (design D5, §Stated consequences); clearing them is the
 operator action in the §13 runbook, not an alert.
+
+## 6b. All-codes failed probe (read-only, `backlog-probe-all-failed.txt`)
+
+Added in PR #2588 fix pass 1, when the observer's watched set was widened from the
+`OUTPUT_PARSE_` prefix to every `status = 'failed'` run (the parser also writes bare
+`OutputParsingError` codes such as `RIVQDOWN_NOT_FOUND` / `MODEL_RIVER_FILE_MALFORMED`, the
+permanent #1781 shape). A second read-only aggregate over `hydro.hydro_run` rows with
+`status = 'failed'`, grouped by `error_code` with no code filter, captured by the orchestrator on
+2026-09-23 during PR #2588 round-1 verification (the raw file carries no timestamp or command
+line). Committed verbatim beside this file:
+[`backlog-probe-all-failed.txt`](backlog-probe-all-failed.txt) (md5
+`11018216d7c2dd88716f545cea5a7694`).
+
+```
+code|total|live_6h|touched_7d|max
+OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED|2|0|0|2026-08-28 08:42:56.636219+00
+(1 row)
+```
+
+Those same two rows are the ONLY `failed` rows on node-27, whatever the code; none falls inside
+the 6 h liveness bound. Widening the watched set therefore adds no alert today.
