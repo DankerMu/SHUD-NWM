@@ -23,7 +23,9 @@ sibling" rather than a member list.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -215,6 +217,59 @@ def test_loop_root_check_reason_and_key_set_match_the_non_loop_assembly(
         assert check["under_workspace"] is True
 
 
+# The shape of the canonicaliser-failure early return (the pre-#2453 RuntimeError arm,
+# which a RecursionError used to land in, and the kept OSError arm): the component
+# pre-check's seven keys plus `unsafe_reason` -- no lstat ran, so no `symlink` /
+# `allow_create` / `under_workspace`.
+_CANONICALISER_FAILURE_KEYS = frozenset(
+    {
+        "approved_root_required",
+        "configured",
+        "contained",
+        "exists",
+        "is_dir",
+        "path",
+        "unsafe_reason",
+        "writable",
+    }
+)
+
+
+@pytest.mark.parametrize("field_name", _FIELDS)
+def test_a_symlink_chain_deeper_than_the_recursion_limit_is_blocked_not_raised(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    # Not a loop: a finite chain l_n -> ... -> l_0 -> real-dir. Up to 3.12
+    # posixpath.realpath recurses once per link, so a chain longer than the recursion
+    # limit raises RecursionError from BOTH realpath forms (the canonicaliser's strict
+    # arm raises it directly, no fallback); 3.13+ walks it iteratively and returns.
+    # The root check must answer with a typed blocker on every interpreter.
+    root, workspace = _layout(tmp_path)
+    previous = workspace / "real-dir"
+    for index in range(sys.getrecursionlimit() + 100):
+        link = workspace / f"chain-{index}"
+        link.symlink_to(previous)
+        previous = link
+    head = previous
+
+    check, blocker = _check(field_name, head, root=root, workspace=workspace, evidence_safe_paths=False)
+
+    assert blocker is not None
+    if sys.version_info < (3, 13):
+        # RecursionError -> the canonicaliser-failure arm (as before #2453's deletion).
+        assert blocker["code"] == f"SCHEDULER_ROOT_{field_name.upper()}_UNSAFE_PATH"
+        assert frozenset(check) == _CANONICALISER_FAILURE_KEYS
+        assert check["unsafe_reason"] == "UNSAFE_PATH"
+    else:
+        # Resolved; the lstat of the head finds a symlink.
+        reference_keys = _reference_key_sets(
+            field_name, root=root, workspace=workspace, evidence_safe_paths=False
+        )[_SYMLINK_KEYS]
+        assert blocker["code"] == f"SCHEDULER_ROOT_{field_name.upper()}_SYMLINK"
+        assert frozenset(check) == reference_keys
+
+
 # --- allow_create arm: published_artifact_root through the runtime-roots preflight --
 
 
@@ -328,3 +383,50 @@ def test_self_loop_lock_root_reports_symlink_with_the_full_key_set(
     assert frozenset(preflight["checks"]["lock_root"]) == _ISSUE_MEASURED_LOCK_ROOT_KEYS
     assert preflight["checks"]["lock_root"]["symlink"] is True
     assert preflight["checks"]["lock_root"]["under_workspace"] is True
+
+
+# --- full pass: the blocker must reach pass evidence ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shape", "reason"),
+    (
+        ("self_loop", "SYMLINK"),
+        ("under_loop", "UNSAFE_PATH"),
+    ),
+)
+def test_run_once_with_a_loop_lock_root_writes_preflight_blocked_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    shape: str,
+    reason: str,
+) -> None:
+    # The root check alone converging is not enough: run_once() also renders every
+    # root into `resolved_runtime_roots` (scheduler_evidence.root_evidence_item). That
+    # renderer used Path.resolve(strict=False), which raises an errno-less RuntimeError
+    # on a loop up to 3.12, so on the 3.11 pin the pass crashed and the #2453 blocker
+    # never reached the artifact, while 3.13+ folded the loop and wrote it.
+    base = Path(os.path.realpath(tmp_path))
+    link = base / "workspace" / "loop-locks"
+    lock_root = link if shape == "self_loop" else link / "child"
+    roots = _set_root_env(monkeypatch, tmp_path, lock_root=lock_root)
+    link.symlink_to(link)
+
+    scheduler = scheduler_module.ProductionScheduler.from_env(ProductionSchedulerConfig())
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.artifact_path is not None
+    artifact_path = Path(result.artifact_path)
+    assert artifact_path.parent == roots["evidence_root"]
+    written = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert written["status"] == "preflight_blocked"
+    assert [blocker["code"] for blocker in written["root_preflight"]["blockers"]] == [
+        f"SCHEDULER_ROOT_LOCK_ROOT_{reason}"
+    ]
+    # The rendered lock root is the configured spelling on every interpreter: the
+    # strict realpath fails (ELOOP) and the non-strict fallback keeps the loop link.
+    assert written["resolved_runtime_roots"]["lock_root"]["path"] == str(lock_root)
+    assert written["resolved_runtime_roots"]["lock_path"]["path"] == str(
+        lock_root / Path(scheduler.config.lock_path).name
+    )

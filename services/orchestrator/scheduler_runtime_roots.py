@@ -288,10 +288,18 @@ def _scheduler_root_check(
     # clause 3: a containment base only, while the judged side is this lstat-ed `path`.
     try:
         resolved = _canonical_path(path)
-    except OSError as error:
-        # Kept, not reachable by input: `path` is absolute, so the non-strict fallback
-        # only raises on a readlink race inside it; fail closed with a typed blocker.
-        unsafe_reason = _scheduler._scheduler_root_os_error_reason(error)
+    except (OSError, RecursionError) as error:
+        # Kept, and reachable by input on the pin. OSError: `path` is absolute, so the
+        # non-strict fallback raises it only on a readlink race inside it. RecursionError:
+        # up to 3.12 posixpath.realpath recurses once per link, so a long enough symlink
+        # CHAIN (no loop; ~1200 links under the default recursion limit) exhausts the
+        # stack in BOTH realpath forms, while 3.13+ resolves it iteratively and the
+        # lstat below reports SYMLINK. Either way fail closed with a typed blocker.
+        unsafe_reason = (
+            "UNSAFE_PATH"
+            if isinstance(error, RecursionError)
+            else _scheduler._scheduler_root_os_error_reason(error)
+        )
         check = {
             "configured": True,
             "path": evidence_path or str(path),
@@ -602,14 +610,18 @@ def _canonical_path(path: Path) -> Path:
     the result (GH-113838), so the two interpreters disagree on the same input.
     The non-strict fallback reproduces the old Path.resolve() product verbatim
     -- POSIX order, symlinks first and `..` afterwards -- so loop-free and
-    ENOENT inputs are unchanged (#1546).
+    ENOENT inputs are unchanged (#1546).  It does raise one thing: up to 3.12
+    both realpath forms recurse once per link, so a symlink chain deeper than
+    the recursion limit propagates RecursionError (3.13+ walks it iteratively).
     """
 
     # ADR 0009 clause 1: same posture as _canonical_parent above, with a reachability
     # note that is measured rather than assumed. Since #2453 the production caller is
     # _scheduler_root_check, which canonicalises the root under check and the workspace
     # anchor here and lstats the root itself before any verdict (its body carries the
-    # per-arm argument, allow_create included). The other entries are
+    # per-arm argument, allow_create included). scheduler_evidence.root_evidence_item
+    # also calls it, render-only: its product is a pass-evidence string that no verdict
+    # reads, so it needs no clause. The other entries are
     # _resolve_optional_config_path / _optional_config_path_relative_to below, which
     # have no caller outside scheduler_candidate_runtime.py's compatibility forwarders;
     # the clause rests on that same preflight lstat for them.

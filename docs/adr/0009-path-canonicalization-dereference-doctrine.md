@@ -343,9 +343,12 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
 2. 守卫只覆盖 `os.path.realpath` 面；`.resolve()` 面由 **#2452 闭合**，靠两件东西，都不是扩展本守卫：
    - **一次性分诊**：四棵树上全部 `.resolve()` (模块, 函数) 对（当日 152 对 / 223 个调用点，AST 计数，
      与 #2452 同源）逐一对照三条从句归类，写在该 change 的 `design.md` §Triage——那是一次性分诊产物，
-     **不是** shipped 注册表（理由同「权衡」节：钉行的存在不钉论证的成立）。结论：5 对落在三条从句之外
-     （两组字符串审计 / 策略分类器：被判路径是别的节点上的日志 URI，或只与词法包含判定取交集的 URI 串，
-     本机内核本就不是它们的权威），逐一写明理由接受，无一需要行为改动，生产调度路径上零 fail-open 站点；
+     **不是** shipped 注册表（理由同「权衡」节：钉行的存在不钉论证的成立）。结论：13 对落在三条从句之外——
+     5 对是两组字符串审计 / 策略分类器（被判路径是别的节点上的日志 URI，或只与词法包含判定取交集的 URI 串，
+     本机内核本就不是它们的权威），8 对是 render-only（产物只是写进证据 / 报告的字符串，无判定读它）；
+     逐一写明理由接受。其中 1 对需要行为改动：`scheduler_evidence.py::root_evidence_item`（render-only）
+     在 3.11 上对环路 root 抛 errno-less `RuntimeError`，把正要报告 blocked root 的整次调度 pass 带崩，
+     已改为经 `_canonical_path` 渲染（不再调 `.resolve()`）。生产调度路径上零 fail-open 站点；
      另把 3.11 上环路中止调用方的去向逐对记下（调用方已包 / 上游已拒 / 可接受的响亮中止 / 已改）。
    - **本面自己的机械判据** `tests/test_resolve_surface_guard.py`：**严格** `.resolve()`（`strict`
      在场且不是字面 `False`）若处于捕 `OSError` 本身的 `try` 体内，则该 `try` 或同函数内包住它的
