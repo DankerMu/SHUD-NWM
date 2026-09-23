@@ -88,7 +88,8 @@ The file lives at the path the user named. It is a small stdlib CLI whose scope 
   - This is the cross-PR escalation that `fix_gate.py` does not do.
 - **Caller.** `instructions/agents/shared.md`, in the PR-conventions section, gets one bullet:
   - run `check` next to `fix_gate.py open`;
-  - run `record` in the post-merge archive commit (the same commit that already carries the openspec archive, so no extra CI push).
+  - run `record` on **every** close of the issue's PR, with the matching `--outcome`: `merged` in the post-merge archive commit (the same commit that already carries the openspec archive, so no extra CI push); `superseded-by-split` / `abandoned` / `descoped` committed when `fix_gate.py close` runs. Add `--ceiling` whenever fix_gate locked, so a successor PR's `check` sees it (review round 1).
+  - `record` validates the mutated memory before writing, and rejects non-positive `--issue` / `--pr`, so the writer never persists what the loader refuses (review round 1).
 
   Then regenerate `CLAUDE.md` and `AGENTS.md` exactly as the byte-exact oracle `tests/test_node22_entrypoint_invariant.py::test_generated_roots_byte_exact` composes them:
   - `AGENTS.md` = header + `shared.md` + `"\n"` + `codex.md`;

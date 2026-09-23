@@ -15,7 +15,11 @@ Commands:
       Idempotent per (issue, pr): an identical re-run changes nothing, a
       differing one replaces that pair's record. `--ceiling` adds P to
       `ceilingPrs` once (fix_gate.py locked on P). `gateEntries` is never
-      touched; new entries start at 0. Run it in the post-merge archive commit.
+      touched; new entries start at 0. Run it on every close of an issue's PR:
+      `merged` in the post-merge archive commit; `superseded-by-split`,
+      `abandoned` or `descoped` committed when `fix_gate.py close` runs.
+      --issue and --pr must be positive; the mutated memory is validated
+      before it is written.
   check --issue N [--issue M ...] [--pr P]
       Exit 2 and name the PRs when an issue already has a ceiling PR (other
       than P). Run it next to `fix_gate.py open --pr P`; before a PR exists,
@@ -141,6 +145,8 @@ def cmd_record(args: argparse.Namespace) -> int:
             entry["ceilingPrs"].append(args.pr)
         print(f"review_gate: issue #{issue} PR #{args.pr} {args.outcome} rounds={args.rounds}: {action}"
               + (" (ceiling)" if args.ceiling else ""))
+    # The writer never persists what its own loader would refuse.
+    _validate(history["issues"])
     save_history(args.root, history)
     return 0
 
@@ -185,9 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "record" and args.rounds < 0:
-        print("review_gate: --rounds must be a non-negative integer", file=sys.stderr)
-        return 2
+    if args.command == "record":
+        if any(issue <= 0 for issue in args.issue) or args.pr <= 0:
+            print("review_gate: --issue and --pr must be a positive integer", file=sys.stderr)
+            return 2
+        if args.rounds < 0:
+            print("review_gate: --rounds must be a non-negative integer", file=sys.stderr)
+            return 2
     try:
         return args.fn(args)
     except MalformedMemory as exc:

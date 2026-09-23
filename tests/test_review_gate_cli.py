@@ -9,6 +9,7 @@ committed file, and it never writes it.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -112,6 +113,42 @@ def test_out_of_vocabulary_or_missing_outcome_is_rejected_by_argparse(
 
     assert excinfo.value.code == 2
     assert "--outcome" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        pytest.param(("--issue", "-5", "--pr", "7"), id="negative-issue"),
+        pytest.param(("--issue", "0", "--pr", "7"), id="zero-issue"),
+        pytest.param(("--issue", "5", "--pr", "0"), id="zero-pr"),
+        pytest.param(("--issue", "5", "--pr", "-7"), id="negative-pr"),
+    ],
+)
+def test_record_rejects_non_positive_issue_or_pr_and_leaves_memory_unchanged(
+    tmp_path: Path, capsys, ids: tuple[str, ...]
+) -> None:
+    path = write_memory(tmp_path, {"issues": {"5": entry()}})
+    before = path.read_bytes()
+
+    assert run(tmp_path, "record", *ids, "--rounds", "1", "--outcome", "merged") != 0
+
+    assert path.read_bytes() == before
+    assert "must be a positive integer" in capsys.readouterr().err
+    # The memory is still loadable by every reader.
+    assert run(tmp_path, "check", "--issue", "5") == 0
+
+
+def test_record_never_persists_what_the_loader_refuses(tmp_path: Path, capsys) -> None:
+    # Bypass main()'s argument guard: the writer itself validates the mutated
+    # history before saving, so an unloadable key never reaches disk.
+    path = write_memory(tmp_path, {"issues": {"5": entry()}})
+    before = path.read_bytes()
+    args = argparse.Namespace(root=tmp_path, issue=[-5], pr=7, rounds=1, outcome="merged", ceiling=False)
+
+    with pytest.raises(review_gate.MalformedMemory, match=r"issues\[-5\]: issue key must be a decimal"):
+        review_gate.cmd_record(args)
+
     assert path.read_bytes() == before
 
 

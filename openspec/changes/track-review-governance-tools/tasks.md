@@ -42,12 +42,12 @@
 ## 4. Specs (#2533, D3)
 
 - [x] 4.1 The implementer reports the measured replacement sets (read-only).
-- [x] 4.2 Orchestrator writes the MODIFIED blocks. `git grep -F` of the five deleted paths over `openspec/specs/` must return nothing.
+- [x] 4.2 Orchestrator writes the MODIFIED blocks. Every current `git grep -F` hit of the five deleted paths over `openspec/specs/` lies inside a requirement restated by a MODIFIED block, so the count is zero after archive (re-checked in the archive PR).
 
 ## 5. Evidence Floor
 
 - [x] 5.1 `uv run pytest -q -rs tests/test_loop_log_audit_attribution.py` must show 0 skipped. Also run `tests/test_review_gate_cli.py`, `tests/test_review_gate_issue_memory.py`, `tests/test_select_ci_tests.py`, `tests/test_node22_entrypoint_invariant.py` and `tests/test_python_environment_truth.py`.
-- [x] 5.2 node-27 oracle at the final head.
+- [x] 5.2 node-27 oracle at the final head (isolated worktree, scratch PG; receipt in the PR body).
 - [x] 5.3 `uv run ruff check .`; `openspec validate track-review-governance-tools --strict --no-interactive`.
 - [x] 5.4 ADR 0003 Revisit appended with the audit output from 1.4.
 - [x] 5.5 `git ls-files .agents/skills .claude/skills` is still empty.
@@ -60,3 +60,6 @@
 - #2261 is closed with accepted deviations. AC1/AC3 land in the tracked CLI. AC4 (verdict hook) and AC5 (`phase-flow.md` wording) are upstream-owned and untracked. The repo-side instruction bullet stands in for AC5.
 - #2044 gets a ruling only. The issue stays open as the tracker for the D4 plan.
 - F/G1/G2/H are not back-filled into the memory.
+- #2533 AC5 ("`tests/test_select_ci_tests.py` unchanged") holds only for the #2533 part: that part changes no routing. This batch does edit the file, for the #2477 and #2261 routes.
+- #2261 AC5: the workflow hard-gate clause it targeted (persisted verdict tables as a pre-merge condition) no longer exists in the installed `phase-flow.md`. Verdict tables remain prose-only upstream ("Record the verdict table in `<REVIEW_DIR>`"), with no tool support; that is upstream-owned.
+- The display/scheduler-unit MODIFIED block also corrects "exactly one suite" to "at least one suite", because `tests/test_node22_refresh_timer_health.py` reads the refresh `.service` too.
