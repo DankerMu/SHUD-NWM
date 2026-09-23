@@ -966,10 +966,13 @@ def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle(
     `tests/test_retry_cancel_consistency.py` is the sole suite that drives
     `POST /runs/{run_id}/cancel` through TestClient and asserts BOTH shapes of
     one gateway error -- the rendered response body and the raw persisted
-    `slurm_cancellation_gap` / `cancel_failed` event. Its imports are
-    function-local, so no importer derivation reaches it, and neither the broad
-    `apps/api/**` rule nor same-name derivation names it; without this rule a
-    diff that re-shared the two payloads reached CI green.
+    `slurm_cancellation_gap` / `cancel_failed` event. Nothing derives it from
+    this route: the importer index is queried only for a changed path that is
+    itself a suite, never for a production module, and no closure guard forces a
+    derived importer set onto this rule -- `apps/api/routes/pipeline.py` is in
+    neither `GUARDED_MODULE_CLOSURES` nor `DIRECTORY_RULE_AUDIT_PATHS`. Neither
+    the broad `apps/api/**` rule nor same-name derivation names it either;
+    without this rule a diff that re-shared the two payloads reached CI green.
     """
 
     selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))

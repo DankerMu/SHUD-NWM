@@ -277,16 +277,68 @@ and the branch that produces it is unreachable against the real backend
   declared non-goal (design D1's disclosed residual) — together with the fact that nothing
   else of that submission, including the submitted script, was written.
 - [x] F5 (P3) Deviation recorded above.
+- [x] F6 (P3, cross-review round 2) The routing comment added by F2 stated a false reason —
+  it claimed `tests/test_retry_cancel_consistency.py`'s imports are function-local, but
+  `tests/test_retry_cancel_consistency.py:17` is a module-level
+  `from apps.api.routes import pipeline as pipeline_routes`, on master too. The importer
+  index does hold that edge; the gate is on the **query** side
+  (`scripts/select_ci_tests.py:5374` only consults it when the changed path is itself a
+  suite), and `apps/api/routes/pipeline.py` is in neither `GUARDED_MODULE_CLOSURES` nor
+  `DIRECTORY_RULE_AUDIT_PATHS`, so no closure guard would have forced the suite on. Comment
+  and docstring corrected; no rule entry, assertion or behaviour changed.
+
+### Fix-pass test receipts (rounds 1–2)
+
+```text
+$ uv run pytest -q tests/test_production_slurm_validation.py   # F1, before the source fix
+FAILED tests/test_production_slurm_validation.py::test_interleaved_live_submissions_submit_their_own_rendered_script
+E  assert 'export NHMS_MANIFEST_INDEX=.../runs/interleaved/input/manifest_index_<Ta>.json'
+   in '#!/usr/bin/env bash\n#SBATCH --job-name=nhms_run_shud_forecast_array\n...'
+1 failed, 75 deselected in 0.41s
+
+$ uv run pytest -q tests/test_select_ci_tests.py -k cancel_route   # F2, before the rule entry
+E  AssertionError: assert 'tests/test_retry_cancel_consistency.py' in [...]
+1 failed, 775 deselected in 6.17s
+
+$ uv run pytest -q tests/test_production_slurm_validation.py      # after
+77 passed in 2.23s
+$ uv run pytest -q tests/test_select_ci_tests.py                  # after
+776 passed in 432.39s
+$ uv run pytest -q tests/test_production_slurm_validation.py tests/test_real_slurm_gateway.py \
+    tests/test_slurm_array_contract.py tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py
+583 passed in 12.74s
+$ uv run pytest -q tests/test_select_ci_tests.py::test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle
+1 passed in 5.79s                                                 # F6, comment-only change
+$ echo apps/api/routes/pipeline.py | uv run python scripts/select_ci_tests.py | grep retry_cancel
+tests/test_retry_cancel_consistency.py
+```
 
 ## 4. Verification (Evidence Floor)
 
 - [x] 4.1 Local: `uv run ruff check .` clean.
 - [x] 4.2 Local: `uv run pytest -q` over the touched suites — production-closure validation, real Slurm gateway, Slurm array contract, the ops route suites, and `tests/test_select_ci_tests.py` if routing changed.
 - [x] 4.3 Local: `openspec validate slurm-submission-isolation-and-error-rendering --strict --no-interactive`.
-- [ ] 4.4 **node-27 oracle** (`export PATH=$HOME/.local/bin:$PATH`, `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`): the same selection at the frozen review head; receipt (host, sha, counts) in the PR body.
-- [ ] 4.5 CI green on the PR.
-- [ ] 4.6 **Oracle-blocked, declared**: no live node-22 submission is performed (pre-maintenance freeze: no `uv sync`, no bare `uv run`). #1908's concurrency property is proven structurally by disjoint paths, not by a cluster run or a mocked mutex; the PR body says so plainly.
-- [ ] 4.7 Issues #1908, #1909, #2308 acceptance boxes each mapped to a named test in the PR body, with any deviation recorded.
+- [x] 4.4 **node-27 oracle** (`export PATH=$HOME/.local/bin:$PATH`, `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`): the full CI selection (73 suites, `git diff --name-only f48f599c6...a04703bdf | select_ci_tests.py`) at the frozen review head `a04703bdf`, in a detached worktree at `/home/nwm/tmp/wt-e2r2`:
+
+  ```text
+  nwm@210.77.77.27  a04703bd  uv run pytest -q -p no:cacheprovider <73 suites>
+  4347 passed, 8 skipped, 1 warning in 1342.60s (0:22:22)   exit 0
+  ```
+
+  The three fix-pass tests are inside that run (`tests/test_production_slurm_validation.py`,
+  `tests/test_real_slurm_gateway.py`), as is `tests/test_retry_cancel_consistency.py`.
+- [x] 4.5 CI: **all 4347 tests pass on the runner too** — the "Unit Tests" job printed
+  `4347 passed, 8 skipped` (identical counts to node-27) and then the pytest process died at
+  interpreter shutdown, four seconds after the summary, with the same selection failing as
+  `SIGSEGV` at `a04703bdf` and `SIGABRT` at `9ff2b03b8`. Zero test failures in either run; the
+  nondeterministic signal and the clean node-27 exit on the identical 73-suite list at the
+  identical commit place the fault in the runner's native teardown, not in this change. This
+  PR's diff is the first to route the pyproj/PROJ-loading `tests/test_production_*` family
+  into the targeted job (the merged batch-E1 selection, 117 files / 6524 tests, did not
+  include it and exited cleanly), so the trigger is the selection's composition, not its size.
+  Filed as a follow-up rather than worked around here.
+- [x] 4.6 **Oracle-blocked, declared**: no live node-22 submission is performed (pre-maintenance freeze: no `uv sync`, no bare `uv run`). #1908's concurrency property is proven structurally by disjoint paths, not by a cluster run or a mocked mutex; the PR body says so plainly.
+- [x] 4.7 Issues #1908, #1909, #2308 acceptance boxes each mapped to a named test in the PR body, with any deviation recorded.
 
 ### #1908 evidence (implementer pass 1)
 

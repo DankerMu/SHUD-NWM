@@ -5211,8 +5211,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the gateway error rendered on the response body and left raw in the
             # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
             # in one test. The broad `apps/api/**` rule buys the three generic API
-            # suites, none of which call `cancel_run`, and this suite's imports are
-            # function-local, so no importer derivation reaches it either.
+            # suites, none of which call `cancel_run`, and nothing derives the rest:
+            # the importer index is queried only for a CHANGED path that is itself
+            # a suite, never for a production module, and no closure guard forces a
+            # derived importer set onto this rule.
             "tests/test_retry_cancel_consistency.py",
         ),
     ),
