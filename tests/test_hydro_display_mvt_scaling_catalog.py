@@ -510,6 +510,24 @@ def test_no_argument_national_valid_times_are_empty_with_no_coverage_rows() -> N
     assert discovery.observed_count == 0
 
 
+def test_no_argument_national_valid_times_are_empty_with_no_rows_and_no_active_network() -> None:
+    """#2458: rows = {} and active = {} pass the set rule, so the empty guard must still hold.
+
+    A fresh deployment or every network deactivated: `frozenset() == frozenset()`,
+    so the #2458 set comparison lets this through, and without the kept
+    `if not latest_by_network` guard the empty `coverage` list reaches `max()`,
+    raising `ValueError` -- an HTTP 500 on a public route.
+    """
+    session = _NationalDiscoverySession([], active_networks=[])
+
+    discovery = national_discharge_valid_times(session)
+
+    assert session.active_networks == []
+    assert discovery.valid_times == []
+    assert discovery.observed_count == 0
+    assert discovery.truncated is False
+
+
 def test_discharge_routes_pass_ifs_through_to_the_coverage_bind(monkeypatch: Any) -> None:
     """`?source=ifs` must reach the SQL bind on BOTH routes, not a `gfs` literal.
 
