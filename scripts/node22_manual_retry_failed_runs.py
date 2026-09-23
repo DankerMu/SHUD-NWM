@@ -76,6 +76,17 @@ def _cohort_hint_scope(run_id: str) -> tuple[str, datetime, str] | None:
         return None
 
 
+def _covered_member_count(
+    job: Mapping[str, Any], members_by_run: Mapping[str, frozenset[str]], model_id: str
+) -> int | None:
+    """Member count of the cohort a ``state_save_qc`` row provably covers ``model_id`` for, else ``None``."""
+
+    if job.get("model_id") not in (None, ""):
+        return 1 if str(job.get("model_id")) == model_id else None
+    members = members_by_run.get(str(job.get("run_id") or ""))
+    return len(members) if members is not None and model_id in members else None
+
+
 def _cohort_candidates(
     jobs: Sequence[Mapping[str, Any]], *, source_id: str, cycle_time: datetime, model_id: str
 ) -> list[dict[str, Any]]:
@@ -84,32 +95,38 @@ def _cohort_candidates(
     Coverage is read, never guessed: a row carrying ``model_id`` is a single-model cohort
     and covers exactly that model; a model-less row covers the model only when its run's
     recorded membership is provable (``_complete_cohort_members_by_run``, the rule the
-    scheduler already applies to split cohorts).
+    scheduler already applies to split cohorts).  A failed master is superseded -- not
+    listed -- when a later succeeded ``state_save_qc`` row of a ``cycle_<source>_<stamp>_*``
+    run covers the model under that same rule, e.g. a rerun recorded as ``..._full_<model>`` (#2605).
     """
 
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    members_by_run = _complete_cohort_members_by_run(jobs, source_id=source_id, cycle_time=cycle_time)
     latest_by_run: dict[str, Mapping[str, Any]] = {}
+    latest_success_key: tuple[Any, ...] | None = None
     for job in sorted(jobs, key=_file_retry_job_truth_sort_key):
         job_run_id = str(job.get("run_id") or "")
         stage = str(job.get("stage") or "")
         if job_run_id != cycle_run_id and not job_run_id.startswith(f"{cycle_run_id}_"):
             continue
-        if DOWNSTREAM_STAGE_ALIASES.get(stage, stage) == "state_save_qc":
-            latest_by_run[job_run_id] = job
-    members_by_run = _complete_cohort_members_by_run(jobs, source_id=source_id, cycle_time=cycle_time)
+        if DOWNSTREAM_STAGE_ALIASES.get(stage, stage) != "state_save_qc":
+            continue
+        latest_by_run[job_run_id] = job
+        if (
+            job_run_id.startswith(f"{cycle_run_id}_")
+            and str(job.get("status") or "") == "succeeded"
+            and _covered_member_count(job, members_by_run, model_id) is not None
+        ):
+            latest_success_key = _file_retry_job_truth_sort_key(job)
     candidates: list[dict[str, Any]] = []
     for job_run_id, job in latest_by_run.items():
         if str(job.get("status") or "") not in MANUAL_RETRY_SOURCE_STATUSES:
             continue
-        if job.get("model_id") not in (None, ""):
-            if str(job.get("model_id")) != model_id:
-                continue
-            member_count = 1
-        else:
-            members = members_by_run.get(job_run_id)
-            if members is None or model_id not in members:
-                continue
-            member_count = len(members)
+        member_count = _covered_member_count(job, members_by_run, model_id)
+        if member_count is None:
+            continue
+        if latest_success_key is not None and _file_retry_job_truth_sort_key(job) < latest_success_key:
+            continue
         candidates.append(
             {
                 "run_id": job_run_id,
