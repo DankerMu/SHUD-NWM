@@ -50,12 +50,13 @@ Measured on master `f3fd8034c`:
    - the flat or non-list rows (`non-list=45`);
    - the empty-core row (`empty=1`, PR 1788, `[[], []]`).
 
-   It asserts that those counts equal `rotation_sample`'s exclusion counts. Every other row must satisfy `loop_log_entry_errors` for its `round_lenses` shape.
+   The guard is scoped to the audit's own population, the multi-round merged rows that `rotation_sample` reads. It asserts that the tolerated counts equal `rotation_sample`'s exclusion counts, and that every other row in that population passes the shape rule. Eight shape-noncompliant rows lie outside the population (rounds=1 PRs 1239, 1241, 1262, 1303, 1360, 1374, 1376, and descoped 1371); the audit never reads them, so the guard does not either.
 4. The suite imports `scripts.governance.loop_log_audit` as a normal module. The `pytest.skip(allow_module_level=True)` fallback is removed.
    - **Routing.** A path-exact selector rule for `scripts/governance/loop_log_audit.py`, and one for `docs/review-loop-log.jsonl`, both target `tests/test_loop_log_audit_attribution.py`.
    - The log's rule also rides `SELECTOR_META_GUARD_TEST`, following the `.review-gate-issues.json` precedent at `scripts/select_ci_tests.py:961-971`.
    - The log also needs an exact `ci.yml` `backend` literal, because `docs/**` is excluded (precedent: `docs/runbooks/tier-node27-timeseries-storage.md`, and the `.review-gate-issues.json` literal).
-5. Run the restored audit once against the frozen log. Append an ADR 0003 Revisit with:
+5. `--log` defaults to the repo's `docs/review-loop-log.jsonl`, so the documented bare invocation works. That is a CLI-ergonomics edit only.
+6. Run the restored audit once against the frozen log. Append an ADR 0003 Revisit with:
    - the DECIDABLE state and the recomputed core/rotated/final-review counts;
    - that the sample is frozen at 690 lines because the append step left the workflow on 2026-09-22;
    - that the installed workflow no longer rotates lenses. Its re-review seat is the fixed `correctness+test-evidence`, so the keep/cut question has no live subject.

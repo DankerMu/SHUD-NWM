@@ -7,48 +7,24 @@ not sit in the denominator, and a Phase 7 final-review catch is a round role,
 not a rotated-in lens. Both defects biased the ratio in the same direction, so
 nothing downstream would have noticed them by feel.
 
-The module under test lives in the force-added (gitignored but tracked)
-`.agents/skills/subagent-workflow/scripts/` asset tree, so it is loaded by
-path; a checkout without that asset skips instead of failing.
+The module under test is the tracked `scripts/governance/loop_log_audit.py`
+(#2477), imported as a normal module: the suite executes in every checkout
+and never skips. Its write-time line checker (`loop_log_entry_errors`, CLI
+`--check-entry`) is the port of the retired skill-side `evidence_check`
+`--loop-log-entry`, with the same finding text.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
+from scripts.governance import loop_log_audit as audit
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_DIR = REPO_ROOT / ".agents" / "skills" / "subagent-workflow" / "scripts"
-AUDIT_SCRIPT = SCRIPTS_DIR / "loop_log_audit.py"
-EVIDENCE_SCRIPT = SCRIPTS_DIR / "evidence_check.py"
 REAL_LOG = REPO_ROOT / "docs" / "review-loop-log.jsonl"
-
-
-def _load(path: Path, name: str) -> ModuleType:
-    if not path.is_file():
-        # Module-level skip needs the explicit opt-in, otherwise pytest turns
-        # it into a collection ERROR and a checkout without the force-added
-        # asset fails the suite instead of skipping it.
-        pytest.skip(f"tracked skill asset absent: {path}", allow_module_level=True)
-    # evidence_check.py imports its siblings (review_gate, loop_log_audit) the
-    # way the installed skill runs it - by script dir on sys.path.
-    if str(SCRIPTS_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS_DIR))
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-audit = _load(AUDIT_SCRIPT, "loop_log_audit")
-evidence = _load(EVIDENCE_SCRIPT, "evidence_check_tracked")
 
 
 def merged_entry(pr: int, round_lenses: object, catches: list[dict] | None = None, **extra: object) -> dict:
@@ -377,11 +353,10 @@ def test_real_ledger_still_audits_and_the_buckets_account_for_every_counted_catc
 
 
 def check_entry(tmp_path: Path, entry: dict) -> list[str]:
+    # The entry round-trips through JSON text first, as a pending line does.
     path = tmp_path / "pending.json"
     path.write_text(json.dumps(entry), encoding="utf-8")
-    findings: list[str] = []
-    evidence.check_loop_log_entry(str(path), findings)
-    return findings
+    return audit.loop_log_entry_errors(json.loads(path.read_text(encoding="utf-8")))
 
 
 def pending_entry(**extra: object) -> dict:
@@ -458,7 +433,7 @@ def test_flat_string_round_lenses_fails_the_cli(tmp_path: Path) -> None:
     path.write_text(json.dumps(pending_entry(round_lenses=["correctness", "final-review"])),
                     encoding="utf-8")
 
-    code = evidence.main(["--root", str(REPO_ROOT), "--loop-log-entry", str(path)])
+    code = audit.main(["--check-entry", str(path)])
 
     assert code == 2
 
@@ -492,7 +467,7 @@ def test_audit_tolerates_the_historical_flat_rows_under_the_unattributable_note(
 def test_historical_ledger_lines_are_not_retroactively_broken(tmp_path: Path) -> None:
     """The write-time rejection must not turn the existing ledger into findings.
 
-    Only `--loop-log-entry` (a pending line) is validated; the audit reads the
+    Only `--check-entry` (a pending line) is validated; the audit reads the
     committed rows through the compatibility shim instead.
     """
     entries = audit.parse_log(REAL_LOG)
@@ -506,3 +481,64 @@ def test_historical_ledger_lines_are_not_retroactively_broken(tmp_path: Path) ->
 
     audited = audit.rotation_sample([e for e in entries if e.get("outcome", "merged") == "merged"])
     assert audited.entries
+
+
+def test_real_log_round_lenses_findings_are_exactly_the_audit_exclusions() -> None:
+    """Reader and writer agree on the committed ledger's rotation population.
+
+    Among the multi-round merged rows (recomputed here, independently of
+    `rotation_sample`), the write-time checker's `round_lenses` findings fall
+    on exactly the rows the audit excludes as unattributable - the historical
+    flat/non-list rows and the one empty-core row (PR 1788, `[[], []]`) - and
+    on no other row. The ledger is frozen (#2477), so the counts are pinned.
+    Rows outside that population (single-round or terminal) never reach the
+    rotation figures and are not part of this agreement.
+    """
+    entries = audit.parse_log(REAL_LOG)
+    assert entries is not None
+    merged = [e for e in entries if e.get("outcome", "merged") == "merged"]
+    multiround = [e for e in merged if e.get("rounds", 0) >= 2 and e.get("round_lenses")]
+
+    def shape_findings(entry: dict) -> list[str]:
+        return [f for f in audit.loop_log_entry_errors(entry) if "round_lenses" in f]
+
+    flagged = [e for e in multiround if shape_findings(e)]
+    empty_core = [e for e in flagged if isinstance(e["round_lenses"][0], list) and not e["round_lenses"][0]]
+    non_list = [e for e in flagged if e not in empty_core]
+
+    sample = audit.rotation_sample(merged)
+    assert (len(non_list), len(empty_core)) == (45, 1)
+    assert [e["pr"] for e in empty_core] == [1788]
+    assert (sample.excluded_bad_shape, sample.excluded_empty_core) == (len(non_list), len(empty_core))
+    assert not any(e in sample.entries for e in flagged)
+    clean = [e for e in multiround if e not in flagged]
+    assert len(clean) == len(multiround) - len(flagged)
+    assert all(shape_findings(e) == [] for e in clean)
+
+
+def test_check_entry_cli_reports_unreadable_input_and_passes_a_clean_line(tmp_path: Path, capsys) -> None:
+    missing = tmp_path / "absent.json"
+    assert audit.main(["--check-entry", str(missing)]) == 2
+    assert f"{missing}:0: [loop-log] --check-entry target missing" in capsys.readouterr().out
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert audit.main(["--check-entry", str(broken)]) == 2
+    assert f"{broken}:1: [loop-log] not valid JSON" in capsys.readouterr().out
+
+    listed = tmp_path / "listed.json"
+    listed.write_text("[1]", encoding="utf-8")
+    assert audit.main(["--check-entry", str(listed)]) == 2
+    assert f"{listed}:1: [loop-log] entry must be a single JSON object" in capsys.readouterr().out
+
+    clean = tmp_path / "clean.json"
+    clean.write_text(json.dumps(pending_entry()), encoding="utf-8")
+    assert audit.main(["--check-entry", str(clean)]) == 0
+    assert "pending line clean" in capsys.readouterr().out
+
+
+def test_default_log_is_the_committed_ledger(capsys) -> None:
+    """The bare on-demand invocation audits the committed ledger from any cwd."""
+    assert audit.DEFAULT_LOG == REAL_LOG
+    audit.main([])
+    assert capsys.readouterr().out.startswith("loop_log_audit: ")

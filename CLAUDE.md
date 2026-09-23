@@ -81,6 +81,7 @@ Do not hand-edit this file.
 ## PR 规范
 
 - 分支命名 `feat/issue-<N>-<short-desc>`；PR body 含变更摘要、测试证据、Evidence Floor 覆盖声明、偏离记录；合并前通过 issue 指定的全部验证命令。
+- 跨 PR 轮次上限记忆 `.review-gate-issues.json` 只经 `scripts/review_gate.py` 写：`fix_gate.py open --pr <PR>` 旁跑 `uv run python scripts/review_gate.py check --issue <N> --pr <PR>`（exit 2 = 该 issue 已在别的 PR 撞过硬停，先要用户决定）；合并后在 post-merge archive commit 里跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome merged`（fix_gate 锁过加 `--ceiling`）。loop-log 审计按需 `uv run python scripts/governance/loop_log_audit.py`。
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 

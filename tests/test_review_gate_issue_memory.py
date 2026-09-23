@@ -8,29 +8,18 @@ top-level keys ended up beside the canonical `issues` map. The escalation path
 reads `history["issues"]` only, so anything written outside that map is silently
 ignored — a corrupt memory looks exactly like a clean one at read time.
 
-This guard reads the file with stdlib json and never imports the CLI that writes
-it. That is deliberate:
-
-  * The four legal outcome values below are hardcoded copies of `OUTCOMES` in
-    `.claude/skills/subagent-workflow/scripts/review_gate.py`. That module is
-    the source of truth for the vocabulary, but it CANNOT be imported here: it
-    is untracked (`git ls-files | grep -ci subagent` returns 0), install-managed,
-    and therefore absent from a plain checkout and from CI. `.claude/` has been
-    gitignored throughout and that path was never tracked; `002ba4b59` untracked
-    the sibling `.agents/skills/` copies of the same scripts, for the stated
-    reason that every reinstall left permanent working-tree drift.
-  * `tests/test_loop_log_audit_attribution.py:26` is the cautionary example: it
-    points `SCRIPTS_DIR` at a skill scripts directory that has held no scripts
-    since `002ba4b59`, so that whole suite module-level-skips in every checkout
-    and every CI run. Importing the writer here would reproduce exactly that
-    silent non-execution.
-
-Keeping the literals in sync with the CLI is a manual, once-per-vocabulary-change
-edit; the alternative is a guard that never runs.
+This guard parses the file with stdlib json and stays independent of the
+writer's loader, so it reports every violation at once instead of stopping at
+the first. The outcome vocabulary is not copied: it is imported from the
+tracked writer `scripts/review_gate.py`, the single authority for `OUTCOMES`
+(#2261). That module is tracked, so the import runs in every checkout and in
+CI. The retired install-managed writer could not be imported, which is why an
+earlier version of this guard kept a hand-synced copy.
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 from pathlib import Path
@@ -38,13 +27,22 @@ from typing import Any
 
 import pytest
 
+from scripts import review_gate
+
 REVIEW_GATE_ISSUE_MEMORY_PATH = Path(__file__).resolve().parents[1] / ".review-gate-issues.json"
 
-# Source: `OUTCOMES` in review_gate.py (untracked/install-managed — see module
-# docstring for why it is copied rather than imported).
-OUTCOMES: frozenset[str] = frozenset({"merged", "superseded-by-split", "abandoned", "descoped"})
+# Source: `OUTCOMES` in the tracked writer scripts/review_gate.py.
+OUTCOMES: frozenset[str] = frozenset(review_gate.OUTCOMES)
 
-# The per-issue record shape written by `issue_record()`: every entry carries
+# The remedy names the tracked writer's real invocation; the test below pins
+# that the subcommand and its --outcome choices exist in the CLI's parser.
+RECORD_COMMAND = "uv run python scripts/review_gate.py record --issue N --pr P --rounds R --outcome"
+RECORD_REMEDY = (
+    f"Remedy when recording a close: `{RECORD_COMMAND} <{'|'.join(review_gate.OUTCOMES)}>` "
+    "(--outcome is required and choice-restricted, so the tracked writer cannot emit this value)."
+)
+
+# The per-issue record shape written by `scripts/review_gate.py record`: every entry carries
 # all three fields, and each has a fixed type.
 ENTRY_FIELD_TYPES: tuple[tuple[str, type, str], ...] = (
     ("ceilingPrs", list, "list"),
@@ -113,9 +111,9 @@ def review_gate_issue_memory_violations(history: Any) -> list[str]:
             outcome = record["outcome"]
             pr = record.get("pr", "<unknown>")
             hand_fix = (
-                f"Remedy for this already-written record (issue {issue} / PR {pr}): close "
-                "cannot rewrite history, so set this field by hand to the PR's real outcome "
-                f"(`gh pr view {pr} --json state`) and commit .review-gate-issues.json."
+                f"Remedy for this already-written record (issue {issue} / PR {pr}): the tracked "
+                "writer refuses to load a memory holding it, so set this field by hand to the PR's "
+                f"real outcome (`gh pr view {pr} --json state`) and commit .review-gate-issues.json."
             )
             # Type first: a JSON list/object outcome is unhashable, so the
             # membership test below would raise instead of reporting.
@@ -129,17 +127,16 @@ def review_gate_issue_memory_violations(history: Any) -> list[str]:
                 # The cmd_close cause is only true of the literal fallback value
                 # "closed"; any other string did not come from that path.
                 cause = (
-                    "Cause: review_gate.py's cmd_close "
-                    'writes `args.outcome or "closed"`, so a close run that omits --outcome '
-                    "persists a value neither its own vocabulary nor evidence_check.py accepts. "
+                    "Cause: the retired untracked review_gate.py's cmd_close "
+                    'wrote `args.outcome or "closed"`, so a close run that omitted --outcome '
+                    "persisted a value outside its own vocabulary. "
                     if outcome == "closed"
                     else ""
                 )
                 violations.append(
                     f"issues[{issue}].closed[{index}].outcome={outcome!r} is outside the "
                     f"OUTCOMES vocabulary {sorted(OUTCOMES)}. {cause}"
-                    "Remedy when closing: it is one flag — `review_gate.py close --outcome merged` "
-                    "(close takes no --issue/--pr; it reads both from the live gate state). "
+                    f"{RECORD_REMEDY} "
                     f"{hand_fix}"
                 )
 
@@ -198,8 +195,8 @@ def test_mutant_bare_top_level_key_is_a_violation() -> None:
 
 
 def test_mutant_out_of_vocabulary_outcome_names_cause_and_remedy() -> None:
-    # G-3b: the writer channel is untracked and cannot be fixed from this repo,
-    # so the failure text must hand the reader the one-flag remedy directly.
+    # G-3b: the failure text must hand the reader the historical cause and the
+    # tracked writer's real `record` invocation directly.
     history = copy.deepcopy(load_review_gate_issue_memory())
     history["issues"]["1736"]["closed"][0]["outcome"] = "closed"
 
@@ -209,7 +206,7 @@ def test_mutant_out_of_vocabulary_outcome_names_cause_and_remedy() -> None:
     message = "\n".join(violations)
     assert "issues[1736].closed[0].outcome='closed'" in message, message
     assert "cmd_close" in message, message
-    assert "`review_gate.py close --outcome merged`" in message, message
+    assert RECORD_COMMAND in message, message
     assert "issue 1736 / PR 1751" in message, message
 
 
@@ -292,5 +289,21 @@ def test_out_of_vocabulary_string_other_than_closed_omits_cmd_close_cause() -> N
     assert len(violations) == 1, violations
     assert "issues[1].closed[0].outcome='merge' is outside the OUTCOMES vocabulary" in violations[0], violations
     assert "cmd_close" not in violations[0], violations
-    assert "`review_gate.py close --outcome merged`" in violations[0], violations
+    assert RECORD_COMMAND in violations[0], violations
     assert "issue 1 / PR 7" in violations[0], violations
+
+
+def test_remedy_names_a_command_the_tracked_cli_accepts() -> None:
+    # The remedy text must point at a subcommand that exists, with the same
+    # --outcome vocabulary the guard enforces.
+    parser = review_gate.build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    assert RECORD_COMMAND.split(" record ")[0] == "uv run python scripts/review_gate.py"
+    assert "record" in subparsers.choices
+    record = subparsers.choices["record"]
+    options = {opt: action for action in record._actions for opt in action.option_strings}
+    for flag in ("--issue", "--pr", "--rounds", "--outcome"):
+        assert f" {flag} " in f" {RECORD_COMMAND} ", flag
+        assert flag in options, flag
+    assert tuple(options["--outcome"].choices) == review_gate.OUTCOMES
+    assert options["--outcome"].required

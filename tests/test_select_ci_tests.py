@@ -52,6 +52,9 @@ from scripts.select_ci_tests import (
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
     FORCING_SQL_SHAPE_ORACLE_TESTS,
+    LOOP_LOG_AUDIT_PATH,
+    LOOP_LOG_AUDIT_TEST,
+    LOOP_LOG_PATH,
     NODE22_ENTRYPOINT_HELPERS_PATH,
     NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
@@ -75,6 +78,8 @@ from scripts.select_ci_tests import (
     RETENTION_COPYBACK_MUTEX_OWNER_PATH,
     RETENTION_COPYBACK_MUTEX_OWNER_TESTS,
     RETENTION_COPYBACK_MUTEX_TESTS,
+    REVIEW_GATE_CLI_PATH,
+    REVIEW_GATE_CLI_TEST,
     REVIEW_GATE_ISSUE_MEMORY_PATH,
     REVIEW_GATE_ISSUE_MEMORY_TEST,
     SCHEDULER_IMPORTER_TESTS,
@@ -3162,8 +3167,9 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
 def test_review_gate_issue_memory_selects_exactly_its_guard_and_the_meta_guard() -> None:
     # #2261 selector leg, exact set (same shape as
     # test_demote_helper_rule_selects_public_chain_consumer_exactly): the
-    # committed round-ceiling memory routes to its structural guard plus the
-    # selector meta-guard, nothing more and nothing less. The meta-guard has to
+    # committed round-ceiling memory routes to its structural guard, its
+    # tracked writer's CLI suite (byte-stable round-trip of the committed file)
+    # plus the selector meta-guard, nothing more and nothing less. The meta-guard has to
     # be an explicit rule target — select_tests only rides it in for changed
     # `tests/` paths, and this is a root JSON file. Exact set: the path is not a
     # backend Python path, so no core-smoke fallback, no same-name derivation
@@ -3171,7 +3177,7 @@ def test_review_gate_issue_memory_selects_exactly_its_guard_and_the_meta_guard()
     # green if the guard target were dropped for the meta-guard alone.
     selected = set(select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")))
 
-    assert selected == {REVIEW_GATE_ISSUE_MEMORY_TEST, SELECTOR_META_GUARD_TEST}
+    assert selected == {REVIEW_GATE_ISSUE_MEMORY_TEST, REVIEW_GATE_CLI_TEST, SELECTOR_META_GUARD_TEST}
     assert not set(CORE_SMOKE_TESTS) & selected
 
 
@@ -3180,8 +3186,8 @@ def test_review_gate_issue_memory_route_reds_when_the_rule_or_its_guard_is_strip
 ) -> None:
     # #2261 selector leg, red (constructed rule table; tracked selector
     # untouched): deleting the rule empties the selection, and dropping the
-    # guard from its targets leaves the accounting PR running the meta-guard
-    # only — the same selector call the green row uses, not a read of the rule.
+    # guard from its targets leaves the accounting PR without the guard — the
+    # same selector call the green row uses, not a read of the rule.
     from scripts import select_ci_tests
 
     stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REVIEW_GATE_ISSUE_MEMORY_PATH)
@@ -3201,7 +3207,10 @@ def test_review_gate_issue_memory_route_reds_when_the_rule_or_its_guard_is_strip
         for rule in PATH_TEST_RULES
     )
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
-    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+    assert select_tests([REVIEW_GATE_ISSUE_MEMORY_PATH], repo_root=Path(".")) == [
+        REVIEW_GATE_CLI_TEST,
+        SELECTOR_META_GUARD_TEST,
+    ]
 
 
 def test_review_gate_issue_memory_backend_filter_entry_is_block_scoped() -> None:
@@ -3241,6 +3250,73 @@ def test_review_gate_issue_memory_backend_filter_entry_reds_when_removed_or_move
     assert literal in moved_to_docs
     assert literal not in _backend_filter_block(moved_to_docs)
 
+
+
+def test_review_gate_cli_selects_both_memory_suites() -> None:
+    # #2261 writer leg, membership: the CLI is a backend Python path, so the
+    # unknown-backend baseline (hard-gate node and scan invariants) rides in
+    # too; what is pinned is that both memory suites are in the selection.
+    assert Path(REVIEW_GATE_CLI_PATH).is_file()
+    selected = set(select_tests([REVIEW_GATE_CLI_PATH], repo_root=Path(".")))
+
+    assert {REVIEW_GATE_CLI_TEST, REVIEW_GATE_ISSUE_MEMORY_TEST} <= selected
+
+
+def test_loop_log_audit_script_selects_its_attribution_suite() -> None:
+    # #2477 script leg, membership (backend Python path: baseline rides in).
+    assert Path(LOOP_LOG_AUDIT_PATH).is_file()
+    selected = set(select_tests([LOOP_LOG_AUDIT_PATH], repo_root=Path(".")))
+
+    assert LOOP_LOG_AUDIT_TEST in selected
+
+
+def test_loop_log_selects_exactly_the_attribution_suite_and_the_meta_guard() -> None:
+    # #2477 data leg, exact set: the ledger is a `docs/` data file outside
+    # every scan root, so nothing but its explicit rule can select anything.
+    selected = set(select_tests([LOOP_LOG_PATH], repo_root=Path(".")))
+
+    assert selected == {LOOP_LOG_AUDIT_TEST, SELECTOR_META_GUARD_TEST}
+
+
+@pytest.mark.parametrize(
+    ("path", "dropped"),
+    [
+        pytest.param(LOOP_LOG_PATH, LOOP_LOG_AUDIT_TEST, id="loop-log"),
+        pytest.param(LOOP_LOG_AUDIT_PATH, LOOP_LOG_AUDIT_TEST, id="loop-log-audit"),
+        pytest.param(REVIEW_GATE_CLI_PATH, REVIEW_GATE_CLI_TEST, id="review-gate-cli"),
+    ],
+)
+def test_governance_tool_routes_red_when_their_rule_is_stripped(
+    monkeypatch: pytest.MonkeyPatch, path: str, dropped: str
+) -> None:
+    # Red leg (constructed rule table; tracked selector untouched): without the
+    # path-exact rule the owned suite leaves the selection.
+    from scripts import select_ci_tests
+
+    stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != path)
+    assert len(stripped) == len(PATH_TEST_RULES) - 1, f"{path} rule not found"
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == path)
+    assert not rule.stop_on_match and not rule.only_when_any_changed
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", stripped)
+
+    assert dropped not in select_tests([path], repo_root=Path("."))
+
+
+def test_loop_log_backend_filter_entry_is_block_scoped() -> None:
+    # #2477 backend-filter leg: `docs/**` is excluded from the backend lane, so
+    # a ledger-only diff opens the targeted gate only through this exact
+    # literal inside the `backend:` block, never through a broad glob.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{LOOP_LOG_PATH}'\n"
+    block = _backend_filter_block(workflow)
+    assert literal in block, "review-loop ledger missing from ci.yml backend filter"
+    assert Path(LOOP_LOG_AUDIT_TEST).is_file(), "the suite the filter entry exists to start is gone"
+    assert not any(
+        fnmatch.fnmatch(LOOP_LOG_PATH, pattern) and pattern != LOOP_LOG_PATH for pattern in _filter_entries(block)
+    ), "backend filter must not cover the ledger with a broad glob"
+
+    moved = workflow.replace(literal, "").replace("            docs:\n", "            docs:\n" + literal)
+    assert literal not in _backend_filter_block(moved)
 
 def test_shared_auth_owners_select_their_focused_contract_suites() -> None:
     # #1684 EVID-01 green rows: each shared auth owner must reach its focused
