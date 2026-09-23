@@ -82,7 +82,7 @@
 
   Append a "closed by #2316" note; do not rewrite history.
 - [x] 3.6 Spec delta MODIFIED blocks for three requirements. The first is "Empty targeted-test selection MUST be loudly self-identifying": its `meta_guard_only` definition disregards the node, its empty class gains the topology exclusion, and two new scenarios are added (review round 1). The other two are "the scheduler refresh env template MUST select its content-asserting owner suite" and "the retention copyback mutex load-bearing modules MUST select the mutex suite". Restate **every** scenario of each with measured selections, including the `copyback_guard.py` and provider-refresh scenarios, and name the pre-existing staleness.
-- [ ] 3.7 CI green on the final push.
+- [x] 3.7 CI green on the final push (PR #2606 @84b7ba078: Unit Tests pass).
 
 ## Deviations (recorded)
 
