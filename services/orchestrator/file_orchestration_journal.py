@@ -14232,6 +14232,29 @@ def _cohort_run_ids_excluding_model(
     bare ``cycle_<source>_<stamp>`` run id stay cycle-wide, as before.
     """
 
+    return frozenset(
+        run_id
+        for run_id, member_model_ids in _complete_cohort_members_by_run(
+            jobs, source_id=source_id, cycle_time=cycle_time
+        ).items()
+        if model_id not in member_model_ids
+    )
+
+
+def _complete_cohort_members_by_run(
+    jobs: Iterable[Mapping[str, Any]], *, source_id: str, cycle_time: datetime
+) -> dict[str, frozenset[str]]:
+    """Recorded membership of each suffixed cohort run id, where it is provable.
+
+    The single membership rule behind :func:`_cohort_run_ids_excluding_model`
+    (#2543), also read by the manual-retry cohort hint (#2584).  Only model-less
+    rows of a ``cycle_<source>_<stamp>_...`` run id count, and only their
+    ``cohort_members`` (forcing and forecast rows).  A run id is present only when
+    at least one row records a member list and no row of that run records a
+    truncated, length-mismatched, cap-sized or blank-``model_id`` list; its value
+    is the union of the recorded ``model_id`` values.
+    """
+
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     members_by_run: dict[str, set[str]] = {}
     incomplete_runs: set[str] = set()
@@ -14254,11 +14277,11 @@ def _cohort_run_ids_excluding_model(
             incomplete_runs.add(run_id)
             continue
         members_by_run.setdefault(run_id, set()).update(member_model_ids)
-    return frozenset(
-        run_id
+    return {
+        run_id: frozenset(member_model_ids)
         for run_id, member_model_ids in members_by_run.items()
-        if run_id not in incomplete_runs and model_id not in member_model_ids
-    )
+        if run_id not in incomplete_runs
+    }
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

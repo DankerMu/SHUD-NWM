@@ -843,6 +843,7 @@ class ForecastOrchestratorCycleMixin:
         pipeline_job_id: str | None = None,
         persist_pipeline_job: bool = True,
         persist_pipeline_event: bool = True,
+        recorded_error_code: str | None = None,
     ) -> _chain.StageRunResult:
         from services.orchestrator import chain_forecast_submission
 
@@ -854,6 +855,7 @@ class ForecastOrchestratorCycleMixin:
             pipeline_job_id=pipeline_job_id,
             persist_pipeline_job=persist_pipeline_job,
             persist_pipeline_event=persist_pipeline_event,
+            recorded_error_code=recorded_error_code,
         )
 
     def _skip_duplicate_submission(

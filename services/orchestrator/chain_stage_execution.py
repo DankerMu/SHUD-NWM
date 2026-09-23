@@ -32,6 +32,7 @@ from services.orchestrator.forcing_submit_identity import (
     is_unresolved_forcing_attempt,
     reordered_forcing_resume_basins,
 )
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES
 
 
 class StageExecutionOrchestrator(Protocol):
@@ -42,6 +43,7 @@ class StageExecutionOrchestrator(Protocol):
 
 
 _FORECAST_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
+STATE_SAVE_SUBMIT_AMBIGUOUS = "STATE_SAVE_SUBMIT_AMBIGUOUS"
 _ACCEPTED_GATEWAY_SUBMIT_STATUSES = frozenset(
     {
         "submitted",
@@ -65,6 +67,12 @@ def is_forecast_cohort_stage(stage: StageDefinition) -> bool:
     if stage_name:
         return stage_name in _FORECAST_STAGE_ALIASES
     return str(stage.job_type or "") in _FORECAST_STAGE_ALIASES
+
+
+def is_state_save_qc_stage(stage: StageDefinition) -> bool:
+    """Return whether a stage normalizes to the canonical ``state_save_qc`` stage."""
+    stage_name = str(stage.stage or "") or str(stage.job_type or "")
+    return DOWNSTREAM_STAGE_ALIASES.get(stage_name) == "state_save_qc"
 
 
 def _submit_error_is_ambiguous(error: Exception, *, gateway_boundary_entered: bool) -> bool:
@@ -586,6 +594,28 @@ def submit_and_wait_cycle_stage(
                         "transition_outcome": getattr(transition_result, "outcome", "unknown"),
                     },
                 )
+        # #2584: an ambiguous state_save_qc submit (the gateway boundary was
+        # entered and the failure is not a proven rejection) is recorded as the
+        # transient STATE_SAVE_SUBMIT_AMBIGUOUS, so the in-stage retry takes it
+        # instead of the permanent-failure mark.  Slurm may nevertheless hold the
+        # original job, so the retry can run beside it.  That is safe because the
+        # checkpoint writes converge: each state object is written with
+        # ``write_bytes_atomic`` (packages/common/state_manager.py:394/:451) and
+        # a same-checksum snapshot returns the existing entry; index writes are
+        # serialized by ``_update_lock`` (:1221/:1243) and published through the
+        # preimage-CAS ``atomic_replace_provider_bytes`` (:4110); copyback is
+        # authoritative per run (:2395-2407).  In most cases the two jobs are
+        # therefore lock-serialized or the later one returns idempotently on the
+        # same checksum.  Worst case, the retry itself fails and the row falls
+        # back to permanently_failed -- today's state, never worse.  The durable
+        # exact-comment reconcile used above is not an option here: sacct on this
+        # cluster does not keep the comment (#1116).
+        recorded_error_code = (
+            STATE_SAVE_SUBMIT_AMBIGUOUS
+            if is_state_save_qc_stage(stage)
+            and _submit_error_is_ambiguous(error, gateway_boundary_entered=gateway_boundary_entered)
+            else None
+        )
         result = orchestrator._record_submission_failure(
             stage,
             context,
@@ -593,6 +623,7 @@ def submit_and_wait_cycle_stage(
             pipeline_job_id=pipeline_job_id,
             persist_pipeline_job=not accepted_submit_failure,
             persist_pipeline_event=not rejection_batch_committed,
+            recorded_error_code=recorded_error_code,
         )
         if stage.stage == "forecast" and not rejection_batch_committed:
             orchestrator._mark_staged_hydro_runs_failed(

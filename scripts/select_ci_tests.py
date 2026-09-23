@@ -1097,6 +1097,11 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator.py",
     "tests/test_partial_success.py",
     "tests/test_pipeline_logs_artifacts.py",
+    # #2584: the ambiguous state_save_qc submit suite top-level-imports the
+    # chain facade (ForecastOrchestrator, HttpSlurmGatewayClient) and drives the
+    # real stage loop through it. Stop-rule owned module, so the addition rides
+    # this at-site tuple. DB-free, sub-second.
+    "tests/test_state_save_submit_ambiguity.py",
     "tests/test_warm_start.py",
     "tests/test_warm_start_chaining.py",
 )
@@ -1218,6 +1223,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # change to the repository's on-disk layout or writer path silently changes
     # what the census observes. 33 tests in 1.21s, hence a rule not an exclusion.
     "tests/test_scheduler_journal_scope_census.py",
+    # #2584: the ambiguous state_save_qc submit suite reads the row, its
+    # submission event and the retry decision through this repository and
+    # `FileJournalRetryService`, and drives the in-stage resubmit on it. Stop-rule
+    # owned module, so the addition rides this at-site tuple. DB-free, sub-second.
+    "tests/test_state_save_submit_ambiguity.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read
@@ -2666,6 +2676,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
             "tests/test_forcing_submit_ambiguity.py",
+            # #2584: the ambiguous state_save_qc submit suite. Its subject is the
+            # submit-failure branch of chain_stage_execution.py and the
+            # recorded/origin error-code split in chain_forecast_submission.py;
+            # it also pins retry.py / scheduler_state_types.py registration and
+            # the scheduler_state_decision.py exhaustion reason. None of those is
+            # stop-rule owned, so this directory rule is their route; its chain.py
+            # and file_orchestration_journal.py pairs ride CHAIN_IMPORTER_TESTS and
+            # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, sub-second.
+            "tests/test_state_save_submit_ambiguity.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",

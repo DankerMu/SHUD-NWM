@@ -14,6 +14,13 @@ when the run is already active or absent, and writes an evidence trail.
 marked run, so the next scheduler pass selects it again.  Hand-editing journal rows is
 NOT an equivalent -- the runbook forbids it, and it leaves no evidence.
 
+A hydro run id (``fcst_<source>_<cycle>_<model>``) whose forecast succeeded but whose
+cohort's ``state_save_qc`` failed is refused with ``no_retryable_failed_job``: the failed
+row belongs to the cohort master run, not to the hydro run.  For that refusal the preview
+lists, read-only, the failed cohort masters of the cycle whose recorded membership covers
+the model (``cohort_candidates``), with a warning that marking one re-runs the whole
+cohort from convert.  The tool never substitutes the id itself (#2584).
+
 Execution host: node-22 (the DB-free file journal lives on its ``/scratch``).
 """
 
@@ -22,23 +29,131 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from packages.common.source_identity import normalize_source_id  # noqa: E402
 from services.orchestrator.chain_types import OrchestratorError  # noqa: E402
 from services.orchestrator.file_orchestration_journal import (  # noqa: E402
     FileJournalRetryService,
     FileOrchestrationJournalRepository,
     RetryEvidenceInvalidError,
+    _blocked_query_job_fault,
+    _complete_cohort_members_by_run,
+    _file_retry_job_truth_sort_key,
+    _is_blocked_query_job,
 )
 from services.orchestrator.journal_root_authority import (  # noqa: E402
     journal_root_refusal_line,
     verify_journal_root_authority,
 )
+from services.orchestrator.retry import MANUAL_RETRY_SOURCE_STATUSES  # noqa: E402
+from services.orchestrator.run_identity import FORECAST_RUN_ID_RE  # noqa: E402
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES  # noqa: E402
+from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: E402
+
+COHORT_RESTART_WARNING = (
+    "Marking a cohort master re-runs the WHOLE cohort from convert, not only the failed "
+    "stage: the forecast of each of its member_count models is recomputed."
+)
+
+
+def _cohort_hint_scope(run_id: str) -> tuple[str, datetime, str] | None:
+    """``(source_id, cycle_time, model_id)`` of a ``fcst_<source>_<YYYYMMDDHH>_<model>`` id."""
+
+    match = FORECAST_RUN_ID_RE.fullmatch(run_id)
+    if match is None:
+        return None
+    try:
+        return normalize_source_id(match.group(1)), parse_cycle_time(match.group(2)), match.group(3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cohort_candidates(
+    jobs: Sequence[Mapping[str, Any]], *, source_id: str, cycle_time: datetime, model_id: str
+) -> list[dict[str, Any]]:
+    """Cohort masters of the cycle whose latest ``state_save_qc`` row failed and covers the model.
+
+    Coverage is read, never guessed: a row carrying ``model_id`` is a single-model cohort
+    and covers exactly that model; a model-less row covers the model only when its run's
+    recorded membership is provable (``_complete_cohort_members_by_run``, the rule the
+    scheduler already applies to split cohorts).
+    """
+
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    latest_by_run: dict[str, Mapping[str, Any]] = {}
+    for job in sorted(jobs, key=_file_retry_job_truth_sort_key):
+        job_run_id = str(job.get("run_id") or "")
+        stage = str(job.get("stage") or "")
+        if job_run_id != cycle_run_id and not job_run_id.startswith(f"{cycle_run_id}_"):
+            continue
+        if DOWNSTREAM_STAGE_ALIASES.get(stage, stage) == "state_save_qc":
+            latest_by_run[job_run_id] = job
+    members_by_run = _complete_cohort_members_by_run(jobs, source_id=source_id, cycle_time=cycle_time)
+    candidates: list[dict[str, Any]] = []
+    for job_run_id, job in latest_by_run.items():
+        if str(job.get("status") or "") not in MANUAL_RETRY_SOURCE_STATUSES:
+            continue
+        if job.get("model_id") not in (None, ""):
+            if str(job.get("model_id")) != model_id:
+                continue
+            member_count = 1
+        else:
+            members = members_by_run.get(job_run_id)
+            if members is None or model_id not in members:
+                continue
+            member_count = len(members)
+        candidates.append(
+            {
+                "run_id": job_run_id,
+                "job_id": str(job.get("job_id") or ""),
+                "stage": job.get("stage"),
+                "status": job.get("status"),
+                "error_code": job.get("error_code"),
+                "member_count": member_count,
+            }
+        )
+    return sorted(candidates, key=lambda candidate: candidate["run_id"])
+
+
+def _cohort_candidates_hint(repository: Any, run_id: str) -> dict[str, Any]:
+    """Read-only hint for a refused hydro run id; never changes the refusal itself."""
+
+    scope = _cohort_hint_scope(run_id)
+    if scope is None:
+        return {}
+    source_id, cycle_time, model_id = scope
+    try:
+        jobs = repository.query_pipeline_jobs_by_cycle(cycle_id_for(source_id, cycle_time))
+        blocked = next((job for job in jobs if _is_blocked_query_job(job)), None)
+        if blocked is not None:
+            journal_reason, journal_field = _blocked_query_job_fault(blocked)
+            return {
+                "cohort_candidates_error": {
+                    "reason": "journal_read_blocked",
+                    "journal_reason": journal_reason,
+                    "journal_field": journal_field,
+                }
+            }
+        candidates = _cohort_candidates(jobs, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+    except Exception as error:  # noqa: BLE001 -- a hint failure must not change the preview answer
+        return {
+            "cohort_candidates_error": {
+                "reason": "cohort_candidates_query_failed",
+                "error": f"{type(error).__name__}: {error}",
+            }
+        }
+    hint: dict[str, Any] = {"cohort_candidates": candidates}
+    if candidates:
+        hint["warning"] = COHORT_RESTART_WARNING
+    return hint
 
 
 def _preview(service: FileJournalRetryService, run_id: str) -> dict[str, Any]:
@@ -71,7 +186,11 @@ def _preview(service: FileJournalRetryService, run_id: str) -> dict[str, Any]:
     if active_job is not None:
         return {"decision": "refused", "reason": "run_active", "job_id": str(active_job.get("job_id") or "")}
     if failed_job is None:
-        return {"decision": "refused", "reason": "no_retryable_failed_job"}
+        return {
+            "decision": "refused",
+            "reason": "no_retryable_failed_job",
+            **_cohort_candidates_hint(service.repository, run_id),
+        }
     return {
         "decision": "would_mark",
         "job_id": str(failed_job.get("job_id") or ""),
