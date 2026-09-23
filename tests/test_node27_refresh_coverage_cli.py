@@ -17,6 +17,7 @@ is stubbed so the assertions are about the CLI's contract only.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg2
@@ -83,7 +84,7 @@ def test_refused_single_run_exits_3_with_one_structured_stderr_line(
 ) -> None:
     # The real advice text, not a stand-in: the one-line contract below is only
     # worth anything if it is the shipped string that has to stay newline-free.
-    def _refuse(_connection: Any, run_id: str, *, force: bool = False) -> bool:
+    def _refuse(_connection: Any, run_id: str, *, force: bool = False, expired_cutoff: Any = None) -> bool:
         raise DisplayCoverageRefreshRefused(run_id, 12, display_coverage._REFUSAL_ADVICE)
 
     monkeypatch.setattr(node27_refresh_coverage, "refresh_run_display_coverage", _refuse)
@@ -109,7 +110,7 @@ def test_force_reaches_the_library_and_reports_normally(
 ) -> None:
     seen: list[tuple[str, bool]] = []
 
-    def _refresh(_connection: Any, run_id: str, *, force: bool = False) -> bool:
+    def _refresh(_connection: Any, run_id: str, *, force: bool = False, expired_cutoff: Any = None) -> bool:
         seen.append((run_id, force))
         return True
 
@@ -132,7 +133,7 @@ def test_single_run_without_force_asks_the_library_not_to_force(
 ) -> None:
     seen: list[tuple[str, bool]] = []
 
-    def _refresh(_connection: Any, run_id: str, *, force: bool = False) -> bool:
+    def _refresh(_connection: Any, run_id: str, *, force: bool = False, expired_cutoff: Any = None) -> bool:
         seen.append((run_id, force))
         return True
 
@@ -186,3 +187,180 @@ def test_all_force_passes_the_flag_through(
     assert node27_refresh_coverage.main(["--all", "--force", "--database-url", DSN]) == 0
     assert seen == [True]
     assert json.loads(capsys.readouterr().out)["refused"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #2504 D6: the window comes from the refresh's own env, the cutoff is resolved
+# once per invocation, and the audit is a read-only report.
+# ---------------------------------------------------------------------------
+
+_WINDOW_ENV = {"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": "21"}
+_CUTOFF = datetime(2026, 9, 1, 6, tzinfo=UTC)
+
+
+@pytest.fixture()
+def cutoff_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    calls: list[tuple[Any, ...]] = []
+
+    def _resolve(dsn: str, window_days: Any, *, connect: Any = None) -> Any:
+        calls.append((dsn, window_days, connect))
+        return None if window_days is None else _CUTOFF
+
+    monkeypatch.setattr(node27_refresh_coverage, "resolve_expired_cutoff", _resolve)
+    return calls
+
+
+def test_all_resolves_the_cutoff_once_from_the_window_and_hands_it_to_the_batch(
+    cli: list[_FakeConnection],
+    cutoff_calls: list[tuple[Any, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _refresh_all(_connection: Any, **kwargs: Any) -> dict[str, int]:
+        seen.append(kwargs)
+        return {"refreshed": 1, "skipped": 0, "failed": 0, "refused": 0}
+
+    monkeypatch.setattr(node27_refresh_coverage, "refresh_all_run_display_coverage", _refresh_all)
+
+    rc = node27_refresh_coverage.main(["--all", "--skip-fresh", "--database-url", DSN], env=_WINDOW_ENV)
+
+    assert rc == 0
+    assert cutoff_calls == [(DSN, 21, node27_refresh_coverage._attributed_connect)]
+    assert [call["expired_cutoff"] for call in seen] == [_CUTOFF]
+    assert seen[0]["expired_rescan_interval"] == timedelta(hours=24)
+    report = json.loads(capsys.readouterr().out)
+    assert report["expired_cutoff"] == "2026-09-01T06:00:00Z"
+
+
+def test_without_the_window_the_refresh_is_not_relaxed(
+    cli: list[_FakeConnection],
+    cutoff_calls: list[tuple[Any, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fail-closed (D6): no window in the refresh's env -> no cutoff, and the
+    DEFAULT_RETENTION_WINDOW_DAYS fallback is never used."""
+    seen: list[Any] = []
+
+    def _refresh_all(_connection: Any, **kwargs: Any) -> dict[str, int]:
+        seen.append(kwargs["expired_cutoff"])
+        return {"refreshed": 0, "skipped": 0, "failed": 0, "refused": 1}
+
+    monkeypatch.setattr(node27_refresh_coverage, "refresh_all_run_display_coverage", _refresh_all)
+
+    assert node27_refresh_coverage.main(["--all", "--skip-fresh", "--database-url", DSN], env={}) == 0
+    assert cutoff_calls == [(DSN, None, node27_refresh_coverage._attributed_connect)]
+    assert seen == [None]
+    assert json.loads(capsys.readouterr().out)["expired_cutoff"] is None
+
+
+def test_single_run_refresh_gets_the_cutoff_too(
+    cli: list[_FakeConnection],
+    cutoff_calls: list[tuple[Any, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[Any] = []
+
+    def _refresh(_connection: Any, run_id: str, *, force: bool = False, expired_cutoff: Any = None) -> bool:
+        seen.append(expired_cutoff)
+        return True
+
+    monkeypatch.setattr(node27_refresh_coverage, "refresh_run_display_coverage", _refresh)
+
+    assert node27_refresh_coverage.main(["--run-id", LEGACY_RUN_ID, "--database-url", DSN], env=_WINDOW_ENV) == 0
+    assert seen == [_CUTOFF]
+    assert json.loads(capsys.readouterr().out)["expired_cutoff"] == "2026-09-01T06:00:00Z"
+
+
+def test_expired_rescan_hours_reaches_the_batch(
+    cli: list[_FakeConnection],
+    cutoff_calls: list[tuple[Any, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+
+    def _refresh_all(_connection: Any, **kwargs: Any) -> dict[str, int]:
+        seen.append(kwargs["expired_rescan_interval"])
+        return {"refreshed": 0, "skipped": 0, "failed": 0, "refused": 0}
+
+    monkeypatch.setattr(node27_refresh_coverage, "refresh_all_run_display_coverage", _refresh_all)
+
+    argv = ["--all", "--skip-fresh", "--expired-rescan-hours", "6", "--database-url", DSN]
+    assert node27_refresh_coverage.main(argv, env=_WINDOW_ENV) == 0
+    assert seen == [timedelta(hours=6)]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "x"])
+def test_expired_rescan_hours_refuses_a_non_positive_or_non_finite_value(
+    cli: list[_FakeConnection], value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        node27_refresh_coverage.main(["--all", "--expired-rescan-hours", value, "--database-url", DSN], env={})
+    assert excinfo.value.code == 2
+    assert "--expired-rescan-hours" in capsys.readouterr().err
+
+
+def test_audit_prints_the_bucketed_report_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[tuple[Any, ...]] = []
+    report = {
+        "mode": "audit-populated-empty",
+        "in_window": {"total": 3, "empty": 1, "probe_failed": 0, "sample_empty_run_ids": ["r1"]},
+        "out_of_window": {"total": 5, "empty": 4, "probe_failed": 0, "sample_empty_run_ids": ["r2"]},
+        "null_end": {"total": 2},
+        "watermark": "2026-09-22T12:00:00Z",
+        "cutoff": "2026-09-01T12:00:00Z",
+        "window_days": 21,
+    }
+
+    def _audit(dsn: str, window_days: int, **_kwargs: Any) -> dict[str, Any]:
+        seen.append((dsn, window_days))
+        return dict(report)
+
+    monkeypatch.setattr(node27_refresh_coverage, "audit_populated_empty", _audit)
+
+    assert node27_refresh_coverage.main(["--audit-populated-empty", "--database-url", DSN], env=_WINDOW_ENV) == 0
+    assert seen == [(DSN, 21)]
+    printed = json.loads(capsys.readouterr().out)
+    assert {key: printed[key] for key in report} == report
+
+
+def test_audit_without_a_window_is_a_typed_config_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        node27_refresh_coverage, "audit_populated_empty", lambda *_a, **_k: pytest.fail("audit must not run")
+    )
+
+    assert node27_refresh_coverage.main(["--audit-populated-empty", "--database-url", DSN], env={}) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("DISPLAY_COVERAGE_AUDIT_FAILED reason=")
+    assert "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS" in captured.err
+
+
+def test_audit_database_error_is_a_typed_exit_2_without_the_password(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _audit(dsn: str, window_days: int, **_kwargs: Any) -> dict[str, Any]:
+        raise psycopg2.OperationalError(f'connection to "{dsn}" failed')
+
+    monkeypatch.setattr(node27_refresh_coverage, "audit_populated_empty", _audit)
+
+    assert node27_refresh_coverage.main(["--audit-populated-empty", "--database-url", DSN], env=_WINDOW_ENV) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("DISPLAY_COVERAGE_AUDIT_FAILED reason=OperationalError")
+    assert ":p@" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_audit_is_exclusive_with_the_refresh_modes(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        node27_refresh_coverage.main(["--audit-populated-empty", "--all", "--database-url", DSN], env=_WINDOW_ENV)
+    assert excinfo.value.code == 2

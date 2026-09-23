@@ -580,8 +580,13 @@ def test_refresh_coverage_all_attributes_every_worker_connection(
     monkeypatch.setattr(
         display_coverage,
         "_refresh",
-        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+        lambda _connection, run_id, *, force=False, expired_cutoff=None: display_coverage.RefreshOutcome(
+            [run_id], []
+        ),
     )
+    # #2504: without the window no watermark connection is opened, so the
+    # count below stays 1 + N whatever the invoking shell exports.
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS", raising=False)
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -592,6 +597,34 @@ def test_refresh_coverage_all_attributes_every_worker_connection(
     for args, kwargs in calls:
         assert args == (DSN,)
         assert kwargs == {"fallback_application_name": "nhms-refresh-coverage"}
+
+
+def test_refresh_coverage_watermark_connection_is_attributed_too(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#2504 D6: with the window configured the CLI opens one more connection,
+    the display watermark read behind the retention cutoff. It goes through the
+    same injected connect, so it carries the identity as well."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _connect(*args: Any, **kwargs: Any) -> _FakeConnection:
+        calls.append((args, kwargs))
+        return _FakeConnection()
+
+    monkeypatch.setattr(psycopg2, "connect", _connect)
+    monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: [])
+
+    argv = ["--all", "--database-url", DSN]
+    assert node27_refresh_coverage.main(argv, env={"NODE27_TIMESERIES_RETENTION_WINDOW_DAYS": "21"}) == 0
+    capsys.readouterr()
+
+    assert calls, "no connection opened"
+    for args, kwargs in calls:
+        assert args == (DSN,)
+        assert kwargs.get("fallback_application_name") == "nhms-refresh-coverage"
+    assert any(kwargs.get("connect_timeout") == 5 for _args, kwargs in calls), "watermark read not attributed"
 
 
 def test_refresh_coverage_worker_connections_keep_the_operator_override(
@@ -617,8 +650,13 @@ def test_refresh_coverage_worker_connections_keep_the_operator_override(
     monkeypatch.setattr(
         display_coverage,
         "_refresh",
-        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+        lambda _connection, run_id, *, force=False, expired_cutoff=None: display_coverage.RefreshOutcome(
+            [run_id], []
+        ),
     )
+    # #2504: without the window no watermark connection is opened, so the
+    # count below stays 1 + N whatever the invoking shell exports.
+    monkeypatch.delenv("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS", raising=False)
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN_WITH_OVERRIDE]) == 0
     report = json.loads(capsys.readouterr().out)

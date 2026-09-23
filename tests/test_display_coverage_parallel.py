@@ -18,6 +18,7 @@ here:
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -55,7 +56,13 @@ def test_refresh_all_uses_independent_parallel_connections(
         connections.append(connection)
         return connection
 
-    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(
+        _connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
         barrier.wait()
         return display_coverage.RefreshOutcome([run_id], [])
 
@@ -115,7 +122,13 @@ def test_one_failing_run_does_not_stop_the_other_runs(
             connections.append(connection)
         return connection
 
-    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(
+        _connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
         return display_coverage.RefreshOutcome([run_id], [])
 
     monkeypatch.setattr(display_coverage, "_refresh", refresh)
@@ -166,7 +179,13 @@ def test_a_run_failing_after_connect_rolls_its_own_connection_back(
             connections.append(connection)
         return connection
 
-    def refresh(connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(
+        connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
         with lock:
             by_run[run_id] = connection
         if run_id == "run-b":
@@ -225,7 +244,13 @@ def test_a_refused_run_is_counted_apart_from_failures_and_does_not_stop_the_batc
             connections.append(connection)
         return connection
 
-    def refresh(connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(
+        connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
         with lock:
             by_run[run_id] = connection
         if run_id == "run-legacy":
@@ -256,7 +281,13 @@ def test_force_is_passed_through_to_every_run(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: ["run-a", "run-b"])
 
-    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(
+        _connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
         seen.append((run_id, force))
         return display_coverage.RefreshOutcome([run_id], [])
 
@@ -271,6 +302,82 @@ def test_force_is_passed_through_to_every_run(monkeypatch: pytest.MonkeyPatch) -
 
     assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 0}
     assert seen == [("run-a", True), ("run-b", True)]
+
+
+@pytest.mark.parametrize("workers", (1, 2))
+def test_the_expired_cutoff_reaches_the_selection_and_every_run(
+    monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    """#2504 D6: one cutoff per batch, handed to the ``--skip-fresh`` selection
+    and to every run's upsert on BOTH worker paths — never re-derived per run."""
+    cutoff = datetime(2026, 9, 1, tzinfo=UTC)
+    interval = timedelta(hours=6)
+    seen: list[tuple[str, Any]] = []
+    stale_calls: list[tuple[list[str], Any, Any]] = []
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: ["run-a", "run-b"])
+
+    def stale(
+        _connection: Any,
+        run_ids: list[str],
+        *,
+        expired_cutoff: Any = None,
+        expired_rescan_interval: Any = None,
+    ) -> set[str]:
+        stale_calls.append((list(run_ids), expired_cutoff, expired_rescan_interval))
+        return set(run_ids)
+
+    def refresh(
+        _connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
+        seen.append((run_id, expired_cutoff))
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_stale_run_ids", stale)
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    result = display_coverage.refresh_all_run_display_coverage(
+        object(),
+        dsn="postgresql://example",
+        connect=lambda _dsn: _Connection(),
+        skip_fresh=True,
+        workers=workers,
+        expired_cutoff=cutoff,
+        expired_rescan_interval=interval,
+    )
+
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 0}
+    assert stale_calls == [(["run-a", "run-b"], cutoff, interval)]
+    assert sorted(seen) == [("run-a", cutoff), ("run-b", cutoff)]
+
+
+def test_without_a_cutoff_every_run_is_refreshed_unrelaxed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default (no window configured) binds ``None``: today's guard."""
+    seen: list[Any] = []
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: ["run-a"])
+
+    def refresh(
+        _connection: Any,
+        run_id: str,
+        *,
+        force: bool = False,
+        expired_cutoff: Any = None,
+    ) -> display_coverage.RefreshOutcome:
+        seen.append(expired_cutoff)
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    display_coverage.refresh_all_run_display_coverage(
+        object(), dsn="postgresql://example", connect=lambda _dsn: _Connection()
+    )
+
+    assert seen == [None]
 
 
 @pytest.mark.parametrize("workers", (0, 9))

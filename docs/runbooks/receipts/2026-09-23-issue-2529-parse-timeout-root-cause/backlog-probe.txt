@@ -1,0 +1,6 @@
+error_code|count|min|max|min|max
+OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED|2|2026-08-28 08:42:56.635348+00|2026-08-28 08:42:56.636219+00|2026-08-28 08:29:17.20341+00|2026-08-28 08:32:35.113427+00
+(1 row)
+touched_1d|touched_7d|total
+0|0|2
+(1 row)

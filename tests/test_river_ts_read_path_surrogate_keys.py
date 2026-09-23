@@ -797,6 +797,9 @@ def test_coverage_sql_binds_only_parameters_the_refresh_actually_supplies() -> N
         # #1446: the overwrite guard's explicit-zeroing bypass, bound by
         # `_refresh` on every call (False unless the caller forces).
         "force",
+        # #2504 D6: the window-scoped relaxation's cutoff, bound on every call
+        # (None unless the caller resolved a window and a watermark).
+        "expired_cutoff",
         *display_coverage._SCAN_PARAM_KEYS,
     }
     for name, sql in (

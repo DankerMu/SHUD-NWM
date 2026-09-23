@@ -23,6 +23,7 @@ bypasses.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -389,3 +390,139 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
     assert AID_MARKER_TAG not in sql
     assert "cr.run_id = rt.run_id" not in outer
     assert "cr.river_network_version_id = rt.river_network_version_id" not in outer
+
+
+# ---------------------------------------------------------------------------
+# #2504 D6: the guard relaxes only for a stored end older than the cutoff
+# ---------------------------------------------------------------------------
+
+_CUTOFF = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_refresh_sql_relaxes_the_guard_only_below_a_bound_cutoff() -> None:
+    """The fourth disjunct is the whole relaxation, and it is NULL-guarded.
+
+    Evaluated for real by the integration suite
+    (tests/test_display_coverage_expired_convergence_integration.py); pinned
+    here so the shape cannot drift silently between node-27 runs: a NULL
+    cutoff (window not configured / watermark unreadable) folds the term away,
+    and a NULL stored end can never satisfy ``<``.
+    """
+    guard = display_coverage._REFRESH_SQL.split("refreshed_at = EXCLUDED.refreshed_at")[-1]
+    relaxation = (
+        "(%(expired_cutoff)s::timestamptz IS NOT NULL "
+        "AND hydro.run_display_coverage.river_valid_time_end < %(expired_cutoff)s::timestamptz)"
+    )
+    assert " ".join(guard.split()).startswith(
+        "WHERE %(force)s OR EXCLUDED.segment_count > 0 OR hydro.run_display_coverage.segment_count = 0 "
+        f"OR {relaxation} RETURNING run_id"
+    )
+
+
+def test_the_cutoff_defaults_to_none_and_is_bound_when_given() -> None:
+    unbound = _Connection([_HEADER_ROW])
+    display_coverage._refresh(unbound, "run-1")
+    assert unbound.cursor_obj.executed[-1][1]["expired_cutoff"] is None
+
+    bound = _Connection([_HEADER_ROW])
+    display_coverage._refresh(bound, "run-1", expired_cutoff=_CUTOFF)
+    _sql, params = bound.cursor_obj.executed[-1]
+    assert _sql is display_coverage._REFRESH_SQL
+    assert params["expired_cutoff"] == _CUTOFF
+    # Relaxation is not a second statement: header + timeout + one upsert.
+    assert len(_executed_sqls(bound)) == 3
+
+
+def test_single_run_refresh_passes_the_cutoff_through() -> None:
+    connection = _Connection([_HEADER_ROW], refresh_rows=_RETURNED_RUN_1)
+
+    assert display_coverage.refresh_run_display_coverage(connection, "run-1", expired_cutoff=_CUTOFF) is True
+
+    assert connection.cursor_obj.executed[-1][1]["expired_cutoff"] == _CUTOFF
+
+
+class _WatermarkSpy:
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        self.calls: list[tuple[str, Any]] = []
+
+    def __call__(self, dsn: str, *, connect: Any = None) -> Any:
+        self.calls.append((dsn, connect))
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+def test_the_cutoff_is_the_display_watermark_minus_the_window() -> None:
+    watermark = datetime(2026, 9, 20, 12, tzinfo=UTC)
+    spy = _WatermarkSpy(watermark)
+    connect = object()
+
+    cutoff = display_coverage.resolve_expired_cutoff("postgresql://x", 21, connect=connect, fetch_watermark=spy)
+
+    assert cutoff == watermark - timedelta(days=21)
+    assert spy.calls == [("postgresql://x", connect)]
+
+
+def test_no_window_means_no_cutoff_and_no_watermark_query() -> None:
+    spy = _WatermarkSpy(datetime(2026, 9, 20, tzinfo=UTC))
+
+    assert display_coverage.resolve_expired_cutoff("postgresql://x", None, fetch_watermark=spy) is None
+    assert spy.calls == []
+
+
+def test_an_unreadable_watermark_means_no_cutoff() -> None:
+    """Fail-closed (D6): never a wall-clock fallback, never a raise that would
+    turn the non-fatal backstop into a failure — just no relaxation."""
+    from packages.common.display_watermark import DisplayWatermarkError
+
+    spy = _WatermarkSpy(DisplayWatermarkError("display watermark is unavailable"))
+
+    assert display_coverage.resolve_expired_cutoff("postgresql://x", 21, fetch_watermark=spy) is None
+    assert len(spy.calls) == 1
+
+
+class _StaleCursor(_Cursor):
+    def __init__(self) -> None:
+        super().__init__([], [], None)
+
+
+def test_skip_fresh_selection_adds_the_rescan_bounded_expired_term() -> None:
+    cursor = _StaleCursor()
+    connection = _Connection([])
+    connection.cursor_obj = cursor
+
+    display_coverage._stale_run_ids(connection, ["run-1"], expired_cutoff=_CUTOFF)
+
+    sql, params = cursor.executed[-1]
+    flat = " ".join(sql.split())
+    assert "(cov.run_id IS NULL OR cov.refreshed_at < h.updated_at" in flat
+    assert (
+        "OR (%(expired_cutoff)s::timestamptz IS NOT NULL AND cov.segment_count > 0 "
+        "AND cov.river_valid_time_end < %(expired_cutoff)s::timestamptz "
+        "AND cov.refreshed_at < now() - %(expired_rescan_interval)s::interval)"
+    ) in flat
+    assert params == {
+        "run_ids": ["run-1"],
+        "expired_cutoff": _CUTOFF,
+        "expired_rescan_interval": display_coverage.DEFAULT_EXPIRED_RESCAN_INTERVAL,
+    }
+    assert display_coverage.DEFAULT_EXPIRED_RESCAN_INTERVAL == timedelta(hours=24)
+
+
+def test_skip_fresh_selection_without_a_cutoff_binds_none() -> None:
+    cursor = _StaleCursor()
+    connection = _Connection([])
+    connection.cursor_obj = cursor
+
+    display_coverage._stale_run_ids(connection, ["run-1"])
+
+    assert cursor.executed[-1][1]["expired_cutoff"] is None
+
+
+def test_refusal_advice_separates_in_window_investigation_from_expected_convergence() -> None:
+    advice = display_coverage._REFUSAL_ADVICE
+    assert "\n" not in advice
+    assert "inside the retention window" in advice
+    assert "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS" in advice
+    assert "--run-id <run> --force" in advice

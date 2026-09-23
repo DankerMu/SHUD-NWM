@@ -83,7 +83,11 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     open_directory_no_follow,
 )
-from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS
+from packages.common.storage import (
+    DEFAULT_RETENTION_WINDOW_DAYS,
+    RETENTION_WINDOW_ENV,
+    configured_retention_window_days,
+)
 
 # 1.1 (#1369): every receipt gained the required ``archive_gate`` object.
 # Historical 1.0 receipts are NEVER rewritten — see the receipts README for
@@ -428,11 +432,18 @@ def config_from_args(
     archive_gate = _resolve_archive_gate(
         getattr(args, "archive_gate", None), env.get(ARCHIVE_GATE_ENV)
     )
-    window_days = _optional_positive_int(
-        env.get("NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"),
-        name="NODE27_TIMESERIES_RETENTION_WINDOW_DAYS",
-        default=_DEFAULT_WINDOW_DAYS,
-    )
+    # #2504 D6: the window is parsed by the resolver the display coverage
+    # refresh shares. It answers None for every value this runner would
+    # default or refuse, so those two paths stay exactly as they were: the
+    # runner's own default for an absent/empty assignment, its typed
+    # RETENTION_CONFIG_INVALID refusal for anything else.
+    window_days = configured_retention_window_days(env)
+    if window_days is None:
+        window_days = _optional_positive_int(
+            env.get(RETENTION_WINDOW_ENV),
+            name=RETENTION_WINDOW_ENV,
+            default=_DEFAULT_WINDOW_DAYS,
+        )
     per_tick_bound = _optional_positive_int(
         env.get("NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND"),
         name="NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND",

@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-09-17
+最后更新：2026-09-23
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -40,8 +40,9 @@
 | [`production-ops/oncall-sql.md`](production-ops/oncall-sql.md) | §9 | 值守 SQL 片段 |
 | [`production-ops/frontier-stall-alert.md`](production-ops/frontier-stall-alert.md) | §10 | 前沿停摆告警 |
 | [`production-ops/coverage-freshness-alert.md`](production-ops/coverage-freshness-alert.md) | §11 | 覆盖新鲜度告警 |
+| [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md) | §13 | 解析失败驻留告警（#2529） |
 
-§12「相关文档」的正文仍在本页末尾。
+§12「相关文档」的正文仍在本页（位于 §13 入口之前；§13 是 #2529 在 §12 之后新增的分册）。
 
 ## 1. 当前结论
 
@@ -339,3 +340,27 @@
   restart and live MVT evidence.
 - [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)：historical bring-up
   and early incident notes; not current topology.
+
+## 13. 解析失败驻留告警（parse-failure residency alert）
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#13-解析失败驻留告警parse-failure-residency-alert)。
+
+### 13.1 判据（驻留型，不看单 tick 的 rc）
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#131-判据驻留型不看单-tick-的-rc)。
+
+### 13.2 邮件怎么读
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#132-邮件怎么读)。
+
+### 13.3 处置
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#133-处置)。
+
+### 13.4 阈值旋钮
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#134-阈值旋钮)。
+
+### 13.5 安装（部署步骤，#2529 的 PR 不做）
+
+完整内容见 [`production-ops/parse-failure-residency-alert.md`](production-ops/parse-failure-residency-alert.md#135-安装部署步骤2529-的-pr-不做)。

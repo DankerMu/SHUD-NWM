@@ -299,6 +299,15 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         ATTRIBUTED,
         "fetch_display_watermark",
     ),
+    # #2504 D6: the coverage refresh anchors its retention cutoff on the same
+    # watermark (via display_coverage.resolve_expired_cutoff, which forwards the
+    # CLI's attributed connect), and the read-only audit fetches it directly.
+    (
+        "scripts/node27_refresh_coverage.py",
+        "packages/common/display_watermark.py",
+        ATTRIBUTED,
+        "fetch_display_watermark",
+    ),
 )
 
 # The keyword every delegated helper exposes so a caller can inject its own

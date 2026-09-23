@@ -516,6 +516,8 @@ def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
                     "variables": list(MVP_STATION_VARIABLES),
                     "variable_count": len(MVP_STATION_VARIABLES),
                     "force": False,
+                    # #2504: unbound cutoff = the pre-#2504 guard.
+                    "expired_cutoff": None,
                     "scan_run_id": None,
                     "scan_forcing_version_id": None,
                     "scan_basin_version_id": None,

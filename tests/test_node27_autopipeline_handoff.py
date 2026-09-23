@@ -2391,9 +2391,12 @@ def test_cancelled_ingest_statement_fails_its_run_and_the_next_tick_is_normal(
     Bounding the statement means a genuinely long ingest statement is now
     cancelled instead of hanging. What must NOT happen is a silent loss: the
     driver's `QueryCanceled` travels the ordinary handoff-failure path, so the
-    run is marked `failed`, the tick's return code is non-zero (visible to the
-    unit and its `OnFailure=`), and the next tick — the whole point of bounding
-    it — runs normally instead of finding the flock still held.
+    run is marked `failed`, the tick's return code is non-zero (it lands in
+    `autopipe.log`; the autopipe unit deliberately has NO `OnFailure=`, #2529 —
+    a run that STAYS failed is seen by the frontier-stall lane and, for an
+    `OUTPUT_PARSE_*` code, by `nhms-node27-parse-failure-residency-alert`), and
+    the next tick — the whole point of bounding it — runs normally instead of
+    finding the flock still held.
     """
     cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
     object_store_root, _calls, _published = _prepare_autopipe(
@@ -2444,8 +2447,10 @@ def test_cancelled_statement_on_a_pre_loop_or_publish_site_propagates_out_of_mai
     JSON, no `completed_with_failures` object an operator or a log scraper
     could mistake for a tick that ran. Under the module's own entrypoint
     (`raise SystemExit(main())`) an uncaught exception is exit 1 plus a
-    traceback on stderr, which is what the unit's `OnFailure=` sees; `main()`
-    itself raises no `SystemExit`, so this asserts the exception, not an rc.
+    traceback on stderr into `autopipe.log` (the autopipe unit has no
+    `OnFailure=`, #2529; the wrapper's `done rc=` line is the tick-level
+    record); `main()` itself raises no `SystemExit`, so this asserts the
+    exception, not an rc.
     """
     cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
     object_store_root, _calls, _published = _prepare_autopipe(
@@ -2540,8 +2545,9 @@ def test_cancelled_display_ready_seed_fails_that_basin_and_the_tick_still_report
     exactly that call in a `try` that records `seed_failed` and `continue`s, so
     the blast radius is one basin: the OTHER basin still seeds, its run still
     ingests, the JSON summary is still emitted, and the tick still exits
-    non-zero so the unit's `OnFailure=` sees it. Two basins is the whole point
-    — with one, "the tick continues" and "the tick died" are indistinguishable.
+    non-zero into `autopipe.log` (no autopipe `OnFailure=`, #2529). Two basins
+    is the whole point — with one, "the tick continues" and "the tick died"
+    are indistinguishable.
 
     Deleting that `try`, or narrowing it to an exception class that excludes
     `QueryCanceled`, would swap "rc≠0 WITH a summary" for "rc≠0, traceback, NO

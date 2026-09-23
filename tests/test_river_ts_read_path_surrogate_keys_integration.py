@@ -1251,6 +1251,8 @@ def _coverage_oracle_statement() -> tuple[str, dict[str, Any]]:
         "variables": list(display_coverage.MVP_STATION_VARIABLES),
         "variable_count": len(display_coverage.MVP_STATION_VARIABLES),
         "force": False,
+        # #2504: unbound cutoff = the pre-#2504 guard.
+        "expired_cutoff": None,
         **dict.fromkeys(display_coverage._SCAN_PARAM_KEYS),
     }
     return display_coverage._REFRESH_SQL, parameters
