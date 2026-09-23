@@ -15,9 +15,15 @@ The probe SHALL be self-contained standard-library code that imports no
 repository package, so it can be staged and run from outside the deployed
 checkout — checking a feature branch out in that tree would put unreviewed code
 into the live scheduler tick. Any contract it therefore has to carry a second
-copy of — the governed pass filename predicate and the writer's maximum
-evidence size — SHALL be pinned to the service-layer definition by a parity
-test rather than by convention.
+copy of — the governed pass filename predicate, its prefix and accepted
+suffixes, and the writer's maximum evidence size — SHALL be pinned to the
+service-layer definitions by a parity test that asserts those constants
+themselves and not merely that a sample of names is classified alike, because a
+predicate later narrowed to a stricter name shape would still classify any fixed
+sample alike while the copy silently grew permissive. That parity test SHALL be
+routed in the repository's CI test selection so that it runs on a change to the
+service-layer definition; a parity test the selector cannot reach on the very
+diff that breaks parity is an after-the-fact detector, not a gate.
 
 The verdicts SHALL be evaluated in a fixed precedence order with the first
 matching condition winning: unreadable evidence, then the scheduler unit
@@ -36,8 +42,8 @@ pass-evidence retention.
 #### Scenario: The scheduler unit signals outrank the artifact signals
 
 - **WHEN** the scheduler timer is not enabled, or is inactive while its service
-  is also inactive, or the service's last result was not success, or the last
-  trigger is older than the configured bound while the service is inactive —
+  is also not running, or the service's last result was not success, or the last
+  trigger is older than the configured bound while the service is not running —
   and the newest pass artifact simultaneously carries the resource-limit
   fallback status
 - **THEN** the probe returns the corresponding unit verdict, not the artifact
@@ -49,7 +55,10 @@ pass-evidence retention.
 #### Scenario: Missing or untrustworthy evidence is never graded healthy
 
 - **WHEN** the systemd query cannot be executed, exits non-zero, or returns
-  fields the probe cannot parse; or the evidence root cannot be listed; or a
+  fields the probe cannot parse; or the evidence root cannot be listed, or holds
+  more entries than the probe's bounded enumeration admits — an unordered
+  truncation would silently invalidate the margin the bounded candidate scan
+  relies on, so reaching that bound is a reported fact rather than a default; or a
   governed artifact in the graded window is a symlink, is not a regular file,
   exceeds the writer's own maximum evidence size, fails to parse, or records no
   start time; or the tracker carries an unrecognized schema version
@@ -86,16 +95,30 @@ backstop for the case where the units are healthy but no artifact is being
 produced, and its bound SHALL be derived from the measured inter-pass interval
 with margin rather than from the timer's nominal cadence.
 
-Because the scheduler timer is armed relative to its service becoming inactive,
-the probe SHALL NOT grade a next-elapse signal — that timer reports no realtime
-next elapse at all — and SHALL treat an inactive timer as stopped only when the
-service is also inactive.
+The scheduler service is a oneshot: while a pass runs it reports the activating
+state and never the active state. Every verdict that is conditioned on the
+service not running — the stopped-timer verdict, the not-triggering verdict and
+the stale-evidence verdict — SHALL therefore treat both the active and the
+activating state as running, and SHALL read the sub-state alongside the active
+state. A verdict conditioned on equality with the active state alone would fire
+during a healthy long pass, which is the exact failure this requirement exists
+to prevent, and the stale-evidence verdict SHALL carry that condition
+structurally rather than rely on its threshold happening to exceed the longest
+observed pass.
+
+The probe SHALL NOT grade a next-elapse signal, because this timer is armed
+relative to its service becoming inactive and reports no realtime next elapse at
+all. The timer itself stays active for the whole of a pass, so an inactive timer
+SHALL be graded as stopped only when the service is also not running — a
+conjunction that is conservative rather than a description of any reachable
+in-flight geometry.
 
 #### Scenario: A long pass in flight is healthy
 
-- **WHEN** the scheduler timer reports an inactive state because it is waiting
-  for its service to finish, the service reports an active state, and the newest
-  completed pass artifact is therefore hours old
+- **WHEN** the scheduler timer reports the active state with a running sub-state
+  and the oneshot service reports the activating state with a start sub-state —
+  the observed geometry of a pass in flight — while the last trigger time and
+  the newest completed pass artifact are both older than their configured bounds
 - **THEN** the probe does not return the stopped-timer verdict, does not return
   the not-triggering verdict, and does not return the stale-evidence verdict
 - **AND** the remaining signals are still graded, so a genuine condition in the
@@ -103,9 +126,9 @@ service is also inactive.
 
 #### Scenario: Units healthy but artifacts stopped is its own verdict
 
-- **WHEN** the timer is enabled and armed and the service's last result was
-  success, but the newest completed pass artifact's recorded start time is older
-  than the configured artifact-age bound
+- **WHEN** the timer is enabled and armed, the service's last result was
+  success and the service is not running, but the newest completed pass
+  artifact's recorded start time is older than the configured artifact-age bound
 - **THEN** the probe returns the stale-evidence verdict and exits non-zero
 - **AND** when no governed terminal pass artifact exists at all, the probe
   returns the distinct evidence-unavailable verdict rather than the stale one
@@ -119,16 +142,28 @@ it; a pass that submitted nothing and held no blocked candidate, which breaks it
 because work that no longer appears blocked is no longer stalled; and a neutral
 pass, which neither extends nor breaks it.
 
-Neutral SHALL cover the pass statuses the scheduler's own no-progress circuit
-already declares neither-count-nor-clear — early-exit, pre-lock, lock-contended
-and resource-limit-aborted passes — and SHALL additionally cover a pass whose
-submission or blocked-candidate count is absent. That absence is real and is
-concentrated exactly where the probe is needed most: the resource-limit fallback
-artifact is the shape that omits those counts. Such a pass SHALL NOT be read as
-having submitted nothing, and SHALL NOT by itself make the whole tick
-probe-failed, because a legitimate degraded artifact inside the window would
-then suppress every other signal. The neutral count SHALL be recorded in the
-receipt.
+Neutral SHALL be decided by an observable the pass writer itself produces, not
+by a list of pass status strings. The scheduler's own no-progress circuit
+declares early-exit, pre-lock, lock-contended and resource-limit-aborted passes
+neither-count-nor-clear, and those are four early-return sites rather than four
+status values: the progress guard is constructed only after that region, so a
+pass that returned earlier carries no progress-guard block at all. Neutral
+SHALL therefore mean a pass whose artifact carries no progress-guard block, or
+whose submission or blocked-candidate count is absent.
+
+A status allowlist SHALL NOT be used in its place, because it is wrong in both
+directions on this lane: a reconciled-restart pass carrying dozens of blocked
+candidates — the first pass of the very incident this probe exists for — would
+be skipped as neutral, a preflight-blocked pass is fully observed and counted by
+the scheduler yet would also be skipped, and an early-exit pass has no status
+string of its own and would fall through to the idle case and reset the streak.
+
+The absent-count case is real and is concentrated exactly where the probe is
+needed most: the resource-limit fallback artifact is the shape that omits those
+counts. Such a pass SHALL NOT be read as having submitted nothing, and SHALL NOT
+by itself make the whole tick probe-failed, because a legitimate degraded
+artifact inside the window would then suppress every other signal. The neutral
+count SHALL be recorded in the receipt.
 
 #### Scenario: A degraded artifact neither advances nor blocks the streak
 
@@ -141,6 +176,15 @@ receipt.
 - **AND** the resource-limit condition is still reported, because it is carried
   by its own higher-precedence verdict
 
+#### Scenario: A fully observed pass is classified by its counts whatever its status
+
+- **WHEN** the graded window contains a pass that carries a progress-guard
+  block, reports a status other than the ordinary submitted or planned ones —
+  a reconciled restart, or a preflight block — and records zero submissions with
+  dozens of blocked candidates
+- **THEN** that pass extends the streak as blocked work
+- **AND** it is not treated as neutral, because the writer observed it fully
+
 #### Scenario: The streak needs sustained blocked work
 
 - **WHEN** the configured number of consecutive graded passes each submitted
@@ -152,7 +196,9 @@ receipt.
 #### Scenario: A transient degraded pass is reported on a window, not on being newest
 
 - **WHEN** a pass carrying the resource-limit fallback status falls inside the
-  configured lookback window but is no longer the newest pass
+  configured lookback window but is no longer the newest pass, the window being
+  evaluated over every artifact the probe successfully read rather than only
+  over the shorter streak window
 - **THEN** the probe returns the resource-limit verdict and exits non-zero,
   because that status holds only while its pass is newest — minutes on this lane
   — and a point check against the newest pass would almost never observe it

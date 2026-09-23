@@ -36,13 +36,24 @@
 「timer 死了」和「一趟长 pass 正在飞」混成同一个量，**不能**充当存活信号。
 存活必须直接读 systemd（照 refresh 探针读它那条 lane 的做法），产物年龄退为**独立的兜底**信号，
 阈值按实测 max 194 分钟留足余量（默认 360 分钟，范围校验 ≥240）。
+且 systemd 侧的判据同样必须实测：调度器 service 是 `Type=oneshot`，**在飞时
+`ActiveState=activating` / `SubState=start`，永远不会是 `active`**；timer 则在飞期间
+**始终 `active`**（`SubState` 在 `running`/`waiting` 间摆）。凡以「service 不在跑」为合取项的档
+（verdict 3/5/7）若写成 `== "active"`，会在健康长 pass 期间全部误报。
 
 **结论二**：探针最需要读的恰恰是降级产物，而那正是 `counts` 缺键的那批。
 「缺键即 0」会把降级 pass 读成「零提交」，「缺键即 `probe_failed`」会在窗口里一出现合法降级产物
-就压住全部信号。必须有第三类：**中性**（既不延长也不打断 streak），并记进 receipt。
-这与调度器自身 circuit 的既有口径一致 ——
-`infra/env/compute.scheduler-dbfree.env.example:148-150` 明文
-「Early-exit, pre-lock, lock-contended and resource-limit-aborted passes neither count nor clear」。
+就压住全部信号。必须有第四类：**中性**（既不延长也不打断 streak），并记进 receipt。
+
+但中性**不能**用 status 允许表定义。`infra/env/compute.scheduler-dbfree.env.example:148-150`
+的「Early-exit, pre-lock, lock-contended and resource-limit-aborted passes neither count nor clear」
+说的是**四类早退写入点**，不是四个 status 字符串；映射成词表两头都错 —— 实测：
+`scheduler_2026092223_7e6955b406ba` 是 `restart_reconciled` 且 `blocked_candidate_count=47`，
+正是 #2570 四趟停摆的**第一趟**，按词表会被当中性跳过。
+改用写方派生的可观测量：`progress_guard` 在 `scheduler_runtime.py:834` 才构造，
+**早退 pass 的产物里没有该键**。实测 276 份完全吻合 —— guard 缺席的恰好是
+4 份 `resource_limit_blocked` + 1 份 `lock_contended`，而 `restart_reconciled`、
+`preflight_blocked` 都带 guard、会按 counts 正确判为 blocked。
 
 ## What Changes
 
@@ -52,14 +63,14 @@
 
 | 序 | verdict | 触发 |
 |---|---|---|
-| 1 | `probe_failed` | 运行期证据不可信（systemd 查询失败、产物超界/软链/坏 JSON/缺 `started_at`、tracker schema 不匹配） |
+| 1 | `probe_failed` | 运行期证据不可信（systemd 查询失败、产物超界/软链/坏 JSON/缺 `started_at`、tracker schema 不匹配、目录枚举触顶） |
 | 2 | `timer_not_enabled` | 调度器 timer `UnitFileState != enabled` |
-| 3 | `timer_stopped` | timer `ActiveState != active` **且** service 也不活跃（lane 不会再触发） |
+| 3 | `timer_stopped` | timer `ActiveState != active` **且** service 也不在跑（lane 不会再触发） |
 | 4 | `scheduler_service_failed` | 调度器 service `Result != success` |
-| 5 | `scheduler_not_triggering` | `LastTriggerUSec` 超龄 **且** service 当前不活跃 |
+| 5 | `scheduler_not_triggering` | `LastTriggerUSec` 超龄 **且** service 当前不在跑 |
 | 6 | `evidence_unavailable` | 根下无任何治理终态 pass 产物 |
-| 7 | `evidence_stale` | 最新终态产物 `started_at` 超龄（systemd 说活着但没产物 —— 独立兜底） |
-| 8 | `pass_limit_blocked` | 回看窗口内**存在**某趟 `status == "resource_limit_blocked"` |
+| 7 | `evidence_stale` | service 当前不在跑 **且** 最新终态产物 `started_at` 超龄（systemd 说活着但没产物 —— 独立兜底） |
+| 8 | `pass_limit_blocked` | 全部已解析产物中，回看窗口内**存在**某趟 `status == "resource_limit_blocked"` |
 | 9 | `lock_contended_persistent` | 连续 ≥N 趟 `status == "lock_contended"` |
 | 10 | `submission_stalled` | 连续 ≥N 趟「零提交且有阻塞候选」 |
 | 11 | `no_progress_circuit_open` | tracker 有未被抑制的条目 `consecutive_passes >= 阈值` |
@@ -106,7 +117,8 @@ Blast radius: 探针只读不改调度器；但装在 node-22 生产 user-system
   安装动作若碰到 `nhms-compute-scheduler.timer` 会打断生产调度
 Selected risk packs: Error handling/部分输出；Resource limits/大输入；Config/项目设置；
   File IO/路径安全；Legacy compatibility；Concurrency-ordering（仅 ordering 轴）
-Evidence floor: 11 档判级各自用例 + 优先级用例 + 三类 pass 口径（延长/打断/中性）各自用例 +
+Evidence floor: 11 档判级各自用例 + 优先级用例（含「在飞几何不得判死」）+ 四类 pass 口径各自用例 +
+  `restart_reconciled`+blocked>0 必判 blocked 的回归用例 +
   排序只信 `started_at` 不信文件名/mtime + 有界读与 fail-closed + 慢性抑制不误伤且不越界 +
   unit 静态断言 + 先例套件全绿 + node-22 实机 live receipt
 ```
