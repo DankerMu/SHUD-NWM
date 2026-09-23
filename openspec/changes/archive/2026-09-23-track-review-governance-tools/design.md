@@ -121,7 +121,7 @@ The truth sources are `select_tests` probes and tracked-module AST derivation, n
 | orchestrator-structural-burndown "Entropy audit enforcement and its corpus split…" | `test_entropy_audit_script.py` | the 15 `tests/test_entropy_audit_*.py` partitions (`ENTROPY_AUDIT_TESTS`) |
 | real-integration-test-matrix "Barrier concurrency harnesses…" | `test_scheduler_file_provider_refresh.py` | the partitions that now hold the thread-lock serialization and receipt-retention tests |
 
-The implementer measures the replacement sets without editing specs, and the orchestrator writes the blocks. Closure is `git grep -F` of the five deleted paths over `openspec/specs/` returning nothing.
+The implementer measures the replacement sets without editing specs, and the orchestrator writes the blocks. Closure is `git grep -F` of the five deleted paths over `openspec/specs/` returning nothing after archive; before archive every hit lies inside a requirement restated by a MODIFIED block.
 
 ### D4 (#2044): ruling — make it recorded and alertable (plan only; not implemented here)
 

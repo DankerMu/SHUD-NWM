@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change issue-126-real-integration-test-matrix. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Real database migrations are verified
 
 The system SHALL provide an integration test lane that applies all `db/migrations/*.sql` files from an empty PostgreSQL database with PostGIS and TimescaleDB available, then verifies schema metadata and idempotency.
@@ -335,7 +337,7 @@ real code-under-test calls, race window, and substantive concurrency assertions.
 This requirement initially governs the four sites explicitly routed by #1645: the concurrent
 idempotency reservation test in `tests/test_gateway_reconcile_idempotency_barrier.py`, the file-submit
 collision test in `tests/test_gateway_reconcile_file_submit_barrier.py`, and the thread-lock
-serialization and receipt-retention tests in `tests/test_scheduler_file_provider_refresh.py`. It does
+serialization and receipt-retention tests, which live in `tests/test_scheduler_refresh_barrier_seam.py` since the #1101 partition of the former refresh monolith. It does
 not require an in-process test harness to cancel an already-started worker that blocks indefinitely
 outside the Barrier, does not make a repository-wide claim about unrelated Barrier sites, and does
 not replace global warning/timeout policy tracked by #1646.
@@ -566,4 +568,3 @@ contributes nothing.
   consecutive names differ, that a name matches the declared `nhms_it_` plus
   32 hex-character shape, and that its suffix parses as a UUID — are retained,
   so the stub does not become the only thing under test
-
