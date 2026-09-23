@@ -116,8 +116,10 @@ The sub-state SHALL be tested against a named set of not-running values rather
 than against inequality with the idle value: a oneshot whose run exited
 non-zero reports a failed sub-state, and reading that as running would gate off
 the stopped-timer verdict and report the lower-precedence service-failure
-verdict in its place. An absent sub-state SHALL count as not running, which is
-the direction that alarms.
+verdict in its place. An absent sub-state SHALL NOT be graded as either state:
+a unit query that returns no sub-state is incomplete evidence and SHALL produce
+the probe-failed verdict, which alarms at a higher precedence than any verdict
+the sub-state would have gated.
 
 The probe SHALL NOT grade a next-elapse signal, because this timer is armed
 relative to its service becoming inactive and reports no realtime next elapse at
@@ -169,8 +171,13 @@ declares early-exit, pre-lock, lock-contended and resource-limit-aborted passes
 neither-count-nor-clear, and those are four early-return sites rather than four
 status values: the progress guard is constructed only after that region, so a
 pass that returned earlier carries no progress-guard block at all. Neutral
-SHALL therefore mean a pass whose artifact carries no progress-guard block, or
-whose submission or blocked-candidate count is absent.
+SHALL therefore mean a pass whose artifact carries no progress-guard block,
+whose submission or blocked-candidate count is absent, or whose status is the
+resource-limit fallback. That last clause is not a return to a status allowlist
+but a second reading of the same writer: the resource-limit path writes both
+counts as zero and may still attach a progress-guard block, so a guard-tripped
+resource-limit pass would otherwise read as idle and reset the streak — the
+opposite of what the scheduler declares for that class.
 
 A status allowlist SHALL NOT be used in its place, because it is wrong in both
 directions on this lane: a reconciled-restart pass carrying dozens of blocked
@@ -205,6 +212,22 @@ count SHALL be recorded in the receipt.
   dozens of blocked candidates
 - **THEN** that pass extends the streak as blocked work
 - **AND** it is not treated as neutral, because the writer observed it fully
+
+A neutral pass SHALL NOT consume a position in whatever bound the streak search
+scans. Counting the streak inside a window whose size equals the alert threshold
+makes the verdict unreachable as soon as one neutral pass falls inside it, which
+on this lane is the common case rather than the exception. The search SHALL
+instead run over the prefix the ordering margin can vouch for, stop at the first
+pass that submitted work or held no blocked candidate, and report how many
+neutral passes it skipped.
+
+#### Scenario: A neutral pass does not cost the streak a position
+
+- **WHEN** the configured streak length is reached only by passes that are not
+  adjacent, because neutral passes are interleaved among them, under the shipped
+  default thresholds
+- **THEN** the submission-stalled verdict is returned
+- **AND** the receipt records how many neutral passes the search skipped
 
 #### Scenario: The streak needs sustained blocked work
 

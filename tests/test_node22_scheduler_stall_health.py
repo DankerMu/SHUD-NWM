@@ -1178,6 +1178,125 @@ def test_s7_a_fully_observed_pass_is_classified_by_its_counts_whatever_its_statu
     assert receipt["passes"]["neutral_count"] == 0
 
 
+# Newest-first shapes under the SHIPPED defaults.  The first one is the
+# Phase 3 P1: twenty-one blocked passes with one neutral pass at position 3.
+# Walked inside a window equal to the threshold (`max(20, 5) = 20`) the neutral
+# pass spends a slot and the streak tops out at 19, so the verdict could never
+# fire in production.  The second is the other side of the same boundary: the
+# neutral pass is still skipped, but an idle pass halts the search one short of
+# the threshold, so the wider search bound does not buy a streak it has not got.
+SHIPPED_DEFAULT_STREAKS = {
+    "neutral_interleaved": (
+        ["blocked", "blocked", "neutral", *["blocked"] * 19],
+        "submission_stalled",
+        21,
+    ),
+    "idle_halts_one_short": (
+        [*["blocked"] * 10, "neutral", *["blocked"] * 9, "idle", *["blocked"] * 5],
+        "ok",
+        19,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SHIPPED_DEFAULT_STREAKS))
+def test_s8_a_neutral_pass_does_not_cost_the_streak_a_position_at_the_shipped_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    shapes, expected, expected_streak = SHIPPED_DEFAULT_STREAKS[case]
+    shipped = {
+        probe.ENV_NO_SUBMISSION_PASSES: "20",
+        probe.ENV_LOCK_PASSES: "5",
+        probe.ENV_SCAN_LIMIT: "64",
+        probe.ENV_CIRCUIT_PASSES: "20",
+    }
+    # The literals ARE the shipped defaults; if a default moves, this test must
+    # be re-derived rather than silently exercising some other geometry.
+    assert (
+        probe.DEFAULT_NO_SUBMISSION_PASSES,
+        probe.DEFAULT_LOCK_PASSES,
+        probe.DEFAULT_SCAN_LIMIT,
+        probe.DEFAULT_CIRCUIT_PASSES,
+    ) == (20, 5, 64, 20)
+
+    root = _evidence_root(tmp_path)
+    for index, shape in enumerate(shapes):
+        minutes = 5 + index * 10
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                blocked=4 if shape == "blocked" else 0,
+                guard=shape != "neutral",
+            ),
+        )
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root, config=shipped)
+    receipt = _receipt(receipts)
+
+    assert receipt["verdict"] == expected
+    assert status == (0 if expected == "ok" else 1)
+    assert receipt["signals"]["no_submission_streak"] == expected_streak
+    assert receipt["signals"]["no_submission_neutral_skipped"] == 1
+    assert receipt["signals"]["no_submission_passes"] == 20
+    # The search bound is the ordering-safe prefix, not the threshold.
+    assert receipt["evidence"]["streak_window"] == 64 - probe.HOUR_BUCKET_MARGIN
+
+
+def test_s9_a_guarded_resource_limit_pass_with_zero_counts_does_not_break_the_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resource-limit shape the writer CAN produce and the probe had missed.
+
+    `scheduler_runtime.py` writes `counts` with both graded keys at zero on
+    that path and attaches `progress_guard` whenever the error details carry
+    one.  Without the status rule that pass reads as idle and resets the
+    streak; the scheduler itself says resource-limit-aborted passes neither
+    count nor clear.  Pushed outside the lookback (as in s6) so the
+    higher-precedence resource-limit verdict does not decide the tick.
+    """
+
+    root = _evidence_root(tmp_path)
+    shapes = ["blocked", "limit", "blocked", "blocked"]
+    for index, shape in enumerate(shapes):
+        minutes = 5 + index * 10
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                status="resource_limit_blocked" if shape == "limit" else "planned",
+                submitted=0,
+                blocked=0 if shape == "limit" else 4,
+                guard=True,
+                counts=True,
+            ),
+        )
+
+    status, receipts, _log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        now=NOW + timedelta(minutes=200),
+        config={
+            probe.ENV_MAX_PASS_AGE_MINUTES: "240",
+            probe.ENV_LIMIT_LOOKBACK_MINUTES: "30",
+            # Search bound 17 - 12 = 5 covers all four passes.
+            probe.ENV_SCAN_LIMIT: "17",
+        },
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["signals"]["resource_limit_passes_in_window"] == 0
+    assert receipt["passes"]["neutral_count"] == 1
+    assert receipt["passes"]["idle_count"] == 0
+    assert receipt["signals"]["no_submission_streak"] == 3
+    assert receipt["signals"]["no_submission_neutral_skipped"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 3.10 / 3.11 -- streak and window boundaries
 # ---------------------------------------------------------------------------
@@ -1287,6 +1406,55 @@ def test_b4_the_lookback_window_is_not_shortened_by_the_streak_window(
     assert receipt["verdict"] == "pass_limit_blocked"
     assert receipt["evidence"]["streak_window_passes"] == 3
     assert receipt["evidence"]["lookback_window_passes"] == 7
+
+
+@pytest.mark.parametrize(("limit_passes", "listed", "truncated"), [(2, 2, 0), (22, 20, 2)])
+def test_b5_the_receipt_names_the_resource_limit_passes_it_graded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_passes: int,
+    listed: int,
+    truncated: int,
+) -> None:
+    """The runbook tells the operator to open those artifacts, so name them.
+
+    Bounded like every other receipt list: past `MAX_RECEIPT_LIST_ENTRIES`
+    the overflow is counted, never silently dropped.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_pass(
+        root,
+        _pass_name(1, "0" * 12),
+        _pass_payload(started_at=NOW - timedelta(minutes=1), status="submitted", submitted=1),
+    )
+    written = []
+    for index in range(limit_passes):
+        minutes = 5 + index * 4
+        name = _pass_name(minutes, f"{index + 1:012x}")
+        written.append(name)
+        _write_pass(
+            root,
+            name,
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                status="resource_limit_blocked",
+                counts=False,
+            ),
+        )
+
+    status, receipts, _log = _run(
+        tmp_path, monkeypatch, evidence_root=root, config={probe.ENV_SCAN_LIMIT: "40"}
+    )
+    signals = _receipt(receipts)["signals"]
+
+    assert status == 1
+    assert signals["resource_limit_passes_in_window"] == limit_passes
+    assert len(signals["resource_limit_pass_names"]) == listed
+    assert signals["resource_limit_pass_names_truncated"] == truncated
+    assert set(signals["resource_limit_pass_names"]) <= set(written)
+    # Newest first, so the list clips away the oldest, not the freshest.
+    assert signals["resource_limit_pass_names"][0] == written[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1712,11 +1880,72 @@ def test_c4_the_shipped_defaults_satisfy_the_probes_own_range_rules(
 
     config = probe.load_config()
 
-    assert config.scan_limit >= config.streak_window + probe.HOUR_BUCKET_MARGIN
+    # The range rule itself, spelled against the thresholds rather than
+    # against `streak_window` (which is DERIVED from `scan_limit`, so a check
+    # written against it would be true by construction).
+    assert config.scan_limit >= (
+        max(config.no_submission_passes, config.lock_passes) + probe.HOUR_BUCKET_MARGIN
+    )
+    # The streak search bound must hold strictly more than the threshold, or
+    # a single neutral pass inside it makes `submission_stalled` unreachable.
+    assert config.streak_window == config.scan_limit - probe.HOUR_BUCKET_MARGIN
+    assert config.streak_window > config.no_submission_passes
     assert config.max_entries_scanned >= config.scan_limit
     assert config.suppressed_reasons == frozenset({SUPPRESSED_REASON})
     assert config.timer_unit == "nhms-compute-scheduler.timer"
     assert config.service_unit == "nhms-compute-scheduler.service"
+
+
+def test_c5_an_explicitly_empty_suppression_list_clears_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=` in a drop-in.
+
+    The one knob whose effect is to silence an alert must distinguish "unset"
+    from "set to nothing"; folding the empty value back into the default would
+    keep the checked-in suppression in force against the operator's explicit
+    instruction.
+    """
+
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+    _write_tracker(
+        root, [_tracker_entry(reason=SUPPRESSED_REASON, consecutive_passes=1300, subject_kind="job")]
+    )
+
+    status, receipts, _log = _run(
+        tmp_path, monkeypatch, evidence_root=root, config={probe.ENV_SUPPRESSED_REASONS: ""}
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "no_progress_circuit_open"
+    assert receipt["suppressed_reasons"] == []
+    assert receipt["suppressed"] == []
+    assert receipt["open"][0]["reason"] == SUPPRESSED_REASON
+
+    # And unset still means the checked-in default.
+    monkeypatch.delenv(probe.ENV_SUPPRESSED_REASONS)
+    assert probe.load_config().suppressed_reasons == frozenset({SUPPRESSED_REASON})
+
+
+def test_c6_a_receipt_root_reached_through_a_symlink_into_the_evidence_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both roots are resolved the same way, so a symlink cannot launder one."""
+
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+    alias = tmp_path / "looks-elsewhere"
+    alias.symlink_to(root, target_is_directory=True)
+
+    status, _receipts, log = _run(
+        tmp_path, monkeypatch, evidence_root=root, receipt_root=alias / "stall-health"
+    )
+
+    assert status == 2
+    assert not log.exists()
+    assert not (root / "stall-health").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1942,15 +2171,43 @@ def test_r1b_a_saturated_tick_still_produces_a_writable_receipt(
     assert receipt["suppressed_reasons_truncated"] == 60
 
 
+def _github_heading_slug(text: str) -> str:
+    """GitHub's heading anchor rule: lowercase, drop punctuation, spaces to hyphens."""
+
+    return re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-")
+
+
+def _runbook_heading_slugs() -> list[str]:
+    slugs: list[str] = []
+    in_fence = False
+    for line in RUNBOOK.read_text().splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if match and not in_fence:
+            slugs.append(_github_heading_slug(match.group(1)))
+    return slugs
+
+
 @pytest.mark.parametrize("verdict", sorted(probe.RUNBOOK_ANCHORS))
 def test_r2_every_verdict_names_a_runbook_anchor_that_exists(verdict: str) -> None:
-    """4.6 mechanically: the pointer the probe emits must resolve in the runbook."""
+    """4.6 mechanically: the pointer the probe emits must resolve in the runbook.
+
+    The anchors are headings, not inline HTML ids (the repo's Markdown lint
+    admits none).  The pointer resolves only if exactly one heading slugs to
+    it: GitHub suffixes a duplicate with `-1`, which would send the operator
+    to whichever copy came first.
+    """
 
     pointer = probe.runbook_pointer(verdict)
     anchor = pointer.split("#", 1)[1]
+    slugs = _runbook_heading_slugs()
 
     assert pointer.startswith(probe.RUNBOOK_PATH + "#")
-    assert f'id="{anchor}"' in RUNBOOK.read_text()
+    assert slugs.count(anchor) == 1, f"{anchor!r} is the slug of {slugs.count(anchor)} headings"
+    # The heading text IS the anchor, so no slugger variant can rewrite it.
+    assert re.search(rf"^#{{1,6}} {re.escape(anchor)}$", RUNBOOK.read_text(), flags=re.MULTILINE)
 
 
 def test_r3_a_non_healthy_verdict_writes_a_runbook_pointer_to_stderr(

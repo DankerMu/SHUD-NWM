@@ -45,6 +45,14 @@ Change surface：
   Phase 1 核实；早先引的 `:1132-1134` 是过期行号），生产模块路径只走 `PATH_TEST_RULES`。
   所以必须显式加路由行，照先例（`select_ci_tests.py:4068` / `:4345` 的
   「#2146 widened this row by one」、`:4365-4379`）。
+  **探针自带的每一份契约副本都要有行**：除 `scheduler_evidence.py` 外，
+  tracker 的 `schema_version` / 文件名副本来自
+  `services/orchestrator/scheduler_no_progress.py:54,56`，同样必须建行 ——
+  否则改 `STATE_SCHEMA_VERSION` 的 PR 会绿着合并，合并后探针每 tick 判 `probe_failed`
+  （优先级 1，盖住其余十档，对这条 lane 彻底失明）。仓库为同一类问题付过一次代价，
+  见 `tests/test_select_ci_tests.py:396-404`（#2146 round 2）。
+  **路由行本身也要有回归钉子**：照先例 `tests/test_select_ci_tests.py:406-461`
+  的 `NODE22_REFRESH_READER_EDGES`，对每条 edge 断言「存在」+「删掉即红」。
   **测试套件本身不需要路由行**：`tests/*.py` 在 `:5366` 就走自选中分支，不进 `PATH_TEST_RULES`。
   不加的连带后果：只动探针/unit 的 PR 一条测试都选不出，降级成 `--collect-only` 零断言冒烟。
 - `runtime-evidence-and-operations/spec.md:393` 的作用域明写是
@@ -170,7 +178,15 @@ systemd 侧全绿而产物断流。它**同样**要求 service 当前不在跑 �
 分类规则（对参与 streak 判级的每一趟终态产物）：
 
 - **neutral**（跳过，既不延长也不打断）：产物**无 `progress_guard` 键**，
-  **或** `counts.submitted_count` / `counts.blocked_candidate_count` 任一缺失。
+  **或** `counts.submitted_count` / `counts.blocked_candidate_count` 任一缺失，
+  **或** `status == "resource_limit_blocked"`。
+  第三条是 Phase 3 评审追**写方源码**补出来的，不是退回 status 词表：
+  `scheduler_runtime.py:1505-1527` 的 resource-limit 路径写 `counts=_empty_counts()`
+  （两个键都在、值为 0）**且**在 `error.details` 带 guard 时附上 `progress_guard` ——
+  这种形状会被前两条漏掉、落进 `idle` 去**打断** streak，与调度器自己
+  「resource-limit-aborted 既不计也不清」相悖。本 session 实测的 5 份
+  `resource_limit_blocked` 恰好全是 guard 缺席（故前两条够用），但写方能产出 guard 在场的形状，
+  按 fail-safe 补上。**仍然禁止**把中性整体退化成 status 允许表。
   后者是独立兜底：实测缺键的 4 份恰是 `resource_limit_blocked` 降级产物 ——
   探针最需要读的那批，既不能当 0，也不能因它整体 `probe_failed`。
 - **progress**：`submitted_count > 0` → **打断** streak。
@@ -196,10 +212,10 @@ pass 名是 `scheduler_<YYYYMMDDHH>_<hex12>.json`（`scheduler_runtime.py:571`�
    （`.json` 与 `.pre_execution.json` 比到 `j` < `p`），且实测 21 份与终态产物长期并存；
    若先截断后剔除，边界处会优先保留 pre_execution 而丢掉对应终态产物，`+12` 的余量论证即失效。
 3. 逐个 bounded、no-follow、≤ `MAX_EVIDENCE_BYTES` 读取并解析；
-4. 按**内容里的 `started_at`** 降序排。**streak 类判级**（verdict 9/10）取前
-   `max(no_submission_passes, lock_passes)` 趟；**verdict 8 的判定集合是全部成功解析出的产物
+4. 按**内容里的 `started_at`** 降序排。**streak 类判级**（verdict 9/10）的遍历范围见下
+   「streak 窗口」；**verdict 8 的判定集合是全部成功解析出的产物
    （≤ `scan_limit`）中 `started_at` 落在 `limit_lookback_minutes` 内的那些**，
-   而不是那 20 趟的子集 —— 否则 pass 密集时 120 分钟的回看会被趟数悄悄截短。
+   而不是 streak 前缀的子集 —— 否则 pass 密集时 120 分钟的回看会被趟数悄悄截短。
    两个集合的口径差异必须写进 receipt（各自的参与趟数）。
 
 余量论证：小时桶与 `started_at` 的小时同源，故桶间序即时序，乱序只在桶内；
@@ -207,6 +223,23 @@ pass 名是 `scheduler_<YYYYMMDDHH>_<hex12>.json`（`scheduler_runtime.py:571`�
 `scan_limit - bucket_max` 个，全部早于边界桶，故 top-N 不被污染。实测单桶最多 8 趟，
 常量取 12 留余量；范围校验 `scan_limit >= max(no_submission_passes, lock_passes) + 12`，
 违反即退出码 2。
+
+## streak 窗口：中性趟不得占用名额（Phase 3 评审的 P1）
+
+初版把两个 streak 都算在 `records[:max(no_submission_passes, lock_passes)]` 上。
+默认值下该窗口 = `max(20, 5) = 20`，**恰好等于** `no_submission_passes` 阈值 20，
+于是窗口里只要出现一个 neutral（它 `continue` 跳过，但**仍占掉一个名额**），
+streak 上限就是 19，`19 >= 20` 恒假 —— **`submission_stalled` 在生产默认值下不可达**。
+live receipt 实测 neutral 约 1/16 趟，任意 20 趟窗口大概率带 neutral。
+原测试之所以没抓到，是因为它把 `LOCK_PASSES` 调到 5、阈值调到 3，人为留出了余量。
+
+修正：**`blocked_streak` 的遍历范围不是阈值本身，而是排序论证能保证正确的前缀**
+（`scan_limit - HOUR_BUCKET_MARGIN`，默认 64−12=52），在其上跳过 neutral、
+遇到 progress/idle 即停、数满 `no_submission_passes` 个 blocked 即判定。
+被跳过的 neutral 趟数写进 receipt。
+
+`lock_contended_streak` 的「consecutive」语义与 spec 一致（按 status 直判，非 lock 即打断），
+不受中性规则影响；但其遍历范围同样改为该前缀以保持一致。
 
 ## 慢性条目：无状态 reason 白名单（已定，不留「或」）
 

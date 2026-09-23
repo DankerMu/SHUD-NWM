@@ -4426,6 +4426,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "services/orchestrator/scheduler_evidence.py",
         ("tests/test_node22_scheduler_stall_health.py",),
     ),
+    # The second D4 parity edge, same reasoning. The probe reads the
+    # no-progress tracker itself (the module's `load_state(dir_fd)` is on the
+    # circuit's WRITE path), so it carries its own copy of the tracker's
+    # `STATE_SCHEMA_VERSION` and `STATE_FILENAME`, pinned by the suite's
+    # tracker parity test. Without this row a PR bumping the schema version
+    # merges green and the probe then grades `probe_failed` on every tick --
+    # precedence 1, masking all ten other verdicts on this lane. The same class
+    # of unrouted reader edge already cost #2146 a round
+    # (`tests/test_select_ci_tests.py`, NODE22_REFRESH_READER_EDGES). Additive
+    # like the row above.
+    PathTestRule(
+        "services/orchestrator/scheduler_no_progress.py",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
     PathTestRule(
         "scripts/node27_download_once.sh",
         ("tests/test_node27_download_cycles.py",),

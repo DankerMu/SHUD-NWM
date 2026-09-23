@@ -461,6 +461,64 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
         )
 
 
+# #2570 -- every route into the node-22 scheduler stall probe suite. The suite
+# `read_text`s both probe units, imports the probe module, and pins the probe's
+# stdlib-only (D4) copies of `scheduler_evidence` (governed pass filename
+# predicate, prefix, suffixes, `MAX_EVIDENCE_BYTES`) and of
+# `scheduler_no_progress` (tracker `STATE_SCHEMA_VERSION`, `STATE_FILENAME`).
+# The two service-layer modules are production paths, which only
+# PATH_TEST_RULES can route; drifting either one without its row merges green
+# and leaves the probe at `probe_failed` (tracker) or mis-classifying artifacts
+# (evidence) on every tick.
+NODE22_STALL_PROBE_SUITE = "tests/test_node22_scheduler_stall_health.py"
+NODE22_STALL_READER_EDGES: tuple[str, ...] = (
+    "infra/systemd/nhms-node22-scheduler-stall-health.service",
+    "infra/systemd/nhms-node22-scheduler-stall-health.timer",
+    "scripts/node22_scheduler_stall_health.py",
+    "services/orchestrator/scheduler_evidence.py",
+    "services/orchestrator/scheduler_no_progress.py",
+)
+# The probe module's row is a PIN, not the only route: the same-name derivation
+# (`scripts/<x>.py` -> `tests/test_<x>.py`) reaches the suite without it, so
+# removing the row cannot red a complement assertion for that edge. Every other
+# edge has no second route and must go dark with its row.
+NODE22_STALL_DERIVED_EDGES = frozenset({"scripts/node22_scheduler_stall_health.py"})
+
+
+@pytest.mark.parametrize(
+    "source",
+    NODE22_STALL_READER_EDGES,
+    ids=[PurePosixPath(source).name for source in NODE22_STALL_READER_EDGES],
+)
+def test_node22_stall_reader_edges_select_the_probe_suite(source: str) -> None:
+    assert NODE22_STALL_PROBE_SUITE in select_tests([source], repo_root=Path("."))
+
+
+def test_node22_stall_reader_edge_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The complement leg: drop exactly these rows and the edges go dark.
+
+    Also asserts the one derived edge STAYS lit without its row, so the
+    exemption above is a measured fact rather than a convenience: if the
+    derivation ever stops reaching the suite, this reds and the row becomes
+    the only route and joins the complement set.
+    """
+    from scripts import select_ci_tests
+
+    edges = set(NODE22_STALL_READER_EDGES)
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in edges)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(edges), "an edge has no row of its own"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for source in NODE22_STALL_READER_EDGES:
+        selected = select_tests([source], repo_root=Path("."))
+        if source in NODE22_STALL_DERIVED_EDGES:
+            assert NODE22_STALL_PROBE_SUITE in selected, f"{source} lost its same-name derivation"
+        else:
+            assert NODE22_STALL_PROBE_SUITE not in selected, (
+                f"{source} still reaches the probe suite without its rule"
+            )
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),

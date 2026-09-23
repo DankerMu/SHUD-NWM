@@ -164,7 +164,10 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
 
 #### 6.2.1 十一档 verdict 的处置
 
-<a id="stall-probe-failed"></a>
+下面每档的五级标题就是探针 receipt/stderr 里 `runbook=` 指针的锚点，标题文本即锚点
+id（小写字母与连字符，渲染器 slug 后不变），改标题等于改探针的对外指针。
+
+##### stall-probe-failed
 
 **1. `probe_failed`** —— 运行期证据不可信，本 tick 不可判级。成因：`systemctl`
 查询失败/输出不可解析、产物超 `MAX_EVIDENCE_BYTES`（5 MB）/软链/非普通文件/坏
@@ -175,8 +178,12 @@ JSON/缺 `started_at`、tracker `schema_version` 不匹配或条目残缺、证�
 （`scripts/node22_scheduler_evidence_retention.py` + 它那对 timer/service）还活着，
 再决定抬阈值还是清积压。**不要**因为看不懂就抬阈值
 把它压成 `ok` —— 枚举触顶后排序余量论证失效，判级结果不可信。
+`errors[]` 里若是 `timer: systemctl returned no UnitFileState`，**通常意味着
+`nhms-compute-scheduler.timer` 的 unit 文件被删了**（`systemctl show` 对不存在的
+unit 仍退出 0，只是 `UnitFileState` 为空）：按下面第 2 档的恢复段落处置，而不是当成
+探针自身故障。
 
-<a id="stall-timer-not-enabled"></a>
+##### stall-timer-not-enabled
 
 **2. `timer_not_enabled`** —— `nhms-compute-scheduler.timer` 的
 `UnitFileState != enabled`。最狠的一档：重启后仍然死。
@@ -184,7 +191,7 @@ JSON/缺 `started_at`、tracker `schema_version` 不匹配或条目残缺、证�
 [`../current-production-ops.md`](../current-production-ops.md) §3.1 的调度器
 启停段落。
 
-<a id="stall-timer-stopped"></a>
+##### stall-timer-stopped
 
 **3. `timer_stopped`** —— timer `ActiveState != active` **且 service 也不在跑**。
 lane 现在不会再触发。合取项是**保守**写法，不是「timer 在飞时会 inactive」——
@@ -192,7 +199,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 间摆），`list-timers` 的 NEXT 显示 `-` 只是 active 期间不计 realtime next elapse。
 处置：查 journal 里 timer 最后一次状态跃迁，再按 §3.1 恢复。
 
-<a id="stall-scheduler-service-failed"></a>
+##### stall-scheduler-service-failed
 
 **4. `scheduler_service_failed`** —— service 的 `Result != success`。
 **没有失败值允许表**：systemd 对 oneshot 的取值域含 `exit-code`/`signal`/
@@ -202,7 +209,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 失败原因；`resources` 一类多半是 Slurm 侧，转
 [`../failed-basin-retry.md`](../failed-basin-retry.md)。
 
-<a id="stall-scheduler-not-triggering"></a>
+##### stall-scheduler-not-triggering
 
 **5. `scheduler_not_triggering`** —— `LastTriggerUSec` 超过
 `NHMS_SCHEDULER_STALL_MAX_TRIGGER_AGE_MINUTES`（默认 360 分钟）**且 service 当前
@@ -212,7 +219,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 处置：`systemctl --user list-timers nhms-compute-scheduler.timer` 看 NEXT；
 若 timer 活着却不触发，查 user-systemd 的 `daemon` 是否被重新执行过。
 
-<a id="stall-evidence-unavailable"></a>
+##### stall-evidence-unavailable
 
 **6. `evidence_unavailable`** —— 证据根下**没有任何治理终态 pass 产物**。
 与第 7 档刻意分开：这是「从来没写过」，不是「写过但很旧」。
@@ -220,7 +227,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 `NHMS_SCHEDULER_STALL_EVIDENCE_ROOT` 指向同一目录；再确认 retention 没有把整个
 目录清空（`retention/` 子目录里有它自己的 receipt）。
 
-<a id="stall-evidence-stale"></a>
+##### stall-evidence-stale
 
 **7. `evidence_stale`** —— service 当前**不在跑**，且最新终态产物的 `started_at`
 超过 `NHMS_SCHEDULER_STALL_MAX_PASS_AGE_MINUTES`（默认 360 分钟）。
@@ -230,7 +237,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 处置：`journalctl --user -u nhms-compute-scheduler.service --since -6h`，找为什么
 每趟都提前 return（多半是 preflight 或 lock）。
 
-<a id="stall-pass-limit-blocked"></a>
+##### stall-pass-limit-blocked
 
 **8. `pass_limit_blocked`** —— 回看窗口
 `NHMS_SCHEDULER_STALL_LIMIT_LOOKBACK_MINUTES`（默认 120 分钟）内**存在**某趟
@@ -238,11 +245,13 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 判定：该状态只在那趟是最新期间成立（实测空闲态 4.5–27 分钟），定点判定配上 15
 分钟探针周期几乎观测不到。这档压在后三档之上，因为那趟产物本身已降级（`counts`
 缺键），诊断窗口最窄。
-处置：打开 receipt 里 `signals.resource_limit_passes_in_window` 对应的那趟产物，
+处置：receipt 的 `signals.resource_limit_pass_names` 列出窗口内这几趟产物的文件名
+（有界，超出部分计入 `resource_limit_pass_names_truncated`；
+`signals.resource_limit_passes_in_window` 是总数），在证据根下逐个打开，
 读 `limit` 块，转
 [`../scheduler-dbfree-typed-reasons.md`](../scheduler-dbfree-typed-reasons.md)。
 
-<a id="stall-lock-contended-persistent"></a>
+##### stall-lock-contended-persistent
 
 **9. `lock_contended_persistent`** —— 连续 ≥ `NHMS_SCHEDULER_STALL_LOCK_PASSES`
 （默认 5）趟 `status == "lock_contended"`。单趟是常态噪声（实测 276 趟里 1 趟），
@@ -253,7 +262,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 的人工处置流程核对锁主，再决定是否清锁，并照既有形状把凭据落成
 `stale-lock-clear-<issue>-<ts>.json`；**探针自己绝不清锁**。
 
-<a id="stall-submission-stalled"></a>
+##### stall-submission-stalled
 
 **10. `submission_stalled`** —— 连续 ≥
 `NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES`（默认 20）趟「零提交且有阻塞候选」。
@@ -264,7 +273,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 | progress | `counts.submitted_count > 0` | **打断** |
 | blocked | `submitted_count == 0` 且 `blocked_candidate_count > 0` | **延长** |
 | idle | `submitted_count == 0` 且 `blocked_candidate_count == 0` | **打断**（阻塞候选消失即阻塞已解除） |
-| neutral | 产物**无 `progress_guard` 键**，**或** 两个 count 任一缺失 | **跳过**（既不延长也不打断） |
+| neutral | 产物**无 `progress_guard` 键**，**或** 两个 count 任一缺失，**或** `status == "resource_limit_blocked"` | **跳过**（既不延长也不打断） |
 
 中性**不是 status 允许表**。调度器自己的口径是「early-exit / pre-lock /
 lock-contended / resource-limit-aborted」**四类早退写入点**，不是四个 status 字符
@@ -273,10 +282,19 @@ lock-contended / resource-limit-aborted」**四类早退写入点**，不是四�
 反例（写进用例钉死）：`scheduler_2026092223_7e6955b406ba.json` 是
 `restart_reconciled` 且 `blocked_candidate_count=47`，正是 #2570 四趟停摆的第一趟，
 按词表会被当中性跳过；`preflight_blocked` 是 fully-observed、调度器自己会计数。
+第三条（`resource_limit_blocked`）不是退回词表，而是同一写入方的第二种形状：
+resource-limit 路径写 `counts` 两个键都为 0，且 `error.details` 带 guard 时会附上
+`progress_guard`，前两条漏掉它就会落进 idle 去**打断** streak。
+
+streak 的遍历范围是**排序余量担保的前缀** `SCAN_LIMIT - 12`（默认 52 趟），**不是**
+阈值本身：中性趟被跳过但在任何按位置切的窗口里仍占一个名额，窗口若等于阈值 20，
+里面只要有一趟中性（实测约 1/16 趟），streak 上限就是 19、这档永远不报。
+receipt 的 `evidence.streak_window` 记这个前缀长度，
+`signals.no_submission_neutral_skipped` 记本次遍历跳过的中性趟数。
 处置：读 receipt 的 `passes` 计数与最新几趟产物的 `blocked_candidates`，转
 [`../scheduler-dbfree-typed-reasons.md`](../scheduler-dbfree-typed-reasons.md)。
 
-<a id="stall-no-progress-circuit-open"></a>
+##### stall-no-progress-circuit-open
 
 **11. `no_progress_circuit_open`** —— `no-progress-tracker.json` 里存在**未被抑制
 的**条目 `consecutive_passes >= NHMS_SCHEDULER_STALL_CIRCUIT_PASSES`（默认 20）。
@@ -285,7 +303,7 @@ lock-contended / resource-limit-aborted」**四类早退写入点**，不是四�
 两者解耦。抑制见 6.2.4。
 处置：按 §6.1 的 reason 三类表定位下游 runbook。
 
-<a id="stall-ok"></a>
+##### stall-ok
 
 **12. `ok`** —— 以上皆不匹配。仅在无任何条件匹配时可达。
 
@@ -300,8 +318,16 @@ cat > ~/.config/systemd/user/nhms-node22-scheduler-stall-health.service.d/10-thr
 [Service]
 Environment=NHMS_SCHEDULER_STALL_MAX_PASS_AGE_MINUTES=480
 EOF
-systemctl --user daemon-reexec   # 或 daemon-reload
+systemctl --user daemon-reload
 ```
+
+**只用 `daemon-reload`，不要 `daemon-reexec`**：reexec 会重启托管生产调度器的
+user manager，而第 5 档正把「user-systemd 被重新执行过」列为
+`scheduler_not_triggering` 的疑似成因 —— 调阈值的步骤不能成为它所调告警的成因。
+
+`NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS` 区分「未设置」与「显式置空」：
+drop-in 写 `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=`（等号后为空）即
+**清空**抑制白名单，不会被还原成 checked-in 默认值；删掉该行才是回到默认。
 
 范围校验（越界即退出码 2，判级前拒绝）：两个 age ≥ 240；
 `LIMIT_LOOKBACK_MINUTES` ≥ 30（须覆盖探针周期 15 + `RandomizedDelaySec=60` +
@@ -322,10 +348,13 @@ install/enable、机器可读 `protected_unchanged`，保护集是
 那对单元的保护**（本流程只对拍调度器那两个）。补 installer 是独立一单。
 
 ```bash
-# 1) 装前快照（必须留档）
+# 1) 装前快照（必须留档）：对拍集只含 Id,UnitFileState；运行态另存、不参与 diff
 ssh -p 32099 frd_muziyao@210.77.77.22 \
   'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,UnitFileState,ActiveState,SubState' | tee /tmp/sched-before.txt
+     -p Id,UnitFileState' | tee /tmp/sched-before.txt
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+     -p Id,ActiveState,SubState' | tee /tmp/sched-before-runtime.txt
 
 # 2) 安装（只拷贝探针自己的两个文件，绝不碰调度器单元）
 ssh -p 32099 frd_muziyao@210.77.77.22 \
@@ -336,15 +365,19 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
    systemctl --user daemon-reload &&
    systemctl --user enable --now nhms-node22-scheduler-stall-health.timer'
 
-# 3) 装后快照并对拍：必须逐行一致
+# 3) 装后快照并对拍：Id,UnitFileState 必须逐行一致（机器可判）
 ssh -p 32099 frd_muziyao@210.77.77.22 \
   'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,UnitFileState,ActiveState,SubState' | tee /tmp/sched-after.txt
+     -p Id,UnitFileState' | tee /tmp/sched-after.txt
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+     -p Id,ActiveState,SubState' | tee /tmp/sched-after-runtime.txt
 diff /tmp/sched-before.txt /tmp/sched-after.txt && echo PROTECTED_UNCHANGED
 ```
 
-`ActiveState`/`SubState` 若因为恰好有一趟 pass 起落而变化，**不要**当成对拍失败，
-但必须在留档里写清当时 `nhms-compute-scheduler.service` 在飞（`activating`）。
+`PROTECTED_UNCHANGED` 只对 `Id,UnitFileState` 判定：`ActiveState`/`SubState` 会随
+一趟 pass 起落而变（在飞时 service 是 `activating`），含进 diff 就无法机器判定。
+两份 `*-runtime.txt` 单独留档，作为装机时刻的运行态记录，不参与通过/失败判定。
 `UnitFileState` 任何变化都是事故，立即回滚探针单元。
 
 #### 6.2.4 抑制白名单：当前值与出处
@@ -355,14 +388,19 @@ diff /tmp/sched-before.txt /tmp/sched-after.txt && echo PROTECTED_UNCHANGED
 ambiguous_fallback_match:comment_accounting_unproven
 ```
 
-**为什么这条结构上不可收敛**：该 reason 由
+**为什么这条不能自动收敛**：该 reason 由
 `services/orchestrator/reconcile.py:2564` 写出 —— 当 name-window fallback 匹配到
 两个及以上 owned in-window master 时，控制器无法证明 forcing identity
 （`reconcile.py:763`），durable reason 落为 `comment_accounting_unproven`。
-根因是**本 Slurm 集群不返回 `job_comment`**（#1116，见 §6.1 reason 表第三行），
-exact-comment 对账因此**永远** unproven：本 session 在 node-22 实测 reconcile
-`match_count 2` 无法收敛。tracker 里这两条的 `consecutive_passes` 实测已到
-1300 / 1198，裸阈值会让告警永久钉住 → 告警疲劳 → 运维被训练成忽略它。
+根因是**本 Slurm 集群不存 `job_comment`**（#1116），exact-comment 对账因此
+unproven；出处见 [`../failed-basin-retry.md`](../failed-basin-retry.md) `:343-350`
+（该 durable outcome 类「没有自动出口」，held 行保持 `reserved`、之后每趟都失败直到被处置）
+与 `:459-477`（fallback 失败的 outcome 表中 `ambiguous_fallback_match` /
+`match_count=2` 一行，以及「fallback 失败从不进入 release ladder、从不产生自动
+absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved-job` CAS）。
+本 session 在 node-22 实测 reconcile `match_count 2` 无法自行收敛。tracker 里这两条的
+`consecutive_passes` 实测已到 1300 / 1198，裸阈值会让告警永久钉住 → 告警疲劳 →
+运维被训练成忽略它。**不能自动收敛不等于可以无视**：处置走上述有保护的运维动作。
 追踪见 #2570（node-22 侧）与 #1116（根因侧）。
 
 纪律：
@@ -373,8 +411,11 @@ exact-comment 对账因此**永远** unproven：本 session 在 node-22 实测 r
 - 被抑制的条目照样写进 receipt 的 `suppressed[]`
   （`subject_kind`/`subject_id`/`reason`/`consecutive_passes`/`matched_rule`），
   可审计性由 receipt 承担，不靠人记。
+- `suppressed[]` 里的条目**应走人工处置流程**（上面 `failed-basin-retry.md` 的有保护
+  运维动作），**不是可以无视**：抑制只是不让它每 15 分钟重复告警，不是宣布它无害。
 - 残余风险（明写、不消除）：若某个真实新 stall 复用了被抑制的 reason，探针不报。
-  接受，因为该 reason 已判定为结构不可收敛；换 reason 类的 stall 仍会报。
+  接受，因为该 reason 已判定为不能自动收敛、且按上条走人工处置；换 reason 类的 stall
+  仍会报。
 
 #### 6.2.5 巡检行：探针自己还活着吗
 

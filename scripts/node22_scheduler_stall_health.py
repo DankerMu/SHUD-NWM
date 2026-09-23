@@ -161,7 +161,10 @@ MIN_CIRCUIT_PASSES = 1
 # bucket: bucket order is chronological because the bucket and `started_at`
 # share the cycle hour, so disorder is confined inside a bucket.  The largest
 # measured bucket holds 8 passes; 12 is the shipped margin and the config
-# check below demands `scan_limit >= max(streak windows) + HOUR_BUCKET_MARGIN`.
+# check below demands `scan_limit >= max(streak thresholds) + HOUR_BUCKET_MARGIN`,
+# which is what keeps the ordering-safe prefix `scan_limit - HOUR_BUCKET_MARGIN`
+# (the streak search bound, `Config.streak_window`) at least as long as either
+# threshold.
 HOUR_BUCKET_MARGIN = 12
 DEFAULT_SCAN_LIMIT = 64
 # The evidence root held 309 entries when measured and grows.  Reaching this
@@ -250,8 +253,10 @@ VERDICT_OK = "ok"
 
 RUNBOOK_PATH = "docs/runbooks/production-ops/stuck-detection.md"
 #: Every non-healthy verdict names a runbook section, in the receipt and on
-#: stderr.  The anchors are explicit HTML ids in section 6.2, so they do not
-#: depend on how a Markdown renderer slugs a heading.
+#: stderr.  Each anchor is a heading in section 6.2 whose text IS the anchor,
+#: so the renderer's slug of that heading equals it verbatim (lowercase ASCII
+#: letters and hyphens only, nothing for a slugger to rewrite).  The repo's
+#: Markdown lint admits no inline HTML, which rules out explicit ids.
 RUNBOOK_ANCHORS = {
     VERDICT_PROBE_FAILED: "stall-probe-failed",
     VERDICT_TIMER_NOT_ENABLED: "stall-timer-not-enabled",
@@ -348,9 +353,23 @@ class Config:
 
     @property
     def streak_window(self) -> int:
-        """How many newest terminal passes the streak verdicts look at."""
+        """How many newest terminal passes the streak searches may walk.
 
-        return max(self.no_submission_passes, self.lock_passes)
+        NOT the alert threshold.  A neutral pass is skipped by the submission
+        streak but would still occupy a slot in any positional window, so a
+        window equal to the threshold (the shipped ``max(20, 5) = 20``) caps
+        the streak at 19 as soon as one neutral pass falls inside it -- and the
+        live receipt measured roughly one neutral pass in sixteen, which made
+        ``submission_stalled`` unreachable at the shipped defaults.  The bound
+        is instead the prefix the ordering argument vouches for: once the
+        ``scan_limit`` lexically greatest names are sorted by ``started_at``,
+        the first ``scan_limit - HOUR_BUCKET_MARGIN`` of them are guaranteed
+        to be the true newest passes, because the arbitrary order inside the
+        boundary hour bucket can displace at most ``HOUR_BUCKET_MARGIN``.  The
+        config check keeps this at least ``max(no_submission, lock)``.
+        """
+
+        return self.scan_limit - HOUR_BUCKET_MARGIN
 
 
 def _int_at_least(name: str, raw: str, minimum: int) -> int:
@@ -389,6 +408,15 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
     def get(name: str, default: str) -> str:
         return source.get(name) or default
+
+    # The suppression list is the one input whose job is to SILENCE an alert,
+    # so "unset" and "explicitly empty" must differ: a drop-in writing
+    # `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=` is an operator
+    # clearing the list, and folding it back into the default would keep the
+    # checked-in suppression in force against their explicit instruction.
+    raw_suppressed_reasons = source.get(ENV_SUPPRESSED_REASONS)
+    if raw_suppressed_reasons is None:
+        raw_suppressed_reasons = DEFAULT_SUPPRESSED_REASONS
 
     max_trigger_age_minutes = _int_at_least(
         ENV_MAX_TRIGGER_AGE_MINUTES,
@@ -441,8 +469,13 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     if not evidence_root.is_dir():
         raise ConfigError(f"{ENV_EVIDENCE_ROOT}={evidence_root} is not a directory")
     receipt_root = Path(get(ENV_RECEIPT_ROOT, DEFAULT_RECEIPT_ROOT))
+    # Both sides resolved the same way.  `realpath` on the evidence root but
+    # only `abspath` on the receipt root would let a receipt root reached
+    # THROUGH a symlink into the evidence root pass the containment test.
+    # `realpath` resolves the existing prefix of a not-yet-created path, so a
+    # first run is covered too.
     resolved_evidence = Path(os.path.realpath(evidence_root))
-    resolved_receipt = Path(os.path.abspath(receipt_root))
+    resolved_receipt = Path(os.path.realpath(receipt_root))
     if resolved_receipt == resolved_evidence or resolved_receipt.is_relative_to(resolved_evidence):
         raise ConfigError(
             f"{ENV_RECEIPT_ROOT}={receipt_root} must not be inside {ENV_EVIDENCE_ROOT}"
@@ -462,9 +495,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         lock_passes=lock_passes,
         no_submission_passes=no_submission_passes,
         circuit_passes=circuit_passes,
-        suppressed_reasons=_parse_suppressed_reasons(
-            get(ENV_SUPPRESSED_REASONS, DEFAULT_SUPPRESSED_REASONS)
-        ),
+        suppressed_reasons=_parse_suppressed_reasons(raw_suppressed_reasons),
         scan_limit=scan_limit,
         max_entries_scanned=max_entries_scanned,
     )
@@ -715,12 +746,27 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
     probe-failed --- a legitimate degraded artifact inside the window would
     then suppress every other signal.  The condition it reports is carried by
     the higher-precedence resource-limit verdict instead.
+
+    The third rule is the same writer read a second time, not a return to a
+    status allowlist.  The resource-limit path (``scheduler_runtime.py``
+    around ``:1505-1527``) writes both counts as zero and attaches a progress
+    guard whenever the error details carry one.  That shape slips past the two
+    rules above and lands in idle, which would RESET the streak --- the
+    opposite of the scheduler's own "resource-limit-aborted neither counts nor
+    clears".  The measured fallbacks all lacked the guard, so the first two
+    rules sufficed on the data; this one closes the shape the writer can
+    still produce.
     """
 
     counts = payload.get("counts")
     submitted = _count_or_none(counts, "submitted_count")
     blocked = _count_or_none(counts, "blocked_candidate_count")
-    if "progress_guard" not in payload or submitted is None or blocked is None:
+    if (
+        "progress_guard" not in payload
+        or submitted is None
+        or blocked is None
+        or payload.get("status") == STATUS_RESOURCE_LIMIT_BLOCKED
+    ):
         return SHAPE_NEUTRAL, submitted, blocked
     if submitted > 0:
         return SHAPE_PROGRESS, submitted, blocked
@@ -882,21 +928,30 @@ def read_tracker_entries(path: Path) -> tuple[list[TrackerEntry], bool]:
 # ---------------------------------------------------------------------------
 
 
-def blocked_streak(records: list[PassRecord], *, window: int) -> int:
-    """Consecutive newest-first passes that submitted nothing while blocked.
+def blocked_streak(records: list[PassRecord], *, window: int) -> tuple[int, int]:
+    """Return ``(streak, neutral_skipped)`` over the newest ``window`` passes.
 
-    Neutral passes are SKIPPED: they neither extend nor break the run.  A
-    progress or idle pass halts the count.
+    The streak counts consecutive newest-first passes that submitted nothing
+    while blocked.  Neutral passes are SKIPPED: they neither extend nor break
+    the run, and ``neutral_skipped`` counts the ones the search walked past so
+    the receipt can show them.  A progress or idle pass halts the search.
+
+    ``window`` must be the ordering-safe prefix (``Config.streak_window``),
+    never the alert threshold: a skipped neutral pass still occupies a
+    position in the slice, so a threshold-sized window could never reach the
+    threshold once it held a single neutral pass.
     """
 
     streak = 0
+    neutral_skipped = 0
     for record in records[:window]:
         if record.shape == SHAPE_NEUTRAL:
+            neutral_skipped += 1
             continue
         if record.shape != SHAPE_BLOCKED:
             break
         streak += 1
-    return streak
+    return streak, neutral_skipped
 
 
 def lock_contended_streak(records: list[PassRecord], *, window: int) -> int:
@@ -1077,10 +1132,8 @@ def grade(*, now: datetime, config: Config, observations: Observations) -> str:
         return VERDICT_LOCK_CONTENDED_PERSISTENT
 
     # 10. Sustained blocked work with nothing submitted.
-    if (
-        blocked_streak(observations.records, window=config.streak_window)
-        >= config.no_submission_passes
-    ):
+    streak, _neutral_skipped = blocked_streak(observations.records, window=config.streak_window)
+    if streak >= config.no_submission_passes:
         return VERDICT_SUBMISSION_STALLED
 
     # 11. An unsuppressed tracker subject at or above the alert threshold.
@@ -1123,10 +1176,12 @@ def build_receipt(
     Every graded signal appears beside the threshold it was compared against,
     so the verdict can be re-derived from the receipt alone without the
     evidence root.  The two artifact windows are reported separately on
-    purpose: the streak verdicts read a fixed number of newest passes, while
-    the resource-limit verdict reads a time window over every artifact that
+    purpose: the streak verdicts walk the ordering-safe prefix of newest
+    passes (``streak_window``, NOT the alert threshold), while the
+    resource-limit verdict reads a time window over every artifact that
     parsed, and conflating them would make the receipt unable to explain
-    either.  Paths are not recorded --- unit names, filenames and counters
+    either.  The resource-limit passes are named, bounded, so the operator can
+    open the exact artifacts the verdict was graded on.  Paths are not recorded --- unit names, filenames and counters
     only --- so an ops receipt never becomes a configuration leak.
     """
 
@@ -1142,6 +1197,8 @@ def build_receipt(
     limit_window = resource_limit_passes_in_window(
         records, now=now, lookback_minutes=config.limit_lookback_minutes
     )
+    limit_names, limit_names_truncated = _clip_list([_clip(record.name) for record in limit_window])
+    no_submission_streak, neutral_skipped = blocked_streak(records, window=config.streak_window)
     suppressed_rows, suppressed_truncated = _clip_list(
         [
             {
@@ -1230,10 +1287,13 @@ def build_receipt(
         },
         "signals": {
             "resource_limit_passes_in_window": len(limit_window),
+            "resource_limit_pass_names": limit_names,
+            "resource_limit_pass_names_truncated": limit_names_truncated,
             "limit_lookback_minutes": config.limit_lookback_minutes,
             "lock_contended_streak": lock_contended_streak(records, window=config.streak_window),
             "lock_passes": config.lock_passes,
-            "no_submission_streak": blocked_streak(records, window=config.streak_window),
+            "no_submission_streak": no_submission_streak,
+            "no_submission_neutral_skipped": neutral_skipped,
             "no_submission_passes": config.no_submission_passes,
             "circuit_open_entries": len(open_entries),
             "circuit_passes": config.circuit_passes,

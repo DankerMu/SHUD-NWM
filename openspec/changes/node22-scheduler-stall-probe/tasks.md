@@ -210,3 +210,70 @@
 - 「pass 挂死不落终态」与「长 pass 在飞」的进一步区分（需 `.pre_execution.json` 的
   `reserved_at`/`final_evidence_artifact` 语义，本单不建该档；systemd 侧信号已覆盖 lane 死亡）。
 - #2570 A 组。
+
+## 6. Phase 3 交叉评审修复（fix pass 1）
+
+### 6.1 阻塞项
+
+- [x] 6.1.1 **中性趟不得占用 streak 名额**（P1）。`blocked_streak` 当前遍历
+      `records[:max(no_submission_passes, lock_passes)]`，默认 = 20 = 阈值本身，
+      窗口里有一个 neutral，streak 上限即 19，`submission_stalled` **不可达**
+      （live receipt 实测 neutral ≈ 1/16 趟）。改为遍历排序论证能担保的前缀
+      `scan_limit - HOUR_BUCKET_MARGIN`（默认 52），跳过 neutral、遇 progress/idle 即停、
+      数满 `no_submission_passes` 即判定。`lock_contended_streak` 语义不变，遍历范围同步。
+      被跳过的 neutral 数写进 receipt。
+- [x] 6.1.2 **tracker 契约副本缺 CI 路由**（P1）。`test_e3` 钉住探针自带的
+      `TRACKER_SCHEMA_VERSION`/`TRACKER_FILENAME` 与 `scheduler_no_progress.py:54,56` 一致，
+      但 `select_ci_tests.py` 没有这条边：改 `STATE_SCHEMA_VERSION` 的 PR 会绿着合并，
+      合并后探针每 tick 判 `probe_failed`（优先级 1，盖住其余十档）。
+      加 `PathTestRule("services/orchestrator/scheduler_no_progress.py", (<新套件>,))`。
+- [x] 6.1.3 **Markdown Lint 挂**：runbook §6.2 的 12 处 `<a id="stall-…"></a>` 触发 MD033，
+      仓库 `.markdownlint.yaml` 只放行 `br`/`sup`/`sub`，全仓无第二处内联 HTML。
+      改为标题锚点（标题文本即 anchor id，如 `##### stall-probe-failed`），
+      **不要**改 `.markdownlint.yaml` 的全仓策略；同步更新 `test_r2` 的锚点断言方式，
+      探针的 `RUNBOOK_*` 常量字符串保持不变。
+
+### 6.2 非阻塞但本轮一并修
+
+- [x] 6.2.1 guard 在场的 `resource_limit_blocked` 被判 idle 而打断 streak
+      （`scheduler_runtime.py:1505-1527` 写零 counts 且可能附 guard）。
+      neutral 增加第三条：`status == "resource_limit_blocked"`。加用例：
+      该形状放在 lookback 之外、blocked 序列之中，断言不打断 streak。
+- [x] 6.2.2 路由行缺回归钉子：照先例 `tests/test_select_ci_tests.py:406-461` 的
+      `NODE22_REFRESH_READER_EDGES`，为本单全部 5 条 edge 加「存在」+「删掉即红」断言。
+      （偏离：`scripts/node22_scheduler_stall_health.py` 那条是 pin，同名派生
+      `scripts/<x>.py -> tests/test_<x>.py` 无行也能选中，故「删掉即红」对它不成立；
+      补集用例对其余 4 条断言变暗、对这条断言**仍亮**，派生失效时即红。）
+- [x] 6.2.3 runbook §6.2.2 把 `daemon-reexec` 改为**只写 `daemon-reload`**：
+      reexec 会重启托管生产调度器的 user manager，而同节 `:213` 正把
+      「daemon 被重新执行过」列为 `scheduler_not_triggering` 的疑似成因 ——
+      调阈值的步骤不能是它所调告警的成因。
+- [x] 6.2.4 抑制白名单无法经 drop-in 清空：`source.get(name) or default`
+      会把 `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=` 静默还原成默认值。
+      该键须区分「未设置」与「显式空」。这是唯一一个作用为压告警的配置项。
+- [x] 6.2.5 runbook §6.2.4 抑制理由的出处**引错了**：引的 §6.1 第三行是另一个字符串
+      `query_unavailable:comment_accounting_unproven`，且那条的结论是「必须人工处置」。
+      改为引 `docs/runbooks/failed-basin-retry.md:343-350` / `:459-477`，
+      并把措辞从「结构上不可收敛」改为「**不能自动收敛**，处置走有保护的运维动作」；
+      同节补一句：`suppressed[]` 里的条目应走人工处置流程，不是可以无视。
+- [x] 6.2.6 verdict 8 不可操作：runbook `:241` 让运维「打开 receipt 里对应的那趟产物」，
+      但 `signals.resource_limit_passes_in_window` 只是整数。receipt 增记窗口内那几趟的
+      **有界文件名列表**（兼顾 1.10「判级可独立重推」）。
+- [x] 6.2.7 receipt 根校验不对称：证据根用 `realpath`、receipt 根用 `abspath`
+      （`:444-446`），经软链指进证据根会被放行。两处统一。
+- [x] 6.2.8 §6.2.3 的装后对拍只 diff `Id,UnitFileState`：`ActiveState`/`SubState`
+      会随 pass 起落变化，含进去则 `PROTECTED_UNCHANGED` 无法机器判定；其余值单独记录。
+- [x] 6.2.9 scheduler timer 的 unit 文件缺失时 `UnitFileState` 为空 → 现在判 `probe_failed`
+      且 runbook 指针指错段落。至少让该 tick 的 runbook 指针指向 verdict 2 的处置段，
+      或在 §6.2.1 补一句「`UnitFileState` 为空通常意味着 unit 文件被删」。
+      （取后者：§6.2.1 第 1 档补句并指向第 2 档恢复段；判级仍 fail-closed 为
+      `probe_failed`，与 spec「缺失属性即不完整证据」一致。node-22 实测
+      `systemctl --user show <不存在>.timer` 退出 0、`LoadState=not-found`、`UnitFileState=` 为空。）
+
+### 6.3 验证
+
+- [x] 6.3.1 `uv run pytest -q tests/test_node22_scheduler_stall_health.py tests/test_select_ci_tests.py`
+- [x] 6.3.2 `uv run ruff check scripts/node22_scheduler_stall_health.py tests/test_node22_scheduler_stall_health.py tests/test_select_ci_tests.py scripts/select_ci_tests.py`
+- [x] 6.3.3 `npx markdownlint-cli2 "docs/runbooks/production-ops/stuck-detection.md"`（或仓库 CI 同款调用）
+- [x] 6.3.4 定向变异自证：把 6.1.1 改回 `records[:window]` → 新用例必须红；
+      去掉 6.1.2 的路由行 → 6.2.2 的补集断言必须红。
