@@ -339,6 +339,132 @@ PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
     "apps/**",
 )
 
+# #2323: the entropy production-topology hard gate. It builds one full-repo
+# entropy report and asserts zero production-topology findings, and that report
+# reads every scannable text file under the scanner's seven roots plus four
+# root-level files. No rule routed those inputs to it, so PR #2321's
+# `openspec/changes/**/evidence/*.json` edit went green in the PR lane and
+# reddened master run 34787384045 after merge. The route targets the ONE node
+# rather than the whole ~97s partition — measured call time 70.71s on node-27,
+# 20.13s on macOS, paid by nearly every PR (any `openspec/changes/**` edit is a
+# scan input) — and is skipped when the whole file is already selected (every
+# entropy scanner-module rule selects ENTROPY_AUDIT_TESTS), so the same test is
+# never emitted twice. The #2323 AC names tests/test_entropy_audit_script.py,
+# which the #1823 split retired; the gate lives here now.
+ENTROPY_AUDIT_REPORT_CONTRACT_TEST = "tests/test_entropy_audit_report_contract.py"
+PRODUCTION_TOPOLOGY_HARD_GATE_TEST = (
+    f"{ENTROPY_AUDIT_REPORT_CONTRACT_TEST}"
+    "::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings"
+)
+
+# #2323: the scanner's input set, MIRRORED — the selector is stdlib-only and
+# imports no repository module, and the roots are locals of
+# `scripts/governance/entropy_audit/check_topology.py::_production_topology_scan_files`
+# rather than constants the scanner exports (and the scanner is not edited). So
+# tests/test_select_ci_tests.py pins the mirror BEHAVIOURALLY: the skip and
+# extension constants equal `entropy_audit.constants`, a synthetic tree scans to
+# exactly the set this mirror accepts, every path the scanner yields over the
+# real tree is accepted here, and a dropped root reddens through `select_tests`.
+#
+# Deliberately NOT mirrored, because each can only OVER-select: the topology
+# checker's own archive/receipt/`scripts/governance/**` exclusions, the
+# MAX_SCANNED_TEXT_FILE_BYTES size cap and the symlink / regular-file checks
+# (the last two need a stat of a path that may be a deletion — which changes
+# the scan too, so no existence check is made either). Known limit: a scanner
+# root added over a directory with no scannable file yet is invisible to the
+# real-tree oracle until a file lands there; such a root scans nothing.
+PRODUCTION_TOPOLOGY_SCAN_ROOTS: tuple[str, ...] = (
+    "scripts",
+    "infra/env",
+    "instructions/agents",
+    "docs/governance",
+    "docs/runbooks",
+    "openspec/changes",
+    "openspec/specs",
+)
+PRODUCTION_TOPOLOGY_SCAN_FILES: tuple[str, ...] = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "infra/README.two-node-docker.md",
+    "openspec/project-profile.md",
+)
+# `repo_files._repo_relative_path_is_skipped`: any part in the skip dirs, any
+# part carrying a skip prefix, or a first part in the skip root dirs. The
+# root-dir arm is unreachable under the seven roots above; it is kept for
+# fidelity and covered by the constant pin only.
+PRODUCTION_TOPOLOGY_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".venv",
+        "node_modules",
+        "dist",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".cache",
+    }
+)
+PRODUCTION_TOPOLOGY_SCAN_SKIP_PREFIXES: tuple[str, ...] = (".nhms-",)
+PRODUCTION_TOPOLOGY_SCAN_SKIP_ROOT_DIRS: frozenset[str] = frozenset({"artifacts", "data"})
+# `repo_files._has_scannable_text_name`: a TEXT_EXTENSIONS suffix, one of the
+# four exact names, or a `.env.` name prefix.
+PRODUCTION_TOPOLOGY_TEXT_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".cfg",
+        ".css",
+        ".env",
+        ".example",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".jsx",
+        ".lock",
+        ".md",
+        ".mjs",
+        ".py",
+        ".rst",
+        ".sh",
+        ".sql",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+PRODUCTION_TOPOLOGY_TEXT_NAMES: frozenset[str] = frozenset({"Makefile", ".gitignore", ".dockerignore", ".env"})
+PRODUCTION_TOPOLOGY_TEXT_NAME_PREFIX = ".env."
+
+# #2498: the forcing template-pair sweep's discovery set, MIRRORED from
+# tests/forcing_ts_template_registry.py's DISCOVERY_ROOTS and
+# _PRUNED_DIRECTORIES (pinned equal by tests/test_select_ci_tests.py; the
+# selector imports no repository module). The per-path forcing riders and the
+# register-derived wiring meta-test only cover paths that are ALREADY
+# registered, so a brand-new file under these roots that constructs a
+# ForcingTemplatePair escaped every forcing shape oracle until master. The
+# supplemental import sniff in `select_tests` closes that: a changed `.py`
+# under a root, with no pruned directory part, whose MODULE-LEVEL imports
+# include `packages.common.forcing_ts_render` (the module a pair is built from)
+# selects FORCING_SQL_SHAPE_ORACLE_TESTS. Routing every path under the six
+# roots instead was rejected on cost by the #1990 cut (b) review (three suites,
+# ~23s, on every backend path).
+#
+# Known limit — the sniff reuses `_top_level_imported_module_names`, which
+# walks `tree.body` only on purpose (#1561), so it does NOT see a function-body
+# import, an import nested under a module-level `if` / `try`, or attribute
+# access through `from packages import common`. Those cases red on master, not
+# in production: the registry sweep itself fails closed on a function-scope
+# pair. The helper is not widened because its other consumers depend on the
+# #1561 semantics — the same function-body blind spot #2390 records.
+FORCING_TEMPLATE_DISCOVERY_ROOTS: tuple[str, ...] = ("packages", "workers", "scripts", "services", "apps", "db")
+FORCING_TEMPLATE_PRUNED_DIRECTORIES: frozenset[str] = frozenset(
+    {"__pycache__", ".git", ".venv", "node_modules", "dist", "build", ".mypy_cache"}
+)
+FORCING_TEMPLATE_RENDER_MODULE = "packages.common.forcing_ts_render"
+
 # #2074: the API-contract corpus, physically partitioned out of the 2,132-line
 # `tests/test_api_contract.py` monolith (38 cases). The retained base path keeps
 # the cases that read the CONTRACT ARTEFACTS — the committed
@@ -2257,8 +2383,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # requirement oracle, so this stop rule is where its importer gap
         # closes. DB-free, 76 tests in 0.70s, hence a rule rather than a
         # rule-gap exclusion.
+        #
+        # #2390 (ruling A) adds the five gateway-reconcile writer suites at the
+        # same site and for the same reason: the shared constant serves eleven
+        # other patterns, and this stop rule shadows the broad
+        # `services/orchestrator/**` list, so the rule site is the only place a
+        # route for this module can live. The five suites drive the file-journal
+        # rollback lanes (`prepare_file_journal_rollback` and the rollback
+        # launch / roll-forward / receipt / quiescence legs) of THIS module, but
+        # every one of them imports it inside function bodies, never at module
+        # scope — so the meta-suite's `_non_gated_top_level_importer_index`,
+        # which walks module-level imports only, derives zero `(module, suite)`
+        # pairs and the importer-gap audit could not see the missing route (nor
+        # accept an INTENTIONAL_RULE_GAP_EXCLUSIONS entry for a pair it never
+        # derives).
+        # 34 of the 36 top-level tests touch the module, so no node-id subset is
+        # defensible; the whole files ride. DB-free, 77 tests in 14.78s (macOS
+        # local) — above the sub-2s riders here, far below CHAIN_IMPORTER_TESTS.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[3],
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_journal_root_lane_adoption.py"),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            "tests/test_journal_root_lane_adoption.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_rollforward.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -2365,8 +2516,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # site that names the shared copyback root the retention deleter locks,
         # one of the mutex's two load-bearing modules (the other is
         # packages/common/copyback_guard.py, routed below), so this stop rule is
-        # where its gap closes. The sibling tests/test_retention_extra_roots.py
-        # gap stays open (issue boundary, recorded known limit).
+        # where its gap closes.
+        #
+        # #2316 closes the sibling tests/test_retention_extra_roots.py gap the
+        # #2260 PR recorded as a known limit, at this same site and on the same
+        # ground: that suite is the oracle for the `runs_only_roots` extra-root
+        # wiring (`(os.getenv("WORKSPACE_ROOT"),
+        # self.config.object_store_copyback_root)`) this module hands the
+        # retention deleter. Patterns [9] (scheduler.py) and [10]
+        # (scheduler_core.py) deliberately do NOT carry it: the suite's
+        # `_pass_scheduler` helper (tests/retention_test_helpers.py) imports
+        # ProductionScheduler from scheduler.py only to construct the object
+        # under test, so a regression of the extra-root deletion surface has to
+        # touch THIS file, and widening [9]/[10] would move two more selections
+        # for no failure they could catch. DB-free, 32 tests in 0.30s (macOS
+        # local).
         #
         # #1186 round 2 adds the second at-site target. scheduler_runtime.py
         # writes most of the top-level keys of a pass evidence payload (it keeps
@@ -2406,6 +2570,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # stop rule is its only route for this module. DB-free, 4 tests in
             # ~0.3s.
             "tests/test_operator_action_status_closure.py",
+            # #2316: the extra-root wiring oracle (rationale above).
+            "tests/test_retention_extra_roots.py",
         ),
         stop_on_match=True,
     ),
@@ -3620,6 +3786,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # rule, so a ledger-only PR would select nothing and fail on master.
         "tests/fixtures/basins_registry_partition_additions.json",
         ("tests/test_select_ci_tests.py",),
+    ),
+    # #2317: the two FROZEN partition oracles the #2183 ledger sits beside —
+    # the #1913 basins-registry and #1948 QHH-bootstrap partition snapshots.
+    # Each is read only by the meta-suite, whose self-digest guards are the only
+    # thing that notices an edit, so as data each reached no rule and an
+    # oracle-only PR selected nothing and merged on the collect-only smoke.
+    # Path-exact, one row each, rather than a `*_partition_*.json` glob: a glob
+    # would change the shape #2313 just pinned and could absorb a future
+    # fixture whose reader is not the meta-suite.
+    PathTestRule(
+        "tests/fixtures/basins_registry_partition_oracle.json",
+        ("tests/test_select_ci_tests.py",),
+    ),
+    PathTestRule(
+        "tests/fixtures/qhh_bootstrap_partition_oracle.json",
+        ("tests/test_select_ci_tests.py",),
+    ),
+    PathTestRule(
+        # #2317's adjacent gap, same failure class: the Heihe IFS station-series
+        # baseline selected zero tests. Its only NON-gated reader is
+        # tests/test_object_store_forcing.py; the e2e/real-disk reader is
+        # marker-gated and deselected in the PR lane anyway, so it is not named.
+        "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json",
+        ("tests/test_object_store_forcing.py",),
     ),
     PathTestRule(
         "packages/common/forecast_store.py",
@@ -5454,13 +5644,17 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
 
     True when the final selection is exactly the selector meta-guard (the
     #1454 shape: deleted test file, unrouted support module, or a selector-test
-    PR) OR when the changed-file set touches the selector itself
-    (``scripts/select_ci_tests.py`` or ``tests/test_select_ci_tests.py``) —
-    the class of diff that rewrites the gate and must not silently lose the
-    full-tree collection oracle, even when supplemental routing makes the
-    final selection non-collapsed (e.g. a selector-source PR also selects the
-    Timescale invariant). Deliberately independent of the final-list shape so a
-    supplemental target can never mask the provenance requirement.
+    PR) — with the supplemental production-topology hard-gate node
+    (``PRODUCTION_TOPOLOGY_HARD_GATE_TEST``) disregarded, because that rider
+    rides on nearly every PR (any ``openspec/changes/**`` edit is a scan input)
+    and must never mask the collapse — OR when the changed-file set touches
+    the selector itself (``scripts/select_ci_tests.py`` or
+    ``tests/test_select_ci_tests.py``) — the class of diff that rewrites the
+    gate and must not silently lose the full-tree collection oracle, even when
+    supplemental routing makes the final selection non-collapsed (e.g. a
+    selector-source PR also selects the Timescale invariant). Deliberately
+    independent of the final-list shape so a supplemental target can never mask
+    the provenance requirement.
     """
     if meta_guard_only:
         return True
@@ -5628,6 +5822,30 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             # #2452: the `.resolve()`-surface guard scans the same file walk.
             selected.add(RESOLVE_SURFACE_GUARD_TEST)
 
+    # #2498: supplemental forcing-template import sniff, same additive shape as
+    # the loops above (no `matched`, no stop-rule participation, no effect on
+    # the unknown-backend fallback). A NEW module that imports the forcing
+    # renderer at module level is the one place a ForcingTemplatePair can
+    # appear that no per-path rider knows about yet, so it runs the shape
+    # oracles on the PR that adds it. Unreadable or missing paths fall through
+    # (see `_imports_forcing_template_renderer`).
+    for path in changed:
+        if _imports_forcing_template_renderer(path, repo_root=repo_root):
+            selected.update(FORCING_SQL_SHAPE_ORACLE_TESTS)
+
+    # #2323: supplemental production-topology reader route. Every changed path
+    # the scanner mirror accepts (existing or deleted) adds the ONE hard-gate
+    # node, additively: no `matched`, no stop-rule participation, no effect on
+    # the unknown-backend fallback. Decided LAST and over the final selection,
+    # so a diff that already runs the whole report-contract file (a scanner
+    # module rule, or the suite itself changed) never gets the node twice.
+    # Cost: the node's call time is 70.71s on node-27 (20.13s on macOS). It is
+    # a supplemental RIDER: `_write_github_output` disregards it when deciding
+    # `meta_guard_only`, so it never masks the #1454 meta-guard collapse.
+    if any(_is_production_topology_scan_input(path) for path in changed):
+        if ENTROPY_AUDIT_REPORT_CONTRACT_TEST not in selected:
+            selected.add(PRODUCTION_TOPOLOGY_HARD_GATE_TEST)
+
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish
     # here in silence, so the selection could shrink (even to empty) with no
@@ -5753,6 +5971,69 @@ def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for path in paths for pattern in patterns)
 
 
+def _is_production_topology_scan_input(path: str) -> bool:
+    """True iff the #2323 mirror says the topology scanner reads ``path``.
+
+    Pure over the repo-relative POSIX string — no stat, no existence check, so
+    a deleted input routes exactly like an edited one. Roots match by path
+    PARTS, not string prefix, so `docs/governance-x/` is not under
+    `docs/governance`. The module globals are read at call time, which is what
+    lets the meta-suite's root-drop monkeypatch prove they are the authority.
+    """
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return False
+    in_scope = path in PRODUCTION_TOPOLOGY_SCAN_FILES or any(
+        len(parts) > len(root_parts) and parts[: len(root_parts)] == root_parts
+        for root_parts in (PurePosixPath(root).parts for root in PRODUCTION_TOPOLOGY_SCAN_ROOTS)
+    )
+    if not in_scope:
+        return False
+    if any(part in PRODUCTION_TOPOLOGY_SCAN_SKIP_DIRS for part in parts):
+        return False
+    if any(part.startswith(PRODUCTION_TOPOLOGY_SCAN_SKIP_PREFIXES) for part in parts):
+        return False
+    if parts[0] in PRODUCTION_TOPOLOGY_SCAN_SKIP_ROOT_DIRS:
+        return False
+    name = parts[-1]
+    return (
+        PurePosixPath(name).suffix in PRODUCTION_TOPOLOGY_TEXT_EXTENSIONS
+        or name in PRODUCTION_TOPOLOGY_TEXT_NAMES
+        or name.startswith(PRODUCTION_TOPOLOGY_TEXT_NAME_PREFIX)
+    )
+
+
+def _imports_forcing_template_renderer(path: str, *, repo_root: Path) -> bool:
+    """True iff changed ``path`` is a #2498 forcing-template candidate.
+
+    A `.py` under FORCING_TEMPLATE_DISCOVERY_ROOTS with no pruned directory part
+    whose module-level imports (all four spellings resolve through
+    `_top_level_imported_module_names`, relative ones included) name
+    FORCING_TEMPLATE_RENDER_MODULE. Anything that cannot be read as such a
+    module — missing (a deletion or rename cannot construct a pair), not a
+    regular file, unreadable, not UTF-8, unparsable — is False, never an error:
+    this is an additive route, and the census/registry suites own the
+    fail-closed contract for undecodable sources. `ValueError` is caught
+    alongside `SyntaxError` because Python 3.11's `ast.parse` raises it for a
+    source holding a NUL byte.
+    """
+    if not path.endswith(".py"):
+        return False
+    parts = PurePosixPath(path).parts
+    if len(parts) < 2 or parts[0] not in FORCING_TEMPLATE_DISCOVERY_ROOTS:
+        return False
+    if any(part in FORCING_TEMPLATE_PRUNED_DIRECTORIES for part in parts[:-1]):
+        return False
+    source_path = repo_root / path
+    try:
+        if not source_path.is_file():
+            return False
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=path)
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return False
+    return FORCING_TEMPLATE_RENDER_MODULE in _top_level_imported_module_names(path, tree)
+
+
 def _test_target_exists(target: str, *, repo_root: Path) -> bool:
     test_path = target.split("::", 1)[0]
     return (repo_root / test_path).is_file()
@@ -5773,7 +6054,21 @@ def _write_github_output(
     # for selector-development PRs whose diff-specific target simply IS this
     # suite. That last class is accepted rather than special-cased: the cost is
     # one extra collection pass on exactly the PR class that changes the gate.
-    meta_guard_only = list(tests) == [SELECTOR_META_GUARD_TEST]
+    #
+    # #2323: the production-topology hard-gate node is a supplemental RIDER and
+    # is disregarded here. Nearly every PR carries an `openspec/changes/**`
+    # edit, which is a topology scan input, so counting the node would turn
+    # every deleted-test / unrouted-support-module collapse into
+    # `[NODE, META]` and silently drop the full-tree collect-only smoke. The
+    # node-ONLY shape (diff-specific selection empty, e.g. `schemas/foo.json`
+    # + tasks.md -> `[NODE]`) is deliberately NOT a collapse. It follows the
+    # `apps/__init__.py` precedent (a supplemental target moves an empty
+    # selection onto the targeted branch without re-arming the smoke), and the
+    # zero-selection class here is non-importable data, so no cross-test import
+    # surface is at risk and the flag stays false.
+    meta_guard_only = [test for test in tests if test != PRODUCTION_TOPOLOGY_HARD_GATE_TEST] == [
+        SELECTOR_META_GUARD_TEST
+    ]
     # `collection_smoke_required` is INDEPENDENT provenance, not a restatement
     # of the final-list shape: a selector-development PR stays collection-
     # required even when supplemental routing makes the final selection
