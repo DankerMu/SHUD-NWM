@@ -14,6 +14,10 @@
       service 的 `UnitFileState`/`ActiveState`/**`SubState`**/`Result`。
       查询失败或字段不可解析 → `probe_failed`。
       **不设 next-elapse 档**：该 timer 是 `OnUnitActiveSec`，`NextElapseUSecRealtime` 恒空（见 design）。
+- [ ] 1.3a **verdict 4 的 `Result` 口径**：`Result != "success"` 即触发，**不得**写成
+      「属于某个失败值允许表」。systemd 对 oneshot 的取值域含
+      `success`/`exit-code`/`signal`/`timeout`/`core-dump`/`resources`/`protocol`/`start-limit-hit`，
+      本 session 只实测到 `success`（未观测到失败形态），所以必须 fail-closed 到「非 success 即报」。
 - [ ] 1.3b **「service 在跑」判据 = `ActiveState in {"active","activating"}`（或 `SubState != "dead"`）。**
       调度器 service 是 `Type=oneshot`，在飞时实测为 `activating`/`start`，**永不 `active`**；
       写成 `== "active"` 会让 verdict 3/5/7 的护栏在健康长 pass 期间全部失效。
@@ -71,6 +75,10 @@
 
 > 诚实口径：新模块在 master 上「红」= 模块不存在，不算 red proof。oracle 是下列行为用例。
 > systemd 用可注入的假 `systemctl` 可执行文件，不 monkeypatch `subprocess`。
+> **harness 形状照抄先例**：`tests/test_node22_refresh_timer_health.py:56-89` 的
+> `_write_fake_systemctl`（写一个记录每次调用的可执行 shim，`chmod(0o755)`，
+> 经 `ENV_SYSTEMCTL` 注入路径）与 `:172-195` 的 `_run` 包装。
+> **不要另起第二套 harness**；`:832` 的「只调用只读子命令」断言也照抄。
 
 - [ ] 3.1 11 档非健康 verdict 各一个用例 + `ok` 一个，每档断言 verdict **与退出码**。
 - [ ] 3.2 优先级：systemd 死 + 产物 `resource_limit_blocked` → 报 systemd 档；
@@ -81,6 +89,8 @@
       oneshot 永远不会是 `active`，那样会给 bug 盖绿章。
 - [ ] 3.4 同一在飞几何下，`LastTriggerUSec` 超龄 → **不**报 `scheduler_not_triggering`；
       最新终态产物超龄 → **不**报 `evidence_stale`。（两档共用 1.3b 的闸门。）
+- [ ] 3.4b `Result=exit-code` → `scheduler_service_failed` 且非零退出
+      （证伪任何「失败值允许表」实现；实测未观测到失败形态，故用例必须自造）。
 - [ ] 3.5 **乱序用例**：文件名字典序与 `started_at` 相反 → 判级取 `started_at` 最新那趟。
 - [ ] 3.6 mtime 用例：最旧产物 mtime 改成最新 → verdict 不变。
 - [ ] 3.7 **截断次序用例**：边界处 `X.json` 与 `X.pre_execution.json` 并存且
