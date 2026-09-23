@@ -56,7 +56,7 @@
 - [x] 3.1 `uv run pytest -q tests/test_node22_manual_retry_failed_runs.py`，以及 `scripts/select_ci_tests.py` 对被改文件选出的集合（确认非空）。
 - [x] 3.2 `uv run ruff check` 被改文件；markdownlint 检查该 runbook。
 - [x] 3.3 `openspec validate cohort-hint-superseded-master --strict --no-interactive`。
-- [ ] 3.4 node-22 部署后只读预览（**禁止** `uv run`，维护窗口前会重建共享 `.venv`）：
+- [x] 3.4 node-22 部署后只读预览（**禁止** `uv run`，维护窗口前会重建共享 `.venv`）：
       `cd /scratch/frd_muziyao/NWM && /scratch/frd_muziyao/NWM/.venv/bin/python scripts/node22_manual_retry_failed_runs.py
       --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal --run-id fcst_ifs_2026092212_dg_8a34ed2ba8f8dd22f2716405569628a9
       --reason "#2605 post-deploy read-only smoke" --requested-by "<operator>"`（不带 `--execute`）→ `decision: refused`、
@@ -66,3 +66,6 @@
 
 - 重跑仍在进行、尚未 `succeeded` 时旧 master 仍会被列出（值守可能重复标记）：issue 只要求 succeeded 取代；另行评估。
 - 选择器对旧 master id 的 `would_mark` 语义、#2600、#2603。
+
+      Receipt (2026-09-24 02:41 CST, node-22 @ 86d89945, deployed 02:40 via pause/drain/deploy/resume, DEPLOY_OK, no service restart):
+      `decision: refused`, `reason: no_retryable_failed_job`, `cohort_candidates: []`, no `warning`, rc=0.
