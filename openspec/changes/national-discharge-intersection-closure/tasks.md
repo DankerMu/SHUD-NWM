@@ -49,7 +49,8 @@
   - Rows 40d (×5 parametrize, TWELVE node ids, re-measured `326 / 12` vs unmutated `338 / 0` on the post-split set, trade → #2457/40f), 40e (site gap FIXED with `336 / 2`, the ONLY-superset sentence narrowed), new 40f (ruling) and 40g (`335/3`, `337/1`, `337/1`); program note at the #2087 CLOSED paragraph and the row-count sentence (87 rows) updated.
 - [x] 4.3 Local focused suites green: `tests/test_hydro_display_mvt_scaling*.py tests/test_display_publish_status_only.py tests/test_precip_overlay.py tests/test_mvt_national_identity_probe_integration.py tests/test_api_contract.py` + `tests/test_select_ci_tests.py`.
   - `338 passed, 21 skipped`; `tests/test_select_ci_tests.py` `791 passed`.
-- [ ] 4.4 (orchestrator) node-27 isolated oracle at the PR head (scratch PG, `NHMS_RUN_INTEGRATION=1`): selector output for the changed files ∪ the 4.3 set.
+- [x ] 4.4 (orchestrator) node-27 isolated oracle at the PR head (scratch PG, `NHMS_RUN_INTEGRATION=1`): selector output for the changed files ∪ the 4.3 set.
+  - @`743f775` (45 suites = selector output for the diff ∪ the 4.3 set; Python 3.11.15; disposable scratch PG from the nhms-db image on :55559; `NHMS_RUN_INTEGRATION=1`): `3592 passed in 576.76s`, 0 skipped, rc=0. The final head adds only openspec text (review Notes: MODIFIED consumer list, D1 render-safety scope) on top of it.
 - [ ] 4.5 CI green on the PR head.
 
 Evidence Floor: 1.1 receipt; 2.2 RED→GREEN; 3.2 mutation counts (a) and (b); 4.3 local; 4.4 node-27 oracle; `uv run ruff check .`; openspec strict validate.

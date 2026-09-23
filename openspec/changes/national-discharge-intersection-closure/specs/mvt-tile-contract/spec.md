@@ -28,3 +28,57 @@
 
 - **WHEN** there are no active networks and no display-ready runs
 - **THEN** the no-argument request returns `valid_times: []` with `observed_count = 0` and does not error
+
+## MODIFIED Requirements
+
+### Requirement: The national discharge intersection's denominator is never older than its numerator
+
+The helper that answers "which active river networks cover this `(source, cycle)`" SHALL read the
+active-network set (the denominator) from a snapshot that is at least as fresh as the snapshot the
+display-ready coverage rows (the numerator) come from. A river network activated after the coverage
+rows were read and before the active set was read MUST therefore make the set comparison unequal, so
+every cycle judged by that pair of reads fails closed, regardless of whether the newly active network
+contributed any coverage row. Without any concurrent write to `core.model_instance`, `hydro.hydro_run` or
+`hydro.run_display_coverage` between the two reads, this rule MUST NOT change any result: the coverage
+rows are already filtered on `active_flag`, so the covered set is a subset of the active set and the
+comparison is unchanged. The rule is about read ORDER alone. It makes no claim about a network
+deactivated between the reads, and none about a coverage row that ceases to be display-ready between
+them — that case is a known fail-open residual of reading the numerator first, not something this
+requirement governs. The rule applies to every consumer of that helper — the
+`GET /api/v1/layers/discharge/cycles` list, the per-cycle branch of
+`GET /api/v1/layers/discharge/valid-times`, the no-argument branch of
+`GET /api/v1/layers/discharge/valid-times`, and the canonical national tile route's coverage check —
+because all four read the intersection through it. This requirement constrains the ORDER of the two
+reads only; it does not make them atomic, and it does not govern a coverage row that ceases to be
+display-ready between them.
+
+#### Scenario: A network activated with zero coverage rows empties the cycles list
+
+- **WHEN** the coverage rows are read while the active networks are `{rn-b, rn-c}`, network `rn-a` is
+  then activated with no display-ready run at all, and the active-network set is read afterwards as
+  `{rn-a, rn-b, rn-c}`
+- **THEN** `GET /api/v1/layers/discharge/cycles?source=gfs` returns `cycles: []` and
+  `default_cycle: null`
+
+#### Scenario: A network activated with zero coverage rows empties the per-cycle valid times
+
+- **WHEN** the same activation happens around the reads for one requested `(source, cycle)`
+- **THEN** `GET /api/v1/layers/discharge/valid-times?source=gfs&cycle=C` returns an empty
+  `valid_times` list with an observed count of `0`
+
+#### Scenario: A network activated with coverage for only one cycle closes the other cycle too
+
+- **WHEN** the coverage rows are read while the active networks are `{rn-b, rn-c}`, network `rn-a` is
+  then activated holding a display-ready run for cycle `K` but none for the older cycle `J`, and the
+  active-network set is read afterwards as `{rn-a, rn-b, rn-c}`
+- **THEN** neither `K` nor `J` is listed by `GET /api/v1/layers/discharge/cycles?source=gfs`
+- **AND** `GET /api/v1/layers/discharge/valid-times?source=gfs&cycle=J` returns an empty
+  `valid_times` list
+
+#### Scenario: Without a concurrent write every result is unchanged
+
+- **WHEN** no write to `core.model_instance`, `hydro.hydro_run` or `hydro.run_display_coverage` lands
+  between the two reads
+- **THEN** the listed cycles, their `valid_time_start` / `valid_time_end` bounds, the per-cycle valid
+  times, and the canonical national tile route's coverage verdict are exactly what they were before
+  this requirement
