@@ -35,6 +35,7 @@
   - ACL/ownership, 2026-09-23T13:09:24Z: `receipts/2026-09-23-issue-1631-acl-recheck.txt`;
   - group membership on both hosts, 13:41Z (this corrects the issue's fact 2 for node-22): `receipts/2026-09-23-issue-1631-group-membership.txt`;
   - the gid-1107 share under `canonical/`, 13:46:56Z: `receipts/2026-09-23-issue-1631-group-1107.txt`.
+  - the canonical cycle-mode listing: `receipts/2026-09-23-issue-1631-canonical-cycle-modes.txt`.
 - [x] 3.2 (implementer) Comment-only cites of #1631 and the ruling at the lock-parent gate in `packages/common/provider_atomic.py` and at the explicit `0o755` pin in `packages/common/safe_fs.py::ensure_directory_no_follow`. `git diff` on both files is comment-only.
   - 5-line comments at the `& 0o022` gate (`provider_atomic.py`) and at the `os.mkdir(part, 0o755, …)` pin (`safe_fs.py`), each citing #1631 / ruling D3. `git diff -U0 … | grep '^[+-]' | grep -v '^+++\|^---' | grep -v '^+\s*#'` → empty.
 
@@ -52,7 +53,7 @@
   - RED before: `9 failed, 20 passed` — 8 bare `RuntimeError: Could not determine home directory.` plus the delegation pin's missing attribute. GREEN: `29 passed`.
 - [x] 4.3 Detection successor verified: `grep -rn '_safe_existing_directory(' services scripts | grep 'field="journal_root"'` → 0 hits; `grep -rn 'verify_journal_root_authority(' services scripts` lists the retention adapter.
   - Grep 1: `grep -rn '_safe_existing_directory(' services scripts | grep 'field="journal_root"'` → 0 hits (exit 1).
-  - Grep 2: `grep -rn 'verify_journal_root_authority(' services scripts` → 19 lines, including `services/orchestrator/scheduler_journal_retention.py:157`.
+  - Grep 2: `grep -rn 'verify_journal_root_authority(' services scripts` → 17 lines at head `611a0f2`, including `services/orchestrator/scheduler_journal_retention.py:157`.
 
 ## 5. Verification
 
@@ -60,7 +61,11 @@
   - `uv run ruff check .` → `All checks passed!` (the closure script was formatted with ruff; its output is unchanged, 421/248/21); `openspec validate … --strict` → valid.
 - [x] 5.2 Local focused suites: `tests/test_scheduler_backfill.py tests/test_scheduler_journal_retention_archive.py tests/test_scheduler_journal_retention_planning.py tests/test_safe_fs.py tests/test_scheduler_journal_root_authority.py` + `tests/test_select_ci_tests.py`.
   - 5 focused suites: `185 passed`, with the default umask and under `umask 002`. `tests/test_select_ci_tests.py`: `791 passed`.
-- [ ] 5.3 (orchestrator) node-27 isolated oracle at the PR head, explicit `umask 002` echoed: selector output ∪ 5.2 set; plus #2403's single test under `umask 022`.
+- [x ] 5.3 (orchestrator) node-27 isolated oracle at the PR head, explicit `umask 002` echoed: selector output ∪ 5.2 set; plus #2403's single test under `umask 022`.
+  - @`611a0f2`, 36 suites = selector output for the diff ∪ the 5.2 set. Setup: Python 3.11.15; disposable scratch PG from the nhms-db image on :55548; `NHMS_RUN_INTEGRATION=1`.
+  - Explicit `umask=0002`: `4471 passed in 956.31s`, 0 skipped, rc=0. This includes #2403's test (AC1) and the 20 parity cases on Linux.
+  - Then `umask=0022`: #2403's test `1 passed, 56 deselected`, `rc_2403_umask022=0` (AC2).
+  - The final head adds only openspec text on top of this: the round-1 Notes and the canonical cycle-mode receipt.
 - [ ] 5.4 CI green on the PR head.
 
 Evidence Floor: 1.1 RED + 5.3 GREEN (002 and 022); 2.1 receipt table + 2.2 census; 3.1 receipts (ACL recheck + group membership on both hosts); 4.1 `expanduser` census; 4.2 RED→GREEN + parity before/after; 4.3 greps; `git diff` on `provider_atomic.py` / `safe_fs.py` comment-only; ruff; openspec strict.

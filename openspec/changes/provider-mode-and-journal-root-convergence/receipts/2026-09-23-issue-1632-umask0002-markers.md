@@ -17,7 +17,7 @@
 | `test_basins_registry_import_qhh.py` | 22 passed | — |
 | `test_display_coverage_residual_debt_integration.py` | 8 passed | — |
 | `test_e2e.py` | 4 passed | — |
-| `test_e2e_ifs.py` | 2 passed, **2 failed** | Both failures are environmental. node-27 has no ecCodes library (`RuntimeError: Cannot find the ecCodes library`; xarray engine `cfgrib` does not load; `ldconfig -p` shows 0 ecCodes entries). They fail identically under `umask 022` in the same worktree. Failing tests: `test_ifs_adapter_canonical_forcing_run_parse_e2e` and `test_ifs_06z_144h_manifest_context_and_forcing_limit`. Neither is a provider-gate failure; both are **not measured for umask**. |
+| `test_e2e_ifs.py` | 2 passed, **2 failed** | (Superseded by the GRIB re-measure section below, which runs these cases with the GRIB env wired in.) Both failures are environmental. pytest does not wire in node-27's ecCodes (`RuntimeError: Cannot find the ecCodes library`; xarray engine `cfgrib` does not load; `ldconfig -p` shows 0 ecCodes entries). They fail identically under `umask 022` in the same worktree. Failing tests: `test_ifs_adapter_canonical_forcing_run_parse_e2e` and `test_ifs_06z_144h_manifest_context_and_forcing_limit`. Neither is a provider-gate failure; both are **not measured for umask**. |
 | `test_forecast_series_run_identity_pushdown_integration.py` | 2 passed | — |
 | `test_hydro_run_parsed_at_integration.py` | 3 passed | — |
 | `test_model_activation_audit_integration.py` | 10 passed | — |
@@ -32,7 +32,7 @@
 | `test_river_ts_dual_write_integration.py` | 17 passed | — |
 | `test_mvt_national_identity_probe_integration.py` (pass 2) | 21 passed | — |
 | `test_river_ts_read_path_surrogate_keys_integration.py` (pass 2) | 25 passed | — |
-| `test_production_met_validation.py` (pass 2) | 32 passed, **6 failed** | Environmental, same cause as `test_e2e_ifs.py`: no ecCodes, so the `cfgrib` engine is unavailable. The same 6 fail under `umask 022`: `test_validate_met_default_lane_writes_required_evidence_and_redacts`, `test_validate_met_manifest_bound_counts_actual_deterministic_sources`, `test_validate_met_same_run_requires_force_and_force_replaces_bundle`, `test_validate_met_disabled_sources_record_skipped_without_success`, `test_validate_met_cached_only_policy_uses_cached_fixture`, `test_argparse_validate_met_fallback`. **Not measured for umask.** |
+| `test_production_met_validation.py` (pass 2) | 32 passed, **6 failed** | (Superseded by the GRIB re-measure section below.) Environmental, same cause as `test_e2e_ifs.py`: ecCodes is not wired in, so the `cfgrib` engine is unavailable. The same 6 fail under `umask 022`: `test_validate_met_default_lane_writes_required_evidence_and_redacts`, `test_validate_met_manifest_bound_counts_actual_deterministic_sources`, `test_validate_met_same_run_requires_force_and_force_replaces_bundle`, `test_validate_met_disabled_sources_record_skipped_without_success`, `test_validate_met_cached_only_policy_uses_cached_fixture`, `test_argparse_validate_met_fallback`. **Not measured for umask.** |
 | `test_object_store_forcing_real_disk.py` (pass 2, run on its own, read-only) | **4 failed** | Stale fixture, not umask. The test hardcodes `LATEST_CYCLE = 2026-06-20T12:00:00Z`, and the node-27 object store now keeps `forcing/ifs/` from `2026080912` onward (89 cycles; raw retention removed June). Result: `404 STATION_FORCING_FILE_NOT_FOUND`, and the same 4 fail under `umask 022`. This invocation used `db_user=nhms_display_ro`, `NHMS_SERVICE_ROLE=display_readonly`, `statement_timeout=20000`, `lock_timeout=2000`, and set no integration URL. **Not measured for umask.** |
 
 **Totals over 21 files: 692 passed, 12 failed, 1 skipped.**
@@ -44,7 +44,7 @@ No file failed on `provider_lock_parent_unsafe` or `provider_destination_access_
 Static census over all 21: `test_orchestration_chain.py` is the only one that names a publish/lock entry, and it names `copyback_run_trees` only as a monkeypatch target (`:3210-3274`, stubbed). None of the 21 creates a provider lock parent or destination.
 
 Not measured on node-27, for a reason other than umask:
-- 8 GRIB-decode cases (`test_e2e_ifs.py` ×2, `test_production_met_validation.py` ×6): no ecCodes on node-27, although `pyproject.toml` names node-27 as the `grib` oracle;
+- 8 GRIB-decode cases (`test_e2e_ifs.py` ×2, `test_production_met_validation.py` ×6): not measured in passes 1 and 2 because ecCodes was not wired in. **Superseded**: the GRIB re-measure section below measures all 8 under both umasks;
 - 4 real-disk cases: fixture cycle past retention;
 - the real-`data/Basins` smoke.
 

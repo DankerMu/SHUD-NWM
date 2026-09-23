@@ -13,7 +13,7 @@ File set = the output of `receipts/provider_atomic_closure.py` (AST reverse-impo
 Opt-ins per file (the conftest markers plus file-level gates):
 - `integration` files: `NHMS_RUN_INTEGRATION=1` + `NHMS_INTEGRATION_DATABASE_URL` (disposable scratch PG). The two live-PostGIS files set `NHMS_ENABLE_LIVE_POSTGIS_MVT` themselves via `monkeypatch`.
 - `e2e`: `NHMS_RUN_E2E=1`.
-- `grib`: `NHMS_RUN_GRIB=1`. node-27 has no ecCodes library, so real-decode cases cannot run there.
+- `grib`: `NHMS_RUN_GRIB=1`. pytest does not wire in node-27's ecCodes: it lives in the GRIB env `/home/nwm/nhms-grib`, which `ldconfig` cannot see. The receipt's re-measure section therefore also runs these cases with `LD_LIBRARY_PATH` / `ECCODES_DIR` / `ECCODES_DEFINITION_PATH` injected, following the `scripts/run_qhh_cycle.sbatch` shape.
 - `real_disk` (`test_object_store_forcing_real_disk.py`): `NHMS_RUN_REAL_DISK=1`, `DATABASE_URL`, `OBJECT_STORE_ROOT`. It is run in its own invocation, read-only:
   - the `nhms_display_ro` DSN with `statement_timeout`/`lock_timeout`;
   - the test's own `NHMS_SERVICE_ROLE=display_readonly`;
@@ -41,7 +41,7 @@ Inert today on two external facts, re-verified on node-27 2026-09-23T13:09:24Z (
 
 The one group both NHMS accounts share is gid 1107 `nwmuser` (members `nwm`, `frd_muziyao`), measured 2026-09-23T13:46:56Z (`receipts/2026-09-23-issue-1631-group-1107.txt`):
 - It is load-bearing under `object-store/canonical/`. `canonical/gfs` and `canonical/IFS` are `2775 frd_muziyao:nwmuser` (setgid group share), and 290 group-1107 entries sit within depth 4.
-- 25 cycle directories there are `755` instead of `2775`: `gfs` 2026091300–2026091900 and `IFS` 2026091300–2026091900, created 2026-09-14 to 2026-09-20. Cycles before and after that window are `2775`. The cause is traced in #2597, and it is NOT the #1631 clamp. The window is the gap cycle that #2100 predicted: before #2100 was deployed, the node-22 producer created mirror directories via `copyback_guard.ensure_traversable_copyback_directory`, which chmods newly created components to `0o755` and so clears setgid. The post-deployment re-sweep, which #2100 made mandatory, was never run. (The safe_fs `0o755` pin cannot produce this shape: under a setgid parent Linux keeps `S_ISGID`, giving `2755`, not `755`.)
+- 25 cycle directories there are `755` instead of `2775`: `gfs` 2026091300–2026091900 (12) and `IFS` 2026091300–2026091900 (13), created 2026-09-14 to 2026-09-20. Cycles before and after that window are `2775`. The per-cycle listing and mode histogram are in `receipts/2026-09-23-issue-1631-canonical-cycle-modes.txt` (re-measured read-only on node-27; see its first line for the timestamp). The cause is traced in #2597, and it is NOT the #1631 clamp. The window is the gap cycle that #2100 predicted: before #2100 was deployed, the node-22 producer created mirror directories via `copyback_guard.ensure_traversable_copyback_directory`, which chmods newly created components to `0o755` and so clears setgid. The post-deployment re-sweep, which #2100 made mandatory, was never run. (The safe_fs `0o755` pin cannot produce this shape: under a setgid parent Linux keeps `S_ISGID`, giving `2755`, not `755`.)
 - No NHMS lane loses needed access through it. node-27 `nwm` neither writes nor deletes under `canonical/`: the canonical retention lane runs in the system unit `nhms-node27-canonical-retention.service` as the copyback root's owner (`scripts/node27_raw_retention.py` module docstring; `infra/systemd/nhms-node27-raw-retention.service` runs only `raw,precip-cache` as `nwm`), and an owner can delete its own `755` directories. Drift since #1513: `object-store/models/direct_grid_variants` is now `1755 frd_muziyao:nfsdata` (the issue records `1777`) — it no longer admits a second uid by mode at all, so it is not a dual-uid subtree today; recorded, not relied on.
 
 Ruling: no code change. The gate is a fail-closed security property (#1513 D3, spec "the provider lock-parent gate stays fail-closed"); the pin is what makes safe_fs deterministic under a permissive umask. **Reopen trigger**: any of the following.
@@ -96,6 +96,6 @@ Tests (existing modules `tests/test_scheduler_journal_retention_archive.py` / `_
   - 20 test files call a provider publish entry without importing `provider_mode_helpers` (census candidates, not verified).
   - `direct_grid_variants` mode has drifted.
   - 25 `755` cycle directories sit inside the `2775` `canonical/` group share.
-  - node-27 has no ecCodes library, although it is the `grib` oracle.
+  - node-27's pytest does not wire in its GRIB env (`/home/nwm/nhms-grib`). Once it is wired in, the 8 GRIB cases decode but fail on a fixture/decoder mismatch (#2594).
   - The `test_object_store_forcing_real_disk.py` fixture cycle is past retention.
   - `services/orchestrator/retention.py` `_sanitize_root_candidate` calls bare `expanduser()`.
