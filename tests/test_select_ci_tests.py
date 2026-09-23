@@ -1686,6 +1686,15 @@ def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins(
     assert "tests/test_river_ts_read_path_surrogate_keys.py" in probe_selected
 
 
+def test_display_route_diff_selects_the_coverage_alert_source_allowlist_pin() -> None:
+    """#2464: the pin `DISPLAY_SOURCE_IDS == each route's source annotation`
+    lives in the coverage-freshness suite behind a function-local import, so no
+    importer derivation finds it; the `hydro_display*` rule must name it for a
+    route-only diff (facade or an owner module) to run it in the PR lane."""
+    for path in ("apps/api/routes/hydro_display.py", "apps/api/routes/hydro_display_constants.py"):
+        assert "tests/test_node27_coverage_freshness_alert.py" in select_tests([path], repo_root=Path(".")), path
+
+
 def test_select_tests_maps_every_registered_cleanup_source_to_the_zero_text_oracle() -> None:
     """#1442's mirror of the rule above, derived rather than frozen.
 

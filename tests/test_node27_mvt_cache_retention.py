@@ -1650,6 +1650,150 @@ def test_wrapper_sources_the_env_file_and_creates_the_log_root(tmp_path: Path) -
     assert f"--summary-path {sourced}/mvt-cache-retention-" in log_text
 
 
+# ---------------------------------------------------------------------------
+# #2284: one summary file per run, even within one second.
+# ---------------------------------------------------------------------------
+_PINNED_STAMP = "20260912T165207Z"
+
+
+def _pinned_date_shim(bin_dir: Path) -> None:
+    """`date` frozen at 2026-09-12T16:52:07Z for every format the wrapper asks
+    for (`+%s` for elapsed, the compact stamp for the file name, the RFC 3339
+    stamp for log lines), so two runs are provably inside one second."""
+    shim = bin_dir / "date"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *%s*) echo 1757695927 ;;\n"
+        f"  *%Y%m%dT%H%M%SZ*) echo {_PINNED_STAMP} ;;\n"
+        "  *) echo 2026-09-12T16:52:07Z ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+
+
+def _summary_writing_repo(tmp_path: Path, *, runner_rc: int = 0, write: bool = True) -> Path:
+    """A stand-in runner that behaves like `_write_summary`: tmp file + rename
+    onto `--summary-path`, content unique per process."""
+    repo = _wrapper_repo(tmp_path)
+    python_bin = repo / ".venv" / "bin" / "python"
+    body = (
+        '  printf \'{"pid": %s}\\n\' "$$" > "$sp.tmp" && mv "$sp.tmp" "$sp"\n' if write else ""
+    )
+    python_bin.write_text(
+        "#!/bin/sh\n"
+        'sp=""\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--summary-path" ]; then sp="$2"; shift; fi\n'
+        "  shift\n"
+        "done\n"
+        'echo "RUNNER_INVOKED summary=$sp"\n'
+        'if [ -n "$sp" ]; then\n'
+        f"{body}"
+        "  :\n"
+        "fi\n"
+        f"exit {runner_rc}\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    return repo
+
+
+def _default_summary_env(tmp_path: Path, repo: Path, *, flock_rc: int = 0) -> dict[str, str]:
+    env_file = tmp_path / "runner.env"
+    env_file.write_text("", encoding="utf-8")
+    env_file.chmod(0o600)
+    bin_dir = _flock_shim(tmp_path, exit_code=flock_rc)
+    _pinned_date_shim(bin_dir)
+    env = _wrapper_env(tmp_path, repo, env_file, bin_dir=bin_dir)
+    del env["NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH"]
+    return env
+
+
+def _summaries(tmp_path: Path) -> list[Path]:
+    return sorted((tmp_path / "logs").glob("mvt-cache-retention-*.json"))
+
+
+def test_two_same_second_runs_leave_two_summary_files(tmp_path: Path) -> None:
+    """The runbook's plan-only-then-production flow inside one second."""
+    repo = _summary_writing_repo(tmp_path)
+    env = _default_summary_env(tmp_path, repo)
+
+    first = _run_wrapper(env)
+    second = _run_wrapper(env)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    names = [path.name for path in _summaries(tmp_path)]
+    assert names == [
+        f"mvt-cache-retention-{_PINNED_STAMP}-2.json",
+        f"mvt-cache-retention-{_PINNED_STAMP}.json",
+    ]
+    pids = {json.loads(path.read_text(encoding="utf-8"))["pid"] for path in _summaries(tmp_path)}
+    assert len(pids) == 2
+    # Readers use `ls -t mvt-cache-retention-*.json | head -1`: the collision
+    # suffix stays inside that glob (which is what `_summaries` globs).
+    lines = (tmp_path / "logs" / "wrapper.log").read_text(encoding="utf-8").splitlines()
+    # The start/done lines name the file each run actually got.
+    for name in names:
+        path = tmp_path / "logs" / name
+        assert any(line.endswith(f"start summary={path}") for line in lines), lines
+        assert any("done rc=0" in line and line.endswith(f"summary={path}") for line in lines), lines
+
+
+def test_a_skipped_tick_leaves_no_summary_file(tmp_path: Path) -> None:
+    repo = _summary_writing_repo(tmp_path)
+    env = _default_summary_env(tmp_path, repo, flock_rc=1)
+
+    result = _run_wrapper(env)
+
+    assert result.returncode == 0
+    assert "previous run still active, skipping tick" in _wrapper_output(tmp_path, result)
+    assert list((tmp_path / "logs").glob("*.json")) == []
+
+
+def test_a_blocked_run_leaves_no_summary_file(tmp_path: Path) -> None:
+    repo = _summary_writing_repo(tmp_path)
+    env = _default_summary_env(tmp_path, repo)
+    env["NODE27_MVT_CACHE_RETENTION_LOCK_PATH"] = "relative.lock"
+
+    result = _run_wrapper(env)
+
+    assert result.returncode == 2
+    assert "LOCK_PATH_NOT_ABSOLUTE" in _wrapper_output(tmp_path, result)
+    assert list((tmp_path / "logs").glob("*.json")) == []
+
+
+def test_a_runner_that_dies_before_writing_leaves_no_empty_summary(tmp_path: Path) -> None:
+    """An empty reservation would become the NEWEST `*.json` and every reader's
+    `ls -t | head -1` would parse nothing; the wrapper removes its own."""
+    repo = _summary_writing_repo(tmp_path, runner_rc=1, write=False)
+    env = _default_summary_env(tmp_path, repo)
+
+    result = _run_wrapper(env)
+
+    assert result.returncode == 1
+    assert "RUNNER_INVOKED summary=" in _wrapper_output(tmp_path, result)
+    assert list((tmp_path / "logs").glob("*.json")) == []
+
+
+def test_an_explicit_summary_override_is_used_verbatim(tmp_path: Path) -> None:
+    """The override is the operator's own path: no reservation, no suffix, and
+    two runs overwrite it exactly as before."""
+    repo = _summary_writing_repo(tmp_path)
+    env = _default_summary_env(tmp_path, repo)
+    override = tmp_path / "logs" / "summary.json"
+    env["NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH"] = str(override)
+
+    _run_wrapper(env)
+    result = _run_wrapper(env)
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in (tmp_path / "logs").glob("*.json")) == ["summary.json"]
+    assert f"RUNNER_INVOKED summary={override}" in _wrapper_output(tmp_path, result)
+
+
 def _porcelain(repo: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],

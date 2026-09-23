@@ -71,9 +71,11 @@ def _run(
     observation: Mapping[str, Any] | None = None,
     observe: Any = None,
     now: datetime = T0,
+    display_sources: Any = None,
 ) -> tuple[int, str, str]:
     provider = observe if observe is not None else RecordingObserve(observation)
-    rc = alerter.main([], now=now, observe=provider, env=dict(env))
+    extra = {} if display_sources is None else {"display_sources": display_sources}
+    rc = alerter.main([], now=now, observe=provider, env=dict(env), **extra)
     captured = capsys.readouterr()
     return rc, captured.out, captured.err
 
@@ -202,6 +204,78 @@ def test_evidence_9_null_source_key_never_alerts(capsys: pytest.CaptureFixture[s
     row = _source_line(out, alerter.NULL_SOURCE_KEY)
     assert "status=not-evaluated" in row
     assert "reason=null-source" in row
+
+
+# ---------------------------------------------------------------------------
+# #2464 — only sources the display surface serves are evaluated.
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_display_source_is_visible_but_never_alerts(capsys: pytest.CaptureFixture[str]) -> None:
+    """ERA5 is wired in the orchestrator; a ready `era5` run with no covered
+    cycle would otherwise read `no-covered-cycle` and mail every day forever,
+    with no coverage action able to clear it."""
+
+    rc, out, _err = _run(
+        capsys,
+        env=_env(),
+        observation={"gfs": _frontiers("gfs", T0, T0), "era5": _frontiers("era5", T0, None)},
+    )
+
+    assert rc == 0
+    row = _source_line(out, "era5")
+    assert "status=not-evaluated" in row
+    assert "reason=unsupported-source" in row
+    assert "status=ok" in _source_line(out, "gfs")
+    assert "no-covered-cycle" not in out
+    assert out.splitlines()[0].endswith("sources=2 evaluated=1 breaching=0")
+
+
+def test_an_unsupported_source_alone_is_not_a_zero_source_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    """A key was observed, so D6's zero-source fail-closed does not apply; it is
+    simply not a display source."""
+
+    rc, out, _err = _run(capsys, env=_env(), observation={"era5": _frontiers("era5", T0, None)})
+
+    assert rc == 0
+    assert "reason=unsupported-source" in _source_line(out, "era5")
+
+
+def test_display_sources_are_the_shared_display_route_enum() -> None:
+    """The lane's allowlist IS the display routes' `source` enum: one alias in
+    `packages.common.source_identity`, read by the three routes and this lane."""
+
+    from packages.common import source_identity
+
+    assert alerter.display_source_ids() is source_identity.DISPLAY_SOURCE_IDS
+    assert alerter.config_from_env(_env()).display_sources is source_identity.DISPLAY_SOURCE_IDS
+    assert source_identity.DISPLAY_SOURCE_IDS == frozenset({"gfs", "ifs"})
+    assert alerter.REASON_UNSUPPORTED_SOURCE == "unsupported-source"
+
+
+@pytest.mark.parametrize(
+    "handler",
+    ["list_discharge_cycles", "list_layer_valid_times", "hydro_national_source_cycle_mvt_tile"],
+)
+def test_display_source_allowlist_equals_each_route_source_annotation(handler: str) -> None:
+    """Pin both sides: a route that widens (or narrows) its `source` Literal on
+    its own, or an allowlist edited without the routes, turns this red."""
+
+    # Function-local on purpose: a module-scope import would make this suite a
+    # direct importer of the whole display stack (four guarded selector
+    # closures). The suite is routed on the `hydro_display*` rule instead.
+    import types
+    import typing
+
+    from apps.api.routes import hydro_display
+    from packages.common import source_identity
+
+    annotation = typing.get_type_hints(getattr(hydro_display, handler))["source"]
+    members = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        (literal,) = members
+        members = list(typing.get_args(literal))
+    assert frozenset(members) == source_identity.DISPLAY_SOURCE_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +663,9 @@ def test_evidence_15_report_fits_the_mailed_journal_tail(capsys: pytest.CaptureF
         key = f"ok{index:02d}"
         observation[key] = _frontiers(key, T0, T0)
 
-    rc, out, _err = _run(capsys, env=_env(), observation=observation)
+    # The synthetic keys stand in for display sources (#2464 allowlist seam):
+    # this pin is about the journal budget, not about which keys are served.
+    rc, out, _err = _run(capsys, env=_env(), observation=observation, display_sources=frozenset(observation))
 
     assert rc == 1
     lines = out.splitlines()
@@ -623,7 +699,7 @@ def test_more_breaching_sources_than_the_table_holds_is_reported_honestly(
         key = f"ok{index:02d}"
         observation[key] = _frontiers(key, T0, T0)
 
-    rc, out, _err = _run(capsys, env=_env(), observation=observation)
+    rc, out, _err = _run(capsys, env=_env(), observation=observation, display_sources=frozenset(observation))
 
     assert rc == 1
     lines = out.splitlines()
@@ -754,6 +830,9 @@ def test_evidence_20_covered_frontier_comes_from_national_discharge_cycles(
     rows = [
         {"source_key": "gfs", "ready_frontier": T0},
         {"source_key": alerter.NULL_SOURCE_KEY, "ready_frontier": T0},
+        # #2464: a non-display key is observed (its row stays visible) but the
+        # catalog is never asked about it.
+        {"source_key": "era5", "ready_frontier": T0},
     ]
     session = _FakeSession(rows)
     engine_calls: dict[str, Any] = {}
@@ -805,6 +884,7 @@ def test_evidence_20_covered_frontier_comes_from_national_discharge_cycles(
     # re-derived in this module.
     assert observation["gfs"].covered_cycle is spy_return["default_cycle"]
     assert observation[alerter.NULL_SOURCE_KEY].covered_cycle is None
+    assert observation["era5"].covered_cycle is None
 
 
 def _non_docstring_literals(source: str) -> list[str]:

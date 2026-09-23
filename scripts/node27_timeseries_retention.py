@@ -459,9 +459,14 @@ def config_from_args(
         name="NODE27_TIMESERIES_RETENTION_LOCK_PATH",
         default=_DEFAULT_LOCK_PATH_STR,
     )
-    # H13 env-toggled enforce: --enforce CLI wins; otherwise env presence
-    # (any non-empty value that is not "0" / "false") toggles.
-    if bool(getattr(args, "enforce", False)):
+    # H13 env-toggled enforce, explicit precedence (#2355): an explicit
+    # `--dry-run` resolves to dry-run WHATEVER the env says (a destructive mode
+    # is never inferred against a non-destructive request); otherwise
+    # `--enforce` enforces; otherwise env presence (any non-empty value that
+    # is not "0" / "false" / "no") toggles.
+    if bool(getattr(args, "dry_run", False)):
+        enforce = False
+    elif bool(getattr(args, "enforce", False)):
         enforce = True
     else:
         raw = env.get("NODE27_TIMESERIES_RETENTION_ENFORCE", "").strip().lower()
@@ -485,8 +490,20 @@ def config_from_args(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="node27_timeseries_retention", description=__doc__)
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--enforce", action="store_true", help="actually invoke drop_chunks")
-    group.add_argument("--dry-run", action="store_true", help="dry-run (default)")
+    group.add_argument(
+        "--enforce",
+        action="store_true",
+        help="actually invoke drop_chunks (irreversible)",
+    )
+    group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "list candidates, drop nothing. Without either flag the mode comes "
+            "from NODE27_TIMESERIES_RETENTION_ENFORCE (a truthy value makes "
+            "enforce the default); --dry-run always wins over that variable"
+        ),
+    )
     parser.add_argument("--receipt-path", dest="receipt_path", type=str, default=None)
     parser.add_argument("--lock-path", dest="lock_path", type=str, default=None)
     parser.add_argument(

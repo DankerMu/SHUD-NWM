@@ -539,6 +539,88 @@ def test_config_enforce_env_falsy_is_dry_run(tmp_path: Path) -> None:
     assert config.enforce is False
 
 
+# ---------------------------------------------------------------------------
+# #2355: an explicit --dry-run wins over the enforce env toggle.
+# ---------------------------------------------------------------------------
+
+#: Every spelling the env fallback reads as "enforce" (non-empty after
+#: strip/lower and not 0/false/no). `--dry-run` must beat all of them.
+_TRUTHY_ENFORCE_SPELLINGS = ("1", "true", "TRUE", " yes ", "enforce", "on", "2")
+_FALSY_ENFORCE_SPELLINGS = (None, "", "  ", "0", "false", "FALSE", "no", " No ")
+
+
+@pytest.mark.parametrize("raw", _TRUTHY_ENFORCE_SPELLINGS)
+def test_dry_run_flag_overrides_every_truthy_enforce_env_spelling(tmp_path: Path, raw: str) -> None:
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE=raw)
+
+    assert retention.config_from_args(_args(dry_run=True), env).enforce is False
+    # Without the flag the same env still enforces (H13 unchanged).
+    assert retention.config_from_args(_args(), env).enforce is True
+
+
+@pytest.mark.parametrize("raw", _FALSY_ENFORCE_SPELLINGS)
+def test_enforce_flag_still_wins_over_a_falsy_or_absent_env(tmp_path: Path, raw: str | None) -> None:
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE=raw)
+
+    assert retention.config_from_args(_args(enforce=True), env).enforce is True
+    assert retention.config_from_args(_args(), env).enforce is False
+    assert retention.config_from_args(_args(dry_run=True), env).enforce is False
+
+
+def test_parser_keeps_dry_run_and_enforce_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        retention._parser().parse_args(["--dry-run", "--enforce"])
+
+
+def test_help_text_states_the_env_default_and_that_dry_run_wins() -> None:
+    help_text = " ".join(retention._parser().format_help().split())
+
+    assert "dry-run (default)" not in help_text
+    assert "NODE27_TIMESERIES_RETENTION_ENFORCE" in help_text
+    assert "--dry-run always wins" in help_text
+
+
+def test_dry_run_with_enforce_env_drops_nothing_through_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-09-19 shape: env file sourced (ENFORCE=1), operator asks for
+    `--dry-run`, one chunk IS eligible. The receipt must be a dry-run and the
+    enforce-only phases (measure, drop) must never run."""
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    code = retention.main(
+        argv=["--dry-run"],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert code == 0
+    receipt = json.loads(
+        Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    )
+    assert receipt["mode"] == "dry-run"
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["candidate_chunks"] == ["_timescaledb_internal.chk-a"]
+    assert [call[0] for call in stub.calls] == ["fetch"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_env_example_no_longer_claims_dry_run_is_ignored() -> None:
+    text = (
+        Path(__file__).resolve().parents[1] / "infra/env/node27-timeseries-retention.example"
+    ).read_text(encoding="utf-8")
+    flat = " ".join(line.lstrip("#").strip() for line in text.splitlines())
+
+    assert "does NOT override this variable" not in flat
+    assert "--dry-run is never read" not in flat
+    assert "--dry-run always wins" in flat
+
+
 @pytest.mark.parametrize(
     ("override", "match"),
     [

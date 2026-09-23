@@ -204,15 +204,31 @@ def _parse_cycle_name(name: str) -> datetime | None:
         return None
 
 
-def _dir_size(path: Path) -> int:
+def _dir_size(path: Path) -> tuple[int, OSError | None]:
+    """`path`'s regular-file bytes, plus the `OSError` that stopped the walk (#2309).
+
+    The whole traversal sits inside the `try`, not only the loop body: the
+    `rglob` generator itself advances through `os.scandir`, and on the pinned
+    3.11 `pathlib` swallows only `PermissionError` while iterating, so a
+    non-EACCES `OSError` there (ESTALE, EIO, EMFILE) used to escape through
+    `collect_targets` and kill the whole tick before any deletion and before
+    the summary write. Same contract as `_iter_dirs`: a returned error means
+    the caller must not plan this target -- a tree that went stale half-walked
+    may be the one node-22 is rewriting. The per-file `stat` guard stays: a
+    single file vanishing mid-walk is sized as 0, not a reason to retire the
+    target.
+    """
     total = 0
-    for child in path.rglob("*"):
-        try:
-            if child.is_file() and not child.is_symlink():
-                total += child.stat().st_size
-        except OSError:
-            continue
-    return total
+    try:
+        for child in path.rglob("*"):
+            try:
+                if child.is_file() and not child.is_symlink():
+                    total += child.stat().st_size
+            except OSError:
+                continue
+    except OSError as error:
+        return total, error
+    return total, None
 
 
 def _safe_resolved_dir(path: Path, *, label: str) -> tuple[Path | None, dict[str, Any] | None]:
@@ -451,13 +467,24 @@ def _collect_raw_lane(
             if not _safe_target(raw_root, cycle_dir):
                 skipped.append({"key": key, "reason": "unsafe_target_path"})
                 continue
+            size_bytes, size_error = _dir_size(cycle_dir)
+            if size_error is not None:
+                skipped.append(
+                    _unavailable_skip(
+                        key=key,
+                        reason=f"{RAW_LANE_KEY}_target_unsafe",
+                        path=cycle_dir,
+                        error=size_error,
+                    )
+                )
+                continue
             targets.append(
                 RetentionTarget(
                     path=cycle_dir,
                     key=key,
                     source=source_dir.name,
                     cycle_time=cycle_time,
-                    size_bytes=_dir_size(cycle_dir),
+                    size_bytes=size_bytes,
                     reason=RAW_LANE_REASON,
                 )
             )
@@ -539,13 +566,24 @@ def _collect_mapped_lane(
             if not _safe_target(lane_root, cycle_dir):
                 skipped.append({"key": key, "reason": "unsafe_target_path"})
                 continue
+            size_bytes, size_error = _dir_size(cycle_dir)
+            if size_error is not None:
+                skipped.append(
+                    _unavailable_skip(
+                        key=key,
+                        reason=f"{skip_prefix}_target_unsafe",
+                        path=cycle_dir,
+                        error=size_error,
+                    )
+                )
+                continue
             targets.append(
                 RetentionTarget(
                     path=cycle_dir,
                     key=key,
                     source=storage_source,
                     cycle_time=cycle_time,
-                    size_bytes=_dir_size(cycle_dir),
+                    size_bytes=size_bytes,
                     reason=reason,
                 )
             )

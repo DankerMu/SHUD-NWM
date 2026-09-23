@@ -75,7 +75,10 @@ if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
 fi
 
 LOCK_PATH="${NODE27_MVT_CACHE_RETENTION_LOCK_PATH:-/tmp/node27-mvt-cache-retention.lock}"
-SUMMARY_PATH="${NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH:-$LOG_ROOT/mvt-cache-retention-$(date -u +%Y%m%dT%H%M%SZ).json}"
+# An explicit override is used verbatim. Without one, the per-run default is
+# built and RESERVED only after the lock is held (#2284, below).
+SUMMARY_PATH="${NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH:-}"
+RESERVED_SUMMARY=""
 LOG_FILE="${NODE27_MVT_CACHE_RETENTION_LOG_FILE:-$LOG_ROOT/mvt-cache-retention.log}"
 
 # Same guard shape as LOG_ROOT, and BEFORE the lock is taken or anything is
@@ -86,10 +89,12 @@ case "$LOCK_PATH" in
   /*) ;;
   *) blocked "LOCK_PATH_NOT_ABSOLUTE" ;;
 esac
-case "$SUMMARY_PATH" in
-  /*) ;;
-  *) blocked "SUMMARY_PATH_NOT_ABSOLUTE" ;;
-esac
+if [ -n "$SUMMARY_PATH" ]; then
+  case "$SUMMARY_PATH" in
+    /*) ;;
+    *) blocked "SUMMARY_PATH_NOT_ABSOLUTE" ;;
+  esac
+fi
 case "$LOG_FILE" in
   /*) ;;
   *) blocked "LOG_FILE_NOT_ABSOLUTE" ;;
@@ -101,9 +106,35 @@ if ! flock -n 9; then
   exit 0
 fi
 
-echo "[$(ts)] node27-mvt-cache-retention: start summary=$SUMMARY_PATH" >> "$LOG_FILE"
 START=$(date +%s)
 cd "$REPO" || blocked "REPO_UNAVAILABLE"
+
+# #2284: the default name has second resolution, and the runbook's
+# plan-only-then-production flow runs twice inside one second, so the second
+# run used to overwrite the first run's summary. Reserve the name by EXCLUSIVE
+# create (`set -C` makes `>` fail on an existing file), appending -2, -3, ... on
+# collision. Done after `flock` (so a skipped tick reserves nothing) and after
+# the last `blocked` exit. The runner's `_write_summary` (tmp + replace) then
+# fills the reserved file. If the runner exits without writing, the EXIT trap
+# removes the still-empty reservation: an empty `*.json` would be the newest
+# file every `ls -t mvt-cache-retention-*.json | head -1` reader picks.
+if [ -z "$SUMMARY_PATH" ]; then
+  SUMMARY_STEM="$LOG_ROOT/mvt-cache-retention-$(date -u +%Y%m%dT%H%M%SZ)"
+  SUMMARY_PATH="$SUMMARY_STEM.json"
+  SUMMARY_SUFFIX=1
+  until ( set -C; : > "$SUMMARY_PATH" ) 2>/dev/null; do
+    if [ ! -e "$SUMMARY_PATH" ] && [ ! -L "$SUMMARY_PATH" ]; then
+      # The create failed for a reason other than a collision.
+      blocked "SUMMARY_PATH_UNWRITABLE"
+    fi
+    SUMMARY_SUFFIX=$((SUMMARY_SUFFIX + 1))
+    SUMMARY_PATH="$SUMMARY_STEM-$SUMMARY_SUFFIX.json"
+  done
+  RESERVED_SUMMARY="$SUMMARY_PATH"
+  trap '[ -n "$RESERVED_SUMMARY" ] && [ -f "$RESERVED_SUMMARY" ] && [ ! -s "$RESERVED_SUMMARY" ] && rm -f "$RESERVED_SUMMARY"' EXIT
+fi
+
+echo "[$(ts)] node27-mvt-cache-retention: start summary=$SUMMARY_PATH" >> "$LOG_FILE"
 
 "$PYTHON_BIN" "$SCRIPT" \
   --summary-path "$SUMMARY_PATH" >> "$LOG_FILE" 2>&1

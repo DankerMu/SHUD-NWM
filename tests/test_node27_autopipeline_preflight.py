@@ -1730,3 +1730,93 @@ def test_wrapper_logs_elapsed_seconds_for_every_executed_phase(tmp_path: Path) -
     # The whole-tick markers stay: per-phase timing is additive, not a swap.
     assert any(line.endswith("autopipe: start") for line in log_lines)
     assert any("autopipe: done rc=0 elapsed_sec=" in line for line in log_lines)
+
+
+def test_wrapper_logs_the_real_rc_of_each_failing_non_fatal_step(tmp_path: Path) -> None:
+    """#2283: `cmd || echo "[$(ts)] ... rc=$?"` logged `rc=0`, because `$(ts)`
+    expands (and exits 0) before `$?` is read. Each non-fatal step gets its own
+    exit code here (3 = coverage backstop, 4 = MVT prewarm) so a line carrying
+    the OTHER step's code, or a stale 0, cannot pass."""
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    for script in ("node27_autopipeline.py", "node27_refresh_coverage.py", "node27_mvt_prewarm.py"):
+        (scripts / script).write_text(f"# fake {script}\n", encoding="utf-8")
+    python_bin.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *node27_refresh_coverage.py*) exit 3 ;;\n"
+        "  *node27_mvt_prewarm.py*) exit 4 ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://node27_writer:writer-secret@db.example/nhms",
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                "OBJECT_STORE_PREFIX=s3://nhms",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_flock.chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", str(WRAPPER)],
+        env={
+            **os.environ,
+            "NODE27_AUTOPIPE_REPO": str(fake_repo),
+            "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Both steps stay non-fatal: the tick carries the ingest rc (0).
+    assert proc.returncode == 0, proc.stderr
+    log_lines = (log_root / "autopipe.log").read_text(encoding="utf-8").splitlines()
+    assert any(line.endswith("autopipe: coverage backstop rc=3 (non-fatal)") for line in log_lines), log_lines
+    assert any(line.endswith("autopipe: MVT prewarm rc=4 (non-fatal)") for line in log_lines), log_lines
+    assert not any("rc=0 (non-fatal)" in line for line in log_lines)
+    # The later phases still ran and were timed after the failures.
+    phases = [line.split("phase=")[1].split(" ")[0] for line in log_lines if "autopipe: phase=" in line]
+    assert phases == ["ingest", "coverage_backstop", "mvt_prewarm"]
+    assert any("autopipe: done rc=0 elapsed_sec=" in line for line in log_lines)
+
+
+def test_wrapper_never_reads_the_exit_status_after_an_expansion() -> None:
+    """Static half of #2283: no line reads `$?` after a `$(...)` expansion on
+    the same line, which is the shape that reports the expansion's status."""
+    offending = [
+        (number, line)
+        for number, line in enumerate(WRAPPER.read_text(encoding="utf-8").splitlines(), start=1)
+        if not line.lstrip().startswith("#")
+        and "$?" in line
+        and "$(" in line
+        and line.index("$(") < line.index("$?")
+    ]
+    assert offending == []

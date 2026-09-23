@@ -21,6 +21,7 @@
     "tests/test_api_errors_logging.py",
     "tests/test_node27_frontier_stall_alert.py",
     "tests/test_node27_raw_retention.py",
+    "tests/test_node27_mvt_cache_retention.py",
     "tests/test_node27_timeseries_retention.py",
     "tests/test_node27_write_roles.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",

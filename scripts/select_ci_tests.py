@@ -3213,6 +3213,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # a one-hop importer via tests/test_openapi_31_contract.py.
             "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_openapi_drift.py",
+            # #2464: NOT guard-derived (the import is function-local on purpose,
+            # so the suite is no importer edge of the display stack). It holds
+            # the pin tying the coverage-freshness lane's allowlist to the
+            # `source` annotation of the three display routes; without this
+            # entry a route-only diff that inlines its own `Literal` again would
+            # leave the lane observing a set the routes no longer serve, green
+            # in the PR lane.
+            "tests/test_node27_coverage_freshness_alert.py",
             # #2010: guard-derived — the precip suite imports
             # apps/api/routes/hydro_display.py at file level (the shared
             # `Rfc3339Instant` / seconds-precision gate and the DB-dependency

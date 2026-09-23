@@ -41,6 +41,22 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
   `not-evaluated`，不参与告警——这种 source 本来就不进全国图层，属于 ingest/保留
   问题。`__null_source__` **恒** `not-evaluated`：目录按 `lower(h.source_id) = :source`
   匹配，NULL-source 的 run 根本不可能被逐 source 目录列出。
+- **只评估展示面实际服务的 source（#2464）**：source key 是从 ingest 表发现的（开放集），
+  而被观测的展示面是 display 路由 `source` 参数的闭集——`packages/common/source_identity.py`
+  的 `DisplaySourceId` / `DISPLAY_SOURCE_IDS`（今天 `gfs`、`ifs`），三条路由与本车道读同一个别名。
+  闭集之外的 key（例如已在编排里接线的 ERA5，一旦运维注册了新 data source）记
+  `not-evaluated` + `reason=unsupported-source`：行照常打印、**不进退出码、不发信**。
+  这**不是**覆盖问题，没有任何 coverage 动作能、也需要"清掉"它；它该不该上全国图层是产品决策，
+  不在本车道。
+
+`not-evaluated` 的 `reason` 一览（均为纯说明性，不进退出码）：
+
+| `reason` | 含义 | 处置 |
+|---|---|---|
+| `null-source` | `source_id IS NULL` 的 run（`__null_source__`），逐 source 目录无法列出 | 无 |
+| `unsupported-source` | source 不在 display 路由的 `source` 枚举内（#2464） | 无；若确要上展示面，是改 `DisplaySourceId` 的产品/契约决策 |
+| `outside-window` | ready 前沿早于 `now() - 回看窗` | 归 §10 前沿车道 |
+| `no-ready-frontier` | 防御分支（按 ready 前沿语句构造不可达） | 留证开 issue |
 - **与 §10 的分工**：ingest 全线停摆时两个前沿一起冻住，gap 不增长，**本车道沉默**，
   那是 `frontier-stalled` 的活；coverage 停摆只推进 ready 前沿，gap 单调增长，在图层
   熄灭前数天就跳闸。

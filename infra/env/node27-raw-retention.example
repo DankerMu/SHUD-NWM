@@ -170,14 +170,15 @@ NODE27_RAW_RETENTION_LANES=raw,precip-cache
 #         file appears, so `ls -t ... | head -1` returns the PREVIOUS tick's
 #         healthy file. #2104 closed the crash path on the lane/source probes --
 #         an unwrapped probe on a lane root or a source root, which used to
-#         retire all three lanes and skip `_write_summary` entirely; what is
-#         left is a tick that dies before `_write_summary` for a reason outside
-#         those probes. The one known today is `_dir_size`'s `rglob` walk over a
-#         deletion target (#2309): its generator is advanced OUTSIDE the `try`
-#         and `pathlib` swallows only `PermissionError` while iterating, so a
-#         non-EACCES `OSError` there -- ESTALE, EIO -- still escapes
-#         `collect_targets`. The freshness clause below is the only thing that
-#         catches any of them.
+#         retire all three lanes and skip `_write_summary` entirely -- and
+#         #2309 closed the one below them: an `OSError` (ESTALE, EIO) while
+#         `_dir_size` walks a deletion target now retires THAT target only, as
+#         a `<lane>_target_unsafe` / `path_unavailable` skip carrying
+#         `error`/`error_type` (never planned, never deleted), and the tick
+#         still writes its summary. That skip ends in `_unsafe`, so the check
+#         below goes RED on it. No other crash path is known, but none is
+#         ruled out either: a tick that dies before `_write_summary` for any
+#         other reason is caught only by the freshness clause below.
 #     Check freshness, execution mode and every failure together, on the
 #     newest summary of EACH unit (nwm user unit, then the canonical system
 #     unit, whose LogsDirectory is 0755 so nwm can read it):
