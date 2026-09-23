@@ -161,10 +161,12 @@ MIN_CIRCUIT_PASSES = 1
 # bucket: bucket order is chronological because the bucket and `started_at`
 # share the cycle hour, so disorder is confined inside a bucket.  The largest
 # measured bucket holds 8 passes; 12 is the shipped margin and the config
-# check below demands `scan_limit >= max(streak thresholds) + HOUR_BUCKET_MARGIN`,
-# which is what keeps the ordering-safe prefix `scan_limit - HOUR_BUCKET_MARGIN`
-# (the streak search bound, `Config.streak_window`) at least as long as either
-# threshold.
+# check below demands `scan_limit - HOUR_BUCKET_MARGIN > max(streak thresholds)`,
+# which keeps the ordering-safe prefix `scan_limit - HOUR_BUCKET_MARGIN` (the
+# streak search bound, `Config.streak_window`) strictly LONGER than either
+# threshold.  Merely equal is not enough: one neutral pass inside a prefix no
+# longer than the threshold caps the streak below it, the failure a
+# threshold-sized window had.
 HOUR_BUCKET_MARGIN = 12
 DEFAULT_SCAN_LIMIT = 64
 # The evidence root held 309 entries when measured and grows.  Reaching this
@@ -366,7 +368,9 @@ class Config:
         the first ``scan_limit - HOUR_BUCKET_MARGIN`` of them are guaranteed
         to be the true newest passes, because the arbitrary order inside the
         boundary hour bucket can displace at most ``HOUR_BUCKET_MARGIN``.  The
-        config check keeps this at least ``max(no_submission, lock)``.
+        config check keeps this strictly longer than ``max(no_submission,
+        lock)``; a prefix exactly as long as the threshold is the same trap as
+        a threshold-sized window.
         """
 
         return self.scan_limit - HOUR_BUCKET_MARGIN
@@ -396,10 +400,10 @@ def _parse_suppressed_reasons(raw: str) -> frozenset[str]:
 def load_config(env: dict[str, str] | None = None) -> Config:
     """Resolve and validate every input, refusing before any evidence is read.
 
-    A value outside its range, a candidate scan that cannot cover the longest
-    graded streak plus one hour bucket of margin, an evidence root that is not
-    a directory, or a receipt root inside the evidence root, are all
-    configuration refusals (exit 2) rather than verdicts.  The receipt-root
+    A value outside its range, a candidate scan that does not exceed the
+    longest graded streak by MORE than one hour bucket of margin, an evidence
+    root that is not a directory, or a receipt root inside the evidence root,
+    are all configuration refusals (exit 2) rather than verdicts.  The receipt-root
     rule is structural, not stylistic: the probe's own output inside the
     evidence root would enter readiness discovery and pass-evidence retention.
     """
@@ -451,13 +455,16 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         1,
     )
 
-    required_scan_limit = max(no_submission_passes, lock_passes) + HOUR_BUCKET_MARGIN
-    if scan_limit < required_scan_limit:
+    longest_streak = max(no_submission_passes, lock_passes)
+    if scan_limit - HOUR_BUCKET_MARGIN <= longest_streak:
         raise ConfigError(
-            f"{ENV_SCAN_LIMIT}={scan_limit} must be at least {required_scan_limit}: the longest "
-            f"graded streak is {max(no_submission_passes, lock_passes)} passes and the lexical "
-            f"candidate scan needs {HOUR_BUCKET_MARGIN} more names so the arbitrary ordering "
-            f"inside the boundary hour bucket cannot displace a pass that belongs in the window"
+            f"{ENV_SCAN_LIMIT}={scan_limit} must be greater than "
+            f"{longest_streak + HOUR_BUCKET_MARGIN}: the ordering-safe prefix "
+            f"{ENV_SCAN_LIMIT} - {HOUR_BUCKET_MARGIN} = {scan_limit - HOUR_BUCKET_MARGIN} "
+            f"must be longer than the longest graded streak threshold ({longest_streak}), "
+            f"or neutral passes inside it make the verdict unreachable; the "
+            f"{HOUR_BUCKET_MARGIN} extra names keep the arbitrary ordering inside the boundary "
+            f"hour bucket from displacing a pass that belongs in the window"
         )
     if max_entries_scanned < scan_limit:
         raise ConfigError(

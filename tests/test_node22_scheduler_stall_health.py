@@ -101,12 +101,13 @@ PG_ENVIRONMENT_VARIABLES = (
 )
 
 # Small thresholds keep the fixtures readable.  `SCAN_LIMIT` obeys the probe's
-# own config rule: `max(no_submission, lock) + HOUR_BUCKET_MARGIN`.
+# own config rule, `SCAN_LIMIT - HOUR_BUCKET_MARGIN > max(no_submission, lock)`:
+# 16 - 12 = 4 > 3, the smallest scan the rule admits for these thresholds.
 BASE_CONFIG = {
     probe.ENV_NO_SUBMISSION_PASSES: "3",
     probe.ENV_LOCK_PASSES: "2",
     probe.ENV_CIRCUIT_PASSES: "3",
-    probe.ENV_SCAN_LIMIT: "15",
+    probe.ENV_SCAN_LIMIT: "16",
     probe.ENV_LIMIT_LOOKBACK_MINUTES: "120",
     probe.ENV_MAX_TRIGGER_AGE_MINUTES: "360",
     probe.ENV_MAX_PASS_AGE_MINUTES: "360",
@@ -871,7 +872,7 @@ def test_o1_recency_comes_from_started_at_not_from_the_filename(
         tmp_path,
         monkeypatch,
         evidence_root=root,
-        config={probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "14"},
+        config={probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "15"},
     )
     receipt = _receipt(receipts)
 
@@ -886,7 +887,7 @@ def test_o2_rewriting_a_modification_time_changes_no_verdict(
 ) -> None:
     root = _evidence_root(tmp_path)
     _reversed_order_evidence(root)
-    config = {probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "14"}
+    config = {probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "15"}
 
     before_status, before_receipts, _log = _run(
         tmp_path, monkeypatch, evidence_root=root, config=config
@@ -910,10 +911,10 @@ def test_o3_a_pre_execution_snapshot_does_not_displace_its_terminal_artifact(
 ) -> None:
     """The scan is exactly full, and the snapshot sits at the boundary.
 
-    Fourteen terminal artifacts fill `scan_limit=14`.  The single pass that
+    Fifteen terminal artifacts fill `scan_limit=15`.  The single pass that
     submitted work is the lexically smallest name, and its pre-execution
     snapshot sorts immediately above it.  An implementation that truncates to
-    fourteen names BEFORE dropping snapshots keeps the snapshot and discards
+    fifteen names BEFORE dropping snapshots keeps the snapshot and discards
     that terminal artifact, leaving a window of nothing but blocked passes.
     """
 
@@ -925,7 +926,7 @@ def test_o3_a_pre_execution_snapshot_does_not_displace_its_terminal_artifact(
         "scheduler_2026092312_000000000000.pre_execution.json",
         _pass_payload(started_at=NOW, status="planned"),
     )
-    for index in range(13):
+    for index in range(14):
         suffix = chr(ord("a") + index) + "0" * 11
         _write_pass(
             root,
@@ -940,14 +941,14 @@ def test_o3_a_pre_execution_snapshot_does_not_displace_its_terminal_artifact(
         config={
             probe.ENV_NO_SUBMISSION_PASSES: "2",
             probe.ENV_LOCK_PASSES: "2",
-            probe.ENV_SCAN_LIMIT: "14",
+            probe.ENV_SCAN_LIMIT: "15",
         },
     )
     receipt = _receipt(receipts)
 
     assert status == 0
     assert receipt["verdict"] == "ok"
-    assert receipt["evidence"]["terminal_passes_parsed"] == 14
+    assert receipt["evidence"]["terminal_passes_parsed"] == 15
     assert receipt["signals"]["no_submission_streak"] == 0
 
 
@@ -1054,7 +1055,8 @@ def test_s4_a_pass_without_a_progress_guard_does_not_break_the_streak(
         tmp_path,
         monkeypatch,
         evidence_root=root,
-        config={probe.ENV_LOCK_PASSES: "5", probe.ENV_SCAN_LIMIT: "17"},
+        # Prefix 17 - 12 = 5 walks all five passes, so the oldest one is graded.
+        config={probe.ENV_SCAN_LIMIT: "17"},
     )
     receipt = _receipt(receipts)
 
@@ -1085,7 +1087,9 @@ def test_s5_a_pass_without_a_progress_guard_does_not_extend_the_streak(
         tmp_path,
         monkeypatch,
         evidence_root=root,
-        config={probe.ENV_LOCK_PASSES: "5", probe.ENV_SCAN_LIMIT: "17"},
+        # Prefix 17 - 12 = 5 puts the trailing blocked pass inside the search,
+        # so only the idle pass stands between it and the streak.
+        config={probe.ENV_SCAN_LIMIT: "17"},
     )
     receipt = _receipt(receipts)
 
@@ -1282,8 +1286,6 @@ def test_s9_a_guarded_resource_limit_pass_with_zero_counts_does_not_break_the_st
         config={
             probe.ENV_MAX_PASS_AGE_MINUTES: "240",
             probe.ENV_LIMIT_LOOKBACK_MINUTES: "30",
-            # Search bound 17 - 12 = 5 covers all four passes.
-            probe.ENV_SCAN_LIMIT: "17",
         },
     )
     receipt = _receipt(receipts)
@@ -1377,7 +1379,7 @@ def test_b3_the_resource_limit_verdict_is_a_window_not_a_newest_pass_check(
 def test_b4_the_lookback_window_is_not_shortened_by_the_streak_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A busy lane: the degraded pass is older than the three-pass streak window.
+    """A busy lane: the degraded pass is older than the four-pass streak window.
 
     Graded over the streak window alone it would be invisible; the lookback is
     a time window over every artifact the probe read.
@@ -1404,7 +1406,7 @@ def test_b4_the_lookback_window_is_not_shortened_by_the_streak_window(
 
     assert status == 1
     assert receipt["verdict"] == "pass_limit_blocked"
-    assert receipt["evidence"]["streak_window_passes"] == 3
+    assert receipt["evidence"]["streak_window_passes"] == 4
     assert receipt["evidence"]["lookback_window_passes"] == 7
 
 
@@ -1720,7 +1722,9 @@ def test_f10_reaching_the_enumeration_bound_is_probe_failed_not_a_silent_truncat
         tmp_path,
         monkeypatch,
         evidence_root=root,
-        config={probe.ENV_MAX_ENTRIES_SCANNED: "15"},
+        # The smallest bound the config admits (it must be >= SCAN_LIMIT = 16),
+        # still below the twenty entries on disk.
+        config={probe.ENV_MAX_ENTRIES_SCANNED: "16"},
     )
 
     assert status == 1
@@ -1883,8 +1887,8 @@ def test_c4_the_shipped_defaults_satisfy_the_probes_own_range_rules(
     # The range rule itself, spelled against the thresholds rather than
     # against `streak_window` (which is DERIVED from `scan_limit`, so a check
     # written against it would be true by construction).
-    assert config.scan_limit >= (
-        max(config.no_submission_passes, config.lock_passes) + probe.HOUR_BUCKET_MARGIN
+    assert config.scan_limit - probe.HOUR_BUCKET_MARGIN > max(
+        config.no_submission_passes, config.lock_passes
     )
     # The streak search bound must hold strictly more than the threshold, or
     # a single neutral pass inside it makes `submission_stalled` unreachable.
@@ -1894,6 +1898,95 @@ def test_c4_the_shipped_defaults_satisfy_the_probes_own_range_rules(
     assert config.suppressed_reasons == frozenset({SUPPRESSED_REASON})
     assert config.timer_unit == "nhms-compute-scheduler.timer"
     assert config.service_unit == "nhms-compute-scheduler.service"
+
+
+# (no_submission_passes, lock_passes): the smallest-thresholds case, the lock
+# threshold being the larger one, and the operator retune that raises only the
+# submission threshold to 52 while leaving the shipped scan limit of 64.
+SCAN_BOUNDARY_THRESHOLDS = [(3, 2), (3, 5), (52, 5)]
+
+
+@pytest.mark.parametrize(("no_submission", "lock"), SCAN_BOUNDARY_THRESHOLDS)
+def test_c7_a_scan_whose_safe_prefix_only_equals_the_longest_streak_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_submission: int,
+    lock: int,
+) -> None:
+    """`scan_limit - margin == threshold`: one neutral pass would cap the streak.
+
+    The evidence tree is poisoned as in c1, so reading it would cost exit 1.
+    """
+
+    scan_limit = max(no_submission, lock) + probe.HOUR_BUCKET_MARGIN
+    root = _evidence_root(tmp_path)
+    _write_pass(root, _pass_name(1, "f" * 12), None, raw="{not json")
+
+    status, receipts, log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        config={
+            probe.ENV_NO_SUBMISSION_PASSES: str(no_submission),
+            probe.ENV_LOCK_PASSES: str(lock),
+            probe.ENV_SCAN_LIMIT: str(scan_limit),
+        },
+    )
+    stderr = capsys.readouterr().err
+
+    assert status == 2
+    assert not log.exists(), "systemctl was invoked before the configuration was validated"
+    assert not (receipts / "latest.json").exists()
+    assert f"{probe.ENV_SCAN_LIMIT}={scan_limit} must be greater than {scan_limit}" in stderr
+    assert "must be longer than the longest graded streak threshold" in stderr
+    assert "neutral passes inside it make the verdict unreachable" in stderr
+
+
+@pytest.mark.parametrize(("no_submission", "lock"), SCAN_BOUNDARY_THRESHOLDS)
+def test_c8_one_name_past_the_boundary_is_graded_and_reaches_the_stall_through_a_neutral_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_submission: int, lock: int
+) -> None:
+    """The smallest admitted scan: a prefix one pass longer than the threshold.
+
+    The evidence is the submission threshold's worth of blocked passes plus
+    one neutral pass -- exactly the prefix when the submission threshold is
+    the larger, fewer than it when the lock threshold is -- which is the case
+    an equal-length prefix could not reach.
+    """
+
+    scan_limit = max(no_submission, lock) + probe.HOUR_BUCKET_MARGIN + 1
+    root = _evidence_root(tmp_path)
+    shapes = ["blocked", "neutral", *(["blocked"] * (no_submission - 1))]
+    for index, shape in enumerate(shapes):
+        minutes = 5 + index * 10
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                blocked=0 if shape == "neutral" else 4,
+                guard=shape != "neutral",
+            ),
+        )
+
+    status, receipts, _log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        config={
+            probe.ENV_NO_SUBMISSION_PASSES: str(no_submission),
+            probe.ENV_LOCK_PASSES: str(lock),
+            probe.ENV_SCAN_LIMIT: str(scan_limit),
+        },
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["evidence"]["streak_window"] == max(no_submission, lock) + 1
+    assert receipt["signals"]["no_submission_streak"] == no_submission
+    assert receipt["signals"]["no_submission_neutral_skipped"] == 1
 
 
 def test_c5_an_explicitly_empty_suppression_list_clears_the_default(

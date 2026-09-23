@@ -135,7 +135,7 @@ systemd 侧全绿而产物断流。它**同样**要求 service 当前不在跑 �
 | `NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES` | 20 | ≥2 | ≈2–3 小时持续「有阻塞候选且零提交」 |
 | `NHMS_SCHEDULER_STALL_CIRCUIT_PASSES` | 20 | ≥1 | 刻意高于调度器自身 observe 阈值 3（`compute.scheduler-dbfree.env.example:151`） |
 | `NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS` | `ambiguous_fallback_match:comment_accounting_unproven` | — | 见下 |
-| `NHMS_SCHEDULER_STALL_SCAN_LIMIT` | 64 | ≥ max(no_submission, lock, 1) + 12 | 见下「排序」 |
+| `NHMS_SCHEDULER_STALL_SCAN_LIMIT` | 64 | **> max(no_submission, lock) + 12**（严格大于：前缀 `scan_limit - 12` 必须比阈值长，否则中性趟会让判级不可达） | 见下「排序」「streak 窗口」 |
 | `NHMS_SCHEDULER_STALL_MAX_ENTRIES_SCANNED` | 4096 | ≥ scan_limit | 证据根实有 309 条且会长；**触顶即 `probe_failed`**（见下「排序」） |
 | `NHMS_SCHEDULER_STALL_EVIDENCE_ROOT` | `/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence` | 必须是目录 | 同 `infra/env/compute.scheduler-dbfree.env.example:69` |
 | `NHMS_SCHEDULER_STALL_RECEIPT_ROOT` | `/scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts` | — | 照 refresh 探针的 `workspace/refresh-timer-health/receipts` 形状；**刻意不落在证据根下**，否则探针自己的产物会进 readiness/retention 的扫描面 |
@@ -221,8 +221,8 @@ pass 名是 `scheduler_<YYYYMMDDHH>_<hex12>.json`（`scheduler_runtime.py:571`�
 余量论证：小时桶与 `started_at` 的小时同源，故桶间序即时序，乱序只在桶内；
 取字典序最大的 `scan_limit` 个（已剔 pre_execution），落在边界桶**之上**的至少
 `scan_limit - bucket_max` 个，全部早于边界桶，故 top-N 不被污染。实测单桶最多 8 趟，
-常量取 12 留余量；范围校验 `scan_limit >= max(no_submission_passes, lock_passes) + 12`，
-违反即退出码 2。
+常量取 12 留余量；范围校验 `scan_limit - 12 > max(no_submission_passes, lock_passes)`
+（**严格大于**，理由见下「streak 窗口」），违反即退出码 2。
 
 ## streak 窗口：中性趟不得占用名额（Phase 3 评审的 P1）
 
@@ -240,6 +240,13 @@ live receipt 实测 neutral 约 1/16 趟，任意 20 趟窗口大概率带 neutr
 
 `lock_contended_streak` 的「consecutive」语义与 spec 一致（按 status 直判，非 lock 即打断），
 不受中性规则影响；但其遍历范围同样改为该前缀以保持一致。
+
+前缀本身也必须**严格长于**阈值（fix pass 2）：初版范围校验用 `>=`，允许
+`scan_limit - 12 == max(no_submission_passes, lock_passes)`，那时前缀长度恰等于阈值，
+前缀里一个 neutral 就把 streak 封顶在阈值减一 —— 与上面修的是同一个失效，只是挪到了边界。
+运维把 `NO_SUBMISSION_PASSES` 调到 52 而不动 `SCAN_LIMIT`（默认 64）即复现。
+故校验改为 `scan_limit - 12 > max(no_submission_passes, lock_passes)`，拒绝信息写明
+「前缀必须比阈值长，否则中性趟会让判级不可达」。
 
 ## 慢性条目：无状态 reason 白名单（已定，不留「或」）
 

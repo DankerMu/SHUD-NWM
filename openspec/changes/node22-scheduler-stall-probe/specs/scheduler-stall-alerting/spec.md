@@ -74,8 +74,10 @@ pass-evidence retention.
 #### Scenario: Configuration is refused before any evidence is gathered
 
 - **WHEN** a threshold falls outside its declared range, the candidate scan
-  limit does not exceed the longest graded streak by at least one hour of
-  passes, or the evidence root is not a directory
+  limit does not exceed the longest graded streak by more than one hour of
+  passes (so the ordering-safe prefix the streak search walks would be no
+  longer than the threshold, and one neutral pass inside it would make the
+  verdict unreachable), or the evidence root is not a directory
 - **THEN** the probe exits with the configuration-refusal status, distinct from
   the alert status
 - **AND** no pass artifact is opened and no systemd query is executed

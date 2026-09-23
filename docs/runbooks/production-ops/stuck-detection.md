@@ -332,8 +332,12 @@ drop-in 写 `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=`（等号后�
 范围校验（越界即退出码 2，判级前拒绝）：两个 age ≥ 240；
 `LIMIT_LOOKBACK_MINUTES` ≥ 30（须覆盖探针周期 15 + `RandomizedDelaySec=60` +
 余量）；`LOCK_PASSES` / `NO_SUBMISSION_PASSES` ≥ 2；`CIRCUIT_PASSES` ≥ 1；
-`SCAN_LIMIT >= max(NO_SUBMISSION_PASSES, LOCK_PASSES) + 12`（12 是单小时桶余量，
-实测单桶最多 8 趟）；`MAX_ENTRIES_SCANNED >= SCAN_LIMIT`。
+`SCAN_LIMIT > max(NO_SUBMISSION_PASSES, LOCK_PASSES) + 12`（**严格大于**；12 是单小时桶
+余量，实测单桶最多 8 趟）；`MAX_ENTRIES_SCANNED >= SCAN_LIMIT`。
+严格大于是因为 streak 只在前缀 `SCAN_LIMIT - 12` 里找：前缀必须比阈值长，否则前缀里
+一趟中性就把 streak 封顶在阈值减一、这档永远不报。**调高任一 streak 阈值时同步调高
+`SCAN_LIMIT`**：例如 `NO_SUBMISSION_PASSES=52` 需要 `SCAN_LIMIT >= 65`，只改前者而留着
+默认 64 会被拒绝（退出码 2）。
 **改完必须把 drop-in 记在本节** —— 一个没人看得见的阈值就是没人能审计的阈值。
 
 #### 6.2.3 安装步骤与装前装后对拍

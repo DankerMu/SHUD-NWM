@@ -5,7 +5,9 @@
 - [x] 1.1 **D4 自包含**：stdlib only。**禁止** `from services...` / `from packages...` 的任何 import
       （理由见 design「D4 自包含约束」）。文件名谓词与 `MAX_EVIDENCE_BYTES`、后缀元组在本文件内自带。
 - [x] 1.2 配置层：读 design 阈值表的全部 env 键；`--now` 只走 CLI 不进 env。
-      **在收集任何证据之前**做范围校验（含 `scan_limit >= max(no_submission_passes, lock_passes) + 12`、
+      **在收集任何证据之前**做范围校验（**该式已由 7.1 收紧为严格大于**
+      `scan_limit - 12 > max(no_submission_passes, lock_passes)`；此处保留原文只为记录当时口径，
+      实现以 7.1 为准 ——「恰好相等」会让中性趟把判级顶成不可达）、
       两个 age 阈值 ≥240、`limit_lookback >= 30`（须覆盖周期 15 + `RandomizedDelaySec=60` + 余量）、证据根是目录），任一不满足即结构化配置拒绝 + 退出码 2，
       且不读任何产物、不执行 systemctl。
 - [x] 1.3 systemd 证据：只跑 `systemctl --user show <unit> -p ...`（**只读**；本文件不得出现
@@ -277,3 +279,20 @@
 - [x] 6.3.3 `npx markdownlint-cli2 "docs/runbooks/production-ops/stuck-detection.md"`（或仓库 CI 同款调用）
 - [x] 6.3.4 定向变异自证：把 6.1.1 改回 `records[:window]` → 新用例必须红；
       去掉 6.1.2 的路由行 → 6.2.2 的补集断言必须红。
+
+## 7. Phase 3 fix pass 2（最后一轮）
+
+- [x] 7.1 **范围校验的边界允许 P1 原样复现**（fix pass 1 的 implementer 自报残留，已复核）。
+      `required_scan_limit = max(no_submission_passes, lock_passes) + HOUR_BUCKET_MARGIN`
+      用的是 `>=`，于是 `scan_limit - 12` 可以**恰好等于**阈值 —— 前缀长度 = 阈值，
+      窗口里一个 neutral 就让判级不可达，与 6.1.1 修的是同一个失效。
+      运维把 `NO_SUBMISSION_PASSES` 调到 52 而不动 `SCAN_LIMIT`（默认 64）即触发。
+      改为**严格大于**：`scan_limit - HOUR_BUCKET_MARGIN > max(no_submission_passes, lock_passes)`，
+      拒绝信息要说清「前缀必须比阈值长，否则中性趟会让判级不可达」。
+      同步：design.md 阈值表的 `SCAN_LIMIT` 范围列、runbook §6.2.2 的 retune 说明、
+      以及测试里 `BASE_CONFIG` 的 `SCAN_LIMIT`（15 → 16，使前缀 4 > 阈值 3）。
+- [x] 7.2 用例：`scan_limit == max(阈值) + 12` 恰好相等 → 退出码 2（配置拒绝），
+      且断言未读任何产物；`+13` → 正常判级。
+- [x] 7.3 变异自证：把 7.1 改回 `>=` → 7.2 的拒绝用例必须红。
+- [x] 7.4 `uv run pytest -q tests/test_node22_scheduler_stall_health.py tests/test_select_ci_tests.py`
+      + `uv run ruff check` 四个改动文件 + `openspec validate --strict`。
