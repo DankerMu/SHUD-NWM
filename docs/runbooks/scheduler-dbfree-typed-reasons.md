@@ -707,13 +707,18 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
 失败又不是"已证明的拒绝"（gateway 502、响应不可解析、超时等），Slurm 可能已经接收了作业。原始 gateway 错误码
 保留在该行 `submission` 事件 details 的 `origin_error_code`（例如 `SLURM_PARSE_ERROR`），`error_message` 保持原文。
 
-- 它是 transient 码（`transient_slurm_runtime`），走阶段内自动重试（有退避，受 `retry_limit` 约束），**不会**直接落成
-  `permanently_failed`；值守无需处理。
+- 它是 transient 码（`transient_slurm_runtime`），走阶段内自动重试（有退避，受 `retry_limit` 约束），第一次失败**不会**
+  直接落成 `permanently_failed`。只要重试还没用完，值守不用动手；这**不等于**永远不需要人工处理，见下一条。
 - 重试与仍在跑的原作业并发是安全的：checkpoint 对象原子写、同 checksum 幂等，index 写入有锁与 preimage CAS，
   copyback 以 run 为权威；最坏情况是重试失败、落回 `permanently_failed`（即 #2584 之前的状态）。
-- 重试耗尽后候选为 `retry_limit_exhausted`；被证明拒绝（`submit_disposition = rejected`）或未进入 gateway 边界的
-  失败保留原始错误码。两种情况的人工出口都是 manual-retry marker 打在 **cohort master id** 上，见
-  [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)
+- **重试耗尽**：阶段内最后一次重试仍失败时，retry service 当趟就把该行标成 `permanently_failed`，`error_code` 仍是
+  `STATE_SAVE_SUBMIT_AMBIGUOUS`。调度器随后判 `decision: permanent_failure`、blocked reason
+  **`permanent_failure_guard`**（行状态为 `permanently_failed` 时优先于其他 reason），`failure.reason_code` 为
+  `STATE_SAVE_SUBMIT_AMBIGUOUS`、`failure.limit_exhausted: true`。只有该行仍停在 `failed` / `submission_failed`
+  （例如那一趟在打永久标记之前就中断了）时，reason 才会是 `retry_limit_exhausted`。
+- 被证明拒绝（`submit_disposition = rejected`）或未进入 gateway 边界的失败保留原始错误码，按该码照旧分类（非 transient
+  码当趟就被标成 `permanently_failed`，判 `permanent_failure_guard`）。重试耗尽和这类失败都需要人工处理：把 manual-retry marker 打在
+  **cohort master id** 上，见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)
   「forecast 已成功、`state_save_qc` 失败」小节。
 
 ## 相关文档

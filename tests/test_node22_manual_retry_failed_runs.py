@@ -619,6 +619,64 @@ def test_failed_multi_member_cohort_is_listed_only_when_its_membership_is_provab
     assert "warning" in preview
 
 
+def _state_save_retry_row(*, status: str, minutes_after_base: int) -> dict[str, Any]:
+    """The in-stage ``_retry_1`` of the HLJ cohort's ``state_save_qc``, stamped after the base row."""
+
+    failed = status != "succeeded"
+    row = _cohort_row(
+        _HLJ_COHORT_RUN_ID,
+        "state_save_qc",
+        status=status,
+        slurm_job_id=None if failed else "54990",
+        model_id=_HLJ_MODEL_ID,
+        error_code="SLURM_PARSE_ERROR" if failed else None,
+        offset=minutes_after_base,
+    )
+    row["job_id"] = f"{_HLJ_STATE_SAVE_JOB_ID}_retry_1"
+    row["retry_count"] = 1
+    return row
+
+
+@pytest.mark.parametrize(
+    ("base_status", "retry_status", "expected_job_ids"),
+    [
+        # The retry recovered the cohort: the older failed base row names nothing.
+        ("permanently_failed", "succeeded", []),
+        # Reverse order, same rows: the latest attempt failed, so the cohort is named by it.
+        ("succeeded", "permanently_failed", [f"{_HLJ_STATE_SAVE_JOB_ID}_retry_1"]),
+    ],
+)
+def test_only_the_latest_state_save_qc_row_of_a_cohort_decides_the_hint(
+    tmp_path: Path, base_status: str, retry_status: str, expected_job_ids: list[str]
+) -> None:
+    root = _ifs_journal(
+        tmp_path,
+        [
+            *_single_model_cohort(state_save_status=base_status),
+            _state_save_retry_row(status=retry_status, minutes_after_base=30),
+            _hlj_hydro_run_row(),
+        ],
+    )
+    rows = {
+        row["job_id"]: row
+        for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("ifs_2026092212")
+        if row["stage"] == "state_save_qc"
+    }
+    # Real, ordered timestamps survive the journal write: the retry row is the later truth.
+    assert rows[_HLJ_STATE_SAVE_JOB_ID]["updated_at"] == "2026-09-23T04:31:39Z"
+    assert rows[f"{_HLJ_STATE_SAVE_JOB_ID}_retry_1"]["updated_at"] == "2026-09-23T05:01:39Z"
+
+    exit_code, receipt = _invoke(root, tmp_path, "--run-id", _HLJ_RUN_ID)
+
+    assert exit_code == 0
+    preview = receipt["runs"][0]["preview"]
+    assert preview["decision"] == "refused"
+    assert preview["reason"] == "no_retryable_failed_job"
+    assert [candidate["job_id"] for candidate in preview["cohort_candidates"]] == expected_job_ids
+    assert ("warning" in preview) is bool(expected_job_ids)
+    assert "cohort_candidates_error" not in preview
+
+
 def test_would_mark_and_run_active_previews_keep_their_exact_fields(tmp_path: Path) -> None:
     root = _journal(tmp_path, [_failed_per_run_job(), _failed_cohort_master_job(), _active_per_run_job()])
 

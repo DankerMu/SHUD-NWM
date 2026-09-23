@@ -1385,6 +1385,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_source_cycle_raw_manifest.py",
         "tests/test_source_scoped_dispatch.py",
         "tests/test_state_clone.py",
+        # #2584: the ambiguous state_save_qc submit suite rides the broad
+        # orchestrator directory rule (chain_stage_execution.py,
+        # chain_forecast_submission.py, retry.py, scheduler_state_types.py,
+        # scheduler_state_decision.py importer gaps). DB-free, sub-second.
+        "tests/test_state_save_submit_ambiguity.py",
         "tests/test_variant_activation_cutover.py",
         "tests/test_warm_start_chaining.py",
     ]

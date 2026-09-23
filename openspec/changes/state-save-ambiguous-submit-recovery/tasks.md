@@ -43,6 +43,12 @@
 - [x] 2.4 脚本提示正例（evidence 4），journal 形态仿照生产（见 design「Seams under test」），行带真实时间戳。
 - [x] 2.5 脚本提示反例（evidence 5 a-e）；多成员 cohort 的 `cohort_members` 放在 forcing/forecast 行上。
 - [x] 2.6 已有测试保持通过：`tests/test_node22_manual_retry_failed_runs.py`、manual-retry 选择器与 DB `RetryService` 的拒绝测试。
+- [x] 2.7 真实阶段循环（`orchestrate_cycle`，`FileJournalRetryService` + `RetryConfig(max_retries=1, backoff_schedule=[0])`）：
+      gateway 先 502 `SLURM_PARSE_ERROR` 再 201 → 第二次 POST、`_state_save_qc_retry_1` 成功、retry 事件
+      `previous_error == "STATE_SAVE_SUBMIT_AMBIGUOUS"`、cycle 完成。
+- [x] 2.8 runbook 的耗尽口径：重试耗尽 → 行 `permanently_failed` / `STATE_SAVE_SUBMIT_AMBIGUOUS`，调度器判
+      `permanent_failure` / `permanent_failure_guard`；行仍为 `submission_failed`（永久标记前中断）时才是 `retry_limit_exhausted`。
+- [x] 2.9 脚本提示只看每个 cohort 最新的 `state_save_qc` 行：base 行失败、`_retry_1` 更晚且成功 → 不列出；反向 → 列出 `_retry_1`。
 
 ## 3. 验证
 
@@ -52,3 +58,8 @@
 - [x] 3.2 `uv run ruff check` 被改文件。
 - [x] 3.3 `openspec validate state-save-ambiguous-submit-recovery --strict --no-interactive`。
 - [x] 3.4 `.large-file-guard.json`：确认被改文件没有新超出 1000 行上限又不在豁免名单中；若有，报告，不要擅自改。
+      结果（偏离，已在 PR 偏离记录中说明）：`chain_stage_execution.py`（1482→1513）与 `chain_forecast_orchestrator_cycle.py`
+      （1045→1047）在 master 上已超限，拆分超出本单范围；编排者按 guard 自身给出的处置在 `exclude` 中登记了这两项。
+- [x] 3.5 CI 选择：`scripts/select_ci_tests.py` 把 `tests/test_state_save_submit_ambiguity.py` 挂到 `services/orchestrator/**`
+      目录规则、`CHAIN_IMPORTER_TESTS`、`FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`；对 `chain_stage_execution.py`、
+      `chain_forecast_submission.py` 执行选择器，结果含该文件。

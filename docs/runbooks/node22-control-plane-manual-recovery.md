@@ -306,10 +306,16 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
      每项含 `run_id`、`job_id`、`stage`、`status`、`error_code`、`member_count`，另有一条 `warning`。
      成员关系证明不了的 cohort（成员列表不完整等）不会列出；提示读 cycle 受阻时给出
      `cohort_candidates_error`（不是空列表），此时改用下一种办法。脚本**不会**替你换 id。
-   - 从 blocked evidence（`state_evidence.pipeline_jobs`）里取 `stage = state_save_qc` 那一行的 `run_id`。
+   - 从 blocked evidence（`state_evidence.pipeline_jobs`）里取。同一 cycle 可能有多行 `stage = state_save_qc`，
+     分属不同 cohort（例如 HLJ 那一行 `permanently_failed`、`model_id` 为 HLJ 的模型；另一行 `succeeded`、
+     `model_id` 为空，属于另一个 47 成员的 cohort），而且 evidence 投影不带 `cohort_members`。所以只取**同时满足**
+     两个条件的那一行的 `run_id`：状态为失败状态（`permanently_failed`、`failed`、`submission_failed` 等），并且
+     `model_id` 等于该候选的模型。失败的 `state_save_qc` 行都没有 `model_id` 时，evidence 证明不了成员关系，
+     不要从中挑，改用上一种办法的 `cohort_candidates`。两种办法都证明不了时不要猜，等 journal 读恢复后重新预览取提示。
 2. **看清代价再标**：标记 cohort master 会让**整个 cohort 从 convert 重跑**到 `state_save_qc`，不只是失败的阶段；
    `member_count` 个模型的 forecast 都会重算。单模型 cohort 约 19 分钟；47 个模型的 cohort 会把 47 个 forecast 全部重跑。
-3. 用该 cohort master id 预览，确认 `decision: would_mark`、`stage: state_save_qc`，再追加 `--execute`。
+3. 用该 cohort master id 预览。先确认预览用的 id 就是第 1 步按提示或 evidence 规则取得的那个 id（不是凭 `would_mark`
+   反推出来的），再确认 `decision: would_mark`、`stage: state_save_qc`，然后追加 `--execute`。
 4. 下一趟自然 pass 会重跑该 cohort。若 cycle 已出调度窗口（例如 IFS 的旧 cycle），接着用
    `scripts/ops/node22-run-cycle-once.sh --cycle-time <YYYY-MM-DDTHH:MM:SSZ> --source <source> --basin-id <basin_id>`，
    先 `--plan` 核对，再 `--submit`。
@@ -322,7 +328,13 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
 
 自 #2584 起，这类"已越过 gateway 边界、未被证明拒绝"的 `state_save_qc` 提交失败记为 transient 的
 `STATE_SAVE_SUBMIT_AMBIGUOUS`（原始错误码在提交失败事件 details 的 `origin_error_code`），会在 `retry_limit`
-内自动重试；只有重试耗尽（`retry_limit_exhausted`）或被证明拒绝时才需要上面的人工出口。
+内自动重试，重试未用完时不需要人工处理。以下两种情况需要走上面的人工出口：
+
+- 重试耗尽：该行被标成 `permanently_failed`、`error_code` 仍为 `STATE_SAVE_SUBMIT_AMBIGUOUS`，调度器判
+  `permanent_failure` / `permanent_failure_guard`。只有该行仍停在 `failed` / `submission_failed`（例如那一趟在打
+  永久标记前中断）时，reason 才是 `retry_limit_exhausted`。
+- 被证明拒绝或未进入 gateway 边界：保留原始错误码，按该码照旧分类；非 transient 码（如 `SLURM_PARSE_ERROR`）同样是
+  `permanently_failed` / `permanent_failure_guard`。
 
 ### 两类 completed-skip fail-stop：`confirm-operator-reentry`
 
