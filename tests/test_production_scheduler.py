@@ -21855,6 +21855,296 @@ def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropp
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in serialized.decode("utf-8")
 
 
+def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
+    """A REAL pass whose unit chain died inside ``orchestrate_cycle`` (#2570).
+
+    Not a hand-written row: the dispatch catch-all
+    (``scheduler_execution.py:743-754``) is what writes ``error_code`` /
+    ``error_traceback_tail``, and it writes them into ``model_run_evidence``
+    (``scheduler_runtime.py:1376``), never onto a candidate row.  The node-22
+    incident shape is exactly this: pass status ``submission_failed``, candidate
+    rows still ``selected``, and the traceback nowhere else — the module imports
+    no logging and never prints.
+    """
+
+    class _ChainKillingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise RuntimeError("dictionary changed size during iteration")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: _ChainKillingOrchestrator(),
+    )
+    evidence = json.loads(json.dumps(scheduler.run_once().evidence))
+    failure_row = evidence["model_run_evidence"][0]
+    assert evidence["status"] == "submission_failed"
+    assert failure_row["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+    assert "error_traceback_tail" in failure_row
+    return evidence
+
+
+def _compact_evidence_size(payload: Mapping[str, Any]) -> int:
+    return len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+
+
+def test_bounded_fallback_keeps_the_model_run_failure_cause(tmp_path: Path) -> None:
+    """#2570: the fallback rebuilt the payload WITHOUT ``model_run_evidence``.
+
+    Four node-22 passes landed as ``resource_limit_blocked`` with the crash site
+    unrecoverable, because the artifact is the only place it is ever written.
+    """
+
+    from services.orchestrator import scheduler_evidence
+
+    pass_id = "scheduler_2026052112_model_run_failure_cause"
+    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    expected_row = evidence["model_run_evidence"][0]
+    expected_tail = expected_row["error_traceback_tail"]
+    max_evidence_bytes = _compact_evidence_size(evidence) // 2
+
+    config = _config(tmp_path / "write", now=_dt("2026-05-21T12:00:00Z"))
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    context = _scheduler_evidence_test_context(config, max_evidence_bytes=max_evidence_bytes)
+
+    artifact_path = scheduler_evidence.write_evidence(context, pass_id, evidence)
+    serialized = Path(artifact_path or "").read_bytes()
+    persisted = json.loads(serialized.decode("utf-8"))
+
+    # The fail-closed fallback tier really ran: neither the within-limit path nor
+    # the non-blocking summary tier (which keeps ``model_run_evidence`` verbatim).
+    assert persisted["status"] == "resource_limit_blocked"
+    assert "evidence_compaction" not in persisted
+    assert "model_run_evidence" not in persisted
+    assert len(serialized) <= max_evidence_bytes
+
+    (failure,) = persisted["model_run_failures"]
+    assert failure["candidate_id"] == expected_row["candidate_id"]
+    # The basin identity the producer actually writes is the VERSIONED one: a
+    # projection key the producer never emits would be a dead entry that quietly
+    # leaves the operator unable to name the basin.
+    assert "basin_id" not in expected_row
+    assert failure["basin_version_id"] == expected_row["basin_version_id"]
+    assert failure["model_id"] == expected_row["model_id"]
+    assert failure["status"] == "submission_failed"
+    assert failure["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+    # Passed through as the producer bounded it: neither re-truncated nor widened.
+    assert failure["error_traceback_tail"] == expected_tail
+    assert len(expected_tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+    assert "scheduler_execution.py" in expected_tail
+    # Deliberately excluded: the tail already ends with the ``Type: message`` summary.
+    assert "error_message" not in failure
+    assert persisted["limit"]["model_run_failures"] == {
+        "status": "summarized",
+        "failed_total": 1,
+        "retained": 1,
+    }
+    # 2.2.7: the projection does not cost the candidate rows their summaries.
+    assert persisted["limit"]["candidate_lists"] == "summarized"
+    assert persisted["candidates"]
+
+
+def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_path: Path) -> None:
+    """A cap that silently swallowed rows would repeat the bug at a smaller scale."""
+
+    from services.orchestrator import scheduler_evidence
+    from services.orchestrator.scheduler_evidence import _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
+
+    failed_count = _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT + 6
+    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    producer_row = evidence["model_run_evidence"][0]
+    # One producer-written row per submitted candidate of the dead unit: the
+    # incident pass carried 96 of them.  Only the identities vary.
+    evidence["model_run_evidence"] = [
+        {
+            **producer_row,
+            "candidate_id": f"gfs:2026-05-21T06:00:00Z:model_{index:03d}:forecast_gfs_deterministic",
+            "model_id": f"model_{index:03d}",
+            "run_id": f"fcst_gfs_2026052106_model_{index:03d}",
+        }
+        for index in range(failed_count)
+    ]
+
+    bounded = scheduler_evidence.bounded_evidence_payload(
+        evidence,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    assert bounded["limit"]["model_run_failures"] == {
+        "status": "summarized",
+        "failed_total": failed_count,
+        "retained": _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT,
+    }
+    assert len(bounded["model_run_failures"]) == _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
+    # The cap keeps a prefix, not a sample: the retained rows are identifiable.
+    assert [row["model_id"] for row in bounded["model_run_failures"]] == [
+        f"model_{index:03d}" for index in range(_BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT)
+    ]
+    assert all(
+        row["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED" and row["error_traceback_tail"]
+        for row in bounded["model_run_failures"]
+    )
+
+
+def test_bounded_fallback_sheds_the_model_run_failure_projection_last(tmp_path: Path) -> None:
+    """The failure cause outlives every other droppable field, then says it was cut."""
+
+    from services.orchestrator import scheduler_evidence
+
+    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    incident = _incident_scheduler_evidence_payload("scheduler_2026052112_shed_order")
+    evidence["candidates"] = incident["candidates"]
+    evidence["blocked_candidates"] = incident["blocked_candidates"]
+    evidence["skipped_candidates"] = incident["skipped_candidates"]
+    evidence["restart_reconcile"] = incident["restart_reconcile"]
+
+    baseline = scheduler_evidence.bounded_evidence_payload(
+        evidence,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+    assert baseline["model_run_failures"]
+    baseline_bytes = _compact_evidence_size(baseline)
+
+    # A byte sweep instead of one reconstructed threshold: the claim is an ORDER,
+    # so it is asserted over every budget that forces the droppable tier, and the
+    # test never has to re-derive the writer's own shedding arithmetic.
+    outlived_the_candidate_lists = False
+    projection_ever_shed = False
+    for max_evidence_bytes in range(baseline_bytes, baseline_bytes // 3, -25):
+        fitted = scheduler_evidence_payload_module._fit_bounded_evidence_payload(
+            json.loads(json.dumps(baseline)),
+            max_evidence_bytes=max_evidence_bytes,
+        )
+        if fitted.get("model_run_failures"):
+            assert fitted["model_run_failures"] == baseline["model_run_failures"]
+            assert fitted["limit"]["model_run_failures"]["status"] == "summarized"
+            if fitted["candidates"] == [] and fitted["restart_reconcile"] == {}:
+                outlived_the_candidate_lists = True
+            continue
+        # Shed: then everything ahead of it in the drop order is already gone,
+        # and the marker says the rows were cut rather than leaving an empty list
+        # that reads as "nothing failed".
+        projection_ever_shed = True
+        assert fitted.get("model_discovery", {}) == {}
+        assert fitted.get("source_cycles", []) == []
+        assert fitted.get("candidates", []) == []
+        assert fitted.get("blocked_candidates", []) == []
+        assert fitted.get("skipped_candidates", []) == []
+        assert fitted.get("restart_reconcile", {}) == {}
+        limit_block = fitted["limit"]
+        if "model_run_failures" in limit_block:
+            assert limit_block["model_run_failures"] == {
+                "status": "dropped",
+                "failed_total": 1,
+                "retained": 0,
+            }
+
+    assert outlived_the_candidate_lists
+    assert projection_ever_shed
+
+
+def test_bounded_fallback_omits_the_model_run_failure_key_when_nothing_failed() -> None:
+    """No failed run means no key and no marker — never a fabricated empty one."""
+
+    from services.orchestrator import scheduler_evidence
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026052112_no_failures")
+    assert "model_run_evidence" not in payload
+
+    bounded = scheduler_evidence.bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=200_000,
+    )
+
+    assert "model_run_failures" not in bounded
+    assert "model_run_failures" not in bounded["limit"]
+
+    payload["model_run_evidence"] = [
+        {"candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic", "status": "submitted"}
+    ]
+    succeeded = scheduler_evidence.bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=200_000,
+    )
+
+    assert "model_run_failures" not in succeeded
+    assert "model_run_failures" not in succeeded["limit"]
+
+
+def test_bounded_fallback_reprojects_the_failure_cause_of_an_already_bounded_payload(tmp_path: Path) -> None:
+    """A fallback product no longer has ``model_run_evidence``; its projection is the record."""
+
+    from services.orchestrator import scheduler_evidence
+
+    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    bounded = scheduler_evidence.bounded_evidence_payload(
+        evidence,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    again = scheduler_evidence.bounded_evidence_payload(
+        bounded,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    assert again["model_run_failures"] == bounded["model_run_failures"]
+    assert again["limit"]["model_run_failures"] == bounded["limit"]["model_run_failures"]
+
+    # An overflow the source already recorded survives the re-entry: re-bounding a
+    # capped projection can only see the rows that survived the cap, so the larger
+    # total wins and ``retained < failed_total`` keeps saying rows were cut.
+    overflowed = json.loads(json.dumps(bounded))
+    overflowed["limit"] = {
+        **overflowed["limit"],
+        "model_run_failures": {"status": "summarized", "failed_total": 70, "retained": 1},
+    }
+    rebounded = scheduler_evidence.bounded_evidence_payload(
+        overflowed,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    assert rebounded["limit"]["model_run_failures"] == {
+        "status": "summarized",
+        "failed_total": 70,
+        "retained": 1,
+    }
+
+    # And a marker that already said "dropped" is never downgraded back.
+    cut = json.loads(json.dumps(bounded))
+    cut["model_run_failures"] = []
+    cut["limit"] = {
+        **cut["limit"],
+        "model_run_failures": {"status": "dropped", "failed_total": 1, "retained": 0},
+    }
+    resummarized = scheduler_evidence.bounded_evidence_payload(
+        cut,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    assert "model_run_failures" not in resummarized
+    assert resummarized["limit"]["model_run_failures"] == {
+        "status": "dropped",
+        "failed_total": 1,
+        "retained": 0,
+    }
+
+
 def test_bounded_evidence_fallback_status_keeps_production_contract_mapping() -> None:
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_contract_mapping")
 

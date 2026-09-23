@@ -81,6 +81,27 @@ _BOUNDED_SOURCE_CYCLE_KEYS = (
 #: The per-model keys of the same leg: the identity, the occurrence count and the
 #: re-entry token ``confirm-operator-reentry`` requires.
 _BOUNDED_SOURCE_CYCLE_MODEL_KEYS = ("model_id", "occurrences", "recorded_init_state_id")
+#: #2570: the failure-cause projection's row keys.  Identity so the operator can
+#: name WHICH unit died, ``status`` so the row reads as the producer wrote it,
+#: and the two fields that are the crash site's only record.  ``error_message``
+#: is deliberately NOT here: ``error_traceback_tail`` already ends with the
+#: ``Type: message`` summary (``scheduler_execution.py:165-168``), so carrying it
+#: too would spend the byte budget on a duplicate.
+_BOUNDED_MODEL_RUN_FAILURE_KEYS = (
+    "candidate_id",
+    "source_id",
+    "cycle_time_utc",
+    "model_id",
+    # ``basin_version_id``, not ``basin_id``: the producer's identity block
+    # (``scheduler_candidate_execution_evidence.py:293-325``) writes the versioned
+    # spelling and never the bare one, so a ``basin_id`` entry here would be a key
+    # that can never match a row.
+    "basin_version_id",
+    "run_id",
+    "status",
+    "error_code",
+    "error_traceback_tail",
+)
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
 # and either can be the only one present, so the compact block must keep both.
 _BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
@@ -291,6 +312,11 @@ def _fit_bounded_evidence_payload(
         # release, and ``dropped`` says exactly that.
         if field_name == "source_cycles" and emptied_non_empty:
             _mark_bounded_source_cycles(bounded_payload, "dropped")
+        # #2570: the same rule for the failure-cause projection.  It is shed last
+        # of the droppable fields, and when it is shed the marker says so instead
+        # of leaving an empty list that reads as "nothing failed".
+        if field_name == "model_run_failures" and emptied_non_empty:
+            _mark_bounded_model_run_failures(bounded_payload, "dropped")
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
 
@@ -347,6 +373,8 @@ def _fit_bounded_evidence_payload(
         # empty-assign tier above always runs first on the ladder's own product.
         if field_name == "source_cycles" and bounded_payload[field_name]:
             _mark_bounded_source_cycles(bounded_payload, "dropped")
+        if field_name == "model_run_failures" and bounded_payload[field_name]:
+            _mark_bounded_model_run_failures(bounded_payload, "dropped")
         bounded_payload.pop(field_name)
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
@@ -615,6 +643,66 @@ def _bounded_source_cycles_state(payload: Mapping[str, Any]) -> Any:
         return None
     marker = limit.get("source_cycles")
     return marker.get("status") if isinstance(marker, Mapping) else None
+
+
+def _bounded_model_run_failures(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    """The capped failure-cause projection and the failed TOTAL (#2570).
+
+    Source rows are the ``model_run_evidence`` rows that carry an
+    ``error_code`` -- the dispatch catch-all writes one per submitted candidate
+    of the unit whose chain died (``scheduler_execution.py:743-754``) -- and
+    only the fixed keys above are kept, passed through exactly as the producer
+    bounded them.  Rows without an ``error_code`` are a healthy run's detail and
+    are not the fallback's business.
+
+    A payload that is ITSELF a fallback product no longer carries
+    ``model_run_evidence``; its own projection is then the only surviving record
+    of the cause, so it is re-projected rather than discarded.  Re-projecting a
+    projected row is a no-op: the row is already exactly this fixed key subset.
+
+    The total is counted before the cap, so an overflow shows up as
+    ``retained < failed_total``.
+    """
+
+    rows_source = _bounded_sequence(payload.get("model_run_evidence"))
+    if not rows_source:
+        rows_source = _bounded_sequence(payload.get("model_run_failures"))
+    rows: list[dict[str, Any]] = []
+    failed_total = 0
+    for item in rows_source:
+        if not isinstance(item, Mapping) or item.get("error_code") is None:
+            continue
+        failed_total += 1
+        if len(rows) >= _scheduler_evidence._BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT:
+            continue
+        rows.append(_present_bounded_summary_keys(item, _BOUNDED_MODEL_RUN_FAILURE_KEYS))
+    return rows, failed_total
+
+
+def _mark_bounded_model_run_failures(payload: dict[str, Any], state: str) -> None:
+    """Set ``limit.model_run_failures.status``; ``dropped`` is never downgraded (#2570)."""
+
+    limit = payload.get("limit")
+    if not isinstance(limit, Mapping):
+        return
+    marker = limit.get("model_run_failures")
+    marker = dict(marker) if isinstance(marker, Mapping) else {}
+    if marker.get("status") == "dropped":
+        return
+    marker["status"] = state
+    if state == "dropped":
+        # The rows are gone, so a retained count from the projection would be a
+        # lie; the failed TOTAL stays, it is what was lost.
+        marker["retained"] = 0
+    payload["limit"] = {**limit, "model_run_failures": marker}
+
+
+def _bounded_model_run_failures_marker(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    limit = payload.get("limit")
+    if not isinstance(limit, Mapping):
+        return None
+    marker = limit.get("model_run_failures")
+    return marker if isinstance(marker, Mapping) else None
 
 
 def _bounded_candidate_lists_state(payload: Mapping[str, Any]) -> Any:
@@ -1240,6 +1328,8 @@ def _bounded_limit_block(
     max_evidence_bytes: int,
     source_cycle_projection: Sequence[Mapping[str, Any]] = (),
     breaker_released_total: int = 0,
+    model_run_failure_projection: Sequence[Mapping[str, Any]] = (),
+    model_run_failed_total: int = 0,
 ) -> dict[str, Any]:
     """Limit block for the fallback shape: fail-closed reason plus observability keys."""
 
@@ -1257,6 +1347,33 @@ def _bounded_limit_block(
         "breaker_released_total": breaker_released_total,
         "retained": len(source_cycle_projection) if source_cycles_state == "summarized" else 0,
     }
+    # #2570: the failure-cause marker only exists when there is a failure to
+    # speak about.  A pass with no failed model run gets no marker and no
+    # projection key -- a fabricated ``failed_total: 0`` would be a statement the
+    # payload cannot make, and every pre-#2570 fallback shape stays unchanged.
+    prior_failures = _bounded_model_run_failures_marker(payload)
+    if model_run_failure_projection or prior_failures is not None:
+        prior_total = prior_failures.get("failed_total") if prior_failures is not None else None
+        # An overflow the SOURCE already recorded is never argued away: re-bounding
+        # a capped projection can only count the rows that survived the cap, so
+        # taking the larger total is what keeps "retained < failed_total" true.
+        failed_total = max(model_run_failed_total, prior_total) if isinstance(prior_total, int) else (
+            model_run_failed_total
+        )
+        if prior_failures is not None and prior_failures.get("status") == "dropped":
+            # Never downgraded: summarizing an already-dropped fallback product a
+            # second time may not claim the failure rows are still shown.
+            limit["model_run_failures"] = {
+                "status": "dropped",
+                "failed_total": failed_total,
+                "retained": 0,
+            }
+        else:
+            limit["model_run_failures"] = {
+                "status": "summarized",
+                "failed_total": failed_total,
+                "retained": len(model_run_failure_projection),
+            }
     pre_limit_status = payload.get("status")
     if pre_limit_status is not None:
         limit["pre_limit_status"] = pre_limit_status
@@ -1276,6 +1393,12 @@ def bounded_evidence_payload(
         # The source is itself a fallback product whose rows were already cut:
         # whatever it still carries can not be presented as the whole release set.
         source_cycle_projection = []
+    model_run_failure_projection, model_run_failed_total = _bounded_model_run_failures(payload)
+    prior_failure_marker = _bounded_model_run_failures_marker(payload)
+    if prior_failure_marker is not None and prior_failure_marker.get("status") == "dropped":
+        # Same rule as the source cycles: the rows were already cut once and the
+        # marker keeps saying so.
+        model_run_failure_projection = []
     bounded_payload = {
         "schema_version": payload.get(
             "schema_version",
@@ -1313,6 +1436,8 @@ def bounded_evidence_payload(
             max_evidence_bytes=max_evidence_bytes,
             source_cycle_projection=source_cycle_projection,
             breaker_released_total=breaker_released_total,
+            model_run_failure_projection=model_run_failure_projection,
+            model_run_failed_total=model_run_failed_total,
         ),
         "counts": payload.get("counts", _scheduler_evidence.empty_counts()),
         "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
@@ -1336,6 +1461,9 @@ def bounded_evidence_payload(
         "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
         "restart_reconcile_proof": payload.get("restart_reconcile_proof"),
         "restart_reconcile": _compact_bounded_restart_reconcile(payload.get("restart_reconcile")),
+        # #2570: the only record of why a unit's chain died.  Absent unless the
+        # pass actually has a failed model run -- see the pop below.
+        "model_run_failures": model_run_failure_projection,
         "no_mutation_proof": payload.get("no_mutation_proof", _scheduler_evidence.no_mutation_proof()),
         "no_progress_circuit": payload.get("no_progress_circuit"),
         "retention": payload.get("retention"),
@@ -1356,6 +1484,11 @@ def bounded_evidence_payload(
         bounded_payload.pop("restart_reconcile_proof", None)
     if "restart_reconcile" not in payload:
         bounded_payload.pop("restart_reconcile", None)
+    # No failed model run means no key at all: an empty list would read as "the
+    # pass had failures and they were cut", which is what the ``dropped`` marker
+    # is for.
+    if not model_run_failure_projection:
+        bounded_payload.pop("model_run_failures", None)
     # #1118: with the circuit disabled the source payload has no such key, and a
     # literal ``None`` here would make the over-budget path differ from the
     # plain one — disabled must stay byte-for-byte as before.
@@ -1374,6 +1507,7 @@ __all__ = [
     "_bounded_candidate_summary",
     "_bounded_candidate_summary_rows",
     "_bounded_limit_block",
+    "_bounded_model_run_failures",
     "_bounded_retained_field_summary",
     "_call_bounded_evidence_payload",
     "_compact_bounded_restart_reconcile",
@@ -1394,6 +1528,7 @@ __all__ = [
     "_is_required_bounded_field",
     "_mapping_status",
     "_mark_bounded_candidate_lists",
+    "_mark_bounded_model_run_failures",
     "_mark_bounded_source_cycles",
     "_minimal_bounded_retained_field_summary",
     "_nested_mapping_value",
