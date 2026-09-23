@@ -125,7 +125,11 @@ run 的处置决定重新产出 / 重新解析，或按业务口径将其 supers
 没有 decline 记录却不再被触碰的 run，按 §13.3 第 1–2 步查原因。
 
 **认领的盲区**：一趟 tick 挂住超过存活界（6 h）时，它的失败会老出被观察集——那个形状归 §10 的 4 h
-前沿停摆车道。
+前沿停摆车道。其二是重算路径：已 `published` 的 run 产物被同 run_id 重写后，每趟 tick 重新登记并
+重新解析；若重新解析确定性失败，`mark_run_failed` 对 `published` 不生效（`FAILABLE_RUN_STATUSES`
+不含 `published`），`parsed_at` 不前进，tick 永久 rc=1 而状态从不变为 `failed`，本车道（只看
+`status='failed'`）与 §10 前沿车道（该 cycle 已覆盖）都看不见；排查看 `autopipe.log` 中该 run 的反复
+解析错误；由后续 issue 跟踪。
 
 ### 13.4 阈值旋钮
 

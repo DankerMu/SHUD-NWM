@@ -57,6 +57,7 @@ covered 侧**按构造与被观测面同一**（设计 D0）：`default_cycle` �
 | `unsupported-source` | source 不在 display 路由的 `source` 枚举内（#2464） | 无；若确要上展示面，是改 `DisplaySourceId` 的产品/契约决策 |
 | `outside-window` | ready 前沿早于 `now() - 回看窗` | 归 §10 前沿车道 |
 | `no-ready-frontier` | 防御分支（按 ready 前沿语句构造不可达） | 留证开 issue |
+
 - **与 §10 的分工**：ingest 全线停摆时两个前沿一起冻住，gap 不增长，**本车道沉默**，
   那是 `frontier-stalled` 的活；coverage 停摆只推进 ready 前沿，gap 单调增长，在图层
   熄灭前数天就跳闸。

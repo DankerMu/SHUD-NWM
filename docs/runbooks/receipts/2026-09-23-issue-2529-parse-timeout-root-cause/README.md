@@ -89,8 +89,8 @@ The key is absent, so the parser runs at its code default of **60 000 ms**
 
 ## 5. Oracle-blocked: AC1 "replace-chain measured duration"
 
-#2529 AC1 asks for the failed runs' replace-chain statement durations. That cannot be reproduced
-post hoc: the 11 runs have since re-parsed (tick #18 onward) and PostgreSQL retains neither the
+Issue #2529 AC1 asks for the failed runs' replace-chain statement durations. That cannot be
+reproduced post hoc: the 11 runs have since re-parsed (tick #18 onward) and PostgreSQL retains neither the
 cancelled statements' timings nor the lock history. **Capture method for the next occurrence**
 (`docs/runbooks/production-ops/parse-failure-residency-alert.md` §13.3): the residency observer's
 report names the resident runs and their first-failing time; while such a tick is still running,
