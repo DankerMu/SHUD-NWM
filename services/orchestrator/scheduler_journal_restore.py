@@ -16,7 +16,11 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_journal_archive as archive_owner
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
-from services.orchestrator.scheduler_journal_retention import _path_under, _safe_existing_directory
+from services.orchestrator.scheduler_journal_retention import (
+    _path_under,
+    _safe_existing_directory,
+    _verified_journal_root,
+)
 from services.orchestrator.scheduler_journal_retention_types import (
     MAX_ARCHIVE_BYTES,
     MAX_ARCHIVE_CYCLE_BYTES,
@@ -90,7 +94,7 @@ def verify_and_restore(
 ) -> dict[str, Any]:
     """Verify one archive, stage it, and restore under the existing cycle flock."""
 
-    journal = _safe_existing_directory(journal_root, field="journal_root")
+    journal = _verified_journal_root(journal_root, setting="--journal-root")
     archive_root = _safe_existing_directory(archive_root, field="archive_root")
     try:
         canonical_source = normalize_source_id(source_id)
@@ -102,7 +106,10 @@ def verify_and_restore(
         cycle_time = datetime.strptime(cycle, "%Y%m%d%H").replace(tzinfo=UTC)
     except ValueError as error:
         raise RetentionFailure("cycle_invalid") from error
-    stage = Path(stage_root).expanduser()
+    try:
+        stage = Path(stage_root).expanduser()
+    except RuntimeError as error:
+        raise RetentionFailure("stage_root_not_absolute") from error
     if not stage.is_absolute():
         raise RetentionFailure("stage_root_not_absolute")
     if stage == Path("/"):

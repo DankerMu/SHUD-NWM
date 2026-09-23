@@ -88,6 +88,11 @@ def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = No
                     # Explicit 0o755 lets umask restrict but never widen a
                     # safe_fs-created directory.  Never fchmod an existing path:
                     # that would override a restrictive umask or inherited ACL.
+                    # The pin clamps an inherited default-ACL mask on
+                    # directories created here; deliberate and kept (#1631;
+                    # ruling D3 of the provider-mode-and-journal-root-
+                    # convergence change).  A mask-carrying non-lock directory
+                    # restores its mode on the components it created instead.
                     os.mkdir(part, 0o755, dir_fd=fd)
                 except FileExistsError:
                     pass

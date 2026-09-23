@@ -1,0 +1,36 @@
+## node-27 2026-09-23T13:41:56Z
+primary-gid users of 1005/1078:
+nwm:1005:1005
+frd_muziyao:1103:1078
+nwm:x:1005:
+nfsdata:x:1078:
+## node-22 2026-09-23T13:41:48Z
+xnode
+uid=1103(frd_muziyao) gid=1078(huser) groups=1078(huser),118(docker),1106(data_reader),1107(nwmuser)
+nwm:x:1005:
+primary-gid users of nfsdata:
+gid 1078 / 1005 on node-22:
+huser:x:1078:yangwen,wangjj,zhaochen,leleshu,zhangmingfang,yangjianghua,st_hexr,st_laiji,st_liyunhan,st_zhanghx,st_lrz811,st_liwz,st_shaoshuai,st_clh0819,st_ljx919,st_zjh928,st_cx1127,st_wyq1127,liguoqiang,st_zhaochen,frd_jhj0129,frd_muziyao,st_zhouxr
+nwm:x:1005:
+primary-gid users 1078/1005:
+leleshu:1061:1078
+yangjianghua:1072:1078
+zhaochen:1074:1078
+yangwen:1077:1078
+wangjj:1079:1078
+zhangmingfang:1032:1078
+st_hexr:1057:1078
+st_laiji:1060:1078
+st_liyunhan:1084:1078
+st_zhanghx:1081:1078
+st_lrz811:1087:1078
+st_liwz:1082:1078
+st_shaoshuai:1016:1078
+st_clh0819:1089:1078
+st_ljx919:1090:1078
+st_zjh928:1091:1078
+st_cx1127:1094:1078
+st_wyq1127:1095:1078
+liguoqiang:1098:1078
+st_zhaochen:1100:1078
+64

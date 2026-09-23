@@ -26,6 +26,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileJournalRetentionMember,
     FileOrchestrationJournalRepository,
 )
+from services.orchestrator.journal_root_authority import verify_journal_root_authority
 from services.orchestrator.retention_frontier import (
     FrontierReadResult,
     max_age_from_env,
@@ -118,7 +119,11 @@ def _path_under(path: Path, root: Path) -> bool:
 
 
 def _safe_existing_directory(value: str | Path, *, field: str) -> Path:
-    path = Path(value).expanduser()
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError as error:
+        # ``~<unknown user>``: no home to expand, so not an absolute path.
+        raise RetentionFailure(f"{field}_not_absolute") from error
     if not path.is_absolute():
         raise RetentionFailure(f"{field}_not_absolute")
     try:
@@ -136,8 +141,49 @@ def _safe_existing_directory(value: str | Path, *, field: str) -> Path:
     return path
 
 
+def _verified_journal_root(value: str | Path, *, setting: str) -> Path:
+    """Verify the journal root through the one journal-root authority (#2384).
+
+    Accept/reject is decided only by ``verify_journal_root_authority``; this
+    adapter never re-decides.  A refusal is translated into the retention
+    receipt vocabulary (``journal_root_*``), which is a published contract:
+    the label comes from the authority's ``error_type`` or, failing that, from
+    one ``lstat`` of the configured path, so every shape keeps the reason it
+    had before retention and restore delegated the decision.  The label step
+    only names a refusal; it cannot turn one into acceptance.
+    """
+
+    try:
+        return verify_journal_root_authority(value, setting=setting)
+    except OrchestratorError as error:
+        if error.error_code != "FILE_JOURNAL_INVALID_ROOT":
+            raise
+        raise RetentionFailure(_journal_root_refusal_reason(value, error)) from error
+
+
+def _journal_root_refusal_reason(value: str | Path, error: OrchestratorError) -> str:
+    if error.details.get("error_type") in {"UnexpandableJournalRoot", "RelativeJournalRoot"}:
+        return "journal_root_not_absolute"
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError:
+        return "journal_root_not_absolute"
+    try:
+        info = path.lstat()
+    except OSError:
+        return "journal_root_unavailable"
+    if stat.S_ISLNK(info.st_mode):
+        return "journal_root_symlink"
+    if not stat.S_ISDIR(info.st_mode):
+        return "journal_root_not_directory"
+    return "journal_root_unsafe"
+
+
 def _safe_archive_root(value: str | Path, *, journal_root: Path, allowed_roots: Sequence[Path]) -> Path:
-    path = Path(value).expanduser()
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError as error:
+        raise RetentionFailure("archive_root_not_absolute") from error
     if not path.is_absolute():
         raise RetentionFailure("archive_root_not_absolute")
     if path == Path("/"):
@@ -188,7 +234,10 @@ def config_from_env(args: argparse.Namespace) -> tuple[SchedulerJournalRetention
         journal_raw = args.journal_root or os.getenv("NHMS_SCHEDULER_JOURNAL_ROOT")
         if journal_raw is None or not journal_raw.strip():
             raise RetentionFailure("journal_root_missing")
-        journal_root = _safe_existing_directory(journal_raw, field="journal_root")
+        journal_root = _verified_journal_root(
+            journal_raw,
+            setting="--journal-root" if args.journal_root else "NHMS_SCHEDULER_JOURNAL_ROOT",
+        )
         if not any(_path_under(journal_root, root) for root in allowed_roots):
             raise RetentionFailure("journal_root_outside_allowed_roots")
         archive_raw = args.archive_root or os.getenv("NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT")

@@ -206,6 +206,11 @@ def _provider_destination_file_lock(
         ensure_directory_no_follow(lock_path.parent, containment_root=containment_root)
         parent_fd = open_directory_no_follow(lock_path.parent, containment_root=containment_root)
         parent = os.fstat(parent_fd)
+        # Deliberate (#1631; ruling D3 of the provider-mode-and-journal-root-
+        # convergence change): this gate cannot coexist with a cross-uid share
+        # through a default-ACL mask, whose mask IS the group bits.  Keep it
+        # fail-closed; when that tension is triggered, keep provider
+        # destinations (and so their locks) out of ACL-shared subtrees instead.
         if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
             raise ProviderAtomicError("provider_lock_parent_unsafe", phase="precommit")
         lock_fd = os.open(lock_path.name, flags, 0o600, dir_fd=parent_fd)
