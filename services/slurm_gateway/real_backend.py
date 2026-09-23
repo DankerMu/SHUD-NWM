@@ -1301,6 +1301,9 @@ class RealSlurmGateway(SlurmGateway):
         truncated = {"stdout": False, "stderr": False}
         deadline = self._now().timestamp() + timeout_seconds
         try:
+            # Read until EOF on both pipes or the deadline, never stop on process exit: an exited
+            # child can still have unread bytes in the pipe (#2583). A descendant holding a pipe
+            # open therefore ends as a timeout; intentional, Slurm CLIs do not leave such children.
             while selector.get_map():
                 remaining = deadline - self._now().timestamp()
                 if remaining <= 0:
@@ -1309,8 +1312,6 @@ class RealSlurmGateway(SlurmGateway):
                     raise subprocess.TimeoutExpired(process.args, timeout_seconds)
                 events = selector.select(timeout=min(0.1, remaining))
                 if not events:
-                    if process.poll() is not None:
-                        break
                     continue
                 for key, _mask in events:
                     chunk = key.fileobj.read1(8192) if hasattr(key.fileobj, "read1") else key.fileobj.read(8192)
@@ -1325,8 +1326,6 @@ class RealSlurmGateway(SlurmGateway):
                     if len(chunk) > remaining_bytes:
                         truncated[stream_name] = True
                         process.kill()
-                if process.poll() is not None:
-                    break
             process.wait(timeout=max(deadline - self._now().timestamp(), 0.001))
         finally:
             selector.close()
