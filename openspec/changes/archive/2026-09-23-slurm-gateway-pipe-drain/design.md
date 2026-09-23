@@ -29,6 +29,8 @@ Sibling surfaces:
 - `_run_command_via_subprocess_run`：用 `subprocess.run` 的 communicate，本身读到 EOF，无此缺陷，不动。
 - `fetch_logs`：读文件，不经 pipe，不涉及。
 - 编排层对 502 的分类（#2584）：不在本单范围。
+- `services/orchestrator/reconcile.py` `_bounded_visibility_stdout`（:309-315）与 `_bounded_sacct_stdout`（:1125-1129）：
+  空闲分支有同样的 poll-break（只有 shape A），修复前就存在。评审时发现，另开 #2587 跟踪，不在本单范围。
 
 Seams under test: `RealSlurmGateway._communicate_bounded`，传入真实 `subprocess.Popen` 或持有真实 `os.pipe`
 读端的最小进程替身；以及经 `_run_command` 的端到端路径（`subprocess.run` 保持原样，以便进入 Popen 分支）。
