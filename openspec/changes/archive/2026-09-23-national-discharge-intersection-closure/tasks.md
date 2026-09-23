@@ -51,6 +51,7 @@
   - `338 passed, 21 skipped`; `tests/test_select_ci_tests.py` `791 passed`.
 - [x ] 4.4 (orchestrator) node-27 isolated oracle at the PR head (scratch PG, `NHMS_RUN_INTEGRATION=1`): selector output for the changed files ∪ the 4.3 set.
   - @`743f775` (45 suites = selector output for the diff ∪ the 4.3 set; Python 3.11.15; disposable scratch PG from the nhms-db image on :55559; `NHMS_RUN_INTEGRATION=1`): `3592 passed in 576.76s`, 0 skipped, rc=0. The final head adds only openspec text (review Notes: MODIFIED consumer list, D1 render-safety scope) on top of it.
-- [ ] 4.5 CI green on the PR head.
+- [x] 4.5 CI green on the PR head.
+  - Run 35864172489 @`75c4e4e`: Unit Tests / SQL Migration Dry Run / Entropy Audit pass. Merged as `7ddd4618e`.
 
 Evidence Floor: 1.1 receipt; 2.2 RED→GREEN; 3.2 mutation counts (a) and (b); 4.3 local; 4.4 node-27 oracle; `uv run ruff check .`; openspec strict validate.
