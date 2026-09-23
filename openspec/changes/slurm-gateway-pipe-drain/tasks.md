@@ -39,7 +39,7 @@
 - [x] 3.1 `uv run pytest -q tests/test_real_slurm_gateway.py`
 - [x] 3.2 `uv run ruff check services/slurm_gateway tests/test_real_slurm_gateway.py`
 - [x] 3.3 `uv run python scripts/select_ci_tests.py`（或等价方式）确认改 `real_backend.py` 时会选中 `tests/test_real_slurm_gateway.py`（已有路由，只核对不改）
-- [ ] 3.4 node-22 Linux 复现（只读，禁止 `uv sync` 或裸 `uv run`；在临时 checkout 上跑，不动活动树）。
+- [x] 3.4 node-22 Linux 复现（只读，禁止 `uv sync` 或裸 `uv run`；在临时 checkout 上跑，不动活动树）。
       脚本全文如下（同一份在修复前的 `327df271` 上的实测结果为 `sleep_then_20000B: {8192: 8, 16384: 274, 20000: 18}`）：
 
       ```python
@@ -64,3 +64,8 @@
 
       运行：`cd <临时 checkout> && PYTHONPATH=. /scratch/frd_muziyao/NWM/.venv/bin/python repro.py 300`，
       要求 `sleep_then_20000B: {20000: 300}`、`sleep_then_line: {22: 300}`。
+
+      实测（2026-09-23，node-22 临时 clone `~/tmp-2583`，活动解释器 3.12.7，活动树未动）：
+      修复前 `real_backend@327df271`：`sleep_then_20000B: {20000: 36, 16384: 260, 8192: 4}`；
+      修复后 `real_backend@87cf7a90`：`sleep_then_20000B: {20000: 300}`、`sleep_then_line: {22: 300}`。
+      同一 clone 上 `tests/test_real_slurm_gateway.py` Linux 实跑：294 passed。
