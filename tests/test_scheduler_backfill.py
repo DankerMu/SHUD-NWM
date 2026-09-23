@@ -20,6 +20,7 @@ from services.orchestrator import scheduler_state_decision as _scheduler_state_d
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from tests.lineage_state_index_fixtures import index_entry as _lineage_index_entry
 from tests.lineage_state_index_fixtures import index_repository as _lineage_index_repository
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 
 # Reuse the project's existing journal-seeding pattern verbatim.
 from tests.test_file_orchestration_journal import _latest_view as _journal_latest_view
@@ -2342,9 +2343,11 @@ def test_db_free_unreadable_index_is_not_memoized_and_resolves_once_repaired(
     """
     root = tmp_path / "lineage-index"
     object_root = root / "objects"
-    object_root.mkdir(parents=True, exist_ok=True)
+    # Both provider-gated paths pin their modes (#2403): the lock parent
+    # ``root`` and the pre-existing destination, independent of the umask.
+    make_directory_with_explicit_mode(object_root)
     index_path = root / "state-index.json"
-    index_path.write_text("{not json", encoding="utf-8")
+    write_provider_destination(index_path, "{not json")
     repository = state_manager_module.FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,

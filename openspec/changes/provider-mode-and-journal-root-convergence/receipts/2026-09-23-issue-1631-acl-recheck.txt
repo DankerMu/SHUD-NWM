@@ -1,0 +1,25 @@
+2026-09-23T13:09:24Z
+uid=1005(nwm) gid=1005(nwm) groups=1005(nwm),27(sudo),999(docker),1107(nwmuser)
+0002
+nwm:x:1005:
+nfsdata:x:1078:
+forcing: 
+runs: 
+states: 
+777 frd_muziyao:nfsdata /home/ghdc/nwm/object-store/raw
+1755 frd_muziyao:nfsdata /home/ghdc/nwm/object-store/models/direct_grid_variants
+# file: /home/ghdc/nwm/object-store/forcing
+user:nwm:rwx
+mask::rwx
+default:user:nwm:rwx
+default:mask::rwx
+# file: /home/ghdc/nwm/object-store/runs
+user:nwm:rwx
+mask::rwx
+default:user:nwm:rwx
+default:mask::rwx
+# file: /home/ghdc/nwm/object-store/states
+user:nwm:rwx
+mask::rwx
+default:user:nwm:rwx
+default:mask::rwx

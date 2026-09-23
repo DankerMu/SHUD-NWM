@@ -1693,6 +1693,10 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_state_manager.py",
             "tests/test_run_tree_copyback.py",
             "tests/test_source_cycle_raw_manifest.py",
+            # #2403: the db-free unreadable-index lineage test pre-creates the
+            # state-index lock parent and its corrupt destination through this
+            # helper, so a helper change moves what that publish gate sees.
+            "tests/test_scheduler_backfill.py",
             # #1102: two of the seven publisher partitions import this helper at
             # module scope — the manual-CLI one pre-creates a provider
             # destination and a mode-sensitive parent, the manifest-audit one

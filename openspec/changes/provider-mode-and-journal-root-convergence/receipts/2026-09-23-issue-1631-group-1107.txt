@@ -1,0 +1,10 @@
+2026-09-23T13:46:56Z
+nwmuser:x:1107:nwm,frd_muziyao
+group-1107 entries under object-store (maxdepth 4, first 5):
+2775 frd_muziyao:nwmuser /home/ghdc/nwm/object-store/canonical/gfs
+755 frd_muziyao:nwmuser /home/ghdc/nwm/object-store/canonical/gfs/2026091400
+2775 frd_muziyao:nwmuser /home/ghdc/nwm/object-store/canonical/gfs/2026090900
+2775 frd_muziyao:nwmuser /home/ghdc/nwm/object-store/canonical/gfs/2026090900/prcp_rate_or_amount
+755 frd_muziyao:nwmuser /home/ghdc/nwm/object-store/canonical/gfs/2026091800
+count:
+290
