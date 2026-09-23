@@ -5,6 +5,8 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -17,6 +19,7 @@ from jinja2.exceptions import SecurityError
 from packages.common.manifest_index import MAX_MANIFEST_INDEX_ENTRIES
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
+from services.slurm_gateway import real_backend
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import (
     ConfigurationError,
@@ -37,6 +40,7 @@ from services.slurm_gateway.real_backend import (
     LOG_TRUNCATION_MARKER,
     MANIFESTS_DIRNAME,
     MAX_ARRAY_TASK_LOGS,
+    MAX_SLURM_COMMAND_OUTPUT_BYTES,
     PRODUCTION_ARRAY_TEMPLATE_NAMES,
     RealSlurmGateway,
     _normalize_slurm_state,
@@ -256,6 +260,137 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     assert {record["program"] for record in command_records} == {"sbatch", "squeue", "sacct", "scancel"}
     assert all(isinstance(arg, str) and "\n" not in arg for record in command_records for arg in record["argv"])
     assert any("--array=0-1%2" in record["argv"] for record in command_records if record["program"] == "sbatch")
+
+
+class _ExitedProcessOverPipes:
+    """Popen stand-in over real pipe read ends whose process has already exited (#2583)."""
+
+    def __init__(self, stdout_fd: int, stderr_fd: int, on_poll=None) -> None:
+        self.args = ["sbatch"]
+        self.returncode = 0
+        self.stdout = os.fdopen(stdout_fd, "rb")
+        self.stderr = os.fdopen(stderr_fd, "rb")
+        self._on_poll = on_poll
+
+    def poll(self) -> int:
+        if self._on_poll is not None:
+            self._on_poll()
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+    def kill(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.stdout.close()
+        self.stderr.close()
+
+
+def test_communicate_bounded_drains_pipe_after_process_exit(tmp_path: Path) -> None:
+    # Shape B of #2583: the child already exited with >1 read chunk still in the pipe.
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    process = _ExitedProcessOverPipes(out_r, err_r)
+    try:
+        # One write into an empty pipe; split writes would block on macOS's 16 KiB default pipe.
+        assert os.write(out_w, b"x" * 20000) == 20000
+        assert os.write(err_w, b"sbatch: warning\n") == len(b"sbatch: warning\n")
+        os.close(out_w)
+        os.close(err_w)
+
+        stdout, stderr, truncated = _gateway(tmp_path)._communicate_bounded(process, timeout_seconds=10)
+    finally:
+        process.close()
+
+    assert len(stdout) == 20000
+    assert stderr == b"sbatch: warning\n"
+    assert truncated == {"stdout": False, "stderr": False}
+
+
+def test_communicate_bounded_keeps_output_written_during_idle_wait(tmp_path: Path) -> None:
+    # Shape A of #2583: sbatch prints its only line and exits while the reader's select is idle.
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    lock = threading.Lock()
+    done = False
+
+    def write_and_close() -> None:
+        nonlocal done
+        with lock:
+            if done:
+                return
+            done = True
+            os.write(out_w, b"Submitted batch job 4242\n")
+            os.write(err_w, b"sbatch: warning\n")
+            os.close(out_w)
+            os.close(err_w)
+
+    # poll() reproduces the pre-fix window; the fixed reader never polls, so the Timer delivers.
+    process = _ExitedProcessOverPipes(out_r, err_r, on_poll=write_and_close)
+    timer = threading.Timer(1.0, write_and_close)
+    timer.start()
+    gateway = _gateway(tmp_path)
+    try:
+        stdout, stderr, truncated = gateway._communicate_bounded(process, timeout_seconds=10)
+    finally:
+        timer.cancel()
+        timer.join()
+        write_and_close()
+        process.close()
+
+    assert stdout == b"Submitted batch job 4242\n"
+    assert stderr == b"sbatch: warning\n"
+    assert truncated == {"stdout": False, "stderr": False}
+    assert gateway._parse_sbatch_job_id(stdout.decode()) == "4242"
+
+
+def test_communicate_bounded_deadline_kills_silent_process(tmp_path: Path) -> None:
+    with subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            _gateway(tmp_path)._communicate_bounded(process, timeout_seconds=1)
+        elapsed = time.monotonic() - started
+        assert process.returncode is not None
+
+    assert elapsed < 5
+
+
+def test_communicate_bounded_truncates_at_capture_limit(tmp_path: Path) -> None:
+    size = MAX_SLURM_COMMAND_OUTPUT_BYTES + 10000
+    with subprocess.Popen(
+        [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(b'x' * {size}); sys.stdout.flush()"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        started = time.monotonic()
+        stdout, _stderr, truncated = _gateway(tmp_path)._communicate_bounded(process, timeout_seconds=30)
+        elapsed = time.monotonic() - started
+        assert process.returncode is not None
+
+    assert len(stdout) == MAX_SLURM_COMMAND_OUTPUT_BYTES
+    assert truncated["stdout"] is True
+    # The killed child's pipes hit EOF, so the reader returns well before the deadline.
+    assert elapsed < 5
+
+
+def test_communicate_bounded_run_command_returns_full_output_via_popen(tmp_path: Path) -> None:
+    # Guard: a patched subprocess.run would route through _run_command_via_subprocess_run instead.
+    assert subprocess.run is real_backend._ORIGINAL_SUBPROCESS_RUN
+    gateway = _gateway(tmp_path)
+
+    large = gateway._run_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 20000)"])
+    assert large.returncode == 0
+    assert len(large.stdout) == 20000
+
+    submitted = gateway._run_command([sys.executable, "-c", "print('Submitted batch job 4242')"])
+    assert gateway._parse_sbatch_job_id(submitted.stdout) == "4242"
 
 
 def test_single_task_array_submits_real_array_and_parses_task_zero(
