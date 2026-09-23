@@ -267,23 +267,31 @@ def _scheduler_root_check(
             return check, _scheduler._scheduler_root_blocker(
                 field_name, unsafe_component_reason, evidence_path or str(path)
             )
+    # #2453: Path.resolve() is not a loop predicate -- a symlink loop makes it raise an
+    # errno-less RuntimeError up to 3.12 in BOTH forms, while 3.13+ folds the non-strict
+    # form -- so a loop root used to leave through a separately assembled early return on
+    # the pin and through the full assembly below on 3.13+ (different blocker code and key
+    # set for one verdict). _canonical_path never raises on a loop, so loop and non-loop
+    # roots share the one assembly and the kernel lstat below decides SYMLINK /
+    # UNSAFE_PATH (ELOOP) / NOT_FOUND on every interpreter.
+    #
+    # ADR 0009 clause 1 for `resolved`: path.lstat() runs before any verdict derived from
+    # `resolved`, and its failure changes the verdict (unsafe_reason / NOT_FOUND /
+    # SYMLINK). A ready verdict needs that lstat to find a non-symlink directory, so every
+    # component resolves in the kernel and the strict realpath arm -- not the non-strict
+    # fallback -- produced `resolved`. The allow_create arm is where the fallback is
+    # taken (path absent): its ready verdict needs path.lstat() == ENOENT with a
+    # parent.lstat() non-symlink writable directory, so the only component the kernel did
+    # not dereference is a missing final name -- neither a symlink to fold nor a `..`
+    # after a missing component -- and `resolved` is exactly canonical(parent)/name, the
+    # directory a later mkdir of `path` creates. The workspace anchor below rests on
+    # clause 3: a containment base only, while the judged side is this lstat-ed `path`.
     try:
-        resolved = path.resolve(strict=False)
+        resolved = _canonical_path(path)
     except OSError as error:
+        # Kept, not reachable by input: `path` is absolute, so the non-strict fallback
+        # only raises on a readlink race inside it; fail closed with a typed blocker.
         unsafe_reason = _scheduler._scheduler_root_os_error_reason(error)
-        check = {
-            "configured": True,
-            "path": evidence_path or str(path),
-            "exists": False,
-            "is_dir": False,
-            "contained": False,
-            "approved_root_required": require_approved_root,
-            "writable": False,
-            "unsafe_reason": unsafe_reason,
-        }
-        return check, _scheduler._scheduler_root_blocker(field_name, unsafe_reason, evidence_path or str(path))
-    except RuntimeError:
-        unsafe_reason = "UNSAFE_PATH"
         check = {
             "configured": True,
             "path": evidence_path or str(path),
@@ -329,7 +337,9 @@ def _scheduler_root_check(
             under_workspace = False
         else:
             try:
-                workspace_anchor = Path(workspace_root).expanduser().resolve(strict=False)
+                # RuntimeError stays in the tuple for expanduser() (no determinable home),
+                # not for the canonicaliser, which no longer raises it (#2453).
+                workspace_anchor = _canonical_path(Path(workspace_root).expanduser())
                 resolved.relative_to(workspace_anchor)
             except (OSError, RuntimeError, ValueError):
                 under_workspace = False
@@ -596,13 +606,13 @@ def _canonical_path(path: Path) -> Path:
     """
 
     # ADR 0009 clause 1: same posture as _canonical_parent above, with a reachability
-    # note that is measured rather than assumed -- this helper is entered only through
-    # _resolve_optional_config_path / _optional_config_path_relative_to below, and
-    # those two have no caller today outside scheduler_candidate_runtime.py's
-    # compatibility forwarders (the production config lane goes through
-    # path_modes._resolve_config_path_for_mode instead). The clause therefore rests on
-    # the preflight dereference any such consumer reaches -- _scheduler_root_check's
-    # path.lstat() -- not on a traced production call site.
+    # note that is measured rather than assumed. Since #2453 the production caller is
+    # _scheduler_root_check, which canonicalises the root under check and the workspace
+    # anchor here and lstats the root itself before any verdict (its body carries the
+    # per-arm argument, allow_create included). The other entries are
+    # _resolve_optional_config_path / _optional_config_path_relative_to below, which
+    # have no caller outside scheduler_candidate_runtime.py's compatibility forwarders;
+    # the clause rests on that same preflight lstat for them.
     try:
         return Path(os.path.realpath(path, strict=True))
     except OSError:

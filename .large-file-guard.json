@@ -99,6 +99,8 @@
     "tests/test_real_slurm_gateway.py",
     "tests/test_slurm_array_contract.py",
     "tests/test_retry_cancel_consistency.py",
-    "tests/test_monitoring_api.py"
+    "tests/test_monitoring_api.py",
+    "services/orchestrator/file_orchestration_migration.py",
+    "tests/test_file_orchestration_migration.py"
   ]
 }

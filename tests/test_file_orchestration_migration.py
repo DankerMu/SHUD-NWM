@@ -2132,3 +2132,30 @@ def test_historical_import_aborts_at_a_divergent_job_row_and_stays_idempotent(tm
         f'"job_id": "{first_job_id}"'
     ), "the already-imported row must not be appended a second time"
     assert divergent_job_id not in replayed
+
+
+@pytest.mark.parametrize("unusable", ("missing", "symlink_loop"))
+def test_rollback_retention_root_refuses_an_unresolvable_workspace_typed(
+    tmp_path: Path,
+    unusable: str,
+) -> None:
+    # #2452: the workspace is resolved strictly inside a handler that maps every
+    # resolution failure to file_journal_rollback_execution_retention_unavailable.
+    # Strict Path.resolve() raises an errno-less RuntimeError on a symlink loop up
+    # to 3.12 (OSError ELOOP on 3.13+), which used to escape that handler on the
+    # pin. A loop workspace must be refused with the same typed error as a
+    # missing one, and nothing may be created under it.
+    workspace = tmp_path / "workspace"
+    if unusable == "symlink_loop":
+        workspace.symlink_to(workspace)
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        migration_module._prepare_rollback_retention_root(
+            workspace,
+            receipt_id="a" * 64,
+            generation="b" * 40,
+        )
+
+    assert raised.value.reason == "file_journal_rollback_execution_retention_unavailable"
+    assert raised.value.field == "rollback_execution_binding"
+    assert sorted(path.name for path in tmp_path.iterdir()) == (["workspace"] if unusable == "symlink_loop" else [])

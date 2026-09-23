@@ -29,10 +29,12 @@ import pytest
 
 from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_journal as journal_module
+from services.orchestrator import journal_scope_census as census_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.journal_root_authority import JOURNAL_ROOT_INVALID_MESSAGE
 from services.orchestrator.journal_scope_census import (
     CENSUS_JOB_ID_SCOPE_COMMAND,
+    CENSUS_JOB_ID_SCOPE_HELP,
     CENSUS_SCHEMA_VERSION,
     OUTPUT_UNEXPANDABLE_MESSAGE,
     OUTPUT_UNWRITABLE_MESSAGE,
@@ -698,6 +700,102 @@ def test_output_with_an_unexpandable_home_is_its_own_typed_code(
     # Zero bytes: neither a receipt file nor a census over the tree.
     assert _snapshot(root) == before
     assert not list(tmp_path.glob("~*"))
+
+
+def _assert_unresolvable_refusal(code: int, out: str, err: str) -> None:
+    assert code == 1
+    assert out == ""
+    assert err.splitlines() == [f"CENSUS_OUTPUT_UNRESOLVABLE: {census_module.OUTPUT_UNRESOLVABLE_MESSAGE}"]
+    for leaked in ("Traceback", "FileNotFoundError", "ValueError", "OSError"):
+        assert leaked not in err
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_relative_output_under_a_removed_working_directory_is_its_own_typed_code(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """#2454: ``os.path.realpath`` of a relative ``--output`` needs the cwd.
+
+    With the process working directory removed, ``abspath`` raises
+    ``FileNotFoundError`` -- the node-22 shape of a census run from a scratch
+    directory a cleanup job deleted.  No entrypoint arm caught it, so a command
+    that documents "1 on a typed failure" printed a traceback.  It is a
+    BEFORE-census refusal like ``CENSUS_OUTPUT_UNEXPANDABLE``: empty stdout,
+    nothing written under the journal root.
+    """
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+    before = _snapshot(root)
+    gone = tmp_path / "removed-cwd"
+    gone.mkdir()
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(gone)
+        gone.rmdir()
+        code, out, err = _invoke(entrypoint, _census_args(root, "--output", "receipt.json"), capsys)
+    finally:
+        os.chdir(original_cwd)
+
+    _assert_unresolvable_refusal(code, out, err)
+    assert _snapshot(root) == before
+    assert not gone.exists()
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_output_with_an_embedded_nul_is_the_same_typed_code(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """#2454: an embedded NUL makes ``os.path.realpath`` raise ``ValueError``.
+
+    Reachable in-process only (``execve`` arguments are NUL-terminated), via a
+    ``CliRunner``-style caller or a library use of the command; the same handler
+    covers it, so it is pinned here with the same shape as the removed-cwd case.
+    """
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+    before = _snapshot(root)
+
+    code, out, err = _invoke(entrypoint, _census_args(root, "--output", str(tmp_path / "rec\x00eipt.json")), capsys)
+
+    _assert_unresolvable_refusal(code, out, err)
+    assert _snapshot(root) == before
+    assert list(tmp_path.iterdir()) == [root]
+
+
+def test_unresolvable_output_code_is_listed_in_help_and_distinct_from_unwritable() -> None:
+    """The BEFORE-census code is documented next to the other three output codes.
+
+    Distinct from ``CENSUS_OUTPUT_UNWRITABLE`` on purpose: that one is the failure
+    AFTER the receipt is on stdout, and sharing it would make exit 1 ambiguous
+    about whether stdout carries a receipt (#1955 design D5).
+    """
+
+    assert census_module.OUTPUT_UNRESOLVABLE_MESSAGE != OUTPUT_UNWRITABLE_MESSAGE
+    # --output's own help names every output code; the command help names the codes
+    # it already named (the in-root refusal is described there in words) plus this one.
+    output_codes = {
+        "CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT",
+        "CENSUS_OUTPUT_UNEXPANDABLE",
+        "CENSUS_OUTPUT_UNRESOLVABLE",
+        "CENSUS_OUTPUT_UNWRITABLE",
+    }
+    for help_text, listed_codes in (
+        (census_module._OUTPUT_HELP, output_codes),
+        (CENSUS_JOB_ID_SCOPE_HELP, output_codes - {"CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT"}),
+    ):
+        for listed in sorted(listed_codes):
+            assert listed in help_text, (listed, help_text)
+    # Listed in the help's BEFORE-census sentence, which never names UNWRITABLE.
+    before_sentence = CENSUS_JOB_ID_SCOPE_HELP.split("A typed failure raised BEFORE the census runs", 1)[1]
+    before_sentence = before_sentence.split("exits 1 with an EMPTY stdout", 1)[0]
+    assert "CENSUS_OUTPUT_UNRESOLVABLE" in before_sentence
+    assert "CENSUS_OUTPUT_UNWRITABLE" not in before_sentence
 
 
 # ---------------------------------------------------------------------------

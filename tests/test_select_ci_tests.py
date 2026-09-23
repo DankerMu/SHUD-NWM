@@ -634,6 +634,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             WRITE_SURFACE_SCAN_PATH,
             "tests/test_slurm_gateway_openapi_security.py",
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert selected == expected
@@ -746,6 +747,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             "tests/test_warm_start.py",
             "tests/test_warm_start_chaining.py",
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
 
@@ -769,6 +771,7 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
@@ -811,10 +814,11 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
-    # The trailing `+ 3` is the three supplemental riders: #1656, #2185, #1627.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 3
+    # The trailing `+ 4` is the four supplemental riders: #1656, #2185, #1627, #2452.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 4
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -832,6 +836,7 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
             "tests/test_pipeline_job_provenance_publisher.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -846,11 +851,13 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # services/** is a river-segment write-surface root (#2185) and a
     # path-canonicalisation family-guard root (#1627), so both scans ride along
     # with the redirect targets.
-    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
+    assert selected == sorted(
+        {*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
+    )
     # The REDIRECT targets are still focused node ids — that is what keeps the
     # whole slow suites out. The supplemental riders are whole files by
     # construction and are excluded here by name, not by loosening the check.
-    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH}
+    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
     assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
 
@@ -958,6 +965,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -1103,6 +1111,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
             "tests/test_select_ci_tests.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -1158,15 +1167,17 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # the copyback-mutex partition in two, #1101 replaced the refresh
     # monolith with fifteen partitions (+14) and #1102 replaced the publisher
     # monolith with seven (+6), so it now lists
-    # 86 targets (#2401/#2397 added the terminal-recency and identity-authority
+    # 88 targets (#2401/#2397 added the terminal-recency and identity-authority
     # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s; #2416 the
     # cross-stage state-residue suite, sub-second; #2385/#2387 the read-blocked
-    # sentinel coupling pin, ~1s), the
-    # rule's 83 plus three riders that arrive from OUTSIDE the
+    # sentinel coupling pin, ~1s; #2453 the root-check loop-convergence suite,
+    # 51 tests in ~0.3s, DB-free), the
+    # rule's 84 plus four riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
-    # and #1627's path-canonicalisation family guard by the services/**
-    # supplemental route it shares.
+    # and #1627's path-canonicalisation family guard plus #2452's
+    # `.resolve()`-surface guard by the services/** supplemental route they
+    # share.
     # The literal stays FROZEN here:
     # reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
@@ -1268,6 +1279,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_quarantine_identity_authority.py",
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         "tests/test_retention.py",
         # #1872 (+#2238 EF-16, `services/orchestrator/__init__.py` leg): the five
         # retention partitions ride the broad orchestrator directory rule
@@ -1317,6 +1329,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort here, between the lineage and timing suites — the literal is
         # compared against `select_tests`'s sorted output, so placement matters.
         *SCHEDULER_REFRESH_TESTS,
+        # #2453: the root-check loop-convergence suite rides the broad
+        # orchestrator directory rule — that route closes the importer gaps of
+        # `services/orchestrator/__init__.py` and scheduler_runtime_roots.py.
+        "tests/test_scheduler_root_check_loop_convergence.py",
         # #2401: the newest-truth terminal-skip suite rides the broad
         # orchestrator directory rule — that route closes the importer gap of
         # `services/orchestrator/__init__.py`. 21 tests in ~10s.
@@ -1355,7 +1371,9 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
     # #2185/#1627: services/** is both a river-segment write-surface root and a
     # path-canonicalisation family-guard root, so both scans are part of the
     # pinned set; the broad-orchestrator fallback still may not be.
-    assert selected == sorted({*RELEASED_RESERVATION_RECOVERY_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
+    assert selected == sorted(
+        {*RELEASED_RESERVATION_RECOVERY_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
+    )
     assert "tests/test_state_clone.py" not in selected
     assert "tests/test_select_ci_tests.py" not in selected
 
@@ -1425,6 +1443,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -1535,6 +1554,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_precip_overlay.py",
         # I1 #1980, same group as the coverage-refresh entry above.
         "tests/test_qhh_latest_fallback_pushdown.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         # #2185: services/** is a river-segment write-surface root, so the scan
         # rides this rule too. mvt.py itself is read-only and carries no write
         # literal; the routing is by root, not by an at-site entry.
@@ -1926,6 +1946,7 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         # #1627: the changed tree is a path-canonicalisation family-guard root.
         FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
     ]
@@ -1957,6 +1978,7 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
         # #1627: the changed tree is a path-canonicalisation family-guard root.
         FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
     ]
@@ -2024,6 +2046,7 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
         # #1627: the changed tree is a path-canonicalisation family-guard root.
         FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
     ]
@@ -2055,6 +2078,7 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         # #1627: the changed tree is a path-canonicalisation family-guard root.
         FAMILY_GUARD_PATH,
         "tests/test_precip_overlay.py",
+        RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
     ]
@@ -3813,6 +3837,7 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
             SELECTOR_META_GUARD_TEST,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
         }
     )
 
@@ -5449,6 +5474,7 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
         SELECTOR_META_GUARD_TEST,
         WRITE_SURFACE_SCAN_PATH,
         FAMILY_GUARD_PATH,
+        RESOLVE_SURFACE_GUARD_PATH,
         "tests/test_pipeline_job_provenance_publisher.py",
     }
     assert owner not in selected
@@ -6266,7 +6292,9 @@ def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path()
     # each dominated by a module-level AST parse paid once per session.
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
-    assert selected == sorted({*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
+    assert selected == sorted(
+        {*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
+    )
     assert SELECTOR_META_GUARD_TEST not in selected
 
 
@@ -6308,6 +6336,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
                 INVARIANT_SUITE_PATH,
                 WRITE_SURFACE_SCAN_PATH,
                 FAMILY_GUARD_PATH,
+                RESOLVE_SURFACE_GUARD_PATH,
             }
         )
         == selected
@@ -6427,6 +6456,7 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
         SELECTOR_META_GUARD_TEST,
         WRITE_SURFACE_SCAN_PATH,
         FAMILY_GUARD_PATH,
+        RESOLVE_SURFACE_GUARD_PATH,
     }
 
 
@@ -6445,7 +6475,14 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # meta-guard rider (D6 unchanged). #1684 EVID-01: the shared policy owner now
     # also selects its dedicated focused matrix suite.
     assert sorted(no_suite) == sorted(
-        {*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH, AUTH_POLICY_TEST, FAMILY_GUARD_PATH}
+        {
+            *CORE_SMOKE_TESTS,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            AUTH_POLICY_TEST,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+        }
     )
     assert SELECTOR_META_GUARD_TEST not in no_suite
 
@@ -6509,6 +6546,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 WRITE_SURFACE_SCAN_PATH,
                 AUTH_POLICY_TEST,
                 FAMILY_GUARD_PATH,
+                RESOLVE_SURFACE_GUARD_PATH,
             }
         )
         == selected
@@ -6782,7 +6820,7 @@ def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> Non
     assert not tracked.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
     assert not future.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
 
-    expected = sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH})
+    expected = sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH})
     for path in (tracked, future):
         assert select_tests([path], repo_root=Path(".")) == expected, path
 
@@ -11191,6 +11229,9 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
         "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
         "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
+        # 28 -> 29 (#2452): the `.resolve()`-surface guard rides the family
+        # guard's services/** supplemental route.
+        RESOLVE_SURFACE_GUARD_PATH,
         *RETENTION_COPYBACK_MUTEX_TESTS,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
@@ -11217,6 +11258,8 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # 15 -> 16 (#1627): packages/** is a path-canonicalisation family-guard root,
     # so the guard accumulates here as a third supplemental rider.
     # 16 -> 17 (#2259): the mutex partition became two collectible halves.
+    # 17 -> 18 (#2452): the `.resolve()`-surface guard rides the same
+    # packages/** supplemental route as the family guard.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
@@ -11230,6 +11273,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_orchestration_chain.py",
         "tests/test_path_canonicalization_family_guard.py",
         "tests/test_production_scheduler.py",
+        "tests/test_resolve_surface_guard.py",
         "tests/test_retention_copyback_lock_signal.py",
         "tests/test_retention_copyback_mutex_budget.py",
         "tests/test_retention_copyback_mutex_protocol.py",
@@ -12650,11 +12694,12 @@ def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_p
     # suite, and neither the selector source nor its suite is in such a diff.
     # #1627 added the SECOND supplemental scan over `apps/**` (the path
     # canonicalisation family guard), so the selection is the two of them —
-    # still the targeted branch, one more assertion-bearing suite.
+    # still the targeted branch, one more assertion-bearing suite. #2452 adds the
+    # `.resolve()`-surface guard over the same walk, so the selection is three.
     fields = _github_output_fields(tmp_path, ["apps/__init__.py"], repo_root=Path("."))
 
-    assert fields["count"] == "2"
-    assert fields["tests"] == " ".join(sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH}))
+    assert fields["count"] == "3"
+    assert fields["tests"] == " ".join(sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}))
     assert fields["meta_guard_only"] == "false"
     assert fields["collection_smoke_required"] == "false"
 
@@ -12863,6 +12908,70 @@ def test_family_guard_routing_reds_when_a_root_is_dropped(monkeypatch: pytest.Mo
     assert FAMILY_GUARD_PATH in retained, (
         f"dropping services/** also stopped a RETAINED root from selecting {FAMILY_GUARD_PATH}"
     )
+
+
+# #2452: the `.resolve()`-surface guard. Spelled locally for the same reason
+# FAMILY_GUARD_PATH is: this module must import against PRE-change selector source.
+RESOLVE_SURFACE_GUARD_PATH = "tests/test_resolve_surface_guard.py"
+
+
+def test_resolve_surface_guard_scans_the_family_guard_walk_and_rides_its_roots() -> None:
+    # #2452: the guard's scan surface is the family guard's own file walk,
+    # IMPORTED rather than restated -- pinned here from the guard's source, so a
+    # guard that grew a private `_SCAN_ROOTS` copy (which could drift from the
+    # routing roots below) reddens by name. Given that, routing it on every path
+    # that routes the family guard is complete by construction; the probes check
+    # the selector actually does so.
+    from scripts.select_ci_tests import RESOLVE_SURFACE_GUARD_TEST
+
+    assert RESOLVE_SURFACE_GUARD_PATH == RESOLVE_SURFACE_GUARD_TEST
+    assert Path(RESOLVE_SURFACE_GUARD_PATH).is_file()
+    tree = ast.parse(Path(RESOLVE_SURFACE_GUARD_PATH).read_text(encoding="utf-8"))
+    imported_from_family_guard = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "tests.test_path_canonicalization_family_guard"
+        for alias in node.names
+    }
+    assert "_iter_python_sources" in imported_from_family_guard, (
+        f"{RESOLVE_SURFACE_GUARD_PATH} must walk the family guard's _iter_python_sources, not its own copy"
+    )
+    restated = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "_SCAN_ROOTS" and isinstance(node.ctx, ast.Store)
+    ]
+    assert restated == [], f"{RESOLVE_SURFACE_GUARD_PATH} binds its own _SCAN_ROOTS at {restated}"
+
+    named = (
+        "services/orchestrator/chain_runtime_utils.py",
+        "services/slurm_gateway/real_backend.py",
+        "services/orchestrator/file_orchestration_migration.py",
+        "services/production_closure/slurm_validation.py",
+    )
+    probes = (*named, *_family_guard_future_probes().values())
+    for probe in probes:
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert RESOLVE_SURFACE_GUARD_PATH in selected, f"{probe}: does not select {RESOLVE_SURFACE_GUARD_PATH}"
+        assert FAMILY_GUARD_PATH in selected, f"{probe}: lost {FAMILY_GUARD_PATH}"
+    for probe in ("apps/frontend/src/main.ts", "openspec/tools/x.py", "scripts/brand_new_thing.py"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert RESOLVE_SURFACE_GUARD_PATH not in selected, f"{probe}: must not select {RESOLVE_SURFACE_GUARD_PATH}"
+
+
+def test_root_check_loop_convergence_suite_routes_from_every_module_it_pins() -> None:
+    # #2453: the suite's subject (scheduler_runtime_roots.py), the upstream
+    # normaliser whose product it pins literally (scheduler_config/path_modes.py)
+    # and the facade it drives the check through (scheduler.py) each select it.
+    suite = "tests/test_scheduler_root_check_loop_convergence.py"
+    assert Path(suite).is_file()
+    for module in (
+        "services/orchestrator/scheduler_runtime_roots.py",
+        "services/orchestrator/scheduler_config/path_modes.py",
+        "services/orchestrator/scheduler.py",
+    ):
+        assert Path(module).is_file(), module
+        assert suite in set(select_tests([module], repo_root=Path("."))), f"{module}: does not select {suite}"
 
 
 def _write_family_guard_fixture(root: Path, source: str) -> Path:

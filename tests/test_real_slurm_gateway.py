@@ -2040,6 +2040,31 @@ def test_render_template_rejects_secret_direct_job_type_before_template_lookup(
     assert "supersecret" not in details
 
 
+@pytest.mark.parametrize("unusable", ("missing", "symlink_loop"))
+def test_rendered_template_skips_an_unresolvable_venv_bin_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unusable: str,
+) -> None:
+    # #2452: the gateway's own copy of the runtime export-line generator resolves
+    # each candidate strictly, and strict Path.resolve() raises an errno-less
+    # RuntimeError on a symlink loop up to 3.12 (OSError ELOOP on 3.13+). A loop
+    # candidate must be skipped like a missing one, not abort template rendering.
+    bad_bin = tmp_path / "bad-bin"
+    if unusable == "symlink_loop":
+        bad_bin.symlink_to(bad_bin)
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(bad_bin))
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv_bin.parent))
+    gateway = _production_gateway(tmp_path)
+
+    rendered = gateway.render_template("convert_canonical", _production_manifest(tmp_path, "convert_canonical"))
+
+    assert f"export PATH={shlex.quote(os.path.realpath(venv_bin))}:$PATH" in rendered
+    assert str(bad_bin) not in rendered
+
+
 def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

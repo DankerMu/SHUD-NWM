@@ -1586,7 +1586,14 @@ def _bind_slurm_log_path(
         resolved_path.relative_to(resolved_log_dir)
     except FileNotFoundError:
         return None, None
-    except (OSError, ProductionValidationError, ValueError):
+    except (OSError, ProductionValidationError, RuntimeError, ValueError):
+        # RuntimeError is what <=3.12 raises, errno-less, for a symlink loop from the
+        # strict log_dir resolve (3.13+: OSError ELOOP) and from the two non-strict
+        # resolves (3.13+: folded, no raise) (#2452). Catching it for the non-strict
+        # pair does not open a divergence: a loop there is the log FILE itself, and on
+        # 3.13+ the folded product reaches _open_bound_slurm_log_file, whose no-follow
+        # stat of the basename answers SLURM_ARRAY_TASK_LOG_UNSAFE -- the code returned
+        # here.
         return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
     if resolved_parent != resolved_log_dir:
         return None, _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)

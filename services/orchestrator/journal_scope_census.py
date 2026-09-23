@@ -51,7 +51,11 @@ than a code, prints ``reason: field``.  Neither prints a traceback.
 The receipt is echoed to stdout BEFORE ``--output`` is written, so an
 unwritable receipt path (``CENSUS_OUTPUT_UNWRITABLE``, exit 1) reports the
 failure without discarding the census that was already paid for; the in-root
-refusal still happens before the census runs, so nothing is echoed for it.
+refusal still happens before the census runs, so nothing is echoed for it, and
+so do the two refusals of an ``--output`` that cannot be turned into a path at
+all (``CENSUS_OUTPUT_UNEXPANDABLE`` for an unknown ``~user``,
+``CENSUS_OUTPUT_UNRESOLVABLE`` for a relative value under a removed working
+directory or an embedded NUL).
 """
 
 from __future__ import annotations
@@ -100,8 +104,10 @@ CENSUS_JOB_ID_SCOPE_HELP = (
     "CENSUS_OUTPUT_UNWRITABLE) "
     "exits 1 even when divergent rows were found, so read exit_code inside the "
     "stdout receipt, not only $?. A typed failure raised BEFORE the census runs "
-    "(an invalid --journal-root, an --output inside the root, or an --output "
-    "whose ~user cannot be expanded: CENSUS_OUTPUT_UNEXPANDABLE) exits 1 with an "
+    "(an invalid --journal-root, an --output inside the root, an --output "
+    "whose ~user cannot be expanded: CENSUS_OUTPUT_UNEXPANDABLE, or an --output "
+    "that cannot be resolved -- a relative path under a removed working "
+    "directory, an embedded NUL: CENSUS_OUTPUT_UNRESOLVABLE) exits 1 with an "
     "EMPTY stdout, so an absent receipt and a stale one are never confusable. "
     "A production-sized tree can legitimately "
     "exceed the default replay record budget "
@@ -130,6 +136,13 @@ OUTPUT_UNWRITABLE_MESSAGE = "census receipt could not be written; the receipt ab
 OUTPUT_UNEXPANDABLE_MESSAGE = (
     "census receipt --output has a home directory that cannot be expanded; no census was run"
 )
+#: #2454.  Same BEFORE-census class as ``OUTPUT_UNEXPANDABLE_MESSAGE`` and distinct
+#: from ``OUTPUT_UNWRITABLE_MESSAGE`` for the same reason (design D5 of #1955):
+#: nothing is on stdout when it fires.  One code for the ``OSError`` (relative
+#: value, working directory removed) and the ``ValueError`` (embedded NUL) arms;
+#: ``error_type`` in the details tells them apart.  Path-free like every other
+#: typed line this command emits.
+OUTPUT_UNRESOLVABLE_MESSAGE = "census receipt --output cannot be resolved to a path; no census was run"
 
 MAX_FILES_HELP = (
     "Override the per-walk discovered-file budget (default 100000). A trip is "
@@ -155,7 +168,8 @@ _OUTPUT_HELP = (
     "Write the receipt to this path. It must be outside the journal root: an "
     "in-root path is refused (CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT, exit 1) before "
     "the census runs, so nothing is echoed for it either, and so is a path whose "
-    "~user cannot be expanded (CENSUS_OUTPUT_UNEXPANDABLE, exit 1). Once the "
+    "~user cannot be expanded (CENSUS_OUTPUT_UNEXPANDABLE, exit 1) or that cannot "
+    "be resolved (CENSUS_OUTPUT_UNRESOLVABLE, exit 1). Once the "
     "census has run, stdout carries the complete receipt whether or not this "
     "file write succeeds (CENSUS_OUTPUT_UNWRITABLE, exit 1)."
 )
@@ -563,6 +577,13 @@ def _require_output_outside_root(output: str, verified_root: Path) -> Path:
     ``FileOrchestrationJournalError`` -- so before #1955 the shape left a
     traceback on a command that documents "1 on a typed failure".  It becomes
     its own code because the failure happens BEFORE the census runs (design D5).
+    The two ``os.path.realpath`` calls are not total either (#2454): a relative
+    ``--output`` whose working directory has been removed raises
+    ``FileNotFoundError`` from ``abspath``, and an embedded NUL raises
+    ``ValueError``.  Both become ``CENSUS_OUTPUT_UNRESOLVABLE``, the same
+    BEFORE-census class.  Neither handler touches the clause-2 admission below:
+    that clause is about which path a successful write lands on, this is about
+    whether the call returns at all.
 
     The two ``os.path.realpath`` calls below are non-strict, which admits a
     symlink loop behind a missing component as a lexically folded product
@@ -593,8 +614,15 @@ def _require_output_outside_root(output: str, verified_root: Path) -> Path:
         ) from error
     # ADR 0009 clause 2, on the premise stated in the docstring above (single operator
     # CLI, no concurrent writer); clause 2 quantifies over inputs only.
-    resolved = Path(os.path.realpath(target))
-    root_real = Path(os.path.realpath(verified_root))
+    try:
+        resolved = Path(os.path.realpath(target))
+        root_real = Path(os.path.realpath(verified_root))
+    except (OSError, ValueError) as error:
+        raise OrchestratorError(
+            "CENSUS_OUTPUT_UNRESOLVABLE",
+            OUTPUT_UNRESOLVABLE_MESSAGE,
+            {"error_type": type(error).__name__, "output": str(output)},
+        ) from error
     if resolved == root_real or root_real in resolved.parents:
         raise OrchestratorError(
             "CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT",
@@ -722,6 +750,7 @@ __all__ = [
     "MAX_FILES_HELP",
     "MAX_RECORDS_HELP",
     "OUTPUT_UNEXPANDABLE_MESSAGE",
+    "OUTPUT_UNRESOLVABLE_MESSAGE",
     "OUTPUT_UNWRITABLE_MESSAGE",
     "add_argparse_census_subparser",
     "census_job_id_scope",

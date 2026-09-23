@@ -525,7 +525,9 @@ def _prepare_rollback_retention_root(
             ):
                 raise OSError("rollback retention generation is incomplete or unsafe")
         return retention_root
-    except (OSError, SafeFilesystemError, RollbackExecutionBindingError) as error:
+    except (OSError, RuntimeError, SafeFilesystemError, RollbackExecutionBindingError) as error:
+        # RuntimeError: the strict workspace resolve above raises it, errno-less, on a
+        # symlink loop up to 3.12 where 3.13+ raises OSError ELOOP (#2452).
         raise FileOrchestrationJournalError(
             "file_journal_rollback_execution_retention_unavailable",
             field="rollback_execution_binding",
