@@ -33,11 +33,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+from datetime import datetime, timedelta
 from typing import Any, Callable, NamedTuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.forcing_ts_render import (
     FORCING_STORES,
     FORCING_TABLE_TOKEN,
@@ -670,16 +672,37 @@ _COVERAGE_CTES = (
 # as before. `force` is the explicit zeroing escape hatch.
 #
 # The skip is whole-row: the `DO UPDATE` sets all 16 columns, so a refused row
-# keeps its station-side values and its `refreshed_at` too. Accepted, not
-# overlooked — the protected cohort is finished pre-cutover runs whose station
-# inputs no longer change. After #1342's contract (task 6.3) the freeze on the
-# legacy-routed cohort is PERMANENT rather than temporary: their river rows went
-# with `hydro.river_timeseries_legacy`, so no later refresh can ever rescan them
-# and this guard is what keeps their measured counts instead of zeroing them.
+# keeps its station-side values and its `refreshed_at` too.
+#
+# #2504 D6 scopes the guard to the RETENTION WINDOW. The fourth disjunct lets an
+# ordinary refresh write the scanned count — zero included — when the row's
+# stored `river_valid_time_end` lies before `expired_cutoff`, which is the
+# display watermark (`packages.common.display_watermark.fetch_display_watermark`,
+# the anchor the retention runner uses as `reference_time`) minus the configured
+# `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`. Never wall time: with a lagging
+# watermark `now() - window` would declare a band expired that retention has not
+# dropped. The term is NULL-guarded, so an unbound cutoff (window not configured
+# for the refresh, or the watermark unreadable) folds it away and the guard is
+# exactly #1446's; a NULL stored end never satisfies `<` and never relaxes.
+#
+# Why the protected cohort can shrink to the window. #1446 protected
+# legacy-routed runs whose river rows went with `hydro.river_timeseries_legacy`
+# (#1342's contract, migration 000060): their materialized counts were the only
+# record left. After 000060 no column distinguishes a legacy-routed run from a
+# narrow-routed one, and no display path reads the dropped legacy table, so
+# OUTSIDE the window every cohort's vanished facts are equally gone — retention
+# removed them for narrow runs, the contract for legacy ones — and a populated
+# row only advertises a curve the display cannot draw. That is an explicit
+# reinterpretation of #2504 AC2: INSIDE the window the guard stands unchanged
+# and a refusal still means "investigate" (legacy cohort or anomalous loss).
+# Because the refresh rescans actual facts, an expired row whose chunk
+# retention has not dropped yet keeps its count.
+#
 # The standing cost is bounded by staleness: because a refused row keeps its old
 # `refreshed_at`, the cron `--all --skip-fresh` loop rescans the run every tick
 # only while `refreshed_at < hydro_run.updated_at` -- a refused run whose row is
-# already fresh is not rescanned at all.
+# already fresh is not rescanned at all. An expired populated row is rescanned
+# at most once per `expired_rescan_interval` (see `_stale_run_ids`).
 _REFRESH_SQL = (
     _COVERAGE_CTES
     + """
@@ -718,6 +741,8 @@ _REFRESH_SQL = (
         WHERE %(force)s
            OR EXCLUDED.segment_count > 0
            OR hydro.run_display_coverage.segment_count = 0
+           OR (%(expired_cutoff)s::timestamptz IS NOT NULL
+               AND hydro.run_display_coverage.river_valid_time_end < %(expired_cutoff)s::timestamptz)
         RETURNING run_id
     """
 )
@@ -803,12 +828,14 @@ class DisplayCoverageRefreshRefused(RuntimeError):
 
 
 _REFUSAL_ADVICE = (
-    "The empty scan is the observation, not the diagnosis: most likely the run was "
-    "routed to the legacy river store before #1342's contract, so its rows went with "
-    "hydro.river_timeseries_legacy and its coverage row stays frozen at the counts it "
-    "last measured. Rows that were legitimately removed (retention, a re-parse) "
-    "produce exactly the same refusal. To materialize the empty scan deliberately, "
-    "rerun with --run-id <run> --force."
+    "The stored river valid-time end lies inside the retention window (or is NULL, or "
+    "no window/watermark was available to this refresh), so the empty scan is not "
+    "expected convergence and needs investigating: a legacy-routed run whose rows went "
+    "with hydro.river_timeseries_legacy, or facts lost for another reason. Outside the "
+    "window an ordinary refresh lowers the row itself, but only when "
+    "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS is set for the refresh and the display "
+    "watermark is readable. To materialize the empty scan deliberately, rerun with "
+    "--run-id <run> --force."
 )
 
 _EXISTING_SEGMENT_COUNT_SQL = """
@@ -818,7 +845,52 @@ _EXISTING_SEGMENT_COUNT_SQL = """
 """
 
 
-def _refresh(connection: Any, run_id: str | None, *, force: bool = False) -> RefreshOutcome:
+#: #2504 D6. How often the ``--skip-fresh`` backstop may rescan an EXPIRED
+#: populated row (stored end older than the cutoff). Facts routinely outlive the
+#: cutoff — chunks drop at one-day granularity and a retention tick can be
+#: refused or deferred (2026-09-19's 55P03) — and without this bound such a row
+#: would be fully rescanned on every ~11-min autopipe tick, serially under the
+#: autopipe flock, each up to the refresh statement budget.
+DEFAULT_EXPIRED_RESCAN_INTERVAL = timedelta(hours=24)
+
+
+def resolve_expired_cutoff(
+    dsn: str | None,
+    window_days: int | None,
+    *,
+    connect: Callable[..., Any] | None = None,
+    fetch_watermark: Callable[..., datetime] | None = None,
+) -> datetime | None:
+    """The #2504 cutoff (display watermark minus the window), or ``None``.
+
+    ``None`` — no relaxation, no expired selection — when the window is not
+    configured for this refresh (``configured_retention_window_days`` answered
+    ``None``: the autopipe cron sources ``node27-ingest.env``, which does not
+    carry the window unless the operator added it) or when the watermark cannot
+    be proven. Fail-closed on purpose: that module forbids a wall-time
+    fallback, and a raise here would turn the non-fatal backstop into a failed
+    step for a condition whose safe answer is simply today's guard. Called ONCE
+    per invocation (a whole ``--all`` batch shares one cutoff).
+    """
+    if window_days is None or not dsn:
+        return None
+    # Resolved at call time (same reason as ``open_connection`` below): a patch
+    # of this module's ``fetch_display_watermark`` must take effect.
+    fetch = fetch_display_watermark if fetch_watermark is None else fetch_watermark
+    try:
+        watermark = fetch(dsn, connect=connect)
+    except DisplayWatermarkError:
+        return None
+    return watermark - timedelta(days=window_days)
+
+
+def _refresh(
+    connection: Any,
+    run_id: str | None,
+    *,
+    force: bool = False,
+    expired_cutoff: datetime | None = None,
+) -> RefreshOutcome:
     params: dict[str, Any] = {
         "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
         # Per-run refresh: run_id uniquely identifies the run and its basin, so
@@ -831,6 +903,8 @@ def _refresh(connection: Any, run_id: str | None, *, force: bool = False) -> Ref
         # the zeroing explicitly. bool() so a truthy string can never reach the
         # driver as a non-boolean literal.
         "force": bool(force),
+        # #2504 D6: NULL folds the relaxation away (today's #1446 guard).
+        "expired_cutoff": expired_cutoff,
     }
     params.update(dict.fromkeys(_SCAN_PARAM_KEYS))
     candidates: list[str] = []
@@ -874,7 +948,13 @@ def _existing_segment_count(connection: Any, run_id: str) -> int:
     return 0 if row is None else int(row["segment_count"])
 
 
-def refresh_run_display_coverage(connection: Any, run_id: str, *, force: bool = False) -> bool:
+def refresh_run_display_coverage(
+    connection: Any,
+    run_id: str,
+    *,
+    force: bool = False,
+    expired_cutoff: datetime | None = None,
+) -> bool:
     """Recompute and upsert coverage for one run. Returns True if a row resulted.
 
     A finished forecast run (any basin) always yields a coverage row (counts may
@@ -884,8 +964,10 @@ def refresh_run_display_coverage(connection: Any, run_id: str, *, force: bool = 
     upsert and the guard skipped it — i.e. the fresh scan found no segments but
     the stored row is populated. Nothing is written and the transaction is
     rolled back before the raise. ``force=True`` performs the zeroing instead.
+    ``expired_cutoff`` (#2504, from ``resolve_expired_cutoff``) lets a row whose
+    stored end is older than it converge to its scan instead.
     """
-    outcome = _refresh(connection, run_id, force=force)
+    outcome = _refresh(connection, run_id, force=force, expired_cutoff=expired_cutoff)
     if run_id in outcome.refused:
         existing = _existing_segment_count(connection, run_id)
         connection.rollback()
@@ -920,6 +1002,8 @@ def refresh_all_run_display_coverage(
     workers: int = 1,
     connect: Callable[..., Any] | None = None,
     force: bool = False,
+    expired_cutoff: datetime | None = None,
+    expired_rescan_interval: timedelta = DEFAULT_EXPIRED_RESCAN_INTERVAL,
 ) -> dict[str, int]:
     """Recompute coverage for every parsed/finished forecast run (all basins).
 
@@ -945,6 +1029,12 @@ def refresh_all_run_display_coverage(
     already stale (``refreshed_at < hydro_run.updated_at``) — a refused run
     whose row is fresh is not rescanned. ``force=True`` performs the zeroing.
 
+    ``expired_cutoff`` (#2504 D6) is resolved ONCE by the caller for the whole
+    batch (``resolve_expired_cutoff``). Each run's upsert may then lower a
+    populated row whose stored end is older than it, and ``skip_fresh``
+    additionally selects such rows not refreshed within
+    ``expired_rescan_interval``. ``None`` keeps today's behaviour exactly.
+
     ``connect`` (#1714) lets the calling component inject its own attributed
     ``psycopg2.connect`` so the per-run worker connections carry that
     component's ``fallback_application_name`` in ``pg_stat_activity`` — these
@@ -955,7 +1045,12 @@ def refresh_all_run_display_coverage(
     run_ids = _eligible_run_ids(connection)
     if skip_fresh:
         # Compute the stale set ONCE (a single LEFT JOIN), not per element.
-        stale = _stale_run_ids(connection, run_ids)
+        stale = _stale_run_ids(
+            connection,
+            run_ids,
+            expired_cutoff=expired_cutoff,
+            expired_rescan_interval=expired_rescan_interval,
+        )
         run_ids = [r for r in run_ids if r in stale]
 
     if workers < 1 or workers > 8:
@@ -972,7 +1067,7 @@ def refresh_all_run_display_coverage(
         conn = None
         try:
             conn = open_connection(dsn)
-            outcome = _refresh(conn, run_id, force=force)
+            outcome = _refresh(conn, run_id, force=force, expired_cutoff=expired_cutoff)
             # #1446: a guard refusal is inspected straight off the outcome, not
             # via an exception round-trip, and is classified BEFORE (and
             # independently of) the generic failure arm below. Nothing was
@@ -1015,8 +1110,22 @@ def refresh_all_run_display_coverage(
     return {"refreshed": refreshed, "skipped": skipped, "failed": failed, "refused": refused}
 
 
-def _stale_run_ids(connection: Any, run_ids: list[str]) -> set[str]:
-    """Runs whose coverage is missing or older than hydro_run.updated_at."""
+def _stale_run_ids(
+    connection: Any,
+    run_ids: list[str],
+    *,
+    expired_cutoff: datetime | None = None,
+    expired_rescan_interval: timedelta = DEFAULT_EXPIRED_RESCAN_INTERVAL,
+) -> set[str]:
+    """Runs whose coverage is missing or older than hydro_run.updated_at.
+
+    #2504 D6 adds, only while a cutoff is bound, populated rows whose stored
+    river end is older than it and that were not refreshed within
+    ``expired_rescan_interval``: the one rescan that lets a frozen expired row
+    converge. The rescan stamps ``refreshed_at``, so a row whose facts survive
+    is not reselected before the interval elapses; one that scans empty drops
+    to 0 and leaves the selection for good. A NULL cutoff folds the term away.
+    """
     if not run_ids:
         return set()
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -1026,8 +1135,16 @@ def _stale_run_ids(connection: Any, run_ids: list[str]) -> set[str]:
             FROM hydro.hydro_run h
             LEFT JOIN hydro.run_display_coverage cov ON cov.run_id = h.run_id
             WHERE h.run_id = ANY(%(run_ids)s)
-              AND (cov.run_id IS NULL OR cov.refreshed_at < h.updated_at)
+              AND (cov.run_id IS NULL OR cov.refreshed_at < h.updated_at
+                   OR (%(expired_cutoff)s::timestamptz IS NOT NULL
+                       AND cov.segment_count > 0
+                       AND cov.river_valid_time_end < %(expired_cutoff)s::timestamptz
+                       AND cov.refreshed_at < now() - %(expired_rescan_interval)s::interval))
             """,
-            {"run_ids": run_ids},
+            {
+                "run_ids": run_ids,
+                "expired_cutoff": expired_cutoff,
+                "expired_rescan_interval": expired_rescan_interval,
+            },
         )
         return {r["run_id"] for r in cursor.fetchall()}

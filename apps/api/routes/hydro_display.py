@@ -42,7 +42,7 @@ import threading
 from collections.abc import Generator
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
@@ -98,6 +98,7 @@ from apps.api.routes.hydro_display_postgis import (
 from apps.api.routes.hydro_display_postgis import _fetch_postgis_tile_bytes as _fetch_postgis_tile_bytes
 from apps.api.routes.hydro_display_postgis import _postgis_tile_params as _postgis_tile_params
 from apps.api.routes.pipeline import _ok
+from packages.common.source_identity import DisplaySourceId
 from services.tiles.mvt import (
     MVT_MAX_ZOOM,
     MVT_MEDIA_TYPE,
@@ -348,8 +349,9 @@ def list_discharge_cycles(
     request: Request,
     # `Literal`, deliberately not a Python `Enum`, for the same reason as the
     # canonical tile route: an Enum makes FastAPI emit a `$ref` the
-    # hand-maintained `openapi/nhms.v1.yaml` would have to mirror twice.
-    source: Literal["gfs", "ifs"] = Query(),
+    # hand-maintained `openapi/nhms.v1.yaml` would have to mirror twice. The
+    # alias is shared with the coverage-freshness alert lane (#2464).
+    source: DisplaySourceId = Query(),
     session: Session = Depends(get_hydro_display_session),
 ) -> dict[str, Any]:
     """Cycles of `source` that EVERY active river network can render, newest first.
@@ -376,7 +378,7 @@ def list_layer_valid_times(
     request: Request,
     layer_id: str,
     run_id: str | None = Query(default=None),
-    source: Literal["gfs", "ifs"] | None = Query(default=None),
+    source: DisplaySourceId | None = Query(default=None),
     cycle: Rfc3339Instant | None = Query(default=None),
     session: Session = Depends(get_hydro_display_session),
 ) -> dict[str, Any]:
@@ -513,7 +515,8 @@ def hydro_national_source_cycle_mvt_tile(
     # `Literal`, deliberately not a Python `Enum`: an Enum makes FastAPI emit a
     # `$ref` into `components/schemas`, which the hand-maintained
     # `openapi/nhms.v1.yaml` would then have to mirror in a second place.
-    source: Literal["gfs", "ifs"],
+    # `DisplaySourceId` is that same Literal, shared with the alert lane (#2464).
+    source: DisplaySourceId,
     cycle: Rfc3339Instant,
     variable: str,
     valid_time: Rfc3339Instant,

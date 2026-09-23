@@ -32,6 +32,15 @@ NODE27_MVT_CACHE_RETENTION_DAYS=14
 NODE27_MVT_CACHE_RETENTION_LOG_ROOT=/home/nwm/node27-mvt-cache-retention-logs
 NODE27_MVT_CACHE_RETENTION_LOCK_PATH=/tmp/node27-mvt-cache-retention.lock
 
+# Summary file: leave NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH unset. The wrapper
+# then writes each run to its own
+# <LOG_ROOT>/mvt-cache-retention-<UTC second>.json, created exclusively and
+# suffixed -2, -3, ... when a run in the same second already holds the name
+# (#2284: plan-only then production back-to-back used to overwrite the first
+# summary). A skipped tick reserves nothing, and a run that dies before
+# writing leaves no empty file behind. A SET value is used verbatim, with no
+# suffixing: every run then overwrites that one file.
+
 # HEALTH CRITERION. The unit is Type=oneshot with no SuccessExitStatus=, so a
 # non-zero rc leaves it in `systemctl --user --failed`; but rc alone cannot see
 # a stale receipt or a rollback gate left switched on, so read the summary:

@@ -120,17 +120,17 @@ NODE27_TIMESERIES_RETENTION_LOCK_PATH=/tmp/nhms-node27-timeseries-retention.lock
 # receipt's candidate_chunks + deferred_remainder before flipping to
 # enforce. See runbook §8.4.
 #
-# !!! The --dry-run CLI flag does NOT override this variable !!!
-# Dry-run vs enforce is decided solely by --enforce / this variable; --dry-run
-# is never read. Once this line is uncommented (the steady state after the
-# timer is enabled), sourcing this file and running with --dry-run still
-# ENFORCES and irreversibly drops up to PER_TICK_BOUND chunks. Any manual
-# dry-run after that point on the DIRECT-python lane
-# (uv run python scripts/node27_timeseries_retention.py) MUST prefix the
-# command with NODE27_TIMESERIES_RETENTION_ENFORCE=0 (inline, after the
-# source). The WRAPPER lane (scripts/node27_timeseries_retention_once.sh)
-# CANNOT be made safe that way: the wrapper re-sources THIS file with
-# `set -a` after the prefix has applied, so the file's value wins and the
-# tick enforces anyway. The only way to dry-run through the wrapper is to
-# set NODE27_TIMESERIES_RETENTION_ENFORCE=0 in this file itself.
+# Precedence (#2355): an explicit --dry-run always wins over this variable --
+# it resolves to dry-run and drops nothing whatever this line says; otherwise
+# --enforce enforces; otherwise this variable decides. So once this line is
+# uncommented (the steady state after the timer is enabled) a run with NO flag
+# ENFORCES and irreversibly drops up to PER_TICK_BOUND chunks, while
+# `... node27_timeseries_retention.py --dry-run` (direct python) and
+# `scripts/node27_timeseries_retention_once.sh --dry-run` (the wrapper forwards
+# its arguments verbatim) both stay dry-run. Before #2355 the flag was never
+# read and a sourced ENFORCE=1 turned a --dry-run into a real drop (observed on
+# node-27 on 2026-09-19). A checkout older than that fix still ignores the
+# flag: there a dry-run needs NODE27_TIMESERIES_RETENTION_ENFORCE=0 inline after
+# the `source` (direct-python lane) or in THIS file (wrapper lane, which
+# re-sources this file after any inline prefix).
 #NODE27_TIMESERIES_RETENTION_ENFORCE=1

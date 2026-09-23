@@ -1,0 +1,60 @@
+## captured_at 2026-09-23T08:58:01Z host=ghdc user=nwm
+## 1. autopipe ticks 2026-09-19 05:00-08:00Z (start/done lines)
+4689775:[2026-09-19T05:00:41Z] autopipe: start
+4690460:[2026-09-19T05:00:55Z] autopipe: done rc=0 elapsed_sec=14
+4690461:[2026-09-19T05:11:40Z] autopipe: start
+4691146:[2026-09-19T05:11:52Z] autopipe: done rc=0 elapsed_sec=12
+4691147:[2026-09-19T05:22:40Z] autopipe: start
+4691832:[2026-09-19T05:22:52Z] autopipe: done rc=0 elapsed_sec=12
+4691833:[2026-09-19T05:33:40Z] autopipe: start
+4692518:[2026-09-19T05:33:52Z] autopipe: done rc=0 elapsed_sec=12
+4692519:[2026-09-19T05:44:40Z] autopipe: start
+4693204:[2026-09-19T05:44:52Z] autopipe: done rc=0 elapsed_sec=12
+4693205:[2026-09-19T05:55:40Z] autopipe: start
+4694787:[2026-09-19T06:30:56Z] autopipe: done rc=1 elapsed_sec=2116
+4694788:[2026-09-19T06:30:56Z] autopipe: start
+4695679:[2026-09-19T06:53:36Z] autopipe: done rc=1 elapsed_sec=1360
+4695680:[2026-09-19T06:53:36Z] autopipe: start
+4696490:[2026-09-19T07:02:41Z] autopipe: done rc=0 elapsed_sec=545
+4696491:[2026-09-19T07:03:40Z] autopipe: start
+4697176:[2026-09-19T07:03:52Z] autopipe: done rc=0 elapsed_sec=12
+4697177:[2026-09-19T07:14:40Z] autopipe: start
+4697862:[2026-09-19T07:14:51Z] autopipe: done rc=0 elapsed_sec=11
+4697863:[2026-09-19T07:25:40Z] autopipe: start
+4699046:[2026-09-19T07:41:05Z] autopipe: done rc=0 elapsed_sec=925
+4699047:[2026-09-19T07:41:05Z] autopipe: start
+4700142:[2026-09-19T07:53:21Z] autopipe: done rc=0 elapsed_sec=736
+4700143:[2026-09-19T07:53:21Z] autopipe: start
+4700828:[2026-09-19T07:53:32Z] autopipe: done rc=0 elapsed_sec=11
+## 2. error tally inside tick #16/#17 (05:55:40Z..06:53:36Z)
+     22 OUTPUT_PARSE_DB_ERROR: Output parser database operation failed: canceling statement due to statement timeout\n\n
+     11 "outcome": "failed"
+## 3. retention unit on 2026-09-19 (journal, UTC)
+2026-09-19T06:41:43+0000 ghdc node27_timeseries_retention_once.sh[2589951]: {"chunk": "_timescaledb_internal._hyper_9_150_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 334925.215, "outcome": "failed"}
+2026-09-19T06:41:43+0000 ghdc node27_timeseries_retention_once.sh[2589951]: {"mode": "enforce", "outcome": "refused", "refusal_reason": "RETENTION_DROP_FAILED:hydro._hyper_9_150_chunk: lock-contention(55P03): canceling statement due to lock timeout\n"}
+2026-09-19T06:41:43+0000 ghdc systemd[2047]: nhms-node27-timeseries-retention.service: Failed with result 'exit-code'.
+2026-09-19T06:41:43+0000 ghdc systemd[2047]: Failed to start NHMS node-27 timeseries retention (gated drop_chunks).
+2026-09-19T08:54:21+0000 ghdc node27_timeseries_retention_once.sh[2706070]: {"mode": "enforce", "outcome": "enforced"}
+2026-09-19T08:54:21+0000 ghdc systemd[2047]: Finished NHMS node-27 timeseries retention (gated drop_chunks).
+## 4. compression unit on 2026-09-19
+2026-09-19T02:02:32+0000 ghdc systemd[2047]: nhms-node27-timeseries-compression.service: Failed with result 'exit-code'.
+2026-09-19T02:02:32+0000 ghdc systemd[2047]: Failed to start NHMS node-27 timeseries compression.
+2026-09-19T02:33:35+0000 ghdc systemd[2047]: Finished NHMS node-27 timeseries compression.
+2026-09-19T05:03:57+0000 ghdc systemd[2047]: Finished NHMS node-27 timeseries compression.
+## 5. timers now
+NextElapseUSecRealtime=Thu 2026-09-24 14:36:00 CST
+LastTriggerUSec=Wed 2026-09-23 14:36:00 CST
+NextElapseUSecRealtime=Thu 2026-09-24 12:25:00 CST
+LastTriggerUSec=Wed 2026-09-23 12:25:32 CST
+## 6. live env keys (values of non-secret keys only)
+OUTPUT_PARSER_DB_STATEMENT_TIMEOUT_MS: <absent in node27-ingest.env>
+AUTOPIPE_RUN_WORKERS: AUTOPIPE_RUN_WORKERS=6
+36:DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
+## 7. deployed checkout
+8371024a Merge pull request #2554 from DankerMu/fix/issue-2550-china-fit-view
+## 3b/4b unit Starting lines 2026-09-19 (UTC)
+2026-09-19T06:36:08+0000 ghdc systemd[2047]: Starting NHMS node-27 timeseries retention (gated drop_chunks)...
+2026-09-19T08:54:21+0000 ghdc systemd[2047]: Starting NHMS node-27 timeseries retention (gated drop_chunks)...
+2026-09-19T00:57:32+0000 ghdc systemd[2047]: Starting NHMS node-27 timeseries compression...
+2026-09-19T02:10:00+0000 ghdc systemd[2047]: Starting NHMS node-27 timeseries compression...
+2026-09-19T04:25:32+0000 ghdc systemd[2047]: Starting NHMS node-27 timeseries compression...

@@ -539,6 +539,88 @@ def test_config_enforce_env_falsy_is_dry_run(tmp_path: Path) -> None:
     assert config.enforce is False
 
 
+# ---------------------------------------------------------------------------
+# #2355: an explicit --dry-run wins over the enforce env toggle.
+# ---------------------------------------------------------------------------
+
+#: Every spelling the env fallback reads as "enforce" (non-empty after
+#: strip/lower and not 0/false/no). `--dry-run` must beat all of them.
+_TRUTHY_ENFORCE_SPELLINGS = ("1", "true", "TRUE", " yes ", "enforce", "on", "2")
+_FALSY_ENFORCE_SPELLINGS = (None, "", "  ", "0", "false", "FALSE", "no", " No ")
+
+
+@pytest.mark.parametrize("raw", _TRUTHY_ENFORCE_SPELLINGS)
+def test_dry_run_flag_overrides_every_truthy_enforce_env_spelling(tmp_path: Path, raw: str) -> None:
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE=raw)
+
+    assert retention.config_from_args(_args(dry_run=True), env).enforce is False
+    # Without the flag the same env still enforces (H13 unchanged).
+    assert retention.config_from_args(_args(), env).enforce is True
+
+
+@pytest.mark.parametrize("raw", _FALSY_ENFORCE_SPELLINGS)
+def test_enforce_flag_still_wins_over_a_falsy_or_absent_env(tmp_path: Path, raw: str | None) -> None:
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE=raw)
+
+    assert retention.config_from_args(_args(enforce=True), env).enforce is True
+    assert retention.config_from_args(_args(), env).enforce is False
+    assert retention.config_from_args(_args(dry_run=True), env).enforce is False
+
+
+def test_parser_keeps_dry_run_and_enforce_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        retention._parser().parse_args(["--dry-run", "--enforce"])
+
+
+def test_help_text_states_the_env_default_and_that_dry_run_wins() -> None:
+    help_text = " ".join(retention._parser().format_help().split())
+
+    assert "dry-run (default)" not in help_text
+    assert "NODE27_TIMESERIES_RETENTION_ENFORCE" in help_text
+    assert "--dry-run always wins" in help_text
+
+
+def test_dry_run_with_enforce_env_drops_nothing_through_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-09-19 shape: env file sourced (ENFORCE=1), operator asks for
+    `--dry-run`, one chunk IS eligible. The receipt must be a dry-run and the
+    enforce-only phases (measure, drop) must never run."""
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    code = retention.main(
+        argv=["--dry-run"],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+
+    assert code == 0
+    receipt = json.loads(
+        Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8")
+    )
+    assert receipt["mode"] == "dry-run"
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["candidate_chunks"] == ["_timescaledb_internal.chk-a"]
+    assert [call[0] for call in stub.calls] == ["fetch"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_env_example_no_longer_claims_dry_run_is_ignored() -> None:
+    text = (
+        Path(__file__).resolve().parents[1] / "infra/env/node27-timeseries-retention.example"
+    ).read_text(encoding="utf-8")
+    flat = " ".join(line.lstrip("#").strip() for line in text.splitlines())
+
+    assert "does NOT override this variable" not in flat
+    assert "--dry-run is never read" not in flat
+    assert "--dry-run always wins" in flat
+
+
 @pytest.mark.parametrize(
     ("override", "match"),
     [
@@ -3953,7 +4035,7 @@ def test_retention_unit_routes_stderr_to_the_journal() -> None:
 def test_sibling_units_keep_their_systemd_err_lane() -> None:
     """The retirement is scoped, and the scope is pinned as a SET, not a sample.
 
-    Nine units sit beside this one. Seven of them were only ever registered,
+    Eleven units sit beside this one. Seven of them were only ever registered,
     never diagnosed here — changing them would be an unreviewed behaviour
     change on lanes this issue never looked at, so this asserts exactly which
     seven still carry `StandardError=append:…/systemd.err`. Equality rather
@@ -3963,12 +4045,19 @@ def test_sibling_units_keep_their_systemd_err_lane() -> None:
     intentional and positively pinned by
     `tests/test_node27_mvt_cache_retention.py`.
 
-    The remaining two are the whole of the difference:
+    The remaining four are the whole of the difference:
     `nhms-node27-resource-governance.service` is the one deliberate retirement
     (#1765 gives it `StandardError=journal` + `OnFailure=`), re-asserted
     negatively below because that is the fact #1712/#1765 must not silently
     reacquire; `nhms-node27-unit-failure-alert@.service` never had a
-    `StandardError=` directive at all. 7 + 1 + 1 = 9.
+    `StandardError=` directive at all; and the two alert lanes that mail their
+    report through that handler keep stdio on the JOURNAL by design, so they
+    never had an append lane either —
+    `nhms-node27-coverage-freshness-alert.service` (#2080) and
+    `nhms-node27-parse-failure-residency-alert.service` (#2529, pinned
+    positively in tests/test_node27_parse_failure_residency_alert.py).
+    7 + 1 + 1 + 2 = 11. The SET below is unchanged by #2529: a journal-stdio
+    lane does not join it.
     """
     siblings = sorted(
         path
@@ -4007,3 +4096,38 @@ def test_runbook_hands_the_operator_the_journal_command() -> None:
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
 
     assert _JOURNALCTL_FENCE in runbook_text
+
+
+# ---------------------------------------------------------------------------
+# #2504 D6: the runner parses its window through the shared resolver and keeps
+# its own default and typed errors.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["21", "1", "365", None, "", " 21", "21 ", "0", "-1", "x", "2.5"])
+def test_runner_window_agrees_with_the_shared_resolver(tmp_path: Path, raw: str | None) -> None:
+    """Every value the resolver accepts is the runner's window; every value it
+    rejects is either the runner's own default (absent/empty) or the runner's
+    typed refusal — so the coverage refresh can never read a window the
+    retention runner would not run."""
+    from packages.common.storage import configured_retention_window_days
+
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=raw)
+    resolved = configured_retention_window_days(env)
+    if resolved is not None:
+        assert retention.config_from_args(_args(), env).window_days == resolved
+    elif raw in (None, ""):
+        assert retention.config_from_args(_args(), env).window_days == retention._DEFAULT_WINDOW_DAYS
+    else:
+        with pytest.raises(retention.RetentionConfigError, match="WINDOW_DAYS"):
+            retention.config_from_args(_args(), env)
+
+
+def test_runner_reads_the_window_through_the_shared_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wiring, not agreement: a resolver answer is what the runner runs."""
+    monkeypatch.setattr(retention, "configured_retention_window_days", lambda _env: 33)
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_WINDOW_DAYS="21")
+
+    assert retention.config_from_args(_args(), env).window_days == 33

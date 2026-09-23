@@ -112,7 +112,10 @@ here precisely because the observed thing — the lookback window — is itself 
 `__null_source__` (runs with `source_id IS NULL`) is always reported as **not evaluated**:
 `national_discharge_cycles` takes a `str` source and matches `lower(h.source_id) = :source`,
 so such runs cannot be listed by the per-source catalog at all. The legacy source-less
-discovery path is out of this issue's scope (non-goal below). Measured on node-27
+discovery path is out of this issue's scope (non-goal below). *(Pointer, 2026-09-23: #2464 generalised this exclusion to every key the per-source
+catalog cannot list — NULL and any source outside the display routes' `source` enum —
+reported `not-evaluated` / `unsupported-source`; see
+`openspec/changes/node27-ops-scripts-fail-closed/design.md` D7.)* Measured on node-27
 (2026-09-18, read-only, `nhms_display_ro`): sources `gfs` and `ifs`, both ready frontier
 `2026-09-17 00:00Z`, both covered frontiers identical, gap `0.000` d, 38 active networks, no
 `__null_source__` cohort — so neither the window rule nor the null-source rule introduces a

@@ -151,3 +151,44 @@ def test_governance_object_store_override_precedence_is_unchanged(
     args = node27_resource_governance.build_parser().parse_args([])
 
     assert args.object_store_root == str(override)
+
+
+# ---------------------------------------------------------------------------
+# #2504 D6: the retention window has one parser shared by the retention runner
+# and the display coverage refresh.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("21", 21, id="plain"),
+        pytest.param("1", 1, id="minimum"),
+        pytest.param(None, None, id="absent"),
+        pytest.param("", None, id="empty"),
+        pytest.param(" 21", None, id="leading-space"),
+        pytest.param("21 ", None, id="trailing-space"),
+        pytest.param("0", None, id="zero"),
+        pytest.param("-1", None, id="negative"),
+        pytest.param("21d", None, id="suffix"),
+        pytest.param("2.5", None, id="fraction"),
+    ],
+)
+def test_configured_retention_window_days_is_none_unless_the_runner_would_accept_it(
+    raw: str | None, expected: int | None
+) -> None:
+    from packages.common.storage import RETENTION_WINDOW_ENV, configured_retention_window_days
+
+    env = {} if raw is None else {RETENTION_WINDOW_ENV: raw}
+
+    assert configured_retention_window_days(env) == expected
+
+
+def test_configured_retention_window_days_has_no_default() -> None:
+    """Fail-closed by contract: absent is ``None``, never
+    ``DEFAULT_RETENTION_WINDOW_DAYS`` — the coverage refresh must not relax its
+    guard for a window the retention runner's own env does not state (D6)."""
+    from packages.common.storage import DEFAULT_RETENTION_WINDOW_DAYS, configured_retention_window_days
+
+    assert configured_retention_window_days({}) is None
+    assert configured_retention_window_days({"UNRELATED": str(DEFAULT_RETENTION_WINDOW_DAYS)}) is None

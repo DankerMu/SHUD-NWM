@@ -61,3 +61,15 @@ AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
 # Per-run display coverage materialization timeout. Direct-grid basins with
 # millions of river rows legitimately exceed the historical 90-second bound.
 NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS=900000
+# #2504: retention window for the display coverage refresh (both the per-run
+# refresh and the `--all --skip-fresh` backstop run from this env). When set, a
+# populated coverage row whose stored river valid-time end is older than
+# (display watermark - this many days) may converge to its scan -- zero
+# included -- and the backstop rescans such rows at most once per 24 h. It MUST
+# equal NODE27_TIMESERIES_RETENTION_WINDOW_DAYS in
+# infra/env/node27-timeseries-retention.env (the value retention actually runs):
+# a smaller value here relaxes the #1446 guard for a band whose chunks retention
+# has not dropped. Unset (the shipped default, and today's node-27 state) = no
+# relaxation at all, exactly the pre-#2504 guard; there is deliberately no
+# fallback to the code default. Setting it on node-27 is a deployment step.
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=

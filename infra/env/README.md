@@ -480,6 +480,10 @@ Node-27 ingest role:
   Every run must provide an object-store
   `runs/<run_id>/input/forcing_domain_handoff.json`; missing handoff is reported
   as `OBJECT_STORE_FORCING_HANDOFF_REQUIRED`.
+- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` ships commented out (#2504). Set
+  it only to the value `infra/env/node27-timeseries-retention.env` carries: it
+  lets the display coverage refresh lower populated rows whose valid-time end
+  is older than the display watermark minus that window. Unset = no relaxation.
 
 Node-27 download role:
 
@@ -500,6 +504,16 @@ Node-27 download role:
   `NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download`, local node-27
   PostgreSQL `:55432`, `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`, and a
   node-27 local `WORKSPACE_ROOT`.
+
+Node-27 parse-failure residency alert (#2529):
+
+- `infra/env/node27-parse-failure-residency-alert.example` is the OPTIONAL
+  knob template for `scripts/node27_parse_failure_residency_alert.py` and
+  `infra/systemd/nhms-node27-parse-failure-residency-alert.{service,timer}`.
+  Every line ships commented (the defaults are the deployed values); copy it to
+  untracked `infra/env/node27-parse-failure-residency-alert.env` (mode `0600`)
+  only to change one. The read-only `nhms_display_ro` `DATABASE_URL` comes from
+  `infra/env/node27-frontier-alert.env`, not from this file.
 
 Node-27 resource governance role:
 

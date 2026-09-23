@@ -1274,6 +1274,117 @@ def test_a_stale_lane_root_handle_is_reported_with_its_errno(
     assert not aged_cache.exists()
 
 
+# ---------------------------------------------------------------------------
+# #2309: a traversal failure while SIZING a target retires only that target.
+# `_dir_size`'s `rglob` advances its generator through `os.scandir`, and on the
+# pinned 3.11 pathlib swallows only `PermissionError` there, so an ESTALE/EIO
+# from enumerating a cycle directory used to escape `collect_targets` and kill
+# the whole tick before any deletion and before the summary write. The fake is
+# keyed on the RESOLVED cycle path (lane roots are `resolve(strict=True)`'d and
+# macOS `tmp_path` lives under the `/var` -> `/private/var` symlink) and only
+# `os.scandir` is patched, so `_iter_dirs` (`iterdir` -> `os.listdir`) and every
+# other probe run for real.
+# ---------------------------------------------------------------------------
+
+
+def _stale_scandir_on(monkeypatch: pytest.MonkeyPatch, stale_dir: Path) -> list[str]:
+    real_scandir = os.scandir
+    stale = stale_dir.resolve()
+    hits: list[str] = []
+
+    def fake_scandir(path: Any = ".") -> Any:
+        if not isinstance(path, int) and Path(os.fspath(path)).resolve() == stale:
+            hits.append(os.fspath(path))
+            raise OSError(errno.ESTALE, "Stale file handle", os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", fake_scandir)
+    return hits
+
+
+def test_a_stale_raw_cycle_while_sizing_retires_only_that_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    stale_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    healthy_raw = _write_raw_cycle(store, "gfs", "2026060200")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    hits = _stale_scandir_on(monkeypatch, stale_cycle)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert hits, "the injected ESTALE never fired -- the test would pass vacuously"
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    unsafe = _entries(payload, "raw_target_unsafe")
+    assert _keys(unsafe) == ["raw/gfs/2026060100"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert unsafe[0]["path"].endswith("raw/gfs/2026060100")
+    assert "Stale file handle" in unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "OSError"
+    assert "raw/gfs/2026060100" not in _keys(payload["planned"])
+    assert _keys(payload["deleted"]) == [
+        "raw/gfs/2026060200",
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert payload["counts"]["failed"] == 0
+    assert stale_cycle.exists()
+    assert not healthy_raw.exists()
+    assert not canonical_cycle.exists()
+    assert not aged_cache.exists()
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["status"] == "completed"
+    assert _keys(_entries(written, "raw_target_unsafe")) == ["raw/gfs/2026060100"]
+
+
+@pytest.mark.parametrize(
+    ("lane", "reason"),
+    [
+        pytest.param("canonical", "canonical_target_unsafe", id="canonical"),
+        pytest.param("precip-cache", "precip_cache_target_unsafe", id="precip-cache"),
+    ],
+)
+def test_a_stale_mapped_lane_cycle_while_sizing_retires_only_that_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    lane: str,
+    reason: str,
+) -> None:
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    stale_cycle = canonical_cycle if lane == "canonical" else aged_cache
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    hits = _stale_scandir_on(monkeypatch, stale_cycle)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert hits, "the injected ESTALE never fired -- the test would pass vacuously"
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    unsafe = _entries(payload, reason)
+    assert _keys(unsafe) == [f"{lane}/IFS/2026060100"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert "Stale file handle" in unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "OSError"
+    expected_deleted = ["raw/gfs/2026060100", "canonical/IFS/2026060100", "precip-cache/IFS/2026060100"]
+    expected_deleted.remove(f"{lane}/IFS/2026060100")
+    assert _keys(payload["deleted"]) == expected_deleted
+    assert payload["counts"]["failed"] == 0
+    assert stale_cycle.exists()
+    assert not raw_cycle.exists()
+    assert summary_path.is_file()
+
+
 def _documented_operator_jq_program() -> str:
     """The `jq -e '...'` program as the env example teaches it, not a copy of it."""
     lines = _RETENTION_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()

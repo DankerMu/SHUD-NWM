@@ -64,25 +64,68 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   当前使用两个独立连接并行刷新。该步骤非 fatal，不应掩盖 autopipe 主返回码。
-- **legacy run 覆写已由 guard 兜底（#1446）**：#1341 后 river coverage 扫描按代理
-  键选行，legacy（pre-#1340、NULL 键）run 扫不到任何行。曾经裸 `--all` 或
-  `--run-id <legacy run>` 会把已物化的 `run_display_coverage` 覆写成 0 / NULL
-  边界，且**旧值无法就地恢复**（归零后的行本身不是永久损失，但**不会自愈**：归零的
-  upsert 会把 `refreshed_at` 刷成 `now()`，该行随即是 fresh 的，cron 的
-  `--all --skip-fresh` 永远不会再回头扫它。#1408 身份 backfill 落地后，恢复需要显式
-  `--run-id <run>` 刷新——或一次省掉 `--skip-fresh` 的 `--all`——才会重新算出真实
-  计数）；现在 upsert 的条件
-  `DO UPDATE ... WHERE` 直接拒绝该写入——`--run-id` 退出码 **3** 并在 stderr 打一行
+- **legacy run 覆写已由 guard 兜底（#1446），且只在保留窗口内兜底（#2504）**：#1341 后 river
+  coverage 扫描按代理键选行，#1342 contract（migration 000060）后 legacy 路由 run 的 river 行随
+  `hydro.river_timeseries_legacy` 一起没了，重扫一无所获，已物化的计数是唯一记录。upsert 的条件
+  `DO UPDATE ... WHERE` 因此**拒绝**把一个 populated 行（`segment_count > 0`）写成空扫描——
+  `--run-id` 退出码 **3** 并在 stderr 打一行
   `DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…`，
-  `--all` 把它计入 JSON 报告的 `refused` 且仍退出 0（不打断批次）。
-  代价：被拒的 run 保留旧 `refreshed_at`——**只在它本来就 stale
-  （`refreshed_at < hydro_run.updated_at`）时**，cron 的 `--all --skip-fresh` 每个
-  tick 才会重扫它一次（空扫描走代理键索引，很快）；被拒但 `refreshed_at` 仍 fresh
-  的 run 不会被重扫。两条了结途径：等 #1408 身份 backfill 补上键后下一次刷新自然
-  成功并自愈；或运维确认后显式 `--run-id <run> --force` 把该 run 归零（单个 run，
-  推荐的人工方式）。`--force` 也可与 `--all` 组合，一条命令把批次里**每个**被拒的
-  run 都归零——属运维显式 opt-in，cron 永不使用。`--skip-fresh` 不再是防覆写的必
-  需项，但仍应保留——省掉它会让每个 tick 重扫所有已 fresh 的 run。详见
+  `--all` 把它计入 JSON 报告的 `refused` 且仍退出 0（不打断批次）。**窗口内的拒绝 = 要调查**
+  （legacy cohort，或别的原因丢了事实）。
+- **窗口外收敛（#2504 D6）**：行的 `river_valid_time_end` 早于
+  `display watermark − NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`（watermark 即 retention runner 的
+  `reference_time`，`packages/common/display_watermark.py`；**从不用墙上时钟**）时，普通刷新照实写入
+  扫描结果——包括 0。000060 之后没有任何列能区分 legacy / narrow 路由，也没有展示路径再读被 drop 的
+  legacy 表，窗口外所有 cohort 的事实都同样没了，populated 行只会让展示面列出一条空曲线，所以
+  **窗口外归零是预期收敛，不是事故**；这同样会把 000060 legacy cohort 的窗口外行降到 0（显式裁定）。
+  事实还在（chunk 还没被 drop）的过期行重扫后保留计数；`river_valid_time_end` 为 NULL 的行永不放宽。
+  `--all --skip-fresh` 另外选中「populated、end 早于 cutoff、且 `refreshed_at` 早于 24 h 前」的行
+  （`--expired-rescan-hours` 可调），每个过期行至多每 24 h 重扫一次；JSON 报告的 `expired_cutoff`
+  写明本次用的 cutoff（`null` = 未放宽）。
+- **fail-closed**：放宽只在刷新进程自己的 env 里有窗口变量、且 watermark 可读时生效。autopipe cron
+  source 的是 `infra/env/node27-ingest.env`，2026-09-23 实测它**没有**这个变量（它在
+  `node27-timeseries-retention.env`，现网值 21）——没设就与 #2504 之前完全一致。启用是部署动作：把
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` 以与 retention env **相同的值**写进 `node27-ingest.env`
+  （更小的值会放开 retention 还没 drop 的那段）。
+- **部署顺序：先在 autopipe flock 之外手跑一次首轮收敛，再往 `node27-ingest.env` 写窗口变量。**
+  第一次带窗口的 `--all --skip-fresh` 要把当时所有过期 populated 行各重扫一次（2026-09-23 只读审计
+  receipt：窗口外 populated 2666 行、其中 2616 行无事实，见
+  [`../receipts/2026-09-23-issue-2504-populated-empty-audit/README.md`](../receipts/2026-09-23-issue-2504-populated-empty-audit/README.md)）。
+  若直接让 cron backstop 做，这一轮在 autopipe flock 之内跑（`--workers ${AUTOPIPE_COVERAGE_WORKERS:-1}`，
+  现网 2），重扫多久就把下一趟 tick 推迟多久。所以先手跑（窗口只在这条命令里内联设置，不持
+  flock，不挡 tick；`--workers 1` 是有意压低与 tick 并发时的库负载；同样避开 retention 06:36 UTC / compression 04:25 UTC 窗口，重扫语句持 chunk 锁会让
+  `drop_chunk` 55P03）：
+
+  ```bash
+  cd /home/nwm/NWM
+  set -a; . infra/env/node27-ingest.env; set +a   # 写库 DSN + refresh 语句预算，与 cron 同源
+  grep -n '^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=' infra/env/node27-timeseries-retention.env
+  W=<上一行显示的值>   # 必须就是 retention 现网值（2026-09-23 为 21）
+  { NODE27_TIMESERIES_RETENTION_WINDOW_DAYS="$W" setsid nohup .venv/bin/python \
+      scripts/node27_refresh_coverage.py --all --skip-fresh --workers 1 \
+      > /home/nwm/autopipe-logs/coverage-2504-first-convergence.json \
+      2> /home/nwm/autopipe-logs/coverage-2504-first-convergence.err & }
+  ```
+
+  完成后（JSON 报告 `expired_cutoff` 非 `null`、`failed` 为 0）用下面的只读审计确认
+  `out_of_window.empty` 降到 0，**然后**再把同一个值写进 `node27-ingest.env`（0600）。此后 backstop
+  看到的过期行都在 24 h 内刷新过，不会重选；日常只剩每天新越过 cutoff 的行和事实还没被 drop 的过期行。
+- **只读审计**：`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=<同 retention> .venv/bin/python
+  scripts/node27_refresh_coverage.py --audit-populated-empty` 打印
+  `{in_window: {total, empty, probe_failed, sample_empty_run_ids}, out_of_window: {…}, null_end: {total},
+  watermark, cutoff}`；逐行 `EXISTS` 探针限定在该行存储的 valid-time 区间、每个探针一条 autocommit 语句、
+  设 `statement_timeout` + `lock_timeout`，不跨 chunk 持 AccessShareLock 堵 retention 的 `drop_chunk`。
+  仍应避开 retention（06:36 UTC）与 compression（04:25 UTC）窗口跑。部署后预期 `out_of_window.empty`
+  在首轮收敛后归零（2026-09-23 基线 2616 → 0，receipt 同上；那次审计 6755 个探针串行 101 s）。
+- **retention 停摆的残余**：retention 被禁用或连续多天被拒（如 09-19 的 55P03）时，事实没被 drop 的过期
+  行会越积越多，每行每 24 h 在 autopipe flock 内被重扫一次（它们重扫后保留计数，所以一直留在选集里）。
+  retention 超过一天没有 drop chunk 时，盯 `autopipe.log` 里的
+  `phase=coverage_backstop elapsed_sec=`：它随这批行增长；先恢复 retention，而不是调 rescan 间隔。
+- 被拒的 run 保留旧 `refreshed_at`——**只在它本来就 stale（`refreshed_at < hydro_run.updated_at`）
+  时**，cron 的 `--all --skip-fresh` 每个 tick 才会重扫它一次；被拒但 fresh 的 run 不会被重扫。运维确认后
+  可显式 `--run-id <run> --force` 把该 run 归零（单个 run，推荐的人工方式）。`--force` 也可与 `--all`
+  组合，一条命令把批次里**每个**被拒的 run 都归零——属运维显式 opt-in，cron 永不使用。`--skip-fresh`
+  仍应保留——省掉它会让每个 tick 重扫所有已 fresh 的 run。详见
   `scripts/node27_refresh_coverage.py` 模块 docstring 的 "Overwrite guard" 段。
 
 确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production

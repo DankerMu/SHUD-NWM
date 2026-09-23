@@ -281,6 +281,13 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     "infra/systemd/nhms-node27-autopipe.service": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
     "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-frontier-alert.service": frozenset({"tests/test_node27_frontier_stall_alert.py"}),
+    # #2529: the residency lane's owner suite reads both units' directives.
+    "infra/systemd/nhms-node27-parse-failure-residency-alert.service": frozenset(
+        {"tests/test_node27_parse_failure_residency_alert.py"}
+    ),
+    "infra/systemd/nhms-node27-parse-failure-residency-alert.timer": frozenset(
+        {"tests/test_node27_parse_failure_residency_alert.py"}
+    ),
     "infra/systemd/nhms-node27-raw-retention.service": frozenset(
         {
             "tests/test_node27_raw_retention.py",
@@ -366,6 +373,39 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
         assert "tests/test_node27_timeseries_retention.py" not in selected, (
             f"{unit} pulled in the `.service`-only sibling lane pin"
         )
+
+
+# #2504 / #2529 reader edges: each path below is READ by a suite that neither
+# its same-name derivation nor a glob row reaches, so without an explicit row a
+# path-only PR would run none of the assertions about it.
+G1_PASS_B_READER_EDGES: dict[str, frozenset[str]] = {
+    # The env template's knobs are pinned by the lane's owner suite.
+    "infra/env/node27-parse-failure-residency-alert.example": frozenset(
+        {"tests/test_node27_parse_failure_residency_alert.py"}
+    ),
+    # The commented window key + MUST-equal note, and the real cron wrapper's
+    # strict-source pass-through of it (#2504 D6).
+    "infra/env/node27-ingest.example": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
+    # The shared retention-window resolver's cross-consumer agreement pin.
+    "packages/common/storage.py": frozenset(
+        {"tests/test_storage.py", "tests/test_node27_timeseries_retention.py"}
+    ),
+    # Same-name derivation: the new lane script and its new suite.
+    "scripts/node27_parse_failure_residency_alert.py": frozenset(
+        {"tests/test_node27_parse_failure_residency_alert.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "readers"),
+    sorted(G1_PASS_B_READER_EDGES.items()),
+    ids=[PurePosixPath(path).name for path in sorted(G1_PASS_B_READER_EDGES)],
+)
+def test_g1_pass_b_paths_select_their_readers(path: str, readers: frozenset[str]) -> None:
+    selected = set(select_tests([path], repo_root=Path(".")))
+
+    assert readers <= selected, f"{path} lost reader suite(s): {sorted(readers - selected)}"
 
 
 # #2188: the node-22 sibling of the table above -- same producer -> consumer
@@ -1684,6 +1724,15 @@ def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins(
     assert "tests/test_display_coverage_refresh.py" in coverage_selected
     assert "tests/test_river_ts_read_path_surrogate_keys.py" in coverage_selected
     assert "tests/test_river_ts_read_path_surrogate_keys.py" in probe_selected
+
+
+def test_display_route_diff_selects_the_coverage_alert_source_allowlist_pin() -> None:
+    """#2464: the pin `DISPLAY_SOURCE_IDS == each route's source annotation`
+    lives in the coverage-freshness suite behind a function-local import, so no
+    importer derivation finds it; the `hydro_display*` rule must name it for a
+    route-only diff (facade or an owner module) to run it in the PR lane."""
+    for path in ("apps/api/routes/hydro_display.py", "apps/api/routes/hydro_display_constants.py"):
+        assert "tests/test_node27_coverage_freshness_alert.py" in select_tests([path], repo_root=Path(".")), path
 
 
 def test_select_tests_maps_every_registered_cleanup_source_to_the_zero_text_oracle() -> None:

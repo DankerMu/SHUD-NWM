@@ -1,0 +1,14 @@
+[Unit]
+Description=Run NHMS node-27 parse-stage failure residency alert every 30 minutes
+
+[Timer]
+# #2529 (design D5): 30 min is fine-grained against the 2 h residency threshold
+# (a permanent failure mails within ~2.5 h) and the lane dedups per run with a
+# 24 h re-alert, so cadence is NOT the mail-volume bound here (unlike the daily
+# coverage-freshness lane). :15/:45 keeps it off the frontier lane's :00/:30.
+OnCalendar=*:15/30
+Persistent=true
+Unit=nhms-node27-parse-failure-residency-alert.service
+
+[Install]
+WantedBy=timers.target

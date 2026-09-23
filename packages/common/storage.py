@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from urllib.parse import urlparse
@@ -33,6 +34,35 @@ class ObjectPrefixPattern:
 # the runner refuses those itself, and the env extractor that used to mirror
 # that refusal on this side retired with its last caller (#1395).
 DEFAULT_RETENTION_WINDOW_DAYS = 14
+
+#: The retention window's one env spelling (#2504 D6). Read by the retention
+#: runner (from `infra/env/node27-timeseries-retention.env`) and by the display
+#: coverage refresh (from `infra/env/node27-ingest.env`); both go through
+#: `configured_retention_window_days`, so the two cannot parse it differently.
+RETENTION_WINDOW_ENV = "NODE27_TIMESERIES_RETENTION_WINDOW_DAYS"
+
+
+def configured_retention_window_days(env: Mapping[str, str]) -> int | None:
+    """The window ``env`` states, or ``None`` when it states none (#2504 D6).
+
+    ``None`` covers BOTH an absent/empty assignment and every value the
+    retention runner's strict parser refuses (surrounding whitespace, a
+    non-integer, anything below 1): accepting a value here that the runner
+    rejects would let the coverage refresh act on a window retention never
+    runs. There is deliberately no default. The runner maps ``None`` onto its
+    own default or typed refusal; the coverage refresh maps it onto "no
+    relaxation" (fail-closed), because falling back to
+    ``DEFAULT_RETENTION_WINDOW_DAYS`` there would relax the #1446 guard for a
+    band whose chunks a longer live window has not dropped.
+    """
+    raw = env.get(RETENTION_WINDOW_ENV)
+    if raw is None or raw == "" or raw != raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 1 else None
 
 
 VALID_PREFIX_PATTERNS: tuple[ObjectPrefixPattern, ...] = (

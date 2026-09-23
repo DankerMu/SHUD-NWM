@@ -228,7 +228,7 @@ if [ -f "$REPO/scripts/node27_refresh_coverage.py" ]; then
   PHASE_START=$(date +%s)
   "$REPO/.venv/bin/python" "$REPO/scripts/node27_refresh_coverage.py" --all --skip-fresh \
     --workers "${AUTOPIPE_COVERAGE_WORKERS:-1}" >> "$LOG" 2>&1 \
-    || echo "[$(ts)] autopipe: coverage backstop rc=$? (non-fatal)" >> "$LOG"
+    || { rc=$?; echo "[$(ts)] autopipe: coverage backstop rc=$rc (non-fatal)" >> "$LOG"; }
   PHASE_END=$(date +%s)
   echo "[$(ts)] autopipe: phase=coverage_backstop elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"
 fi
@@ -242,11 +242,14 @@ if [ "${AUTOPIPE_MVT_PREWARM_ENABLED:-1}" = "1" ] && [ -f "$REPO/scripts/node27_
   "$REPO/.venv/bin/python" "$REPO/scripts/node27_mvt_prewarm.py" \
     --zooms "${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5}" \
     --workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}" >> "$LOG" 2>&1 \
-    || echo "[$(ts)] autopipe: MVT prewarm rc=$? (non-fatal)" >> "$LOG"
+    || { rc=$?; echo "[$(ts)] autopipe: MVT prewarm rc=$rc (non-fatal)" >> "$LOG"; }
   PHASE_END=$(date +%s)
   echo "[$(ts)] autopipe: phase=mvt_prewarm elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"
 fi
 
+# Both `(non-fatal)` branches above capture `rc=$?` as their FIRST command
+# (#2283): `echo "[$(ts)] ... rc=$?"` logged rc=0, because `$(ts)` expands
+# (and exits 0) before `$?` is read.
 END=$(date +%s)
 echo "[$(ts)] autopipe: done rc=$RC elapsed_sec=$((END - START))" >> "$LOG"
 exit "$RC"

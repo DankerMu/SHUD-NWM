@@ -1,0 +1,34 @@
+[Unit]
+Description=NHMS node-27 parse-stage failure residency alert
+# #2529 (design D5): the ALERT IS the non-zero exit. Exit 1 = a run the autopipe
+# still retries has stayed `failed` (any error code) for >= the residency threshold and is due
+# (never alerted, or last alerted >= the re-alert interval ago); exit 2 = the
+# observer itself is broken (config / database / state). Delivery is the
+# already-live handler, unchanged; `%n` expands to the FULL unit name
+# (including `.service`), which is the argument its wrapper expects.
+# The autopipe unit itself deliberately carries NO `OnFailure=`: every transient
+# rc=1 tick would mail, and its `append:` stdio would leave the body empty.
+# Installing into ~/.config/systemd/user/ + `daemon-reload` + enabling the
+# timer is a MANUAL node-27 deployment step (not done by the PR that added it).
+OnFailure=nhms-node27-unit-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+# Read-only `nhms_display_ro` DSN (SELECT on hydro.hydro_run), shared with the
+# frontier and coverage-freshness lanes: one copy of that secret, whose
+# 0600/symlink contract the frontier lane's wrapper enforces every 30 minutes.
+EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env
+# Optional knobs (threshold / re-alert / liveness / report size / state path);
+# `-`: absent file = the defaults. Read second, so it may override the above.
+EnvironmentFile=-%h/NWM/infra/env/node27-parse-failure-residency-alert.env
+# The redaction chokepoint imports `packages.common.redaction`, so the repo
+# root must be importable when the script runs as a FILE.
+Environment=PYTHONPATH=/home/nwm/NWM
+ExecStart=/home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_parse_failure_residency_alert.py
+# NO `StandardOutput=append:` / `StandardError=append:`: the JOURNAL is the mail
+# body. The handler mails `journalctl -n 30`; the report is at most 12 lines
+# (summary + 10 residents + "... and K more") plus systemd's five framing lines.
+# Bounded: connect 10 s + one 30 s statement; a monitoring lane that hangs must
+# become a visible failed unit, not sit in `activating` forever.
+TimeoutStartSec=300

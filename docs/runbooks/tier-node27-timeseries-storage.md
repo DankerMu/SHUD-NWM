@@ -7189,12 +7189,15 @@ chmod 0600 /home/nwm/NWM/infra/env/node27-timeseries-retention.env
 # 1) a manual run must pass --receipt-path explicitly, or it aborts with
 # RETENTION_CONFIG_INVALID, exit 2, and no receipt. Use a timestamped filename
 # so manual runs never clobber each other or a timer tick's receipt.
-# The NODE27_TIMESERIES_RETENTION_ENFORCE=0 prefix is NOT decoration: the
-# --dry-run flag does NOT override the env. Once ENFORCE=1 is resident in the
-# deployed env file — the steady state after the timer is enabled (§8.1 step 3)
-# — an unprefixed run ENFORCES and irreversibly drops up to
-# NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND chunks. The inline assignment
-# comes AFTER the `source`, so it wins.
+# Since #2355 an explicit --dry-run always wins over the env: with ENFORCE=1
+# resident in the deployed env file — the steady state after the timer is
+# enabled (§8.1 step 3) — `--dry-run` still resolves to dry-run and drops
+# nothing, while a run with NO flag ENFORCES and irreversibly drops up to
+# NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND chunks. The
+# NODE27_TIMESERIES_RETENTION_ENFORCE=0 prefix below is kept as belt and
+# braces, and it is REQUIRED on a checkout older than #2355, where the flag
+# was never read (2026-09-19: a sourced ENFORCE=1 turned `--dry-run` into a
+# real drop). The inline assignment comes AFTER the `source`, so it wins.
 set -a; source /home/nwm/NWM/infra/env/node27-timeseries-retention.env; set +a
 DRYRUN_RECEIPT="$HOME/node27-timeseries-retention-logs/retention-dryrun-$(date -u +%Y%m%dT%H%M%SZ).json"
 NODE27_TIMESERIES_RETENTION_ENFORCE=0 \
@@ -7282,10 +7285,12 @@ before a receipt exists.
   like any other and will be dropped. That is the deliberate, documented
   widening of the delete surface that comes with
   `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled`. Dry-run vs enforce is
-  decided SOLELY by `--enforce` /
-  `NODE27_TIMESERIES_RETENTION_ENFORCE`; the `--dry-run` CLI flag controls
-  nothing — it is never read, so it cannot hold back an env that says
-  enforce (§8.4 step 2). With no archive gates left to evaluate, a dry-run
+  resolved in this order (#2355): an explicit `--dry-run` is dry-run whatever
+  `NODE27_TIMESERIES_RETENTION_ENFORCE` says; else `--enforce` enforces; else
+  the env variable decides (§8.4 step 2). Before #2355 `--dry-run` was never
+  read and could not hold back an env that said enforce — a receipt from a
+  pre-#2355 checkout must be read with that in mind. With no archive gates
+  left to evaluate, a dry-run
   ends either as `dry-run` or as one of the runner's own refusals.
 - `outcome=refused`: `mode=enforce`; `refusal_reason` is one of the four
   codes in §8.2. Nothing was dropped this tick. A `refused` receipt can be
@@ -7387,13 +7392,15 @@ before a receipt exists.
    grep above has nothing to find and its silence carries zero information:
    read the terminal output you still have — that is the whole diagnostic.
    Do NOT re-run through the wrapper to manufacture a bracket. A wrapper
-   invocation is a live enforcing tick: with
+   invocation without `--dry-run` is a live enforcing tick: with
    `NODE27_TIMESERIES_RETENTION_ENFORCE=1` resident in the env file it
    irreversibly drops up to `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND`
    chunks, and a shell-prefixed `NODE27_TIMESERIES_RETENTION_ENFORCE=0` cannot
    hold it back because the wrapper re-sources the env file with `set -a`
    after the prefix applies (`scripts/node27_timeseries_retention_once.sh:52-58`),
-   so the file's value wins. It would also mint a NEW receipt rather than
+   so the file's value wins. Only the forwarded `--dry-run` flag holds it back
+   (#2355; on a checkout older than that fix, nothing does). Either way it would
+   also mint a NEW receipt rather than
    diagnose the old one. The whole bracket procedure below applies to wrapper
    receipts only.
 

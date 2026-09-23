@@ -3213,6 +3213,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # a one-hop importer via tests/test_openapi_31_contract.py.
             "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_openapi_drift.py",
+            # #2464: NOT guard-derived (the import is function-local on purpose,
+            # so the suite is no importer edge of the display stack). It holds
+            # the pin tying the coverage-freshness lane's allowlist to the
+            # `source` annotation of the three display routes; without this
+            # entry a route-only diff that inlines its own `Literal` again would
+            # leave the lane observing a set the routes no longer serve, green
+            # in the PR lane.
+            "tests/test_node27_coverage_freshness_alert.py",
             # #2010: guard-derived — the precip suite imports
             # apps/api/routes/hydro_display.py at file level (the shared
             # `Rfc3339Instant` / seconds-precision gate and the DB-dependency
@@ -4634,6 +4642,48 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # accumulation, not repeated here.
         "infra/systemd/nhms-node27-frontier-alert.service",
         ("tests/test_node27_frontier_stall_alert.py",),
+    ),
+    PathTestRule(
+        # #2529: the residency lane's owner suite resolves all three paths and
+        # asserts their bodies (the `OnFailure=` handler line, both
+        # `EnvironmentFile=` lines, journal stdio, `OnCalendar=*:15/30`, every
+        # knob documented commented-out). The `.service` also gets the sibling
+        # lane pin from the #2173 glob row by accumulation; the `.timer` and the
+        # env template match no other reader of their body (the
+        # `infra/env/node27-*.example` glob only buys the write-roles DSN scan).
+        "infra/systemd/nhms-node27-parse-failure-residency-alert.service",
+        ("tests/test_node27_parse_failure_residency_alert.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node27-parse-failure-residency-alert.timer",
+        ("tests/test_node27_parse_failure_residency_alert.py",),
+    ),
+    PathTestRule(
+        "infra/env/node27-parse-failure-residency-alert.example",
+        ("tests/test_node27_parse_failure_residency_alert.py",),
+    ),
+    PathTestRule(
+        # #2504 D6: the coverage refresh reads NODE27_TIMESERIES_RETENTION_WINDOW_DAYS
+        # from THIS template's deployed copy (the autopipe cron sources it).
+        # `tests/test_node27_autopipeline_preflight.py` runs the real cron
+        # wrapper with this key in a strict-source env file and asserts the
+        # libpq-ambient filter lets it through; the globs matching this path
+        # (write-roles DSN scan, docker runtime pin) never read that line.
+        "infra/env/node27-ingest.example",
+        ("tests/test_node27_autopipeline_preflight.py",),
+    ),
+    PathTestRule(
+        # #2504 D6: `configured_retention_window_days` is shared by the
+        # retention runner and the coverage refresh.
+        # `tests/test_node27_timeseries_retention.py::test_runner_window_agrees_with_the_shared_resolver`
+        # is the cross-consumer agreement pin (the resolver must never accept a
+        # window the runner refuses); a storage-only diff otherwise selects only
+        # its same-name suite and the core-smoke baseline.
+        "packages/common/storage.py",
+        (
+            "tests/test_storage.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
     ),
     PathTestRule(
         # #2180: `tests/test_node27_raw_retention.py:317-322` resolves this

@@ -39,7 +39,10 @@ Design pins (``openspec/changes/node27-coverage-freshness-alert/design.md``):
   reported ``not-evaluated`` instead of alerting forever from day one.
   ``__null_source__`` is always ``not-evaluated``: ``national_discharge_cycles``
   takes a ``str`` source and matches ``lower(h.source_id) = :source``, so such
-  runs cannot be listed by the per-source catalog at all.
+  runs cannot be listed by the per-source catalog at all. The same holds for
+  any key outside the display routes' ``source`` enum (#2464,
+  ``packages.common.source_identity.DISPLAY_SOURCE_IDS``): it is reported
+  ``not-evaluated`` / ``unsupported-source`` and never reaches the exit code.
 - **D2 threshold** — ``default_gap_days() = NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS
   / GAP_THRESHOLD_DIVISOR``. No day count is hard-coded, so shrinking the window
   automatically shrinks the threshold. ``NHMS_COVERAGE_GAP_DAYS`` overrides it;
@@ -86,7 +89,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -139,6 +142,7 @@ STATUS_NOT_EVALUATED = "not-evaluated"
 REASON_NULL_SOURCE = "null-source"
 REASON_OUTSIDE_WINDOW = "outside-window"
 REASON_NO_READY_FRONTIER = "no-ready-frontier"
+REASON_UNSUPPORTED_SOURCE = "unsupported-source"
 
 RUNBOOK_REFERENCE = "docs/runbooks/current-production-ops.md - 覆盖新鲜度告警"
 
@@ -196,6 +200,22 @@ def lookback_days() -> float:
     return float(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS)
 
 
+def display_source_ids() -> frozenset[str]:
+    """The display surface's ``source`` set (#2464), from its owner.
+
+    ``packages.common.source_identity.DISPLAY_SOURCE_IDS`` is derived from the
+    SAME ``Literal`` alias the three display routes annotate ``source`` with, so
+    the lane's allowlist cannot drift from what the national layer serves.
+    Imported lazily for the same reason as ``lookback_days``: a host without
+    the repo on the import path fails in the config stage (typed exit 2), not
+    at module import as a raw traceback.
+    """
+
+    from packages.common.source_identity import DISPLAY_SOURCE_IDS
+
+    return DISPLAY_SOURCE_IDS
+
+
 def default_gap_days() -> float:
     """D2's ``DEFAULT_GAP_DAYS``, spelled as a function because the constant it
     derives from is imported lazily (see ``lookback_days``)."""
@@ -208,6 +228,9 @@ class CoverageAlertConfig:
     database_url: str
     gap_days: float
     lookback_days: float
+    #: #2464: keys outside this set are reported ``not-evaluated`` /
+    #: ``unsupported-source`` and never reach the exit code.
+    display_sources: frozenset[str]
 
     @property
     def gap_delta(self) -> timedelta:
@@ -279,6 +302,7 @@ def config_from_env(env: Mapping[str, str] | None = None) -> CoverageAlertConfig
         database_url=database_url,
         gap_days=_gap_days_env(env, lookback),
         lookback_days=lookback,
+        display_sources=display_source_ids(),
     )
 
 
@@ -392,8 +416,10 @@ def default_observe(config: CoverageAlertConfig) -> Observation:
     inside it is not injectable, which is why the unit tests inject at the
     ``observe`` seam and this adapter is proven by the node-27 live receipt.
 
-    ``__null_source__`` is skipped: the catalog matches
-    ``lower(h.source_id) = :source`` and can never list a NULL-source run.
+    ``__null_source__`` and every key outside ``config.display_sources`` are
+    skipped: the catalog matches ``lower(h.source_id) = :source`` and can never
+    list a NULL-source run, and a source the display routes do not serve
+    (#2464) is not on the national layer at all.
     """
 
     import sqlalchemy
@@ -414,7 +440,9 @@ def default_observe(config: CoverageAlertConfig) -> Observation:
             for row in rows:
                 key = str(row["source_key"])
                 covered: Any = None
-                if key != NULL_SOURCE_KEY:
+                # The catalog is asked only about keys it can serve (#2464);
+                # `__null_source__` is never one of them.
+                if key in config.display_sources:
                     covered = mvt.national_discharge_cycles(session, source=key)["default_cycle"]
                 observation[key] = SourceFrontiers(
                     source_key=key,
@@ -475,6 +503,17 @@ def evaluate(
             # neither be covered nor be a coverage stall (D1).
             verdicts.append(
                 SourceVerdict(key, STATUS_NOT_EVALUATED, REASON_NULL_SOURCE, ready, covered, None)
+            )
+            continue
+        if key not in config.display_sources:
+            # #2464, the same argument as NULL generalised: discovery reads the
+            # ingest table (an open set), but the observed surface is the
+            # display routes' closed `source` enum. A source outside it (ERA5
+            # is wired in the orchestrator) is not on the national layer, so
+            # `no-covered-cycle` there would be a permanent, uncleareable daily
+            # mail. Reported so the operator sees it, never breaching.
+            verdicts.append(
+                SourceVerdict(key, STATUS_NOT_EVALUATED, REASON_UNSUPPORTED_SOURCE, ready, covered, None)
             )
             continue
         if ready is None:
@@ -657,7 +696,11 @@ def main(
     now: datetime | None = None,
     observe: ObservationProvider | None = None,
     env: Mapping[str, str] | None = None,
+    display_sources: frozenset[str] | None = None,
 ) -> int:
+    """``display_sources`` is a test seam only (#2464): it replaces the display
+    route enum so budget/truncation pins can use many synthetic keys."""
+
     build_parser().parse_args(argv)
     env_map = os.environ if env is None else env
 
@@ -680,6 +723,8 @@ def main(
             structured={"status": "failed", "code": CODE_CONFIG_INVALID, "reason": reason},
         )
         return EXIT_CONFIG
+    if display_sources is not None:
+        config = replace(config, display_sources=frozenset(display_sources))
 
     stamp = (now or datetime.now(UTC)).astimezone(UTC)
     provider = default_observe if observe is None else observe

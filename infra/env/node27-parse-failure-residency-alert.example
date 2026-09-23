@@ -1,0 +1,40 @@
+# Node-27 parse-stage failure residency alert (issue #2529, design D5):
+# scripts/node27_parse_failure_residency_alert.py via
+# infra/systemd/nhms-node27-parse-failure-residency-alert.{service,timer}.
+#
+# OPTIONAL. Copy to node27-parse-failure-residency-alert.env (mode 0600) only to
+# change a default; the unit reads it with a leading `-`, so an absent file
+# means every default below. Every line ships commented because the defaults
+# ARE the deployed values.
+#
+# DATABASE_URL is NOT set here: the unit reads the read-only `nhms_display_ro`
+# DSN from infra/env/node27-frontier-alert.env (the same single copy the
+# frontier and coverage-freshness lanes use; this lane only SELECTs
+# hydro.hydro_run). A DATABASE_URL line in this file would override it, which
+# is only for a scratch-DB receipt, never for production.
+#
+# Residency threshold, hours (>= 0). A watched run (status='failed', any error
+# code -- on node-27 the output parser is the only writer of 'failed') present
+# in every observation for at least this long is resident. 0 = every watched
+# run is resident at once (live-receipt setting only).
+# NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS=2
+#
+# Re-alert interval, hours (> 0): a resident run mails again at most this often.
+# NHMS_PARSE_RESIDENCY_REALERT_HOURS=24
+#
+# Retry liveness, hours (> 0): only failed runs whose updated_at is within this
+# bound are watched. Every autopipe tick re-registers a failed run first
+# (scripts/node27_ingest_run.py upsert: status kept, updated_at = now()); the
+# parser's mark_run_failed does NOT touch an already-failed row, so error_code
+# stays the first failure's code (reported as first_error_code). Abandoned
+# historical failures fall outside it and never alert; clearing them is an
+# operator action (runbook). A tick hung for longer than this ages its failures
+# out of the watched set — the 4 h frontier-stall lane covers that.
+# NHMS_PARSE_RESIDENCY_RETRY_LIVENESS_HOURS=6
+#
+# Resident lines in the report (1..20). The report is the mail body and must fit
+# the handler's 30-line journal tail together with systemd's framing lines.
+# NHMS_PARSE_RESIDENCY_REPORT_RUNS=10
+#
+# State file (absolute). The lock file sits beside it (<path>.lock).
+# NHMS_PARSE_RESIDENCY_STATE_PATH=/home/nwm/node27-parse-failure-residency-alert/state.json
