@@ -21891,6 +21891,31 @@ def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
     return evidence
 
 
+def _output_uri_blocked_model_run_evidence(tmp_path: Path, *, model_count: int) -> list[dict[str, Any]]:
+    """REAL ``OUTPUT_URI_UNAVAILABLE`` rows: an ``error_code``, and no crash site.
+
+    The same ``model_run_evidence`` list takes ``error_code`` rows from six
+    sites (``scheduler_execution.py``:592/:640/:658/:664/:697/:742) and only the
+    last -- the dispatch catch-all -- carries ``error_traceback_tail``.  These are the
+    earlier, tail-less kind, produced by the object-store lookup returning no
+    URI, so the projection's cap is exercised against the shape the producer
+    really emits rather than a hand-forged dict.
+    """
+
+    orchestrator = FakeProductionOrchestrator(expose_object_store=False)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model(f"model_{index:03d}", f"basin_{index:03d}") for index in range(model_count)]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    rows = json.loads(json.dumps(scheduler.run_once().evidence))["model_run_evidence"]
+    assert len(rows) == model_count
+    assert all(row["error_code"] == "OUTPUT_URI_UNAVAILABLE" for row in rows)
+    assert not any("error_traceback_tail" in row for row in rows)
+    return rows
+
+
 def _compact_evidence_size(payload: Mapping[str, Any]) -> int:
     return len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
@@ -21956,9 +21981,12 @@ def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_
     """A cap that silently swallowed rows would repeat the bug at a smaller scale."""
 
     from services.orchestrator import scheduler_evidence
-    from services.orchestrator.scheduler_evidence import _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
 
-    failed_count = _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT + 6
+    # A LITERAL row count, and the cap constant imported only after the
+    # behaviour is asserted: importing it up front makes a pre-fix source fail
+    # at import time, which would leave "an overflow stays visible" -- the
+    # actual claim -- never falsified.
+    failed_count = 200
     evidence = _submission_failed_pass_evidence(tmp_path / "pass")
     producer_row = evidence["model_run_evidence"][0]
     # One producer-written row per submitted candidate of the dead unit: the
@@ -21979,20 +22007,68 @@ def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_
         max_evidence_bytes=1_000_000,
     )
 
-    assert bounded["limit"]["model_run_failures"] == {
-        "status": "summarized",
-        "failed_total": failed_count,
-        "retained": _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT,
-    }
-    assert len(bounded["model_run_failures"]) == _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
-    # The cap keeps a prefix, not a sample: the retained rows are identifiable.
-    assert [row["model_id"] for row in bounded["model_run_failures"]] == [
-        f"model_{index:03d}" for index in range(_BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT)
-    ]
+    marker = bounded["limit"]["model_run_failures"]
+    assert marker["status"] == "summarized"
+    assert marker["failed_total"] == failed_count
+    retained = marker["retained"]
+    # The overflow is reported, not swallowed: the marker's retained count is
+    # the number of rows actually kept, and it is short of the total.
+    assert retained == len(bounded["model_run_failures"]) < failed_count
     assert all(
         row["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED" and row["error_traceback_tail"]
         for row in bounded["model_run_failures"]
     )
+
+    from services.orchestrator.scheduler_evidence import _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
+
+    assert retained == _BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
+    # The cap keeps a prefix, not a sample: the retained rows are identifiable.
+    # Every row here carries a crash site, so the crash-first partition leaves
+    # the producer's order untouched.
+    assert [row["model_id"] for row in bounded["model_run_failures"]] == [
+        f"model_{index:03d}" for index in range(_BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT)
+    ]
+
+
+def test_bounded_model_run_failure_cap_never_evicts_the_only_crash_site(tmp_path: Path) -> None:
+    """A cycle's worth of tail-less blocked rows must not crowd out the cause.
+
+    ``OUTPUT_URI_UNAVAILABLE`` / ``RAW_INPUT_STAGING_FAILED`` rows are appended
+    to ``model_run_evidence`` BEFORE the dispatch catch-all's row, and 18 basins
+    x 2 sources over a few cycle-source pairs already exceed the cap.  Under a
+    plain prefix cap the one row carrying ``error_traceback_tail`` is evicted
+    and the artifact degrades to the #2570 failure it was written to close.
+    """
+
+    from services.orchestrator import scheduler_evidence
+
+    blocked_rows = _output_uri_blocked_model_run_evidence(tmp_path / "blocked", model_count=70)
+    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    crash_row = evidence["model_run_evidence"][0]
+    assert crash_row["error_traceback_tail"]
+    # The blocked rows alone already overflow the cap, and they come first.
+    evidence["model_run_evidence"] = [*blocked_rows, crash_row]
+
+    bounded = scheduler_evidence.bounded_evidence_payload(
+        evidence,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=1_000_000,
+    )
+
+    kept = bounded["model_run_failures"]
+    with_cause = [row for row in kept if row.get("error_traceback_tail")]
+    assert with_cause, "the only crash-site row was evicted by tail-less blocked rows"
+    assert [row["candidate_id"] for row in with_cause] == [crash_row["candidate_id"]]
+    assert with_cause[0]["error_traceback_tail"] == crash_row["error_traceback_tail"]
+    # Crash sites fill the cap first; the remaining slots still go to the
+    # blocked rows in the producer's order, so the cap is not wasted.
+    assert kept[0] == with_cause[0]
+    assert [row["model_id"] for row in kept[1:]] == [row["model_id"] for row in blocked_rows[: len(kept) - 1]]
+    # The counting basis is unchanged: every ``error_code`` row is a failure.
+    marker = bounded["limit"]["model_run_failures"]
+    assert marker["status"] == "summarized"
+    assert marker["failed_total"] == len(blocked_rows) + 1
+    assert marker["retained"] == len(kept) < marker["failed_total"]
 
 
 def test_bounded_fallback_sheds_the_model_run_failure_projection_last(tmp_path: Path) -> None:

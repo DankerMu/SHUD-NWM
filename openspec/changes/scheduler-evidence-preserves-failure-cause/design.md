@@ -3,8 +3,9 @@
 Change surface: `services/orchestrator/scheduler_evidence_payload.py`
 （`bounded_evidence_payload:1279-1349` 新增失败原因投影 + 其投影 helper），
 `services/orchestrator/scheduler_evidence.py`（`_DROPPABLE_BOUNDED_EVIDENCE_FIELDS:81-88`
-的次序、新投影的行数上限常量），`tests/test_production_scheduler.py`，
-`tests/test_scheduler_evidence_decidability.py`。
+的次序、新投影的行数上限常量），`tests/test_production_scheduler.py`（`tests/test_scheduler_evidence_decidability.py` 与
+`tests/test_production_readiness_validation.py` / `tests/test_operator_action_status_closure.py`
+只作 must-remain-green oracle，不改动）。
 
 Must preserve:
 - **#1118 不变量**：`no_progress_circuit` 仍是「每一层最先剥」，本单不碰
@@ -29,6 +30,12 @@ Must add/change:
   + `status` + `error_code` + `error_traceback_tail`。
 - 行数上限沿用 `_BOUNDED_SOURCE_CYCLE_PROJECTION_LIMIT = 64` 的先例（新增独立常量），
   **溢出必须可见**：在 `limit` 块里报失败总行数与保留行数，照 `limit.source_cycles` 的形状做。
+- **封顶前按「是否带 `error_traceback_tail`」分区，tail 行优先填槽**。写 `error_code` 进同一个
+  `evidence` 列表的有**六处**，只有 dispatch 兜底（`scheduler_execution.py:742-754`）带 tail，
+  且它排在全部 blocked 行（`:592` output_uri / `:640` slurm preflight / `:658` secret manifest /
+  `:664` resource profile / `:697` raw staging）**之后**；不分区则一趟先攒够 64 条无 tail 的
+  blocked 行就能把唯一带崩溃现场的行整类挤掉，产物退化成与本单要修的失效等价。
+  `failed_total` 的计数口径不变（全部 `error_code` 非空的行），分区内部保持原始顺序。
 - 源 payload 没有 `model_run_evidence`、或没有任何 `error_code` 非空的行时，
   **不得**捏造空键——照既有「lane 缺席就缺席、不给伪造空列表」的纪律。
 - **二次降级（re-entry）**：`write_evidence`（`scheduler_evidence.py:465-468`）会把调用方的

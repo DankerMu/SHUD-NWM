@@ -660,6 +660,17 @@ def _bounded_model_run_failures(payload: Mapping[str, Any]) -> tuple[list[dict[s
     of the cause, so it is re-projected rather than discarded.  Re-projecting a
     projected row is a no-op: the row is already exactly this fixed key subset.
 
+    The cap fills from the rows that CARRY a crash site first.  Six sites in the
+    same unit loop append an ``error_code`` row to ``model_run_evidence``
+    (``scheduler_execution.py``:592 ``OUTPUT_URI_UNAVAILABLE``, :640/:658/:664
+    the Slurm-preflight and secret-manifest blocks, :697
+    ``RAW_INPUT_STAGING_FAILED``, :742 the dispatch catch-all) and only the LAST
+    of them carries ``error_traceback_tail``.  A plain prefix cap would
+    therefore let one cycle's worth of tail-less blocked rows fill all 64 slots
+    and evict the single row that says why the pass died -- exactly the #2570
+    failure at a smaller scale.  Each partition keeps the producer's order, so
+    the retained rows stay identifiable.
+
     The total is counted before the cap, so an overflow shows up as
     ``retained < failed_total``.
     """
@@ -667,15 +678,20 @@ def _bounded_model_run_failures(payload: Mapping[str, Any]) -> tuple[list[dict[s
     rows_source = _bounded_sequence(payload.get("model_run_evidence"))
     if not rows_source:
         rows_source = _bounded_sequence(payload.get("model_run_failures"))
-    rows: list[dict[str, Any]] = []
+    limit = _scheduler_evidence._BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT
+    with_cause: list[dict[str, Any]] = []
+    without_cause: list[dict[str, Any]] = []
     failed_total = 0
     for item in rows_source:
         if not isinstance(item, Mapping) or item.get("error_code") is None:
             continue
         failed_total += 1
-        if len(rows) >= _scheduler_evidence._BOUNDED_MODEL_RUN_FAILURE_PROJECTION_LIMIT:
+        bucket = with_cause if item.get("error_traceback_tail") else without_cause
+        if len(bucket) >= limit:
             continue
-        rows.append(_present_bounded_summary_keys(item, _BOUNDED_MODEL_RUN_FAILURE_KEYS))
+        bucket.append(_present_bounded_summary_keys(item, _BOUNDED_MODEL_RUN_FAILURE_KEYS))
+    rows = with_cause[:limit]
+    rows.extend(without_cause[: limit - len(rows)])
     return rows, failed_total
 
 

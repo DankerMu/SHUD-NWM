@@ -73,7 +73,7 @@ both; producer-to-fixture synchronisation is a separate obligation.
 #### Scenario: terminal limit compaction remains the fail-closed floor
 
 - WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
-- THEN `limit.pre_limit_status`, `limit.candidate_lists` and `limit.source_cycles` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
+- THEN `limit.pre_limit_status`, `limit.candidate_lists`, `limit.source_cycles` and `limit.model_run_failures` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
 
 #### Scenario: Candidate-heavy evidence is summarized before fail-closed fallback
 
@@ -87,11 +87,13 @@ both; producer-to-fixture synchronisation is a separate obligation.
 
 #### Scenario: the cause of a failed pass survives the bounded fallback
 
-- WHEN a unit's chain is terminated by an unhandled exception, the pass records one `model_run_evidence` row per submitted candidate with `status` `submission_failed`, an `error_code`, and the bounded `error_traceback_tail` the executor captured, and the payload then exceeds `max_evidence_bytes` and falls back
+- WHEN a pass records `model_run_evidence` rows that carry an `error_code` — among them, when a unit's chain is terminated by an unhandled exception, one row per submitted candidate with `status` `submission_failed` and the bounded `error_traceback_tail` the executor captured — and the payload then exceeds `max_evidence_bytes` and falls back
 - THEN the bounded fallback SHALL carry a bounded projection of those failure rows, each row carrying the candidate identity it has, `status`, `error_code`, and `error_traceback_tail`
+- AND when the failure rows exceed the cap, the rows carrying an `error_traceback_tail` SHALL be retained ahead of those that do not, because only the dispatch catch-all writes a traceback and its rows are appended after the blocked rows that carry an `error_code` alone
 - AND the projection SHALL pass the values through as the producer bounded them, neither re-truncated nor widened
 - AND the projection SHALL be capped at a fixed row count, with the failed total and the retained count reported in the `limit` block so an overflow is never silent
 - AND when the source payload carries no `model_run_evidence`, or none of its rows carry an `error_code`, the fallback SHALL omit the key rather than fabricate an empty one
 - AND the key SHALL be shed last among the droppable bounded-evidence fields, after model discovery, source cycles, the candidate lists and the restart-reconcile block, because it is the only record of that cause: the executor writes the traceback to the artifact and never to stdout or stderr
+- AND the reported failed total SHALL be monotone across a re-bounding: re-projecting an already capped projection SHALL NOT lower it
 - AND when the payload being bounded is itself a bounded fallback product — which happens because the writer replaces the caller's evidence mapping in place — the projection SHALL be carried through and re-projected from that product's own rows rather than discarded, and its `limit` marker SHALL NOT downgrade from `dropped` back to a retained state
 - AND the existing terminal limit-compaction tier MAY still drop it, leaving the fail-closed floor unchanged.
