@@ -66,6 +66,7 @@
   - Explicit `umask=0002`: `4471 passed in 956.31s`, 0 skipped, rc=0. This includes #2403's test (AC1) and the 20 parity cases on Linux.
   - Then `umask=0022`: #2403's test `1 passed, 56 deselected`, `rc_2403_umask022=0` (AC2).
   - The final head adds only openspec text on top of this: the round-1 Notes and the canonical cycle-mode receipt.
-- [ ] 5.4 CI green on the PR head.
+- [x] 5.4 CI green on the PR head.
+  - Run 35876581318 @`6e9cbef`: Unit Tests / Entropy Audit pass. Merged as `a2885569f`.
 
 Evidence Floor: 1.1 RED + 5.3 GREEN (002 and 022); 2.1 receipt table + 2.2 census; 3.1 receipts (ACL recheck + group membership on both hosts); 4.1 `expanduser` census; 4.2 RED→GREEN + parity before/after; 4.3 greps; `git diff` on `provider_atomic.py` / `safe_fs.py` comment-only; ruff; openspec strict.
