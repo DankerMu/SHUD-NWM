@@ -3621,6 +3621,11 @@
           "pr": 2469,
           "outcome": "merged",
           "rounds": 2
+        },
+        {
+          "pr": 2609,
+          "outcome": "merged",
+          "rounds": 2
         }
       ]
     },
@@ -3696,6 +3701,28 @@
       "closed": [
         {
           "pr": 2606,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2533": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2609,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2477": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2609,
           "outcome": "merged",
           "rounds": 2
         }

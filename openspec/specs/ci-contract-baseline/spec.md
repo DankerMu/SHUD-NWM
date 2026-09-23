@@ -435,7 +435,7 @@ provably wrong.
   `workers/shud_runtime/runtime.py` for naming a QHH diagnostic token
 - **THEN** the comment is reworded to drop the literal token with zero
   executable-logic change, and
-  `tests/test_entropy_audit_script.py` passes with
+  `tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings` passes with
   `hard_gate_failing_count == 0`
 
 ### Requirement: Selector path-rule duplicate patterns MUST be allowlisted decisions
@@ -626,7 +626,7 @@ to the core smoke selection instead of an empty selection.
 
 WHEN a pull request changes only `scripts/scheduler_file_provider_refresh_once.sh`
 THEN the `backend` filter reports true
-AND the targeted selector output includes `tests/test_scheduler_file_provider_refresh.py`
+AND the targeted selector output includes `tests/test_scheduler_refresh_deployment_contract.py`
 
 #### Scenario: unmapped shell script falls back loudly, not empty
 
@@ -1010,7 +1010,7 @@ When a changed Python test suite reaches the targeted selector's ordinary self-s
 
 ### Requirement: Calibration declaration changes MUST execute their consumer contract suites
 
-A pull request that changes `config/calibration_overrides.yaml` MUST open the backend targeted-test gate and the targeted selector SHALL select `tests/test_publish_scheduler_file_registry.py`, `tests/test_basins_package.py`, and `tests/test_select_ci_tests.py`. The route MUST be exact to that declaration path and SHALL NOT substitute core-smoke or collect-only execution for these assertion-level consumers.
+A pull request that changes `config/calibration_overrides.yaml` MUST open the backend targeted-test gate and the targeted selector SHALL select `tests/test_publish_registry_calibration_overrides.py`, `tests/test_basins_package.py`, and `tests/test_select_ci_tests.py`. The route MUST be exact to that declaration path and SHALL NOT substitute core-smoke or collect-only execution for these assertion-level consumers.
 
 #### Scenario: Declaration-only change reaches publication and package assertions
 
@@ -1178,7 +1178,7 @@ requirement.
 
 ### Requirement: display and scheduler unit files with a content-asserting owner suite MUST select that suite
 
-`infra/systemd/nhms-display-api.service`, `infra/systemd/nhms-scheduler-file-provider-refresh.service` and `infra/systemd/nhms-scheduler-file-provider-refresh.timer` each have exactly one suite that `read_text`s that path and asserts its directives, and none of them lies inside the `infra/systemd/nhms-node27-*.service` glob rule, so before this change a unit-only diff selected nothing at all and the targeted job degraded to a zero-assertion `--collect-only` smoke. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for each: the display-api unit targeting `tests/test_hydro_display_mvt_scaling.py`, and both scheduler file-provider-refresh units targeting `tests/test_scheduler_file_provider_refresh.py`. Because none of the three matches the node-27 glob, none of the three selections SHALL contain `tests/test_node27_timeseries_retention.py`. The node-27 owner-table meta test SHALL decide whether a unit owes the sibling lane pin by matching that glob rather than by the `.service` suffix, so that a node-27 unit named outside the `nhms-node27-` prefix is judged correctly. `nhms-display-api.service` is not an `nhms-node27-*`-named unit and therefore lies outside the domain of "node-27 unit files with a content-asserting owner suite MUST select that suite", whose scope is the `infra/systemd/nhms-node27-*.service` glob; it is governed by this requirement instead. Units with no content-asserting reader (`nhms-compute-compose.service`, `nhms-display-compose.service`, `nhms-node27-frontier-alert.timer`, `nhms-node27-raw-retention.timer`, `nhms-scheduler-evidence-retention.timer`) SHALL NOT receive a rule under this requirement, and the four node-22 units already routed by the existing exact rules SHALL keep their current selections unchanged.
+`infra/systemd/nhms-display-api.service`, `infra/systemd/nhms-scheduler-file-provider-refresh.service` and `infra/systemd/nhms-scheduler-file-provider-refresh.timer` each have at least one suite that `read_text`s that path and asserts its directives, and none of them lies inside the `infra/systemd/nhms-node27-*.service` glob rule, so before this change a unit-only diff selected nothing at all and the targeted job degraded to a zero-assertion `--collect-only` smoke. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for each: the display-api unit targeting `tests/test_hydro_display_mvt_scaling.py`, and both scheduler file-provider-refresh units targeting `tests/test_scheduler_refresh_deployment_contract.py`; the `.service` unit also selects `tests/test_node22_refresh_timer_health.py`, which reads it too. Because none of the three matches the node-27 glob, none of the three selections SHALL contain `tests/test_node27_timeseries_retention.py`. The node-27 owner-table meta test SHALL decide whether a unit owes the sibling lane pin by matching that glob rather than by the `.service` suffix, so that a node-27 unit named outside the `nhms-node27-` prefix is judged correctly. `nhms-display-api.service` is not an `nhms-node27-*`-named unit and therefore lies outside the domain of "node-27 unit files with a content-asserting owner suite MUST select that suite", whose scope is the `infra/systemd/nhms-node27-*.service` glob; it is governed by this requirement instead. Units with no content-asserting reader (`nhms-compute-compose.service`, `nhms-display-compose.service`, `nhms-node27-frontier-alert.timer`, `nhms-node27-raw-retention.timer`, `nhms-scheduler-evidence-retention.timer`) SHALL NOT receive a rule under this requirement, and the four node-22 units already routed by the existing exact rules SHALL keep their current selections unchanged.
 
 #### Scenario: a display-api unit diff selects its owner suite without the node-27 lane pin
 
@@ -1188,7 +1188,7 @@ requirement.
 #### Scenario: a scheduler file-provider-refresh unit diff selects its owner suite
 
 - **WHEN** the changed paths are exactly `infra/systemd/nhms-scheduler-file-provider-refresh.service` or exactly `infra/systemd/nhms-scheduler-file-provider-refresh.timer`
-- **THEN** `select_tests` emits a non-empty set containing `tests/test_scheduler_file_provider_refresh.py` and not containing `tests/test_node27_timeseries_retention.py`
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_scheduler_refresh_deployment_contract.py` and not containing `tests/test_node27_timeseries_retention.py`
 
 #### Scenario: existing node-27 owner-table selections are preserved
 
@@ -1199,7 +1199,7 @@ requirement.
 
 `infra/env/compute.scheduler-provider-refresh.env.example` is read by path, and its content is asserted, by two suites:
 
-- `tests/test_scheduler_refresh_deployment_contract.py`. It asserts that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. That content assertion moved there from the retired `tests/test_scheduler_file_provider_refresh.py` when #1101 partitioned the monolith.
+- `tests/test_scheduler_refresh_deployment_contract.py`. It asserts that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. That content assertion moved there when #1101 partitioned the former refresh monolith.
 - `tests/test_node22_refresh_timer_health.py` (#2146). It pins the receipt-root line.
 
 `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` for the template, with neither `stop_on_match` nor `only_when_any_changed`, targeting those owner suites. The rule SHALL NOT be added to the `#1684` rollout-producer group, whose target is the static deployment contract suite and which does not read this template.
@@ -1362,7 +1362,7 @@ as a formatted value, not only as a value pytest happens to render.
 
 ### Requirement: the retention copyback mutex load-bearing modules MUST select the mutex suite
 
-The retention copyback mutex is pinned by the two partitions `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`. They came from the #2259 split of the former `tests/test_retention_copyback_mutex.py`. The mutex has two load-bearing modules:
+The retention copyback mutex is pinned by the two partitions `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`. They came from the #2259 split of the former single mutex suite. The mutex has two load-bearing modules:
 - `services/orchestrator/scheduler_runtime.py` holds its wiring: the scheduler call site that names the shared copyback root.
 - `packages/common/copyback_guard.py` holds its lock semantics.
 
@@ -1596,3 +1596,22 @@ For every changed `.py` path under the forcing discovery roots (`packages`, `wor
 
 - **WHEN** the changed path under a discovery root does not exist on disk
 - **THEN** `select_tests` returns without raising
+
+### Requirement: review-governance tools and records SHALL select their suites
+
+`scripts/select_ci_tests.py` SHALL carry path-exact rules, with neither `stop_on_match` nor `only_when_any_changed`:
+
+- `scripts/governance/loop_log_audit.py` and `docs/review-loop-log.jsonl` → `tests/test_loop_log_audit_attribution.py`;
+- `scripts/review_gate.py` → `tests/test_review_gate_cli.py` and `tests/test_review_gate_issue_memory.py`.
+
+The CI `backend` paths filter SHALL list `docs/review-loop-log.jsonl` as an exact literal, so a log-only diff opens the targeted gate.
+
+#### Scenario: a loop-log diff selects the attribution suite
+
+- **WHEN** the changed paths are exactly `docs/review-loop-log.jsonl`
+- **THEN** the CI `backend` filter matches, and the selection contains `tests/test_loop_log_audit_attribution.py`
+
+#### Scenario: a review-gate CLI diff selects both memory suites
+
+- **WHEN** the changed paths are exactly `scripts/review_gate.py`
+- **THEN** the selection contains `tests/test_review_gate_cli.py` and `tests/test_review_gate_issue_memory.py`

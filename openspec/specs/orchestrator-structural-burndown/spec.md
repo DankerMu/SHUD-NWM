@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change governance-6-entropy-structural-burndown. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Scheduler lease extraction SHALL preserve mutation fences
 
 Scheduler lease extraction SHALL preserve mutation fences even when lease code
@@ -629,10 +631,11 @@ before-blob allowlist SHALL fail.
 
 - **WHEN** imports of `tests/basins_registry_import_helpers.py` are derived from tracked
   module ASTs
-- **THEN** the seven registry owners and
-  `tests/test_publish_scheduler_file_registry.py` are its eight direct collectible importers
-- **AND** `tests/qhh_production_bootstrap_helpers.py` is its sole non-collectible support
-  importer, while QHH-bootstrap A, B, and C import that QHH helper rather than the registry
+- **THEN** the seven registry owners and the four publish-registry partitions
+  `tests/test_publish_registry_{calibration_overrides,package_contexts,radiation_repair,refresh_lane}.py`
+  are its eleven direct collectible importers
+- **AND** `tests/qhh_production_bootstrap_helpers.py` and `tests/publish_registry_helpers.py` are its
+  only non-collectible support importers, while QHH-bootstrap A, B, and C import that QHH helper rather than the registry
   helper directly
 - **AND** the two D-to-registry imports remain the only QHH-helper transition, with all QHH
   rows, 66 nodes, owners, markers, and execution summaries unchanged and the QHH oracle
@@ -791,7 +794,8 @@ semantics SHALL be equivalent to the pre-split owners.
 ### Requirement: Entropy audit enforcement and its corpus split without report drift
 
 The repository SHALL split `scripts/governance/audit_repo_entropy.py` and
-`tests/test_entropy_audit_script.py` below 1,000 lines with shared definitions in
+its former single test module (now the fifteen `tests/test_entropy_audit_*.py` partitions of
+`ENTROPY_AUDIT_TESTS`) below 1,000 lines with shared definitions in
 support modules. The audit's check identifiers, module heatmap keys, public function
 set, exit codes, and the stable subset of `metadata` SHALL be unchanged. The stable
 subset is exactly `schema_version`, `mode`, `check_family_count`,
@@ -839,4 +843,3 @@ inbound reference and anchor SHALL still resolve.
   `#311-pipeline-job-provenance-sidecar-and-recovery-2420` still resolves, and
   markdown lint passes
 - **AND** the targeted selector routes the document's new paths.
-

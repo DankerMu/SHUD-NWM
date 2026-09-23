@@ -51,7 +51,7 @@
 - [x] 5.3 `uv run ruff check .`; `openspec validate track-review-governance-tools --strict --no-interactive`.
 - [x] 5.4 ADR 0003 Revisit appended with the audit output from 1.4.
 - [x] 5.5 `git ls-files .agents/skills .claude/skills` is still empty.
-- [ ] 5.6 CI green on the final push.
+- [x] 5.6 CI green on the final push (PR #2609 @adefa1a8d: Unit Tests, Markdown Lint, SQL Migration Dry Run pass).
 
 ## Deviations (recorded)
 
