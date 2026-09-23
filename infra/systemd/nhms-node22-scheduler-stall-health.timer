@@ -1,0 +1,27 @@
+[Unit]
+Description=Quarter-hourly health probe for the NHMS node-22 DB-free scheduler lane
+# As with the service unit: no Wants=, After=, Requires=, Before=, BindsTo= or
+# PartOf= naming nhms-compute-scheduler.timer or nhms-compute-scheduler.service.
+# The watched lane never enters the watcher's dependency graph.
+
+[Timer]
+# Every 15 minutes at :03, :18, :33, :48 -- offset off the hour so the probe
+# does not contend with the hour-boundary work on this host.
+OnCalendar=*:03/15
+RandomizedDelaySec=60
+# `Persistent=` replays a tick missed while the timer was NOT LOADED -- across
+# a boot, or before an explicit activation. It does nothing at all for a timer
+# left `enabled` + `inactive`, which is exactly the shape that silences a
+# probe: such a timer never transitions to active, so there is no moment at
+# which the missed tick is replayed. Nothing here revives a silenced probe and
+# no comment may suggest otherwise. It is `false` because at a 15-minute
+# cadence the replay buys nothing the next ordinary tick does not already
+# deliver. The probe's own liveness is an operator check instead, documented
+# as a steady-state row in
+# `docs/runbooks/production-ops/stuck-detection.md` section 6.2: `list-timers`
+# NEXT is not `-`, and the probe receipt's `generated_at` is recent.
+Persistent=false
+Unit=nhms-node22-scheduler-stall-health.service
+
+[Install]
+WantedBy=default.target

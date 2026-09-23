@@ -34,6 +34,8 @@
     "schemas/examples/timeseries_compression_live_evidence.example.json",
     "docs/runbooks/receipts/tier-node27-timeseries-storage/**/*.json",
     "tests/test_node22_refresh_timer_health.py",
+    "scripts/node22_scheduler_stall_health.py",
+    "tests/test_node22_scheduler_stall_health.py",
     "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md",
     "packages/common/state_manager.py",
     "services/orchestrator/file_orchestration_journal.py",

@@ -4386,6 +4386,64 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/systemd/nhms-node22-refresh-timer-health.timer",
         ("tests/test_node22_refresh_timer_health.py",),
     ),
+    # #2570: the DB-free scheduler stall probe and its two units, the node-22
+    # dual of the refresh probe above. `tests/test_node22_scheduler_stall_health.py`
+    # `read_text`s both units (`Type=oneshot`, the `ExecStart` interpreter and
+    # script path, `StandardOutput/StandardError=journal`, `UMask=0077`, no
+    # `PrivateTmp` and no `EnvironmentFile` DIRECTIVE, the libpq
+    # `UnsetEnvironment=` set, `OnCalendar=*:03/15`, `RandomizedDelaySec=60`,
+    # `Unit=`, and that NEITHER file names `nhms-compute-scheduler` in any
+    # ordering or dependency directive). A unit-only diff selected nothing
+    # before this row, which degrades the PR lane to a zero-assertion
+    # `--collect-only` smoke on exactly the file whose content is the
+    # assertion.
+    PathTestRule(
+        "infra/systemd/nhms-node22-scheduler-stall-health.service",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node22-scheduler-stall-health.timer",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    # The probe module itself. The same-name derivation
+    # (`scripts/<x>.py` -> `tests/test_<x>.py`) already reaches this suite, so
+    # unlike the three rows above this one is a PIN rather than the only route:
+    # it survives a suite rename that would silently break the derivation, and
+    # it makes the probe's route auditable next to the unit rows it belongs
+    # with. It adds no target the derivation would not have added.
+    PathTestRule(
+        "scripts/node22_scheduler_stall_health.py",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    # The D4 parity edge. The probe is stdlib-only by design (it is staged and
+    # run from outside the deployed checkout), so it carries its own copy of
+    # the governed pass filename predicate, its prefix and suffixes, and the
+    # writer's `MAX_EVIDENCE_BYTES`. The parity test that pins those constants
+    # to this module lives in the probe suite, and the importer closure only
+    # applies when the CHANGED path is itself a test file
+    # (`select_ci_tests.py:5354-5364`) -- a production module path is routed by
+    # PATH_TEST_RULES alone. Without this row the parity test would not run on
+    # the very diff that breaks parity, which makes it an after-the-fact
+    # detector rather than a gate. Additive: `services/orchestrator/**` keeps
+    # routing this path to its own targets (no `stop_on_match` on either rule).
+    PathTestRule(
+        "services/orchestrator/scheduler_evidence.py",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    # The second D4 parity edge, same reasoning. The probe reads the
+    # no-progress tracker itself (the module's `load_state(dir_fd)` is on the
+    # circuit's WRITE path), so it carries its own copy of the tracker's
+    # `STATE_SCHEMA_VERSION` and `STATE_FILENAME`, pinned by the suite's
+    # tracker parity test. Without this row a PR bumping the schema version
+    # merges green and the probe then grades `probe_failed` on every tick --
+    # precedence 1, masking all ten other verdicts on this lane. The same class
+    # of unrouted reader edge already cost #2146 a round
+    # (`tests/test_select_ci_tests.py`, NODE22_REFRESH_READER_EDGES). Additive
+    # like the row above.
+    PathTestRule(
+        "services/orchestrator/scheduler_no_progress.py",
+        ("tests/test_node22_scheduler_stall_health.py",),
+    ),
     PathTestRule(
         "scripts/node27_download_once.sh",
         ("tests/test_node27_download_cycles.py",),
