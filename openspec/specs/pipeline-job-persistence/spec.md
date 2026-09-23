@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: pipeline_job Record Creation
 
 In PostgreSQL-backed scheduler mode, the system SHALL create a `pipeline_job` record in the `ops.pipeline_job` table whenever the Orchestrator submits a stage job to Slurm. In DB-free scheduler mode, the node-22 file journal SHALL be the authoritative job record at submission, and node-27's `ops.pipeline_job` SHALL be a derived projection created from a validated published job-provenance record. Under no deployment SHALL node-27 display or ingest fabricate a job solely to satisfy evidence collection.
@@ -1554,3 +1556,12 @@ The batch per-model row reducer SHALL have no flag governing direct-record parti
 - **WHEN** `inspect.signature(FileOrchestrationJournalRepository._cycle_rows_by_model_unlocked)` is read
 - **THEN** its parameters are exactly `self` and the keyword-only `source_id`, `cycle_time`, `model_ids`; a re-added `include_direct_jobs` parameter fails the pin
 
+### Requirement: The job-id scope census SHALL refuse an unresolvable `--output` with its own typed code before the census runs
+
+When canonicalising the receipt path or the verified journal root raises — an `OSError` such as `FileNotFoundError` for a relative `--output` whose working directory has been removed, or a `ValueError` for a value carrying an embedded NUL — the census command SHALL fail with the typed code `CENSUS_OUTPUT_UNRESOLVABLE` before any census work, on both the click and the argparse entrypoint: exit status 1, empty stdout, and exactly one `<code>: <message>` line on stderr with no traceback. The code SHALL be distinct from `CENSUS_OUTPUT_UNWRITABLE`, which denotes a failure after the receipt reached stdout, and SHALL be listed in the command's help beside the other output codes. The refusal SHALL write nothing under the journal root.
+
+#### Scenario: A relative output under a deleted working directory is a typed refusal
+
+- **GIVEN** a verified journal root and a process whose working directory has been removed
+- **WHEN** an operator runs the census with `--output receipt.json` through either entrypoint
+- **THEN** the command exits 1 with empty stdout, stderr is exactly `CENSUS_OUTPUT_UNRESOLVABLE: <message>`, no traceback is printed, and the journal root is byte-identical

@@ -85,8 +85,8 @@
   - Green; `git diff tests/test_path_canonicalization_family_guard.py` empty (criterion, exemption list and the census clause-2 entry byte-unchanged; D1 needed no exemption).
 - [x] 4.5 ADR 0009: 已知限制 2 rewritten to point at #2452's triage and the new guard (closed); 已知限制 3's last sentence points at #2454 (closed).
   - 已知限制 2 rewritten (points at the §Triage and `tests/test_resolve_surface_guard.py`, closed); 已知限制 3's last sentence points at #2454 (closed); 子族定性 records #2453 closed; the four `scheduler_runtime_roots.py:<line>` anchors this change would have rotted are rewritten as symbol anchors.
-- [ ] 4.6 node-27 real-DB pytest receipt at the PR head for the focused suites (orchestrator-side oracle).
-- [ ] 4.7 CI green on the PR head (or red with the cause recorded).
+- [x] 4.6 node-27 real-DB pytest receipt at the PR head for the focused suites (orchestrator-side oracle). — node-27 @7375960ed, isolated worktree, Python 3.11.15, disposable scratch PG (nhms-db image), NHMS_RUN_INTEGRATION=1, 11 suites: 4567 passed, rc=0 (`/home/nwm/tmp/oracle-batchF/run-7375960eda33bf078738ee48ff9f932e64ca8096.log`).
+- [x] 4.7 CI green on the PR head (or red with the cause recorded). — CI run 35834186827 @7375960ed: Unit Tests, SQL Migration Dry Run, Markdown Lint success.
 ## 5. Fix pass 1 (PR #2581 review)
 
 - [x] 5.1 [O1] `scheduler_evidence.py::root_evidence_item` (T8) renders through `scheduler_runtime_roots._canonical_path(_expanduser_or_verbatim(value))` (function-local import; `scheduler_runtime_roots` → `scheduler` → `scheduler_evidence` would cycle at module level). No direct `realpath` call, so the realpath authority set / exemption list are unchanged; the `_canonical_path` reachability comment names the new render-only caller.
