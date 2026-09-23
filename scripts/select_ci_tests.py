@@ -345,11 +345,12 @@ PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
 # root-level files. No rule routed those inputs to it, so PR #2321's
 # `openspec/changes/**/evidence/*.json` edit went green in the PR lane and
 # reddened master run 34787384045 after merge. The route targets the ONE node
-# (~20s) rather than the whole ~97s partition, and is skipped when the whole
-# file is already selected (every entropy scanner-module rule selects
-# ENTROPY_AUDIT_TESTS), so the same test is never emitted twice. The #2323 AC
-# names tests/test_entropy_audit_script.py, which the #1823 split retired; the
-# gate lives here now.
+# rather than the whole ~97s partition — measured call time 70.71s on node-27,
+# 20.13s on macOS, paid by nearly every PR (any `openspec/changes/**` edit is a
+# scan input) — and is skipped when the whole file is already selected (every
+# entropy scanner-module rule selects ENTROPY_AUDIT_TESTS), so the same test is
+# never emitted twice. The #2323 AC names tests/test_entropy_audit_script.py,
+# which the #1823 split retired; the gate lives here now.
 ENTROPY_AUDIT_REPORT_CONTRACT_TEST = "tests/test_entropy_audit_report_contract.py"
 PRODUCTION_TOPOLOGY_HARD_GATE_TEST = (
     f"{ENTROPY_AUDIT_REPORT_CONTRACT_TEST}"
@@ -5624,13 +5625,17 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
 
     True when the final selection is exactly the selector meta-guard (the
     #1454 shape: deleted test file, unrouted support module, or a selector-test
-    PR) OR when the changed-file set touches the selector itself
-    (``scripts/select_ci_tests.py`` or ``tests/test_select_ci_tests.py``) —
-    the class of diff that rewrites the gate and must not silently lose the
-    full-tree collection oracle, even when supplemental routing makes the
-    final selection non-collapsed (e.g. a selector-source PR also selects the
-    Timescale invariant). Deliberately independent of the final-list shape so a
-    supplemental target can never mask the provenance requirement.
+    PR) — with the supplemental production-topology hard-gate node
+    (``PRODUCTION_TOPOLOGY_HARD_GATE_TEST``) disregarded, because that rider
+    rides on nearly every PR (any ``openspec/changes/**`` edit is a scan input)
+    and must never mask the collapse — OR when the changed-file set touches
+    the selector itself (``scripts/select_ci_tests.py`` or
+    ``tests/test_select_ci_tests.py``) — the class of diff that rewrites the
+    gate and must not silently lose the full-tree collection oracle, even when
+    supplemental routing makes the final selection non-collapsed (e.g. a
+    selector-source PR also selects the Timescale invariant). Deliberately
+    independent of the final-list shape so a supplemental target can never mask
+    the provenance requirement.
     """
     if meta_guard_only:
         return True
@@ -5815,6 +5820,9 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     # the unknown-backend fallback. Decided LAST and over the final selection,
     # so a diff that already runs the whole report-contract file (a scanner
     # module rule, or the suite itself changed) never gets the node twice.
+    # Cost: the node's call time is 70.71s on node-27 (20.13s on macOS). It is
+    # a supplemental RIDER: `_write_github_output` disregards it when deciding
+    # `meta_guard_only`, so it never masks the #1454 meta-guard collapse.
     if any(_is_production_topology_scan_input(path) for path in changed):
         if ENTROPY_AUDIT_REPORT_CONTRACT_TEST not in selected:
             selected.add(PRODUCTION_TOPOLOGY_HARD_GATE_TEST)
@@ -6027,7 +6035,21 @@ def _write_github_output(
     # for selector-development PRs whose diff-specific target simply IS this
     # suite. That last class is accepted rather than special-cased: the cost is
     # one extra collection pass on exactly the PR class that changes the gate.
-    meta_guard_only = list(tests) == [SELECTOR_META_GUARD_TEST]
+    #
+    # #2323: the production-topology hard-gate node is a supplemental RIDER and
+    # is disregarded here. Nearly every PR carries an `openspec/changes/**`
+    # edit, which is a topology scan input, so counting the node would turn
+    # every deleted-test / unrouted-support-module collapse into
+    # `[NODE, META]` and silently drop the full-tree collect-only smoke. The
+    # node-ONLY shape (diff-specific selection empty, e.g. `schemas/foo.json`
+    # + tasks.md -> `[NODE]`) is deliberately NOT a collapse. It follows the
+    # `apps/__init__.py` precedent (a supplemental target moves an empty
+    # selection onto the targeted branch without re-arming the smoke), and the
+    # zero-selection class here is non-importable data, so no cross-test import
+    # surface is at risk and the flag stays false.
+    meta_guard_only = [test for test in tests if test != PRODUCTION_TOPOLOGY_HARD_GATE_TEST] == [
+        SELECTOR_META_GUARD_TEST
+    ]
     # `collection_smoke_required` is INDEPENDENT provenance, not a restatement
     # of the final-list shape: a selector-development PR stays collection-
     # required even when supplemental routing makes the final selection

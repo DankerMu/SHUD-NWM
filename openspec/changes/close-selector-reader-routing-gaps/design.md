@@ -108,7 +108,7 @@ A changed path that is under a root, or equal to a direct file, and that passes 
 
 The existing helpers resolve all four import forms: `import packages.common.forcing_ts_render`, `from packages.common import forcing_ts_render`, `from packages.common.forcing_ts_render import X`, and relative `from .forcing_ts_render import X` inside `packages/common/`.
 
-**Fail-open on unreadable input.** A missing file, a non-regular file, `OSError`, `UnicodeDecodeError` or `SyntaxError` falls through silently. A deleted or renamed path cannot construct a pair.
+**Fail-open on unreadable input.** A missing file, a non-regular file, `OSError`, `UnicodeDecodeError`, `SyntaxError` or `ValueError` (a NUL byte on Python 3.11) falls through silently. A deleted or renamed path cannot construct a pair.
 
 **Why not route every backend path.** The #2498 alternative, riding all six roots, was rejected by the #1990 cut (b) review on cost: three suites, ~23s, on every backend path.
 
@@ -136,11 +136,14 @@ This means the new route fires only when the diff also contains a backend path. 
 ## Risks / Trade-offs
 
 - **Added lane cost.**
-  - About +20s (the node builds one full-repo report) on effectively **every** backend PR. The repo's CI-cost discipline puts `openspec/changes/**/tasks.md` in the final push of each PR, and that path is a scan input. The node id is already the cheapest target that runs the gate.
+  - About +20s on macOS and 70.71s call time on node-27 (the node builds one full-repo report), on effectively **every** backend PR. The repo's CI-cost discipline puts `openspec/changes/**/tasks.md` in the final push of each PR, and that path is a scan input. The node id is already the cheapest target that runs the gate.
   - The re-measured cost of the five writer suites on `file_orchestration_migration.py` diffs.
   - `tests/test_retention_extra_roots.py` on `scheduler_runtime.py` diffs.
 - **Contract flips in the meta-suite.**
   - Docs and root-instruction paths under the scan roots that used to select `[]` now select exactly the hard-gate node (`test_generated_roots_and_unrelated_docs_stay_selector_empty`, `test_select_tests_ignores_docs_only_changes`). Those tests are retargeted and renamed, with the premise comment rewritten, not widened in place.
   - The two D3 oracle routes select exactly the meta-guard, so `meta_guard_only=true` and the collection smoke runs for them. This is the #2183 precedent, not a regression.
+  - **`meta_guard_only` disregards the hard-gate node (review round 1, P1).** Because the node rides almost every PR through its `tasks.md`, counting it would turn every #1454 collapse (a deleted test file, an unrouted `tests/` support module, a D3 oracle route) into `[node, meta-guard]`. That would silently drop the full-tree collect-only smoke. The flag is therefore computed over the selection with the node removed, and `collection_smoke_required` follows it.
+  - **The node-only case is accepted.** When the diff-specific selection is empty, for example `schemas/foo.json` plus `tasks.md`, the result is `[node]`: count 1, and no zero-assertion collect-only smoke. The diff-specific class is non-importable data, and the `apps/__init__.py` precedent accepted the same trade. A test pins it.
+- **Main-spec empty-class prose moves.** The pinned empty-selection class loses the `.py` paths under `openspec/changes/**` and `openspec/specs/**`. Non-`.py` scannable text under `scripts/` also leaves the empty selection. The empty-selection requirement is MODIFIED to say so.
 - **Exact-set pins in the main spec move.** Both requirements the delta MODIFIES are restated with measured selections in every scenario. Their other scenarios are already stale on master (the pre-#2259 mutex file name; the provider-refresh owner suites), and the delta names that.
 - **Residual scope.** The hard-gate node asserts all 13 `HARD_GATE_CHECK_IDS`. D4 routes only the production-topology inputs, so other gated families' inputs stay unrouted; that is outside #2323.

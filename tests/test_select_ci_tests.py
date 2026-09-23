@@ -7127,6 +7127,66 @@ def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None
     assert fields["collection_smoke_required"] == "true"
 
 
+# #2323 rider vs the #1454 collapse. Nearly every PR carries an
+# `openspec/changes/**/tasks.md` edit, which is a production-topology scan input
+# and so adds the hard-gate node. The node is a supplemental rider: it must not
+# turn a diff-specific meta-guard collapse into a two-target "ordinary"
+# selection and silently drop the full-tree collect-only smoke
+# (ci-contract-baseline: "a PR whose only backend change deletes a test file ...
+# keeps the import-surface guard").
+_TASKS_MD = "openspec/changes/x/tasks.md"
+
+
+@pytest.mark.parametrize(
+    "collapsed_path",
+    [
+        # deleted test file: self-selection dropped by the missing-target filter
+        "tests/test_deleted_x.py",
+        # unrouted support module (#1487 carve-out member)
+        "tests/integration_helpers.py",
+        # D3 oracle JSON route: selects only the meta-guard on its own
+        "tests/fixtures/basins_registry_partition_oracle.json",
+    ],
+)
+def test_github_output_topology_rider_does_not_mask_the_meta_guard_collapse(
+    tmp_path: Path, collapsed_path: str
+) -> None:
+    if collapsed_path == "tests/test_deleted_x.py":
+        assert not Path(collapsed_path).exists()
+
+    fields = _github_output_fields(tmp_path, [collapsed_path, _TASKS_MD], repo_root=Path("."))
+
+    assert json.loads(fields["tests_json"]) == [TOPOLOGY_HARD_GATE_NODE, SELECTOR_META_GUARD_TEST]
+    assert fields["meta_guard_only"] == "true"
+    assert fields["collection_smoke_required"] == "true"
+
+
+def test_github_output_topology_node_only_selection_is_not_a_collapse(tmp_path: Path) -> None:
+    # Pinned accepted trade: an empty diff-specific selection (non-importable
+    # data) plus a scan input yields the node alone. Like the apps/__init__.py
+    # precedent, the supplemental target takes the targeted branch and does not
+    # re-arm the smoke.
+    fields = _github_output_fields(tmp_path, ["schemas/foo.json", _TASKS_MD], repo_root=Path("."))
+
+    assert fields["count"] == "1"
+    assert json.loads(fields["tests_json"]) == [TOPOLOGY_HARD_GATE_NODE]
+    assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "false"
+
+
+def test_github_output_topology_rider_on_ordinary_selection_is_not_a_collapse(tmp_path: Path) -> None:
+    fields = _github_output_fields(
+        tmp_path, ["services/orchestrator/scheduler_runtime.py", _TASKS_MD], repo_root=Path(".")
+    )
+
+    tests = json.loads(fields["tests_json"])
+    assert TOPOLOGY_HARD_GATE_NODE in tests
+    assert SELECTOR_META_GUARD_TEST not in tests
+    assert len(tests) > 2
+    assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "false"
+
+
 def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path) -> None:
     # Accepted shape-not-provenance semantics (design decision 2): these diffs
     # have the meta-guard suite as their diff-specific target, so they fire the

@@ -1,6 +1,6 @@
 ## 1. Selector routes (`scripts/select_ci_tests.py`)
 
-- [x] 1.1 (#2316, D1) Append `tests/test_retention_extra_roots.py` to the `FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11]` rule target tuple. Replace the "sibling ... gap stays open" sentence of that rule's comment with the #2316 closure note and the [9]/[10] trade-off. Leave `FILE_JOURNAL_READ_STATE_TESTS` and patterns [0]–[10] byte-identical.
+- [x] 1.1 (#2316, D1) Append `tests/test_retention_extra_roots.py` to the `FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11]` rule target tuple. Replace the "sibling ... gap stays open" sentence of that rule's comment with the #2316 closure note and the [9]/[10] trade-off. Leave `FILE_JOURNAL_READ_STATE_TESTS` and the rules of patterns [0]–[2] and [4]–[10] byte-identical (pattern [3] is D2).
 - [x] 1.2 (#2390, D2, ruling A) Append the five `tests/test_gateway_reconcile_writer_{prepare,launch,rollforward,receipts,quiescence}.py` suites to the `FILE_JOURNAL_READ_STATE_PATH_PATTERNS[3]` rule target tuple. The rule comment must record:
   - why the edit is at the rule site;
   - why the importer-gap audit derives no gap (function-body imports);
@@ -15,7 +15,7 @@
   - The loop does not set `matched`, takes no part in stop rules, and does not touch the unknown-backend fallback.
   - No stat and no existence check.
 - [x] 1.5 (#2498, D5) Add the forcing discovery-root and pruned-directory mirror constants and an import-sniff supplemental additive loop that reuses `_top_level_imported_module_names`.
-  - Fall through silently on a missing or non-regular file, `OSError`, `UnicodeDecodeError` or `SyntaxError`.
+  - Fall through silently on a missing or non-regular file, `OSError`, `UnicodeDecodeError`, `SyntaxError` or `ValueError`.
   - Record the function-body / nested-import blind spot at the constant.
 
 ## 2. Meta-suite (`tests/test_select_ci_tests.py`)
@@ -47,6 +47,11 @@
   - the scheduler_runtime literal pin (~:11246).
   - Keep authority imports (`tests.forcing_ts_template_registry`, entropy `constants` / `check_topology`) function-local, following the `:1795` precedent.
 
+- [x] 2.7 (Review round 1, P1) Compute `meta_guard_only` over the final selection with the supplemental hard-gate node disregarded. Pins:
+  - a deleted test file, an unrouted support module, or a D3 oracle, each plus `tasks.md`, gives `meta_guard_only=true` and `collection_smoke_required=true`;
+  - `schemas/foo.json` plus `tasks.md` gives `[node]`, with both flags false (accepted trade);
+  - an ordinary selection plus `tasks.md` stays non-collapsed.
+
 ## 3. Evidence Floor
 
 - [x] 3.1 Selector outputs before and after, for:
@@ -63,7 +68,7 @@
   - the three fixture routes.
 
   D5's gain on the tracked tree is expected to be empty, because the existing importers are already routed. D5's proof is the synthetic tree in 2.5.
-- [ ] 3.3 node-27 oracle at the final head (isolated worktree, disposable scratch PG, `NHMS_RUN_INTEGRATION=1`). Run:
+- [x] 3.3 node-27 oracle at the final head (isolated worktree, disposable scratch PG, `NHMS_RUN_INTEGRATION=1`). Run:
   - `tests/test_select_ci_tests.py`;
   - `tests/test_retention_extra_roots.py`;
   - the five writer suites (count and wall clock recorded);
@@ -76,7 +81,7 @@
   - `openspec/changes/archive/2026-09-11-route-retention-deletes-through-copyback-mutex/tasks.md` (:360-367).
 
   Append a "closed by #2316" note; do not rewrite history.
-- [x] 3.6 Spec delta MODIFIED blocks for both requirements: "the scheduler refresh env template MUST select its content-asserting owner suite" and "the retention copyback mutex load-bearing modules MUST select the mutex suite". Restate **every** scenario of each with measured selections, including the `copyback_guard.py` and provider-refresh scenarios, and name the pre-existing staleness.
+- [x] 3.6 Spec delta MODIFIED blocks for three requirements. The first is "Empty targeted-test selection MUST be loudly self-identifying": its `meta_guard_only` definition disregards the node, its empty class gains the topology exclusion, and two new scenarios are added (review round 1). The other two are "the scheduler refresh env template MUST select its content-asserting owner suite" and "the retention copyback mutex load-bearing modules MUST select the mutex suite". Restate **every** scenario of each with measured selections, including the `copyback_guard.py` and provider-refresh scenarios, and name the pre-existing staleness.
 - [ ] 3.7 CI green on the final push.
 
 ## Deviations (recorded)

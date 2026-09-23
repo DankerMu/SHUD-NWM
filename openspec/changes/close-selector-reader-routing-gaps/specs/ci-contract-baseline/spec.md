@@ -2,7 +2,7 @@
 
 ### Requirement: the scheduler runtime rule site MUST select the extra-roots wiring suite
 
-`tests/test_retention_extra_roots.py` is the oracle for the `runs_only_roots` extra-root wiring that `services/orchestrator/scheduler_runtime.py` hands to the retention deleter. `scripts/select_ci_tests.py` SHALL add that suite at the `stop_on_match` file-journal rule site matching `scheduler_runtime.py`. It SHALL NOT edit the shared `FILE_JOURNAL_READ_STATE_TESTS` constant. The selections of the other `FILE_JOURNAL_READ_STATE_PATH_PATTERNS` entries SHALL remain unchanged.
+`tests/test_retention_extra_roots.py` is the oracle for the `runs_only_roots` extra-root wiring that `services/orchestrator/scheduler_runtime.py` hands to the retention deleter. `scripts/select_ci_tests.py` SHALL add that suite at the `stop_on_match` file-journal rule site matching `scheduler_runtime.py`. It SHALL NOT edit the shared `FILE_JOURNAL_READ_STATE_TESTS` constant, and this rule-site edit SHALL NOT change the selection of any other `FILE_JOURNAL_READ_STATE_PATH_PATTERNS` entry (pattern [3]'s own at-site extension is the separate requirement below).
 
 #### Scenario: a scheduler runtime diff selects both retention wiring oracles
 
@@ -148,3 +148,162 @@ The selections for `services/orchestrator/cli.py`, `services/orchestrator/__init
 
 - **WHEN** the changed paths are exactly `packages/common/copyback_guard.py`
 - **THEN** the selection contains `tests/test_copyback_guard.py`, `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`, and is identical to its selection before this change
+
+### Requirement: Empty targeted-test selection MUST be loudly self-identifying
+
+The `Unit Tests` job's collect-only fallback SHALL be independently
+recognizable as a zero-assertion run whenever the PR backend gate is open
+but the targeted-test selector maps the diff to zero test files: it MUST
+emit a workflow
+warning annotation and a step summary stating that no assertions were
+executed, and the collection outcome MUST be surfaced in the job log — the
+collected-count summary on success and the full collection output on
+failure, with a collection failure still failing the step. The selector SHALL
+NOT silently shrink its selection: when a rule-selected test target no
+longer exists in the tree, the selector MUST emit a warning naming the
+dropped target (stderr always; a workflow warning annotation when running
+under GitHub Actions) while keeping its return-value semantics unchanged.
+The collect-only branch's check name and pass/fail semantics are unchanged
+by this requirement (gate-strength changes are out of scope).
+Additionally, when the final selection collapses to exactly the selector
+meta-guard suite (`meta_guard_only` — a property of the final
+selection's shape only, with the supplemental production-topology hard-gate
+node disregarded: that node rides almost every PR, because each PR's final push
+carries its `openspec/changes/**/tasks.md`, so counting it would hide every
+collapse; it fires for a PR whose only backend change is
+`tests/test_select_ci_tests.py`, but not for a PR that changes
+`scripts/select_ci_tests.py`, whose supplemental routing selects more
+than the meta-guard suite; that PR keeps the full-tree smoke through
+`collection_smoke_required` under "Selector-development changes MUST
+retain full-tree collection smoke"), the selector SHALL expose the collapse as a
+distinguishable GitHub-output field and the `Unit Tests` job SHALL run
+the targeted selection AND the labeled full-tree collect-only smoke,
+whose labeling on this branch MUST NOT claim zero assertions were
+executed; a PR whose only backend change deletes a test file (or
+touches only a `tests/` support module without derived non-gated
+importer suites) thereby keeps the import-surface guard it had
+before the meta-guard accumulation existed. Support modules WITH
+derived non-gated importer suites are governed by the requirement
+"Support-module changes MUST select their non-gated importer
+suites", which routes them to assertion-level targets instead of
+this collapse path.
+
+The pinned empty-selection class "`.py` outside the five backend prefixes" is
+narrowed by the river-segment write-surface routing. `BACKEND_PYTHON_SOURCE_PREFIXES`
+is `apps/api/`, `packages/`, `services/`, `workers/`, `scripts/`, so before that
+routing every `.py` under `apps/` that was not under `apps/api/` fell in this
+class. Those paths are inside the write-surface scan's `PRODUCTION_DIRS`, so
+they now select that one suite and are no longer empty. The class SHALL
+therefore be respelled as the `.py` paths that are under NONE of: a backend
+prefix, the write-surface scan's five roots, or the timescale write-guard
+invariant's four roots — the last of which matters because `db/**` is neither a
+backend prefix nor a write-surface root, yet a `.py` path under it selects the
+timescale invariant and the migration suite, so a two-clause spelling would
+wrongly claim `db/x.py` is empty. The production-topology reader route
+(#2323) narrows the class once more: a path under that scanner's roots or equal
+to one of its direct files, with a scannable text name, selects the hard-gate
+node, so the class excludes those too. That removes the `.py` paths under
+`openspec/changes/**` and `openspec/specs/**` (tracked evidence scripts live
+there), and it also moves non-`.py` scannable text under `scripts/` (for
+example `scripts/node27_display_v2_browser_evidence.mjs`) off the empty
+selection. Its tracked members today are the `.py` paths under `.agents/**`
+and under `openspec/**` outside `changes/` and `specs/`; a `.py` under `docs/**`, `.github/**` or an
+unmapped `infra/**` would join them, and none is tracked today. This is the route-A
+selector-widening the class was explicitly left open for, and it is a real
+change today, not only for future paths: `apps/__init__.py` is a tracked file
+that moves from an empty selection to exactly the write-surface scan, losing the
+zero-assertion full-tree collect-only smoke it used to receive and gaining an
+assertion-executing targeted run instead. The mechanism is the selector's
+`count` output: the job's collect-only branch is guarded by `count == 0`, so a
+one-element selection takes the targeted branch. Neither carve-out re-arms the
+smoke — `meta_guard_only` fires only for a selection that is exactly the
+selector meta-guard suite, and `collection_smoke_required` is false for this
+class both before and after, since neither the selector source nor its suite is
+in the diff.
+
+#### Scenario: collect-only fallback is labeled as zero assertions
+
+- **WHEN** a PR hits the `backend` paths-filter but the selector returns
+  zero test files (e.g. a `schemas/**`-only change)
+- **THEN** the `Unit Tests` job run shows a warning annotation and a step
+  summary stating that 0 assertions were executed and only collect-only
+  import/syntax smoke ran, and the pytest collected-count summary appears
+  in the job log (full collection output on failure, which fails the step)
+
+#### Scenario: stale rule target is dropped with a warning, not silently
+
+- **WHEN** a selection rule maps a changed path to a test file that does
+  not exist in the tree
+- **THEN** the selector drops the target from its output but emits a
+  warning naming the missing target, and emits no such warning when every
+  selected target exists
+
+#### Scenario: known empty-selection input classes are pinned
+
+- **WHEN** the diff consists only of files in the known unmapped classes
+  (`schemas/**`, unmapped `infra/**`, `.py` under none of the backend
+  prefixes, the write-surface scan's roots, the timescale invariant's
+  roots and the production-topology scan inputs, non-`.py` under backend
+  prefixes that is not a production-topology scan input, non-`.py` under `tests/`,
+  `.sh` files outside `scripts/`; `scripts/**/*.sh` left this list when it
+  joined the backend gate — an unmapped one now arms the core-smoke fallback)
+- **THEN** the selector returns an empty selection and the selector test
+  suite pins each class explicitly as the route-C contract, so any future
+  route-A/B policy change must flip a visible assertion
+
+#### Scenario: a Python path under apps but outside apps/api leaves the pinned-empty class
+
+- **WHEN** the changed paths are exactly `apps/__init__.py`, a tracked file, or `apps/frontend/scripts/gen.py`, a future-shaped one
+- **THEN** the returned selection is exactly `["tests/test_river_segment_write_surface_scan.py"]`, the selector's GitHub output reports a count of 1 with `meta_guard_only=false`, and neither path appears among the pinned empty-selection classes
+
+#### Scenario: a Python path under db stays out of the pinned-empty class
+
+- **WHEN** the changed paths are exactly `db/brand_new_thing.py`
+- **THEN** the returned selection is non-empty — it contains `tests/test_timescale_write_guard_wire_site_invariant.py` — and does not contain `tests/test_river_segment_write_surface_scan.py`
+
+#### Scenario: meta-guard-only collapse restores the collect-only smoke
+
+- **WHEN** a PR's only backend change deletes one `tests/test_*.py` file,
+  so the missing-target filter leaves exactly
+  `tests/test_select_ci_tests.py` in the selection
+- **THEN** the selector's GitHub output reports `meta_guard_only=true`,
+  and the `Unit Tests` job runs the meta-guard suite and additionally the
+  labeled full-tree collect-only smoke, with a collection failure failing
+  the step
+
+#### Scenario: non-collapsed selections suppress the flag
+
+- **WHEN** the selection contains any target other than the selector
+  meta-guard suite, or is empty
+- **THEN** the GitHub output reports `meta_guard_only=false` and the
+  targeted branch behaves as before
+
+#### Scenario: selector-development PRs fire the flag honestly
+
+- **WHEN** the diff's only backend change is
+  `tests/test_select_ci_tests.py`, so the diff-specific selection IS
+  exactly the meta-guard suite
+- **THEN** `meta_guard_only=true` and the collect-only smoke also runs
+  — accepted by design (one extra collection pass on exactly the PR
+  class that changes the gate), and the smoke labeling does not claim
+  the run executed zero assertions
+- **AND** when the diff's only backend change is instead
+  `scripts/select_ci_tests.py`, the selection is not collapsed: it
+  also contains the supplemental invariant suites routed from
+  `scripts/**` (the selection includes `tests/test_select_ci_tests.py`
+  plus supplemental invariant suites such as
+  `tests/test_river_segment_write_surface_scan.py` and
+  `tests/test_timescale_write_guard_wire_site_invariant.py`), so
+  `meta_guard_only=false` as "non-collapsed selections suppress the
+  flag" requires, while `collection_smoke_required=true` still runs
+  the collect-only smoke
+
+#### Scenario: the supplemental topology node does not mask the collapse
+
+- **WHEN** the changed paths are a deleted `tests/test_*.py` file (or an unrouted `tests/` support module, or `tests/fixtures/basins_registry_partition_oracle.json`) together with an `openspec/changes/**/tasks.md`
+- **THEN** the selection is the selector meta-guard suite plus the production-topology hard-gate node, and the GitHub output reports `meta_guard_only=true` and `collection_smoke_required=true`
+
+#### Scenario: a data-only diff with a tasks update runs the hard-gate node instead of the zero-assertion smoke
+
+- **WHEN** the changed paths are exactly `schemas/foo.json` and `openspec/changes/x/tasks.md`
+- **THEN** the selection is exactly the production-topology hard-gate node, count is 1, and both `meta_guard_only` and `collection_smoke_required` are false. This is the accepted trade of the `apps/__init__.py` precedent: the diff-specific class is non-importable data
