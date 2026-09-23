@@ -73,20 +73,43 @@ failure only when the selected task manifest declares
 `expected_outcome=controlled_failure`; that branch invokes the repository
 output-parser `.rivqdown` parser on a minimal NaN fixture so the signature comes
 from the QC/parser path rather than a bare shell shortcut. Ordinary task `1`
-workloads do not get the validation marker. Use `--force` only for an
-intentional rerun of an existing `run_id`; the default protects audit evidence
-from accidental overwrite.
+workloads do not get the validation marker. `--force` governs the **evidence
+bundle** under `artifacts/production-closure/<run_id>/slurm/` only: use it for an
+intentional rerun of an existing `run_id`, and the default protects audit
+evidence from accidental overwrite. It has no meaning for the shared live inputs
+below, which are submission-scoped and can therefore never collide.
 
 In submit mode, the manifest index rendered into `NHMS_MANIFEST_INDEX` is copied
 under the configured shared workspace at
-`<workspace_root>/runs/<run_id>/input/manifest_index.json` so compute nodes can
-read it. Fake and no-submit preflight runs keep generated manifest inputs inside
-the evidence lane and are planned/preflight-only, not publishable acceptance
-evidence. If submit preflight is blocked, runtime manifests and the manifest
-index also stay inside the evidence lane and are not written to the shared
-workspace. If `sbatch` rejects the submission, the validator removes the shared
-runtime manifests/index written for that attempted submission before writing the
-blocked evidence bundle.
+`<workspace_root>/runs/<run_id>/input/manifest_index_<submission_token>.json`,
+where `<submission_token>` is a UTC timestamp claimed by an exclusive create with
+a bounded retry, so compute nodes can read it. The two task run identities are
+scoped the same way (`<run_id>_<submission_token>_success` and
+`<run_id>_<submission_token>_controlled_fail`), so their runtime manifests land
+at `<workspace_root>/runs/<that run id>/input/manifest.json` and the array log
+directory -- derived from the index stem -- is per submission too. The script
+handed to `sbatch` is scoped the same way, at
+`<workspace_root>/runs/<run_id>/input/rendered_run_shud_forecast_array_<submission_token>.sbatch`:
+it carries `NHMS_MANIFEST_INDEX`, which each array task reads after `sbatch`
+returns, so a shared script path would let one submission submit another's
+manifests. The lane bundle keeps its stable
+`rendered_run_shud_forecast_array.sbatch` copy as evidence of what the run
+rendered. Two concurrent submissions made with the same configured `run_id` are
+therefore path-disjoint by construction: neither can overwrite or delete a file
+the other wrote, without a lock or a scheduler query. Successful submissions leave their index and input
+directories behind, one set per submission; retention for this lane is not
+automated.
+
+Fake and no-submit preflight runs keep generated manifest inputs inside the
+evidence lane (at the stable `manifest_index.json` / `<run_id>_success` names,
+because nothing is shared there) and are planned/preflight-only, not publishable
+acceptance evidence. If submit preflight is blocked, runtime manifests and the
+manifest index also stay inside the evidence lane and are not written to the
+shared workspace. If `sbatch` rejects the submission, the validator removes
+exactly the shared runtime manifests, index and submitted script **that
+submission wrote** -- never a path re-derived from `run_id` alone -- before
+writing the blocked evidence bundle, and then rewrites a lane-local index for the
+bundle.
 
 If required preflight inputs or Slurm CLI tools are absent, the command writes a
 clear blocker bundle under `artifacts/production-closure/<run_id>/slurm/` and
@@ -97,10 +120,14 @@ contains:
   solver, model package URI, walltime/resources, object roots, and evidence root.
 - `rendered_run_shud_forecast_array.sbatch`: canonical `infra/sbatch` rendering
   with shared stdout/stderr, `cpus_per_task`, memory, walltime, `SHUD_THREADS`,
-  `OMP_NUM_THREADS`, workspace/object roots, and manifest-index command.
+  `OMP_NUM_THREADS`, workspace/object roots, and manifest-index command. In
+  submit mode this lane file is evidence only; the byte-identical copy submitted
+  to `sbatch` is the submission-scoped
+  `rendered_run_shud_forecast_array_<submission_token>.sbatch` in the shared
+  workspace.
 - `manifest_index.json`: two-task array fixture for success and controlled
-  failure; submit mode also copies this index into the shared workspace for the
-  rendered sbatch script.
+  failure; submit mode also writes this index into the shared workspace as
+  `manifest_index_<submission_token>.json` for the rendered sbatch script.
 - `slurm_accounting.json`: fake or attached Slurm accounting fields with job ID,
   state, exit code, elapsed, node list, partition, and array task rows.
 - `array_partial_success.json`: publishable sibling success and actionable

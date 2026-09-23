@@ -130,12 +130,6 @@ STRICT_IDENTIFIER_FIELDS = {
     "task_id",
 }
 
-ARRAY_CAPABLE_JOB_TYPES = {
-    "produce_forcing_array",
-    "run_shud_forecast_array",
-    "parse_output_array",
-}
-
 PRODUCTION_ARRAY_TEMPLATE_NAMES = frozenset(
     {
         "produce_forcing_array.sbatch",
@@ -144,6 +138,28 @@ PRODUCTION_ARRAY_TEMPLATE_NAMES = frozenset(
         "save_state_snapshot_array.sbatch",
     }
 )
+
+
+def array_capable_job_types(job_type_templates: Mapping[str, str] | None = None) -> frozenset[str]:
+    """The job types the single-job submit entrypoint must refuse.
+
+    Derived from ``PRODUCTION_ARRAY_TEMPLATE_NAMES`` instead of maintained as a
+    second literal list: the two lists drifted once already (``save_state_snapshot_array``
+    was never added when two retired types were removed), which let a fully
+    authorized single submit render an array template without ``--array=``.
+
+    The deployment mapping is unioned with the defaults **pairwise**, not merged
+    over them, so a deployment override can only ever widen the refused set:
+    pointing a production array job type at some other template does not
+    un-refuse it, while pointing a new job type at a production array template
+    refuses that one too.
+    """
+
+    pairs: list[tuple[Any, Any]] = list(DEFAULT_JOB_TYPE_TEMPLATES.items())
+    pairs.extend((job_type_templates or {}).items())
+    return frozenset(
+        str(job_type) for job_type, template_name in pairs if str(template_name) in PRODUCTION_ARRAY_TEMPLATE_NAMES
+    )
 
 
 class _ArrayLogBinding(NamedTuple):
@@ -260,7 +276,7 @@ class RealSlurmGateway(SlurmGateway):
         job_type = request.resolved_job_type()
         if job_type and job_type not in self.settings.job_type_templates:
             raise TemplateNotFoundError(job_type)
-        if job_type in ARRAY_CAPABLE_JOB_TYPES:
+        if job_type in array_capable_job_types(self.settings.job_type_templates):
             raise SlurmValidationError(
                 "Array-capable job types must be submitted through the array endpoint.",
                 {"job_type": job_type, "endpoint": "/api/v1/slurm/job-arrays"},

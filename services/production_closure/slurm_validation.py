@@ -23,6 +23,7 @@ from packages.common.safe_fs import (
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     unlink_no_follow,
+    write_bytes_no_follow_exclusive,
 )
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.slurm_env import secret_bearing_url_reason
@@ -89,6 +90,10 @@ DEFAULT_POLL_TIMEOUT_SECONDS = 900.0
 MAX_POLL_INTERVAL_SECONDS = 300.0
 MAX_POLL_TIMEOUT_SECONDS = 86400.0
 MIN_POLL_INTERVAL_SECONDS = 1.0
+SHARED_MANIFEST_INDEX_PREFIX = "manifest_index"
+RENDERED_SCRIPT_STEM = "rendered_run_shud_forecast_array"
+RENDERED_SCRIPT_NAME = f"{RENDERED_SCRIPT_STEM}.sbatch"
+MAX_SUBMISSION_TOKEN_ATTEMPTS = 10
 CONTROLLED_FAILURE_LOG_MARKER = "NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED"
 CONTROLLED_FAILURE_LOG_SIGNATURES = ("NON_FINITE_FLOW",)
 MAX_SLURM_LOG_BYTES = 1024 * 1024
@@ -164,6 +169,56 @@ class EvidenceWriter:
             exists_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_EXISTS",
             write_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED",
         )
+
+    def create_json_exclusive(self, path: Path, payload: Any, *, file_label: str = "Runtime manifest") -> None:
+        """Create a shared live-lane runtime input by exclusive create.
+
+        ``force`` and ``_created_paths`` deliberately do **not** apply here: the
+        live lane's shared inputs are submission-scoped, so a file that already
+        exists belongs to another submission and must survive untouched.
+        ``FileExistsError`` is propagated so the caller can arbitrate (the index
+        claim retries; a runtime manifest refuses).
+        """
+
+        content = (json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
+        self._create_bytes_exclusive(path, content, file_label=file_label)
+
+    def create_text_exclusive(self, path: Path, value: str, *, file_label: str = "Rendered sbatch script") -> None:
+        """Create a shared live-lane text input by exclusive create.
+
+        Same rule as :meth:`create_json_exclusive`; the redaction is the one
+        :meth:`write_text` applies, so the submission-scoped copy and the lane
+        evidence copy are byte-identical.
+        """
+
+        self._create_bytes_exclusive(path, redact_text(value).encode("utf-8"), file_label=file_label)
+
+    def _create_bytes_exclusive(self, path: Path, content: bytes, *, file_label: str) -> None:
+        safe_path = self._safe_file_path(
+            path,
+            allow_outside_evidence=True,
+            file_label=file_label,
+            write_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED",
+        )
+        try:
+            write_bytes_no_follow_exclusive(safe_path, content)
+        except FileExistsError:
+            raise
+        except SafeFilesystemError as error:
+            error_code = (
+                "PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED"
+                if error.kind == "io"
+                else "PRODUCTION_SLURM_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ProductionValidationError(
+                error_code,
+                f"Failed to write {file_label.lower()} {safe_path}: {error}",
+            ) from error
+        except OSError as error:
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED",
+                f"Failed to write {file_label.lower()} {safe_path}: {error}",
+            ) from error
 
     def write_text(self, path: Path, value: str, *, already_redacted: bool = False) -> None:
         content = value if already_redacted else redact_text(value)
@@ -376,13 +431,20 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         use_shared_workspace_inputs=use_shared_workspace_inputs,
     )
     rendered_script = _render_production_template(config, manifest_index, writer)
-    writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
+    submit_script = _write_rendered_script(
+        config,
+        writer,
+        manifest_index,
+        rendered_script,
+        use_shared_workspace_inputs=use_shared_workspace_inputs,
+    )
     submit_manifest_index = manifest_index
+    submit_manifest_tasks = manifest_tasks
 
     accounting = (
         _fake_accounting(config)
         if config.fake_slurm
-        else _real_accounting(config, blockers, submit_manifest_index)
+        else _real_accounting(config, blockers, submit_manifest_index, submit_manifest_tasks, submit_script)
     )
     if accounting.get("shared_runtime_inputs_cleaned") is True:
         manifest_index, manifest_tasks = _write_manifest_index(
@@ -392,13 +454,13 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         )
     writer.write_json(config.lane_dir / "slurm_accounting.json", accounting)
 
-    partial_success = _partial_success_evidence(config, accounting, submit_manifest_index)
+    partial_success = _partial_success_evidence(config, accounting, submit_manifest_index, manifest_tasks)
     writer.write_json(config.lane_dir / "array_partial_success.json", partial_success)
 
     retry_cancel = _retry_cancel_evidence(config, partial_success, accounting)
     writer.write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
 
-    qc = _qc_blocking_evidence(config, partial_success, accounting, submit_manifest_index)
+    qc = _qc_blocking_evidence(config, partial_success, accounting, submit_manifest_index, manifest_tasks)
     writer.write_json(config.lane_dir / "qc_blocking.json", qc)
 
     metadata = _environment_metadata(config)
@@ -427,7 +489,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         "blockers": all_blockers,
         "files": [
             "preflight.json",
-            "rendered_run_shud_forecast_array.sbatch",
+            RENDERED_SCRIPT_NAME,
             "manifest_index.json",
             "slurm_accounting.json",
             "array_partial_success.json",
@@ -680,44 +742,110 @@ def _write_manifest_index(
     *,
     use_shared_workspace_inputs: bool,
 ) -> tuple[Path, list[dict[str, Any]]]:
-    manifest_index = _manifest_index_path(config, use_shared_workspace_inputs=use_shared_workspace_inputs)
-    tasks = _manifest_index_tasks(config, use_shared_workspace_inputs=use_shared_workspace_inputs)
-    for task in tasks:
-        _write_runtime_manifest(config, task, writer)
     if use_shared_workspace_inputs:
-        writer.write_runtime_manifest_json(manifest_index, redact_payload(tasks))
-        writer.write_json(config.lane_dir / "manifest_index.json", redact_payload(tasks))
-    else:
-        writer.write_json(manifest_index, redact_payload(tasks))
+        return _claim_shared_manifest_index(config, writer)
+    manifest_index = _manifest_index_path(config, use_shared_workspace_inputs=False)
+    tasks = _manifest_index_tasks(config, use_shared_workspace_inputs=False)
+    for task in tasks:
+        _write_runtime_manifest(config, task, writer, use_shared_workspace_inputs=False)
+    writer.write_json(manifest_index, redact_payload(tasks))
     return manifest_index, tasks
+
+
+def _claim_shared_manifest_index(
+    config: ProductionSlurmConfig,
+    writer: EvidenceWriter,
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Claim one submission token, then write the files that token names.
+
+    The claim is the exclusive create of the index and it happens **before** any
+    other file of this submission exists. Two submissions that pick the same
+    microsecond therefore diverge at the index, not after they have already
+    overwritten each other's runtime manifests.
+    """
+
+    for attempt in range(MAX_SUBMISSION_TOKEN_ATTEMPTS):
+        submission_token = _submission_token(attempt)
+        manifest_index = _manifest_index_path(
+            config,
+            use_shared_workspace_inputs=True,
+            submission_token=submission_token,
+        )
+        tasks = _manifest_index_tasks(
+            config,
+            use_shared_workspace_inputs=True,
+            submission_token=submission_token,
+        )
+        try:
+            writer.create_json_exclusive(manifest_index, tasks, file_label="Manifest index")
+        except FileExistsError:
+            continue
+        for task in tasks:
+            _write_runtime_manifest(config, task, writer, use_shared_workspace_inputs=True)
+        writer.write_json(config.lane_dir / "manifest_index.json", redact_payload(tasks))
+        return manifest_index, tasks
+    raise ProductionValidationError(
+        "PRODUCTION_SLURM_SUBMISSION_TOKEN_EXHAUSTED",
+        "Unable to claim a unique submission manifest index under "
+        f"{config.workspace_root / 'runs' / config.run_id / 'input'}.",
+    )
+
+
+def _submission_token(attempt: int) -> str:
+    """A submission identity that is also a safe path component.
+
+    The array log directory is derived from the index stem, so the token must
+    satisfy ``SAFE_IDENTIFIER_RE``; this timestamp format does.
+    """
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    return timestamp if attempt == 0 else f"{timestamp}_{attempt}"
+
+
+def _task_run_id(config: ProductionSlurmConfig, suffix: str, submission_token: str | None) -> str:
+    if submission_token is None:
+        return f"{config.run_id}_{suffix}"
+    return f"{config.run_id}_{submission_token}_{suffix}"
 
 
 def _manifest_index_tasks(
     config: ProductionSlurmConfig,
     *,
     use_shared_workspace_inputs: bool,
+    submission_token: str | None = None,
 ) -> list[dict[str, Any]]:
     return [
         _task_manifest(
             config,
             task_id=0,
-            run_id=f"{config.run_id}_success",
+            run_id=_task_run_id(config, "success", submission_token),
             model_id=config.model_id,
             use_shared_workspace_inputs=use_shared_workspace_inputs,
         ),
         _task_manifest(
             config,
             task_id=1,
-            run_id=f"{config.run_id}_controlled_fail",
+            run_id=_task_run_id(config, "controlled_fail", submission_token),
             model_id=f"{config.model_id}_fail",
             use_shared_workspace_inputs=use_shared_workspace_inputs,
         ),
     ]
 
 
-def _manifest_index_path(config: ProductionSlurmConfig, *, use_shared_workspace_inputs: bool) -> Path:
+def _manifest_index_path(
+    config: ProductionSlurmConfig,
+    *,
+    use_shared_workspace_inputs: bool,
+    submission_token: str | None = None,
+) -> Path:
     if use_shared_workspace_inputs:
-        return config.workspace_root / "runs" / config.run_id / "input" / "manifest_index.json"
+        return (
+            config.workspace_root
+            / "runs"
+            / config.run_id
+            / "input"
+            / f"{SHARED_MANIFEST_INDEX_PREFIX}_{submission_token}.json"
+        )
     return config.lane_dir / "manifest_index.json"
 
 
@@ -754,7 +882,13 @@ def _task_manifest(
     }
 
 
-def _write_runtime_manifest(config: ProductionSlurmConfig, task: dict[str, Any], writer: EvidenceWriter) -> Path:
+def _write_runtime_manifest(
+    config: ProductionSlurmConfig,
+    task: dict[str, Any],
+    writer: EvidenceWriter,
+    *,
+    use_shared_workspace_inputs: bool,
+) -> Path:
     run_id = str(task["run_id"])
     manifest_path = Path(str(task["manifest_path"]))
     runtime_manifest = {
@@ -801,7 +935,17 @@ def _write_runtime_manifest(config: ProductionSlurmConfig, task: dict[str, Any],
             "log_uri": task["log_uri"],
         },
     }
-    writer.write_runtime_manifest_json(manifest_path, runtime_manifest)
+    if use_shared_workspace_inputs:
+        try:
+            writer.create_json_exclusive(manifest_path, runtime_manifest)
+        except FileExistsError as error:
+            raise ProductionValidationError(
+                "PRODUCTION_SLURM_RUNTIME_MANIFEST_EXISTS",
+                f"Runtime manifest already exists: {manifest_path}. "
+                "Submission-scoped live inputs are never overwritten, not even with --force.",
+            ) from error
+    else:
+        writer.write_runtime_manifest_json(manifest_path, runtime_manifest)
     return manifest_path
 
 
@@ -882,6 +1026,55 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
     return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index))
 
 
+def _write_rendered_script(
+    config: ProductionSlurmConfig,
+    writer: EvidenceWriter,
+    manifest_index: Path,
+    rendered_script: str,
+    *,
+    use_shared_workspace_inputs: bool,
+) -> Path:
+    """Write the rendered sbatch script and return the path to submit.
+
+    The lane copy keeps its stable name because it is evidence of what this run
+    rendered. It must not be the file handed to ``sbatch`` in the live lane: it
+    is named from the configured ``run_id`` alone, so a second submission with
+    the same ``run_id`` and ``--force`` replaces it in place, and the script is
+    the only carrier of the submission's identity (``NHMS_MANIFEST_INDEX`` is
+    baked into it, and an array task resolves its manifest from that variable
+    after ``sbatch`` has returned).
+
+    The submitted copy therefore lives beside the index it names, under
+    ``runs/<run_id>/input/``, keyed by the same submission token: that keeps it
+    inside the workspace root, which is what lets the failed-``sbatch`` cleanup
+    unlink it (``_cleanup_shared_runtime_inputs`` refuses any path outside the
+    workspace), and it keeps ``--force``/``_created_paths`` semantics confined to
+    the ``lane_dir`` evidence bundle. The name is derived from the claimed index,
+    the same single source the array log dir is derived from.
+    """
+
+    writer.write_text(config.lane_dir / RENDERED_SCRIPT_NAME, rendered_script)
+    if not use_shared_workspace_inputs:
+        return config.lane_dir / RENDERED_SCRIPT_NAME
+    script_path = _submission_script_path(manifest_index)
+    try:
+        writer.create_text_exclusive(script_path, rendered_script)
+    except FileExistsError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RENDERED_SCRIPT_EXISTS",
+            f"Rendered sbatch script already exists: {script_path}. "
+            "Submission-scoped live inputs are never overwritten, not even with --force.",
+        ) from error
+    return script_path
+
+
+def _submission_script_path(manifest_index: Path) -> Path:
+    """The submitted script's path, derived from the index this submission claimed."""
+
+    token = manifest_index.stem.removeprefix(f"{SHARED_MANIFEST_INDEX_PREFIX}_")
+    return manifest_index.with_name(f"{RENDERED_SCRIPT_STEM}_{token}.sbatch")
+
+
 def _safe_template_model_package_uri(value: str) -> str:
     if not value:
         return ""
@@ -892,6 +1085,8 @@ def _real_accounting(
     config: ProductionSlurmConfig,
     blockers: list[dict[str, str]],
     manifest_index: Path,
+    manifest_tasks: Sequence[dict[str, Any]],
+    script_path: Path,
 ) -> dict[str, Any]:
     if blockers or not config.submit:
         return {
@@ -901,7 +1096,6 @@ def _real_accounting(
             "records": [],
         }
     _prepare_shared_log_dir(config, manifest_index)
-    script_path = config.lane_dir / "rendered_run_shud_forecast_array.sbatch"
     array_spec = f"0-1%{max(1, min(config.max_concurrent, 2))}"
     submit_command = ["sbatch", "--parsable", f"--array={array_spec}"]
     if config.account:
@@ -909,7 +1103,10 @@ def _real_accounting(
     submit_command.append(str(script_path))
     submit = _run_command(submit_command)
     if submit["returncode"] != 0:
-        cleanup = _cleanup_shared_runtime_inputs(config)
+        cleanup = _cleanup_shared_runtime_inputs(
+            config,
+            _shared_runtime_input_paths(manifest_index, manifest_tasks, script_path),
+        )
         cleanup_blockers = _shared_runtime_cleanup_blockers(cleanup)
         return {
             "mode": "blocked",
@@ -1017,9 +1214,12 @@ def _safe_workspace_path(workspace_root: Path, path: Path) -> Path:
     return resolved_path
 
 
-def _cleanup_shared_runtime_inputs(config: ProductionSlurmConfig) -> list[dict[str, str]]:
+def _cleanup_shared_runtime_inputs(
+    config: ProductionSlurmConfig,
+    written_paths: Sequence[Path],
+) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
-    for path in _shared_runtime_input_paths(config):
+    for path in written_paths:
         try:
             safe_path = _safe_workspace_path(config.workspace_root, path)
         except ProductionValidationError as error:
@@ -1046,11 +1246,24 @@ def _shared_runtime_cleanup_blockers(cleanup: list[dict[str, str]]) -> list[dict
     ]
 
 
-def _shared_runtime_input_paths(config: ProductionSlurmConfig) -> list[Path]:
+def _shared_runtime_input_paths(
+    manifest_index: Path,
+    manifest_tasks: Sequence[dict[str, Any]],
+    script_path: Path,
+) -> list[Path]:
+    """The shared paths this submission actually wrote.
+
+    Derived from the written artefacts, never from a ``run_id`` formula: a
+    formula would name another submission's files if the layout ever changes
+    again. The index comes first so cleanup revokes the claim before the
+    manifests it names; the submitted script is last because it is the entry
+    point that names them all.
+    """
+
     return [
-        config.workspace_root / "runs" / config.run_id / "input" / "manifest_index.json",
-        config.workspace_root / "runs" / f"{config.run_id}_success" / "input" / "manifest.json",
-        config.workspace_root / "runs" / f"{config.run_id}_controlled_fail" / "input" / "manifest.json",
+        manifest_index,
+        *(Path(str(task["manifest_path"])) for task in manifest_tasks),
+        script_path,
     ]
 
 
@@ -1582,10 +1795,21 @@ def _allowlisted_slurm_config(stdout: str) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def _evidence_run_id(manifest_tasks: Sequence[dict[str, Any]], task_id: int) -> str:
+    """Read an evidence run id from the tasks this submission actually wrote.
+
+    Never re-derive it from ``config.run_id``: under submission-scoped live
+    inputs a formula names a run directory that does not exist on disk.
+    """
+
+    return str(manifest_tasks[0 if task_id == 0 else 1]["run_id"])
+
+
 def _partial_success_evidence(
     config: ProductionSlurmConfig,
     accounting: dict[str, Any],
     manifest_index: Path,
+    manifest_tasks: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
     records = accounting.get("records") if isinstance(accounting.get("records"), list) else []
     task_records = [record for record in records if record.get("task_id") is not None]
@@ -1593,20 +1817,20 @@ def _partial_success_evidence(
     mode = str(accounting.get("mode", ""))
     if mode == "not_submitted":
         return _blocked_partial_success(
-            config,
+            manifest_tasks,
             [{"error_code": "PRODUCTION_SLURM_PREFLIGHT_ONLY", "field": "submit"}],
             status="preflight_only",
         )
     if not task_records and mode != "fake":
         return _blocked_partial_success(
-            config,
+            manifest_tasks,
             blockers or [{"error_code": "SLURM_ARRAY_TASK_ACCOUNTING_MISSING", "field": "sacct"}],
         )
     if accounting.get("mode") == "blocked" and _has_incomplete_accounting_blocker(blockers):
-        return _blocked_partial_success(config, blockers)
+        return _blocked_partial_success(manifest_tasks, blockers)
     if not task_records:
         if accounting.get("mode") == "blocked":
-            return _blocked_partial_success(config, blockers)
+            return _blocked_partial_success(manifest_tasks, blockers)
         task_records = _planned_task_records()
     tasks = []
     for record in task_records:
@@ -1629,7 +1853,7 @@ def _partial_success_evidence(
             {
                 "task_id": task_id,
                 "job_id": record.get("job_id"),
-                "run_id": f"{config.run_id}_{'success' if task_id == 0 else 'controlled_fail'}",
+                "run_id": _evidence_run_id(manifest_tasks, task_id),
                 "publishable": succeeded,
                 "status": "succeeded" if succeeded else "blocked",
                 "error_code": task_error_code,
@@ -1752,7 +1976,7 @@ def _slurm_log_dir(config: ProductionSlurmConfig, manifest_index: Path) -> Path:
 
 
 def _blocked_partial_success(
-    config: ProductionSlurmConfig,
+    manifest_tasks: Sequence[dict[str, Any]],
     blockers: list[dict[str, Any]],
     *,
     status: str = "blocked",
@@ -1769,7 +1993,7 @@ def _blocked_partial_success(
             {
                 "task_id": task_id,
                 "job_id": None,
-                "run_id": f"{config.run_id}_{'success' if task_id == 0 else 'controlled_fail'}",
+                "run_id": _evidence_run_id(manifest_tasks, task_id),
                 "publishable": False,
                 "status": status,
                 "error_code": error_code,
@@ -1822,6 +2046,7 @@ def _qc_blocking_evidence(
     partial_success: dict[str, Any],
     accounting: dict[str, Any],
     manifest_index: Path,
+    manifest_tasks: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
     success = next((task for task in partial_success["tasks"] if task["publishable"]), None)
     mode = str(accounting.get("mode", ""))
@@ -1838,7 +2063,7 @@ def _qc_blocking_evidence(
         "schema": "nhms.production_closure.slurm.qc_blocking.v1",
         "malformed_task": {
             "task_id": 1,
-            "run_id": f"{config.run_id}_controlled_fail",
+            "run_id": _evidence_run_id(manifest_tasks, 1),
             "status": malformed_status,
             "error_code": "NON_FINITE_FLOW" if evidence_verified else "QC_BLOCKING_NOT_VERIFIED",
             "evidence_verified": evidence_verified,
@@ -1851,7 +2076,7 @@ def _qc_blocking_evidence(
         },
         "sibling_success": {
             "task_id": success.get("task_id") if success else 0,
-            "run_id": success.get("run_id") if success else f"{config.run_id}_success",
+            "run_id": success.get("run_id") if success else _evidence_run_id(manifest_tasks, 0),
             "publishable": bool(success),
         },
     }

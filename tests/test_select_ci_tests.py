@@ -669,7 +669,10 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # The write-site invariant joins because runtime.py lives under workers/**
     # (#1656 supplemental routing), the river-segment write-surface scan joins
     # by the same root (#2185), and so does the path-canonicalisation family
-    # guard (#1627).
+    # guard (#1627). #1908 added the production-closure Slurm validation suite to
+    # the `workers/shud_runtime/**` rule: that suite asserts cli.py's manifest
+    # safety gate directly, because the submission-scoped task run ids exist to
+    # satisfy that gate unchanged.
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
     assert selected == sorted(
@@ -677,6 +680,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             "tests/test_direct_grid_e2e.py",
             "tests/test_e2e.py",
             WRITE_SURFACE_SCAN_PATH,
+            "tests/test_production_slurm_validation.py",
             "tests/test_runtime_ic_header.py",
             "tests/test_runtime_mode.py",
             "tests/test_shud_runtime.py",
@@ -954,6 +958,26 @@ def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_or
         assert node_id in selected, node_id
 
     assert "tests/test_retry.py" not in selected
+
+
+def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle() -> None:
+    """#2308: the cancel route's only oracle for rendered-on-wire / raw-in-event.
+
+    `tests/test_retry_cancel_consistency.py` is the sole suite that drives
+    `POST /runs/{run_id}/cancel` through TestClient and asserts BOTH shapes of
+    one gateway error -- the rendered response body and the raw persisted
+    `slurm_cancellation_gap` / `cancel_failed` event. Nothing derives it from
+    this route: the importer index is queried only for a changed path that is
+    itself a suite, never for a production module, and no closure guard forces a
+    derived importer set onto this rule -- `apps/api/routes/pipeline.py` is in
+    neither `GUARDED_MODULE_CLOSURES` nor `DIRECTORY_RULE_AUDIT_PATHS`. Neither
+    the broad `apps/api/**` rule nor same-name derivation names it either;
+    without this rule a diff that re-shared the two payloads reached CI green.
+    """
+
+    selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))
+
+    assert "tests/test_retry_cancel_consistency.py" in selected
 
 
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:

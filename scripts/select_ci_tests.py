@@ -2458,6 +2458,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_shud_runtime.py",
             "tests/test_runtime_mode.py",
             "tests/test_runtime_ic_header.py",
+            # #1908: the production-closure live-submit lane makes its task run
+            # ids submission-scoped precisely so cli.py's manifest safety gate
+            # stays unchanged; that suite asserts the gate directly.
+            "tests/test_production_slurm_validation.py",
         ),
     ),
     PathTestRule(
@@ -5203,6 +5207,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # recorded-failure delta on the provenance walk -- so a change to
             # this route's except table or its 503 assembly must run it.
             "tests/test_file_journal_read_blocked_consumers.py",
+            # #2308: the ONLY oracle for the cancel side's two-shape invariant --
+            # the gateway error rendered on the response body and left raw in the
+            # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
+            # in one test. The broad `apps/api/**` rule buys the three generic API
+            # suites, none of which call `cancel_run`, and nothing derives the rest:
+            # the importer index is queried only for a CHANGED path that is itself
+            # a suite, never for a production module, and no closure guard forces a
+            # derived importer set onto this rule.
+            "tests/test_retry_cancel_consistency.py",
         ),
     ),
     PathTestRule(

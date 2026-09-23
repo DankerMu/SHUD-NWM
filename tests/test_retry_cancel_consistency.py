@@ -16,7 +16,13 @@ from sqlalchemy.pool import StaticPool
 from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryNotFoundError, RetryService
+from services.orchestrator.retry import (
+    RetryConfig,
+    RetryNotFoundError,
+    RetryService,
+    _has_runtime_root_field,
+    _mapping_at,
+)
 from services.slurm_gateway.gateway import SlurmGatewayError
 
 HYDRO_RUN_STATUS_ENUM = {
@@ -54,6 +60,34 @@ MET_CYCLE_STATUS_ENUM = {
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# #2308: the two kinds of host text a real `SlurmCommandError` carries -- the
+# configured `slurm_bin_path` in `details.command[0]` and an absolute workspace
+# path inside `details.stderr.snippet`.  Neither is a secret, so `redact_payload`
+# alone leaves both verbatim on the wire.
+_GATEWAY_SCANCEL_BIN = "/opt/slurm/24.05/bin/scancel"
+_GATEWAY_WORKSPACE_ROOT = "/srv/nhms/workspace"
+
+
+def _scancel_path_bearing_error(status_code: int, code: str, run_id: str) -> SlurmGatewayError:
+    """A gateway error shaped like `RealSlurmGateway._run_command`'s failure detail."""
+
+    return SlurmGatewayError(
+        status_code,
+        code,
+        f"Slurm command scancel failed with exit code 1 for {_GATEWAY_WORKSPACE_ROOT}/runs/{run_id}.",
+        {
+            "command": [_GATEWAY_SCANCEL_BIN, "--verbose", "slurm_paths"],
+            "returncode": 1,
+            "stderr": {
+                "snippet": (
+                    "scancel: error: Kill job error on job id 4711: "
+                    f"{_GATEWAY_WORKSPACE_ROOT}/runs/{run_id}/input/manifest.json is unreadable"
+                ),
+                "truncated": False,
+            },
+        },
+    )
 
 
 def test_characterization_manual_retry_writes_pending_to_hydro_run() -> None:
@@ -366,13 +400,11 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert gap["gateway_response"]["cancellation_proven"] is False
         assert gap["gateway_response"]["token"] == "[redacted]"
         assert gap["gateway_response"]["authorization"] == "[redacted]"
-        assert gap["gateway_response"]["auth"]["issuer_url"] == "https://idp.example.invalid/auth"
-        assert gap["gateway_response"]["auth"]["value"] == "[redacted]"
-        assert gap["gateway_response"]["auth"]["permissions"] == ["jobs.cancel", {"provider": "[redacted]"}]
-        assert gap["gateway_response"]["auth"]["errors"] == [{"status": "[redacted]"}]
-        assert gap["gateway_response"]["auth"]["scope"]["provider"] == "[redacted]"
-        assert gap["gateway_response"]["auth"]["scope"]["status"] == "[redacted]"
-        assert gap["gateway_response"]["auth"]["scope"]["message"] == "[redacted]"
+        # #2308: the RESPONSE copy goes through the shared public evidence renderer,
+        # which collapses a whole mapping under a sensitive key ("auth") to the
+        # scalar placeholder instead of recursing into it.  The persisted event
+        # below keeps the structured, secrets-redacted shape it always had.
+        assert gap["gateway_response"]["auth"] == "[redacted]"
         assert gap["gateway_response"]["details"]["code"] == "SCANCEL_PENDING"
         assert gap["gateway_response"]["details"]["status"] == "pending"
         assert gap["gateway_response"]["details"]["password"] == "[redacted]"
@@ -409,6 +441,173 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
             assert raw_secret not in event_body
         assert "[redacted]" in response_body
         assert "[redacted]" in event_body
+
+
+def test_cancel_failure_response_renders_gateway_host_paths_while_the_event_stays_raw() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_paths", status="running")
+        _create_job(
+            store,
+            job_id="job_cancel_paths",
+            run_id="run_cancel_paths",
+            status="running",
+            slurm_job_id="slurm_paths",
+        )
+        gateway = _MockGateway(
+            failures={"slurm_paths": _scancel_path_bearing_error(502, "SLURM_COMMAND_ERROR", "run_cancel_paths")}
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_cancel_paths/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        failure = data["failed_jobs"][0]
+        assert data["slurm_failures"] == data["failed_jobs"]
+        assert failure["job_id"] == "job_cancel_paths"
+        error = failure["error"]
+        assert error["status_code"] == 502
+        assert error["code"] == "SLURM_COMMAND_ERROR"
+        assert error["message"] == "Slurm command scancel failed with exit code 1 for [local-path]."
+        assert error["details"]["command"] == ["[local-path]", "--verbose", "slurm_paths"]
+        assert error["details"]["returncode"] == 1
+        assert error["details"]["stderr"]["snippet"] == (
+            "scancel: error: Kill job error on job id 4711: [local-path] is unreadable"
+        )
+        assert error["details"]["stderr"]["truncated"] is False
+        response_body = json.dumps(response.json(), sort_keys=True)
+        assert _GATEWAY_SCANCEL_BIN not in response_body
+        assert _GATEWAY_WORKSPACE_ROOT not in response_body
+
+        event = next(event for event in _events(store) if event.event_type == "cancel_failed")
+        raw_error = event.details["error"]
+        assert raw_error["code"] == "SLURM_COMMAND_ERROR"
+        assert raw_error["message"] == (
+            f"Slurm command scancel failed with exit code 1 for {_GATEWAY_WORKSPACE_ROOT}/runs/run_cancel_paths."
+        )
+        assert raw_error["details"]["command"] == [_GATEWAY_SCANCEL_BIN, "--verbose", "slurm_paths"]
+        assert raw_error["details"]["stderr"]["snippet"] == (
+            "scancel: error: Kill job error on job id 4711: "
+            f"{_GATEWAY_WORKSPACE_ROOT}/runs/run_cancel_paths/input/manifest.json is unreadable"
+        )
+        event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+        assert "[local-path]" not in event_body
+
+
+def test_cancel_blocked_response_renders_gateway_host_paths_while_the_event_stays_raw() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_blocked_paths", status="running")
+        _insert_forecast_cycle(store, "cycle_blocked_paths", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_blocked_paths",
+            run_id="run_blocked_paths",
+            cycle_id="cycle_blocked_paths",
+            status="running",
+            slurm_job_id="slurm_paths",
+        )
+        gateway = _MockGateway(
+            failures={"slurm_paths": _scancel_path_bearing_error(404, "JOB_NOT_FOUND", "run_blocked_paths")}
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_blocked_paths/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        gap = data["blocked_jobs"][0]
+        assert data["slurm_cancellation_gaps"] == data["blocked_jobs"]
+        assert data["failed_jobs"] == []
+        assert gap["job_id"] == "job_blocked_paths"
+        error = gap["error"]
+        assert error["status_code"] == 404
+        assert error["code"] == "JOB_NOT_FOUND"
+        assert error["message"] == "Slurm command scancel failed with exit code 1 for [local-path]."
+        assert error["details"]["command"] == ["[local-path]", "--verbose", "slurm_paths"]
+        assert error["details"]["stderr"]["snippet"] == (
+            "scancel: error: Kill job error on job id 4711: [local-path] is unreadable"
+        )
+        response_body = json.dumps(response.json(), sort_keys=True)
+        assert _GATEWAY_SCANCEL_BIN not in response_body
+        assert _GATEWAY_WORKSPACE_ROOT not in response_body
+
+        event = next(event for event in _events(store) if event.event_type == "slurm_cancellation_gap")
+        raw_error = event.details["error"]
+        assert raw_error["details"]["command"] == [_GATEWAY_SCANCEL_BIN, "--verbose", "slurm_paths"]
+        assert _GATEWAY_WORKSPACE_ROOT in raw_error["details"]["stderr"]["snippet"]
+        event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+        assert "[local-path]" not in event_body
+
+
+def test_unproven_cancellation_renders_manifest_roots_on_the_wire_and_keeps_them_raw_in_the_event() -> None:
+    """#2308 task 3.5 -- the settled ``gateway_response`` split.
+
+    ``_unproven_slurm_cancellation_payload`` dumps a ``SlurmJobRecord`` whose
+    ``manifest`` carries ``workspace_dir`` / ``object_store_root`` /
+    ``manifest_index_path`` / ``array_log_dir`` for an array submission
+    (``services/slurm_gateway/real_backend.py``'s ``submit_job_array``), so the
+    wire copy has host paths to render.  The persisted copy must stay raw:
+    retry's runtime-root recovery reads exactly that subtree
+    (``services/orchestrator/retry.py``'s ``_event_runtime_root_candidates``,
+    path ``("gateway_response", "manifest")``) through ``_mapping_at`` /
+    ``_has_runtime_root_field`` -- the two readers this test calls.  (That
+    scan's row filter is ``event_type == "submission"``, so it does not reach
+    this route's cancellation events; the readers are still the real recovery
+    code, and the rendered copy asserted below is what they could not use.)
+    """
+
+    index_path = f"{_GATEWAY_WORKSPACE_ROOT}/runs/run_array_roots/input/manifest_index_20260522T010203040506.json"
+    array_log_dir = f"{_GATEWAY_WORKSPACE_ROOT}/logs/arrays/manifest_index_20260522T010203040506"
+    with _store() as store:
+        _insert_hydro_run(store, "run_array_roots", status="running")
+        _insert_forecast_cycle(store, "cycle_array_roots", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_array_roots",
+            run_id="run_array_roots",
+            cycle_id="cycle_array_roots",
+            status="submitted",
+            slurm_job_id="slurm_array_roots",
+        )
+        gateway = _MockGateway(
+            responses={
+                "slurm_array_roots": {
+                    "job_id": "slurm_array_roots",
+                    "status": "pending",
+                    "manifest": {
+                        "run_id": "run_array_roots",
+                        "job_type": "run_shud_forecast_array",
+                        "workspace_dir": _GATEWAY_WORKSPACE_ROOT,
+                        "object_store_root": f"{_GATEWAY_WORKSPACE_ROOT}/object-store",
+                        "manifest_index_path": index_path,
+                        "array_log_dir": array_log_dir,
+                    },
+                }
+            }
+        )
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_array_roots/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        gap = response.json()["data"]["slurm_cancellation_gaps"][0]
+        assert gap["job_id"] == "job_array_roots"
+        rendered_manifest = _mapping_at(gap, ("gateway_response", "manifest"))
+        assert rendered_manifest == {
+            "run_id": "run_array_roots",
+            "job_type": "run_shud_forecast_array",
+            "workspace_dir": "[local-path]",
+            "object_store_root": "[local-path]",
+            "manifest_index_path": "[local-path]",
+            "array_log_dir": "[local-path]",
+        }
+        assert _GATEWAY_WORKSPACE_ROOT not in json.dumps(response.json(), sort_keys=True)
+
+        event = next(event for event in _events(store) if event.event_type == "slurm_cancellation_gap")
+        persisted_manifest = _mapping_at(event.details, ("gateway_response", "manifest"))
+        assert persisted_manifest is not None
+        assert _has_runtime_root_field(persisted_manifest)
+        assert persisted_manifest["workspace_dir"] == _GATEWAY_WORKSPACE_ROOT
+        assert persisted_manifest["object_store_root"] == f"{_GATEWAY_WORKSPACE_ROOT}/object-store"
+        assert persisted_manifest["manifest_index_path"] == index_path
+        assert persisted_manifest["array_log_dir"] == array_log_dir
 
 
 def test_cancel_conflict_terminal_slurm_job_preserves_local_state() -> None:
