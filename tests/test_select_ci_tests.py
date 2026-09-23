@@ -100,6 +100,18 @@ from scripts.select_ci_tests import (
     select_tests,
 )
 
+# #2323: the production-topology hard-gate node the supplemental scan-input
+# route adds (its own tests are in the #2323 section at the end of this file).
+# Defined up here because exact-set pins and parametrize tables throughout the
+# file name it. LITERAL (#1827), and spelled locally rather than imported so
+# this module still imports against PRE-change selector source: read back from
+# the selector constant, a renamed node would move with production and never
+# red here (the anchor test in the #2323 section pins the two equal).
+TOPOLOGY_HARD_GATE_NODE = (
+    "tests/test_entropy_audit_report_contract.py"
+    "::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings"
+)
+
 _LIFECYCLE_OWNER_EDGES: tuple[tuple[str, str], ...] = (
     ("scripts/node27_timeseries_compression_supervisor.py", "tests/test_node27_lifecycle_contract.py"),
     ("schemas/timeseries_compression_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
@@ -828,7 +840,9 @@ def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() 
         repo_root=Path("."),
     )
 
-    assert selected == sorted(DIRECT_GRID_SURFACE_TESTS)
+    # #2323: `openspec/changes/**` is a production-topology scan root, so the
+    # hard-gate node joins the compact fixture additively.
+    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, TOPOLOGY_HARD_GATE_NODE})
 
 
 def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
@@ -846,7 +860,9 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
     # five #1455 importer suites (all seconds-scale), plus the write-site
     # invariant (workers/** root, #1656), the river-segment write-surface
     # scan (same root, #2185) and the path-canonicalisation family guard (same
-    # root, #1627) — and no core-smoke blowout.
+    # root, #1627) — and no core-smoke blowout. #2323 adds the one
+    # production-topology hard-gate node for the three `openspec/changes/**`
+    # scan inputs.
     assert selected == sorted(
         {
             *DIRECT_GRID_SURFACE_TESTS,
@@ -855,10 +871,12 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            TOPOLOGY_HARD_GATE_NODE,
         }
     )
-    # The trailing `+ 4` is the four supplemental riders: #1656, #2185, #1627, #2452.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 4
+    # The trailing `+ 5` is the five supplemental riders: #1656, #2185, #1627,
+    # #2452 and #2323.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 5
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -999,6 +1017,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # pin READS this module's `run_once` with `ast` (it must not import
             # it), so a pass-status literal added or moved here has to run it.
             "tests/test_operator_action_status_closure.py",
+            # #2316's at-site addition to the same stop rule: the extra-root
+            # wiring oracle for the `runs_only_roots` tuple this module builds.
+            "tests/test_retention_extra_roots.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
@@ -1710,6 +1731,32 @@ def test_select_tests_routes_the_registry_partition_additions_ledger_to_the_meta
     assert selected == ["tests/test_select_ci_tests.py"]
 
 
+@pytest.mark.parametrize(
+    "oracle",
+    [
+        "tests/fixtures/basins_registry_partition_oracle.json",
+        "tests/fixtures/qhh_bootstrap_partition_oracle.json",
+    ],
+)
+def test_select_tests_routes_each_frozen_partition_oracle_to_the_meta_suite(oracle: str) -> None:
+    # #2317: the #1913 / #1948 frozen partition oracles are data read only by
+    # this suite's self-digest guards, so an oracle-only PR selected nothing and
+    # the guards ran only on the post-merge master run. EXACT, so the route
+    # cannot also pick up a glob sibling; a deleted rule reds as `[]`.
+    assert Path(oracle).is_file(), oracle
+    assert select_tests([oracle], repo_root=Path(".")) == ["tests/test_select_ci_tests.py"]
+
+
+def test_select_tests_routes_the_station_series_baseline_to_its_non_gated_reader() -> None:
+    # #2317's adjacent gap: tests/test_object_store_forcing.py is the only
+    # non-gated reader (the real-disk reader is e2e-gated), so it is the whole
+    # route. EXACT; a deleted rule reds as `[]`.
+    baseline = "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json"
+    assert Path(baseline).is_file()
+    assert baseline in Path("tests/test_object_store_forcing.py").read_text(encoding="utf-8")
+    assert select_tests([baseline], repo_root=Path(".")) == ["tests/test_object_store_forcing.py"]
+
+
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
     """The #1341 switch touches three production files; all three must select the pins.
 
@@ -1831,6 +1878,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
 
     assert selected == [
         "tests/test_display_publish_status_only.py",
+        # #2323: scripts/** is a production-topology scan root.
+        TOPOLOGY_HARD_GATE_NODE,
         # I11 #1990 task 7.2: this script is in the forcing discovery-set census
         # (one `row_counts` lookup key), and nothing routed the census here, so a
         # new forcing table mention was red only on the post-merge master run.
@@ -1952,6 +2001,9 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
     selected = select_tests(["scripts/node27_autopipe_cron.sh"], repo_root=Path("."))
 
     assert selected == [
+        # #2323: scripts/** is a production-topology scan root (`.sh` is a
+        # scanned text extension).
+        TOPOLOGY_HARD_GATE_NODE,
         "tests/test_node27_autopipeline_preflight.py",
         "tests/test_node27_mvt_prewarm.py",
     ]
@@ -2368,9 +2420,15 @@ def test_select_tests_maps_the_replay_script_to_every_partition_without_core_smo
 
     selected = select_tests([STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH], repo_root=Path("."))
 
-    # #1656 and #2185: scripts/** is a root of both supplemental scans.
+    # #1656 and #2185: scripts/** is a root of both supplemental scans; #2323:
+    # it is also a production-topology scan root.
     assert selected == sorted(
-        [*STATE_INDEX_COPYBACK_REPLAY_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH]
+        [
+            *STATE_INDEX_COPYBACK_REPLAY_TESTS,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            TOPOLOGY_HARD_GATE_NODE,
+        ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -2747,12 +2805,14 @@ def test_select_tests_keeps_core_smoke_fallback_for_script_without_same_name_sui
 def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     selected = select_tests(["scripts/validate_readonly_db_boundary.py"], repo_root=Path("."))
 
-    # #1656 and #2185: scripts/** is a root of both supplemental scans.
+    # #1656 and #2185: scripts/** is a root of both supplemental scans; #2323:
+    # it is also a production-topology scan root.
     assert selected == sorted(
         [
             *READONLY_DB_VALIDATION_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
+            TOPOLOGY_HARD_GATE_NODE,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -2946,10 +3006,12 @@ def test_qhh_continuous_python_keeps_its_existing_targets_with_the_authority_own
 def test_qhh_backend_smoke_control_stays_exact_and_unchanged() -> None:
     # Round-2 control: the backend-smoke script keeps its exact one-target
     # mapping (no authority owner joins it), and its explicit set must not be a
-    # subset-superset of the other producers. Exact set — it has no supplemental
-    # routing (it is a `scripts/**/*.sh` producer with a rule).
+    # subset-superset of the other producers. Exact set — its only supplemental
+    # routing is #2323's production-topology hard-gate node (it is a
+    # `scripts/**/*.sh` producer with a rule, and `scripts/` is a scan root),
+    # which is not an authority owner.
     selected = set(select_tests([QHH_BACKEND_SMOKE_SCRIPT], repo_root=Path(".")))
-    assert selected == {QHH_STATIC_TEST}
+    assert selected == {QHH_STATIC_TEST, TOPOLOGY_HARD_GATE_NODE}
 
 
 def test_node22_path_rules_red_when_only_the_owner_edge_is_removed(
@@ -3319,10 +3381,14 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
         "tests/test_node22_refresh_timer_health.py",
-        # #1101 moved the reading case into this partition; the set stays a
-        # 3-set because only one of the fifteen partitions reads the template.
+        # #1101 moved the reading case into this partition; the set stayed a
+        # 3-set because only one of the fifteen partitions reads the template
+        # (a 4-set since #2323, below).
         *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
         "tests/test_two_node_docker_runtime.py",
+        # #2323: `infra/env/` is a production-topology scan root, and the
+        # additive route is the one target a template-only PR gains.
+        TOPOLOGY_HARD_GATE_NODE,
     }
 
 
@@ -3367,7 +3433,13 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
     [
         pytest.param(
             "infra/env/compute.example",
-            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            # #2323: every `infra/env/*.example` is a production-topology scan
+            # input, so each row below gains exactly the hard-gate node.
+            [
+                TOPOLOGY_HARD_GATE_NODE,
+                SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+                "tests/test_two_node_docker_runtime.py",
+            ],
             id="compute-example",
         ),
         pytest.param(
@@ -3381,6 +3453,7 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
             # of this file, which is how the missing
             # `NHMS_ORCHESTRATOR_TERMINAL_STAGE` reached a rebuilt node.
             [
+                TOPOLOGY_HARD_GATE_NODE,
                 "tests/test_env_templates.py",
                 SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
                 "tests/test_two_node_docker_runtime.py",
@@ -3389,7 +3462,7 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
         ),
         pytest.param(
             "infra/env/display.example",
-            ["tests/test_two_node_docker_runtime.py"],
+            [TOPOLOGY_HARD_GATE_NODE, "tests/test_two_node_docker_runtime.py"],
             id="display-example",
         ),
     ],
@@ -3488,6 +3561,8 @@ def test_raw_retention_env_template_selects_exactly_its_readers_and_glob_suites(
         "tests/test_node27_raw_retention.py",
         "tests/test_node27_write_roles.py",
         "tests/test_two_node_docker_runtime.py",
+        # #2323: `infra/env/` is a production-topology scan root.
+        TOPOLOGY_HARD_GATE_NODE,
     }
 
 
@@ -3664,11 +3739,16 @@ def test_environment_backend_filter_entry_reds_when_removed_or_moved_out(entry: 
     assert literal not in _backend_filter_block(moved_to_frontend)
 
 
-def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
-    # Round-2 negatives: the generated `CLAUDE.md`/`AGENTS.md` roots are governed
-    # by the instruction source plus byte-exact projection (never a direct
-    # selector rule), and the derived QHH runbook and unrelated docs must remain
-    # selector-empty and non-exact backend entries. EXCEPTION (#1684 EVID-05/F):
+def test_generated_roots_and_unscoped_runbooks_select_exactly_the_hard_gate_node() -> None:
+    # Round-2 negatives, retargeted by #2323: the generated `CLAUDE.md`/`AGENTS.md`
+    # roots are governed by the instruction source plus byte-exact projection
+    # (never a direct selector RULE), and the derived QHH runbook and the other
+    # runbooks carry no reader rule and stay non-exact backend entries. What
+    # changed is the premise that they read nothing: all four are inputs of the
+    # entropy production-topology scan (two direct files, two under
+    # `docs/runbooks/`), so each selects EXACTLY the hard-gate node — no reader
+    # suite, no core smoke. A docs path outside the scan roots stays
+    # selector-empty. EXCEPTION (#1684 EVID-05/F):
     # `docs/runbooks/current-production-ops.md` is the node-22 gateway rollout
     # owner and now selects the static deployment contract suite (asserted in
     # test_rollout_owner_producers_select_the_static_deployment_contract), while
@@ -3679,7 +3759,12 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
         "docs/runbooks/qhh-backend-smoke.md",
         "docs/runbooks/failed-basin-retry.md",
     ):
-        assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
+        assert select_tests([path], repo_root=Path(".")) == [TOPOLOGY_HARD_GATE_NODE], (
+            f"{path} must select exactly the topology hard-gate node"
+        )
+    unscanned_doc = "docs/adr/0009-path-canonicalization-dereference-doctrine.md"
+    assert Path(unscanned_doc).is_file()
+    assert select_tests([unscanned_doc], repo_root=Path(".")) == [], f"{unscanned_doc} must stay selector-empty"
     # #2075 widened this EXACT set by one: `tests/test_env_templates.py` is a
     # literal reader of this runbook (it asserts the pinned terminal stage
     # appears there), so the README/runbook/template consistency guard is
@@ -3698,7 +3783,10 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # #1103 split the runbook into an index page plus the `production-ops/`
     # sub-runbooks and partitioned the node-22 entrypoint owner; the index row
     # and the sub-runbook row carry the identical reader set.
+    # #2323: both rows also carry the production-topology hard-gate node
+    # (`docs/runbooks/` is a scan root), additively.
     expected_runbook_readers = [
+        TOPOLOGY_HARD_GATE_NODE,
         "tests/test_env_templates.py",
         "tests/test_node22_entrypoint_invariant.py",
         "tests/test_node22_entrypoint_invariant_python_scan.py",
@@ -6453,11 +6541,13 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
     explicit = "scripts/validate_readonly_db_boundary.py"
     assert not Path(f"tests/test_{PurePosixPath(explicit).stem}.py").exists()
     explicit_sel = set(select_tests([explicit], repo_root=Path(".")))
-    # #1656 and #2185: scripts/** is a root of both supplemental scans.
+    # #1656 and #2185: scripts/** is a root of both supplemental scans; #2323:
+    # it is also a production-topology scan root.
     assert explicit_sel == {
         *READONLY_DB_VALIDATION_TESTS,
         INVARIANT_SUITE_PATH,
         WRITE_SURFACE_SCAN_PATH,
+        TOPOLOGY_HARD_GATE_NODE,
     }
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
@@ -6602,12 +6692,17 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     )
 
 
-def test_select_tests_ignores_docs_only_changes() -> None:
+def test_select_tests_routes_docs_only_changes_to_exactly_the_hard_gate_node() -> None:
     # #1684 EVID-05/F: the node-22 gateway rollout runbook is an exact rollout
     # owner (its §3.2.2 wiring is asserted by the static deployment contract),
-    # so a runbook-only change now selects that focused suite; other `docs/**`
-    # changes still select nothing.
+    # so a runbook-only change now selects that focused suite. #2323 retired
+    # the "other `docs/**` changes select nothing" premise for the scan roots:
+    # a runbook is an entropy production-topology scan input, so an unruled
+    # runbook selects EXACTLY the hard-gate node (and the rollout runbook
+    # carries it beside its readers). `docs/**` outside the scan roots still
+    # selects nothing.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
+        TOPOLOGY_HARD_GATE_NODE,
         "tests/test_env_templates.py",
         # #2472/#2473 round 1: bare `uv run` / `uv sync` line scanner.
         # #1103 partitioned it in two; both partitions ride this row.
@@ -6622,7 +6717,8 @@ def test_select_tests_ignores_docs_only_changes() -> None:
         "tests/test_role_boundary_static.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
-    assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
+    assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == [TOPOLOGY_HARD_GATE_NODE]
+    assert select_tests(["docs/other/other-page.md"], repo_root=Path(".")) == []
 
 
 def test_pyproject_change_selects_policy_core_smoke_and_meta_guard() -> None:
@@ -7050,15 +7146,18 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
     # #1656 and #2185: scripts/select_ci_tests.py lives under scripts/**, which
     # is a root of both supplemental scans, so a selector-source diff selects
     # the meta-guard PLUS the write-site invariant PLUS the river-segment
-    # write-surface scan — three targets, NOT the meta-guard collapse. The
+    # write-surface scan — three targets, NOT the meta-guard collapse. #2323
+    # made it four: `scripts/` is also a production-topology scan root, so the
+    # hard-gate node rides along. The
     # collection signal is still true by PROVENANCE (the selector source itself
     # changed), so the workflow runs the full-tree collect smoke in addition to
-    # those three — the round-1 cand-01 fix.
+    # those four — the round-1 cand-01 fix.
     fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
 
-    assert fields["count"] == "3"
+    assert fields["count"] == "4"
     assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
     assert WRITE_SURFACE_SCAN_PATH in fields["tests"]
+    assert TOPOLOGY_HARD_GATE_NODE in fields["tests"]
     assert fields["meta_guard_only"] == "false"
     assert fields["collection_smoke_required"] == "true"
 
@@ -7077,9 +7176,11 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # three readers the row had been missing (node-22 entrypoint invariant,
         # Python environment truth, role boundary static), so the count was 7.
         # #1103 partitioned the entrypoint owner in two, taking it to 8, and
-        # gave the sub-runbook tree the identical row.
-        ("docs/runbooks/current-production-ops.md", "8"),
-        ("docs/runbooks/production-ops/service-bringup.md", "8"),
+        # gave the sub-runbook tree the identical row. #2323 took both to 9:
+        # `docs/runbooks/` is a production-topology scan root, so the hard-gate
+        # node rides along.
+        ("docs/runbooks/current-production-ops.md", "9"),
+        ("docs/runbooks/production-ops/service-bringup.md", "9"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
@@ -11186,7 +11287,21 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # by the file-journal selection test, so only the at-site target is named --
     # the same "pin what the extension added" shape as the scheduler_runtime.py
     # row below.
-    ("services/orchestrator/file_orchestration_migration.py", ("tests/test_journal_root_lane_adoption.py",)),
+    # #2390 (ruling A) added the five gateway-reconcile writer suites to the same
+    # rule: they drive this module's rollback lanes through FUNCTION-BODY imports
+    # only, so the importer-gap audit derives no pair for them and this row is
+    # the only machine check that the route exists at all.
+    (
+        "services/orchestrator/file_orchestration_migration.py",
+        (
+            "tests/test_journal_root_lane_adoption.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_rollforward.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+        ),
+    ),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
     # #2260: the scheduler_runtime.py stop rule's at-site addition. Its shared
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
@@ -11197,11 +11312,16 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # #1186 round 2 added a second at-site target to this same rule: one node id
     # of the scope-dimension closure pin, because this module publishes most of a
     # pass payload's top-level keys.
+    # #2316 closed the #2260 sibling known limit: the extra-root wiring oracle
+    # rides the same rule, because the `runs_only_roots` tuple it guards is
+    # assembled in this module. (#1905/#2402, #2405 and #2442 targets are pinned
+    # by the exact literal selection below.)
     (
         "services/orchestrator/scheduler_runtime.py",
         (
             *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
+            "tests/test_retention_extra_roots.py",
         ),
     ),
 )
@@ -11238,6 +11358,77 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
         )
 
 
+# #2316 / #2390: the targets the two at-site extensions of this change add,
+# spelled as LITERALS (#1827) so a rename in production cannot move the pin.
+_EXTRA_ROOTS_WIRING_TEST = "tests/test_retention_extra_roots.py"
+_GATEWAY_RECONCILE_WRITER_TESTS: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_writer_prepare.py",
+    "tests/test_gateway_reconcile_writer_launch.py",
+    "tests/test_gateway_reconcile_writer_rollforward.py",
+    "tests/test_gateway_reconcile_writer_receipts.py",
+    "tests/test_gateway_reconcile_writer_quiescence.py",
+)
+
+
+def test_scheduler_runtime_selects_the_extra_roots_wiring_oracle_and_both_mutex_halves() -> None:
+    # #2316: the `runs_only_roots` extra-root wiring the retention deleter gets
+    # is assembled in scheduler_runtime.py, and its stop rule shadows the broad
+    # orchestrator list that already carries the suite, so the at-site target is
+    # the only route. Both #2259 mutex halves stay alongside it.
+    selected = set(select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")))
+
+    assert {
+        _EXTRA_ROOTS_WIRING_TEST,
+        "tests/test_retention_copyback_mutex_budget.py",
+        "tests/test_retention_copyback_mutex_protocol.py",
+    } <= selected
+    assert "tests/test_state_clone.py" not in selected, "the scheduler_runtime.py stop rule stopped stopping"
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        # FILE_JOURNAL_READ_STATE_PATH_PATTERNS [0], [8], [9], [10]: the
+        # neighbours whose selections #2316/#2390 must not move. None carries an
+        # exact pin of its own, so the pin is the one way either change could
+        # move them — gaining a new at-site target. (Full identity against the
+        # pre-change selector is the task 3.2 tracked-tree sweep.)
+        "packages/common/safe_fs.py",
+        "services/orchestrator/cli.py",
+        "services/orchestrator/scheduler.py",
+        "services/orchestrator/scheduler_core.py",
+    ],
+)
+def test_sibling_journal_patterns_do_not_gain_the_2316_or_2390_targets(sibling: str) -> None:
+    selected = set(select_tests([sibling], repo_root=Path(".")))
+
+    leaked = sorted(selected & {_EXTRA_ROOTS_WIRING_TEST, *_GATEWAY_RECONCILE_WRITER_TESTS})
+    assert not leaked, f"{sibling} now selects {leaked}: an at-site extension leaked past its own rule"
+
+
+def test_file_orchestration_migration_selects_the_writer_suites_and_still_stops() -> None:
+    # #2390 ruling A: all five writer suites ride the pattern[3] rule site with
+    # the #1955 lane-adoption target, and the stop rule still stops
+    # (`tests/test_state_clone.py` is a broad-list-only target).
+    selected = set(select_tests(["services/orchestrator/file_orchestration_migration.py"], repo_root=Path(".")))
+
+    assert {*_GATEWAY_RECONCILE_WRITER_TESTS, "tests/test_journal_root_lane_adoption.py"} <= selected
+    assert "tests/test_state_clone.py" not in selected
+
+
+def test_gateway_reconcile_writer_suites_have_no_module_scope_edge_to_the_migration_module() -> None:
+    # The #2390 premise, pinned: the importer-gap audit cannot see these five
+    # routes because none of the suites imports file_orchestration_migration at
+    # module scope. If one ever does, the audit derives the pair on its own and
+    # this comment (and the rule-site one) must be revisited.
+    importers = _non_gated_top_level_importer_index().get("services.orchestrator.file_orchestration_migration", set())
+
+    for suite in _GATEWAY_RECONCILE_WRITER_TESTS:
+        assert Path(suite).is_file(), suite
+        assert suite not in importers, f"{suite} now imports the migration module at module scope"
+        assert "file_orchestration_migration" in Path(suite).read_text(encoding="utf-8"), suite
+
+
 # #2260: the retention copyback mutex's two load-bearing modules. Both pins are
 # exact equality against LITERAL lists (#1827): an expectation read back from
 # FILE_JOURNAL_READ_STATE_TESTS or any rule would move with production and could
@@ -11252,6 +11443,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     # two. This module writes most of a pass payload's
     # top-level keys, and that pin is what turns "a new key nobody dispositioned"
     # from a silent false exit 0 into a red test.
+    # 30 -> 31 (#2316, measured): the extra-root wiring oracle joins at the
+    # same site, closing the sibling gap #2260 recorded as a known limit.
     assert Path("services/orchestrator/scheduler_runtime.py").is_file()
 
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
@@ -11282,6 +11475,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         # guard's services/** supplemental route.
         RESOLVE_SURFACE_GUARD_PATH,
         *RETENTION_COPYBACK_MUTEX_TESTS,
+        # #2316: the `runs_only_roots` extra-root wiring oracle.
+        "tests/test_retention_extra_roots.py",
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         # 25 -> 28 (#1905/#2402, then #2405, then #2442): the evidence-size
@@ -17949,9 +18144,12 @@ def test_production_ops_tracked_tree_routes_the_index_and_every_subrunbook() -> 
     # Each tracked sub-runbook routes the full reader set on its own, so this
     # holds for a file added after the rule was written (the glob is the
     # mechanism; this is the proof it actually fires on the real tree).
+    # #2323: `docs/runbooks/` is a production-topology scan root, so each
+    # selection is the reader set plus exactly the hard-gate node — never a
+    # narrower reader set.
     for path in tracked:
         assert select_tests([path], repo_root=Path(".")) == sorted(
-            set(PRODUCTION_OPS_RUNBOOK_TESTS)
+            {*PRODUCTION_OPS_RUNBOOK_TESTS, TOPOLOGY_HARD_GATE_NODE}
         ), path
     support = {rule.pattern: set(rule.tests) for rule in SUPPORT_MODULE_TEST_RULES}
     assert support.get(PRODUCTION_OPS_RUNBOOK_HELPERS_PATH) == set(
@@ -19695,3 +19893,369 @@ def test_manual_recovery_runbook_selects_the_reentry_confirmation_pin() -> None:
     runbook = "docs/runbooks/node22-control-plane-manual-recovery.md"
     assert Path(runbook).is_file(), runbook
     assert "tests/test_operator_reentry_confirmation.py" in select_tests([runbook], repo_root=Path("."))
+
+
+# ---------------------------------------------------------------------------
+# #2323: production-topology scanner inputs -> the topology hard-gate node.
+# ---------------------------------------------------------------------------
+# One tracked scannable file per mirrored root and every direct file, each with
+# its PRE-#2323 selection (measured at 3b32f9ed0). The route must add exactly
+# the node and keep everything else.
+_TOPOLOGY_ROUTE_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "scripts/diagnostic/qhh/README.md",
+        (
+            "tests/test_node22_entrypoint_invariant.py",
+            "tests/test_node22_entrypoint_invariant_python_scan.py",
+            "tests/test_qhh_scripts_static.py",
+        ),
+    ),
+    ("infra/env/display.example", ("tests/test_two_node_docker_runtime.py",)),
+    (
+        "instructions/agents/shared.md",
+        (
+            "tests/test_node22_entrypoint_invariant.py",
+            "tests/test_node22_entrypoint_invariant_python_scan.py",
+            "tests/test_python_environment_truth.py",
+        ),
+    ),
+    ("docs/governance/DOC_STATUS.md", ()),
+    ("docs/runbooks/qhh-backend-smoke.md", ()),
+    # An ARCHIVED change on purpose: an active change directory moves at
+    # archive time and would red this `is_file()` pin on master. The scanner
+    # reads `archive/**` (only the topology checker's findings skip it).
+    ("openspec/changes/archive/2026-09-13-close-selector-gate-fixture-gaps/proposal.md", ()),
+    ("openspec/specs/ci-contract-baseline/spec.md", ()),
+    ("AGENTS.md", ()),
+    ("CLAUDE.md", ()),
+    ("infra/README.two-node-docker.md", ("tests/test_two_node_docker_runbook_environment_invariant.py",)),
+    ("openspec/project-profile.md", ()),
+)
+
+
+def _scanner_relative_paths(root: Path) -> set[str]:
+    from scripts.governance.entropy_audit.check_topology import _production_topology_scan_files
+
+    resolved = root.resolve()
+    return {Path(path).resolve().relative_to(resolved).as_posix() for path in _production_topology_scan_files(root)}
+
+
+def test_production_topology_hard_gate_node_names_a_real_test_function() -> None:
+    # The route emits a `::` node id; `_test_target_exists` only checks the
+    # FILE, so a renamed gate function would ship as a pytest "not found" error
+    # instead of a selector red. Pin the function itself, and pin the literal
+    # against the selector constant so the two cannot drift apart.
+    test_file, function = TOPOLOGY_HARD_GATE_NODE.split("::")
+    tree = ast.parse(Path(test_file).read_text(encoding="utf-8"))
+    assert function in {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    assert _prod_module.PRODUCTION_TOPOLOGY_HARD_GATE_TEST == TOPOLOGY_HARD_GATE_NODE
+    assert _prod_module.ENTROPY_AUDIT_REPORT_CONTRACT_TEST == test_file
+    assert test_file in ENTROPY_AUDIT_TESTS
+
+
+def test_production_topology_mirror_constants_equal_the_scanner_constants() -> None:
+    # Drift oracle (a): the skip/extension halves of the mirror ARE constants
+    # in the scanner, so they are pinned by plain equality. (The roots and the
+    # four exact text names are locals there; oracles (b)-(d) cover them.)
+    from scripts.governance.entropy_audit import constants
+
+    assert _prod_module.PRODUCTION_TOPOLOGY_SCAN_SKIP_DIRS == constants.SCAN_SKIP_DIRS
+    assert _prod_module.PRODUCTION_TOPOLOGY_SCAN_SKIP_PREFIXES == constants.SCAN_SKIP_PREFIXES
+    assert _prod_module.PRODUCTION_TOPOLOGY_SCAN_SKIP_ROOT_DIRS == constants.SCAN_SKIP_ROOT_DIRS
+    assert _prod_module.PRODUCTION_TOPOLOGY_TEXT_EXTENSIONS == constants.TEXT_EXTENSIONS
+
+
+def test_production_topology_mirror_equals_the_scanner_over_a_synthetic_tree(tmp_path: Path) -> None:
+    # Drift oracle (b): the scanner's OWN walk over a synthetic tree must yield
+    # exactly the candidates the selector mirror accepts. Positives cover every
+    # root, every direct file, nesting and the four exact text names plus the
+    # `.env.` prefix; negatives cover an unsupported extension, both skip arms
+    # that are reachable under the roots, out-of-root paths and the string-
+    # prefix trap `docs/governance-x/` (roots match by path parts).
+    # Roots and direct files are spelled LITERALLY, never read back from the
+    # mirror: a probe derived from the mirror vanishes together with a dropped
+    # root, and the equality would stay green around the drift.
+    positives = [
+        "scripts/probe.md",
+        "infra/env/probe.md",
+        "instructions/agents/probe.md",
+        "docs/governance/probe.md",
+        "docs/runbooks/probe.md",
+        "openspec/changes/probe.md",
+        "openspec/specs/probe.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "infra/README.two-node-docker.md",
+        "openspec/project-profile.md",
+        "openspec/changes/some-change/evidence/receipt-c4.json",
+        "scripts/nested/deeper/tool.py",
+        "scripts/Makefile",
+        "scripts/.gitignore",
+        "scripts/.dockerignore",
+        "infra/env/.env",
+        "infra/env/.env.local",
+        "docs/runbooks/probe.sh",
+    ]
+    negatives = [
+        "docs/runbooks/x.log",
+        "scripts/node_modules/pkg/x.md",
+        "scripts/__pycache__/x.md",
+        "scripts/.nhms-x/y.md",
+        "openapi/nhms.v1.yaml",
+        "tests/x.md",
+        "docs/other/x.md",
+        "docs/governance-x/y.md",
+        "README.md",
+        "infra/other.md",
+    ]
+    for relative in (*positives, *negatives):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("probe\n", encoding="utf-8")
+
+    scanned = _scanner_relative_paths(tmp_path)
+    mirrored = {path for path in (*positives, *negatives) if _prod_module._is_production_topology_scan_input(path)}
+
+    assert scanned == mirrored, {"scanner_only": sorted(scanned - mirrored), "mirror_only": sorted(mirrored - scanned)}
+    # Anti-vacuity: the equality is not two empty sets, and it splits the
+    # candidates exactly along the declared positive/negative line.
+    assert scanned == set(positives)
+
+
+def test_production_topology_mirror_accepts_every_path_the_scanner_reads_in_this_repo() -> None:
+    # Drift oracle (c), the dangerous direction first: a scanner root (or text
+    # name) added without the mirror would leave its files unrouted, so every
+    # path the scanner yields over the REAL tree must be accepted, by name.
+    scanned = _scanner_relative_paths(Path("."))
+    assert len(scanned) > 1000, "the real-tree scan collapsed; the oracle would be vacuous"
+    rejected = sorted(path for path in scanned if not _prod_module._is_production_topology_scan_input(path))
+    assert not rejected, f"the scanner reads paths the selector mirror does not route: {rejected[:20]}"
+
+
+def test_production_topology_mirror_over_accepts_only_what_the_scanner_rejects_for_stat_reasons() -> None:
+    # Drift oracle (c), the other direction: a tracked file the mirror accepts
+    # but the scanner does not read must be one the scanner rejects ONLY for a
+    # reason the mirror deliberately does not model — size, symlink or
+    # non-regular type (plus `stat-error`: a tracked file deleted in this
+    # working tree). Anything else is a mirror predicate that grew too wide.
+    from scripts.governance.entropy_audit.repo_files import _repo_text_rejection_reason
+
+    tracked = subprocess.run(["git", "ls-files"], check=True, capture_output=True, text=True).stdout.splitlines()
+    scanned = _scanner_relative_paths(Path("."))
+    root = Path(".").resolve()
+    unexplained: dict[str, str | None] = {}
+    for path in tracked:
+        if path in scanned or not _prod_module._is_production_topology_scan_input(path):
+            continue
+        reason = _repo_text_rejection_reason(root, root / path)
+        if reason in {"symlink", "not-regular-file", "stat-error"} or (reason or "").startswith("exceeds-"):
+            continue
+        unexplained[path] = reason
+    assert not unexplained, unexplained
+
+
+@pytest.mark.parametrize("dropped", ["openspec/changes", "docs/runbooks", "infra/env"])
+def test_dropping_a_mirrored_root_drops_the_hard_gate_route(monkeypatch: pytest.MonkeyPatch, dropped: str) -> None:
+    # Drift oracle (d): the constant is the LIVE authority of `select_tests`,
+    # not a decorative copy — removing one root removes the route for a path
+    # under it, observed through the public entry point.
+    from scripts import select_ci_tests
+
+    probe = f"{dropped}/probe-2323.md"
+    assert TOPOLOGY_HARD_GATE_NODE in select_tests([probe], repo_root=Path("."))
+    monkeypatch.setattr(
+        select_ci_tests,
+        "PRODUCTION_TOPOLOGY_SCAN_ROOTS",
+        tuple(root for root in select_ci_tests.PRODUCTION_TOPOLOGY_SCAN_ROOTS if root != dropped),
+    )
+    assert TOPOLOGY_HARD_GATE_NODE not in select_tests([probe], repo_root=Path("."))
+
+
+def test_dropping_a_mirrored_direct_file_drops_the_hard_gate_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    assert select_tests(["openspec/project-profile.md"], repo_root=Path(".")) == [TOPOLOGY_HARD_GATE_NODE]
+    monkeypatch.setattr(
+        select_ci_tests,
+        "PRODUCTION_TOPOLOGY_SCAN_FILES",
+        tuple(path for path in select_ci_tests.PRODUCTION_TOPOLOGY_SCAN_FILES if path != "openspec/project-profile.md"),
+    )
+    assert select_tests(["openspec/project-profile.md"], repo_root=Path(".")) == []
+
+
+@pytest.mark.parametrize(("path", "before"), _TOPOLOGY_ROUTE_PROBES, ids=[path for path, _ in _TOPOLOGY_ROUTE_PROBES])
+def test_production_topology_inputs_add_exactly_the_hard_gate_node(path: str, before: tuple[str, ...]) -> None:
+    # One probe per root and every direct file: the selection is EXACTLY the
+    # pre-#2323 selection plus the node — additive, never a replacement, and no
+    # unknown-backend fallback (CORE_SMOKE_TESTS) arrives with it.
+    assert Path(path).is_file(), path
+    assert select_tests([path], repo_root=Path(".")) == sorted({*before, TOPOLOGY_HARD_GATE_NODE})
+
+
+def test_pr_2321_evidence_file_selects_the_hard_gate_node() -> None:
+    # The #2323 incident path: PR #2321 edited it, selected `[]`, and reddened
+    # master run 34787384045. The file has since moved, which is the point — the
+    # route needs no existence check, because a deletion changes the scan too.
+    # Its pre-#2323 selection was `[]`, so the exact set is the node alone.
+    path = "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-verification.json"
+    assert select_tests([path], repo_root=Path(".")) == [TOPOLOGY_HARD_GATE_NODE]
+
+
+@pytest.mark.parametrize("path", ["openapi/nhms.v1.yaml", "docs/runbooks/x.log", "tests/x.md"])
+def test_paths_outside_the_scanner_input_do_not_get_the_hard_gate_node(path: str) -> None:
+    assert TOPOLOGY_HARD_GATE_NODE not in select_tests([path], repo_root=Path("."))
+
+
+def test_a_scanner_module_diff_keeps_the_whole_partition_without_a_duplicate_node() -> None:
+    # check_topology.py is under `scripts/`, so the mirror accepts it — but its
+    # own rule already runs every ENTROPY_AUDIT_TESTS file, the gate included,
+    # and the node must not be emitted a second time.
+    selected = select_tests(["scripts/governance/entropy_audit/check_topology.py"], repo_root=Path("."))
+
+    assert set(ENTROPY_AUDIT_TESTS) <= set(selected)
+    assert TOPOLOGY_HARD_GATE_NODE not in selected
+
+
+def test_the_hard_gate_node_is_suppressed_when_the_report_contract_suite_itself_changed() -> None:
+    # The whole-file check is over the FINAL selection, not per path: a diff
+    # with a scan input AND the changed report-contract suite (which
+    # self-selects) runs the file once and never the duplicate node.
+    selected = select_tests(
+        ["docs/runbooks/qhh-backend-smoke.md", "tests/test_entropy_audit_report_contract.py"],
+        repo_root=Path("."),
+    )
+
+    assert "tests/test_entropy_audit_report_contract.py" in selected
+    assert TOPOLOGY_HARD_GATE_NODE not in selected
+
+
+# ---------------------------------------------------------------------------
+# #2498: new forcing-template modules -> FORCING_SQL_SHAPE_ORACLE_TESTS.
+# ---------------------------------------------------------------------------
+# One synthetic module per discovery root, together covering every import
+# spelling `_top_level_imported_module_names` resolves (the issue's three paths
+# included). Value = the module-level import line.
+_FORCING_TEMPLATE_SNIFF_PROBES: tuple[tuple[str, str], ...] = (
+    ("packages/common/forcing_ts_new_reader.py", "from .forcing_ts_render import ForcingTemplatePair"),
+    ("packages/common/forcing_ts_new_module_form.py", "from . import forcing_ts_render"),
+    ("services/display_api/forcing_new_view.py", "from packages.common.forcing_ts_render import ForcingTemplatePair"),
+    ("apps/api/forcing_new_endpoint.py", "import packages.common.forcing_ts_render"),
+    ("workers/forcing_new/reader.py", "from packages.common import forcing_ts_render"),
+    ("scripts/forcing_new_probe.py", "import packages.common.forcing_ts_render as render"),
+    ("db/forcing_new_seed.py", "from packages.common.forcing_ts_render import (\n    ForcingTemplatePair,\n)"),
+)
+
+
+def _forcing_sniff_repo(tmp_path: Path) -> Path:
+    # `_test_target_exists` drops every target missing under `repo_root`, so
+    # the oracle files are stubbed; nothing else is, so the only targets that
+    # can survive are the three this route (or a rule) emits.
+    for oracle in FORCING_SQL_SHAPE_ORACLE_TESTS:
+        stub = tmp_path / oracle
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("", encoding="utf-8")
+    return tmp_path
+
+
+def _write_module(root: Path, relative: str, source: str | bytes) -> None:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(source, bytes):
+        target.write_bytes(source)
+    else:
+        target.write_text(source, encoding="utf-8")
+
+
+def test_forcing_template_sniff_roots_equal_the_registry_discovery_set() -> None:
+    from tests import forcing_ts_template_registry
+
+    assert _prod_module.FORCING_TEMPLATE_DISCOVERY_ROOTS == forcing_ts_template_registry.DISCOVERY_ROOTS
+    assert _prod_module.FORCING_TEMPLATE_PRUNED_DIRECTORIES == forcing_ts_template_registry._PRUNED_DIRECTORIES
+    # Every root has a probe below, so a seventh root without one reds here.
+    assert {path.split("/", 1)[0] for path, _ in _FORCING_TEMPLATE_SNIFF_PROBES} == set(
+        forcing_ts_template_registry.DISCOVERY_ROOTS
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "import_line"), _FORCING_TEMPLATE_SNIFF_PROBES, ids=[path for path, _ in _FORCING_TEMPLATE_SNIFF_PROBES]
+)
+def test_a_new_module_importing_the_forcing_renderer_selects_the_shape_oracles(
+    tmp_path: Path, path: str, import_line: str
+) -> None:
+    root = _forcing_sniff_repo(tmp_path)
+    _write_module(root, path, f"{import_line}\n\nPAIR = None\n")
+
+    assert set(FORCING_SQL_SHAPE_ORACLE_TESTS) <= set(select_tests([path], repo_root=root))
+
+
+@pytest.mark.parametrize("path", [path for path, _ in _FORCING_TEMPLATE_SNIFF_PROBES])
+def test_the_same_new_module_without_the_renderer_import_selects_no_shape_oracle(tmp_path: Path, path: str) -> None:
+    # Negative control on the IDENTICAL paths: no rule glob or derivation hands
+    # these paths the oracles, so the import is what the positive case proves.
+    root = _forcing_sniff_repo(tmp_path)
+    _write_module(root, path, "import json\nfrom packages.common import forcing_store_routing\n")
+
+    assert set(FORCING_SQL_SHAPE_ORACLE_TESTS).isdisjoint(select_tests([path], repo_root=root))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/frontend/node_modules/pkg/forcing_vendored.py",
+        "packages/build/forcing_generated.py",
+        "docs/forcing_not_a_root.py",
+    ],
+)
+def test_pruned_or_out_of_root_modules_do_not_trigger_the_forcing_sniff(tmp_path: Path, path: str) -> None:
+    root = _forcing_sniff_repo(tmp_path)
+    _write_module(root, path, "from packages.common.forcing_ts_render import ForcingTemplatePair\n")
+
+    assert set(FORCING_SQL_SHAPE_ORACLE_TESTS).isdisjoint(select_tests([path], repo_root=root))
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        ("packages/common/forcing_deleted.py", None),
+        ("services/forcing_unparsable.py", "from packages.common.forcing_ts_render import (\n"),
+        ("workers/forcing_not_utf8.py", b"from packages.common import forcing_ts_render\n# \xff\xfe\n"),
+        ("scripts/forcing_nul_byte.py", b"from packages.common import forcing_ts_render\n\x00\n"),
+        ("apps/forcing_is_a_directory.py", "DIRECTORY"),
+    ],
+)
+def test_unreadable_changed_paths_fall_through_the_forcing_sniff(
+    tmp_path: Path, path: str, source: str | bytes | None
+) -> None:
+    # A deletion/rename cannot construct a pair, and an undecodable or
+    # unparsable source is the census's fail-closed business, not the
+    # selector's: all of these return normally and add nothing.
+    root = _forcing_sniff_repo(tmp_path)
+    if source == "DIRECTORY":
+        (root / path).mkdir(parents=True)
+    elif source is not None:
+        _write_module(root, path, source)
+
+    assert set(FORCING_SQL_SHAPE_ORACLE_TESTS).isdisjoint(select_tests([path], repo_root=root))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def build():\n    from packages.common.forcing_ts_render import ForcingTemplatePair\n",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from packages.common import forcing_ts_render\n",
+        "try:\n    import packages.common.forcing_ts_render\nexcept ImportError:\n    pass\n",
+    ],
+    ids=["function-body", "if-nested", "try-nested"],
+)
+def test_the_forcing_sniff_documented_blind_spot_stays_blind(tmp_path: Path, source: str) -> None:
+    # PINNED LIMIT, not a wish: `_top_level_imported_module_names` walks
+    # `tree.body` only (#1561), so these spellings do not route. The registry
+    # sweep fails closed on a function-scope pair, so they red on master. If
+    # the helper is ever widened, this pin moves on purpose with its comment.
+    root = _forcing_sniff_repo(tmp_path)
+    _write_module(root, "services/forcing_blind_spot.py", source)
+
+    assert set(FORCING_SQL_SHAPE_ORACLE_TESTS).isdisjoint(
+        select_tests(["services/forcing_blind_spot.py"], repo_root=root)
+    )

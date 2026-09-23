@@ -39,7 +39,7 @@ Domain packs (profile): none selected — no forecast, geometry, DB, SHUD or Slu
 
 Non-goals:
 - No production runtime change; no CI workflow change; no edit to `FILE_JOURNAL_READ_STATE_TESTS` or `PRECIP_SURFACE_TESTS`.
-- `tests/test_retention_extra_roots.py` scheduler_runtime gap (#2260 sibling) — known limit.
+- `tests/test_retention_extra_roots.py` scheduler_runtime gap (#2260 sibling) — known limit. **Closed by #2316** (change `close-selector-reader-routing-gaps`).
 - Replacing bare literals in `tests/test_node27_raw_retention.py` (#2191 out of scope).
 - `only_when_any_changed` honouring on `PATH_TEST_RULES` (#2198 option a) and type split (option c).
 - QHH `qhh_bootstrap_partition_oracle` sibling freeze (#2183 out of scope).
@@ -90,7 +90,7 @@ Non-goals:
 
 ## Known limits
 
-- `tests/test_retention_extra_roots.py` is still not selected by a `scheduler_runtime.py`-only diff (#2260 sibling leg; issue boundary).
+- `tests/test_retention_extra_roots.py` is still not selected by a `scheduler_runtime.py`-only diff (#2260 sibling leg; issue boundary). **Closed by #2316** (change `close-selector-reader-routing-gaps`): the same stop rule is extended at its site with the suite.
 - #2183: no real partition addition ships; the ledger is proved only by pure-checker constructive proofs (injected text/lists/readers) until the first genuine addition uses it.
 - The frozen oracle `tests/fixtures/basins_registry_partition_oracle.json` itself still routes to nothing in the PR lane (pre-existing; it is not meant to be edited).
 - The QHH partition freeze (#1948) has the same no-addition shape and is untouched.

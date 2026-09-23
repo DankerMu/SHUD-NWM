@@ -94,3 +94,57 @@ For every changed `.py` path under the forcing discovery roots (`packages`, `wor
 
 - **WHEN** the changed path under a discovery root does not exist on disk
 - **THEN** `select_tests` returns without raising
+
+## MODIFIED Requirements
+
+### Requirement: the scheduler refresh env template MUST select its content-asserting owner suite
+
+`infra/env/compute.scheduler-provider-refresh.env.example` is read by path, and its content is asserted, by two suites:
+
+- `tests/test_scheduler_refresh_deployment_contract.py`. It asserts that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. That content assertion moved there from the retired `tests/test_scheduler_file_provider_refresh.py` when #1101 partitioned the monolith.
+- `tests/test_node22_refresh_timer_health.py` (#2146). It pins the receipt-root line.
+
+`scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` for the template, with neither `stop_on_match` nor `only_when_any_changed`, targeting those owner suites. The rule SHALL NOT be added to the `#1684` rollout-producer group, whose target is the static deployment contract suite and which does not read this template.
+
+Rule matches accumulate. The `infra/env/**` rule stays in place, and the template is a production-topology scanner input. The template's selection SHALL therefore be exactly:
+- the owner suites;
+- `tests/test_two_node_docker_runtime.py`;
+- the production-topology hard-gate node.
+
+`tests/test_select_ci_tests.py` SHALL pin that selection as an exact set rather than by membership. The sibling `infra/env/*.example` templates SHALL keep their owner selections and gain only the hard-gate node.
+
+#### Scenario: a refresh env template diff selects its owner suite
+
+- **WHEN** the changed paths are exactly `infra/env/compute.scheduler-provider-refresh.env.example`
+- **THEN** `select_tests` emits exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_node22_refresh_timer_health.py", "tests/test_scheduler_refresh_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+
+#### Scenario: sibling env templates keep their existing selections
+
+- **WHEN** the changed paths are exactly `infra/env/compute.example`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+- **WHEN** the changed paths are exactly `infra/env/compute.scheduler-dbfree.env.example`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_env_templates.py", "tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+- **WHEN** the changed paths are exactly `infra/env/display.example`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_two_node_docker_runtime.py"]`
+
+### Requirement: the retention copyback mutex load-bearing modules MUST select the mutex suite
+
+The retention copyback mutex is pinned by the two partitions `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`. They came from the #2259 split of the former `tests/test_retention_copyback_mutex.py`. The mutex has two load-bearing modules:
+- `services/orchestrator/scheduler_runtime.py` holds its wiring: the scheduler call site that names the shared copyback root.
+- `packages/common/copyback_guard.py` holds its lock semantics.
+
+`scripts/select_ci_tests.py` SHALL select both partitions for a diff to either module:
+- For `scheduler_runtime.py`, the partitions SHALL be added at the `stop_on_match` file-journal rule site that matches the path, without editing the shared `FILE_JOURNAL_READ_STATE_TESTS` constant. That rule site also carries `tests/test_retention_extra_roots.py` (#2316).
+- For `copyback_guard.py`, a path-exact rule without `stop_on_match` or `only_when_any_changed` SHALL add the partitions, so that the module's other selections accumulate unchanged.
+
+The selections for `services/orchestrator/cli.py`, `services/orchestrator/__init__.py`, `services/orchestrator/retention.py` and `tests/retention_test_helpers.py` SHALL keep selecting both partitions. The exact selection of each module is pinned in `tests/test_select_ci_tests.py`, not here. The 22/23-entry exact lists this requirement used to carry went stale when later at-site riders (#1186, #1905/#2402, #2259) grew the selection.
+
+#### Scenario: a scheduler runtime diff selects the mutex suite
+
+- **WHEN** the changed paths are exactly `services/orchestrator/scheduler_runtime.py`
+- **THEN** the selection contains `tests/test_retention_copyback_mutex_budget.py`, `tests/test_retention_copyback_mutex_protocol.py` and `tests/test_retention_extra_roots.py`, and does not contain `tests/test_state_clone.py`
+
+#### Scenario: a copyback guard diff selects the mutex suite without losing its owners
+
+- **WHEN** the changed paths are exactly `packages/common/copyback_guard.py`
+- **THEN** the selection contains `tests/test_copyback_guard.py`, `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`, and is identical to its selection before this change

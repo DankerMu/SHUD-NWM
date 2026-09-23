@@ -366,6 +366,8 @@ at `4fe059f7` and the covering mutants are recorded there.
   extended at its site with this suite, and the exact 23-path selection is
   pinned. The `tests/test_retention_extra_roots.py` sibling gap stays **open**
   (outside #2260's boundary).
+  **Sibling closed by #2316** (change `close-selector-reader-routing-gaps`):
+  the same stop rule now also selects `tests/test_retention_extra_roots.py`.
 - Issue #2238's sixth acceptance criterion (correct #2035's "Unchanged
   downstream consumers" wording for `retention.py`) is **already satisfied at
   base `6fdb2015`** by that change's own post-ceiling sweep. This change neither
