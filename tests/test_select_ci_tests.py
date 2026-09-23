@@ -669,7 +669,10 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # The write-site invariant joins because runtime.py lives under workers/**
     # (#1656 supplemental routing), the river-segment write-surface scan joins
     # by the same root (#2185), and so does the path-canonicalisation family
-    # guard (#1627).
+    # guard (#1627). #1908 added the production-closure Slurm validation suite to
+    # the `workers/shud_runtime/**` rule: that suite asserts cli.py's manifest
+    # safety gate directly, because the submission-scoped task run ids exist to
+    # satisfy that gate unchanged.
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
     assert selected == sorted(
@@ -677,6 +680,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             "tests/test_direct_grid_e2e.py",
             "tests/test_e2e.py",
             WRITE_SURFACE_SCAN_PATH,
+            "tests/test_production_slurm_validation.py",
             "tests/test_runtime_ic_header.py",
             "tests/test_runtime_mode.py",
             "tests/test_shud_runtime.py",

@@ -2458,6 +2458,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_shud_runtime.py",
             "tests/test_runtime_mode.py",
             "tests/test_runtime_ic_header.py",
+            # #1908: the production-closure live-submit lane makes its task run
+            # ids submission-scoped precisely so cli.py's manifest safety gate
+            # stays unchanged; that suite asserts the gate directly.
+            "tests/test_production_slurm_validation.py",
         ),
     ),
     PathTestRule(

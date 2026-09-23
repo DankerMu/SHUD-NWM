@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,14 +13,113 @@ from packages.common import safe_fs
 from services.production_closure import slurm_validation
 from services.slurm_gateway.real_backend import SLURM_STATE_MAP
 from tests.slurm_template_helpers import _join_line_continuations
+from workers.shud_runtime import cli as shud_runtime_cli
 
 # Spec layout: workspace/{run_id}_cycle/array_logs/{index-stem}. Independent of
 # production_closure helpers so regressions cannot pass by construction.
+# The dry-run/fake lane keeps the stable stem; the live-submit lane's index is
+# submission-scoped (`manifest_index_<token>`), so its stem is rederived below
+# from the index the run actually wrote -- never loosened to a prefix match.
 _PRODUCTION_ARRAY_INDEX_STEM = "manifest_index"
 
 
-def _neutral_array_log_dir(workspace_root: Path, run_id: str) -> Path:
-    return workspace_root / f"{run_id}_cycle" / "array_logs" / _PRODUCTION_ARRAY_INDEX_STEM
+def _neutral_array_log_dir(workspace_root: Path, run_id: str, *, index_stem: str | None = None) -> Path:
+    return workspace_root / f"{run_id}_cycle" / "array_logs" / (index_stem or _PRODUCTION_ARRAY_INDEX_STEM)
+
+
+def _live_index_paths(workspace_root: Path, run_id: str) -> list[Path]:
+    input_dir = workspace_root / "runs" / run_id / "input"
+    if not input_dir.is_dir():
+        return []
+    return sorted(input_dir.glob(f"{_PRODUCTION_ARRAY_INDEX_STEM}_*.json"))
+
+
+def _live_index_path(workspace_root: Path, run_id: str) -> Path:
+    """The single submission-scoped index this live submit wrote."""
+
+    indexes = _live_index_paths(workspace_root, run_id)
+    assert len(indexes) == 1, f"expected exactly one submission index under runs/{run_id}/input, found {indexes}"
+    return indexes[0]
+
+
+def _live_array_log_dir(workspace_root: Path, run_id: str) -> Path:
+    """The array log dir of the live submission, keyed by the index it wrote."""
+
+    return _neutral_array_log_dir(workspace_root, run_id, index_stem=_live_index_path(workspace_root, run_id).stem)
+
+
+def _cleaned_index_stem(accounting: dict) -> str:
+    """The scoped index stem a failed submission's own cleanup targeted.
+
+    Used where cleanup already removed the index, so it can no longer be
+    globbed: the recorded cleanup list is the submission's own write record.
+    """
+
+    cleaned = [Path(item["path"]) for item in accounting["shared_runtime_input_cleanup"]]
+    indexes = [path for path in cleaned if path.name.startswith(f"{_PRODUCTION_ARRAY_INDEX_STEM}_")]
+    assert len(indexes) == 1, f"expected exactly one scoped index in the cleanup record, found {cleaned}"
+    return indexes[0].stem
+
+
+def _live_runtime_manifest_paths(workspace_root: Path, run_id: str) -> list[Path]:
+    """Every submission-scoped runtime manifest written for a configured run_id.
+
+    The run directory name is pinned to `<run_id>_<UTC token>_<slot>` so a stale
+    manifest at the old stable path is not mistaken for one of this lane's.
+    """
+
+    runs_dir = workspace_root / "runs"
+    if not runs_dir.is_dir():
+        return []
+    scoped = re.compile(rf"^{re.escape(run_id)}_\d{{8}}T\d{{12}}(?:_\d+)?_(?:success|controlled_fail)$")
+    return sorted(
+        path for path in runs_dir.glob("*/input/manifest.json") if scoped.fullmatch(path.parent.parent.name)
+    )
+
+
+def _hook_index_claim(monkeypatch, place) -> dict[str, Path]:
+    """Run ``place(index_path, entries)`` right after the live submit claims its token.
+
+    Submission-scoped paths do not exist before the claim, so hostile fixtures
+    that used to be planted at fixed paths are planted here instead -- derived
+    from the index the run actually wrote, not from a predicted name.
+    """
+
+    original = slurm_validation.write_bytes_no_follow_exclusive
+    planted: dict[str, Path] = {}
+
+    def hooked(path: Path, content: bytes, *, containment_root: Path | None = None) -> Path:
+        result = original(path, content, containment_root=containment_root)
+        if path.name.startswith(f"{_PRODUCTION_ARRAY_INDEX_STEM}_") and "index" not in planted:
+            planted["index"] = path
+            planted.update(place(path, json.loads(content.decode("utf-8"))) or {})
+        return result
+
+    monkeypatch.setattr(slurm_validation, "write_bytes_no_follow_exclusive", hooked)
+    return planted
+
+
+def _task_manifest_path(entries: list[dict], task_id: int) -> Path:
+    return Path(next(entry for entry in entries if entry["task_id"] == task_id)["manifest_path"])
+
+
+def _symlink_task_run_dir(entries: list[dict], *, task_id: int, target: Path) -> dict[str, Path]:
+    run_dir = _task_manifest_path(entries, task_id).parent.parent
+    run_dir.symlink_to(target, target_is_directory=True)
+    return {"run_dir": run_dir}
+
+
+def _plant_hostile_array_log_leaf(monkeypatch, workspace_root: Path, run_id: str, place) -> dict[str, Path]:
+    """Plant a hostile entry at the array log leaf the moment its name exists."""
+
+    def _place(index_path: Path, entries: list[dict]) -> dict[str, Path]:
+        del entries
+        leaf = _neutral_array_log_dir(workspace_root, run_id, index_stem=index_path.stem)
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        place(leaf)
+        return {"leaf": leaf}
+
+    return _hook_index_claim(monkeypatch, _place)
 
 
 def _rendered_array_log_dir(rendered: str) -> Path:
@@ -255,8 +356,8 @@ def test_validate_slurm_blocked_submit_keeps_manifests_inside_evidence_lane(
     assert summary["status"] == "blocked"
     assert summary["manifest_index_path"] == str(lane_dir / "manifest_index.json")
     assert all(str(lane_dir) in path for path in summary["runtime_manifest_paths"])
-    assert not (workspace_root / "runs" / "blockedsubmit" / "input" / "manifest_index.json").exists()
-    assert not (workspace_root / "runs" / "blockedsubmit_success" / "input" / "manifest.json").exists()
+    assert _live_index_paths(workspace_root, "blockedsubmit") == []
+    assert _live_runtime_manifest_paths(workspace_root, "blockedsubmit") == []
     _assert_no_shared_array_log_dir(workspace_root, "blockedsubmit")
 
 
@@ -280,8 +381,8 @@ def test_validate_slurm_preflight_only_does_not_publish_planned_success(
     lane_dir = tmp_path / "artifacts" / "preflightonly" / "slurm"
     assert summary["status"] == "ready"
     assert all(str(lane_dir) in path for path in summary["runtime_manifest_paths"])
-    assert not (Path.cwd() / "workspace" / "runs" / "preflightonly_success" / "input" / "manifest.json").exists()
-    assert not (Path.cwd() / "workspace" / "runs" / "preflightonly" / "input" / "manifest_index.json").exists()
+    assert _live_index_paths(Path.cwd() / "workspace", "preflightonly") == []
+    assert _live_runtime_manifest_paths(Path.cwd() / "workspace", "preflightonly") == []
 
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
     assert partial["status"] == "preflight_only"
@@ -557,7 +658,7 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
             script_path = Path(command[-1])
             rendered = script_path.read_text(encoding="utf-8")
             log_dir = _rendered_array_log_dir(rendered)
-            expected_log_dir = _neutral_array_log_dir(workspace_root, "submit147")
+            expected_log_dir = _live_array_log_dir(workspace_root, "submit147")
             assert log_dir == expected_log_dir
             assert log_dir.is_dir()
             (log_dir / "7777_0.out").write_text("task 0 stdout\n", encoding="utf-8")
@@ -627,9 +728,10 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     assert {record["task_id"] for record in accounting["records"] if record["task_id"] is not None} == {0, 1}
     lane_dir = tmp_path / "artifacts" / "submit147" / "slurm"
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
-    workspace_manifest_index = tmp_path / "shared-workspace" / "runs" / "submit147" / "input" / "manifest_index.json"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, "submit147")
-    assert workspace_manifest_index.exists()
+    workspace_manifest_index = _live_index_path(workspace_root, "submit147")
+    expected_log_dir = _live_array_log_dir(workspace_root, "submit147")
+    assert workspace_manifest_index.parent == workspace_root / "runs" / "submit147" / "input"
+    assert summary["manifest_index_path"] == str(workspace_manifest_index)
     assert f"export NHMS_MANIFEST_INDEX={workspace_manifest_index}" in rendered
     assert _rendered_array_log_dir(rendered) == expected_log_dir
     assert expected_log_dir.is_dir()
@@ -667,6 +769,268 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     assert "9002" not in evidence_text
 
 
+class _FrozenClock:
+    """Pin the submission token so the collision-retry branch is reachable."""
+
+    frozen = datetime(2026, 5, 16, 12, 0, 0, 123456, tzinfo=UTC)
+    token = "20260516T120000123456"
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.frozen if tz is None else cls.frozen.astimezone(tz)
+
+
+def _live_submit(
+    monkeypatch,
+    *,
+    evidence_root: Path,
+    workspace_root: Path,
+    run_id: str,
+    force: bool = False,
+    sbatch_returncode: int = 0,
+) -> int:
+    """One `validate-slurm --submit` run against a shared workspace, sbatch stubbed."""
+
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            if sbatch_returncode:
+                return subprocess.CompletedProcess(command, sbatch_returncode, stdout="", stderr="invalid account")
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    argv = [
+        "validate-slurm",
+        "--evidence-root",
+        str(evidence_root),
+        "--run-id",
+        run_id,
+        "--submit",
+        "--poll-interval-seconds",
+        "1",
+        "--poll-timeout-seconds",
+        "0",
+    ]
+    if force:
+        argv.append("--force")
+    return slurm_validation.main(argv)
+
+
+def _index_entries(index_path: Path) -> list[dict]:
+    return json.loads(index_path.read_text(encoding="utf-8"))
+
+
+def _resolved_worker_manifest(index_path: Path, task_id: int) -> Path:
+    """What the array worker's unmodified safety gate resolves for one task."""
+
+    return Path(shud_runtime_cli._resolve_execute_manifest(None, str(index_path), task_id))
+
+
+def test_two_live_submissions_with_the_same_run_id_stay_disjoint(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#1908 task 1.3: two live submits for one configured run_id -- the second
+    with --force -- own disjoint index paths, task run ids, runtime manifest
+    paths and array log dirs, and each submitted task resolves its own manifest."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "dualsubmit"
+    lane_dir = evidence_root / run_id / "slurm"
+    # The rendered sbatch script exports WORKSPACE_ROOT before invoking the
+    # worker, so pin it here too: the gate resolves against it, not the cwd.
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+
+    assert _live_submit(monkeypatch, evidence_root=evidence_root, workspace_root=workspace_root, run_id=run_id) == 0
+    capsys.readouterr()
+    index_a = _live_index_path(workspace_root, run_id)
+    entries_a = _index_entries(index_a)
+    manifests_a = [Path(entry["manifest_path"]) for entry in entries_a]
+    log_dir_a = _live_array_log_dir(workspace_root, run_id)
+    partial_a = json.loads((lane_dir / "array_partial_success.json").read_text(encoding="utf-8"))
+    qc_a = json.loads((lane_dir / "qc_blocking.json").read_text(encoding="utf-8"))
+    frozen_a = {path: path.read_bytes() for path in [index_a, *manifests_a]}
+
+    assert (
+        _live_submit(
+            monkeypatch,
+            evidence_root=evidence_root,
+            workspace_root=workspace_root,
+            run_id=run_id,
+            force=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    indexes = _live_index_paths(workspace_root, run_id)
+    assert len(indexes) == 2
+    index_b = next(path for path in indexes if path != index_a)
+    entries_b = _index_entries(index_b)
+    manifests_b = [Path(entry["manifest_path"]) for entry in entries_b]
+    log_dir_b = _neutral_array_log_dir(workspace_root, run_id, index_stem=index_b.stem)
+    partial_b = json.loads((lane_dir / "array_partial_success.json").read_text(encoding="utf-8"))
+    qc_b = json.loads((lane_dir / "qc_blocking.json").read_text(encoding="utf-8"))
+
+    run_ids_a = [entry["run_id"] for entry in entries_a]
+    run_ids_b = [entry["run_id"] for entry in entries_b]
+    assert set(run_ids_a).isdisjoint(run_ids_b)
+    assert set(manifests_a).isdisjoint(manifests_b)
+    assert log_dir_a != log_dir_b
+    assert log_dir_a.is_dir() and log_dir_b.is_dir()
+    assert all(path.exists() for path in [*manifests_a, *manifests_b])
+
+    # B must not have disturbed a single byte A's queued tasks are about to read.
+    for path, content in frozen_a.items():
+        assert path.read_bytes() == content
+
+    # Each submitted task resolves the manifest its own submission wrote, through
+    # workers/shud_runtime/cli.py's unmodified index safety gate.
+    for index_path, entries in ((index_a, entries_a), (index_b, entries_b)):
+        for entry in entries:
+            resolved = _resolved_worker_manifest(index_path, entry["task_id"])
+            assert resolved == Path(entry["manifest_path"])
+            assert resolved.parent.parent.name == entry["run_id"]
+            assert json.loads(resolved.read_text(encoding="utf-8"))["run_id"] == entry["run_id"]
+
+    # Evidence names the run ids this submission wrote, never a run_id formula.
+    assert [task["run_id"] for task in partial_a["tasks"]] == run_ids_a
+    assert [task["run_id"] for task in partial_b["tasks"]] == run_ids_b
+    assert qc_a["malformed_task"]["run_id"] == run_ids_a[1]
+    assert qc_b["malformed_task"]["run_id"] == run_ids_b[1]
+    assert qc_a["sibling_success"]["run_id"] == run_ids_a[0]
+    assert qc_b["sibling_success"]["run_id"] == run_ids_b[0]
+
+
+def test_failed_second_submission_cleanup_leaves_the_first_submission_intact(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#1908 task 1.4: B's sbatch fails; B's cleanup removes only what B wrote."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "cleanupdisjoint"
+    lane_dir = evidence_root / run_id / "slurm"
+
+    assert _live_submit(monkeypatch, evidence_root=evidence_root, workspace_root=workspace_root, run_id=run_id) == 0
+    capsys.readouterr()
+    index_a = _live_index_path(workspace_root, run_id)
+    manifests_a = _live_runtime_manifest_paths(workspace_root, run_id)
+    frozen_a = {path: path.read_bytes() for path in [index_a, *manifests_a]}
+
+    assert (
+        _live_submit(
+            monkeypatch,
+            evidence_root=evidence_root,
+            workspace_root=workspace_root,
+            run_id=run_id,
+            force=True,
+            sbatch_returncode=1,
+        )
+        == 0
+    )
+    summary_b = json.loads(capsys.readouterr().out)
+    assert summary_b["status"] == "blocked"
+    accounting_b = json.loads((lane_dir / "slurm_accounting.json").read_text(encoding="utf-8"))
+    assert accounting_b["shared_runtime_inputs_cleaned"] is True
+
+    cleaned = [Path(item["path"]) for item in accounting_b["shared_runtime_input_cleanup"]]
+    assert {item["status"] for item in accounting_b["shared_runtime_input_cleanup"]} == {"absent"}
+    assert len(cleaned) == 3
+    assert all(not path.exists() for path in cleaned)
+    assert index_a not in cleaned
+    assert set(manifests_a).isdisjoint(cleaned)
+
+    for path, content in frozen_a.items():
+        assert path.read_bytes() == content
+    assert _live_index_paths(workspace_root, run_id) == [index_a]
+    assert _live_runtime_manifest_paths(workspace_root, run_id) == manifests_a
+
+
+def test_live_submit_retries_a_colliding_submission_token(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#1908 task 1.1: the token is claimed by exclusive create with a bounded
+    retry, so a same-microsecond collision still yields disjoint submissions."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "tokencollision"
+    monkeypatch.setattr(slurm_validation, "datetime", _FrozenClock)
+
+    assert _live_submit(monkeypatch, evidence_root=evidence_root, workspace_root=workspace_root, run_id=run_id) == 0
+    capsys.readouterr()
+    index_a = _live_index_path(workspace_root, run_id)
+    assert index_a.name == f"manifest_index_{_FrozenClock.token}.json"
+
+    assert (
+        _live_submit(
+            monkeypatch,
+            evidence_root=evidence_root,
+            workspace_root=workspace_root,
+            run_id=run_id,
+            force=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    index_b = next(path for path in _live_index_paths(workspace_root, run_id) if path != index_a)
+    assert index_b.name == f"manifest_index_{_FrozenClock.token}_1.json"
+    assert set(entry["run_id"] for entry in _index_entries(index_a)).isdisjoint(
+        entry["run_id"] for entry in _index_entries(index_b)
+    )
+
+
+def test_live_submit_fails_closed_when_every_submission_token_is_taken(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#1908 task 1.1: the retry is bounded and fails closed, never reusing a claim."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "tokenexhausted"
+    monkeypatch.setattr(slurm_validation, "datetime", _FrozenClock)
+
+    assert _live_submit(monkeypatch, evidence_root=evidence_root, workspace_root=workspace_root, run_id=run_id) == 0
+    capsys.readouterr()
+    input_dir = workspace_root / "runs" / run_id / "input"
+    for attempt in range(1, slurm_validation.MAX_SUBMISSION_TOKEN_ATTEMPTS):
+        (input_dir / f"manifest_index_{_FrozenClock.token}_{attempt}.json").write_text("[]\n", encoding="utf-8")
+
+    try:
+        exit_code = _live_submit(
+            monkeypatch,
+            evidence_root=evidence_root,
+            workspace_root=workspace_root,
+            run_id=run_id,
+            force=True,
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 1
+    assert "PRODUCTION_SLURM_SUBMISSION_TOKEN_EXHAUSTED" in capsys.readouterr().err
+    assert len(_live_index_paths(workspace_root, run_id)) == slurm_validation.MAX_SUBMISSION_TOKEN_ATTEMPTS
+
+
 def test_validate_slurm_submit_blocks_when_shared_logs_are_missing(
     tmp_path: Path,
     monkeypatch,
@@ -679,14 +1043,12 @@ def test_validate_slurm_submit_blocks_when_shared_logs_are_missing(
     workspace_root = tmp_path / "shared-workspace"
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
-    expected_log_dir = _neutral_array_log_dir(workspace_root, "missinglogs")
-
     def fake_run(command, **kwargs):
         del kwargs
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == expected_log_dir
+            assert log_dir == _live_array_log_dir(workspace_root, "missinglogs")
             assert log_dir.is_dir()
             return subprocess.CompletedProcess(command, 0, stdout="6677\n", stderr="")
         if program == "sacct":
@@ -731,6 +1093,7 @@ def test_validate_slurm_submit_blocks_when_shared_logs_are_missing(
         if blocker["error_code"] == "SLURM_ARRAY_TASK_LOG_MISSING"
     }
     assert missing_paths
+    expected_log_dir = _live_array_log_dir(workspace_root, "missinglogs")
     assert all(path.parent == expected_log_dir for path in missing_paths)
     lane_dir = tmp_path / "artifacts" / "missinglogs" / "slurm"
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
@@ -763,7 +1126,7 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_marker_missing(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "missingmarker")
+            assert log_dir == _live_array_log_dir(workspace_root, "missingmarker")
             assert log_dir.is_dir()
             for task_id in (0, 1):
                 (log_dir / f"7788_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
@@ -806,7 +1169,7 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_marker_missing(
         "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING"
     ]
     lane_dir = tmp_path / "artifacts" / "missingmarker" / "slurm"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, "missingmarker")
+    expected_log_dir = _live_array_log_dir(workspace_root, "missingmarker")
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
     assert _rendered_array_log_dir(rendered) == expected_log_dir
     partial = json.loads((lane_dir / "array_partial_success.json").read_text())
@@ -838,13 +1201,16 @@ def test_validate_slurm_shared_log_dir_refuses_symlink_swap_before_mkdir_without
     original_ensure = safe_fs.ensure_directory_no_follow
     swapped = False
 
-    expected_log_dir = _neutral_array_log_dir(workspace_root, run_id)
-    cycle_root = expected_log_dir.parent.parent
+    cycle_root = workspace_root / f"{run_id}_cycle"
+    array_logs_root = cycle_root / "array_logs"
 
     def swap_run_workspace_before_log_dir_create(path: Path, *, containment_root: Path | None = None) -> Path:
         nonlocal swapped
-        if path == expected_log_dir and not swapped:
+        # The leaf is the submission-scoped index stem, so match the run's own
+        # request for it rather than a name predicted before the token exists.
+        if path.parent == array_logs_root and not swapped:
             swapped = True
+            assert path == _live_array_log_dir(workspace_root, run_id)
             cycle_root.symlink_to(external, target_is_directory=True)
         return original_ensure(path, containment_root=containment_root)
 
@@ -904,7 +1270,7 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_signature_missing(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "missingsignature")
+            assert log_dir == _live_array_log_dir(workspace_root, "missingsignature")
             assert log_dir.is_dir()
             for task_id in (0, 1):
                 (log_dir / f"7799_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
@@ -977,7 +1343,7 @@ def test_validate_slurm_submit_blocks_symlinked_log_without_touching_target(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "symlinklog")
+            assert log_dir == _live_array_log_dir(workspace_root, "symlinklog")
             assert log_dir.is_dir()
             (log_dir / "7811_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7811_0.err").write_text("task 0 stderr\n", encoding="utf-8")
@@ -1048,7 +1414,7 @@ def test_validate_slurm_submit_blocks_fifo_log_without_hanging(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "fifolog")
+            assert log_dir == _live_array_log_dir(workspace_root, "fifolog")
             assert log_dir.is_dir()
             (log_dir / "7814_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7814_0.err").write_text("task 0 stderr\n", encoding="utf-8")
@@ -1144,7 +1510,7 @@ def test_validate_slurm_submit_blocks_log_swapped_to_symlink_after_path_check(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "racedlog")
+            assert log_dir == _live_array_log_dir(workspace_root, "racedlog")
             assert log_dir.is_dir()
             (log_dir / "7813_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7813_0.err").write_text("task 0 stderr\n", encoding="utf-8")
@@ -1223,7 +1589,7 @@ def test_validate_slurm_submit_blocks_log_parent_swapped_to_symlink_after_path_c
         nonlocal swapped
         blocker = original_validate_path(config, path, field=field, task_id=task_id, manifest_index=manifest_index)
         if blocker is None and not swapped and task_id == 1 and field == "task_1_out":
-            log_dir = _neutral_array_log_dir(workspace_root, "parentracedlog")
+            log_dir = _live_array_log_dir(workspace_root, "parentracedlog")
             for child in log_dir.iterdir():
                 child.unlink()
             log_dir.rmdir()
@@ -1246,7 +1612,7 @@ def test_validate_slurm_submit_blocks_log_parent_swapped_to_symlink_after_path_c
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "parentracedlog")
+            assert log_dir == _live_array_log_dir(workspace_root, "parentracedlog")
             assert log_dir.is_dir()
             (log_dir / "7815_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7815_0.err").write_text("task 0 stderr\n", encoding="utf-8")
@@ -1317,7 +1683,7 @@ def test_validate_slurm_submit_blocks_oversized_log(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "oversizedlog")
+            assert log_dir == _live_array_log_dir(workspace_root, "oversizedlog")
             assert log_dir.is_dir()
             (log_dir / "7812_0.out").write_text("task 0 stdout\n", encoding="utf-8")
             (log_dir / "7812_0.err").write_text("task 0 stderr\n", encoding="utf-8")
@@ -1431,9 +1797,15 @@ def test_validate_slurm_submit_blocks_when_task_accounting_rows_never_finish(
     assert partial["status"] == "blocked"
     assert partial["successful_outputs_remain_publishable"] is False
     workspace_root = tmp_path / "shared-workspace"
-    assert not (workspace_root / "runs" / "sbatchfailed" / "input" / "manifest_index.json").exists()
-    assert not (workspace_root / "runs" / "sbatchfailed_success" / "input" / "manifest.json").exists()
-    assert not (workspace_root / "runs" / "sbatchfailed_controlled_fail" / "input" / "manifest.json").exists()
+    # sbatch succeeded here, so no cleanup ran: this submission's scoped inputs
+    # must still be on disk for the queued tasks to read.
+    # (Pre-change these three asserts named run_id "sbatchfailed" and were vacuous.)
+    index_path = _live_index_path(workspace_root, "missingtasks")
+    index_entries = json.loads(index_path.read_text(encoding="utf-8"))
+    assert sorted(Path(entry["manifest_path"]) for entry in index_entries) == _live_runtime_manifest_paths(
+        workspace_root, "missingtasks"
+    )
+    assert all(Path(entry["manifest_path"]).exists() for entry in index_entries)
     assert all(task["publishable"] is False for task in partial["tasks"])
 
 
@@ -1455,7 +1827,7 @@ def test_validate_slurm_submit_blocks_when_controlled_failure_does_not_occur(
         program = Path(command[0]).name
         if program == "sbatch":
             log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
-            assert log_dir == _neutral_array_log_dir(workspace_root, "nofail")
+            assert log_dir == _live_array_log_dir(workspace_root, "nofail")
             assert log_dir.is_dir()
             for task_id in (0, 1):
                 (log_dir / f"9999_{task_id}.out").write_text(f"task {task_id} stdout\n", encoding="utf-8")
@@ -1620,10 +1992,15 @@ def test_validate_slurm_submit_sbatch_failure_writes_blocked_bundle(
     workspace_root = tmp_path / "shared-workspace"
     assert summary["manifest_index_path"] == str(lane_dir / "manifest_index.json")
     assert all(str(lane_dir) in path for path in summary["runtime_manifest_paths"])
-    assert not (workspace_root / "runs" / "sbatchfailed" / "input" / "manifest_index.json").exists()
-    assert not (workspace_root / "runs" / "sbatchfailed_success" / "input" / "manifest.json").exists()
-    assert not (workspace_root / "runs" / "sbatchfailed_controlled_fail" / "input" / "manifest.json").exists()
-    expected_log_dir = _neutral_array_log_dir(workspace_root, "sbatchfailed")
+    assert _live_index_paths(workspace_root, "sbatchfailed") == []
+    assert _live_runtime_manifest_paths(workspace_root, "sbatchfailed") == []
+    # The index itself is gone, so rederive its stem from the submission's own
+    # cleanup record -- which also pins that cleanup targeted the scoped index.
+    expected_log_dir = _neutral_array_log_dir(
+        workspace_root,
+        "sbatchfailed",
+        index_stem=_cleaned_index_stem(accounting),
+    )
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
     assert _rendered_array_log_dir(rendered) == expected_log_dir
     assert expected_log_dir.is_dir()
@@ -1637,9 +2014,12 @@ def test_validate_slurm_submit_refuses_regular_file_neutral_log_dir_without_sbat
 ) -> None:
     workspace_root = tmp_path / "shared-workspace"
     run_id = "filelogdir"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, run_id)
-    expected_log_dir.parent.mkdir(parents=True)
-    expected_log_dir.write_text("not a directory\n", encoding="utf-8")
+    planted = _plant_hostile_array_log_leaf(
+        monkeypatch,
+        workspace_root,
+        run_id,
+        lambda leaf: leaf.write_text("not a directory\n", encoding="utf-8"),
+    )
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -1678,6 +2058,7 @@ def test_validate_slurm_submit_refuses_regular_file_neutral_log_dir_without_sbat
     captured = capsys.readouterr()
     assert "PRODUCTION_SLURM_LOG_DIR_INVALID" in captured.err
     assert "Traceback" not in captured.err
+    expected_log_dir = planted["leaf"]
     assert expected_log_dir.is_file()
     assert expected_log_dir.read_text(encoding="utf-8") == "not a directory\n"
 
@@ -1689,9 +2070,7 @@ def test_validate_slurm_submit_refuses_fifo_neutral_log_dir_without_sbatch(
 ) -> None:
     workspace_root = tmp_path / "shared-workspace"
     run_id = "fifologdir"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, run_id)
-    expected_log_dir.parent.mkdir(parents=True)
-    os.mkfifo(expected_log_dir)
+    planted = _plant_hostile_array_log_leaf(monkeypatch, workspace_root, run_id, os.mkfifo)
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -1730,6 +2109,7 @@ def test_validate_slurm_submit_refuses_fifo_neutral_log_dir_without_sbatch(
     captured = capsys.readouterr()
     assert "PRODUCTION_SLURM_LOG_DIR_INVALID" in captured.err
     assert "Traceback" not in captured.err
+    expected_log_dir = planted["leaf"]
     assert expected_log_dir.exists()
     assert not expected_log_dir.is_dir()
     assert not expected_log_dir.is_symlink()
@@ -1742,13 +2122,16 @@ def test_validate_slurm_submit_refuses_symlink_leaf_neutral_log_dir_without_sbat
 ) -> None:
     workspace_root = tmp_path / "shared-workspace"
     run_id = "symlinkleaflogdir"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, run_id)
     external = tmp_path / "external-leaf-logs"
     external.mkdir()
     sentinel = external / "sentinel.txt"
     sentinel.write_text("do-not-write\n", encoding="utf-8")
-    expected_log_dir.parent.mkdir(parents=True)
-    expected_log_dir.symlink_to(external, target_is_directory=True)
+    planted = _plant_hostile_array_log_leaf(
+        monkeypatch,
+        workspace_root,
+        run_id,
+        lambda leaf: leaf.symlink_to(external, target_is_directory=True),
+    )
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -1787,6 +2170,7 @@ def test_validate_slurm_submit_refuses_symlink_leaf_neutral_log_dir_without_sbat
     captured = capsys.readouterr()
     assert "PRODUCTION_SLURM_LOG_DIR_INVALID" in captured.err
     assert "Traceback" not in captured.err
+    expected_log_dir = planted["leaf"]
     assert expected_log_dir.is_symlink()
     assert sorted(path.name for path in external.iterdir()) == ["sentinel.txt"]
     assert sentinel.read_text(encoding="utf-8") == "do-not-write\n"
@@ -1799,11 +2183,12 @@ def test_validate_slurm_submit_refuses_symlink_ancestor_neutral_log_dir_without_
 ) -> None:
     workspace_root = tmp_path / "shared-workspace"
     run_id = "symlinkancestorlogdir"
-    expected_log_dir = _neutral_array_log_dir(workspace_root, run_id)
-    cycle_root = expected_log_dir.parent.parent
+    # The refusal happens at the symlinked cycle ancestor, before the leaf name
+    # matters, so the leaf below it is named independently of the index stem.
+    cycle_root = workspace_root / f"{run_id}_cycle"
     external = tmp_path / "external-cycle"
-    (external / "array_logs" / expected_log_dir.name).mkdir(parents=True)
-    sentinel = external / "array_logs" / expected_log_dir.name / "sentinel.txt"
+    (external / "array_logs" / "any_leaf").mkdir(parents=True)
+    sentinel = external / "array_logs" / "any_leaf" / "sentinel.txt"
     sentinel.write_text("do-not-write\n", encoding="utf-8")
     workspace_root.mkdir(parents=True)
     cycle_root.symlink_to(external, target_is_directory=True)
@@ -1956,9 +2341,10 @@ def test_validate_slurm_refuses_symlinked_runtime_manifest(monkeypatch, tmp_path
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    run_dir = workspace_root / "runs" / "symlinkmanifest_success"
-    run_dir.parent.mkdir(parents=True)
-    run_dir.symlink_to(outside, target_is_directory=True)
+    planted = _hook_index_claim(
+        monkeypatch,
+        lambda index_path, entries: _symlink_task_run_dir(entries, task_id=0, target=outside),
+    )
 
     try:
         exit_code = slurm_validation.main(
@@ -1976,10 +2362,17 @@ def test_validate_slurm_refuses_symlinked_runtime_manifest(monkeypatch, tmp_path
 
     assert exit_code == 1
     assert not (outside / "input" / "manifest.json").exists()
-    assert run_dir.is_symlink()
+    assert planted["run_dir"].is_symlink()
 
 
-def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_validate_slurm_live_submit_leaves_a_stale_stable_path_runtime_manifest_untouched(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """#1908: live runtime inputs are submission-scoped, so the old stable path
+    is never a collision and never an overwrite target -- not even with --force."""
+
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
@@ -1992,14 +2385,78 @@ def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypat
         del kwargs
         program = Path(command[0]).name
         if program == "sbatch":
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="blocked after manifest write")
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    manifest_path = workspace_root / "runs" / "existingmanifest_success" / "input" / "manifest.json"
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text('{"old": true}\n', encoding="utf-8")
+    stale = workspace_root / "runs" / "existingmanifest_success" / "input" / "manifest.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"old": true}\n', encoding="utf-8")
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "existingmanifest",
+            "--submit",
+            "--force",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert json.loads(stale.read_text(encoding="utf-8")) == {"old": True}
+    scoped = _live_runtime_manifest_paths(workspace_root, "existingmanifest")
+    assert stale not in scoped
+    assert len(scoped) == 2
+    assert summary["manifest_index_path"] == str(_live_index_path(workspace_root, "existingmanifest"))
+
+
+def test_validate_slurm_live_submit_refuses_to_overwrite_a_scoped_runtime_manifest_with_force(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """#1908 task 1.1b: shared live writes are exclusive-create, so a file that
+    appears at a scoped manifest path between the claim and the write survives
+    and the submission refuses -- ``--force`` governs the lane bundle only."""
+
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    sbatch_calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if Path(command[0]).name == "sbatch":
+            sbatch_calls.append(command)
+            raise AssertionError("sbatch must not run when a scoped runtime manifest already exists")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def occupy_scoped_manifest(index_path: Path, entries: list[dict]) -> dict[str, Path]:
+        del index_path
+        manifest_path = _task_manifest_path(entries, 0)
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text('{"other_submission": true}\n', encoding="utf-8")
+        return {"occupied": manifest_path}
+
+    planted = _hook_index_claim(monkeypatch, occupy_scoped_manifest)
 
     try:
         exit_code = slurm_validation.main(
@@ -2008,32 +2465,18 @@ def test_validate_slurm_refuses_existing_runtime_manifest_unless_force(monkeypat
                 "--evidence-root",
                 str(tmp_path / "artifacts"),
                 "--run-id",
-                "existingmanifest",
+                "scopedmanifest",
                 "--submit",
+                "--force",
             ]
         )
     except SystemExit as exc:
         exit_code = int(exc.code or 0)
 
     assert exit_code == 1
+    assert sbatch_calls == []
     assert "PRODUCTION_SLURM_RUNTIME_MANIFEST_EXISTS" in capsys.readouterr().err
-    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"old": True}
-
-    assert (
-        slurm_validation.main(
-            [
-                "validate-slurm",
-                "--evidence-root",
-                str(tmp_path / "artifacts"),
-                "--run-id",
-                "existingmanifest",
-                "--submit",
-                "--force",
-            ]
-        )
-        == 0
-    )
-    assert not manifest_path.exists()
+    assert json.loads(planted["occupied"].read_text(encoding="utf-8")) == {"other_submission": True}
 
 
 def test_slurm_evidence_writer_rejects_lane_parent_symlink_swap_before_write(
@@ -2133,7 +2576,7 @@ def test_validate_slurm_shared_runtime_cleanup_refuses_parent_symlink_swap_witho
 
     def swap_cleanup_parent(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False):
         nonlocal swapped
-        if path.name == "manifest_index.json" and path.parent.name == "input" and not swapped:
+        if path.name.startswith("manifest_index_") and path.parent.name == "input" and not swapped:
             swapped = True
             run_dir = path.parent.parent
             safe_fs.rmtree_no_follow(run_dir, containment_root=workspace_root)
@@ -2180,7 +2623,7 @@ def test_validate_slurm_submit_reports_shared_input_cleanup_failure(
     original_unlink_no_follow = slurm_validation.unlink_no_follow
 
     def fake_unlink(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False):
-        if path.name == "manifest_index.json":
+        if path.name.startswith("manifest_index_"):
             raise OSError("nfs busy")
         return original_unlink_no_follow(path, containment_root=containment_root, missing_ok=missing_ok)
 
@@ -2220,7 +2663,7 @@ def test_validate_slurm_submit_reports_shared_input_cleanup_failure(
     accounting = json.loads((lane_dir / "slurm_accounting.json").read_text())
     assert accounting["shared_runtime_inputs_cleaned"] is False
     assert any(item["status"] == "failed" for item in accounting["shared_runtime_input_cleanup"])
-    assert (tmp_path / "shared-workspace" / "runs" / "cleanupfailed" / "input" / "manifest_index.json").exists()
+    assert _live_index_path(tmp_path / "shared-workspace", "cleanupfailed").exists()
 
 
 def test_validate_slurm_rejects_symlinked_lane_and_evidence_file(monkeypatch, tmp_path: Path) -> None:
