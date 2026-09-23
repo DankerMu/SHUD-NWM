@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change mvt-tile-cache-lifecycle-retention. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: MVT file cache retention prunes exactly three path shapes by wall-clock mtime
 
 `scripts/node27_mvt_cache_retention.py` SHALL be a stdlib-only runner that never opens a database connection. It reads the cache root from `NHMS_MVT_FILE_CACHE_DIR` (the value the display API PROCESS has), expanded with `Path(...).expanduser()` exactly as `services/tiles/mvt.py` does, and the age from `NODE27_MVT_CACHE_RETENTION_DAYS` (default 14; `--retention-days` overrides). The age MUST parse as an integer ≥ 1 from whichever source supplies it; a non-integer or `< 1` value is a preflight blocker, never silently replaced by the default (a deliberate departure from `node27_raw_retention._env_int`). The cache root MUST be absolute, MUST NOT be `/`, MUST exist, MUST NOT be a symlink (checked with `is_symlink()` on the unresolved, `expanduser()`-ed path BEFORE any `resolve()`), and MUST be a directory; enumeration uses that unresolved path. A malformed `--reference-time` (not RFC3339) is a preflight blocker with `field: reference_time`, `reason: not_rfc3339`. `<root>/.locks` MUST itself be a non-symlink directory for the lock lane to run; otherwise that lane alone is skipped with a lane-level `skipped[]` entry and the tile/intermediate lane still runs. The cutoff is `reference_time − retention_days` where `reference_time` is the wall clock at start (UTC) or the RFC3339 `--reference-time` argument; it is deliberately NOT the display watermark, because a pruned tile is regenerated from the database on the next request (a cache miss), whereas the precipitation PNG lane's input is an irreplaceable mirror.
@@ -152,3 +154,12 @@ The runner SHALL write a JSON summary to `--summary-path` on every non-blocked r
 - **WHEN** one cache root holds an aged `precip/IFS/2026060100/*.png` and an aged `ab/<sha>.pbf`
 - **THEN** the raw-retention runner plans only the `precip/...` directory and the MVT cache runner plans only the `.pbf`, and neither lists the other's path under any key
 
+### Requirement: Each MVT cache retention run SHALL leave its own summary file
+
+When no explicit summary path is configured, the MVT cache retention wrapper SHALL write each run's summary to a path no other run uses, creating it exclusively, so that two runs starting within the same second leave two summary files.
+
+#### Scenario: Plan-only then production in the same second
+
+- **GIVEN** two runs of the wrapper whose clock reads the same second
+- **WHEN** both complete
+- **THEN** the log directory contains two distinct summary files, each valid JSON describing its own run

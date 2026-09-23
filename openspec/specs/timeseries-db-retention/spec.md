@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change fix-retention-freed-bytes-compressed. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: freed_bytes accounting MUST be compression-aware
 
 The retention receipt's per-chunk `freed_bytes` SHALL report the total bytes
@@ -507,3 +509,12 @@ The node-27 resource-governance audit SHALL write its receipt unchanged and then
 - **WHEN** every recommendation is below critical
 - **THEN** the process exits 0 and no `RESOURCE_GOVERNANCE_CRITICAL:` line is printed
 
+### Requirement: An explicit dry-run SHALL override the enforce environment toggle
+
+The node-27 time-series retention runner SHALL resolve its mode with this precedence: an explicit `--dry-run` resolves to dry-run whatever `NODE27_TIMESERIES_RETENTION_ENFORCE` says; otherwise an explicit `--enforce` resolves to enforce; otherwise the environment toggle decides as before. A dry-run SHALL NOT call `drop_chunk` and SHALL NOT enter the enforce-only measurement.
+
+#### Scenario: Dry-run with the enforce toggle set drops nothing
+
+- **GIVEN** `NODE27_TIMESERIES_RETENTION_ENFORCE=1` in the environment and at least one chunk eligible for retention
+- **WHEN** the runner is invoked with `--dry-run`
+- **THEN** the receipt records `mode=dry-run` and `outcome=dry-run` and no chunk is dropped
