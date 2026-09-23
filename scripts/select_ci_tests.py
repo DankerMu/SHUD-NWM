@@ -5207,6 +5207,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # recorded-failure delta on the provenance walk -- so a change to
             # this route's except table or its 503 assembly must run it.
             "tests/test_file_journal_read_blocked_consumers.py",
+            # #2308: the ONLY oracle for the cancel side's two-shape invariant --
+            # the gateway error rendered on the response body and left raw in the
+            # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
+            # in one test. The broad `apps/api/**` rule buys the three generic API
+            # suites, none of which call `cancel_run`, and this suite's imports are
+            # function-local, so no importer derivation reaches it either.
+            "tests/test_retry_cancel_consistency.py",
         ),
     ),
     PathTestRule(

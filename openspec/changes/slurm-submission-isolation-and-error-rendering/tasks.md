@@ -210,11 +210,16 @@ $ openspec validate slurm-submission-isolation-and-error-rendering --strict --no
 Change 'slurm-submission-isolation-and-error-rendering' is valid
 ```
 
-**CI routing (0.2)** — no new test module and no new top-level import, so
-`scripts/select_ci_tests.py` is unchanged; the existing `apps/api/**` rule plus
-same-name derivation already selects `tests/test_monitoring_api.py`,
-`tests/test_retry_cancel_consistency.py`, `tests/test_openapi_response_conformance.py`
-and the API-contract suites for this diff (15 files).
+**CI routing (0.2)** — **corrected in review fix pass 1: this claim was wrong.**
+`tests/test_retry_cancel_consistency.py` was in this PR's 1269-test selection only
+because the test file itself was in the diff; measured on the route alone,
+`echo apps/api/routes/pipeline.py | uv run python scripts/select_ci_tests.py`
+returned 11 suites and **not** that one — so a later diff touching only
+`apps/api/routes/pipeline.py` would never have run the sole oracle for #2308's
+cancel-side rendered-on-wire / raw-in-event invariant. The narrow
+`apps/api/routes/pipeline.py` rule in `scripts/select_ci_tests.py` now names it,
+with a routing pin in `tests/test_select_ci_tests.py`
+(`test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle`).
 `.large-file-guard.json` gained `tests/test_retry_cancel_consistency.py` (1620) and
 `tests/test_monitoring_api.py` (3590); `apps/api/routes/pipeline.py` was already excluded.
 
@@ -229,6 +234,49 @@ readers — `_mapping_at(event.details, ("gateway_response", "manifest"))` plus
 `_has_runtime_root_field` — over the persisted event, with the rendered copy asserted as
 the shape those readers could not use; no `submission` event is planted and no end-to-end
 retry is run, since either would be staged rather than observed.
+
+**Wire-shape deviation (3.6 / 4.7):** #2308's acceptance says the existing secrets
+assertions stay green, and they do — but seven response-side `gateway_response.auth.*`
+assertions in `test_unproven_cancel_gateway_response_redacts_response_and_event_details`
+were rewritten into a single `auth == "[redacted]"`, with the structured, key-wise
+assertions moved to the event side. Coverage is preserved on both copies and the wire is
+strictly safer (the whole subtree collapses instead of being walked), but this **changes
+the JSON type of `gateway_response.auth` on the response** from object to string. It is a
+behaviour change of the public body, disclosed here rather than only in the PR body:
+`SlurmGatewayUpstreamError`'s keys are unchanged, so `openapi/nhms.v1.yaml` is untouched,
+and the branch that produces it is unreachable against the real backend
+(`cancel_job` only returns proven records, `real_backend.py:474-484`).
+
+## Review fix pass 1 (cross-review round 1 findings)
+
+- [x] F1 (P1) The rendered sbatch script was still submitted from the stable, overwritable
+  `lane_dir` path, so an interleaved second submission with `--force` could replace it in
+  place and submission A would hand `sbatch` **B's** `NHMS_MANIFEST_INDEX`. The submitted
+  copy is now submission-scoped at
+  `runs/<run_id>/input/rendered_run_shud_forecast_array_<token>.sbatch`, derived once from
+  the claimed index in `_write_rendered_script` and carried into `_real_accounting` instead
+  of being recomputed at submit time; it is created exclusively and is part of
+  `_shared_runtime_input_paths`, so failed-`sbatch` cleanup covers it. The stable `lane_dir`
+  copy stays as evidence. Placement under the workspace (not `lane_dir`) is required:
+  `_cleanup_shared_runtime_inputs` refuses any path outside `workspace_root`, and keeping it
+  out of `lane_dir` keeps `--force`/`_created_paths` confined to the evidence bundle.
+  Discriminating test: `test_interleaved_live_submissions_submit_their_own_rendered_script`
+  re-enters `validate_slurm` for B **inside A's `sbatch` stub**; the sequential disjointness
+  test cannot see this defect. Spec, design D1's artefact table and
+  `docs/validation/production-closure.md` now name the script.
+- [x] F2 (P2) `apps/api/routes/pipeline.py` did not select
+  `tests/test_retry_cancel_consistency.py`; measured, fixed and pinned — see the corrected
+  #2308 CI-routing note above.
+- [x] F3 (P3) The "fully authorized" claim for #1909 was asserted by construction. Added the
+  mutation control `test_authorized_array_manifest_reaches_sbatch_once_the_refusal_is_removed`:
+  with `services.slurm_gateway.real_backend.array_capable_job_types` stubbed to an empty set,
+  the same four requests reach the `sbatch` stub, so the manifest really was authorizable.
+- [x] F4 (P3) A claimed-then-refused submission leaves its index behind.
+  `test_validate_slurm_live_submit_refuses_to_overwrite_a_scoped_runtime_manifest_with_force`
+  now pins that post-state as intentional — retention/GC of per-submission inputs is a
+  declared non-goal (design D1's disclosed residual) — together with the fact that nothing
+  else of that submission, including the submitted script, was written.
+- [x] F5 (P3) Deviation recorded above.
 
 ## 4. Verification (Evidence Floor)
 

@@ -48,6 +48,23 @@ def _live_array_log_dir(workspace_root: Path, run_id: str) -> Path:
     return _neutral_array_log_dir(workspace_root, run_id, index_stem=_live_index_path(workspace_root, run_id).stem)
 
 
+def _live_script_name(index_stem: str) -> str:
+    """The sbatch script one live submission hands the scheduler.
+
+    Rederived from the submission token the same way the array log dir is, and
+    spelled out here rather than imported, so a regression in the production
+    helper cannot pass by construction.
+    """
+
+    token = index_stem[len(_PRODUCTION_ARRAY_INDEX_STEM) + 1 :]
+    assert token, f"index stem {index_stem} carries no submission token"
+    return f"rendered_run_shud_forecast_array_{token}.sbatch"
+
+
+def _live_script_path(index_path: Path) -> Path:
+    return index_path.with_name(_live_script_name(index_path.stem))
+
+
 def _cleaned_index_stem(accounting: dict) -> str:
     """The scoped index stem a failed submission's own cleanup targeted.
 
@@ -780,16 +797,8 @@ class _FrozenClock:
         return cls.frozen if tz is None else cls.frozen.astimezone(tz)
 
 
-def _live_submit(
-    monkeypatch,
-    *,
-    evidence_root: Path,
-    workspace_root: Path,
-    run_id: str,
-    force: bool = False,
-    sbatch_returncode: int = 0,
-) -> int:
-    """One `validate-slurm --submit` run against a shared workspace, sbatch stubbed."""
+def _live_submit_env(monkeypatch, workspace_root: Path) -> None:
+    """The environment one live `validate-slurm --submit` run needs."""
 
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
@@ -798,18 +807,8 @@ def _live_submit(
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
 
-    def fake_run(command, **kwargs):
-        del kwargs
-        program = Path(command[0]).name
-        if program == "sbatch":
-            if sbatch_returncode:
-                return subprocess.CompletedProcess(command, sbatch_returncode, stdout="", stderr="invalid account")
-            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
-        if program == "sacct":
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+def _live_submit_argv(*, evidence_root: Path, run_id: str, force: bool = False) -> list[str]:
     argv = [
         "validate-slurm",
         "--evidence-root",
@@ -824,7 +823,35 @@ def _live_submit(
     ]
     if force:
         argv.append("--force")
-    return slurm_validation.main(argv)
+    return argv
+
+
+def _live_submit(
+    monkeypatch,
+    *,
+    evidence_root: Path,
+    workspace_root: Path,
+    run_id: str,
+    force: bool = False,
+    sbatch_returncode: int = 0,
+) -> int:
+    """One `validate-slurm --submit` run against a shared workspace, sbatch stubbed."""
+
+    _live_submit_env(monkeypatch, workspace_root)
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            if sbatch_returncode:
+                return subprocess.CompletedProcess(command, sbatch_returncode, stdout="", stderr="invalid account")
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return slurm_validation.main(_live_submit_argv(evidence_root=evidence_root, run_id=run_id, force=force))
 
 
 def _index_entries(index_path: Path) -> list[dict]:
@@ -914,6 +941,105 @@ def test_two_live_submissions_with_the_same_run_id_stay_disjoint(
     assert qc_b["sibling_success"]["run_id"] == run_ids_b[0]
 
 
+def test_interleaved_live_submissions_submit_their_own_rendered_script(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#1908 task 1.3, interleaved rather than sequential.
+
+    The sequential disjointness test above cannot see a shared, overwritable
+    script path: A is finished before B renders anything. Here B runs to
+    completion *inside* A's ``sbatch`` stub, so the bytes A hands the scheduler
+    are read after B has written its own script. That script is the only carrier
+    of the submission's identity -- ``NHMS_MANIFEST_INDEX`` is baked into it and
+    each array task resolves its manifest from that variable after ``sbatch``
+    returns -- so if the two submissions share one script path, A submits B's
+    tasks and A's own index and manifests are never read.
+
+    Both runs use ``--force`` against one evidence root deliberately: that is the
+    lane-bundle collision ``--force`` still permits (B pre-creates the
+    post-``sbatch`` lane files A is about to write), and a second evidence root
+    would make the two script paths differ for a reason the fix does not own.
+    """
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "interleaved"
+    lane_dir = evidence_root / run_id / "slurm"
+    _live_submit_env(monkeypatch, workspace_root)
+
+    claimed: list[Path] = []
+    original_exclusive = slurm_validation.write_bytes_no_follow_exclusive
+
+    def record_claim(path: Path, content: bytes, *, containment_root: Path | None = None) -> Path:
+        result = original_exclusive(path, content, containment_root=containment_root)
+        if path.name.startswith(f"{_PRODUCTION_ARRAY_INDEX_STEM}_") and path.suffix == ".json":
+            claimed.append(path)
+        return result
+
+    monkeypatch.setattr(slurm_validation, "write_bytes_no_follow_exclusive", record_claim)
+
+    submitted: list[tuple[Path, str]] = []
+    reentered = False
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            nonlocal reentered
+            if not reentered:
+                reentered = True
+                # B renders, writes and submits entirely inside A's sbatch call.
+                assert (
+                    slurm_validation.main(
+                        _live_submit_argv(evidence_root=evidence_root, run_id=run_id, force=True)
+                    )
+                    == 0
+                )
+            script_path = Path(command[-1])
+            submitted.append((script_path, script_path.read_text(encoding="utf-8")))
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        slurm_validation.main(_live_submit_argv(evidence_root=evidence_root, run_id=run_id, force=True)) == 0
+    )
+    capsys.readouterr()
+
+    # A claims its index first, then B claims one inside A's sbatch; B therefore
+    # submits first and A submits second.
+    assert len(claimed) == 2
+    index_a, index_b = claimed
+    assert index_a != index_b
+    assert len(submitted) == 2
+    (script_b, content_b), (script_a, content_a) = submitted
+
+    # The bytes each submission handed sbatch name its own index, nobody else's.
+    assert f"export NHMS_MANIFEST_INDEX={index_a}" in content_a
+    assert f"export NHMS_MANIFEST_INDEX={index_b}" in content_b
+    assert str(index_b) not in content_a
+    assert str(index_a) not in content_b
+    assert script_a != script_b
+
+    # Each submitted script names the array log dir of its own index stem, so A's
+    # task logs cannot land in B's directory.
+    assert _rendered_array_log_dir(content_a) == _neutral_array_log_dir(
+        workspace_root, run_id, index_stem=index_a.stem
+    )
+    assert _rendered_array_log_dir(content_b) == _neutral_array_log_dir(
+        workspace_root, run_id, index_stem=index_b.stem
+    )
+
+    # The stable lane copy stays -- as evidence, last writer wins, and it is
+    # byte-identical to what that writer submitted.
+    assert (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8") == content_b
+
+
 def test_failed_second_submission_cleanup_leaves_the_first_submission_intact(
     tmp_path: Path,
     monkeypatch,
@@ -930,7 +1056,8 @@ def test_failed_second_submission_cleanup_leaves_the_first_submission_intact(
     capsys.readouterr()
     index_a = _live_index_path(workspace_root, run_id)
     manifests_a = _live_runtime_manifest_paths(workspace_root, run_id)
-    frozen_a = {path: path.read_bytes() for path in [index_a, *manifests_a]}
+    script_a = _live_script_path(index_a)
+    frozen_a = {path: path.read_bytes() for path in [index_a, *manifests_a, script_a]}
 
     assert (
         _live_submit(
@@ -950,9 +1077,12 @@ def test_failed_second_submission_cleanup_leaves_the_first_submission_intact(
 
     cleaned = [Path(item["path"]) for item in accounting_b["shared_runtime_input_cleanup"]]
     assert {item["status"] for item in accounting_b["shared_runtime_input_cleanup"]} == {"absent"}
-    assert len(cleaned) == 3
+    # Index, two runtime manifests and the script B actually submitted.
+    assert len(cleaned) == 4
+    assert _live_script_name(_cleaned_index_stem(accounting_b)) in {path.name for path in cleaned}
     assert all(not path.exists() for path in cleaned)
     assert index_a not in cleaned
+    assert script_a not in cleaned
     assert set(manifests_a).isdisjoint(cleaned)
 
     for path, content in frozen_a.items():
@@ -2477,6 +2607,67 @@ def test_validate_slurm_live_submit_refuses_to_overwrite_a_scoped_runtime_manife
     assert sbatch_calls == []
     assert "PRODUCTION_SLURM_RUNTIME_MANIFEST_EXISTS" in capsys.readouterr().err
     assert json.loads(planted["occupied"].read_text(encoding="utf-8")) == {"other_submission": True}
+
+    # The claimed index survives the refusal, on purpose: retention/GC of
+    # per-submission inputs is a declared non-goal of this change (design D1's
+    # disclosed residual), so the orphan is the intended post-state, pinned here
+    # rather than cleaned up.
+    assert planted["index"].exists()
+    assert [entry["task_id"] for entry in _index_entries(planted["index"])] == [0, 1]
+    assert _live_index_paths(workspace_root, "scopedmanifest") == [planted["index"]]
+    # Nothing else of this submission was written: the only scoped manifest on
+    # disk is the occupier the test planted, and the refusal came before the
+    # submitted sbatch script was created.
+    assert _live_runtime_manifest_paths(workspace_root, "scopedmanifest") == [planted["occupied"]]
+    assert not _live_script_path(planted["index"]).exists()
+
+
+def test_validate_slurm_live_submit_refuses_to_overwrite_a_scoped_sbatch_script_with_force(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """The submitted script is a shared live input, so it is exclusive-create too.
+
+    A file at the scoped script path is another submission's entry point --
+    overwriting it would make that submission run these manifests. ``--force``
+    governs the lane bundle only, so the run refuses before calling ``sbatch``
+    and the planted file survives byte for byte.
+    """
+
+    _live_submit_env(monkeypatch, tmp_path / "shared-workspace")
+    workspace_root = tmp_path / "shared-workspace"
+    sbatch_calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if Path(command[0]).name == "sbatch":
+            sbatch_calls.append(command)
+            raise AssertionError("sbatch must not run when a scoped sbatch script already exists")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def occupy_scoped_script(index_path: Path, entries: list[dict]) -> dict[str, Path]:
+        del entries
+        script_path = _live_script_path(index_path)
+        script_path.write_text("#!/usr/bin/env bash\n# another submission\n", encoding="utf-8")
+        return {"occupied": script_path}
+
+    planted = _hook_index_claim(monkeypatch, occupy_scoped_script)
+
+    try:
+        exit_code = slurm_validation.main(
+            _live_submit_argv(evidence_root=tmp_path / "artifacts", run_id="scopedscript", force=True)
+        )
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+
+    assert exit_code == 1
+    assert sbatch_calls == []
+    assert "PRODUCTION_SLURM_RENDERED_SCRIPT_EXISTS" in capsys.readouterr().err
+    assert planted["occupied"].read_text(encoding="utf-8") == "#!/usr/bin/env bash\n# another submission\n"
+    assert _live_index_paths(workspace_root, "scopedscript") == [planted["index"]]
 
 
 def test_slurm_evidence_writer_rejects_lane_parent_symlink_swap_before_write(

@@ -91,6 +91,8 @@ MAX_POLL_INTERVAL_SECONDS = 300.0
 MAX_POLL_TIMEOUT_SECONDS = 86400.0
 MIN_POLL_INTERVAL_SECONDS = 1.0
 SHARED_MANIFEST_INDEX_PREFIX = "manifest_index"
+RENDERED_SCRIPT_STEM = "rendered_run_shud_forecast_array"
+RENDERED_SCRIPT_NAME = f"{RENDERED_SCRIPT_STEM}.sbatch"
 MAX_SUBMISSION_TOKEN_ATTEMPTS = 10
 CONTROLLED_FAILURE_LOG_MARKER = "NHMS_PRODUCTION_SLURM_CONTROLLED_FAILURE_EXPECTED"
 CONTROLLED_FAILURE_LOG_SIGNATURES = ("NON_FINITE_FLOW",)
@@ -178,13 +180,26 @@ class EvidenceWriter:
         claim retries; a runtime manifest refuses).
         """
 
+        content = (json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
+        self._create_bytes_exclusive(path, content, file_label=file_label)
+
+    def create_text_exclusive(self, path: Path, value: str, *, file_label: str = "Rendered sbatch script") -> None:
+        """Create a shared live-lane text input by exclusive create.
+
+        Same rule as :meth:`create_json_exclusive`; the redaction is the one
+        :meth:`write_text` applies, so the submission-scoped copy and the lane
+        evidence copy are byte-identical.
+        """
+
+        self._create_bytes_exclusive(path, redact_text(value).encode("utf-8"), file_label=file_label)
+
+    def _create_bytes_exclusive(self, path: Path, content: bytes, *, file_label: str) -> None:
         safe_path = self._safe_file_path(
             path,
             allow_outside_evidence=True,
             file_label=file_label,
             write_error_code="PRODUCTION_SLURM_RUNTIME_MANIFEST_WRITE_FAILED",
         )
-        content = (json.dumps(redact_payload(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
         try:
             write_bytes_no_follow_exclusive(safe_path, content)
         except FileExistsError:
@@ -416,14 +431,20 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         use_shared_workspace_inputs=use_shared_workspace_inputs,
     )
     rendered_script = _render_production_template(config, manifest_index, writer)
-    writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
+    submit_script = _write_rendered_script(
+        config,
+        writer,
+        manifest_index,
+        rendered_script,
+        use_shared_workspace_inputs=use_shared_workspace_inputs,
+    )
     submit_manifest_index = manifest_index
     submit_manifest_tasks = manifest_tasks
 
     accounting = (
         _fake_accounting(config)
         if config.fake_slurm
-        else _real_accounting(config, blockers, submit_manifest_index, submit_manifest_tasks)
+        else _real_accounting(config, blockers, submit_manifest_index, submit_manifest_tasks, submit_script)
     )
     if accounting.get("shared_runtime_inputs_cleaned") is True:
         manifest_index, manifest_tasks = _write_manifest_index(
@@ -468,7 +489,7 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         "blockers": all_blockers,
         "files": [
             "preflight.json",
-            "rendered_run_shud_forecast_array.sbatch",
+            RENDERED_SCRIPT_NAME,
             "manifest_index.json",
             "slurm_accounting.json",
             "array_partial_success.json",
@@ -1005,6 +1026,55 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
     return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index))
 
 
+def _write_rendered_script(
+    config: ProductionSlurmConfig,
+    writer: EvidenceWriter,
+    manifest_index: Path,
+    rendered_script: str,
+    *,
+    use_shared_workspace_inputs: bool,
+) -> Path:
+    """Write the rendered sbatch script and return the path to submit.
+
+    The lane copy keeps its stable name because it is evidence of what this run
+    rendered. It must not be the file handed to ``sbatch`` in the live lane: it
+    is named from the configured ``run_id`` alone, so a second submission with
+    the same ``run_id`` and ``--force`` replaces it in place, and the script is
+    the only carrier of the submission's identity (``NHMS_MANIFEST_INDEX`` is
+    baked into it, and an array task resolves its manifest from that variable
+    after ``sbatch`` has returned).
+
+    The submitted copy therefore lives beside the index it names, under
+    ``runs/<run_id>/input/``, keyed by the same submission token: that keeps it
+    inside the workspace root, which is what lets the failed-``sbatch`` cleanup
+    unlink it (``_cleanup_shared_runtime_inputs`` refuses any path outside the
+    workspace), and it keeps ``--force``/``_created_paths`` semantics confined to
+    the ``lane_dir`` evidence bundle. The name is derived from the claimed index,
+    the same single source the array log dir is derived from.
+    """
+
+    writer.write_text(config.lane_dir / RENDERED_SCRIPT_NAME, rendered_script)
+    if not use_shared_workspace_inputs:
+        return config.lane_dir / RENDERED_SCRIPT_NAME
+    script_path = _submission_script_path(manifest_index)
+    try:
+        writer.create_text_exclusive(script_path, rendered_script)
+    except FileExistsError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_RENDERED_SCRIPT_EXISTS",
+            f"Rendered sbatch script already exists: {script_path}. "
+            "Submission-scoped live inputs are never overwritten, not even with --force.",
+        ) from error
+    return script_path
+
+
+def _submission_script_path(manifest_index: Path) -> Path:
+    """The submitted script's path, derived from the index this submission claimed."""
+
+    token = manifest_index.stem.removeprefix(f"{SHARED_MANIFEST_INDEX_PREFIX}_")
+    return manifest_index.with_name(f"{RENDERED_SCRIPT_STEM}_{token}.sbatch")
+
+
 def _safe_template_model_package_uri(value: str) -> str:
     if not value:
         return ""
@@ -1016,6 +1086,7 @@ def _real_accounting(
     blockers: list[dict[str, str]],
     manifest_index: Path,
     manifest_tasks: Sequence[dict[str, Any]],
+    script_path: Path,
 ) -> dict[str, Any]:
     if blockers or not config.submit:
         return {
@@ -1025,7 +1096,6 @@ def _real_accounting(
             "records": [],
         }
     _prepare_shared_log_dir(config, manifest_index)
-    script_path = config.lane_dir / "rendered_run_shud_forecast_array.sbatch"
     array_spec = f"0-1%{max(1, min(config.max_concurrent, 2))}"
     submit_command = ["sbatch", "--parsable", f"--array={array_spec}"]
     if config.account:
@@ -1035,7 +1105,7 @@ def _real_accounting(
     if submit["returncode"] != 0:
         cleanup = _cleanup_shared_runtime_inputs(
             config,
-            _shared_runtime_input_paths(manifest_index, manifest_tasks),
+            _shared_runtime_input_paths(manifest_index, manifest_tasks, script_path),
         )
         cleanup_blockers = _shared_runtime_cleanup_blockers(cleanup)
         return {
@@ -1179,16 +1249,22 @@ def _shared_runtime_cleanup_blockers(cleanup: list[dict[str, str]]) -> list[dict
 def _shared_runtime_input_paths(
     manifest_index: Path,
     manifest_tasks: Sequence[dict[str, Any]],
+    script_path: Path,
 ) -> list[Path]:
     """The shared paths this submission actually wrote.
 
     Derived from the written artefacts, never from a ``run_id`` formula: a
     formula would name another submission's files if the layout ever changes
     again. The index comes first so cleanup revokes the claim before the
-    manifests it names.
+    manifests it names; the submitted script is last because it is the entry
+    point that names them all.
     """
 
-    return [manifest_index, *(Path(str(task["manifest_path"])) for task in manifest_tasks)]
+    return [
+        manifest_index,
+        *(Path(str(task["manifest_path"])) for task in manifest_tasks),
+        script_path,
+    ]
 
 
 def _poll_sacct_for_expected_array(

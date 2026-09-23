@@ -960,6 +960,23 @@ def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_or
     assert "tests/test_retry.py" not in selected
 
 
+def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle() -> None:
+    """#2308: the cancel route's only oracle for rendered-on-wire / raw-in-event.
+
+    `tests/test_retry_cancel_consistency.py` is the sole suite that drives
+    `POST /runs/{run_id}/cancel` through TestClient and asserts BOTH shapes of
+    one gateway error -- the rendered response body and the raw persisted
+    `slurm_cancellation_gap` / `cancel_failed` event. Its imports are
+    function-local, so no importer derivation reaches it, and neither the broad
+    `apps/api/**` rule nor same-name derivation names it; without this rule a
+    diff that re-shared the two payloads reached CI green.
+    """
+
+    selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))
+
+    assert "tests/test_retry_cancel_consistency.py" in selected
+
+
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
     """#2385/#2387: one suite pins BOTH consumer ends of one sentinel family.
 

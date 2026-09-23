@@ -24,9 +24,12 @@ One submission token per live submit: `datetime.now(UTC).strftime("%Y%m%dT%H%M%S
 | task run ids | `<run_id>_success`, `<run_id>_controlled_fail` | `<run_id>_<token>_success`, `<run_id>_<token>_controlled_fail` |
 | task manifests | `runs/<run_id>_success/input/manifest.json` | `runs/<run_id>_<token>_success/input/manifest.json` |
 | array log dir | derived from index stem | derived from index stem → per submission, for free |
-| lane evidence (`lane_dir`) | unchanged | unchanged |
+| submitted sbatch script | `lane_dir/rendered_run_shud_forecast_array.sbatch` | `runs/<run_id>/input/rendered_run_shud_forecast_array_<token>.sbatch`, derived from the claimed index |
+| lane evidence (`lane_dir`) | unchanged | unchanged (the stable script stays, as evidence only) |
 
 Two concurrent `--force` submissions are then disjoint **by construction**. No flock, no lease, no `squeue` probe, and nothing to mock — which is why this shape is preferred over the issue's alternative.
+
+The rendered sbatch script is part of that set, not an evidence detail: `NHMS_MANIFEST_INDEX` is baked into it and the array task resolves its manifest from that variable *after* `sbatch` returns, so a stable, overwritable script path is enough on its own to make submission A submit submission B's content. The submitted copy is therefore keyed by the same token and lives beside the index it names, under `runs/<run_id>/input/`, for two reasons: it must be inside `workspace_root` or the failed-`sbatch` cleanup would refuse it as an unsafe path (`_cleanup_shared_runtime_inputs` → `_safe_workspace_path`), and keeping it out of `lane_dir` keeps `--force` / `_created_paths` confined to the evidence bundle. The stable `lane_dir` copy stays, as the evidence of what this run rendered — last writer wins there, which is the documented `--force` rerun semantics.
 
 **Write order is load-bearing.** Today `_write_manifest_index` (`:685-688`) writes the two task manifests *first* and the index last, and `EvidenceWriter._write_bytes` (`:172-207`) overwrites via `atomic_write_bytes_no_follow`, skipping even the exists guard under `--force` (`:188`). If the token were only arbitrated by the index's exclusive create at the end, two submissions colliding on the same microsecond would have already overwritten each other's task manifests. So:
 

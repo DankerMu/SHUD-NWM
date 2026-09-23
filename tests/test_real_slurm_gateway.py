@@ -3096,6 +3096,45 @@ def test_array_capable_job_type_rejected_from_single_submit(
     assert exc_info.value.details["job_type"] == job_type
 
 
+class _SbatchReached(Exception):
+    """Raised by the stub when a submit actually gets as far as calling sbatch."""
+
+
+@pytest.mark.parametrize("job_type", _PRODUCTION_ARRAY_JOB_TYPES)
+def test_authorized_array_manifest_reaches_sbatch_once_the_refusal_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    """The mutation control for the refusal test above.
+
+    The array refusal sits before every other validation, so "no sbatch call"
+    alone cannot tell a refusal apart from a manifest that some later check
+    would have rejected anyway. Removing only the refusal must let the very same
+    request reach the scheduler: that is what proves `_authorized_array_manifest`
+    is authorizable and that the refusal -- not a downstream failure -- is what
+    stopped it.
+    """
+
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr("services.slurm_gateway.real_backend.array_capable_job_types", lambda *_: frozenset())
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        if Path(command[0]).name == "sbatch":
+            raise _SbatchReached(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(_SbatchReached):
+        gateway.submit_job(SubmitJobRequest(manifest=_authorized_array_manifest(tmp_path, job_type)))
+
+    assert any(Path(command[0]).name == "sbatch" for command in calls)
+
+
 def test_array_capable_job_type_rejected_from_single_submit_despite_template_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
