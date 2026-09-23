@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change governance-0-ci-contract-baseline. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Governance cleanup starts from a green contract baseline
 
 Governance PRs that change role boundaries, dead-code paths, documentation authority, or entropy automation MUST start from a passing master contract baseline. The baseline includes backend fast tests and the generated frontend types matching `openapi/nhms.v1.yaml`.
@@ -161,7 +163,10 @@ The collect-only branch's check name and pass/fail semantics are unchanged
 by this requirement (gate-strength changes are out of scope).
 Additionally, when the final selection collapses to exactly the selector
 meta-guard suite (`meta_guard_only` — a property of the final
-selection's shape only: it fires for a PR whose only backend change is
+selection's shape only, with the supplemental production-topology hard-gate
+node disregarded: that node rides almost every PR, because each PR's final push
+carries its `openspec/changes/**/tasks.md`, so counting it would hide every
+collapse; it fires for a PR whose only backend change is
 `tests/test_select_ci_tests.py`, but not for a PR that changes
 `scripts/select_ci_tests.py`, whose supplemental routing selects more
 than the meta-guard suite; that PR keeps the full-tree smoke through
@@ -190,9 +195,17 @@ prefix, the write-surface scan's five roots, or the timescale write-guard
 invariant's four roots — the last of which matters because `db/**` is neither a
 backend prefix nor a write-surface root, yet a `.py` path under it selects the
 timescale invariant and the migration suite, so a two-clause spelling would
-wrongly claim `db/x.py` is empty. Its tracked members today are the `.py` paths under
-`openspec/**` and `.agents/**`; a `.py` under `docs/**`, `.github/**` or an
-unmapped `infra/**` would join them, and none is tracked today. This is the route-A
+wrongly claim `db/x.py` is empty. The production-topology reader route
+(#2323) narrows the class once more: a path under that scanner's roots or equal
+to one of its direct files, with a scannable text name, selects the hard-gate
+node, so the class excludes those too. That removes the `.py` paths under
+`openspec/changes/**` and `openspec/specs/**` (tracked evidence scripts live
+there), and it also moves non-`.py` scannable text under `scripts/` (for
+example `scripts/node27_display_v2_browser_evidence.mjs`) off the empty
+selection. No tracked `.py` falls in this class today; a `.py` under
+`.agents/**`, under `openspec/**` outside `changes/` and `specs/`, under
+`docs/**` outside `governance/` and `runbooks/`, under `.github/**`, or under an
+unmapped `infra/**` outside `infra/env/` would join it. This is the route-A
 selector-widening the class was explicitly left open for, and it is a real
 change today, not only for future paths: `apps/__init__.py` is a tracked file
 that moves from an empty selection to exactly the write-surface scan, losing the
@@ -201,7 +214,8 @@ assertion-executing targeted run instead. The mechanism is the selector's
 `count` output: the job's collect-only branch is guarded by `count == 0`, so a
 one-element selection takes the targeted branch. Neither carve-out re-arms the
 smoke — `meta_guard_only` fires only for a selection that is exactly the
-selector meta-guard suite, and `collection_smoke_required` is false for this
+selector meta-guard suite (the supplemental production-topology hard-gate node
+disregarded), and `collection_smoke_required` is false for this
 class both before and after, since neither the selector source nor its suite is
 in the diff.
 
@@ -226,8 +240,9 @@ in the diff.
 
 - **WHEN** the diff consists only of files in the known unmapped classes
   (`schemas/**`, unmapped `infra/**`, `.py` under none of the backend
-  prefixes, the write-surface scan's roots and the timescale invariant's
-  roots, non-`.py` under backend prefixes, non-`.py` under `tests/`,
+  prefixes, the write-surface scan's roots, the timescale invariant's
+  roots and the production-topology scan inputs, non-`.py` under backend
+  prefixes that is not a production-topology scan input, non-`.py` under `tests/`,
   `.sh` files outside `scripts/`; `scripts/**/*.sh` left this list when it
   joined the backend gate — an unmapped one now arms the core-smoke fallback)
 - **THEN** the selector returns an empty selection and the selector test
@@ -257,7 +272,8 @@ in the diff.
 #### Scenario: non-collapsed selections suppress the flag
 
 - **WHEN** the selection contains any target other than the selector
-  meta-guard suite, or is empty
+  meta-guard suite and the supplemental production-topology hard-gate node,
+  or is empty after that node is disregarded
 - **THEN** the GitHub output reports `meta_guard_only=false` and the
   targeted branch behaves as before
 
@@ -280,6 +296,16 @@ in the diff.
   `meta_guard_only=false` as "non-collapsed selections suppress the
   flag" requires, while `collection_smoke_required=true` still runs
   the collect-only smoke
+
+#### Scenario: the supplemental topology node does not mask the collapse
+
+- **WHEN** the changed paths are a deleted `tests/test_*.py` file (or an unrouted `tests/` support module, or `tests/fixtures/basins_registry_partition_oracle.json`) together with an `openspec/changes/**/tasks.md`
+- **THEN** the selection is the selector meta-guard suite plus the production-topology hard-gate node, and the GitHub output reports `meta_guard_only=true` and `collection_smoke_required=true`
+
+#### Scenario: a data-only diff with a tasks update runs the hard-gate node instead of the zero-assertion smoke
+
+- **WHEN** the changed paths are exactly `schemas/foo.json` and `openspec/changes/x/tasks.md`
+- **THEN** the selection is exactly the production-topology hard-gate node, count is 1, and both `meta_guard_only` and `collection_smoke_required` are false. This is the accepted trade of the `apps/__init__.py` precedent: the diff-specific class is non-importable data
 
 ### Requirement: Guarded-module selector rules MUST cover their non-gated importer closure
 
@@ -826,7 +852,7 @@ target in that pin rather than treat the route as a violation.
 
 ### Requirement: Selector-development changes MUST retain full-tree collection smoke
 
-The selector SHALL expose a `collection_smoke_required` GitHub output whose provenance is independent of the final selected-target list shape. It SHALL be true when the final selection is exactly the selector meta-guard or when the changed-file set contains `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`; otherwise it SHALL be false for non-empty ordinary selections. The `Unit Tests` workflow SHALL use this field to run the labeled full-tree collect-only smoke in addition to targeted assertions. Targeted assertions SHALL execute before this smoke; when the smoke is required, the full-tree collect command SHALL be executable and reachable, its failure SHALL emit its log and return nonzero, and its label SHALL NOT claim zero assertions after targeted assertions ran. One full-workflow positive contract SHALL prove both effective Actions metadata and shell behavior. It SHALL require the audited named-step identity, exact targeted-test environment binding, default root checkout/shell semantics, and fail-closed step/job policy. It SHALL reject any unapproved `run` payload before execution. A bounded probe SHALL execute only an independently authored trusted fixture and finite test-owned semantic variants, clean its process group on every exit, and prove the behavior matrix without running real tests, database, network, or arbitrary workflow commands. The existing `meta_guard_only` field SHALL remain a final-list shape property and zero-selection behavior SHALL remain unchanged.
+The selector SHALL expose a `collection_smoke_required` GitHub output whose provenance is independent of the final selected-target list shape. It SHALL be true when the final selection is exactly the selector meta-guard (the supplemental production-topology hard-gate node disregarded, as `meta_guard_only` defines it) or when the changed-file set contains `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`; otherwise it SHALL be false for non-empty ordinary selections. The `Unit Tests` workflow SHALL use this field to run the labeled full-tree collect-only smoke in addition to targeted assertions. Targeted assertions SHALL execute before this smoke; when the smoke is required, the full-tree collect command SHALL be executable and reachable, its failure SHALL emit its log and return nonzero, and its label SHALL NOT claim zero assertions after targeted assertions ran. One full-workflow positive contract SHALL prove both effective Actions metadata and shell behavior. It SHALL require the audited named-step identity, exact targeted-test environment binding, default root checkout/shell semantics, and fail-closed step/job policy. It SHALL reject any unapproved `run` payload before execution. A bounded probe SHALL execute only an independently authored trusted fixture and finite test-owned semantic variants, clean its process group on every exit, and prove the behavior matrix without running real tests, database, network, or arbitrary workflow commands. The existing `meta_guard_only` field SHALL remain a final-list shape property and zero-selection behavior SHALL remain unchanged.
 
 #### Scenario: Selector source change keeps supplemental and collection oracles
 
@@ -1171,19 +1197,33 @@ requirement.
 
 ### Requirement: the scheduler refresh env template MUST select its content-asserting owner suite
 
-`tests/test_scheduler_file_provider_refresh.py` reads `infra/env/compute.scheduler-provider-refresh.env.example` by path and asserts its content: that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present, and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. Before this change the only rule matching that path was the `infra/env/**` rule, whose single target does not read the file, so a template-only diff reached the targeted lane with no reader of the changed file executed — and because that selection is non-empty, the zero-assertion CI warning did not fire either. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for that template targeting `tests/test_scheduler_file_provider_refresh.py`. Because rule matches accumulate and the `infra/env/**` rule stays in place, the template's selection SHALL be exactly that owner suite together with `tests/test_two_node_docker_runtime.py`, and `tests/test_select_ci_tests.py` SHALL pin it as an exact set rather than by membership. The rule SHALL NOT be added to the `#1684` rollout-producer group, whose target is the static deployment contract suite and which does not read this template. The selections of the other thirteen `infra/env/*.example` templates SHALL remain unchanged.
+`infra/env/compute.scheduler-provider-refresh.env.example` is read by path, and its content is asserted, by two suites:
+
+- `tests/test_scheduler_refresh_deployment_contract.py`. It asserts that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. That content assertion moved there from the retired `tests/test_scheduler_file_provider_refresh.py` when #1101 partitioned the monolith.
+- `tests/test_node22_refresh_timer_health.py` (#2146). It pins the receipt-root line.
+
+`scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` for the template, with neither `stop_on_match` nor `only_when_any_changed`, targeting those owner suites. The rule SHALL NOT be added to the `#1684` rollout-producer group, whose target is the static deployment contract suite and which does not read this template.
+
+Rule matches accumulate. The `infra/env/**` rule stays in place, and the template is a production-topology scanner input. The template's selection SHALL therefore be exactly:
+- the owner suites;
+- `tests/test_two_node_docker_runtime.py`;
+- the production-topology hard-gate node.
+
+`tests/test_select_ci_tests.py` SHALL pin that selection as an exact set rather than by membership. The sibling `infra/env/*.example` templates SHALL keep their owner selections and gain only the hard-gate node.
 
 #### Scenario: a refresh env template diff selects its owner suite
 
 - **WHEN** the changed paths are exactly `infra/env/compute.scheduler-provider-refresh.env.example`
-- **THEN** `select_tests` emits exactly `["tests/test_scheduler_file_provider_refresh.py", "tests/test_two_node_docker_runtime.py"]`
+- **THEN** `select_tests` emits exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_node22_refresh_timer_health.py", "tests/test_scheduler_refresh_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
 
 #### Scenario: sibling env templates keep their existing selections
 
-- **WHEN** the changed paths are exactly `infra/env/compute.example`, or exactly `infra/env/compute.scheduler-dbfree.env.example`
-- **THEN** each selection is exactly `["tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+- **WHEN** the changed paths are exactly `infra/env/compute.example`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+- **WHEN** the changed paths are exactly `infra/env/compute.scheduler-dbfree.env.example`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_env_templates.py", "tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
 - **WHEN** the changed paths are exactly `infra/env/display.example`
-- **THEN** the selection is exactly `["tests/test_two_node_docker_runtime.py"]`
+- **THEN** the selection is exactly `["tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings", "tests/test_two_node_docker_runtime.py"]`
 
 ### Requirement: the precipitation application-composition owners MUST select the precipitation surface oracles
 
@@ -1322,17 +1362,25 @@ as a formatted value, not only as a value pytest happens to render.
 
 ### Requirement: the retention copyback mutex load-bearing modules MUST select the mutex suite
 
-`tests/test_retention_copyback_mutex.py` pins the retention copyback mutex, whose wiring lives in `services/orchestrator/scheduler_runtime.py` (the scheduler call site that names the shared copyback root) and whose lock semantics live in `packages/common/copyback_guard.py`. `scripts/select_ci_tests.py` SHALL select the mutex suite for a diff to either module. For `scheduler_runtime.py` the suite SHALL be added at the `stop_on_match` file-journal rule site that matches the path, without editing the shared `FILE_JOURNAL_READ_STATE_TESTS` constant. For `copyback_guard.py` a path-exact rule without `stop_on_match` or `only_when_any_changed` SHALL add the suite so the module's existing selections accumulate unchanged. Selections for `services/orchestrator/retention.py`, `services/orchestrator/cli.py`, `services/orchestrator/__init__.py` and `tests/retention_test_helpers.py` SHALL remain unchanged.
+The retention copyback mutex is pinned by the two partitions `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`. They came from the #2259 split of the former `tests/test_retention_copyback_mutex.py`. The mutex has two load-bearing modules:
+- `services/orchestrator/scheduler_runtime.py` holds its wiring: the scheduler call site that names the shared copyback root.
+- `packages/common/copyback_guard.py` holds its lock semantics.
+
+`scripts/select_ci_tests.py` SHALL select both partitions for a diff to either module:
+- For `scheduler_runtime.py`, the partitions SHALL be added at the `stop_on_match` file-journal rule site that matches the path, without editing the shared `FILE_JOURNAL_READ_STATE_TESTS` constant. That rule site also carries `tests/test_retention_extra_roots.py` (#2316).
+- For `copyback_guard.py`, a path-exact rule without `stop_on_match` or `only_when_any_changed` SHALL add the partitions, so that the module's other selections accumulate unchanged.
+
+The selections for `services/orchestrator/cli.py`, `services/orchestrator/__init__.py`, `services/orchestrator/retention.py` and `tests/retention_test_helpers.py` SHALL keep selecting both partitions. The exact selection of each module is pinned in `tests/test_select_ci_tests.py`, not here. The 22/23-entry exact lists this requirement used to carry went stale when later at-site riders (#1186, #1905/#2402, #2259) grew the selection.
 
 #### Scenario: a scheduler runtime diff selects the mutex suite
 
 - **WHEN** the changed paths are exactly `services/orchestrator/scheduler_runtime.py`
-- **THEN** `select_tests` emits exactly `["tests/test_file_orchestration_journal.py", "tests/test_file_orchestration_migration.py", "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model", "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows", "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success", "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope", "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata", "tests/test_orchestration_chain.py::test_psycopg_has_active_pipeline_includes_queued_pipeline_rows", "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission", "tests/test_production_scheduler.py::test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission", "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_download_source_cycle", "tests/test_production_scheduler.py::test_db_free_injected_collaborators_plan_without_unimplemented_provider_blocker", "tests/test_production_scheduler.py::test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call", "tests/test_production_scheduler.py::test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_call", "tests/test_production_scheduler.py::test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call", "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion", "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url", "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit", "tests/test_retention_copyback_mutex.py", "tests/test_river_segment_write_surface_scan.py", "tests/test_scheduler_journal_retention_archive.py", "tests/test_scheduler_journal_retention_planning.py", "tests/test_source_cycle_raw_manifest.py"]`, which is the prior 22-entry selection plus `tests/test_retention_copyback_mutex.py`
+- **THEN** the selection contains `tests/test_retention_copyback_mutex_budget.py`, `tests/test_retention_copyback_mutex_protocol.py` and `tests/test_retention_extra_roots.py`, and does not contain `tests/test_state_clone.py`
 
 #### Scenario: a copyback guard diff selects the mutex suite without losing its owners
 
 - **WHEN** the changed paths are exactly `packages/common/copyback_guard.py`
-- **THEN** `select_tests` emits exactly `["tests/test_api.py", "tests/test_copyback_guard.py", "tests/test_gateway.py", "tests/test_migrations.py", "tests/test_orchestration_chain.py", "tests/test_production_scheduler.py", "tests/test_retention_copyback_mutex.py", "tests/test_river_segment_write_surface_scan.py", "tests/test_select_ci_tests.py", "tests/test_timescale_write_guard_wire_site_invariant.py"]`
+- **THEN** the selection contains `tests/test_copyback_guard.py`, `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`, and is identical to its selection before this change
 
 ### Requirement: path routing rules MUST NOT carry an activation gate
 
@@ -1454,3 +1502,97 @@ checks its structure. Without both edges the guard exists but never executes on 
 - **WHEN** CI computes its path filters and targeted selection
 - **THEN** the backend lane starts and the selection contains the memory file's structural guard suite
 
+### Requirement: the scheduler runtime rule site MUST select the extra-roots wiring suite
+
+`tests/test_retention_extra_roots.py` is the oracle for the `runs_only_roots` extra-root wiring that `services/orchestrator/scheduler_runtime.py` hands to the retention deleter. `scripts/select_ci_tests.py` SHALL add that suite at the `stop_on_match` file-journal rule site matching `scheduler_runtime.py`. It SHALL NOT edit the shared `FILE_JOURNAL_READ_STATE_TESTS` constant, and this rule-site edit SHALL NOT change the selection of any other `FILE_JOURNAL_READ_STATE_PATH_PATTERNS` entry (pattern [3]'s own at-site extension is the separate requirement below).
+
+#### Scenario: a scheduler runtime diff selects both retention wiring oracles
+
+- **WHEN** the changed paths are exactly `services/orchestrator/scheduler_runtime.py`
+- **THEN** the selection contains `tests/test_retention_extra_roots.py`, `tests/test_retention_copyback_mutex_budget.py` and `tests/test_retention_copyback_mutex_protocol.py`, and every target the path selected before this change
+
+#### Scenario: the sibling journal patterns do not move
+
+- **WHEN** the changed paths are exactly `services/orchestrator/scheduler.py`, or exactly `services/orchestrator/scheduler_core.py`, or exactly `packages/common/safe_fs.py`
+- **THEN** each selection is identical to its selection before this change
+
+### Requirement: the file-orchestration migration rule site MUST select the rollback-lane writer suites
+
+The five `tests/test_gateway_reconcile_writer_{prepare,launch,rollforward,receipts,quiescence}.py` suites drive the file-journal rollback lanes of `services/orchestrator/file_orchestration_migration.py` through function-body imports, which the importer-gap audit cannot derive. `scripts/select_ci_tests.py` SHALL add all five suites at the `stop_on_match` file-journal rule site matching that module. The selector meta-suite's at-site extension pin for the module SHALL list all six at-site targets. The rule SHALL still stop.
+
+#### Scenario: a migration module diff selects the writer suites
+
+- **WHEN** the changed paths are exactly `services/orchestrator/file_orchestration_migration.py`
+- **THEN** the selection contains all five writer suites and `tests/test_journal_root_lane_adoption.py`, and does not contain `tests/test_state_clone.py`
+
+### Requirement: frozen fixture data read by a non-gated suite MUST select that suite
+
+`scripts/select_ci_tests.py` SHALL carry path-exact rules, with neither `stop_on_match` nor `only_when_any_changed`, for fixture data files. The files are listed below with the suites that read them:
+
+- `tests/fixtures/basins_registry_partition_oracle.json` (#1913): read only by the selector meta-suite;
+- `tests/fixtures/qhh_bootstrap_partition_oracle.json` (#1948): read only by the selector meta-suite;
+- `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`: its non-gated reader is `tests/test_object_store_forcing.py`.
+
+The existing selections of `tests/fixtures/basins_registry_partition_additions.json` and `tests/fixtures/river_ts_templates_51f9d273.json` SHALL remain unchanged.
+
+#### Scenario: a frozen partition oracle diff selects the meta-suite
+
+- **WHEN** the changed paths are exactly `tests/fixtures/basins_registry_partition_oracle.json`, or exactly `tests/fixtures/qhh_bootstrap_partition_oracle.json`
+- **THEN** `select_tests` emits exactly `["tests/test_select_ci_tests.py"]`
+
+#### Scenario: the station-series baseline diff selects its reader
+
+- **WHEN** the changed paths are exactly `tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json`
+- **THEN** `select_tests` emits exactly `["tests/test_object_store_forcing.py"]`
+
+### Requirement: production-topology scanner inputs MUST select the topology hard gate
+
+`scripts/select_ci_tests.py` SHALL mirror the entropy production-topology scanner's input set:
+- the roots `scripts`, `infra/env`, `instructions/agents`, `docs/governance`, `docs/runbooks`, `openspec/changes` and `openspec/specs`;
+- the direct files `AGENTS.md`, `CLAUDE.md`, `infra/README.two-node-docker.md` and `openspec/project-profile.md`;
+- the scanner's skip-directory, skip-prefix and skip-root-directory predicate;
+- the scanner's text-name predicate.
+
+For every changed path in that set, a supplemental additive route SHALL select `tests/test_entropy_audit_report_contract.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings`. The route SHALL NOT add the node when the whole file `tests/test_entropy_audit_report_contract.py` is already selected. The route SHALL NOT change any other target, stop-rule behaviour or the unknown-backend fallback. The selector meta-suite SHALL fail when the mirror drifts from the scanner:
+- the scanner yields a path the mirror rejects;
+- the synthetic-tree scan set differs from the mirror;
+- the mirrored skip or extension constants differ from the scanner's.
+
+#### Scenario: the PR #2321 evidence file selects the hard gate
+
+- **WHEN** the changed paths are exactly `openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-verification.json`
+- **THEN** the selection contains the hard-gate node id and every target that path selected before this change
+
+#### Scenario: a path outside the scanner input does not get the hard gate from this route
+
+- **WHEN** the changed paths are exactly `openapi/nhms.v1.yaml`, or exactly `docs/runbooks/x.log`, or exactly `tests/x.md`
+- **THEN** the selection does not contain the hard-gate node id
+
+#### Scenario: a scanner-module diff keeps the whole partition without a duplicate node
+
+- **WHEN** the changed paths are exactly `scripts/governance/entropy_audit/check_topology.py`
+- **THEN** the selection contains every `ENTROPY_AUDIT_TESTS` member and not the hard-gate node id
+
+#### Scenario: a scanner root that grows beyond the mirror is caught
+
+- **WHEN** the scanner yields a path that the selector mirror rejects
+- **THEN** the selector meta-suite fails and names the path
+
+### Requirement: new forcing-template modules MUST select the forcing shape oracles
+
+For every changed `.py` path under the forcing discovery roots (`packages`, `workers`, `scripts`, `services`, `apps`, `db`, pinned equal to `tests/forcing_ts_template_registry.py`), `scripts/select_ci_tests.py` SHALL select every `FORCING_SQL_SHAPE_ORACLE_TESTS` member when the path has no pruned directory part and its module-level imports include `packages.common.forcing_ts_render`. The route SHALL be supplemental and additive. A changed path that is missing, not a regular file, unreadable, not UTF-8 or unparsable SHALL fall through without raising.
+
+#### Scenario: a new module importing the renderer selects the oracles
+
+- **WHEN** the changed paths are exactly a new file under any discovery root, for example `packages/common/forcing_ts_new_reader.py`, `services/display_api/forcing_new_view.py` or `apps/api/forcing_new_endpoint.py`, that imports `packages.common.forcing_ts_render` at module level
+- **THEN** the selection contains every `FORCING_SQL_SHAPE_ORACLE_TESTS` member
+
+#### Scenario: a new module without the import does not select the oracles
+
+- **WHEN** the changed paths are exactly a new file under a discovery root that does not import `packages.common.forcing_ts_render`
+- **THEN** the selection contains no `FORCING_SQL_SHAPE_ORACLE_TESTS` member
+
+#### Scenario: a deleted path falls through
+
+- **WHEN** the changed path under a discovery root does not exist on disk
+- **THEN** `select_tests` returns without raising
