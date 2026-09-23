@@ -61,9 +61,15 @@ pass-evidence retention.
   relies on, so reaching that bound is a reported fact rather than a default; or a
   governed artifact in the graded window is a symlink, is not a regular file,
   exceeds the writer's own maximum evidence size, fails to parse, or records no
-  start time; or the tracker carries an unrecognized schema version
+  start time; or the tracker is a symlink, is not a regular file, exceeds the
+  read bound, fails to parse, carries an unrecognized schema version, or holds a
+  malformed entry
 - **THEN** the probe returns the probe-failed verdict and exits non-zero
 - **AND** the healthy verdict is not reachable on that tick
+- **AND** a tracker file that is simply absent is a determinate observation of
+  zero entries rather than a failure, because the scheduler writes no tracker at
+  all when its circuit is disabled and a missing tracker is the documented shape
+  of a first enablement; the receipt records that it was absent
 
 #### Scenario: Configuration is refused before any evidence is gathered
 
@@ -106,12 +112,27 @@ to prevent, and the stale-evidence verdict SHALL carry that condition
 structurally rather than rely on its threshold happening to exceed the longest
 observed pass.
 
+The sub-state SHALL be tested against a named set of not-running values rather
+than against inequality with the idle value: a oneshot whose run exited
+non-zero reports a failed sub-state, and reading that as running would gate off
+the stopped-timer verdict and report the lower-precedence service-failure
+verdict in its place. An absent sub-state SHALL count as not running, which is
+the direction that alarms.
+
 The probe SHALL NOT grade a next-elapse signal, because this timer is armed
 relative to its service becoming inactive and reports no realtime next elapse at
 all. The timer itself stays active for the whole of a pass, so an inactive timer
 SHALL be graded as stopped only when the service is also not running — a
 conjunction that is conservative rather than a description of any reachable
 in-flight geometry.
+
+#### Scenario: A failed run is not mistaken for a running one
+
+- **WHEN** the scheduler service reports a failed active state and a failed
+  sub-state while the timer is inactive
+- **THEN** the service counts as not running, so the stopped-timer verdict is
+  reachable and is returned ahead of the lower-precedence service-failure
+  verdict
 
 #### Scenario: A long pass in flight is healthy
 

@@ -1,0 +1,38 @@
+[Unit]
+Description=NHMS node-22 DB-free scheduler stall health probe (read-only)
+# This unit deliberately declares NO relationship to
+# nhms-compute-scheduler.timer / nhms-compute-scheduler.service: no Wants=,
+# After=, Requires=, Before=, BindsTo= or PartOf=. The watcher queries the
+# watched lane with a read-only `systemctl --user show` and must never be able
+# to drag it into its own start-up or failure path.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE PGDATESTYLE PGGEQO PGGSSDELEGATION PGGSSENCMODE PGGSSLIB PGHOST PGHOSTADDR PGKRBSRVNAME PGLOADBALANCEHOSTS PGLOCALEDIR PGMAXPROTOCOLVERSION PGMINPROTOCOLVERSION PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH PGREQUIREPEER PGREQUIRESSL PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCERTMODE PGSSLCOMPRESSION PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLNEGOTIATION PGSSLROOTCERT PGSSLSNI PGSSL_CERT_FILE PGSSL_KEY_FILE PGSSL_ROOT_CERT_FILE PGSYSCONFDIR PGTARGETSESSIONATTRS PGTZ PGUSER
+# node-22 reaches no live database and this probe requires none; the libpq
+# selector set above is cleared as defence in depth, same list as the
+# file-provider refresh probe unit.
+#
+# Every threshold, unit name and path is env-overridable, but this unit ships
+# NO EnvironmentFile on purpose: the shipped defaults ARE the node-22
+# production values, and an env file would be one more untracked surface that
+# can silently relax an alert threshold. To retune, drop in
+#   ~/.config/systemd/user/nhms-node22-scheduler-stall-health.service.d/10-thresholds.conf
+# with `[Service]` + `Environment=NHMS_SCHEDULER_STALL_MAX_PASS_AGE_MINUTES=...`
+# and record the drop-in in the runbook (section 6.2) -- a threshold nobody can
+# see is a threshold nobody can audit.
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py
+StandardOutput=journal
+StandardError=journal
+# The same node-22 namespace constraint the refresh units document:
+# user-systemd makes the filesystem root inaccessible inside a PrivateTmp
+# mount namespace, and this probe's no-follow reads open absolute paths under
+# /scratch. So no PrivateTmp here either; privacy is carried by UMask plus the
+# mode-0700 receipt root the probe creates for itself.
+UMask=0077
+# A wedged watchdog must become visible rather than hang: the probe issues two
+# bounded read-only systemctl queries, one bounded directory enumeration and
+# at most NHMS_SCHEDULER_STALL_SCAN_LIMIT + 1 bounded file reads.
+TimeoutStartSec=120

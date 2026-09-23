@@ -4,9 +4,10 @@ Change surface：
 - 新增 `scripts/node22_scheduler_stall_health.py`（探针本体，只读）；
 - 新增 `infra/systemd/nhms-node22-scheduler-stall-health.service` / `.timer`；
 - 新增 `tests/test_node22_scheduler_stall_health.py`；
-- 改 `scripts/select_ci_tests.py`（为新脚本/unit/套件加 `PATH_TEST_RULES` 路由行，
+- 改 `scripts/select_ci_tests.py`（为新脚本与两个 unit 加 `PATH_TEST_RULES` 路由行，
   并加 `services/orchestrator/scheduler_evidence.py` → 新套件 这条边）；
-- 改 `docs/runbooks/production-ops/stuck-detection.md`（新增 §6.2：11 档处置 + 安装 + 巡检 + retune）。
+- 改 `docs/runbooks/production-ops/stuck-detection.md`（新增 §6.2：11 档处置 + 安装 + 巡检 + retune）；
+- 改 `.large-file-guard.json`（两条豁免，理由见下 D4 段）。
 
 **不改**：`services/**`（含 `scheduler_no_progress.py`、`monitoring.py`）、
 `scripts/node22_refresh_timer_health.py`、任何既有 unit。
@@ -40,9 +41,11 @@ Change surface：
   12 位 hex + 后缀」，样本仍会全部同判，而探针的三行拷贝静默偏松 —— 所以**必须**把
   prefix / suffixes / 上界三个常量本身也钉住。
 - **平价测试必须能在打破平价的那个 diff 上触发**，否则它只是 merge 后的事后探测器：
-  `scripts/select_ci_tests.py:1132-1134` 写明 importer 闭包只在**改动路径本身是测试文件**时生效，
-  生产模块路径只走 `PATH_TEST_RULES`。所以必须显式加路由行，照先例
-  （`select_ci_tests.py:4068` / `:4345` 的「#2146 widened this row by one」、`:4365-4379`）。
+  importer 闭包只在**改动路径本身是测试文件**时生效（`select_ci_tests.py:5350-5366`，
+  Phase 1 核实；早先引的 `:1132-1134` 是过期行号），生产模块路径只走 `PATH_TEST_RULES`。
+  所以必须显式加路由行，照先例（`select_ci_tests.py:4068` / `:4345` 的
+  「#2146 widened this row by one」、`:4365-4379`）。
+  **测试套件本身不需要路由行**：`tests/*.py` 在 `:5366` 就走自选中分支，不进 `PATH_TEST_RULES`。
   不加的连带后果：只动探针/unit 的 PR 一条测试都选不出，降级成 `--collect-only` 零断言冒烟。
 - `runtime-evidence-and-operations/spec.md:393` 的作用域明写是
   「Readiness root discovery and scheduler pass-evidence retention」两个具名消费者
@@ -52,6 +55,12 @@ Change surface：
 - `scripts/node22_scheduler_evidence_retention.py:225` 确实直接 import 了该谓词，
   但它是**另一类工具**：可变更的 retention 作业，本来就只从部署树跑，不具备 staging 属性。
   以它为先例会踩碎 D4。
+- **`.large-file-guard.json` 两条豁免是 D4 的直接代价**，不是图省事：探针 1503 行
+  （其中 291 行 docstring，实际代码约 830 行 / 40 个函数；先例 845 行 / 464 行代码 / 21 个函数，
+  1.8 倍对应「12 档判级 vs 8 档、3 类证据源 vs 2 类」）。拆成多文件会把 D4 的
+  「拷一个文件出去就能跑」削成「拷两个文件」，而那正是 D4 存在的理由。
+  测试 2065 行有直接先例：同类探针的 `tests/test_node22_refresh_timer_health.py`（3456 行）
+  早已在同一份 exclude 里。
 - 范围澄清：本单发出的 unit 走的是**部署树**里的绝对路径
   （`/scratch/frd_muziyao/NWM/.venv/bin/python` + 部署树里的脚本，同先例 unit）。
   D4 的 staging 收益作用于运维**临时/应急的手工运行**，不作用于这对 unit ——
@@ -74,9 +83,15 @@ Change surface：
 
 1. **service 是 `Type=oneshot`，在飞时 `ActiveState=activating` / `SubState=start`，
    永远不会出现 `active`。** 所以「service 在跑」的判据是
-   `ActiveState in {"active", "activating"}`（等价写法 `SubState != "dead"`），
-   **不是** `ActiveState == "active"`。凡是以「service 不活跃」为合取项的档
-   （verdict 3、5、7）都必须用这个判据，且必须读 `SubState`。
+   `ActiveState in {"active", "activating"}`，**不是** `ActiveState == "active"`。
+   凡是以「service 不在跑」为合取项的档（verdict 3、5、7）都必须用这个判据，且必须读 `SubState`。
+   **更正（implementer 在 Phase 1 抓到，本 design 原写「等价写法 `SubState != "dead"`」是错的）**：
+   二者不等价 —— oneshot 运行失败后报 `ActiveState=failed` / `SubState=failed`，
+   按 `!= "dead"` 会判成「在跑」，于是 verdict 3 的闸门被关掉，本该报 `timer_stopped` 的 tick
+   降级报成优先级更低的 `scheduler_service_failed`。SubState 必须测**命名集合**
+   `{"dead", "failed"}`，不得用不等式。`failed` 这一值本 session **未实机观测到**
+   （只见过 `success`），因此是按构造处理、不是按实测 —— 这正是它必须被命名而非留给不等式的理由。
+   空 `SubState` 判为「不在跑」（落向告警方向）。
 2. **timer 在 pass 在飞期间始终 `ActiveState=active`**（`SubState` 在 `running`/`waiting` 间摆动），
    **从不 inactive**。`systemctl list-timers` 的 NEXT 显示 `-` 是因为 active 期间不计 realtime
    next elapse，与 `ActiveState` 无关。因此 verdict 3 的合取式虽然保守无害，其**理由**不是
@@ -86,6 +101,14 @@ Change surface：
 
 verdict 5 `scheduler_not_triggering` 用 `LastTriggerUSec` 年龄，且要求 service 当前**不在跑**
 （一趟 193 分钟的 pass 期间 `LastTriggerUSec` 自然会老）。
+`LastTriggerUSec` **为空**（timer 装上后从未触发过）视为无限逾期 → 报该档；
+有值但不可解析 → `probe_failed`。（Phase 1 补定，原 fixture 未定义。）
+
+tracker 文件**缺失（ENOENT）判为确定观测**（零条目，receipt 记 `tracker_present: false`），
+不判 `probe_failed`：`NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES <= 0` 时调度器根本不写该文件，
+且 runbook §6.1 明写 `state_reset: "missing"` 是首次启用的正常形态。
+其余一切读失败（软链 / 非普通文件 / 超界 / 坏 JSON / schema 不符 / 条目残缺）→ `probe_failed`。
+（Phase 1 补定，原 fixture 只写了「schema 不匹配」。）
 
 产物年龄（verdict 7）保留为**独立兜底**：timer 照常触发但 service 每次秒退不写产物时，
 systemd 侧全绿而产物断流。它**同样**要求 service 当前不在跑 —— 否则「一趟超过
