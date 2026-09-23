@@ -1132,7 +1132,10 @@ def _python_runtime_export_lines(target_python_runtime: Any = None) -> list[str]
     for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
-        except OSError:
+        except (OSError, RuntimeError):
+            # RuntimeError: strict Path.resolve() raises it, errno-less, on a symlink
+            # loop up to 3.12 (3.13+ raises OSError ELOOP); a loop candidate is
+            # skipped exactly like any other unresolvable one (#2452).
             continue
         if resolved in seen or not resolved.is_dir():
             continue

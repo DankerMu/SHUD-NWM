@@ -875,7 +875,20 @@ def root_evidence_item(
     elif evidence_safe_paths:
         path = "[local-path]"
     else:
-        path = str(Path(value).expanduser().resolve(strict=False))
+        # Render-only (no verdict reads this string), so it must never abort the pass
+        # that is trying to report a blocked root. Path.resolve() raised an errno-less
+        # RuntimeError on a symlink-loop root up to 3.12, which crashed run_once() on
+        # the pin before the #2453 SYMLINK blocker reached pass evidence, while 3.13+
+        # folded the loop and wrote it. _canonical_path (strict realpath, non-strict
+        # fallback) never raises on a loop, and _expanduser_or_verbatim keeps the raw
+        # value when no home can be determined. Imported here: scheduler_runtime_roots
+        # imports scheduler, which imports this module.
+        from services.orchestrator.scheduler_runtime_roots import (
+            _canonical_path,
+            _expanduser_or_verbatim,
+        )
+
+        path = str(_canonical_path(_expanduser_or_verbatim(value)))
     payload = {
         "path": path,
         "configured": path is not None,

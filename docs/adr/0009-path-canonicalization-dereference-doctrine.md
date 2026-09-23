@@ -132,7 +132,7 @@ errno 分流被增删、兜底被挪进 helper，集合都不动，只有**新�
 | `scheduler_preflight.py::_preflight_allowed_roots` | B | **3** | 仅作包含基底；被判定路径在 `:634` 被 `exists()/is_dir()` 探 |
 | `scheduler_preflight.py::_storage_root_check` | B | 1 | `:634` `.exists() and .is_dir()`，`:652-661` 据此出 blocker |
 | `scheduler_runtime_roots.py::_scheduler_allowed_roots_and_blockers` | B | **3** | 同 `_preflight_allowed_roots` |
-| `scheduler_runtime_roots.py::_canonical_parent` | B（裸 `except OSError`） | 1 | 产物进 preflight 路径，`:304` `lstat` |
+| `scheduler_runtime_roots.py::_canonical_parent` | B（裸 `except OSError`） | 1 | 产物进 preflight 路径，`_scheduler_root_check` 的 `path.lstat()` |
 | `scheduler_runtime_roots.py::_canonical_path` | B（裸 `except OSError`） | 1 | 同上 |
 | `scheduler_runtime_roots.py::_optional_config_path` | B（裸 `except OSError`） | **3** | 产物经 `services/orchestrator/scheduler_config/path_modes.py::_optional_config_path_for_mode` 变成 `allowed_storage_roots`，**只作包含基底**、自身从不被探；被判定的那条路径才被解引用——`_scheduler_root_check` lstat 的是 `path`，**不是 `allowed_roots`**，是另一个值 |
 | `scheduler_runtime_roots.py::_require_safe_directory_final_component` | B | 1 | 构造期硬守卫，产物随即被 open |
@@ -261,7 +261,7 @@ attr 为 `realpath` 的 `ast.Attribute`，扩面而不藏事。
   （同文件的 `_config_path_preserve_final_component_for_mode`、
   `_config_path_relative_to_preserve_final_for_mode`、以及 `_confined_path_for_mode`
   的兜底臂——按本 ADR 已知限制 1(b) 用符号锚而非行号）的产物进 preflight 路径，
-  在 `scheduler_runtime_roots.py:304` 被 `lstat`。**按从句 1 正当，不是 fail-open。**
+  在 `scheduler_runtime_roots.py::_scheduler_root_check` 的 `path.lstat()` 被探。**按从句 1 正当，不是 fail-open。**
 
   **产物在两个解释器上确实分叉，但分叉在解引用点是判据中性的**（实测）：
   环藏在 symlink 父段之后时，3.13 折叠、3.11 返回 raw，两条拼法逐字不同；
@@ -272,13 +272,16 @@ attr 为 `realpath` 的 `ast.Attribute`，扩面而不藏事。
   **这不等于该 preflight 腿没有跨解释器差异。** 它有：blocker code 与 evidence 载荷
   两端都不同（实测 `..._LOCK_ROOT_UNSAFE_PATH` vs `..._LOCK_ROOT_SYMLINK`）。
   但反事实探针把成因钉在**那条腿自己的** `Path.resolve(strict=False)`
-  （`scheduler_runtime_roots.py:271` 与其下 `except RuntimeError` 早退臂）上，
-  **不是本 helper**：交叉喂入两种拼法，键集仍随解释器走而不随输入串走。已立单 **#2453**。
+  （#2453 修复前 `scheduler_runtime_roots.py::_scheduler_root_check` 里那次调用与其下 `except RuntimeError` 早退臂）上，
+  **不是本 helper**：交叉喂入两种拼法，键集仍随解释器走而不随输入串走。已立单 **#2453**，
+  **已闭合**：`_scheduler_root_check` 改走 `_canonical_path`（本表从句 1 成员）、删掉早退臂，
+  环路输入与非环路输入同一条装配线，由 `lstat` 定 `SYMLINK` / `UNSAFE_PATH` / `NOT_FOUND`，
+  3.11 与 3.14 上 code 与键集一致（`tests/test_scheduler_root_check_loop_convergence.py`）。
   本 ADR 只为本 helper 的这条臂背书，且背书范围**只到「解引用点判据中性」为止**。
 - **裸 `except OSError` 写法**（`scheduler_runtime_roots.py::_canonical_parent` / `_canonical_path` /
   `_optional_config_path`，`path_modes.py::_resolve_config_path_for_mode` 两条臂）：
   **写法相同不等于从句相同。** `_canonical_parent`、`_canonical_path` 与 `path_modes.py`
-  两条臂依**从句 1**（产物进 preflight 路径、`scheduler_runtime_roots.py:304` `lstat`）；
+  两条臂依**从句 1**（产物进 preflight 路径、`scheduler_runtime_roots.py::_scheduler_root_check` 的 `path.lstat()`）；
   `_optional_config_path` 依**从句 3**——它的产物变成 `allowed_storage_roots`，
   只作包含基底、自身从不被探，被探的是 `path`，是另一个值。
   **把它们按写法合并成一条从句是错的**——守卫断言二只管「具名了从句」，
@@ -337,15 +340,26 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
    **(c) 转述别人报告里的闭合性断言，和手抄一张清单是同一件事。** 要么自己跑一遍，
    要么别写；两份报告冲突时唯一正确的动作是自己动手测，而不是挑一份信。
 
-2. 守卫只覆盖 `os.path.realpath` 面。`.resolve()` 面在同四棵树上有 152 个 (模块, 函数) 对
-   / 223 个调用点，本次未逐一对照三条从句归类，已立单 **#2452**（分诊，不是「替换全部 `.resolve()`」）。
-   该单实测出一个**与本 ADR 守卫直接冲突的倒置**，记在这里免得有人提「把 `.resolve()` 加进守卫」：
-   本 ADR 的守卫判据是「至少一处 `strict=True`」，而在 `.resolve()` 面上，
-   仓内 7 个 `strict=True` 站点里有 4 个的 handler 不捕 `RuntimeError`
-   ——**在 3.11 生产 pin 上它们是死代码**。也就是说，在那个面上，
-   「能通过本守卫的 `strict=True`」恰恰是生产 pin 上不安全的那一形。
-   `.resolve()` 没有可充当安全性质的 `strict=True`，故它需要自己的判据，
-   不能靠扩展本守卫闭合。
+2. 守卫只覆盖 `os.path.realpath` 面；`.resolve()` 面由 **#2452 闭合**，靠两件东西，都不是扩展本守卫：
+   - **一次性分诊**：四棵树上全部 `.resolve()` (模块, 函数) 对（当日 152 对 / 223 个调用点，AST 计数，
+     与 #2452 同源）逐一对照三条从句归类，写在该 change 的 `design.md` §Triage——那是一次性分诊产物，
+     **不是** shipped 注册表（理由同「权衡」节：钉行的存在不钉论证的成立）。结论：13 对落在三条从句之外——
+     5 对是两组字符串审计 / 策略分类器（被判路径是别的节点上的日志 URI，或只与词法包含判定取交集的 URI 串，
+     本机内核本就不是它们的权威），8 对是 render-only（产物只是写进证据 / 报告的字符串，无判定读它）；
+     逐一写明理由接受。其中 1 对需要行为改动：`scheduler_evidence.py::root_evidence_item`（render-only）
+     在 3.11 上对环路 root 抛 errno-less `RuntimeError`，把正要报告 blocked root 的整次调度 pass 带崩，
+     已改为经 `_canonical_path` 渲染（不再调 `.resolve()`）。生产调度路径上零 fail-open 站点；
+     另把 3.11 上环路中止调用方的去向逐对记下（调用方已包 / 上游已拒 / 可接受的响亮中止 / 已改）。
+   - **本面自己的机械判据** `tests/test_resolve_surface_guard.py`：**严格** `.resolve()`（`strict`
+     在场且不是字面 `False`）若处于捕 `OSError` 本身的 `try` 体内，则该 `try` 或同函数内包住它的
+     `try` 必须有捕 `RuntimeError`（或其基类）的 handler；违规者集合为空。
+   本守卫的判据**构造性不可复用**：这里的判据建立在「严格 `os.path.realpath` 抛带 errno 的
+   `OSError`」上，而 `.resolve()` 的严格形在 3.12 及更早对环路抛 errno-less `RuntimeError`——
+   #2452 实测的 4 个「`strict=True` + handler 不捕 `RuntimeError`」站点在 3.11 生产 pin 上正是死代码，
+   能过本守卫的那一形恰是 pin 上不安全的那一形；4 处已补 `RuntimeError` 臂、归到与 `OSError` 臂同一结果。
+   **非严格形刻意不进新判据**：3.13+ 上它对环路折叠而不抛，给它加 `RuntimeError` 臂只会制造
+   #2453 那种分歧（3.11 出 blocker、3.13 放行折叠值）；它们归分诊。新判据**判不了**
+   「handler 是否归流到与不抛路径同一套装配」——那正是 #2453 的教训，仍是设计评审的事。
 3. `journal_scope_census::_require_output_outside_root` 依从句 2。静态输入上无逃逸
    （悬空 symlink、中间组件缺失 + `..`、中间组件 ELOOP、父目录含 symlink + 末组件缺失，
    四类均方向正确或响亮失败）。**但从句 2 只对输入量化**：`_require_output_outside_root` 的返回值
@@ -353,9 +367,11 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
    中间隔着一次自述在 node-22 上「takes minutes」的 census。
    本 ADR 对该站点的背书**以「单次操作者 CLI、无并发写者」为前提**；
    若将来有并发写者进入该路径，从句 2 不再适用，该站点须改依从句 1 或改为复查。
-   同一函数里那次未加保护的 `os.path.realpath(target)` 另有问题（相对路径 + cwd 已删除、
-   内嵌 NUL），属既存问题，另行立单。
-4. 8 个核心 root 字段的前置探针（`scheduler_preflight.py:634`、`scheduler_runtime_roots.py:304`）
+   同一函数里那两次 `os.path.realpath` 的抛型面（相对路径 + cwd 已删除 → `FileNotFoundError`、
+   内嵌 NUL → `ValueError`）已由 **#2454 闭合**：包进 `except (OSError, ValueError)`，出 census 之前的
+   typed code `CENSUS_OUTPUT_UNRESOLVABLE`；这是「调用会不会抛」，与从句 2 的「写落在哪」正交，
+   守卫白名单里该项一字未动。
+4. 8 个核心 root 字段的前置探针（`scheduler_preflight.py:634`、`scheduler_runtime_roots.py::_scheduler_root_check` 的 `path.lstat()`）
    挂在默认关闭的开关上（`slurm_execution_enabled` / `require_runtime_roots`）。
    这**不**构成错位——`lock_path` 与 `evidence_dir` 在使用点真的落到内核
    （`services/orchestrator/scheduler_lease.py:252` `os.open` 与 `:271`

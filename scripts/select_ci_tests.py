@@ -313,6 +313,14 @@ RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS: tuple[str, ...] = ("db/**",)
 # targets.
 PATH_CANONICALIZATION_FAMILY_GUARD_TEST = "tests/test_path_canonicalization_family_guard.py"
 
+# #2452 / ADR 0009 已知限制 2: the `.resolve()`-surface guard. It walks the SAME
+# four trees -- it imports the family guard's own file walk rather than restating
+# `_SCAN_ROOTS` -- and asserts that no strict `.resolve()` sits behind an
+# OSError-only handler. A new such site anywhere under those roots must red the
+# merge gate, so it rides the family guard's supplemental loop over
+# PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: same roots, same set-union-only shape.
+RESOLVE_SURFACE_GUARD_TEST = "tests/test_resolve_surface_guard.py"
+
 # #1627: the four roots the family guard scans, mirroring its own module-level
 # `_SCAN_ROOTS` binding in tests/test_path_canonicalization_family_guard.py
 # mapped to `<root>/**` globs. A selector meta-guard parses that binding out of
@@ -1139,6 +1147,12 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # `_candidate_state_decision` seam, so a facade or seam edit must run it.
     # DB-free, 21 tests in ~10s: a rule, not a rule-gap exclusion.
     "tests/test_scheduler_terminal_recency.py",
+    # #2453: the root-check loop-convergence suite top-level-imports
+    # `services.orchestrator.scheduler` and drives `_scheduler_root_check` and both
+    # root preflights through the facade (the check itself calls back into the
+    # facade for every helper), plus a real `ProductionSchedulerConfig`. A facade
+    # edit must run it. DB-free, 51 tests in ~0.4s.
+    "tests/test_scheduler_root_check_loop_convergence.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -2700,6 +2714,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # subject modules route it through their own per-file rows. DB-free,
             # 21 tests in ~10s.
             "tests/test_scheduler_terminal_recency.py",
+            # #2453: the root-check loop-convergence suite's subject is
+            # scheduler_runtime_roots.py::_scheduler_root_check, and it pins the
+            # upstream normaliser's product from scheduler_config/path_modes.py; it
+            # also top-level-imports `services.orchestrator` itself. None of the
+            # three is stop-rule owned, so this directory rule is where those
+            # importer gaps close; its scheduler.py pair rides
+            # SCHEDULER_IMPORTER_TESTS. DB-free, 51 tests in ~0.4s.
+            "tests/test_scheduler_root_check_loop_convergence.py",
             # #2397: the §8.7 identity-authority suite top-level-imports
             # `services.orchestrator` itself, scheduler_candidates.py (the
             # journal-predecessor quarantine it drives), scheduler_discovery.py
@@ -5530,6 +5552,8 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS):
             selected.add(PATH_CANONICALIZATION_FAMILY_GUARD_TEST)
+            # #2452: the `.resolve()`-surface guard scans the same file walk.
+            selected.add(RESOLVE_SURFACE_GUARD_TEST)
 
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish

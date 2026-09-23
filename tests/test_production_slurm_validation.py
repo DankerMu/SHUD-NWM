@@ -1526,6 +1526,93 @@ def test_validate_slurm_submit_blocks_symlinked_log_without_touching_target(
     assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_UNSAFE"
 
 
+@pytest.mark.parametrize("loop_at", ("log_file", "log_dir"))
+def test_validate_slurm_submit_blocks_a_symlink_loop_log_on_every_interpreter(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    loop_at: str,
+) -> None:
+    """#2452: a symlink loop in the Slurm log binding is a typed blocker, not a traceback.
+
+    ``_bind_slurm_log_path`` resolves the log directory strictly and the log path
+    non-strictly, inside a handler that catches ``OSError`` but not the
+    errno-less ``RuntimeError`` that BOTH forms of ``Path.resolve()`` raise on a
+    loop up to 3.12.  A self-loop log FILE therefore escaped as ``RuntimeError``
+    on the 3.11 pin, while 3.13+ folds the non-strict resolve and reaches the
+    no-follow basename stat, which reports SLURM_ARRAY_TASK_LOG_UNSAFE.  With
+    ``RuntimeError`` handled at the binding, both interpreters report that same
+    code (design D6).  A loop AS the log DIRECTORY is refused earlier, by the
+    lstat-based symlink-component check, on every interpreter alike; it is pinned
+    here so the convergence claim covers both places a loop can sit.
+    """
+
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    workspace_root = tmp_path / "shared-workspace"
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(shutil_proxy(), "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            log_dir = _rendered_array_log_dir(Path(command[-1]).read_text(encoding="utf-8"))
+            assert log_dir == _live_array_log_dir(workspace_root, "looplog")
+            if loop_at == "log_dir":
+                log_dir.rmdir()
+                log_dir.symlink_to(log_dir)
+                return subprocess.CompletedProcess(command, 0, stdout="7811\n", stderr="")
+            (log_dir / "7811_0.out").write_text("task 0 stdout\n", encoding="utf-8")
+            (log_dir / "7811_0.err").write_text("task 0 stderr\n", encoding="utf-8")
+            (log_dir / "7811_1.out").symlink_to(log_dir / "7811_1.out")
+            (log_dir / "7811_1.err").write_text(
+                f"{slurm_validation.CONTROLLED_FAILURE_LOG_MARKER}\nNON_FINITE_FLOW\n",
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="7811\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "7811|COMPLETED|0:0|00:00:11|cn04|CPU\n"
+                    "7811_0|COMPLETED|0:0|00:00:10|cn04|CPU\n"
+                    "7811_1|FAILED|2:0|00:00:05|cn04|CPU\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-slurm",
+            "--evidence-root",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "looplog",
+            "--submit",
+            "--poll-interval-seconds",
+            "1",
+            "--poll-timeout-seconds",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert "SLURM_ARRAY_TASK_LOG_UNSAFE" in [blocker["error_code"] for blocker in summary["blockers"]]
+    partial = json.loads((tmp_path / "artifacts" / "looplog" / "slurm" / "array_partial_success.json").read_text())
+    task1 = next(task for task in partial["tasks"] if task["task_id"] == 1)
+    assert task1["log_status"] == "blocked"
+    assert task1["error_code"] == "SLURM_ARRAY_TASK_LOG_UNSAFE"
+
+
 def test_validate_slurm_submit_blocks_fifo_log_without_hanging(
     tmp_path: Path,
     monkeypatch,

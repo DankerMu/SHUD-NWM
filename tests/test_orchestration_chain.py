@@ -11955,6 +11955,33 @@ def test_template_export_lines_omits_grib_env_when_unset(monkeypatch, tmp_path: 
     assert not any(line.startswith("export LD_LIBRARY_PATH=") for line in lines)
 
 
+@pytest.mark.parametrize("unusable", ("missing", "symlink_loop"))
+def test_template_export_lines_skip_an_unresolvable_venv_bin_candidate(
+    monkeypatch,
+    tmp_path: Path,
+    unusable: str,
+):
+    # #2452: the candidate resolve is strict, and strict Path.resolve() raises an
+    # errno-less RuntimeError on a symlink loop up to 3.12 (OSError ELOOP on 3.13+).
+    # A loop candidate must be skipped exactly like a missing one, on every
+    # interpreter, instead of aborting sbatch export-line generation.
+    from services.orchestrator.chain import _template_export_lines
+
+    monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    bad_bin = tmp_path / "bad-bin"
+    if unusable == "symlink_loop":
+        bad_bin.symlink_to(bad_bin)
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(bad_bin))
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv_bin.parent))
+
+    lines = _template_export_lines({"workspace_dir": "/work"})
+
+    assert f"export PATH={shlex.quote(str(venv_bin.resolve(strict=True)))}:$PATH" in lines
+    assert not any(str(bad_bin) in line for line in lines)
+
+
 def test_template_export_lines_includes_published_artifact_root(monkeypatch):
     from services.orchestrator.chain import _template_export_lines
 
