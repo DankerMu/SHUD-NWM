@@ -88,6 +88,11 @@ jobs:
               # pattern — so the structural guard over it never started the
               # targeted gate. Exact literal only; no root `*.json` glob.
               - '.review-gate-issues.json'
+              # #2477: the frozen review-loop ledger. `docs/**` is excluded, so
+              # a ledger-only diff matched no backend pattern and the real-log
+              # guard in the attribution suite never started the targeted
+              # gate. Exact literal only; no `docs/**` or `*.jsonl` glob.
+              - 'docs/review-loop-log.jsonl'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'

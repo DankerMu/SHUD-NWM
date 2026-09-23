@@ -966,10 +966,24 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
 # is a root JSON file; it also holds this route's own pins.
 REVIEW_GATE_ISSUE_MEMORY_PATH = ".review-gate-issues.json"
 REVIEW_GATE_ISSUE_MEMORY_TEST = "tests/test_review_gate_issue_memory.py"
+# The tracked writer's CLI suite joins the data route: a memory diff also
+# re-proves that the committed file round-trips through its only writer.
+REVIEW_GATE_CLI_PATH = "scripts/review_gate.py"
+REVIEW_GATE_CLI_TEST = "tests/test_review_gate_cli.py"
 REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS: tuple[str, ...] = (
     REVIEW_GATE_ISSUE_MEMORY_TEST,
+    REVIEW_GATE_CLI_TEST,
     SELECTOR_META_GUARD_TEST,
 )
+
+# #2477: the tracked loop-log attribution audit and the frozen ledger it reads.
+# The suite pins the audit's arithmetic and a real-log guard over the ledger,
+# so both paths route to it explicitly (a `.jsonl` under `docs/` has no import
+# closure). The log rule carries the meta-guard for the same reason as the
+# review-gate memory: it is a non-`tests/` data path that holds route pins.
+LOOP_LOG_AUDIT_PATH = "scripts/governance/loop_log_audit.py"
+LOOP_LOG_PATH = "docs/review-loop-log.jsonl"
+LOOP_LOG_AUDIT_TEST = "tests/test_loop_log_audit_attribution.py"
 
 # #1912/#1903: the Basins package publication corpus has six frozen baseline
 # partitions plus one additive river/segment mapping owner, all below the 1,000-line
@@ -5365,6 +5379,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # instead of the zero-assertion collect-only collapse.
         REVIEW_GATE_ISSUE_MEMORY_PATH,
         REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS,
+    ),
+    PathTestRule(
+        # #2261: the memory's tracked writer routes to both memory suites.
+        REVIEW_GATE_CLI_PATH,
+        (REVIEW_GATE_CLI_TEST, REVIEW_GATE_ISSUE_MEMORY_TEST),
+    ),
+    PathTestRule(
+        # #2477: the attribution audit's own suite.
+        LOOP_LOG_AUDIT_PATH,
+        (LOOP_LOG_AUDIT_TEST,),
+    ),
+    PathTestRule(
+        # #2477: the frozen ledger; the exact ci.yml backend literal starts
+        # the targeted gate, this rule turns it into the real-log guard.
+        LOOP_LOG_PATH,
+        (LOOP_LOG_AUDIT_TEST, SELECTOR_META_GUARD_TEST),
     ),
     PathTestRule(
         # #1646: a pytest-config change must re-prove the thread-exception

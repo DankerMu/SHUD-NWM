@@ -4,8 +4,9 @@ Date: 2026-08-02
 
 ## Status
 
-Accepted (autonomous default-keep; revisit at the next audit sample or on
-maintainer override)
+Accepted; closed as historical 2026-09-23 (see the last Revisit). Originally
+accepted under autonomous default-keep, to revisit at the next audit sample or
+on maintainer override.
 
 ## Context
 
@@ -4986,3 +4987,26 @@ fixture `none` 的 spec-only 改动，0 轮审查、没有派席位，对 core�
 
 处置同前：**记录 deferral，不改规则**。合并授权只覆盖 #2024 本身，不含审核策略调整；keep/cut 仍由
 维护者人工决定，并且应在 #2477 落地、重算比例之后再做。
+
+## Revisit 2026-09-23 (#2477 落地，按 #2036 修复后的算法重算；样本冻结)
+
+前两条 Revisit 都把 keep/cut 推迟到「#2477 落地、重算比例之后」。本条就是那次重算。#2036 修复后的审计已从
+`002ba4b59^` 恢复为被跟踪的 `scripts/governance/loop_log_audit.py`，这次在
+`docs/review-loop-log.jsonl` 上实跑，日志共 690 行，其中 677 行 merged、13
+行 terminal。
+
+- **结果：不再是 DECIDABLE，退出码 0。** 231 个多轮已合并 PR 中，128 个被排除在轮换分母之外：
+  79 个只收窄、没有新增 lens；45 个 round-1 lens 集合是 non-list；1 个是 empty（PR
+  1788）；3 个声明为 incidental。剩下 103 个发生轮换的 PR，later-round catches
+  为 **core=146 / rotated=173 / final_review=43**，另有 15 个不可归属。rotated
+  份额 **54.2%**，与已记录的 `keep` 一致。用 `--rotation-decision none` 做无条件判定时同样指向「集中在
+  rotated-in lenses」。
+- **与上两条的差异完全来自算法。** 上两条的 core=388 / rotated=275 / phase=74、rotated
+  份额 41.5%，是修复前算法算出来的，偏差正是 #2036 修掉的那几项：子集收缩的轮次被算进分母；扁平字符串被逐字符拆开；
+  Phase 7 的 catch 被记成 rotated。所以前两条里「判据不成立、只靠 default-keep」的判断不再成立。
+- **样本已冻结，问题的对象也已不在。** 2026-09-22 安装的 `subagent-workflow` 已不再写这份日志，
+  最后一行是 2026-09-18 的 PR #2496。它的 re-review 固定用一个 `correctness+test-evidence`
+  席，不再做 lens 轮换。因此这个 ADR 所裁决的行为在当前工作流里已经不存在。
+
+处置：**keep 维持**，这次有修复后算法的实数支撑。本 ADR 关闭为历史决定：只有日志写入步骤回到工作流、或者轮换重新被引入时才需要再审。
+审计工具留在 `scripts/governance/loop_log_audit.py`，需要时手动运行。
