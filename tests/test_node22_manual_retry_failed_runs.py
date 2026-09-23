@@ -322,6 +322,7 @@ def _cohort_row(
     members: list[dict[str, Any]] | None = None,
     error_code: str | None = None,
     offset: int = 0,
+    at: str | None = None,
 ) -> dict[str, Any]:
     minutes = _STAGE_MINUTES[stage] + offset
     row: dict[str, Any] = {
@@ -340,6 +341,8 @@ def _cohort_row(
         "finished_at": _stamp(minutes + 1),
         "updated_at": _stamp(minutes + 1),
     }
+    if at is not None:
+        row.update({"created_at": at, "submitted_at": at, "finished_at": at, "updated_at": at})
     if members is not None:
         row["cohort_members"] = members
     if error_code is not None:
@@ -356,27 +359,36 @@ def _cohort_row(
     return row
 
 
-def _single_model_cohort(*, state_save_status: str) -> list[dict[str, Any]]:
+def _single_model_cohort(
+    *,
+    state_save_status: str,
+    run_id: str = _HLJ_COHORT_RUN_ID,
+    slurm_job_ids: tuple[str, str, str, str] = ("54817", "54822", "54871", "54918"),
+    stamps: tuple[str | None, ...] = (None, None, None, None),
+) -> list[dict[str, Any]]:
     """The HLJ cohort master: model on convert/forcing/state_save_qc, members on the forecast row."""
 
     failed = state_save_status != "succeeded"
+    convert, forcing, forecast, state_save = slurm_job_ids
     return [
-        _cohort_row(_HLJ_COHORT_RUN_ID, "convert", status="succeeded", slurm_job_id="54817", model_id=_HLJ_MODEL_ID),
-        _cohort_row(_HLJ_COHORT_RUN_ID, "forcing", status="succeeded", slurm_job_id="54822", model_id=_HLJ_MODEL_ID),
+        _cohort_row(run_id, "convert", status="succeeded", slurm_job_id=convert, model_id=_HLJ_MODEL_ID, at=stamps[0]),
+        _cohort_row(run_id, "forcing", status="succeeded", slurm_job_id=forcing, model_id=_HLJ_MODEL_ID, at=stamps[1]),
         _cohort_row(
-            _HLJ_COHORT_RUN_ID,
+            run_id,
             "forecast",
             status="succeeded",
-            slurm_job_id="54871",
+            slurm_job_id=forecast,
             members=_members((_HLJ_MODEL_ID,)),
+            at=stamps[2],
         ),
         _cohort_row(
-            _HLJ_COHORT_RUN_ID,
+            run_id,
             "state_save_qc",
             status=state_save_status,
-            slurm_job_id=None if failed else "54918",
+            slurm_job_id=None if failed else state_save,
             model_id=_HLJ_MODEL_ID,
             error_code="SLURM_PARSE_ERROR" if failed else None,
+            at=stamps[3],
         ),
     ]
 
@@ -674,6 +686,147 @@ def test_only_the_latest_state_save_qc_row_of_a_cohort_decides_the_hint(
     assert preview["reason"] == "no_retryable_failed_job"
     assert [candidate["job_id"] for candidate in preview["cohort_candidates"]] == expected_job_ids
     assert ("warning" in preview) is bool(expected_job_ids)
+    assert "cohort_candidates_error" not in preview
+
+
+# ---------------------------------------------------------------------------------------------
+# #2605: a failed master already recovered under ANOTHER cohort run id is not a candidate.
+#
+# Production shape (node-22 journal, IFS 2026092212, HLJ model): the ``_convert_<m>`` master's
+# ``state_save_qc`` permanently failed at 04:31:01Z; after the operator's manual mark the
+# cohort re-ran as ``cycle_ifs_2026092212_full_<m>``, whose ``state_save_qc`` 55154 succeeded at
+# 13:34:13Z.  The hint grouped by run id and still named the recovered ``_convert_`` master.
+# ---------------------------------------------------------------------------------------------
+
+_HLJ_FULL_COHORT_RUN_ID = f"cycle_ifs_2026092212_full_{_HLJ_MODEL_ID}"
+# (convert, forcing, forecast, state_save_qc) updated_at of each cohort, as journaled on node-22.
+_CONVERT_MASTER_STAMPS = (
+    "2026-09-23T04:12:21Z",
+    "2026-09-23T04:21:18Z",
+    "2026-09-23T04:29:53Z",
+    "2026-09-23T04:31:01Z",
+)
+_FULL_RERUN_STAMPS = (
+    "2026-09-23T13:15:44Z",
+    "2026-09-23T13:23:28Z",
+    "2026-09-23T13:32:09Z",
+    "2026-09-23T13:34:13Z",
+)
+_LATER_COHORT_RUN_ID = "cycle_ifs_2026092212_convert_cohort_7e4f2a9c1d05"
+_LATER_OFFSET = 543  # state_save_qc stamped 150 + 543 + 1 minutes after 02:00:39Z = 13:34:39Z
+
+
+def _hlj_hydro_run_rows() -> list[dict[str, Any]]:
+    """Both production forecast rows of the hydro run: the 54871 original and the 55153 rerun."""
+
+    rerun = {
+        **_hlj_hydro_run_row(),
+        "job_id": f"job_{_HLJ_RUN_ID}_forecast_reconciled_55153_0",
+        "slurm_job_id": "55153_0",
+    }
+    for key in ("created_at", "submitted_at"):
+        rerun[key] = _FULL_RERUN_STAMPS[1]
+    for key in ("finished_at", "updated_at"):
+        rerun[key] = _FULL_RERUN_STAMPS[2]
+    original = _hlj_hydro_run_row()
+    original.update({"finished_at": _CONVERT_MASTER_STAMPS[2], "updated_at": _CONVERT_MASTER_STAMPS[2]})
+    return [original, rerun]
+
+
+def _state_save_updated_at(root: Path) -> dict[str, str]:
+    jobs = FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("ifs_2026092212")
+    return {job["run_id"]: job["updated_at"] for job in jobs if job["stage"] == "state_save_qc"}
+
+
+@pytest.mark.parametrize(
+    ("convert_stamps", "full_stamps", "expected_run_ids"),
+    [
+        # 2.1: the production incident -- the failure is older than the full rerun's success.
+        (_CONVERT_MASTER_STAMPS, _FULL_RERUN_STAMPS, []),
+        # 2.2: reverse order -- the master failed again after the full cohort succeeded.
+        (_FULL_RERUN_STAMPS, _CONVERT_MASTER_STAMPS, [_HLJ_COHORT_RUN_ID]),
+    ],
+    ids=["production_incident_superseded", "failed_again_after_success_listed"],
+)
+def test_later_success_under_another_cohort_run_id_supersedes_the_failed_master(
+    tmp_path: Path,
+    convert_stamps: tuple[str, ...],
+    full_stamps: tuple[str, ...],
+    expected_run_ids: list[str],
+) -> None:
+    root = _ifs_journal(
+        tmp_path,
+        [
+            *_single_model_cohort(state_save_status="permanently_failed", stamps=convert_stamps),
+            *_single_model_cohort(
+                state_save_status="succeeded",
+                run_id=_HLJ_FULL_COHORT_RUN_ID,
+                slurm_job_ids=("55151", "55152", "55153", "55154"),
+                stamps=full_stamps,
+            ),
+            *_hlj_hydro_run_rows(),
+        ],
+    )
+    # Real, ordered timestamps survive the journal write.
+    assert _state_save_updated_at(root) == {
+        _HLJ_COHORT_RUN_ID: convert_stamps[3],
+        _HLJ_FULL_COHORT_RUN_ID: full_stamps[3],
+    }
+
+    exit_code, receipt = _invoke(root, tmp_path, "--run-id", _HLJ_RUN_ID)
+
+    assert exit_code == 0
+    preview = receipt["runs"][0]["preview"]
+    assert preview["decision"] == "refused"
+    assert preview["reason"] == "no_retryable_failed_job"
+    assert [candidate["run_id"] for candidate in preview["cohort_candidates"]] == expected_run_ids
+    assert [candidate["member_count"] for candidate in preview["cohort_candidates"]] == [1] * len(expected_run_ids)
+    assert ("warning" in preview) is bool(expected_run_ids)
+    assert "cohort_candidates_error" not in preview
+
+
+@pytest.mark.parametrize(
+    "membership_complete",
+    [
+        # 2.4: a later model-less cohort whose complete recorded membership includes the model.
+        True,
+        # 2.5: same cohort, but a blank member ``model_id`` -- coverage unprovable, supersedes nothing.
+        False,
+    ],
+    ids=["complete_membership_supersedes", "incomplete_membership_supersedes_nothing"],
+)
+def test_later_multi_member_success_supersedes_only_when_its_membership_is_provable(
+    tmp_path: Path, membership_complete: bool
+) -> None:
+    members = _members((_HLJ_MODEL_ID, *_OTHER_MODEL_IDS))
+    if not membership_complete:
+        members[2] = {**members[2], "model_id": ""}
+    root = _ifs_journal(
+        tmp_path,
+        [
+            *_single_model_cohort(state_save_status="permanently_failed"),
+            _hlj_hydro_run_row(),
+            *_multi_member_cohort(
+                _LATER_COHORT_RUN_ID, (), members=members, state_save_status="succeeded", offset=_LATER_OFFSET
+            ),
+        ],
+    )
+    assert _state_save_updated_at(root) == {
+        _HLJ_COHORT_RUN_ID: "2026-09-23T04:31:39Z",
+        _LATER_COHORT_RUN_ID: "2026-09-23T13:34:39Z",
+    }
+
+    exit_code, receipt = _invoke(root, tmp_path, "--run-id", _HLJ_RUN_ID)
+
+    assert exit_code == 0
+    preview = receipt["runs"][0]["preview"]
+    assert preview["reason"] == "no_retryable_failed_job"
+    if membership_complete:
+        assert preview["cohort_candidates"] == []
+        assert "warning" not in preview
+    else:
+        assert [(c["run_id"], c["member_count"]) for c in preview["cohort_candidates"]] == [(_HLJ_COHORT_RUN_ID, 1)]
+        assert "whole cohort from convert" in preview["warning"].lower()
     assert "cohort_candidates_error" not in preview
 
 

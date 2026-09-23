@@ -304,7 +304,8 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
    - 用 hydro run id 预览一次。拒绝为 `no_retryable_failed_job` 时，预览结果里带只读提示
      `cohort_candidates`：同一 cycle 中 `state_save_qc` 处于失败状态、且记录的成员覆盖该模型的 cohort master，
      每项含 `run_id`、`job_id`、`stage`、`status`、`error_code`、`member_count`，另有一条 `warning`。
-     成员关系证明不了的 cohort（成员列表不完整等）不会列出；提示读 cycle 受阻时给出
+     成员关系证明不了的 cohort（成员列表不完整等）不会列出；已被更晚成功的 cohort 取代的 master 也不列出（同一 cycle
+     另有更晚的 `state_save_qc` 行已 `succeeded` 且按同一成员规则覆盖该模型，例如重跑记在 `..._full_<model>` 下）；提示读 cycle 受阻时给出
      `cohort_candidates_error`（不是空列表），此时改用下一种办法。脚本**不会**替你换 id。
    - 从 blocked evidence（`state_evidence.pipeline_jobs`）里取。同一 cycle 可能有多行 `stage = state_save_qc`，
      分属不同 cohort（例如 HLJ 那一行 `permanently_failed`、`model_id` 为 HLJ 的模型；另一行 `succeeded`、
