@@ -27,7 +27,7 @@ from services.artifacts import (
     safe_public_log_uri,
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
-from services.orchestrator.public_evidence import _public_message
+from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import (
     ManualRetryService,
     RetryConfig,
@@ -619,7 +619,12 @@ def cancel_run(
             try:
                 cancellation = _coerce_mapping(gateway.cancel_job(job.slurm_job_id))
             except SlurmGatewayError as error:
-                gap = _slurm_cancellation_gap_payload(job, run_id, error)
+                # #2308: two shapes, never one shared dict. ``raw_error`` is the
+                # secrets-redacted gateway text the events persist -- operators
+                # diagnose from the real command vector and stderr; ``gap`` is
+                # the wire copy, rendered so host paths leave the response body.
+                raw_error = _raw_slurm_gateway_error(error)
+                gap = _slurm_cancellation_gap_payload(job, run_id, raw_error)
                 if _is_unproven_slurm_cancel_error(error):
                     blocked_jobs.append(gap)
                     idempotent_jobs.append(
@@ -644,7 +649,7 @@ def cancel_run(
                             "run_id": run_id,
                             "slurm_job_id": job.slurm_job_id,
                             "previous_status": previous_status,
-                            "error": gap["error"],
+                            "error": raw_error,
                             "cancellation_proven": False,
                         },
                     )
@@ -662,7 +667,7 @@ def cancel_run(
                         "run_id": run_id,
                         "slurm_job_id": job.slurm_job_id,
                         "previous_status": previous_status,
-                        "error": gap["error"],
+                        "error": raw_error,
                         "cancellation_proven": False,
                     },
                 )
@@ -860,22 +865,12 @@ def queue_depth(
         try:
             depth = dict(queue_depth_method())
         except SlurmGatewayError as error:
-            raise ApiError(
-                status_code=error.status_code,
-                code=error.code,
-                message=_safe_redacted_text(error.message),
-                details=_safe_redacted_payload(error.details),
-            ) from error
+            raise _public_slurm_gateway_api_error(error) from error
     else:
         try:
             records = gateway.list_jobs(limit=1000, offset=0)
         except SlurmGatewayError as error:
-            raise ApiError(
-                status_code=error.status_code,
-                code=error.code,
-                message=_safe_redacted_text(error.message),
-                details=_safe_redacted_payload(error.details),
-            ) from error
+            raise _public_slurm_gateway_api_error(error) from error
         depth = {"running": 0, "pending": 0, "idle": 0}
         for record in records:
             status = getattr(record.status, "value", record.status)
@@ -893,6 +888,22 @@ def queue_depth(
             "pending": int(depth.get("pending", 0)),
             "idle": int(depth.get("idle", 0)),
         },
+    )
+
+
+def _public_slurm_gateway_api_error(error: SlurmGatewayError) -> ApiError:
+    """#2308: the queue-depth upstream-error body, rendered.
+
+    Same field names as before (``SlurmGatewayUpstreamError``); only the values
+    are rendered, so the configured ``slurm_bin_path`` in ``details.command[0]``
+    and the workspace paths in ``details.stderr.snippet`` leave the response.
+    """
+
+    return ApiError(
+        status_code=error.status_code,
+        code=error.code,
+        message=_public_error_message(error.message),
+        details=_public_evidence(_safe_redacted_payload(error.details)),
     )
 
 
@@ -927,7 +938,29 @@ def _is_unproven_slurm_cancel_error(error: SlurmGatewayError) -> bool:
     )
 
 
-def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, error: SlurmGatewayError) -> dict[str, Any]:
+def _raw_slurm_gateway_error(error: SlurmGatewayError) -> dict[str, Any]:
+    """The gateway error as the pipeline events persist it: secrets-redacted, host text raw.
+
+    #2308: this is deliberately NOT the response shape. ``[local-path]`` is a
+    wire rendering, not something an event owes its readers -- what the event
+    owes them is the command vector and stderr an operator can act on. (The
+    sibling ``gateway_response.manifest`` subtree stays raw for the same reason
+    plus one more: that shape is what retry's runtime-root recovery reads back
+    off persisted ``submission`` events, ``retry.py``'s
+    ``_event_runtime_root_candidates``.)
+    """
+
+    return {
+        "status_code": error.status_code,
+        "code": error.code,
+        "message": _safe_redacted_text(error.message),
+        "details": _safe_redacted_payload(error.details or {}),
+    }
+
+
+def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, raw_error: dict[str, Any]) -> dict[str, Any]:
+    """The wire copy of a cancellation gap: the raw error rendered for the public body."""
+
     return {
         "job_id": job.job_id,
         "run_id": run_id,
@@ -935,10 +968,9 @@ def _slurm_cancellation_gap_payload(job: PipelineJob, run_id: str, error: SlurmG
         "slurm_job_id": job.slurm_job_id,
         "cancellation_proven": False,
         "error": {
-            "status_code": error.status_code,
-            "code": error.code,
-            "message": _safe_redacted_text(error.message),
-            "details": _safe_redacted_payload(error.details or {}),
+            **raw_error,
+            "message": _public_error_message(str(raw_error["message"])),
+            "details": _public_evidence(raw_error["details"]),
         },
     }
 
@@ -948,13 +980,21 @@ def _unproven_slurm_cancellation_payload(
     run_id: str,
     response: dict[str, Any],
 ) -> dict[str, Any]:
+    """The wire copy of an unproven cancellation.
+
+    #2308: ``SlurmJobRecord.manifest`` carries ``workspace_dir`` /
+    ``manifest_index_path`` / ``array_log_dir`` for an array submission, so this
+    payload is rendered. The event beside it keeps the raw copy
+    (``_safe_redacted_payload(cancellation)`` at the ``insert_event`` call).
+    """
+
     return {
         "job_id": job.job_id,
         "run_id": run_id,
         "status": job.status,
         "slurm_job_id": job.slurm_job_id,
         "cancellation_proven": False,
-        "gateway_response": _safe_redacted_payload(response),
+        "gateway_response": _public_evidence(_safe_redacted_payload(response)),
     }
 
 

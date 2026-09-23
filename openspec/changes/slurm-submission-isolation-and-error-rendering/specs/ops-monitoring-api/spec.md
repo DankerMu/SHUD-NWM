@@ -8,7 +8,7 @@ When a Slurm gateway error reaches an ops API response body, its `message` and i
 
 This SHALL apply to the cancel endpoint's 200 body — every gateway error carried under its failed and blocked job entries — and to the queue-depth endpoint's upstream-error body. The response SHALL contain no configured scheduler binary path and no workspace root text.
 
-The pipeline events persisted beside those responses SHALL keep the gateway's raw, secrets-redacted text, for two reasons: operators diagnose from them, and the retry lane's runtime-root recovery reads the persisted gateway response's manifest subtree, so a rendered event copy would break a working recovery path. It is NOT an anti-laundering rule — `[local-path]` is deliberately persisted evidence elsewhere. A single rendered payload SHALL NOT be shared between a response and a persisted event.
+The pipeline events persisted beside those responses SHALL keep the gateway's raw, secrets-redacted text, because operators diagnose from them and because the durable event is the system's record of what the scheduler actually reported. It is NOT an anti-laundering rule — `[local-path]` is deliberately persisted evidence elsewhere. The same raw-persistence rule protects the runtime-root recovery that reads a persisted gateway response's manifest subtree, on the `submission` events that recovery scans. A single rendered payload SHALL NOT be shared between a response and a persisted event: the persisted copy SHALL remain in the shape those readers can consume.
 
 The upstream-error response schema's field names SHALL NOT change; only the values are rendered. Errors that carry no gateway text, such as the retry error family, SHALL keep their current rendering.
 
@@ -32,7 +32,7 @@ The upstream-error response schema's field names SHALL NOT change; only the valu
 
 - **WHEN** a cancellation returns a record whose manifest carries a workspace directory, a manifest index path or an array log directory, and the route reports it as an unproven cancellation
 - **THEN** the response's gateway-response payload SHALL be rendered like any other gateway evidence
-- **THEN** the persisted event's copy SHALL keep the raw values, and the retry lane's runtime-root recovery SHALL still read real roots from it
+- **THEN** the persisted event's copy SHALL keep the raw values, in the shape the runtime-root readers consume — a real root, not a placeholder
 
 #### Scenario: Persisted cancellation events keep the raw evidence
 

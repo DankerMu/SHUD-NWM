@@ -23,6 +23,10 @@ from services.slurm_gateway.gateway import SlurmGatewayError
 from workers.data_adapters.base import cycle_id_for
 
 GENERIC_RETRY_JOB_TYPE = "forecast_qhh_stage"
+# #2308: the configured scheduler binary path and the workspace root — host text,
+# not secrets, so secrets-only redaction never removed them.
+_GATEWAY_SQUEUE_BIN = "/opt/slurm/24.05/bin/squeue"
+_GATEWAY_WORKSPACE_ROOT = "/srv/nhms/workspace"
 
 
 def test_pipeline_status_endpoint() -> None:
@@ -2966,6 +2970,78 @@ def test_queue_depth_list_jobs_error_redacts_secret_gateway_payload() -> None:
     for raw_secret in ("user:pass", "tok123", "sig123", "pass123", "signature=sig123"):
         assert raw_secret not in response_text
     assert "[redacted]" in response_text
+
+
+def test_queue_depth_direct_method_error_renders_gateway_host_paths() -> None:
+    """#2308 — the queue-depth upstream-error body renders host paths.
+
+    Shaped like `RealSlurmGateway._run_command`'s failure detail: the configured
+    `slurm_bin_path` in `command[0]` and an absolute workspace path inside the
+    stderr snippet.  Neither is a secret, so `redact_payload` alone left both
+    verbatim on the wire.
+    """
+
+    class QueueDepthPathGateway:
+        def queue_depth(self) -> dict[str, int]:
+            raise SlurmGatewayError(
+                502,
+                "SLURM_COMMAND_ERROR",
+                f"Slurm command squeue failed with exit code 1 for {_GATEWAY_WORKSPACE_ROOT}/runs.",
+                {
+                    "command": [_GATEWAY_SQUEUE_BIN, "--noheader", "--array"],
+                    "returncode": 1,
+                    "stderr": {
+                        "snippet": f"squeue: error: cannot stat {_GATEWAY_WORKSPACE_ROOT}/spool/state",
+                        "truncated": False,
+                    },
+                },
+            )
+
+    with _store() as store:
+        with _client(store, QueueDepthPathGateway()) as client:
+            response = client.get("/api/v1/queue/depth")
+
+    assert response.status_code == 502
+    error = response.json()["error"]
+    # 3.4: the upstream-error keys are unchanged, only the values are rendered.
+    assert set(error) >= {"code", "message", "details"}
+    assert error["code"] == "SLURM_COMMAND_ERROR"
+    assert error["message"] == "Slurm command squeue failed with exit code 1 for [local-path]."
+    assert error["details"]["command"] == ["[local-path]", "--noheader", "--array"]
+    assert error["details"]["returncode"] == 1
+    assert error["details"]["stderr"]["snippet"] == "squeue: error: cannot stat [local-path]"
+    assert error["details"]["stderr"]["truncated"] is False
+    response_text = json.dumps(response.json(), sort_keys=True)
+    assert _GATEWAY_SQUEUE_BIN not in response_text
+    assert _GATEWAY_WORKSPACE_ROOT not in response_text
+
+
+def test_queue_depth_list_jobs_error_renders_gateway_host_paths() -> None:
+    class ListJobsPathGateway:
+        def list_jobs(self, *, limit: int, offset: int) -> list[Any]:
+            del limit, offset
+            raise SlurmGatewayError(
+                504,
+                "SLURM_TIMEOUT",
+                f"Slurm command squeue timed out for {_GATEWAY_WORKSPACE_ROOT}/runs.",
+                {
+                    "command": [_GATEWAY_SQUEUE_BIN, "--noheader"],
+                    "timeout_seconds": 30,
+                },
+            )
+
+    with _store() as store:
+        with _client(store, ListJobsPathGateway()) as client:
+            response = client.get("/api/v1/queue/depth")
+
+    assert response.status_code == 504
+    error = response.json()["error"]
+    assert error["code"] == "SLURM_TIMEOUT"
+    assert error["message"] == "Slurm command squeue timed out for [local-path]."
+    assert error["details"] == {"command": ["[local-path]", "--noheader"], "timeout_seconds": 30}
+    response_text = json.dumps(response.json(), sort_keys=True)
+    assert _GATEWAY_SQUEUE_BIN not in response_text
+    assert _GATEWAY_WORKSPACE_ROOT not in response_text
 
 
 def test_display_queue_depth_unavailable_without_constructing_gateway() -> None:

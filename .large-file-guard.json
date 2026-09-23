@@ -95,6 +95,8 @@
     "tests/test_production_slurm_validation.py",
     "services/slurm_gateway/real_backend.py",
     "tests/test_real_slurm_gateway.py",
-    "tests/test_slurm_array_contract.py"
+    "tests/test_slurm_array_contract.py",
+    "tests/test_retry_cancel_consistency.py",
+    "tests/test_monitoring_api.py"
   ]
 }

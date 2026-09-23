@@ -116,18 +116,125 @@ and `tests/test_slurm_array_contract.py` (1300).
 
 ## 3. #2308 — render gateway errors on responses, keep events raw (design D3)
 
-- [ ] 3.1 Red first: with the gateway raising a command error whose `command[0]` is the configured `slurm_bin_path` and whose stderr snippet contains an absolute workspace path, `POST /api/v1/runs/{run_id}/cancel` returns a body whose failed-job entry carries `[local-path]` in the stderr snippet and no scheduler binary path in the command vector.
-- [ ] 3.2 Same for the unproven-cancellation branch (blocked jobs) and for `GET /api/v1/queue/depth`'s upstream-error body.
-- [ ] 3.3 **In the same tests**: the persisted `slurm_cancellation_gap` / `cancel_failed` event's `details.error` still carries the raw command vector and stderr text. The rendered payload must not be shared with the event. The reason to pin this is functional, not stylistic: `[local-path]` is deliberately persisted evidence elsewhere, but retry's runtime-root recovery reads the persisted `gateway_response.manifest` subtree.
-- [ ] 3.4 The upstream-error response keys are unchanged; `openapi/nhms.v1.yaml` is not touched; `_api_error` is not touched.
-- [ ] 3.5 `_unproven_slurm_cancellation_payload`'s `gateway_response` is settled, not a probe: the dumped `SlurmJobRecord.manifest` carries `workspace_dir` / `manifest_index_path` / `array_log_dir` for array submissions (`real_backend.py:390-400`). Render the **response** copy; keep the **event** copy raw, and assert that retry's runtime-root recovery can still read `("gateway_response", "manifest")` off the persisted event (`services/orchestrator/retry.py:1421`, field set `:89-95`). Do not try to settle this with a live probe — `cancel_job` only returns proven records (`real_backend.py:474-484`), so the branch is unreachable against the real backend.
-- [ ] 3.6 Existing secrets-redaction assertions stay green.
+- [x] 3.1 Red first: with the gateway raising a command error whose `command[0]` is the configured `slurm_bin_path` and whose stderr snippet contains an absolute workspace path, `POST /api/v1/runs/{run_id}/cancel` returns a body whose failed-job entry carries `[local-path]` in the stderr snippet and no scheduler binary path in the command vector.
+- [x] 3.2 Same for the unproven-cancellation branch (blocked jobs) and for `GET /api/v1/queue/depth`'s upstream-error body.
+- [x] 3.3 **In the same tests**: the persisted `slurm_cancellation_gap` / `cancel_failed` event's `details.error` still carries the raw command vector and stderr text. The rendered payload must not be shared with the event. Correction folded in from the implementation pass: retry's runtime-root scan filters `event_type == "submission"` (`services/orchestrator/retry.py:1382-1386`), so it never reads these two event types — its readers are used as the honest oracle for "a real root, not a placeholder", not as a consumer of these rows. The binding reason for this route is operator diagnosis.
+- [x] 3.4 The upstream-error response keys are unchanged; `openapi/nhms.v1.yaml` is not touched; `_api_error` is not touched.
+- [x] 3.5 `_unproven_slurm_cancellation_payload`'s `gateway_response` is settled, not a probe: the dumped `SlurmJobRecord.manifest` carries `workspace_dir` / `manifest_index_path` / `array_log_dir` for array submissions (`real_backend.py:390-400`). Render the **response** copy; keep the **event** copy raw, and assert that retry's runtime-root recovery can still read `("gateway_response", "manifest")` off the persisted event (`services/orchestrator/retry.py:1421`, field set `:89-95`). Do not try to settle this with a live probe — `cancel_job` only returns proven records (`real_backend.py:474-484`), so the branch is unreachable against the real backend.
+- [x] 3.6 Existing secrets-redaction assertions stay green.
+
+### #2308 evidence (implementer pass 3)
+
+The split is three call sites in `apps/api/routes/pipeline.py`, one raw shape and one
+rendered shape:
+
+- `_raw_slurm_gateway_error(error)` (new) builds the secrets-only dict once per
+  `SlurmGatewayError`; `cancel_run` hands it straight to both `insert_event` calls
+  (`details["error"]`) and hands the SAME dict to `_slurm_cancellation_gap_payload`,
+  which returns the wire entry with `message` through `_public_error_message` and
+  `details` through `_public_evidence`. `_public_evidence` rebuilds every mapping and
+  list, so the two payloads share no mutable object.
+- `_unproven_slurm_cancellation_payload` now renders (`_public_evidence(_safe_redacted_payload(response))`);
+  the `insert_event` beside it keeps `_safe_redacted_payload(cancellation)` verbatim.
+- `queue_depth`'s two `SlurmGatewayError` arms go through the new
+  `_public_slurm_gateway_api_error`. `_api_error` (RetryError) is untouched, and
+  `openapi/nhms.v1.yaml` is untouched — the `SlurmGatewayUpstreamError` keys do not move.
+
+**Response-shape note (3.4, disclosed):** the shared renderer collapses a whole mapping
+under a *sensitive* key to the scalar `"[redacted]"` instead of recursing (it is
+`_sanitize_public_field`'s existing rule, the same one `runtime_root_resolution` gets).
+So in `test_unproven_cancel_gateway_response_redacts_response_and_event_details` the
+response's `gateway_response.auth` subtree becomes the string `"[redacted]"` while the
+persisted event keeps the structured, key-wise-redacted mapping — the split showing
+itself. No real `SlurmCommandError` detail key (`command`, `returncode`, `stdout`,
+`stderr`, `timeout_seconds`) is sensitive, so production bodies only lose host paths.
+
+**RED** (tests at their new state, `apps/api/routes/pipeline.py` unmodified):
+
+```
+$ uv run pytest -q tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py \
+    -k "renders_gateway_host_paths or renders_manifest_roots_on_the_wire or unproven_cancel_gateway_response_redacts"
+E   AssertionError: assert {'errors': [{'status': '[redacted]'}], 'issuer_url': 'https://idp.example.invalid/auth', ...} == '[redacted]'
+E   AssertionError: assert 'Slurm comman...cancel_paths.' == 'Slurm comman...[local-path].'
+E   AssertionError: assert 'Slurm comman...locked_paths.' == 'Slurm comman...[local-path].'
+E   AssertionError: assert {'array_log_d...t-store', ...} == {'array_log_d...l-path]', ...}
+      {'workspace_dir': '/srv/nhms/workspace'} != {'workspace_dir': '[local-path]'}
+      {'manifest_index_path': '/srv/nhms/workspace/runs/run_array_roots/input/manifest_index_20260522T010203040506.json'} != {'manifest_index_path': '[local-path]'}
+E   AssertionError: assert 'Slurm comman...rkspace/runs.' == 'Slurm comman...[local-path].'
+E   AssertionError: assert 'Slurm comman...rkspace/runs.' == 'Slurm comman...[local-path].'
+FAILED tests/test_retry_cancel_consistency.py::test_unproven_cancel_gateway_response_redacts_response_and_event_details
+FAILED tests/test_retry_cancel_consistency.py::test_cancel_failure_response_renders_gateway_host_paths_while_the_event_stays_raw
+FAILED tests/test_retry_cancel_consistency.py::test_cancel_blocked_response_renders_gateway_host_paths_while_the_event_stays_raw
+FAILED tests/test_retry_cancel_consistency.py::test_unproven_cancellation_renders_manifest_roots_on_the_wire_and_keeps_them_raw_in_the_event
+FAILED tests/test_monitoring_api.py::test_queue_depth_direct_method_error_renders_gateway_host_paths
+FAILED tests/test_monitoring_api.py::test_queue_depth_list_jobs_error_renders_gateway_host_paths
+6 failed, 129 deselected in 0.37s
+```
+
+**GREEN**:
+
+```
+$ uv run ruff check .
+All checks passed!
+
+$ uv run pytest -q tests/test_retry_cancel_consistency.py tests/test_monitoring_api.py \
+    -k "renders_gateway_host_paths or renders_manifest_roots_on_the_wire or unproven_cancel_gateway_response_redacts"
+6 passed, 129 deselected in 0.37s
+
+$ uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py \
+    tests/test_api_contract_pipeline_ops.py tests/test_retry.py \
+    tests/test_openapi_response_conformance.py tests/test_api_contract.py
+411 passed in 7.54s
+
+$ uv run pytest -q tests/test_production_slurm_validation.py tests/test_real_slurm_gateway.py \
+    tests/test_slurm_array_contract.py        # passes 1-2 still green
+442 passed in 9.34s
+
+$ printf 'apps/api/routes/pipeline.py\ntests/test_retry_cancel_consistency.py\ntests/test_monitoring_api.py\n' \
+    | uv run python scripts/select_ci_tests.py | xargs uv run pytest -q
+# the 15 suites CI selects for this diff: test_api, test_api_contract,
+# test_api_contract_pipeline_ops, test_api_contract_resources,
+# test_file_journal_read_blocked_consumers, test_monitoring_api,
+# test_node27_connection_attribution(+_delegated), test_openapi_response_conformance,
+# test_path_canonicalization_family_guard, test_pipeline_logs_artifacts,
+# test_pipeline_ops_identity_envelope, test_retry_cancel_consistency,
+# test_river_segment_write_surface_scan, test_select_ci_tests
+1269 passed in 321.75s (0:05:21)
+
+$ uv run pytest -q tests/test_select_ci_tests.py && uv run pytest -q tests/test_orchestration_chain.py \
+    tests/test_gateway.py tests/test_slurm_route_contract.py tests/test_api.py \
+    tests/test_api_errors_logging.py tests/test_runtime_mode.py
+775 passed in 284.14s (0:04:44)
+
+$ openspec validate slurm-submission-isolation-and-error-rendering --strict --no-interactive
+Change 'slurm-submission-isolation-and-error-rendering' is valid
+```
+
+**CI routing (0.2)** — no new test module and no new top-level import, so
+`scripts/select_ci_tests.py` is unchanged; the existing `apps/api/**` rule plus
+same-name derivation already selects `tests/test_monitoring_api.py`,
+`tests/test_retry_cancel_consistency.py`, `tests/test_openapi_response_conformance.py`
+and the API-contract suites for this diff (15 files).
+`.large-file-guard.json` gained `tests/test_retry_cancel_consistency.py` (1620) and
+`tests/test_monitoring_api.py` (3590); `apps/api/routes/pipeline.py` was already excluded.
+
+**Fixture-rationale deviation (for 4.7):** design D3 and spec say the event must stay raw
+because "retry's runtime-root recovery reads `("gateway_response", "manifest")` off
+persisted events". The path tuple at `retry.py:1421` is real, but the scan around it
+(`_event_runtime_root_candidates`) filters `PipelineEvent.event_type == "submission"`, so
+it never reaches the `slurm_cancellation_gap` / `cancel_failed` rows this route writes.
+The required behaviour is unaffected (events stay raw; operator diagnosis is the reason
+that does bind this route). Task 3.5's assertion is therefore written with retry's real
+readers — `_mapping_at(event.details, ("gateway_response", "manifest"))` plus
+`_has_runtime_root_field` — over the persisted event, with the rendered copy asserted as
+the shape those readers could not use; no `submission` event is planted and no end-to-end
+retry is run, since either would be staged rather than observed.
 
 ## 4. Verification (Evidence Floor)
 
-- [ ] 4.1 Local: `uv run ruff check .` clean.
-- [ ] 4.2 Local: `uv run pytest -q` over the touched suites — production-closure validation, real Slurm gateway, Slurm array contract, the ops route suites, and `tests/test_select_ci_tests.py` if routing changed.
-- [ ] 4.3 Local: `openspec validate slurm-submission-isolation-and-error-rendering --strict --no-interactive`.
+- [x] 4.1 Local: `uv run ruff check .` clean.
+- [x] 4.2 Local: `uv run pytest -q` over the touched suites — production-closure validation, real Slurm gateway, Slurm array contract, the ops route suites, and `tests/test_select_ci_tests.py` if routing changed.
+- [x] 4.3 Local: `openspec validate slurm-submission-isolation-and-error-rendering --strict --no-interactive`.
 - [ ] 4.4 **node-27 oracle** (`export PATH=$HOME/.local/bin:$PATH`, `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`): the same selection at the frozen review head; receipt (host, sha, counts) in the PR body.
 - [ ] 4.5 CI green on the PR.
 - [ ] 4.6 **Oracle-blocked, declared**: no live node-22 submission is performed (pre-maintenance freeze: no `uv sync`, no bare `uv run`). #1908's concurrency property is proven structurally by disjoint paths, not by a cluster run or a mocked mutex; the PR body says so plainly.
