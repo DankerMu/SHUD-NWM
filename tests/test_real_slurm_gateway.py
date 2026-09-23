@@ -35,11 +35,25 @@ from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, Submit
 from services.slurm_gateway.real_backend import (
     ARRAY_LOGS_DIRNAME,
     LOG_TRUNCATION_MARKER,
+    MANIFESTS_DIRNAME,
     MAX_ARRAY_TASK_LOGS,
+    PRODUCTION_ARRAY_TEMPLATE_NAMES,
     RealSlurmGateway,
     _normalize_slurm_state,
     array_log_dir,
     map_slurm_error_code,
+)
+
+# The production array job types the single-submit endpoint must refuse.  Spelled
+# out from the default mapping rather than copied, so a fifth array template is
+# parametrized here without a second edit; tests/test_slurm_array_contract.py
+# pins this same set against the gateway's own derivation and its hand list.
+_PRODUCTION_ARRAY_JOB_TYPES = tuple(
+    sorted(
+        job_type
+        for job_type, template_name in DEFAULT_JOB_TYPE_TEMPLATES.items()
+        if template_name in PRODUCTION_ARRAY_TEMPLATE_NAMES
+    )
 )
 
 
@@ -3036,19 +3050,142 @@ def test_manifest_injection_rejected(monkeypatch, tmp_path):
         )
 
 
-def test_array_capable_job_type_rejected_from_single_submit(monkeypatch, tmp_path) -> None:
-    gateway = _gateway(tmp_path)
-
+def _refuse_sbatch(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(command, **kwargs):
         del command, kwargs
         raise AssertionError("subprocess.run must not be called for array-capable single submit")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+
+def _authorized_array_manifest(tmp_path: Path, job_type: str) -> dict[str, object]:
+    """A single-submit manifest carrying everything an array template needs.
+
+    The refusal must not be an accident of some later validation failing first:
+    this manifest names a real manifest index inside the workspace under the
+    cycle's manifests directory plus the matching cohort-neutral array log dir,
+    so ``_bound_production_array_log_dir`` resolves instead of raising.
+    """
+
+    workspace = tmp_path / "workspace"
+    index_path = workspace / "cycle_001" / MANIFESTS_DIRNAME / f"{job_type}_index_20260512T000000.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps([{**_fake_array_task("run_001", "model_001"), "task_id": 0, "workspace_dir": str(workspace)}]),
+        encoding="utf-8",
+    )
+    manifest = dict(_production_manifest(tmp_path, job_type))
+    manifest["manifest_index_path"] = str(index_path)
+    manifest["array_log_dir"] = str(workspace / "cycle_001" / ARRAY_LOGS_DIRNAME / index_path.stem)
+    return manifest
+
+
+@pytest.mark.parametrize("job_type", _PRODUCTION_ARRAY_JOB_TYPES)
+def test_array_capable_job_type_rejected_from_single_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _refuse_sbatch(monkeypatch)
+
     with pytest.raises(SlurmValidationError) as exc_info:
-        gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="run_shud_forecast_array"))
+        gateway.submit_job(SubmitJobRequest(manifest=_authorized_array_manifest(tmp_path, job_type)))
 
     assert exc_info.value.details["endpoint"] == "/api/v1/slurm/job-arrays"
+    assert exc_info.value.details["job_type"] == job_type
+
+
+def test_array_capable_job_type_rejected_from_single_submit_despite_template_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A deployment override cannot narrow the refused set.
+
+    Remapping a production array job type to a non-array template must not
+    un-refuse it: the default mapping still binds it to an array template.
+    """
+
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates={**DEFAULT_JOB_TYPE_TEMPLATES, "save_state_snapshot_array": "smoke.sbatch"},
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    _refuse_sbatch(monkeypatch)
+
+    with pytest.raises(SlurmValidationError) as exc_info:
+        gateway.submit_job(
+            SubmitJobRequest(manifest=_authorized_array_manifest(tmp_path, "save_state_snapshot_array"))
+        )
+
+    assert exc_info.value.details["endpoint"] == "/api/v1/slurm/job-arrays"
+
+
+def test_deployment_mapped_array_template_is_refused_from_single_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A deployment override can only widen the refused set.
+
+    A job type the defaults never mention is refused as soon as the deployment
+    points it at a production array template.
+    """
+
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            job_type_templates={**DEFAULT_JOB_TYPE_TEMPLATES, "custom_array": "run_shud_forecast_array.sbatch"},
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    _refuse_sbatch(monkeypatch)
+    manifest = {**_authorized_array_manifest(tmp_path, "run_shud_forecast_array"), "job_type": "custom_array"}
+
+    with pytest.raises(SlurmValidationError) as exc_info:
+        gateway.submit_job(SubmitJobRequest(manifest=manifest))
+
+    assert exc_info.value.details["endpoint"] == "/api/v1/slurm/job-arrays"
+    assert exc_info.value.details["job_type"] == "custom_array"
+
+
+def test_submit_job_array_still_submits_save_state_snapshot_array(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The array entrypoint keeps accepting the job type the single one refuses."""
+
+    gateway = _production_gateway(tmp_path)
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    tasks = [
+        {**_fake_array_task("run_001", "model_001"), "workspace_dir": str(tmp_path / "workspace")},
+        {**_fake_array_task("run_002", "model_002"), "workspace_dir": str(tmp_path / "workspace")},
+    ]
+
+    record = gateway.submit_job_array(
+        job_type="save_state_snapshot_array",
+        cycle_id="cycle_001",
+        stage_name="save_state",
+        tasks=tasks,
+        manifest=_production_manifest(tmp_path, "save_state_snapshot_array"),
+    )
+
+    sbatch_commands = [command for command in commands if Path(command[0]).name == "sbatch"]
+    assert len(sbatch_commands) == 1
+    assert any(argument.startswith("--array=0-1%") for argument in sbatch_commands[0])
+    assert record.manifest["array_task_count"] == 2
 
 
 def test_unsupported_legacy_job_type_rejected_before_submission(monkeypatch, tmp_path):

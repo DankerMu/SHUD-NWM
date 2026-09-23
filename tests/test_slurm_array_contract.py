@@ -12,6 +12,7 @@ import pytest
 from packages.common import state_cli
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
+from services.slurm_gateway import real_backend
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import ManifestValidationError as GatewayManifestValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway
@@ -503,6 +504,31 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     # assertions above keep judging the raw rendering, as does the quoted
     # `<<'PY'` heredoc this template carries (bash folds nothing in there).
     assert _SHUD_CONSOLE_COMMAND in _join_line_continuations(rendered)
+
+
+def test_single_submit_refusal_set_is_derived_from_the_production_array_templates() -> None:
+    """The refused set follows the production array templates without a second edit.
+
+    ``ARRAY_CAPABLE_JOB_TYPES`` used to be a hand-maintained literal and drifted
+    from ``PRODUCTION_ARRAY_TEMPLATE_NAMES`` once; this pins the agreement so a
+    fifth array template cannot leave the single-submit endpoint accepting it.
+    """
+
+    derived = real_backend.array_capable_job_types(DEFAULT_JOB_TYPE_TEMPLATES)
+
+    assert derived == set(_PRODUCTION_ARRAY_JOB_TYPES)
+    assert {DEFAULT_JOB_TYPE_TEMPLATES[job_type] for job_type in derived} == set(
+        real_backend.PRODUCTION_ARRAY_TEMPLATE_NAMES
+    )
+
+
+def test_deployment_job_type_template_override_only_widens_the_refusal_set() -> None:
+    narrowing = {**DEFAULT_JOB_TYPE_TEMPLATES, "save_state_snapshot_array": "smoke.sbatch"}
+    widening = {**DEFAULT_JOB_TYPE_TEMPLATES, "custom_array": "run_shud_forecast_array.sbatch"}
+
+    assert real_backend.array_capable_job_types(narrowing) == set(_PRODUCTION_ARRAY_JOB_TYPES)
+    assert real_backend.array_capable_job_types(widening) == set(_PRODUCTION_ARRAY_JOB_TYPES) | {"custom_array"}
+    assert real_backend.array_capable_job_types({}) == set(_PRODUCTION_ARRAY_JOB_TYPES)
 
 
 @pytest.mark.parametrize("job_type", _PRODUCTION_ARRAY_JOB_TYPES)

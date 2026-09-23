@@ -35,10 +35,84 @@
 
 ## 2. #1909 — single-submit refuses every production array type (design D2)
 
-- [ ] 2.1 Red first: `submit_job(job_type="save_state_snapshot_array")` with a **complete authorized** manifest (valid cycle identity and manifest index path, so the refusal cannot be an accident of log-dir binding) raises before any scheduler call, with `details["endpoint"] == "/api/v1/slurm/job-arrays"`; assert no sbatch invocation.
-- [ ] 2.2 `ARRAY_CAPABLE_JOB_TYPES` becomes a derivation: reverse-look `PRODUCTION_ARRAY_TEMPLATE_NAMES` through `DEFAULT_JOB_TYPE_TEMPLATES` ∪ `settings.job_type_templates`, so a deployment override (`services/slurm_gateway/config.py:57,65-68`) can only widen the refused set. It has exactly one consumer (`real_backend.py:263`), so an instance-level derivation is safe. Pin the agreement between the derived set and `tests/test_slurm_array_contract.py:55-60`'s `_PRODUCTION_ARRAY_JOB_TYPES`.
-- [ ] 2.3 Parametrize the existing rejection test over all four types; add a positive test that `submit_job_array("save_state_snapshot_array")` still submits with `array_spec` (not `TemplateNotFound`).
-- [ ] 2.4 `uv run pytest -q tests/test_real_slurm_gateway.py -k array_capable_job_type_rejected_from_single_submit` green (the issue's named command).
+- [x] 2.1 Red first: `submit_job(job_type="save_state_snapshot_array")` with a **complete authorized** manifest (valid cycle identity and manifest index path, so the refusal cannot be an accident of log-dir binding) raises before any scheduler call, with `details["endpoint"] == "/api/v1/slurm/job-arrays"`; assert no sbatch invocation.
+- [x] 2.2 `ARRAY_CAPABLE_JOB_TYPES` becomes a derivation: reverse-look `PRODUCTION_ARRAY_TEMPLATE_NAMES` through `DEFAULT_JOB_TYPE_TEMPLATES` ∪ `settings.job_type_templates`, so a deployment override (`services/slurm_gateway/config.py:57,65-68`) can only widen the refused set. It has exactly one consumer (`real_backend.py:263`), so an instance-level derivation is safe. Pin the agreement between the derived set and `tests/test_slurm_array_contract.py:55-60`'s `_PRODUCTION_ARRAY_JOB_TYPES`.
+- [x] 2.3 Parametrize the existing rejection test over all four types; add a positive test that `submit_job_array("save_state_snapshot_array")` still submits with `array_spec` (not `TemplateNotFound`).
+- [x] 2.4 `uv run pytest -q tests/test_real_slurm_gateway.py -k array_capable_job_type_rejected_from_single_submit` green (the issue's named command).
+
+### #1909 evidence (implementer pass 2)
+
+Pre-implementation checks the design asks for: `ARRAY_CAPABLE_JOB_TYPES` had exactly one
+consumer (`real_backend.py:263`, `submit_job`) and no other module, test or doc referenced it;
+`tests/test_slurm_array_contract.py:55-60`'s `_PRODUCTION_ARRAY_JOB_TYPES` already enumerated
+the four, so the derived set is pinned against that enumeration rather than a new literal.
+
+The union is **pairwise over `(job_type, template)` pairs**, not a dict merge: merging
+`settings.job_type_templates` over `DEFAULT_JOB_TYPE_TEMPLATES` would let a deployment
+*narrow* the refused set by remapping an array job type to another template — and would
+have silently un-refused `run_shud_forecast_array` in `tests/test_slurm_route_contract.py:134`
+and `tests/test_real_slurm_gateway.py`'s `_gateway`, both of which remap it to a stub template.
+
+**RED** (tests at their new state, `services/slurm_gateway/real_backend.py` unmodified):
+
+```
+$ uv run pytest -q tests/test_real_slurm_gateway.py tests/test_slurm_array_contract.py \
+    -k "array_capable_job_type_rejected_from_single_submit or deployment_mapped_array_template \
+        or submit_job_array_still_submits_save_state or refusal_set_is_derived or override_only_widens"
+E       AssertionError: subprocess.run must not be called for array-capable single submit
+E       AssertionError: subprocess.run must not be called for array-capable single submit
+E       AssertionError: subprocess.run must not be called for array-capable single submit
+E       AttributeError: module 'services.slurm_gateway.real_backend' has no attribute 'array_capable_job_types'
+E       AttributeError: module 'services.slurm_gateway.real_backend' has no attribute 'array_capable_job_types'
+FAILED ...::test_array_capable_job_type_rejected_from_single_submit[save_state_snapshot_array]
+FAILED ...::test_array_capable_job_type_rejected_from_single_submit_despite_template_override
+FAILED ...::test_deployment_mapped_array_template_is_refused_from_single_submit
+FAILED ...::test_single_submit_refusal_set_is_derived_from_the_production_array_templates
+FAILED ...::test_deployment_job_type_template_override_only_widens_the_refusal_set
+5 failed, 4 passed, 358 deselected in 0.57s
+```
+
+The three `subprocess.run` failures are the proof the refused request was **fully authorized**:
+the submit reached `_submit_rendered_script` (`real_backend.py:285` -> `:1123` -> `:1216`), i.e. it
+passed manifest validation, the production array log-dir binding and template rendering. The
+other three parametrizations (`produce_forcing_array`, `run_shud_forecast_array`,
+`parse_output_array`) are among the 4 passed — they were already in the old literal.
+
+**GREEN**:
+
+```
+$ uv run ruff check .
+All checks passed!
+
+$ uv run pytest -q tests/test_real_slurm_gateway.py -k array_capable_job_type_rejected_from_single_submit
+5 passed, 280 deselected in 0.22s
+
+$ uv run pytest -q tests/test_real_slurm_gateway.py tests/test_slurm_array_contract.py
+367 passed in 6.88s
+
+$ uv run pytest -q tests/test_slurm_route_contract.py tests/test_production_slurm_validation.py \
+    tests/test_job_array.py tests/test_orchestration_chain.py tests/test_gateway.py \
+    tests/test_slurm_route_security_contract.py
+647 passed, 1 skipped in 29.86s
+
+$ uv run pytest -q tests/test_slurm_route_contract.py -k array_capable
+1 passed, 23 deselected in 0.08s
+
+$ openspec validate slurm-submission-isolation-and-error-rendering --strict --no-interactive
+Change 'slurm-submission-isolation-and-error-rendering' is valid
+```
+
+`tests/test_real_slurm_gateway.py`'s parametrization is spelled out from
+`DEFAULT_JOB_TYPE_TEMPLATES` x `PRODUCTION_ARRAY_TEMPLATE_NAMES` rather than copied, so a fifth
+array template parametrizes the refusal test without an edit; the contract file's hand list stays
+the pin that must be updated (and fails loudly if it is not).
+
+**CI routing (0.2)** — no new test module; `scripts/select_ci_tests.py` already selects
+`tests/test_real_slurm_gateway.py`, `tests/test_slurm_array_contract.py` and
+`tests/test_slurm_route_contract.py` for a `services/slurm_gateway/real_backend.py` diff
+(52 files selected), so no routing change. `.large-file-guard.json` gained
+`services/slurm_gateway/real_backend.py` (2379), `tests/test_real_slurm_gateway.py` (5287)
+and `tests/test_slurm_array_contract.py` (1300).
 
 ## 3. #2308 — render gateway errors on responses, keep events raw (design D3)
 
