@@ -327,30 +327,41 @@ tests/test_retry_cancel_consistency.py
 
   The three fix-pass tests are inside that run (`tests/test_production_slurm_validation.py`,
   `tests/test_real_slurm_gateway.py`), as is `tests/test_retry_cancel_consistency.py`.
-- [ ] 4.5 CI: **red, with zero test failures.** Three runs, three heads, same shape — the
-  "Unit Tests" job prints `4347 passed, 8 skipped` (`4340` at the first head) and then the
-  pytest process dies at interpreter shutdown, a few seconds after the summary:
+- [ ] 4.5 CI: **red on all four runs, with zero test failures in any of them** — and the cause
+  was traced to the runner's dependency resolution, not to this change. Left unchecked because
+  the gate never went green; merged on the owner's decision after the diagnosis below.
 
   | head | run | result |
   |---|---|---|
   | `9ff2b03b8` | 35806934648 | `4340 passed, 8 skipped` → `free(): invalid pointer` → SIGABRT |
   | `a04703bdf` | 35809404590 | `4347 passed, 8 skipped` → SIGSEGV |
   | `05bec5f7a` | 35811130239 | `4347 passed, 8 skipped` → SIGSEGV |
+  | `784732a78` | 35812497758 | `4347 passed, 8 skipped` → SIGSEGV |
 
-  Not one assertion fails in any of them, and the same 73-suite list at `a04703bdf` on
-  node-27 exits 0 with identical counts (4.4). `free(): invalid pointer` is glibc heap
-  corruption in a native extension at teardown, which is why the signal varies.
+  **Root cause, established by single-variable ablation** — all three runs below on node-27, one
+  machine, one commit (`784732a78`), one 73-suite list, changing exactly one thing per run:
 
-  **A first hypothesis was tested and refuted**, and is recorded here rather than left in the
-  PR's history: the crash is *not* explained by this diff being the first to route the
-  pyproj/PROJ-loading `tests/test_production_*` family into the targeted job. PR #2421 also
-  matched `services/production_closure/**`, selected 17 of these same 73 files including that
-  whole family, and exited 0 (`2419 passed, 9 skipped`). A second axis is open and untested:
-  CI installs with `pip install -e ".[dev]"` (`.github/workflows/ci.yml:281,311,346`), which
-  does not read `uv.lock`, so the runner resolved numpy 2.4.6 / pandas 3.0.6 / pytest 9.1.1
-  against the lock's 2.4.4 / 3.0.2 / 9.0.3 — meaning the node-27 run is *not* a controlled
-  comparison of the same dependency set. Tracked in #2573 with a bisection plan; deliberately
-  not worked around in this PR.
+  | dependency source | native ecCodes | result |
+  |---|---|---|
+  | `uv sync` (reads `uv.lock`) | absent — `Engine 'cfgrib' loading failed` | `4347 passed, 8 skipped`, exit 0 |
+  | `uv pip install -e ".[dev]"` (CI's resolution) | present, no such warning | `4347 passed, 8 skipped` → `free(): invalid pointer` |
+  | the same, minus `eccodeslib` + `eckitlib` | absent again | `4347 passed, 8 skipped`, exit 0 |
+
+  CI installs with `pip install -e ".[dev]"` (`.github/workflows/ci.yml:281,311,346`), which does
+  not read `uv.lock`; the floating resolution pulls `eccodeslib 2.49.0.30` and `eckitlib 2.3.0.30`,
+  two native-library wheels absent from the lock, which turn `cfgrib` from "import fails, skipped by
+  xarray's backend scan" into a loaded native extension. Its teardown corrupts the heap, which is why
+  the crash always lands after the `N passed` summary and why the signal drifts between SIGABRT and
+  SIGSEGV. The middle run reproduced CI's signature byte-for-byte off CI; the third removed only those
+  two packages and the crash disappeared with this PR's diff fully present.
+
+  **Two earlier hypotheses were tested and refuted**, recorded here rather than dropped:
+  pyproj/PROJ (still installed and still warning in the clean ablation run), and selection
+  composition — this diff being the first to route the `tests/test_production_*` family into the
+  targeted job (PR #2421 matched `services/production_closure/**`, selected 17 of these same files
+  including that whole family, and exited 0).
+
+  Fix belongs to #2573 (make CI install from the lock); deliberately not worked around here.
 - [x] 4.6 **Oracle-blocked, declared**: no live node-22 submission is performed (pre-maintenance freeze: no `uv sync`, no bare `uv run`). #1908's concurrency property is proven structurally by disjoint paths, not by a cluster run or a mocked mutex; the PR body says so plainly.
 - [x] 4.7 Issues #1908, #1909, #2308 acceptance boxes each mapped to a named test in the PR body, with any deviation recorded.
 
