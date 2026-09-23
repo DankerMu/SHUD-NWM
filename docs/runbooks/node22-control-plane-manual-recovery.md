@@ -273,7 +273,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 
 | decision | 入口 |
 |---|---|
-| `permanent_failure` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker） |
+| `permanent_failure` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker）；forecast 已成功、`state_save_qc` 失败时传 **cohort master id**，见下 |
 | `cancelled_manual_retry_required` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker） |
 | `blocked_journal_predecessor_identity_quarantine` | `confirm-operator-reentry`（§8.7 断路器） |
 | `blocked_strict_warm_start_init_state_mismatch` | `confirm-operator-reentry`（strict warm-start 预算） |
@@ -293,6 +293,36 @@ run 在飞或不存在时拒绝）：
   --requested-by "<operator>"
 # 预览无误后追加 --execute
 ```
+
+#### forecast 已成功、`state_save_qc` 失败：标记 cohort master（#2584）
+
+blocked candidate 展示的是 hydro run id（`fcst_<source>_<YYYYMMDDHH>_<model_id>`），但失败的
+`state_save_qc` 行挂在 **cohort master** 下（`run_id = cycle_<source>_<YYYYMMDDHH>_convert_...`）。
+hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_failed_job`），这是正确的，不要设法绕过。
+
+1. **取 cohort master id**，二选一：
+   - 用 hydro run id 预览一次。拒绝为 `no_retryable_failed_job` 时，预览结果里带只读提示
+     `cohort_candidates`：同一 cycle 中 `state_save_qc` 处于失败状态、且记录的成员覆盖该模型的 cohort master，
+     每项含 `run_id`、`job_id`、`stage`、`status`、`error_code`、`member_count`，另有一条 `warning`。
+     成员关系证明不了的 cohort（成员列表不完整等）不会列出；提示读 cycle 受阻时给出
+     `cohort_candidates_error`（不是空列表），此时改用下一种办法。脚本**不会**替你换 id。
+   - 从 blocked evidence（`state_evidence.pipeline_jobs`）里取 `stage = state_save_qc` 那一行的 `run_id`。
+2. **看清代价再标**：标记 cohort master 会让**整个 cohort 从 convert 重跑**到 `state_save_qc`，不只是失败的阶段；
+   `member_count` 个模型的 forecast 都会重算。单模型 cohort 约 19 分钟；47 个模型的 cohort 会把 47 个 forecast 全部重跑。
+3. 用该 cohort master id 预览，确认 `decision: would_mark`、`stage: state_save_qc`，再追加 `--execute`。
+4. 下一趟自然 pass 会重跑该 cohort。若 cycle 已出调度窗口（例如 IFS 的旧 cycle），接着用
+   `scripts/ops/node22-run-cycle-once.sh --cycle-time <YYYY-MM-DDTHH:MM:SSZ> --source <source> --basin-id <basin_id>`，
+   先 `--plan` 核对，再 `--submit`。
+
+实例（2026-09-23）：`basins_hlj` IFS 12Z 的 `state_save_qc` 提交收到 gateway 502 `SLURM_PARSE_ERROR`
+（作业其实已被 Slurm 接收并 COMPLETED），行被标成 `permanently_failed`。对 hydro run id
+`fcst_ifs_2026092212_dg_8a34ed2ba8f8dd22f2716405569628a9` 预览被拒；对
+`cycle_ifs_2026092212_convert_dg_8a34ed2ba8f8dd22f2716405569628a9` 预览为 `would_mark`，21:10 CST 执行后
+55151–55154 全部 COMPLETED，21:34 copyback 到 `/ghdc`，node-27 于 21:49 列出 IFS 2026092212。
+
+自 #2584 起，这类"已越过 gateway 边界、未被证明拒绝"的 `state_save_qc` 提交失败记为 transient 的
+`STATE_SAVE_SUBMIT_AMBIGUOUS`（原始错误码在提交失败事件 details 的 `origin_error_code`），会在 `retry_limit`
+内自动重试；只有重试耗尽（`retry_limit_exhausted`）或被证明拒绝时才需要上面的人工出口。
 
 ### 两类 completed-skip fail-stop：`confirm-operator-reentry`
 

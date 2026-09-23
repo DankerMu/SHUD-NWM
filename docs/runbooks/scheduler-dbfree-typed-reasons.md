@@ -686,6 +686,10 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
      才真的从头跑。sink 正是在这种矛盾上判 `None` 并**正向比较拒掉**，不让 chain 有机会
      按哪一个跑。处置不变：同样带外先修输入。
    - 更晚的阶段（`state_save_qc` / `parse` 等）：来自失败态重导出，同样不是本次授权覆盖的范围。
+     `state_save_qc` 失败而 forecast 已成功的候选，人工出口是 manual-retry marker 打在 **cohort master id** 上
+     （不是 hydro run id，也不是 `confirm-operator-reentry`），会整 cohort 从 convert 重跑，步骤见
+     [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) 的
+     「forecast 已成功、`state_save_qc` 失败」小节。
 
    **先确认这条拒绝是不是"确认物本身坏了"**：`operator_reentry_sink_refusal.malformed_confirmation`
    为 `true` 时，说明 `operator_reentry_confirmation` 这个键存在但不是对象（具体类型见同块的
@@ -696,6 +700,21 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
    重启、在 reservation 处被戳、计数 +1，**恰好消费一次**；再之后的 pass 回到原来的
    fail-stop blocked，旧 pin 返回 `pin_mismatch`。不需要、也不应该重新签一次。
 4. 修不好输入时不要绕：没有把这类候选放行的合法通道。
+
+## 错误码 `STATE_SAVE_SUBMIT_AMBIGUOUS`（#2584）
+
+不是 blocked reason，是 `state_save_qc` 行的 `error_code`。含义：该阶段的提交已进入 Slurm Gateway 调用边界，
+失败又不是"已证明的拒绝"（gateway 502、响应不可解析、超时等），Slurm 可能已经接收了作业。原始 gateway 错误码
+保留在该行 `submission` 事件 details 的 `origin_error_code`（例如 `SLURM_PARSE_ERROR`），`error_message` 保持原文。
+
+- 它是 transient 码（`transient_slurm_runtime`），走阶段内自动重试（有退避，受 `retry_limit` 约束），**不会**直接落成
+  `permanently_failed`；值守无需处理。
+- 重试与仍在跑的原作业并发是安全的：checkpoint 对象原子写、同 checksum 幂等，index 写入有锁与 preimage CAS，
+  copyback 以 run 为权威；最坏情况是重试失败、落回 `permanently_failed`（即 #2584 之前的状态）。
+- 重试耗尽后候选为 `retry_limit_exhausted`；被证明拒绝（`submit_disposition = rejected`）或未进入 gateway 边界的
+  失败保留原始错误码。两种情况的人工出口都是 manual-retry marker 打在 **cohort master id** 上，见
+  [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)
+  「forecast 已成功、`state_save_qc` 失败」小节。
 
 ## 相关文档
 

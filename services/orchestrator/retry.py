@@ -39,6 +39,10 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SOURCE_CYCLE_UNAVAILABLE",
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
+    # #2584: a state_save_qc submit that crossed the gateway boundary without a proven
+    # rejection -- Slurm may already hold the job; the gateway's own code travels as
+    # ``origin_error_code`` on the submission-failure event.
+    "STATE_SAVE_SUBMIT_AMBIGUOUS",
 }
 # The `{STAGE}_FAILED` members are derived from the canonical downstream stage domain
 # (openspec change retry-stage-failure-classification, #1462) so that adding a stage to
@@ -237,6 +241,7 @@ def failure_classifier(error_code: str | None) -> str:
         "SLURM_RESERVATION_LOST",
         "SBATCH_SUBMISSION_FAILED",
         "STORAGE_WRITE_FAILED",
+        "STATE_SAVE_SUBMIT_AMBIGUOUS",
     }:
         return "transient_slurm_runtime"
     if code in {"SHUD_FAILED", "FAILED_RUN", "RUNTIME_FAILED"}:

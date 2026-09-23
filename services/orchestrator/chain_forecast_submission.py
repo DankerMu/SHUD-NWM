@@ -44,11 +44,20 @@ def _record_submission_failure(
     pipeline_job_id: str | None = None,
     persist_pipeline_job: bool = True,
     persist_pipeline_event: bool = True,
+    recorded_error_code: str | None = None,
 ) -> StageRunResult:
+    """Record a failed stage submit on the row, its event, and the cycle.
+
+    ``recorded_error_code`` replaces the error's own code everywhere this records
+    one; the error's own code is then kept as ``origin_error_code`` in the
+    submission event details (#2584: an ambiguous ``state_save_qc`` submit).
+    """
+
     pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
     now = _utcnow()
     message = str(redact_payload(str(error)))
-    error_code = getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED"
+    origin_error_code = getattr(error, "error_code", None) or "SBATCH_SUBMISSION_FAILED"
+    error_code = recorded_error_code or origin_error_code
     if persist_pipeline_job:
         self.repository.upsert_pipeline_job(
             {
@@ -89,6 +98,7 @@ def _record_submission_failure(
                     "stage": stage.stage,
                     "job_type": stage.job_type,
                     "error": message,
+                    **({"origin_error_code": origin_error_code} if error_code != origin_error_code else {}),
                     "runtime_root_contract": _submission_runtime_root_contract(
                         {
                             "workspace_dir": str(Path(self.config.workspace_root)),
