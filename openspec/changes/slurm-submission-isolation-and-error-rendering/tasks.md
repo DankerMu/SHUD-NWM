@@ -327,16 +327,30 @@ tests/test_retry_cancel_consistency.py
 
   The three fix-pass tests are inside that run (`tests/test_production_slurm_validation.py`,
   `tests/test_real_slurm_gateway.py`), as is `tests/test_retry_cancel_consistency.py`.
-- [x] 4.5 CI: **all 4347 tests pass on the runner too** — the "Unit Tests" job printed
-  `4347 passed, 8 skipped` (identical counts to node-27) and then the pytest process died at
-  interpreter shutdown, four seconds after the summary, with the same selection failing as
-  `SIGSEGV` at `a04703bdf` and `SIGABRT` at `9ff2b03b8`. Zero test failures in either run; the
-  nondeterministic signal and the clean node-27 exit on the identical 73-suite list at the
-  identical commit place the fault in the runner's native teardown, not in this change. This
-  PR's diff is the first to route the pyproj/PROJ-loading `tests/test_production_*` family
-  into the targeted job (the merged batch-E1 selection, 117 files / 6524 tests, did not
-  include it and exited cleanly), so the trigger is the selection's composition, not its size.
-  Filed as a follow-up rather than worked around here.
+- [ ] 4.5 CI: **red, with zero test failures.** Three runs, three heads, same shape — the
+  "Unit Tests" job prints `4347 passed, 8 skipped` (`4340` at the first head) and then the
+  pytest process dies at interpreter shutdown, a few seconds after the summary:
+
+  | head | run | result |
+  |---|---|---|
+  | `9ff2b03b8` | 35806934648 | `4340 passed, 8 skipped` → `free(): invalid pointer` → SIGABRT |
+  | `a04703bdf` | 35809404590 | `4347 passed, 8 skipped` → SIGSEGV |
+  | `05bec5f7a` | 35811130239 | `4347 passed, 8 skipped` → SIGSEGV |
+
+  Not one assertion fails in any of them, and the same 73-suite list at `a04703bdf` on
+  node-27 exits 0 with identical counts (4.4). `free(): invalid pointer` is glibc heap
+  corruption in a native extension at teardown, which is why the signal varies.
+
+  **A first hypothesis was tested and refuted**, and is recorded here rather than left in the
+  PR's history: the crash is *not* explained by this diff being the first to route the
+  pyproj/PROJ-loading `tests/test_production_*` family into the targeted job. PR #2421 also
+  matched `services/production_closure/**`, selected 17 of these same 73 files including that
+  whole family, and exited 0 (`2419 passed, 9 skipped`). A second axis is open and untested:
+  CI installs with `pip install -e ".[dev]"` (`.github/workflows/ci.yml:281,311,346`), which
+  does not read `uv.lock`, so the runner resolved numpy 2.4.6 / pandas 3.0.6 / pytest 9.1.1
+  against the lock's 2.4.4 / 3.0.2 / 9.0.3 — meaning the node-27 run is *not* a controlled
+  comparison of the same dependency set. Tracked in #2573 with a bisection plan; deliberately
+  not worked around in this PR.
 - [x] 4.6 **Oracle-blocked, declared**: no live node-22 submission is performed (pre-maintenance freeze: no `uv sync`, no bare `uv run`). #1908's concurrency property is proven structurally by disjoint paths, not by a cluster run or a mocked mutex; the PR body says so plainly.
 - [x] 4.7 Issues #1908, #1909, #2308 acceptance boxes each mapped to a named test in the PR body, with any deviation recorded.
 
