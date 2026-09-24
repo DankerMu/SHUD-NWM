@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import types
 import typing
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -45,6 +46,7 @@ import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from fastapi.utils import create_model_field
+from starlette.responses import Response
 
 from apps.api.main import app
 from apps.api.routes import forecast as forecast_routes
@@ -724,6 +726,20 @@ def test_strict_diff_distinguishes_int_float_bool_null_absent_and_reformatted_ti
     assert not strict_diff(expected, expected)
 
 
+def returns_response_object(route: APIRoute) -> bool:
+    """The route's handler is annotated to return a Starlette ``Response``.
+
+    FastAPI leaves ``response_model`` as None for BOTH ``-> Response`` (a binary
+    tile / PNG / proxy route) and an unannotated handler (a JSON route whose
+    body nothing validates), so ``response_model is None`` alone cannot tell
+    them apart. Only the annotation can.
+    """
+    annotation = typing.get_type_hints(route.endpoint).get("return")
+    union = typing.get_origin(annotation) in (typing.Union, types.UnionType)
+    options = typing.get_args(annotation) if union else (annotation,)
+    return all(isinstance(option, type) and issubclass(option, Response) for option in options)
+
+
 def _in_scope_route_objects() -> dict[str, APIRoute]:
     routes = {}
     for route in app.routes:
@@ -734,6 +750,27 @@ def _in_scope_route_objects() -> dict[str, APIRoute]:
             continue
         routes[key] = route
     return routes
+
+
+def unmodelled_routes(routes: list[Any], modelled: set[str]) -> set[str]:
+    """Routes outside ``modelled`` that are neither pre-modelled nor binary.
+
+    Keys are ``"METHOD path"``; the slurm gateway collapses to its module. The
+    binary exemption requires a ``Response`` return annotation, so an
+    unannotated JSON handler in a business route module lands here.
+    """
+    others = set()
+    for route in routes:
+        if not isinstance(route, APIRoute):
+            continue
+        key = f"{sorted(route.methods)[0]} {route.path}"
+        module = route.endpoint.__module__
+        if key in modelled or key in PRE_MODELLED_ROUTES:
+            continue
+        if module.startswith("apps.api.routes.") and route.response_model is None and returns_response_object(route):
+            continue  # binary tiles / PNG / basemap proxy: return a Response object
+        others.add(module if module == "services.slurm_gateway.routes" else key)
+    return others
 
 
 def _in_scope_json_routes() -> set[str]:
@@ -760,18 +797,25 @@ def test_every_json_route_is_sampled() -> None:
     assert not untyped, sorted(untyped)
     # Every business route module's JSON route carries a response model, and the
     # routes left out are exactly the documented out-of-scope set.
-    others = set()
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        key = f"{sorted(route.methods)[0]} {route.path}"
-        module = route.endpoint.__module__
-        if key in in_scope or key in PRE_MODELLED_ROUTES:
-            continue
-        if module.startswith("apps.api.routes.") and route.response_model is None:
-            continue  # binary tiles / PNG / basemap proxy: return a Response object
-        others.add(module if module == "services.slurm_gateway.routes" else key)
-    assert others == set(OUT_OF_SCOPE_ROUTES)
+    assert unmodelled_routes(app.routes, in_scope) == set(OUT_OF_SCOPE_ROUTES)
+
+
+def test_completeness_exemption_requires_a_response_annotation() -> None:
+    # FastAPI gives both probes `response_model is None`; only the binary one
+    # may be exempted, so the unannotated JSON route must surface.
+    def binary() -> Response:
+        return Response(b"png", media_type="image/png")
+
+    def unannotated_json():
+        return {"leaked": True}
+
+    probe = fastapi.FastAPI()
+    for endpoint in (binary, unannotated_json):
+        endpoint.__module__ = "apps.api.routes.probe"
+        probe.add_api_route(f"/probe/{endpoint.__name__}", endpoint, methods=["GET"])
+    routes = [route for route in probe.routes if isinstance(route, APIRoute)]
+    assert [route.response_model for route in routes] == [None, None]
+    assert unmodelled_routes(routes, set()) == {"GET /probe/unannotated_json"}
 
 
 def test_master_fields_are_the_implicit_annotations() -> None:

@@ -32,6 +32,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from apps.api.main import app
 from apps.api.response_models.envelope import OkEnvelope
+from tests.test_response_model_preservation import returns_response_object
 
 SPEC_PATH = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
 SPEC: dict[str, Any] = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
@@ -40,13 +41,16 @@ ENVELOPE_KEYS = {"request_id", "status", "data", "auth_policy_decisions"}
 _NULL = {"type": "null"}
 
 
+def _business_routes() -> list[APIRoute]:
+    return [
+        route
+        for route in app.routes
+        if isinstance(route, APIRoute) and route.endpoint.__module__.startswith("apps.api.routes.")
+    ]
+
+
 def _modelled_routes() -> list[APIRoute]:
-    routes = []
-    for route in app.routes:
-        if isinstance(route, APIRoute) and route.endpoint.__module__.startswith("apps.api.routes."):
-            if route.response_model is not None:
-                routes.append(route)
-    return routes
+    return [route for route in _business_routes() if route.response_model is not None]
 
 
 ROUTES = {f"{sorted(route.methods)[0]} {route.path}": route for route in _modelled_routes()}
@@ -232,6 +236,16 @@ def test_envelopes_declare_only_the_published_envelope_members() -> None:
 
 def test_route_table_is_the_35_plus_4_modelled_routes() -> None:
     assert len(ROUTES) == 39, sorted(ROUTES)
+
+
+def test_every_unmodelled_business_route_is_annotated_to_return_a_response() -> None:
+    # `response_model is None` is also what FastAPI yields for an UNANNOTATED
+    # handler, which this suite would otherwise skip without a comparison: only
+    # a `-> Response` handler (tiles / PNG / basemap proxy) may stay unmodelled.
+    unmodelled = [route for route in _business_routes() if route.response_model is None]
+    unannotated = sorted(route.path for route in unmodelled if not returns_response_object(route))
+    assert not unannotated, unannotated
+    assert len(unmodelled) == 8, sorted(route.path for route in unmodelled)
 
 
 def test_parity_rule_reds_on_a_renamed_property_a_required_drift_and_a_lost_null() -> None:

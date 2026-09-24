@@ -648,6 +648,9 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_openapi_drift.py",
         "tests/test_openapi_response_conformance.py",
         "tests/test_pipeline_ops_identity_envelope.py",
+        # #2348: the only suite binding the yaml's hand data schemas to the
+        # runtime response models.
+        "tests/test_response_model_schema_parity.py",
         "tests/test_slurm_gateway_openapi_security.py",
     ]
 
@@ -702,6 +705,9 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
             "tests/test_pipeline_ops_identity_envelope.py",
+            # #2348: parity reads the committed yaml the drift oracle binds to
+            # this module's patched document (the rule's #2211 note).
+            "tests/test_response_model_schema_parity.py",
             WRITE_SURFACE_SCAN_PATH,
             "tests/test_slurm_gateway_openapi_security.py",
             FAMILY_GUARD_PATH,
@@ -1499,6 +1505,9 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_forecast_store_routing.py",
             # #2222: the `/runs` SQL allowlist + serializer live in this file.
             "tests/test_hydro_run_public_projection.py",
+            # #2348: the preservation oracle drives this file's payload builders.
+            "tests/test_response_model_preservation.py",
+            "tests/test_response_model_preservation_pipeline.py",
             "tests/test_node27_pgdata_workload.py",
             "tests/test_node27_pgdata_workload_plan.py",
             "tests/test_node27_pgdata_workload_io.py",
@@ -20735,10 +20744,113 @@ def test_every_modelled_route_module_selects_both_preservation_halves() -> None:
     assert HYDRO_RUN_PROJECTION in select_tests(["apps/api/routes/forecast.py"], repo_root=Path("."))
 
 
+def _hand_schema_owners() -> list[str]:
+    """Every tracked source of a hand-published OpenAPI schema, from the tree."""
+    owners = [str(path) for path in sorted(Path("apps/api").glob("openapi_patching*.py")) if path.is_file()]
+    return [*owners, "apps/api/openapi_restored_schemas.py", "openapi/nhms.v1.yaml"]
+
+
 def test_hand_schema_owner_and_forecast_store_select_their_2348_oracles() -> None:
-    restored = set(select_tests(["apps/api/openapi_restored_schemas.py"], repo_root=Path(".")))
-    assert {RESPONSE_MODEL_PARITY, "tests/test_openapi_drift.py"} <= restored
+    # Derived from the tree: a new `openapi_patching_*` owner, the restored
+    # schemas and the committed yaml each select the parity suite (the only
+    # oracle reading the hand schemas against the models) and drift.
+    owners = _hand_schema_owners()
+    assert len(owners) == 11, owners  # facade + 8 owner modules + restored + yaml
+    for owner in owners:
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert {RESPONSE_MODEL_PARITY, "tests/test_openapi_drift.py"} <= selected, owner
     assert HYDRO_RUN_PROJECTION in select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
-    # The store members of the attribution tuple do not inherit the oracle.
-    for store in ("packages/common/model_registry.py", "packages/common/object_store_forcing.py"):
-        assert not RESPONSE_MODEL_PRESERVATION & set(select_tests([store], repo_root=Path("."))), store
+    # The model registry store is NOT an oracle builder: the registry samples
+    # run over `FakeModelRegistryStore`, so it must not inherit the oracle.
+    registry = set(select_tests(["packages/common/model_registry.py"], repo_root=Path(".")))
+    assert not RESPONSE_MODEL_PRESERVATION & registry
+
+
+# The oracle modules whose top-level `packages.*` / `workers.*` imports are the
+# production builders the preservation oracle drives. tests/api_contract_helpers.py
+# is the import path of the forecast-store row fixtures it builds samples from.
+RESPONSE_MODEL_ORACLE_IMPORTERS = (
+    "tests/test_response_model_preservation.py",
+    "tests/test_response_model_preservation_pipeline.py",
+    "tests/api_contract_helpers.py",
+)
+# Builders the oracle reaches through ANOTHER suite's helper, which the direct
+# import walk above cannot see: `read_station_forcing_csv`, via
+# tests/test_forecast_api_met_station_series.py's `_client` (the oracle's
+# `station_series_client`). Named, not walked: that suite's own imports
+# (`safe_fs`, ...) are fixture material, not builders.
+RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS = ("packages/common/object_store_forcing.py",)
+
+
+def _response_model_oracle_imports() -> set[str]:
+    """Tracked `packages/**` / `workers/**` modules the oracle imports at top level."""
+    owners = set(RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS)
+    for importer in RESPONSE_MODEL_ORACLE_IMPORTERS:
+        tree = ast.parse(Path(importer).read_text(encoding="utf-8"))
+        for module in _top_level_imported_module_names(importer, tree):
+            if module.split(".", 1)[0] not in {"packages", "workers"}:
+                continue
+            path = Path(*module.split(".")).with_suffix(".py")
+            if path.is_file():
+                owners.add(path.as_posix())
+    return owners
+
+
+def _response_model_oracle_fixture_imports() -> set[str]:
+    """Imports the gap ledger rules fixture material for an oracle half.
+
+    e.g. `workers/data_adapters/base.py`: the pipeline half imports `cycle_id_for`
+    only to mint the ids of its sqlite rows (a reasoned `edge-consumer`).
+    """
+    return {
+        owner
+        for (owner, suite), reason in INTENTIONAL_RULE_GAP_EXCLUSIONS.items()
+        if suite in RESPONSE_MODEL_PRESERVATION and reason == "edge-consumer"
+    }
+
+
+def _response_model_oracle_builder_owners() -> set[str]:
+    return _response_model_oracle_imports() - _response_model_oracle_fixture_imports()
+
+
+def _preservation_gaps() -> dict[str, list[str]]:
+    gaps = {}
+    for owner in sorted(_response_model_oracle_builder_owners()):
+        missing = sorted(RESPONSE_MODEL_PRESERVATION - set(select_tests([owner], repo_root=Path("."))))
+        if missing:
+            gaps[owner] = missing
+    return gaps
+
+
+def test_every_builder_the_preservation_oracle_drives_selects_both_halves() -> None:
+    # #2348: a store-only diff that changes a payload must run the oracle on
+    # ITS PR. Derived from the oracle's own imports, so a new builder import
+    # that no rule routes reds here.
+    owners = _response_model_oracle_builder_owners()
+    assert {
+        "packages/common/best_available.py",
+        "packages/common/forecast_store.py",
+        "packages/common/object_store_forcing.py",
+        "packages/common/state_manager.py",
+    } <= owners, sorted(owners)
+    # The ledger exclusion is live, not vacuous: the import is really there.
+    assert "workers/data_adapters/base.py" in _response_model_oracle_imports() - owners
+    assert _preservation_gaps() == {}
+
+
+def test_preservation_builder_guard_reds_when_one_rule_leg_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Constructed rule table, tracked tree untouched: dropping the oracle from
+    # ONE builder's rule must surface exactly that builder.
+    from dataclasses import replace
+
+    from scripts import select_ci_tests
+
+    def strip(rule: PathTestRule) -> PathTestRule:
+        if rule.pattern != "packages/common/state_manager.py":
+            return rule
+        kept = tuple(test for test in rule.tests if test not in RESPONSE_MODEL_PRESERVATION)
+        assert kept != rule.tests
+        return replace(rule, tests=kept)
+
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", tuple(strip(rule) for rule in PATH_TEST_RULES))
+    assert _preservation_gaps() == {"packages/common/state_manager.py": sorted(RESPONSE_MODEL_PRESERVATION)}

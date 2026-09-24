@@ -250,3 +250,23 @@ def test_run_detail_and_list_publish_the_same_closed_hydro_run_contract() -> Non
         assert schema["allOf"][1]["properties"]["data"] == {"$ref": "#/components/schemas/HydroRun"}
         page = spec["components"]["schemas"]["HydroRunPage"]
         assert page["properties"]["items"]["items"] == {"$ref": "#/components/schemas/HydroRun"}
+
+
+def test_route_passes_db_enum_labels_outside_the_published_enum_through_verbatim(client: TestClient) -> None:
+    # Live node-27 (2026-09-24): `enum_range(NULL::hydro.run_status)` carries
+    # `frequency_done`, which no migration under db/migrations/ creates. A DB
+    # label the repo does not know must pass through verbatim, as it did on
+    # master, never 500 the page. `reforecast` stands in for a future run_type.
+    drifted = {**_post_i7_row(), "status": "frequency_done", "run_type": "reforecast"}
+    app.dependency_overrides[forecast_routes.get_forecast_store] = lambda: _SqlShapeStore([drifted])
+
+    detail = client.get(f"/api/v1/runs/{RUN_ID}")
+    listing = client.get("/api/v1/runs", params={"basin_id": "drifted-label", "limit": 5})
+
+    assert detail.status_code == 200, detail.text
+    assert listing.status_code == 200, listing.text
+    (item,) = listing.json()["data"]["items"]
+    for run in (detail.json()["data"], item):
+        _assert_public_run(run)
+        assert run["status"] == "frequency_done"
+        assert run["run_type"] == "reforecast"

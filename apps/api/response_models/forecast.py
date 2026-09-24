@@ -7,7 +7,6 @@ so the fields are ``str``.
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -19,30 +18,6 @@ from apps.api.response_models.envelope import OkEnvelope, OpenModel
 # --------------------------------------------------------------------------- #
 
 
-class RunType(str, Enum):
-    """``hydro.run_type`` (db/migrations/000003 + 000045)."""
-
-    analysis = "analysis"
-    forecast = "forecast"
-    hindcast = "hindcast"
-
-
-class RunStatus(str, Enum):
-    """``hydro.run_status`` (db/migrations/000003 + 000013)."""
-
-    created = "created"
-    staged = "staged"
-    pending = "pending"
-    submitted = "submitted"
-    running = "running"
-    succeeded = "succeeded"
-    parsed = "parsed"
-    published = "published"
-    failed = "failed"
-    cancelled = "cancelled"
-    superseded = "superseded"
-
-
 class HydroRun(BaseModel):
     """The public run projection (``HYDRO_RUN_PUBLIC_FIELDS``).
 
@@ -51,13 +26,21 @@ class HydroRun(BaseModel):
     ``required``/nullability follow the published hand schema
     (``openapi_restored_schemas._hydro_run_schema``); the timestamps are the
     ``_json_ready`` strings.
+
+    ``run_type`` / ``status`` are ``str``, not the published ``RunType`` /
+    ``RunStatus`` enums: the value is the live ``hydro.run_type`` /
+    ``hydro.run_status`` label, and the live enum is not bounded by the repo
+    migrations (node-27, 2026-09-24: ``run_status`` carries ``frequency_done``,
+    which no migration creates). A closed runtime enum would 500 the whole
+    ``/runs`` page on such a row, where master passed the label through; the
+    hand schema stays the published contract.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     run_id: str
     run_key: int | None = None
-    run_type: RunType
+    run_type: str
     scenario_id: str
     model_id: str
     basin_id: str | None = None
@@ -68,7 +51,7 @@ class HydroRun(BaseModel):
     source_id: str | None = None
     source: str | None = None
     cycle_time: str | None = None
-    status: RunStatus
+    status: str
     slurm_job_id: str | None = None
     start_time: str
     end_time: str
