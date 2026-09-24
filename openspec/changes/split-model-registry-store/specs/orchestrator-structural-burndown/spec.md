@@ -7,8 +7,9 @@ every owner module are below 1,000 lines without adding any `.large-file-guard.j
 exclusion. `PsycopgModelRegistryStore` SHALL remain importable from
 `packages.common.model_registry` and SHALL expose every attribute it exposed before,
 with each method's source unchanged. Class-attribute and module-level monkeypatch
-seams SHALL still reach the real call path, source-pinned members SHALL stay in the
-facade, and the connection-owning transaction SHALL stay in the facade.
+seams SHALL still reach the real call path, source-pin checks SHALL cover the facade
+and every `model_registry_*` owner module, and `from_env`, `_transaction`,
+`_PsycopgTransaction` and `_attribution_connect_kwargs` SHALL stay in the facade.
 
 #### Scenario: a class-attribute patch still intercepts a mixin method
 
