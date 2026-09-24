@@ -241,7 +241,7 @@ CREATE TABLE core.model_instance (
 > `met.interp_weight`——和纯写入点
 > （INSERT 字面量、schema DDL、API payload 直通），2026-09-02）。列出它们是为了
 > 能看清翻这个 flag 的爆炸半径；写这一列的路径除下文的激活闸门外还有
-> `workers/model_registry/qhh_production_bootstrap.py::_activate_qhh_model`（`:1622`）
+> `workers/model_registry/qhh_bootstrap_registry.py::_activate_qhh_model`
 > 与 `:1675-1679` 的持久化置 inactive，不在读者清单内：
 >
 > - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，

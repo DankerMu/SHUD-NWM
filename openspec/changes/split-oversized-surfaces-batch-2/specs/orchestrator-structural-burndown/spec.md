@@ -40,7 +40,8 @@ disposition markers SHALL stay inside their member function bodies.
 - **WHEN** `tests/basins_registry_import_helpers.py` spies one of the eleven patched
   `basins_registry_import` names and the import orchestration runs
 - **THEN** the spy records the call, and deliberately breaking the real call site
-  turns the spy-count assertion red.
+  turns a committed spy-count assertion red or, for a spy no committed assertion
+  discriminates, a split-time seam probe red.
 
 #### Scenario: the write-surface scan still finds its single writers
 
