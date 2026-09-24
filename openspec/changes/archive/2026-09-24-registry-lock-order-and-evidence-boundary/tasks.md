@@ -38,9 +38,9 @@
 
 ## 6. 执行与收口
 
-- [ ] 6.1 node-27 全量 pytest（disposable DB，frozen SHA）
-- [ ] 6.2 合并后 node-27 display 部署 + 公网 curl 前后 receipt（`/api/v1/basins` 不含 evidence basin；versions 404；集合 ⊆ node-22 `manifest-last.json` basin 集合或差异有 issue 归属）
-- [ ] 6.3 **暂停等用户确认** → 执行 4.x / 5.x，receipt（前后计数、二次执行 0 行）；`evidence/restore/README.md` 更新；fixture 同步（处置按用户裁定）——随 post-merge archive PR 提交
+- [x] 6.1 node-27 全量 pytest（disposable DB，frozen SHA）
+- [x] 6.2 合并后 node-27 display 部署 + 公网 curl 前后 receipt（`/api/v1/basins` 不含 evidence basin；versions 404；集合 ⊆ node-22 `manifest-last.json` basin 集合或差异有 issue 归属）
+- [x] 6.3 **暂停等用户确认** → 执行 4.x / 5.x，receipt（前后计数、二次执行 0 行）；`evidence/restore/README.md` 更新；fixture 同步（处置按用户裁定）——随 post-merge archive PR 提交
 - [x] 6.4 ruff、openspec strict、guard hook
 
 ## Evidence Floor

@@ -17,7 +17,7 @@
         "y": 3911708.47393155,
         "z": -9999.0,
         "seed": "qhh_production_bootstrap",
-        "source": "qhh.tsd.forc",
+        "source": "heihe.tsd.forc",
         "basin_id": "basins_heihe",
         "model_id": "basins_heihe_shud",
         "original_id": "1",
@@ -28,7 +28,7 @@
         "forcing_filename": "X100.75Y37.65.csv",
         "elevation_metadata": {
           "raw_z": -9999.0,
-          "source": "qhh.tsd.forc",
+          "source": "heihe.tsd.forc",
           "normalized_missing_to_zero": true
         },
         "shud_forcing_index": 1,
