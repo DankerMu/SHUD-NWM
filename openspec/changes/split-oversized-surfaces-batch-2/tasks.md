@@ -45,12 +45,12 @@
 
 ## 4. #2490（部分）— `qhh_production_bootstrap.py`（2901）+ `basins_registry_import.py`（2481）
 
-- [ ] 4.1 `qhh_production_bootstrap.py` 拆 owner module，`bootstrap_qhh_production` / `_bootstrap_database` 编排入口、`_seed_output_segment_rows`、`_output_segment_order_offset`、`_DYNAMIC_FORCING_COUNT_TEMPLATES` / `_dynamic_forcing_count_sql` / `_dynamic_forcing_counts` 以及 D1 seam 的调用者留原文件；facade 与新模块 < 1000
-- [ ] 4.2 `basins_registry_import.py` 拆 owner module，D1 全部 seam 名的调用者、`_backfill_output_segment_geometry`、`_lock_river_network_version`、`_transaction`（唯一 `psycopg2.connect`）留原文件；新模块不引用 `psycopg2.connect` / `create_engine`；facade 与新模块 < 1000
-- [ ] 4.3 D1 seam 裁定逐条列出；`tests/basins_registry_import_helpers.py` 的 11 个 spy 各做一次突变红证（或按 spy-count 断言族做代表性突变并说明覆盖）
-- [ ] 4.4 D3：`tests/test_river_segment_write_surface_scan.py` 与 selector 镜像零改动且绿
-- [ ] 4.5 D4：`uv run pytest -q tests/test_select_ci_tests.py` 绿（#1913/#1948 partition 守卫）；若 oracle 红 → 停止上报
-- [ ] 4.6 Evidence：`uv run pytest -q tests/test_qhh_production_bootstrap*.py tests/test_basins_registry_import*.py tests/test_river_segment_write_surface_scan.py tests/test_qhh_scripts_static.py tests/test_forcing_read_path_store_routing.py tests/test_forcing_ts_template_census.py tests/test_node27_connection_attribution*.py tests/test_select_ci_tests.py` 绿；指纹零漂移
+- [x] 4.1 `qhh_production_bootstrap.py` 拆 owner module，`bootstrap_qhh_production` / `_bootstrap_database` 编排入口、`_seed_output_segment_rows`、`_output_segment_order_offset`、`_DYNAMIC_FORCING_COUNT_TEMPLATES` / `_dynamic_forcing_count_sql` / `_dynamic_forcing_counts` 以及 D1 seam 的调用者留原文件；facade 与新模块 < 1000
+- [x] 4.2 `basins_registry_import.py` 拆 owner module，D1 全部 seam 名的调用者、`_backfill_output_segment_geometry`、`_lock_river_network_version`、`_transaction`（唯一 `psycopg2.connect`）留原文件；新模块不引用 `psycopg2.connect` / `create_engine`；facade 与新模块 < 1000
+- [x] 4.3 D1 seam 裁定逐条列出；`tests/basins_registry_import_helpers.py` 的 11 个 spy 各做一次突变红证（或按 spy-count 断言族做代表性突变并说明覆盖）
+- [x] 4.4 D3：`tests/test_river_segment_write_surface_scan.py` 与 selector 镜像零改动且绿
+- [x] 4.5 D4：`uv run pytest -q tests/test_select_ci_tests.py` 绿（#1913/#1948 partition 守卫）；若 oracle 红 → 停止上报
+- [x] 4.6 Evidence：`uv run pytest -q tests/test_qhh_production_bootstrap*.py tests/test_basins_registry_import*.py tests/test_river_segment_write_surface_scan.py tests/test_qhh_scripts_static.py tests/test_forcing_read_path_store_routing.py tests/test_forcing_ts_template_census.py tests/test_node27_connection_attribution*.py tests/test_select_ci_tests.py` 绿；指纹零漂移
 
 ## 5. 收口
 
