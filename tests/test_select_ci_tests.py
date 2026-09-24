@@ -59,6 +59,11 @@ from scripts.select_ci_tests import (
     NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TESTS,
+    NODE22_REFRESH_TIMER_HEALTH_ENV_TEMPLATE_TESTS,
+    NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH,
+    NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH,
+    NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS,
+    NODE22_REFRESH_TIMER_HEALTH_TESTS,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
@@ -438,10 +443,11 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
     # #1101 partitioned the refresh monolith into fifteen suites; the case that
     # `read_text`s both units moved to the deployment-contract partition, so the
     # owner is that partition and NOT the whole corpus.
+    # #2532 partitioned the probe suite into five; its row carries all five.
     "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
         {
             *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
-            "tests/test_node22_refresh_timer_health.py",
+            *NODE22_REFRESH_TIMER_HEALTH_TESTS,
         }
     ),
     "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
@@ -451,7 +457,8 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
 
 
 # #2146 round 2 — UNROUTED reader edges of the node-22 probe suite.
-# `tests/test_node22_refresh_timer_health.py` both `read_text`s and imports the
+# The probe suite (five `tests/test_node22_refresh_timer_health_*.py` partitions
+# since #2532) both `read_text`s and imports the
 # refresh runner (the `run_id` filename shape its history fallback filters on,
 # and `SCHEMA_VERSION` against the probe's copy). That path did not route to
 # it, so bumping the runner's receipt schema merged green on a PR that touched
@@ -475,14 +482,18 @@ NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
     "scripts/scheduler_refresh/receipt.py": frozenset(SCHEDULER_REFRESH_RUNNER_TESTS),
     # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
     # the probe stdlib-only) and derives both threshold ceilings from it.
-    "services/orchestrator/scheduler_file_providers.py": frozenset({"tests/test_node22_refresh_timer_health.py"}),
+    # #2532: the probe suite is five partitions; every edge below names all five.
+    "services/orchestrator/scheduler_file_providers.py": frozenset(NODE22_REFRESH_TIMER_HEALTH_TESTS),
     # The probe's own installer and units were routed from the start but had no
     # pin: the suite runs the installer as a subprocess and `read_text`s both
     # units, and without these three rules none of them selects it (the
     # installer falls back to the generic shell baseline, the units to nothing).
-    "scripts/install_node22_refresh_timer_health.sh": frozenset({"tests/test_node22_refresh_timer_health.py"}),
-    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset({"tests/test_node22_refresh_timer_health.py"}),
-    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset({"tests/test_node22_refresh_timer_health.py"}),
+    "scripts/install_node22_refresh_timer_health.sh": frozenset(NODE22_REFRESH_TIMER_HEALTH_TESTS),
+    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset(NODE22_REFRESH_TIMER_HEALTH_TESTS),
+    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset(NODE22_REFRESH_TIMER_HEALTH_TESTS),
+    # #2532: the same-name derivation that routed the probe module to the
+    # monolith died with it; the explicit owner row is the only route now.
+    NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH: frozenset(NODE22_REFRESH_TIMER_HEALTH_TESTS),
 }
 
 
@@ -513,7 +524,7 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
 
     for source in NODE22_REFRESH_READER_EDGES:
         selected = select_tests([source], repo_root=Path("."))
-        assert "tests/test_node22_refresh_timer_health.py" not in selected, (
+        assert not set(NODE22_REFRESH_TIMER_HEALTH_TESTS) & set(selected), (
             f"{source} still reaches the probe suite without its rule"
         )
 
@@ -2482,7 +2493,7 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
     # own tuples, never a glob result — the glob is the MUTANT side.
     #
     # The corpus filter is a PREFIX on the file NAME: `in` would sweep in
-    # tests/test_node22_refresh_timer_health.py, a different lane with its own
+    # the tests/test_node22_refresh_timer_health_*.py partitions, a different lane with its own
     # owner rows.
     partitions = set(SCHEDULER_REFRESH_TESTS)
     helpers = {SCHEDULER_REFRESH_HELPERS_PATH, SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH}
@@ -2549,6 +2560,115 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
         # The rule is only honest if it equals what the tracked tree derives.
         derived = _derived_support_module_importers([helper])[helper]
         assert derived == expected, sorted(derived ^ expected)
+
+
+def _module_string_constants(path: str) -> set[str]:
+    """Every string literal in ``path`` except its module docstring."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    docstring = ast.get_docstring(tree, clean=False)
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value != docstring
+    }
+
+
+def _names_imported_from(path: str, module: str) -> set[str]:
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    return {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == module
+        for alias in node.names
+    }
+
+
+def test_node22_refresh_timer_health_partition_tracked_tree_is_exactly_five_suites_and_one_helper() -> None:
+    # #2532: five collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A sixth partition, a leftover compatibility shim
+    # for the deleted 3456-line monolith, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuples, never a glob result -- the glob is the MUTANT side.
+    #
+    # Both corpus filters are PREFIXES on the file NAME, so neither sweeps in the
+    # sibling node-22 lanes (tests/test_node22_scheduler_stall_health.py,
+    # tests/test_node22_entrypoint_invariant*.py); the suite prefix also catches a
+    # resurrected monolith.
+    partitions = set(NODE22_REFRESH_TIMER_HEALTH_TESTS)
+    helper = NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 5, sorted(partitions)
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_node22_refresh_timer_health.py").exists(), (
+        "the pre-#2532 monolith is back; the explicit rows and its same-name "
+        "derivation from scripts/node22_refresh_timer_health.py would both fire"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_node22_refresh_timer_health")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("node22_refresh_timer_health")
+    }
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    # Every membership route that carried the monolith carries the WHOLE corpus,
+    # so each of these paths still selects the 202 cases it selected before.
+    for pattern in (
+        NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH,
+        "scripts/install_node22_refresh_timer_health.sh",
+        "infra/systemd/nhms-node22-refresh-timer-health.service",
+        "infra/systemd/nhms-node22-refresh-timer-health.timer",
+        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+        "services/orchestrator/scheduler_file_providers.py",
+        SCHEDULER_REFRESH_OWNER_PATH,
+        *SCHEDULER_REFRESH_PACKAGE_MODULES,
+    ):
+        targets = set(rule_for(pattern).tests)
+        assert partitions <= targets, f"{pattern} lost partition(s): {sorted(partitions - targets)}"
+
+    # The two exact-set rows carry only the partitions that literally read the
+    # path, and each reader tuple must equal what the partitions' own source
+    # says -- the tuple is not trusted.
+    env_readers = {
+        path
+        for path in partitions
+        if "compute.scheduler-provider-refresh.env.example" in _module_string_constants(path)
+    }
+    assert env_readers == set(NODE22_REFRESH_TIMER_HEALTH_ENV_TEMPLATE_TESTS), sorted(
+        env_readers ^ set(NODE22_REFRESH_TIMER_HEALTH_ENV_TEMPLATE_TESTS)
+    )
+    env_targets = set(rule_for("infra/env/compute.scheduler-provider-refresh.env.example").tests)
+    assert env_targets & partitions == env_readers, sorted((env_targets & partitions) ^ env_readers)
+
+    helper_module = PurePosixPath(helper).with_suffix("").as_posix().replace("/", ".")
+    runbook_readers = {
+        path
+        for path in partitions
+        if _names_imported_from(path, helper_module) & {"RUNBOOK", "_probe_runbook_section"}
+    }
+    assert runbook_readers == set(NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS), sorted(
+        runbook_readers ^ set(NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS)
+    )
+    for pattern in ("docs/runbooks/current-production-ops.md", PRODUCTION_OPS_SUBRUNBOOK_GLOB):
+        targets = set(rule_for(pattern).tests)
+        assert targets & partitions == runbook_readers, sorted((targets & partitions) ^ runbook_readers)
+
+    # The helper's support rule is only honest if it equals what the tracked
+    # tree derives.
+    helper_targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+    assert helper_targets == partitions, sorted(helper_targets ^ partitions)
+    derived = _derived_support_module_importers([helper])[helper]
+    assert derived == partitions, sorted(derived ^ partitions)
 
 
 def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None:
@@ -3454,14 +3574,15 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     Pinned as an EXACT set, not membership: `infra/env/**` is untouched and rule matches
     accumulate (`selected.update(rule.tests)`), so the correct result is not the owner
     suite alone. #2146 widened it from a 2-set to a 3-set:
-    `tests/test_node22_refresh_timer_health.py::test_the_production_path_defaults_match_every_file_that_states_them`
+    `tests/test_node22_refresh_timer_health_history.py::test_the_production_path_defaults_match_every_file_that_states_them`
     `read_text`s this template and pins its `NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT=`
     line to the probe's `DEFAULT_REFRESH_RECEIPT` parent, so it is a literal reader too.
     `tests/test_node27_write_roles.py` also reads this template (its `_env_templates()` globs
     `infra/env/*.example`) and stays unselected by design — that leg is out of scope for #2195.
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
-        "tests/test_node22_refresh_timer_health.py",
+        # #2532: only the history partition of the probe suite reads it.
+        "tests/test_node22_refresh_timer_health_history.py",
         # #1101 moved the reading case into this partition; the set stayed a
         # 3-set because only one of the fifteen partitions reads the template
         # (a 4-set since #2323, below).
@@ -3871,7 +3992,10 @@ def test_generated_roots_and_unscoped_runbooks_select_exactly_the_hard_gate_node
         "tests/test_env_templates.py",
         "tests/test_node22_entrypoint_invariant.py",
         "tests/test_node22_entrypoint_invariant_python_scan.py",
-        "tests/test_node22_refresh_timer_health.py",
+        # #2532: the three probe-suite partitions that read the probe section.
+        "tests/test_node22_refresh_timer_health_history.py",
+        "tests/test_node22_refresh_timer_health_installer.py",
+        "tests/test_node22_refresh_timer_health_runbook_and_env.py",
         "tests/test_node27_coverage_freshness_alert.py",
         "tests/test_python_environment_truth.py",
         "tests/test_role_boundary_static.py",
@@ -6790,7 +6914,10 @@ def test_select_tests_routes_docs_only_changes_to_exactly_the_hard_gate_node() -
         "tests/test_node22_entrypoint_invariant.py",
         "tests/test_node22_entrypoint_invariant_python_scan.py",
         # #2146 round 2: third literal reader -- the node-22 probe suite.
-        "tests/test_node22_refresh_timer_health.py",
+        # #2532 partitioned it; three partitions read the probe section.
+        "tests/test_node22_refresh_timer_health_history.py",
+        "tests/test_node22_refresh_timer_health_installer.py",
+        "tests/test_node22_refresh_timer_health_runbook_and_env.py",
         # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
         "tests/test_node27_coverage_freshness_alert.py",
         # #2472/#2473 round 1: capacity-check and topology sentence readers.
@@ -7319,9 +7446,10 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # #1103 partitioned the entrypoint owner in two, taking it to 8, and
         # gave the sub-runbook tree the identical row. #2323 took both to 9:
         # `docs/runbooks/` is a production-topology scan root, so the hard-gate
-        # node rides along.
-        ("docs/runbooks/current-production-ops.md", "9"),
-        ("docs/runbooks/production-ops/service-bringup.md", "9"),
+        # node rides along. #2532 took both to 11: the probe suite is five
+        # partitions, three of which read the probe section.
+        ("docs/runbooks/current-production-ops.md", "11"),
+        ("docs/runbooks/production-ops/service-bringup.md", "11"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
@@ -11773,6 +11901,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
         "tests/test_scheduler_refresh_cutover_gate_audit.py",
     ),
+    # #2532: the verdict-table partition drives every case through the helper's
+    # `_run` / `_verdict`, so it cannot stop importing the shared fakes without
+    # the partition itself being gutted.
+    (NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH, "tests/test_node22_refresh_timer_health_verdicts.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes

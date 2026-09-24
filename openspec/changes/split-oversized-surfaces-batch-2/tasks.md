@@ -21,10 +21,10 @@
 
 ## 1. #2532 — `tests/test_node22_refresh_timer_health.py`（3456 行）
 
-- [ ] 1.1 拆为 collectible 分区（各 < 1000）+ 非收集 helper；只手写 docstring 与 import 块
-- [ ] 1.2 删除 `.large-file-guard.json` 该条 exclude，零替代
-- [ ] 1.3 `scripts/select_ci_tests.py` 中该路径的全部字面量 rule target，以及 `tests/test_select_ci_tests.py` 中的 `NODE22_UNIT_OWNER_SUITES` / `NODE22_REFRESH_READER_EDGES` / 负向 pin / test-id 锚（design D6），改为显式枚举新分区；`tests/test_select_ci_tests.py` 新增 tracked-tree 守卫；各一次 mutation 红证
-- [ ] 1.4 Evidence：suffix 集合与 0.1 逐字节相等；指纹零漂移；`uv run pytest -q tests/test_node22_refresh_timer_health*.py tests/test_select_ci_tests.py` 绿
+- [x] 1.1 拆为 collectible 分区（各 < 1000）+ 非收集 helper；只手写 docstring 与 import 块
+- [x] 1.2 删除 `.large-file-guard.json` 该条 exclude，零替代
+- [x] 1.3 `scripts/select_ci_tests.py` 中该路径的全部字面量 rule target，以及 `tests/test_select_ci_tests.py` 中的 `NODE22_UNIT_OWNER_SUITES` / `NODE22_REFRESH_READER_EDGES` / 负向 pin / test-id 锚（design D6），改为显式枚举新分区；`tests/test_select_ci_tests.py` 新增 tracked-tree 守卫；各一次 mutation 红证
+- [x] 1.4 Evidence：suffix 集合与 0.1 逐字节相等；指纹零漂移；`uv run pytest -q tests/test_node22_refresh_timer_health*.py tests/test_select_ci_tests.py` 绿
 
 ## 2. #2527 — `tests/test_direct_grid_display_cutover_flip.py`（1814 行）
 
