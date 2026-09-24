@@ -2824,6 +2824,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # historical path is QHH_PRODUCTION_BOOTSTRAP_TESTS[0]).
             *QHH_PRODUCTION_BOOTSTRAP_TESTS,
             "tests/test_qhh_scripts_static.py",
+            # #2491: AST pin that `import_basin_into_registry_core` locks the
+            # basin_version row first and that `_bootstrap_database` locks its
+            # scope before delegating -- both read from this directory.
+            "tests/test_registry_parent_lock_order_scan.py",
         ),
     ),
     PathTestRule(
@@ -5398,6 +5402,28 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "scripts/ops/node22-run-cycle-once.sh",
         ("tests/test_production_scheduler.py",),
+    ),
+    PathTestRule(
+        # #1729 / #1480: the runner is the executor both disposable-DB suites
+        # drive; the grammar suite is its same-name owner.
+        "scripts/ops/node27_oneshot_sql.py",
+        (
+            "tests/test_node27_oneshot_sql.py",
+            "tests/test_node27_1729_evidence_basin_delete_integration.py",
+            "tests/test_node27_1480_seed_provenance_backfill_integration.py",
+        ),
+    ),
+    PathTestRule(
+        # #1729: the delete / backup / rollback trio runs only through the
+        # one-shot runner; the marker-grammar suite parses every file and the
+        # disposable-DB suite executes them (ci.yml's `database:` lane).
+        "scripts/ops/node27_1729_delete_evidence_basin*.sql",
+        ("tests/test_node27_oneshot_sql.py", "tests/test_node27_1729_evidence_basin_delete_integration.py"),
+    ),
+    PathTestRule(
+        # #1480: same shape as the #1729 trio for the backfill / rollback pair.
+        "scripts/ops/node27_1480_backfill_seed_station_provenance*.sql",
+        ("tests/test_node27_oneshot_sql.py", "tests/test_node27_1480_seed_provenance_backfill_integration.py"),
     ),
     PathTestRule(
         # #1823: the display-API wrapper's entropy reach is now the fifteen

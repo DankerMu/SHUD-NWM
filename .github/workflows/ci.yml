@@ -118,6 +118,15 @@ jobs:
               - 'services/orchestrator/scheduler.py'
               - 'services/orchestrator/pipeline_job_provenance.py'
               - 'scripts/backfill_pipeline_job_provenance.py'
+              # #1729 / #1480: the one-shot node-27 data scripts and their runner are
+              # proven only by the disposable-DB suites, so a script-only diff must open
+              # this lane. Exact literals, no `scripts/ops/**` glob.
+              - 'scripts/ops/node27_oneshot_sql.py'
+              - 'scripts/ops/node27_1729_delete_evidence_basin.sql'
+              - 'scripts/ops/node27_1729_delete_evidence_basin_backup.sql'
+              - 'scripts/ops/node27_1729_delete_evidence_basin_rollback.sql'
+              - 'scripts/ops/node27_1480_backfill_seed_station_provenance.sql'
+              - 'scripts/ops/node27_1480_backfill_seed_station_provenance_rollback.sql'
 
               - '.github/workflows/ci.yml'
               - 'pyproject.toml'

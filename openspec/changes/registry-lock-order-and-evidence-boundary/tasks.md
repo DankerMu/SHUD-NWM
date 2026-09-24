@@ -12,29 +12,29 @@
 
 ## 1. Baselines
 
-- [ ] 1.1 node-27 只读：`core.basin` 行数、evidence 依赖计数、#1480 分组计数、公网 `/api/v1/basins` 与 versions 响应；live `pg_constraint` FK dependents、跨 schema 列名扫描、`pg_trigger`（落 `.workplans/`）
+- [x] 1.1 node-27 只读：`core.basin` 行数、evidence 依赖计数、#1480 分组计数、公网 `/api/v1/basins` 与 versions 响应；live `pg_constraint` FK dependents、跨 schema 列名扫描、`pg_trigger`（落 `.workplans/`）
 
 ## 2. #2491
 
-- [ ] 2.1 `_lock_basin_version` + 在 `import_basin_into_registry_core` 最前调用；docstring 锁序不变量
-- [ ] 2.2 静态扫描测试（bv 锁先于其它写 helper）+ 突变红证
-- [ ] 2.3 真实 DB 双会话交错测试（修复前红 / 修复后绿、有界）
+- [x] 2.1 `_lock_basin_version` + 在 `import_basin_into_registry_core` 最前调用；docstring 锁序不变量
+- [x] 2.2 静态扫描测试（bv 锁先于其它写 helper）+ 突变红证
+- [x] 2.3 真实 DB 双会话交错测试（修复前红 / 修复后绿、有界）
 - [ ] 2.4 `_lock_basin_version_scope` 同类确认结论写入 PR body
 
 ## 3. #1729 读侧
 
-- [ ] 3.1 `list_basins` / `list_basin_versions` 过滤；常量
-- [ ] 3.2 单测 + 真实 DB 用例；其它公开 basin 读路径的逐项处置说明
+- [x] 3.1 `list_basins` / `list_basin_versions` 过滤；常量
+- [x] 3.2 单测 + 真实 DB 用例；其它公开 basin 读路径的逐项处置说明
 
 ## 4. #1729 删行脚本
 
-- [ ] 4.1 backup / delete / rollback 脚本（计数断言、单事务）
-- [ ] 4.2 disposable DB 测试：删除成功、计数不符零删除、rollback 还原
+- [x] 4.1 backup / delete / rollback 脚本（计数断言、单事务）
+- [x] 4.2 disposable DB 测试：删除成功、计数不符零删除、rollback 还原
 
 ## 5. #1480 回填脚本
 
-- [ ] 5.1 backfill / rollback 脚本（谓词推导、两键、幂等）
-- [ ] 5.2 disposable DB 测试：改写正确、其余键不变、二次 0 行、rollback 还原
+- [x] 5.1 backfill / rollback 脚本（谓词推导、两键、幂等）
+- [x] 5.2 disposable DB 测试：改写正确、其余键不变、二次 0 行、rollback 还原
 
 ## 6. 执行与收口
 

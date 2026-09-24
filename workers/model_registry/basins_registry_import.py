@@ -311,7 +311,10 @@ def import_basin_into_registry_core(
 
     Sequence rationale:
 
-    * ``_delete_legacy_seg_rows`` MUST run first: pre-PR-2 imports left
+    * ``_lock_basin_version`` MUST run before every other step (#2491): it is
+      the first parent row lock, so every caller takes ``basin_version ->
+      river_network_version`` (see ``_lock_river_network_version``).
+    * ``_delete_legacy_seg_rows`` MUST run next: pre-PR-2 imports left
       ``<model>_seg_*`` rows under ``basin_version`` + ``river_network_version``
       parents whose ``segment_count`` / ``checksum`` were derived from
       ``gis/seg.shp``. PR 2 derives both from ``gis/river.shp`` and the values
@@ -344,6 +347,7 @@ def import_basin_into_registry_core(
     its bespoke output seeding intact.
     """
 
+    _lock_basin_version(cursor, sources.ids["basin_version_id"])
     _delete_legacy_seg_rows(cursor, sources.ids)
     # Unconditional: ``_refresh_parent_version_materialization`` does its own
     # per-row probe and skips when a row is absent (fresh basin) or already
@@ -578,8 +582,41 @@ def _refresh_parent_version_materialization(cursor: Any, sources: ImportSources)
         )
 
 
+def _lock_basin_version(cursor: Any, basin_version_id: str) -> None:
+    """Take the parent ``core.basin_version`` row lock (#2491).
+
+    ``import_basin_into_registry_core`` calls this before any other statement,
+    so the generic import locks ``basin_version`` before its
+    ``_refresh_parent_version_materialization`` ``UPDATE``s the network row --
+    the order ``qhh_bootstrap_registry.py::_lock_qhh_basin_scope`` (``FOR
+    UPDATE``) already takes. Without it the generic import went network ->
+    basin_version and deadlocked against a concurrent bootstrap of the same
+    existing basin (ABBA). ``FOR NO KEY UPDATE`` is the lock the later
+    non-key ``UPDATE core.basin_version`` takes anyway; inside the bootstrap's
+    transaction, which already holds ``FOR UPDATE``, it is a no-op.
+
+    A missing row (first import) locks nothing and returns nothing; the
+    concurrent first-import unique-key race is out of scope.
+    """
+    cursor.execute(
+        """
+        SELECT 1
+        FROM core.basin_version
+        WHERE basin_version_id = %s
+        FOR NO KEY UPDATE
+        """,
+        (basin_version_id,),
+    )
+
+
 def _lock_river_network_version(cursor: Any, river_network_version_id: str) -> None:
     """Take the parent ``core.river_network_version`` row lock (#2157).
+
+    Parent-lock order (#2491): ``basin_version -> river_network_version ->
+    river_segment``. ``import_basin_into_registry_core`` takes
+    ``_lock_basin_version`` first, then this row (its rnv ``UPDATE``), then the
+    segment rows; the QHH bootstrap takes the same basin_version row first in
+    ``_lock_qhh_basin_scope``.
 
     Lock-order invariant: every production path that rewrites EXISTING
     ``core.river_segment`` rows in place -- the ``UPDATE`` in
@@ -603,7 +640,11 @@ def _lock_river_network_version(cursor: Any, river_network_version_id: str) -> N
     Row-level ``INSERT`` of new segments (``_ensure_river_segments``,
     ``db/seeds/seed_demo.py``'s ``ON CONFLICT DO NOTHING``) and
     ``_delete_legacy_seg_rows`` are outside it: they never lock a row either
-    in-place writer targets.
+    in-place writer targets. The same boundary holds for the parent-lock
+    order: ``_delete_legacy_seg_rows`` DELETEs ``river_segment`` rows before
+    the rnv ``UPDATE`` (after the basin_version lock), and that row-level
+    DELETE is not part of the ``basin_version -> river_network_version``
+    invariant.
 
     Precondition: the parent row already exists. The statement does not fetch
     or assert the row -- on a missing row it simply locks nothing -- so every
