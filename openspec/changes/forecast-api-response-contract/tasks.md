@@ -45,8 +45,8 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Local: `uv run ruff check .`; targeted pytest; `openspec validate forecast-api-response-contract --strict --no-interactive` and `timeseries-narrow-store-expand-contract`; the frontend commands.
-- [ ] 3.2 node-27 full pytest on the frozen SHA (disposable DB). The failure set must equal master's.
+- [x] 3.1 Local: `uv run ruff check .`; targeted pytest; `openspec validate forecast-api-response-contract --strict --no-interactive` and `timeseries-narrow-store-expand-contract`; the frontend commands.
+- [x] 3.2 node-27 full pytest on the frozen SHA (disposable DB). The failure set must equal master's. Result: `5f901ff8a` full run gave 20726 passed, 1 failed, 62 skipped. The one failure is the pre-existing #2615 (`test_canonical_precip_copyback_backfill::test_backfill_module_launch_outside_the_repo_root_fails_with_no_summary`), the same set as the K3 baseline. The fix delta on `b0e670808` passed all 1340 of preservation×2, parity, projection, openapi drift/conformance/3.1, forecast_api, select_ci_tests and connection_attribution.
 
 ## 4. Review / CI
 
