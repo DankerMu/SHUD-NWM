@@ -27,7 +27,7 @@
 - [x] 2.1 `wc -l` 全部 < 1000；`.large-file-guard.json` 零 diff
 - [x] 2.2 `uv run ruff check .`；`openspec validate split-model-registry-store --strict --no-interactive`
 - [x] 2.2b orchestrator 写 ci-contract-baseline MODIFIED delta（:928 注册表所在 requirement；:820 场景已核无需改，见 D3）
-- [ ] 2.3 node-27 全量 `pytest -q`（真实 DB，frozen SHA）receipt
+- [x] 2.3 node-27 全量 `pytest -q`（真实 DB，frozen SHA）receipt
 
 ## Evidence Floor
 
