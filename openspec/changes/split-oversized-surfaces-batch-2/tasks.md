@@ -60,8 +60,8 @@
 - [x] 5.4 `git diff origin/master --stat` 不含 D2 列出的任何死锁消费者
 - [x] 5.4b orchestrator 按实际分区名写 `specs/ci-contract-baseline/spec.md` MODIFIED delta（三条按路径点名被拆语料的 requirement）
 - [x] 5.5 `uv run ruff check .` 绿；`openspec validate split-oversized-surfaces-batch-2 --strict --no-interactive` 绿
-- [ ] 5.6 node-27 frozen-SHA：`TMPDIR=/home/nwm/tmp uv run pytest -q` 全量 receipt（#2490 要求全量）
-- [ ] 5.7 PR body：不写 `Closes #2490`，记 #2490 部分交付偏离；声明 CI 定向选择 ≠ 全量
+- [x] 5.6 node-27 frozen-SHA：`TMPDIR=/home/nwm/tmp uv run pytest -q` 全量 receipt（#2490 要求全量）
+- [x] 5.7 PR body：不写 `Closes #2490`，记 #2490 部分交付偏离；声明 CI 定向选择 ≠ 全量
 
 ## Evidence Floor
 
