@@ -7,6 +7,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
+from apps.api.response_models.data_sources import (
+    DataSourcePageEnvelope,
+    ForecastCyclePageEnvelope,
+    MetStationPageEnvelope,
+    StationSeriesResponseEnvelope,
+)
 from apps.api.routes.forecast import DEFAULT_LIMIT, MAX_LIMIT, _ok
 from packages.common.forecast_store import (
     MAX_STATION_SERIES_LIMIT,
@@ -51,7 +57,11 @@ def get_object_store_root(request: Request) -> Path:
     return Path(object_store_root)
 
 
-@router.get("/data-sources")
+@router.get(
+    "/data-sources",
+    response_model=DataSourcePageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_data_sources(
     request: Request,
     limit: int = Query(default=DEFAULT_LIMIT, ge=1),
@@ -64,7 +74,11 @@ def list_data_sources(
         raise _api_error(error) from error
 
 
-@router.get("/data-sources/{source_id}/cycles")
+@router.get(
+    "/data-sources/{source_id}/cycles",
+    response_model=ForecastCyclePageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_cycles(
     request: Request,
     source_id: str,
@@ -91,7 +105,11 @@ def list_cycles(
         raise _api_error(error) from error
 
 
-@router.get("/met/stations")
+@router.get(
+    "/met/stations",
+    response_model=MetStationPageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_met_stations(
     request: Request,
     basin_version_id: str | None = None,
@@ -136,7 +154,12 @@ def list_met_stations(
         raise _api_error(error) from error
 
 
-@router.get("/met/stations/{station_id}/series", operation_id="getMetStationSeries")
+@router.get(
+    "/met/stations/{station_id}/series",
+    operation_id="getMetStationSeries",
+    response_model=StationSeriesResponseEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_met_station_series(
     request: Request,
     station_id: str,

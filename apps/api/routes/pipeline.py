@@ -18,6 +18,17 @@ from sqlalchemy.orm import Session
 
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
+from apps.api.response_models.pipeline import (
+    CancelRunResultEnvelope,
+    JobLogsEnvelope,
+    PipelineJobPageEnvelope,
+    PipelineStageListEnvelope,
+    PipelineStatusEnvelope,
+    QueueDepthEnvelope,
+    RetryRunResultEnvelope,
+    StageDurationMetricListEnvelope,
+    SuccessRateMetricListEnvelope,
+)
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.artifacts import (
@@ -263,7 +274,11 @@ def _manual_action_suggestion(control_action: str) -> str:
     return "Ask a node 22 operator to handle this control-plane action from the compute_control runbook."
 
 
-@router.get("/pipeline/status")
+@router.get(
+    "/pipeline/status",
+    response_model=PipelineStatusEnvelope,
+    response_model_exclude_unset=True,
+)
 def pipeline_status(
     request: Request,
     source: str | None = Query(default=None),
@@ -333,7 +348,11 @@ def pipeline_status(
     )
 
 
-@router.get("/pipeline/stages")
+@router.get(
+    "/pipeline/stages",
+    response_model=PipelineStageListEnvelope,
+    response_model_exclude_unset=True,
+)
 def pipeline_stages(
     request: Request,
     source: str | None = Query(default=None),
@@ -380,7 +399,11 @@ def pipeline_stages(
     return _ok(request, _stage_summaries(store, resolved_cycle_id))
 
 
-@router.get("/jobs")
+@router.get(
+    "/jobs",
+    response_model=PipelineJobPageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_jobs(
     request: Request,
     source: str | None = None,
@@ -482,7 +505,11 @@ def _jobs_strict_identity_trigger_fields(raw_fields: set[str]) -> set[str]:
     return set()
 
 
-@router.get("/jobs/{job_id}/logs")
+@router.get(
+    "/jobs/{job_id}/logs",
+    response_model=JobLogsEnvelope,
+    response_model_exclude_unset=True,
+)
 def job_logs(
     job_id: str,
     request: Request,
@@ -530,7 +557,11 @@ def job_logs(
     )
 
 
-@router.post("/runs/{run_id}/retry")
+@router.post(
+    "/runs/{run_id}/retry",
+    response_model=RetryRunResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def retry_run(
     run_id: str,
     request: Request,
@@ -597,7 +628,11 @@ def retry_run(
     )
 
 
-@router.post("/runs/{run_id}/cancel")
+@router.post(
+    "/runs/{run_id}/cancel",
+    response_model=CancelRunResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def cancel_run(
     run_id: str,
     request: Request,
@@ -768,7 +803,11 @@ def cancel_run(
     )
 
 
-@router.get("/metrics/stage-duration")
+@router.get(
+    "/metrics/stage-duration",
+    response_model=StageDurationMetricListEnvelope,
+    response_model_exclude_unset=True,
+)
 def stage_duration_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
@@ -813,7 +852,11 @@ def stage_duration_metrics(
     return _ok(request, data)
 
 
-@router.get("/metrics/success-rate")
+@router.get(
+    "/metrics/success-rate",
+    response_model=SuccessRateMetricListEnvelope,
+    response_model_exclude_unset=True,
+)
 def success_rate_metrics(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
@@ -855,7 +898,11 @@ def success_rate_metrics(
     return _ok(request, data)
 
 
-@router.get("/queue/depth")
+@router.get(
+    "/queue/depth",
+    response_model=QueueDepthEnvelope,
+    response_model_exclude_unset=True,
+)
 def queue_depth(
     request: Request,
     gateway: SlurmGateway = Depends(get_queue_depth_gateway),

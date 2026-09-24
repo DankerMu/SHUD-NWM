@@ -35,6 +35,46 @@ QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
+# #2222: the public ``HydroRun`` projection. Every ``hydro.hydro_run`` column a
+# client may see, in fixed order; ``get_run`` / ``list_runs`` select exactly these
+# as ``h.<col>`` (never ``h.*``) plus the three join aliases below, and
+# ``_hydro_run_response`` projects through the same allowlist, so a new
+# ``hydro_run`` column (e.g. an internal store router) cannot reach
+# ``GET /api/v1/runs{,/{run_id}}`` without an explicit change here.
+HYDRO_RUN_PUBLIC_COLUMNS = (
+    "run_id",
+    "run_type",
+    "scenario_id",
+    "model_id",
+    "basin_version_id",
+    "forcing_version_id",
+    "init_state_id",
+    "source_id",
+    "cycle_time",
+    "start_time",
+    "end_time",
+    "status",
+    "slurm_job_id",
+    "run_manifest_uri",
+    "output_uri",
+    "log_uri",
+    "error_code",
+    "error_message",
+    "created_at",
+    "updated_at",
+    "run_key",
+    "parsed_at",
+)
+HYDRO_RUN_JOIN_ALIASES = ("river_network_version_id", "basin_id", "source")
+HYDRO_RUN_PUBLIC_FIELDS = (*HYDRO_RUN_PUBLIC_COLUMNS, *HYDRO_RUN_JOIN_ALIASES)
+_HYDRO_RUN_PUBLIC_SELECT_SQL = ",\n".join(
+    [
+        *(f"                    h.{column}" for column in HYDRO_RUN_PUBLIC_COLUMNS),
+        "                    mi.river_network_version_id",
+        "                    bv.basin_id",
+        "                    COALESCE(ds.adapter_name, h.source_id) AS source",
+    ]
+)
 
 
 # These spanning reads route each fact through its authoritative run, before
@@ -1411,12 +1451,9 @@ class PsycopgForecastStore:
         with self._transaction() as cursor:
             row = self._fetch_optional(
                 cursor,
-                """
+                f"""
                 SELECT
-                    h.*,
-                    mi.river_network_version_id,
-                    bv.basin_id,
-                    COALESCE(ds.adapter_name, h.source_id) AS source
+{_HYDRO_RUN_PUBLIC_SELECT_SQL}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
@@ -1475,10 +1512,7 @@ class PsycopgForecastStore:
                 cursor,
                 f"""
                 SELECT
-                    h.*,
-                    mi.river_network_version_id,
-                    bv.basin_id,
-                    COALESCE(ds.adapter_name, h.source_id) AS source
+{_HYDRO_RUN_PUBLIC_SELECT_SQL}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
@@ -4545,7 +4579,13 @@ def _json_ready(value: Any) -> Any:
 
 
 def _hydro_run_response(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _json_ready(dict(row))
+    """#2222: project the row onto the public ``HydroRun`` allowlist.
+
+    Defence in depth behind the explicit SQL projection: a row carrying any
+    other key (a future column, a test double's extra) is filtered here, and
+    an allowlisted key the row does not carry stays absent.
+    """
+    return _json_ready({field: row[field] for field in HYDRO_RUN_PUBLIC_FIELDS if field in row})
 
 
 def _run_display_coverage_available(cursor: Any) -> bool:

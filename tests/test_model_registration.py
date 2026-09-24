@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,23 @@ from workers.model_registry.validator import (
     validate_model_package_path,
     validate_model_package_uri,
 )
+
+_REGISTRY_CREATED_AT = datetime(2026, 5, 14, tzinfo=UTC)
+
+
+def _basin_version_record(basin_id: str, basin_version_id: str) -> dict[str, Any]:
+    return {
+        "basin_version_id": basin_version_id,
+        "basin_id": basin_id,
+        "version_label": "v01",
+        "geom": {"type": "MultiPolygon", "coordinates": [[[[90, 25], [91, 25], [91, 26], [90, 25]]]]},
+        "active_flag": False,
+        "valid_from": None,
+        "valid_to": None,
+        "source_uri": None,
+        "checksum": None,
+        "created_at": _REGISTRY_CREATED_AT,
+    }
 
 
 class FakeModelRegistryStore:
@@ -107,22 +125,42 @@ class FakeModelRegistryStore:
         self.write_calls.append("create_basin_with_version")
         if payload["basin_id"] == "dupe":
             raise DuplicateResourceError("basin_id already exists: dupe")
+        # #2348: the `RETURNING` rows the real store echoes (response models require them).
         return {
-            "basin": {"basin_id": payload["basin_id"], "basin_name": payload["basin_name"]},
-            "basin_version": {"basin_version_id": payload["basin_version"].get("basin_version_id") or "basin_v01"},
+            "basin": {
+                "basin_id": payload["basin_id"],
+                "basin_name": payload["basin_name"],
+                "basin_group": payload.get("basin_group"),
+                "description": payload.get("description"),
+                "created_at": _REGISTRY_CREATED_AT,
+            },
+            "basin_version": _basin_version_record(
+                payload["basin_id"], payload["basin_version"].get("basin_version_id") or "basin_v01"
+            ),
         }
 
     def create_basin_version(self, basin_id: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_basin_version")
         if basin_id == "missing":
             raise MissingResourceError("basin_id not found: missing")
-        return {"basin_id": basin_id, "basin_version_id": payload.get("basin_version_id") or f"{basin_id}_v01"}
+        return _basin_version_record(basin_id, payload.get("basin_version_id") or f"{basin_id}_v01")
 
     def create_river_network(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_river_network")
         if payload["basin_version_id"] == "missing":
             raise InvalidReferenceError("basin_version_id does not exist: missing")
-        return {"river_network_version": {"river_network_version_id": "basin_rivnet_v01"}, "segment_count": 1}
+        return {
+            "river_network_version": {
+                "river_network_version_id": "basin_rivnet_v01",
+                "basin_version_id": payload["basin_version_id"],
+                "version_label": payload["version_label"],
+                "segment_count": 1,
+                "source_uri": None,
+                "checksum": None,
+                "created_at": _REGISTRY_CREATED_AT,
+            },
+            "segment_count": 1,
+        }
 
     def list_river_segments(
         self,
@@ -195,7 +233,15 @@ class FakeModelRegistryStore:
         self.write_calls.append("create_mesh_version")
         if payload["version_label"] == "":
             raise InvalidPayloadError("version_label must contain at least one alphanumeric character.")
-        return {"mesh_version_id": payload.get("mesh_version_id") or "basin_mesh_v01"}
+        return {
+            "mesh_version_id": payload.get("mesh_version_id") or "basin_mesh_v01",
+            "basin_version_id": payload["basin_version_id"],
+            "version_label": payload["version_label"],
+            "mesh_uri": payload["mesh_uri"],
+            "checksum": payload.get("checksum"),
+            "properties_json": dict(payload.get("properties_json") or {}),
+            "created_at": _REGISTRY_CREATED_AT,
+        }
 
     def create_model(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_model")
@@ -208,6 +254,7 @@ class FakeModelRegistryStore:
         record = dict(payload)
         record.setdefault("active_flag", False)
         record.setdefault("lifecycle_state", "active" if record["active_flag"] else "inactive")
+        record.setdefault("created_at", _REGISTRY_CREATED_AT)
         self.models[record["model_id"]] = record
         return record
 
@@ -391,7 +438,10 @@ class FakeModelRegistryStore:
 
     def create_crosswalk_entries(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         self.write_calls.append("create_crosswalk_entries")
-        return {"count": len(payload["entries"]), "items": payload["entries"]}
+        items = [
+            {"river_network_version_id": payload["river_network_version_id"], **entry} for entry in payload["entries"]
+        ]
+        return {"count": len(items), "items": items}
 
 
 class NullGeometryModelRegistryStore(FakeModelRegistryStore):

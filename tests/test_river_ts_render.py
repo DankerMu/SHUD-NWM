@@ -1370,6 +1370,164 @@ def test_whole_row_star_quoted_declaration_precedence(door: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unqualified bare `*` SELECT output exposure (#2216)
+# ---------------------------------------------------------------------------
+# PostgreSQL §7.3.1: a bare `*` output item emits every column of the table
+# expression. At the top query level whose FROM list is exactly one fact read
+# that is the whole fact row; the seven members are spelled out here rather
+# than read from the implementation tuple.
+_BARE_STAR_ROW = {
+    "run_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "river_segment_id",
+    "variable",
+    "unit",
+    "quality_flag",
+}
+
+
+@pytest.mark.parametrize(
+    ("sql", "fact_alias"),
+    [
+        ("SELECT * FROM hydro.river_timeseries WHERE run_key = :k", None),
+        ("SELECT * FROM hydro.river_timeseries rt WHERE rt.run_key = :k", "rt"),
+        ("SELECT * FROM hydro.river_timeseries AS rt WHERE rt.run_key = :k", "rt"),
+        ("SELECT rt.value, * FROM hydro.river_timeseries rt WHERE rt.run_key = :k", "rt"),
+        ("SELECT ALL * FROM hydro.river_timeseries rt", "rt"),
+        ("SELECT DISTINCT * FROM hydro.river_timeseries rt", "rt"),
+        ("SELECT DISTINCT ON (rt.run_key) * FROM hydro.river_timeseries rt WHERE rt.run_key = :k", "rt"),
+        ("select /* lead */ *\n  -- tail\n  from HYDRO.RIVER_TIMESERIES as RT", "rt"),
+        ("SELECT * FROM hydro.river_timeseries UNION ALL SELECT * FROM other_rows", None),
+    ],
+    ids=["no-alias", "bare-alias", "as-alias", "later", "all", "distinct", "distinct-on", "comments-case", "union"],
+)
+def test_bare_star_output_exposes_the_fact_row(sql: str, fact_alias: str | None) -> None:
+    entry = "bare-star-output"
+    assert fact_table_text_identity_columns(sql, entry=entry) == _BARE_STAR_ROW
+    if fact_alias is None:
+        # No alias to name: the alias-scoped matcher does not become a validator.
+        assert text_fact_columns(sql, "rt") == set()
+    else:
+        assert text_fact_columns(sql, fact_alias) == _BARE_STAR_ROW
+        assert text_fact_columns(sql, fact_alias.upper()) == _BARE_STAR_ROW
+        assert text_fact_columns(sql, "q") == set()
+    with pytest.raises(RiverTemplateError) as raised:
+        render_river_ts_sql(sql, "narrow", entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert "text identity column(s)" in message
+    assert all(column in message for column in _BARE_STAR_ROW)
+    assert "unmodelled" not in message
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM hydro.river_timeseries rt JOIN hydro.hydro_run hr ON hr.run_key = rt.run_key",
+        "SELECT * FROM hydro.river_timeseries rt, hydro.hydro_run hr",
+        "SELECT * FROM hydro.hydro_run hr JOIN hydro.river_timeseries ON true",
+        "SELECT * FROM (SELECT rt.value FROM hydro.river_timeseries rt) q",
+        "SELECT q.value FROM (SELECT * FROM hydro.river_timeseries rt) q",
+        "WITH c AS (SELECT * FROM hydro.river_timeseries rt) SELECT c.value FROM c",
+        "SELECT 1 WHERE EXISTS (SELECT * FROM hydro.river_timeseries rt)",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key IN (SELECT * FROM hydro.river_timeseries)",
+    ],
+    ids=["join", "comma-join", "join-unaliased", "derived-source", "derived-body", "cte-body", "exists", "in-list"],
+)
+@pytest.mark.parametrize("door", ["helper", "narrow"])
+def test_bare_star_with_unprovable_fact_ownership_is_refused(sql: str, door: str) -> None:
+    entry = "bare-star-unprovable"
+    # The unguarded seam stays a matcher: no proven fact alias, so no full set.
+    assert text_fact_columns(sql, "rt") == set()
+    with pytest.raises(RiverTemplateError) as raised:
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry=entry)
+        else:
+            render_river_ts_sql(sql, door, entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert "unmodelled unqualified whole-row star" in message
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) FROM hydro.river_timeseries rt WHERE rt.run_key = :k",
+        "SELECT count(*) AS n, max(rt.value) FROM hydro.river_timeseries rt",
+        "SELECT f(*) FROM hydro.river_timeseries rt",
+        "SELECT rt.value FROM hydro.river_timeseries rt ORDER BY *",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = (SELECT * FROM hydro.hydro_run LIMIT 1)",
+        "SELECT cr.* FROM hydro.river_timeseries rt JOIN candidate_runs cr ON cr.run_key = rt.run_key",
+        "WITH source_rows AS (SELECT rt.value FROM hydro.river_timeseries rt) SELECT source_rows.* FROM source_rows",
+        "WITH bounded_rows AS (SELECT rt.value FROM hydro.river_timeseries rt) SELECT * FROM bounded_rows",
+        "SELECT rt.value FROM hydro.river_timeseries rt JOIN (SELECT * FROM hydro.hydro_run) hr ON true",
+        'SELECT "*" FROM hydro.river_timeseries rt',
+        "SELECT '*', E'*', rt.value /* * /* * */ */ -- *\nFROM hydro.river_timeseries rt",
+        "SELECT rt.value * 2 FROM hydro.river_timeseries rt",
+        "SELECT rt.run_key, rt.variable_e, rt.unit_e FROM hydro.river_timeseries rt",
+    ],
+    ids=[
+        "count",
+        "count-aggregate",
+        "function-arg",
+        "order-by",
+        "scalar-body",
+        "cr-star",
+        "source-rows-star",
+        "star-over-cte",
+        "nonfact-derived-star",
+        "quoted-star",
+        "data",
+        "multiply",
+        "keys-enums",
+    ],
+)
+def test_bare_star_nonexposure_controls_keep_their_outcome(sql: str) -> None:
+    entry = "bare-star-control"
+    assert text_fact_columns(sql, "rt") == set()
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT hydro.river_timeseries.* FROM hydro.river_timeseries WHERE run_key = :k",
+        "SELECT hydro . river_timeseries . * FROM hydro.river_timeseries",
+        "SELECT * FROM hydro.river_timeseries rt JOIN hydro . river_timeseries x ON true",
+    ],
+    ids=["table-qualified", "multipart", "join-unmodelled-read"],
+)
+@pytest.mark.parametrize("door", ["helper", "narrow"])
+def test_bare_star_keeps_reference_count_precedence(sql: str, door: str) -> None:
+    entry = "bare-star-count"
+    with pytest.raises(RiverTemplateError) as raised:
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry=entry)
+        else:
+            render_river_ts_sql(sql, door, entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert "unmodelled fact-table reference form" in message
+    assert "whole-row star" not in message
+
+
+@pytest.mark.parametrize("door", ["helper", "narrow"])
+def test_bare_star_keeps_quoted_declaration_and_alias_star_precedence(door: str) -> None:
+    def call(sql: str) -> None:
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry="bare-star-precedence")
+        else:
+            render_river_ts_sql(sql, door, entry="bare-star-precedence")
+
+    with pytest.raises(RiverTemplateError, match="double-quoted alias"):
+        call('SELECT * FROM hydro.river_timeseries AS "rt" JOIN hydro.hydro_run hr ON true')
+    with pytest.raises(RiverTemplateError, match="unmodelled whole-row star exposure"):
+        call("SELECT *, foo(rt.*) FROM hydro.river_timeseries rt JOIN hydro.hydro_run hr ON true")
+
+
+# ---------------------------------------------------------------------------
 # Parenthesized whole-row fact-alias field selection (#2112)
 # ---------------------------------------------------------------------------
 # Keep this literal enumeration independent of the implementation tuple.  The

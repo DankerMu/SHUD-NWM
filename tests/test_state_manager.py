@@ -46,6 +46,7 @@ from packages.common.state_manager import (
     publish_state_snapshot_index,
     repair_state_snapshot_index,
     state_snapshot_id,
+    state_snapshot_to_dict,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
 from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
@@ -159,7 +160,9 @@ class FakeStateSnapshotRepository:
         page = items[offset : offset + limit]
         return {
             "total_count": len(items),
-            "items": [_snapshot_dict(snapshot) for snapshot in page],
+            # #2348: the production row shape (all lineage keys), which the
+            # route's `StateSnapshotPage` response model requires.
+            "items": [state_snapshot_to_dict(snapshot) for snapshot in page],
             "limit": limit,
             "offset": offset,
         }
@@ -4533,19 +4536,6 @@ async def _get(path: str) -> Any:
         return await client.get(path)
 
 
-def _snapshot_dict(snapshot: StateSnapshot) -> dict[str, Any]:
-    return {
-        "state_id": snapshot.state_id,
-        "model_id": snapshot.model_id,
-        "run_id": snapshot.run_id,
-        "valid_time": _format_time(snapshot.valid_time),
-        "state_uri": snapshot.state_uri,
-        "checksum": snapshot.checksum,
-        "usable_flag": snapshot.usable_flag,
-        "created_at": _format_time(snapshot.created_at),
-    }
-
-
 def _dt(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         candidate = value
@@ -4554,12 +4544,6 @@ def _dt(value: str | datetime) -> datetime:
     if candidate.tzinfo is None:
         return candidate.replace(tzinfo=UTC)
     return candidate.astimezone(UTC)
-
-
-def _format_time(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    return _dt(value).isoformat().replace("+00:00", "Z")
 
 
 # --------------------------------------------------------------------------- #

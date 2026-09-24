@@ -25,9 +25,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Create Basin Api V1 Basins Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/BasinCreateResult'
         '422':
           description: Validation Error
           content:
@@ -117,10 +122,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Create Basin Version Api V1 Basins  Basin Id  Versions
-                  Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/BasinVersionRecord'
         '422':
           description: Validation Error
           content:
@@ -202,9 +211,14 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Create River Network Api V1 River Networks Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/RiverNetworkCreateResult'
         '422':
           description: Validation Error
           content:
@@ -377,9 +391,14 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Create Mesh Version Api V1 Mesh Versions Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/MeshVersionRecord'
         '422':
           description: Validation Error
           content:
@@ -410,9 +429,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Create Model Api V1 Models Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/ModelInstanceRecord'
         '422':
           description: Validation Error
           content:
@@ -516,9 +540,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Set Model Active Api V1 Models  Model Id  Active Put
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/ModelLifecycleResult'
         '422':
           description: Validation Error
           content:
@@ -672,10 +701,14 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Create River Segment Crosswalks Api V1 River Segment
-                  Crosswalks Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/CrosswalkCreateResult'
         '422':
           description: Validation Error
           content:
@@ -814,9 +847,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get Run Api V1 Runs  Run Id  Get
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/HydroRun'
         '422':
           description: Validation Error
           content:
@@ -1014,8 +1052,7 @@ paths:
               schema:
                 type: array
                 items:
-                  type: object
-                  additionalProperties: true
+                  $ref: '#/components/schemas/BestAvailableSelection'
                 title: Response List Best Available Api V1 Met Best Available Get
         '422':
           description: Validation Error
@@ -1052,9 +1089,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List Data Sources Api V1 Data Sources Get
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/DataSourcePage'
         '422':
           description: Validation Error
           content:
@@ -1122,10 +1164,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List Cycles Api V1 Data Sources  Source Id  Cycles
-                  Get
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/ForecastCyclePage'
         '422':
           description: Validation Error
           content:
@@ -1426,9 +1472,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List State Snapshots Api V1 State Snapshots Get
+                $ref: '#/components/schemas/StateSnapshotPage'
         '422':
           description: Validation Error
           content:
@@ -1454,9 +1498,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Get State Snapshot Api V1 State Snapshots  State Id  Get
+                $ref: '#/components/schemas/StateSnapshot'
         '422':
           description: Validation Error
           content:
@@ -1817,9 +1859,14 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Cancel Run Api V1 Runs  Run Id  Cancel Post
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/CancelRunResult'
         '422':
           description: Validation Error
           content:
@@ -5418,6 +5465,7 @@ components:
       - superseded
     HydroRun:
       type: object
+      additionalProperties: false
       required:
       - run_id
       - run_type
@@ -6148,6 +6196,828 @@ components:
           - display_readonly_unavailable
         display_readonly:
           type: boolean
+    BasinCreateResult:
+      properties:
+        basin:
+          $ref: '#/components/schemas/BasinRecord'
+        basin_version:
+          $ref: '#/components/schemas/BasinVersionRecord'
+      additionalProperties: true
+      type: object
+      required:
+      - basin
+      - basin_version
+      title: BasinCreateResult
+    BasinRecord:
+      properties:
+        basin_id:
+          type: string
+          title: Basin Id
+        basin_name:
+          type: string
+          title: Basin Name
+        basin_group:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Basin Group
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      additionalProperties: true
+      type: object
+      required:
+      - basin_id
+      - basin_name
+      - basin_group
+      - description
+      - created_at
+      title: BasinRecord
+    BasinVersionRecord:
+      properties:
+        basin_version_id:
+          type: string
+          title: Basin Version Id
+        basin_id:
+          type: string
+          title: Basin Id
+        version_label:
+          type: string
+          title: Version Label
+        geom:
+          $ref: '#/components/schemas/GeoJsonGeometry'
+        active_flag:
+          type: boolean
+          title: Active Flag
+        valid_from:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Valid From
+        valid_to:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Valid To
+        source_uri:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Uri
+        checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Checksum
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      additionalProperties: true
+      type: object
+      required:
+      - basin_version_id
+      - basin_id
+      - version_label
+      - geom
+      - active_flag
+      - valid_from
+      - valid_to
+      - source_uri
+      - checksum
+      - created_at
+      title: BasinVersionRecord
+    BestAvailableSelection:
+      properties:
+        forcing_version_id:
+          type: string
+          title: Forcing Version Id
+        valid_time:
+          type: string
+          title: Valid Time
+        variable:
+          type: string
+          title: Variable
+        selected_source:
+          type: string
+          title: Selected Source
+        source_cycle_time:
+          type: string
+          title: Source Cycle Time
+        fallback_order:
+          items:
+            type: string
+          type: array
+          title: Fallback Order
+        quality_flag:
+          type: string
+          title: Quality Flag
+      additionalProperties: true
+      type: object
+      required:
+      - forcing_version_id
+      - valid_time
+      - variable
+      - selected_source
+      - source_cycle_time
+      - fallback_order
+      - quality_flag
+      title: BestAvailableSelection
+    CancelRunResult:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        cancelled_jobs:
+          items:
+            $ref: '#/components/schemas/PipelineJob'
+          type: array
+          title: Cancelled Jobs
+        cancelled:
+          items:
+            $ref: '#/components/schemas/PipelineJob'
+          type: array
+          title: Cancelled
+        failed_jobs:
+          items:
+            $ref: '#/components/schemas/CancellationGap'
+          type: array
+          title: Failed Jobs
+        slurm_failures:
+          items:
+            $ref: '#/components/schemas/CancellationGap'
+          type: array
+          title: Slurm Failures
+        blocked_jobs:
+          items:
+            $ref: '#/components/schemas/CancellationGap'
+          type: array
+          title: Blocked Jobs
+        slurm_cancellation_gaps:
+          items:
+            $ref: '#/components/schemas/CancellationGap'
+          type: array
+          title: Slurm Cancellation Gaps
+        partial_failure:
+          type: boolean
+          title: Partial Failure
+        idempotent_jobs:
+          items:
+            $ref: '#/components/schemas/IdempotentCancelJob'
+          type: array
+          title: Idempotent Jobs
+        hydro_run:
+          anyOf:
+          - $ref: '#/components/schemas/HydroRunCancelTransition'
+          - type: 'null'
+        forecast_cycle:
+          anyOf:
+          - $ref: '#/components/schemas/ForecastCycleCancelTransition'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      required:
+      - run_id
+      - cancelled_jobs
+      - cancelled
+      - failed_jobs
+      - slurm_failures
+      - blocked_jobs
+      - slurm_cancellation_gaps
+      - partial_failure
+      - idempotent_jobs
+      - hydro_run
+      - forecast_cycle
+      title: CancelRunResult
+    CancellationGap:
+      properties:
+        job_id:
+          type: string
+          title: Job Id
+        run_id:
+          type: string
+          title: Run Id
+        status:
+          type: string
+          title: Status
+        slurm_job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Slurm Job Id
+        cancellation_proven:
+          type: boolean
+          title: Cancellation Proven
+        error:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Error
+        gateway_response:
+          title: Gateway Response
+      additionalProperties: true
+      type: object
+      required:
+      - job_id
+      - run_id
+      - status
+      - slurm_job_id
+      - cancellation_proven
+      title: CancellationGap
+    CrosswalkCreateResult:
+      properties:
+        count:
+          type: integer
+          title: Count
+        items:
+          items:
+            $ref: '#/components/schemas/CrosswalkRecord'
+          type: array
+          title: Items
+      additionalProperties: true
+      type: object
+      required:
+      - count
+      - items
+      title: CrosswalkCreateResult
+    CrosswalkRecord:
+      properties:
+        river_network_version_id:
+          type: string
+          title: River Network Version Id
+        river_segment_id:
+          type: string
+          title: River Segment Id
+        source:
+          type: string
+          title: Source
+        external_id:
+          type: string
+          title: External Id
+        properties_json:
+          additionalProperties: true
+          type: object
+          title: Properties Json
+      additionalProperties: true
+      type: object
+      required:
+      - river_network_version_id
+      - river_segment_id
+      - source
+      - external_id
+      - properties_json
+      title: CrosswalkRecord
+    DataSource:
+      properties:
+        source_id:
+          type: string
+          title: Source Id
+        source_name:
+          type: string
+          title: Source Name
+        source_type:
+          type: string
+          title: Source Type
+        status:
+          type: string
+          title: Status
+        native_format:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Native Format
+        license_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: License Status
+        adapter_name:
+          type: string
+          title: Adapter Name
+        config_json:
+          additionalProperties: true
+          type: object
+          title: Config Json
+        created_at:
+          type: string
+          title: Created At
+        provider:
+          title: Provider
+        source:
+          type: string
+          title: Source
+        format:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Format
+        description:
+          title: Description
+      additionalProperties: true
+      type: object
+      required:
+      - source_id
+      - source_name
+      - source_type
+      - status
+      - native_format
+      - license_status
+      - adapter_name
+      - config_json
+      - created_at
+      - provider
+      - source
+      - format
+      - description
+      title: DataSource
+    DataSourcePage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/DataSource'
+          type: array
+          title: Items
+        total_count:
+          type: integer
+          title: Total Count
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      additionalProperties: true
+      type: object
+      required:
+      - items
+      - total_count
+      - limit
+      - offset
+      title: DataSourcePage
+    ForecastCycle:
+      properties:
+        cycle_id:
+          type: string
+          title: Cycle Id
+        source_id:
+          type: string
+          title: Source Id
+        cycle_time:
+          type: string
+          title: Cycle Time
+        issue_time:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issue Time
+        status:
+          type: string
+          title: Status
+        manifest_uri:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Manifest Uri
+        retry_count:
+          type: integer
+          title: Retry Count
+        error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Code
+        error_message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Message
+        created_at:
+          type: string
+          title: Created At
+        file_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: File Count
+        quality_flag:
+          type: string
+          title: Quality Flag
+      additionalProperties: true
+      type: object
+      required:
+      - cycle_id
+      - source_id
+      - cycle_time
+      - issue_time
+      - status
+      - manifest_uri
+      - retry_count
+      - error_code
+      - error_message
+      - created_at
+      - file_count
+      - quality_flag
+      title: ForecastCycle
+    ForecastCycleCancelTransition:
+      properties:
+        cycle_id:
+          type: string
+          title: Cycle Id
+        previous_status:
+          type: string
+          title: Previous Status
+        status:
+          type: string
+          title: Status
+        preserved:
+          type: boolean
+          title: Preserved
+      additionalProperties: true
+      type: object
+      required:
+      - cycle_id
+      - previous_status
+      - status
+      - preserved
+      title: ForecastCycleCancelTransition
+    ForecastCyclePage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ForecastCycle'
+          type: array
+          title: Items
+        total_count:
+          type: integer
+          title: Total Count
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      additionalProperties: true
+      type: object
+      required:
+      - items
+      - total_count
+      - limit
+      - offset
+      title: ForecastCyclePage
+    GeoJsonGeometry:
+      properties:
+        type:
+          type: string
+          title: Type
+        coordinates:
+          items: {}
+          type: array
+          title: Coordinates
+      additionalProperties: true
+      type: object
+      required:
+      - type
+      - coordinates
+      title: GeoJsonGeometry
+    HydroRunCancelTransition:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        previous_status:
+          type: string
+          title: Previous Status
+        status:
+          type: string
+          title: Status
+        preserved:
+          type: boolean
+          title: Preserved
+      additionalProperties: true
+      type: object
+      required:
+      - run_id
+      - previous_status
+      - status
+      - preserved
+      title: HydroRunCancelTransition
+    IdempotentCancelJob:
+      properties:
+        job_id:
+          type: string
+          title: Job Id
+        slurm_job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Slurm Job Id
+        note:
+          type: string
+          title: Note
+        error_code:
+          type: string
+          title: Error Code
+      additionalProperties: true
+      type: object
+      required:
+      - job_id
+      - slurm_job_id
+      - note
+      - error_code
+      title: IdempotentCancelJob
+    MeshVersionRecord:
+      properties:
+        mesh_version_id:
+          type: string
+          title: Mesh Version Id
+        basin_version_id:
+          type: string
+          title: Basin Version Id
+        version_label:
+          type: string
+          title: Version Label
+        mesh_uri:
+          type: string
+          title: Mesh Uri
+        checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Checksum
+        properties_json:
+          additionalProperties: true
+          type: object
+          title: Properties Json
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      additionalProperties: true
+      type: object
+      required:
+      - mesh_version_id
+      - basin_version_id
+      - version_label
+      - mesh_uri
+      - checksum
+      - properties_json
+      - created_at
+      title: MeshVersionRecord
+    ModelInstanceRecord:
+      properties:
+        model_id:
+          type: string
+          title: Model Id
+        basin_version_id:
+          type: string
+          title: Basin Version Id
+        river_network_version_id:
+          type: string
+          title: River Network Version Id
+        mesh_version_id:
+          type: string
+          title: Mesh Version Id
+        calibration_version_id:
+          type: string
+          title: Calibration Version Id
+        shud_code_version:
+          type: string
+          title: Shud Code Version
+        rshud_code_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rshud Code Version
+        autoshud_code_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Autoshud Code Version
+        container_image:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Container Image
+        model_package_uri:
+          type: string
+          title: Model Package Uri
+        active_flag:
+          type: boolean
+          title: Active Flag
+        lifecycle_state:
+          type: string
+          title: Lifecycle State
+        resource_profile:
+          additionalProperties: true
+          type: object
+          title: Resource Profile
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      additionalProperties: true
+      type: object
+      required:
+      - model_id
+      - basin_version_id
+      - river_network_version_id
+      - mesh_version_id
+      - calibration_version_id
+      - shud_code_version
+      - rshud_code_version
+      - autoshud_code_version
+      - container_image
+      - model_package_uri
+      - active_flag
+      - lifecycle_state
+      - resource_profile
+      - created_at
+      title: ModelInstanceRecord
+    RiverNetworkCreateResult:
+      properties:
+        river_network_version:
+          $ref: '#/components/schemas/RiverNetworkVersionRecord'
+        segment_count:
+          type: integer
+          title: Segment Count
+      additionalProperties: true
+      type: object
+      required:
+      - river_network_version
+      - segment_count
+      title: RiverNetworkCreateResult
+    RiverNetworkVersionRecord:
+      properties:
+        river_network_version_id:
+          type: string
+          title: River Network Version Id
+        basin_version_id:
+          type: string
+          title: Basin Version Id
+        version_label:
+          type: string
+          title: Version Label
+        segment_count:
+          type: integer
+          title: Segment Count
+        source_uri:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Uri
+        checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Checksum
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      additionalProperties: true
+      type: object
+      required:
+      - river_network_version_id
+      - basin_version_id
+      - version_label
+      - segment_count
+      - source_uri
+      - checksum
+      - created_at
+      title: RiverNetworkVersionRecord
+    StateSnapshot:
+      properties:
+        state_id:
+          type: string
+          title: State Id
+        model_id:
+          type: string
+          title: Model Id
+        run_id:
+          type: string
+          title: Run Id
+        valid_time:
+          type: string
+          title: Valid Time
+        state_uri:
+          type: string
+          title: State Uri
+        checksum:
+          type: string
+          title: Checksum
+        usable_flag:
+          type: boolean
+          title: Usable Flag
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Id
+        cycle_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cycle Id
+        lead_hours:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Lead Hours
+        model_package_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Package Version
+        model_package_checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Package Checksum
+        original_shud_filename:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Original Shud Filename
+        cloned_from_state_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cloned From State Id
+        cloned_from_model_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cloned From Model Id
+        clone_gate_fingerprint:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Clone Gate Fingerprint
+        clone_gate_kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Clone Gate Kind
+      additionalProperties: true
+      type: object
+      required:
+      - state_id
+      - model_id
+      - run_id
+      - valid_time
+      - state_uri
+      - checksum
+      - usable_flag
+      - created_at
+      - source_id
+      - cycle_id
+      - lead_hours
+      - model_package_version
+      - model_package_checksum
+      - original_shud_filename
+      - cloned_from_state_id
+      - cloned_from_model_id
+      - clone_gate_fingerprint
+      - clone_gate_kind
+      title: StateSnapshot
+    StateSnapshotPage:
+      properties:
+        total_count:
+          type: integer
+          title: Total Count
+        items:
+          items:
+            $ref: '#/components/schemas/StateSnapshot'
+          type: array
+          title: Items
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      additionalProperties: true
+      type: object
+      required:
+      - total_count
+      - items
+      - limit
+      - offset
+      title: StateSnapshotPage
   responses:
     MvtLivePostgisUnavailable:
       description: Live PostGIS MVT is unavailable for this canonical tile route.

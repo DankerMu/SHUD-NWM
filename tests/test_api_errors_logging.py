@@ -1521,3 +1521,59 @@ def test_extra_error_headers_cannot_override_canonical_request_id() -> None:
     assert response.body
     names = [name.lower() for name in response.headers]
     assert names.count("x-request-id") == 1
+
+
+# --------------------------------------------------------------------------- #
+# #2348: a handler payload its route's response_model rejects
+# --------------------------------------------------------------------------- #
+class _TypedBody(BaseModel):
+    count: int
+    label: str
+
+
+RESPONSE_SECRET = "sk-live-response-body-2348"
+
+
+def _response_validation_app() -> FastAPI:
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/api/v1/probe-response-model", response_model=_TypedBody)
+    def _mismatching() -> dict[str, Any]:
+        # `count` cannot be an int; the secret rides in the rejected payload.
+        return {"count": RESPONSE_SECRET, "label": None, "token": RESPONSE_SECRET}
+
+    return app
+
+
+def test_response_validation_error_returns_the_500_envelope_and_logs_one_redacted_line(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    client = TestClient(_response_validation_app(), raise_server_exceptions=False)
+
+    response = client.get("/api/v1/probe-response-model", headers={"X-Request-ID": "req-2348-rv"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "req-2348-rv"
+    assert response.json() == {
+        "request_id": "req-2348-rv",
+        "status": "error",
+        "error": {
+            "code": "RESPONSE_VALIDATION_ERROR",
+            "message": "The server produced a response that does not match its declared schema.",
+            "details": None,
+        },
+    }
+    assert RESPONSE_SECRET not in response.text
+    (record,) = api_error_logs.records
+    assert record.levelno == logging.ERROR
+    line = record.getMessage()
+    assert "request_id=req-2348-rv" in line
+    assert "code=RESPONSE_VALIDATION_ERROR" in line
+    assert "status=500" in line
+    assert "path=/api/v1/probe-response-model" in line
+    # Only field locations and error types: two errors, no payload value.
+    assert "'error_count': 2" in line
+    assert "'loc': 'response.count', 'type': 'int_parsing'" in line
+    assert "'loc': 'response.label', 'type': 'string_type'" in line
+    assert RESPONSE_SECRET not in api_error_logs.text

@@ -8,6 +8,12 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
+from apps.api.response_models.forecast import (
+    ForecastSeriesResponse,
+    HydroRunEnvelope,
+    HydroRunPageEnvelope,
+    QhhLatestProductEnvelope,
+)
 from packages.common.forecast_store import (
     QHH_BASIN_ID,
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
@@ -31,7 +37,11 @@ def get_forecast_store() -> PsycopgForecastStore:
         raise _api_error(error) from error
 
 
-@router.get("/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series")
+@router.get(
+    "/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series",
+    response_model=ForecastSeriesResponse,
+    response_model_exclude_unset=True,
+)
 def get_forecast_series(
     request: Request,
     basin_version_id: str,
@@ -79,7 +89,11 @@ def get_forecast_series(
         raise _api_error(error) from error
 
 
-@router.get("/runs/{run_id}")
+@router.get(
+    "/runs/{run_id}",
+    response_model=HydroRunEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_run(
     run_id: str,
     request: Request,
@@ -91,7 +105,11 @@ def get_run(
         raise _api_error(error) from error
 
 
-@router.get("/runs")
+@router.get(
+    "/runs",
+    response_model=HydroRunPageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_runs(
     request: Request,
     basin_id: str | None = None,
@@ -107,8 +125,12 @@ def list_runs(
         # `!r` 隔离客户端可控的自由文本维度：字面量 `"None"` 记作 `'None'`，与「没给
         # 该维度」的 `None` 不同 key，不会折叠进无过滤条目（#2078）。有界的
         # `capped_limit`/`offset` 是 int，照旧裸插值。
+        # `source` 在存储层按 `LOWER(...)` 比较（forecast_store.list_runs），key 按同一口径
+        # 归一，GFS/gfs/Gfs 共用一条条目（#2177）；传给 store 的仍是原值。`basin_id` /
+        # `status` 是精确匹配，保持原样。
+        source_key = source.lower() if source is not None else None
         cycle_key = cycle_time.isoformat() if cycle_time else None
-        cache_key = f"runs:{basin_id!r}:{source!r}:{cycle_key!r}:{status!r}:{capped_limit}:{offset}"
+        cache_key = f"runs:{basin_id!r}:{source_key!r}:{cycle_key!r}:{status!r}:{capped_limit}:{offset}"
         page = display_catalog_cached(
             request,
             cache_key,
@@ -129,7 +151,12 @@ def list_runs(
         raise _api_error(error) from error
 
 
-@router.get("/mvp/qhh/latest-product", operation_id="getQhhLatestProduct")
+@router.get(
+    "/mvp/qhh/latest-product",
+    operation_id="getQhhLatestProduct",
+    response_model=QhhLatestProductEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_qhh_latest_product(
     request: Request,
     source: str | None = Query(

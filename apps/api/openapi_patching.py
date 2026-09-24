@@ -3,7 +3,8 @@
 Implementation families were split out (#2074) to `openapi_patching_nullable.py`,
 `openapi_patching_security.py`, `openapi_patching_envelopes.py`,
 `openapi_patching_parameters.py`, `openapi_patching_ops_schemas.py`,
-`openapi_patching_display_schemas.py` and `openapi_patching_pipeline.py`. This
+`openapi_patching_display_schemas.py`, `openapi_patching_pipeline.py` and
+`openapi_patching_response_models.py` (#2348). This
 module stays the compatibility facade and the single owner of the ORDER in which
 patches are applied and of `_finalize_openapi_schema`'s timing.
 
@@ -52,6 +53,10 @@ from apps.api.openapi_patching_nullable import _remove_nullable_keywords
 from apps.api.openapi_patching_ops_schemas import _runtime_config_schema
 from apps.api.openapi_patching_parameters import _station_series_parameters
 from apps.api.openapi_patching_pipeline import _patch_pipeline_openapi
+from apps.api.openapi_patching_response_models import (
+    _patch_response_model_envelopes,
+    _prune_unreferenced_response_model_components,
+)
 from apps.api.openapi_patching_security import _publish_security_boundary
 from apps.api.openapi_restored_schemas import (
     _basin_schema,
@@ -109,6 +114,7 @@ def custom_openapi_factory(api: FastAPI, *, patch_schema: OpenApiPatchSchema | N
 
 
 def patch_openapi_schema(schema: dict) -> None:
+    _patch_response_model_envelopes(schema)
     _patch_mvt_tile_openapi(schema)
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
@@ -116,6 +122,7 @@ def patch_openapi_schema(schema: dict) -> None:
     _patch_layer_metadata_openapi(schema)
     _patch_pipeline_openapi(schema)
     _patch_runtime_openapi(schema)
+    _prune_unreferenced_response_model_components(schema)
     _finalize_openapi_schema(schema)
 
 
@@ -334,11 +341,10 @@ def _patch_basin_registry_openapi(schema: dict) -> None:
     """Restore the published ``Basin`` schema and the basin-list response body.
 
     ``GET /api/v1/basins`` returns the ``_ok()`` envelope around a list of
-    registry rows, so its handler is annotated ``dict[str, Any]`` and FastAPI can
-    only emit an opaque ``additionalProperties: true`` body. The named component
-    and the envelope-wrapped 200 body are therefore hand-written here, exactly as
-    the layer and station-series contracts are, without touching the route (a
-    ``response_model`` would filter the response body at runtime).
+    registry rows. The named component and the envelope-wrapped 200 body are
+    hand-written here, exactly as the layer and station-series contracts are;
+    the route's runtime ``BasinListEnvelope`` model (#2348) is bound to them by
+    ``tests/test_response_model_schema_parity.py``.
 
     ``SuccessEnvelope`` is (re)assigned rather than assumed so this patch is
     order-independent with respect to ``_patch_layer_metadata_openapi``, which
@@ -366,8 +372,8 @@ def _patch_basin_registry_openapi(schema: dict) -> None:
 def _patch_river_segment_openapi(schema: dict) -> None:
     """Restore the river-segment GeoJSON collection and detail response bodies.
 
-    Both handlers (``apps/api/routes/models.py:428`` / ``:495``) are annotated
-    ``dict[str, Any]`` around ``_ok()``, so FastAPI can only emit an opaque body.
+    Both handlers return ``_ok()`` around the store payload; their runtime
+    models (#2348) are bound to these hand schemas by the parity test.
     """
     components = schema.setdefault("components", {})
     schemas = components.setdefault("schemas", {})
@@ -430,7 +436,12 @@ def _patch_model_instance_openapi(schema: dict) -> None:
 
 
 def _patch_hydro_run_openapi(schema: dict) -> None:
-    """Restore the run-list response body (``apps/api/routes/forecast.py:97``)."""
+    """Publish the hand ``HydroRun`` / ``HydroRunPage`` contract (#2222).
+
+    The run-list body is set here; the run-detail body
+    (``allOf[SuccessEnvelope, {data: $ref HydroRun}]``) comes from the
+    ``HydroRunEnvelope`` response model via ``_patch_response_model_envelopes``.
+    """
     components = schema.setdefault("components", {})
     schemas = components.setdefault("schemas", {})
     schemas["SuccessEnvelope"] = _success_envelope_schema()

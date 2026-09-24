@@ -326,6 +326,7 @@ def custom_openapi() -> dict[str, Any]:
 
 
 def _patch_openapi_schema(schema: dict) -> None:
+    _patch_response_model_envelopes(schema)
     _patch_mvt_tile_openapi(schema)
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
@@ -339,6 +340,7 @@ def _patch_openapi_schema(schema: dict) -> None:
     _patch_forecast_series_openapi(schema)
     _patch_pipeline_openapi(schema)
     _patch_runtime_openapi(schema)
+    _prune_unreferenced_response_model_components(schema)
     _finalize_openapi_schema(schema)
 
 
@@ -348,6 +350,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+_patch_response_model_envelopes = openapi_patching._patch_response_model_envelopes
 _patch_mvt_tile_openapi = openapi_patching._patch_mvt_tile_openapi
 _patch_station_series_openapi = openapi_patching._patch_station_series_openapi
 _patch_qhh_latest_product_openapi = openapi_patching._patch_qhh_latest_product_openapi
@@ -361,6 +364,7 @@ _patch_hydro_run_openapi = openapi_patching._patch_hydro_run_openapi
 _patch_forecast_series_openapi = openapi_patching._patch_forecast_series_openapi
 _patch_pipeline_openapi = openapi_patching._patch_pipeline_openapi
 _patch_runtime_openapi = openapi_patching._patch_runtime_openapi
+_prune_unreferenced_response_model_components = openapi_patching._prune_unreferenced_response_model_components
 _finalize_openapi_schema = openapi_patching._finalize_openapi_schema
 
 

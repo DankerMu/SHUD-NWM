@@ -1146,6 +1146,97 @@ def _outer_whole_row_stars(sql: str, aliases: frozenset[str]) -> _WholeRowStars:
     return _WholeRowStars(exact, unsupported)
 
 
+@dataclass(frozen=True)
+class _UnqualifiedOutputStars:
+    """Bare ``*`` SELECT output items whose own FROM list reads the fact table (#2216).
+
+    ``proven_aliases`` / ``proven_unaliased`` name the fact read that a proven
+    item expands; ``has_unprovable_expansion`` is an item whose FROM list names
+    the fact table in a shape the finite model below cannot attribute.
+    """
+
+    proven_aliases: frozenset[str]
+    proven_unaliased: bool
+    has_unprovable_expansion: bool
+
+
+def _output_item_from_list(level: str, item_end: int) -> str | None:
+    """The depth-0 FROM list that follows one output item at its own query level.
+
+    Reuses the output-list boundary vocabulary: commas separate output items or
+    FROM entries and never end the list; ``INTO`` may precede ``FROM``; any other
+    boundary ends it. ``None`` when the item's SELECT has no FROM of its own.
+    """
+    start: int | None = None
+    for boundary in _top_level_spans(level, _SELECT_OUTPUT_BOUNDARY):
+        if boundary.start() < item_end:
+            continue
+        word = boundary.group().upper()
+        if word == ",":
+            continue
+        if start is not None:
+            return level[start : boundary.start()]
+        if word == "INTO":
+            continue
+        if word != "FROM":
+            return None
+        start = boundary.start()
+    return None if start is None else level[start:]
+
+
+def _unqualified_output_star_from_lists(level: str, *, nested: bool) -> Iterator[tuple[str | None, bool]]:
+    """``(from_list, nested)`` for every complete ``*`` output item, level by level.
+
+    Output items come from :func:`_select_output_items`; only the items at this
+    level's bracket depth 0 are owned here, and every balanced group is then its
+    own (nested) level. ``nested`` is True for any level inside a group: a CTE
+    body, a derived table, an ``EXISTS`` / ``IN`` sub-select.
+    """
+    groups = _top_level_groups(level)
+    spans = [(start, start + len(body)) for start, body in groups]
+    for start, end in _select_output_items(level):
+        if level[start:end] == "*" and not any(first <= start < last for first, last in spans):
+            yield _output_item_from_list(level, end), nested
+    for _, body in groups:
+        yield from _unqualified_output_star_from_lists(body, nested=True)
+
+
+def _outer_unqualified_output_stars(sql: str) -> _UnqualifiedOutputStars:
+    """Classify complete bare ``*`` SELECT output items by same-level fact ownership.
+
+    Separate from :func:`_outer_whole_row_stars` (a bare ``*`` has no alias token)
+    and from :func:`_alias_member_analysis`. It walks the same scanner-owned outer
+    view: comparison-position scalar bodies are already stripped, literals and
+    comments blanked, and a complete quoted ``"*"`` is an identifier, not an
+    item of exactly ``*``. ``COUNT(*)``, function arguments and ``ORDER BY *`` are
+    not output items at all.
+
+    The finite ownership model: a ``*`` at the statement's top query level whose
+    FROM list is exactly one fact-table read (unaliased, bare alias or ``AS``
+    alias) is PROVEN and exposes the whole fact row. A ``*`` whose own FROM list
+    names no fact table keeps its prior outcome, like ``source_rows.*``. Every
+    other ``*`` whose FROM list names the fact table — beside another relation,
+    inside a derived table, or at a nested level such as a CTE body or an
+    ``EXISTS`` sub-select — is UNPROVABLE here and is refused by the guard.
+    """
+    outer = _blank_non_code(outer_predicates(sql))
+    aliases: set[str] = set()
+    unaliased = unprovable = False
+    if "*" not in outer:
+        return _UnqualifiedOutputStars(frozenset(), False, False)
+    for from_list, nested in _unqualified_output_star_from_lists(outer, nested=False):
+        if from_list is None or _FACT_NAME_TOKEN.search(from_list) is None:
+            continue
+        proof = None if nested else _FACT_REFERENCE.fullmatch(from_list.rstrip())
+        if proof is None:
+            unprovable = True
+        elif proof.group(1) is None:
+            unaliased = True
+        else:
+            aliases.add(proof.group(1).lower())
+    return _UnqualifiedOutputStars(frozenset(aliases), unaliased, unprovable)
+
+
 def _text_identity_columns_for_references(
     sql: str,
     aliases: frozenset[str],
@@ -1161,6 +1252,11 @@ def _text_identity_columns_for_references(
         ).exact_columns
     )
     if _outer_whole_row_stars(sql, aliases).has_exact_expansion:
+        found.update(TEXT_IDENTITY_COLUMNS)
+    bare_stars = _outer_unqualified_output_stars(sql)
+    if (has_unaliased_reference and bare_stars.proven_unaliased) or (
+        bare_stars.proven_aliases & frozenset(alias.lower() for alias in aliases)
+    ):
         found.update(TEXT_IDENTITY_COLUMNS)
     return found
 
@@ -1179,7 +1275,10 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
     field notation are matched here, but unsupported forms are not refusals here.
     Exact outer SELECT ``alias.*`` / ``(alias).*`` items expose all seven legacy
     members; unsupported stars remain matcher-only here, and scalar bodies stay
-    outside this output-schema check.
+    outside this output-schema check. A bare ``*`` output item (#2216) exposes
+    them only when ``alias`` is the proven fact alias of that item's top-level
+    FROM list; an unaliased read gives the caller no alias to name, so it stays
+    empty here.
     It is therefore NOT the answer to "does this statement predicate on the fact
     table's text identity" — that question is
     :func:`fact_table_text_identity_columns`, which refuses an unmodelled
@@ -1500,7 +1599,8 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     hides where the text-identity scan cannot look. Checks run in this order —
     ``U&`` → lexical subset → unterminated belt → quoted alias → parenthesized
     field selection → functional field notation → outer whole-row star → the
-    counts → the sub-select delta → aliased or unaliased scalar bodies:
+    counts → the sub-select delta → aliased or unaliased scalar bodies → unqualified
+    output star:
 
     #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
        in the code — the one syntax that can name the table with no occurrence of
@@ -1563,7 +1663,12 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        it does not return a member set;
     #. an UNALIASED SCALAR BODY — with no attributed fact alias, an unqualified
        known identity value is ambiguous, except in the three complete registered
-       authority key resolutions. Refuse scalar scope rather than infer a schema.
+       authority key resolutions. Refuse scalar scope rather than infer a schema;
+    #. an unprovable UNQUALIFIED OUTPUT STAR (#2216) — a bare ``*`` output item
+       whose own FROM list names the fact table, but not as the whole FROM list
+       of the top query level (beside another relation, in a derived table, or at
+       a nested level such as a CTE body). LAST, so every existing refusal keeps
+       its reason.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
@@ -1672,6 +1777,12 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
                     f"{entry}: unaliased fact read with ambiguous unqualified text identity "
                     "inside comparison-position scalar subquery — scalar-scope is not modelled"
                 )
+    if _outer_unqualified_output_stars(sql).has_unprovable_expansion:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled unqualified whole-row star exposure — a bare SELECT output * is "
+            "modelled only at the top query level whose FROM list is exactly one fact-table read; "
+            "select named key/enum columns instead"
+        )
 
 
 @dataclass(frozen=True)
@@ -1973,8 +2084,10 @@ def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> 
     Raises :class:`RiverTemplateError`, naming ``entry``, on a reference form the
     alias walk does not model, an unsupported parenthesized or functional
     fact-alias field form, unsupported outer whole-row star exposure, or ambiguous
-    unqualified scalar identity under an unaliased read. Exact outer SELECT stars
-    report all legacy text identity members.
+    unqualified scalar identity under an unaliased read, or an unqualified ``*``
+    output item whose fact ownership is unprovable. Exact outer SELECT stars —
+    ``alias.*`` / ``(alias).*`` and a bare ``*`` at the top level whose FROM list
+    is exactly one fact read — report all legacy text identity members.
     """
     _assert_modelled_reference_forms(sql, entry)
     attribution = fact_table_attribution(sql)

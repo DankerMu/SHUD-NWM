@@ -23,6 +23,9 @@ from packages.common.forecast_store import (
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
+    _cycle_response,
+    _data_source_response,
+    _station_response,
 )
 from tests.test_monitoring_api import _MockGateway
 
@@ -35,6 +38,49 @@ STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE = (
 
 
 QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
+
+
+# Full production rows (db/migrations/000005_met.sql) behind the list doubles.
+DATA_SOURCE_ROW: dict[str, Any] = {
+    "source_id": "GFS",
+    "source_name": "GFS",
+    "source_type": "forecast",
+    "status": "enabled",
+    "native_format": "GRIB2",
+    "license_status": None,
+    "adapter_name": "gfs_adapter",
+    "config_json": {"provider": "NOAA/NCEP", "cycle_hours_utc": [0, 12]},
+    "created_at": datetime(2026, 5, 14, tzinfo=UTC),
+}
+
+
+def forecast_cycle_row(source_id: str) -> dict[str, Any]:
+    return {
+        "cycle_id": f"{source_id}_2026051400",
+        "source_id": source_id,
+        "cycle_time": datetime(2026, 5, 14, tzinfo=UTC),
+        "issue_time": datetime(2026, 5, 14, tzinfo=UTC),
+        "status": "raw_complete",
+        "manifest_uri": f"s3://nhms/raw/{source_id}/2026051400/manifest.json",
+        "retry_count": 0,
+        "error_code": None,
+        "error_message": None,
+        "created_at": datetime(2026, 5, 14, 3, tzinfo=UTC),
+    }
+
+
+def met_station_row(basin_version_id: str) -> dict[str, Any]:
+    return {
+        "station_id": "station_1",
+        "basin_version_id": basin_version_id,
+        "station_name": "Station 1",
+        "longitude": 101.0,
+        "latitude": 36.0,
+        "elevation_m": 3200.0,
+        "station_role": "forcing_proxy",
+        "properties_json": {"source": "fixture"},
+        "created_at": datetime(2026, 5, 14, tzinfo=UTC),
+    }
 
 
 def _parameter_names(operation: dict[str, Any], spec: dict[str, Any]) -> list[str]:
@@ -311,9 +357,12 @@ class _DataSourceStore:
     def __init__(self) -> None:
         self.station_series_calls: list[dict[str, Any]] = []
 
+    # #2348: the three list doubles build their items with the production row
+    # serializers over full `SELECT *` / inventory rows, so the routes'
+    # response models see the shape the real store returns.
     def list_data_sources(self, *, limit: int, offset: int) -> dict[str, Any]:
         return {
-            "items": [{"source_id": "GFS", "provider": "NOAA/NCEP", "format": "GRIB2"}],
+            "items": [_data_source_response(dict(DATA_SOURCE_ROW))],
             "total_count": 1,
             "limit": limit,
             "offset": offset,
@@ -321,13 +370,7 @@ class _DataSourceStore:
 
     def list_cycles(self, **kwargs: Any) -> dict[str, Any]:
         return {
-            "items": [
-                {
-                    "cycle_id": f"{kwargs['source_id']}_2026051400",
-                    "source_id": kwargs["source_id"],
-                    "status": "raw_complete",
-                }
-            ],
+            "items": [_cycle_response(forecast_cycle_row(kwargs["source_id"]))],
             "total_count": 1,
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
@@ -335,13 +378,7 @@ class _DataSourceStore:
 
     def list_met_stations(self, **kwargs: Any) -> dict[str, Any]:
         return {
-            "items": [
-                {
-                    "station_id": "station_1",
-                    "basin_version_id": kwargs["basin_version_id"],
-                    "active_flag": True,
-                }
-            ],
+            "items": [_station_response(met_station_row(kwargs["basin_version_id"]))],
             "total_count": 1,
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
@@ -607,7 +644,9 @@ class _ForecastSeriesStore:
             "segments": [
                 {
                     "scenario": "analysis_true_field",
+                    "scenario_id": "analysis_true_field",
                     "source": "ERA5",
+                    "segment_role": "past_3_days",
                     "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
                 }
             ],

@@ -1970,6 +1970,431 @@ export interface components {
             queue_depth_mode: "slurm_gateway" | "display_readonly_unavailable";
             display_readonly: boolean;
         };
+        /** BasinCreateResult */
+        BasinCreateResult: {
+            basin: components["schemas"]["BasinRecord"];
+            basin_version: components["schemas"]["BasinVersionRecord"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** BasinRecord */
+        BasinRecord: {
+            /** Basin Id */
+            basin_id: string;
+            /** Basin Name */
+            basin_name: string;
+            /** Basin Group */
+            basin_group: string | null;
+            /** Description */
+            description: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** BasinVersionRecord */
+        BasinVersionRecord: {
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** Basin Id */
+            basin_id: string;
+            /** Version Label */
+            version_label: string;
+            geom: components["schemas"]["GeoJsonGeometry"];
+            /** Active Flag */
+            active_flag: boolean;
+            /** Valid From */
+            valid_from: string | null;
+            /** Valid To */
+            valid_to: string | null;
+            /** Source Uri */
+            source_uri: string | null;
+            /** Checksum */
+            checksum: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** BestAvailableSelection */
+        BestAvailableSelection: {
+            /** Forcing Version Id */
+            forcing_version_id: string;
+            /** Valid Time */
+            valid_time: string;
+            /** Variable */
+            variable: string;
+            /** Selected Source */
+            selected_source: string;
+            /** Source Cycle Time */
+            source_cycle_time: string;
+            /** Fallback Order */
+            fallback_order: string[];
+            /** Quality Flag */
+            quality_flag: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CancelRunResult */
+        CancelRunResult: {
+            /** Run Id */
+            run_id: string;
+            /** Cancelled Jobs */
+            cancelled_jobs: components["schemas"]["PipelineJob"][];
+            /** Cancelled */
+            cancelled: components["schemas"]["PipelineJob"][];
+            /** Failed Jobs */
+            failed_jobs: components["schemas"]["CancellationGap"][];
+            /** Slurm Failures */
+            slurm_failures: components["schemas"]["CancellationGap"][];
+            /** Blocked Jobs */
+            blocked_jobs: components["schemas"]["CancellationGap"][];
+            /** Slurm Cancellation Gaps */
+            slurm_cancellation_gaps: components["schemas"]["CancellationGap"][];
+            /** Partial Failure */
+            partial_failure: boolean;
+            /** Idempotent Jobs */
+            idempotent_jobs: components["schemas"]["IdempotentCancelJob"][];
+            hydro_run: components["schemas"]["HydroRunCancelTransition"] | null;
+            forecast_cycle: components["schemas"]["ForecastCycleCancelTransition"] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CancellationGap */
+        CancellationGap: {
+            /** Job Id */
+            job_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Status */
+            status: string;
+            /** Slurm Job Id */
+            slurm_job_id: string | null;
+            /** Cancellation Proven */
+            cancellation_proven: boolean;
+            /** Error */
+            error?: {
+                [key: string]: unknown;
+            } | null;
+            /** Gateway Response */
+            gateway_response?: unknown;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CrosswalkCreateResult */
+        CrosswalkCreateResult: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["CrosswalkRecord"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** CrosswalkRecord */
+        CrosswalkRecord: {
+            /** River Network Version Id */
+            river_network_version_id: string;
+            /** River Segment Id */
+            river_segment_id: string;
+            /** Source */
+            source: string;
+            /** External Id */
+            external_id: string;
+            /** Properties Json */
+            properties_json: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
+        /** DataSource */
+        DataSource: {
+            /** Source Id */
+            source_id: string;
+            /** Source Name */
+            source_name: string;
+            /** Source Type */
+            source_type: string;
+            /** Status */
+            status: string;
+            /** Native Format */
+            native_format: string | null;
+            /** License Status */
+            license_status: string | null;
+            /** Adapter Name */
+            adapter_name: string;
+            /** Config Json */
+            config_json: {
+                [key: string]: unknown;
+            };
+            /** Created At */
+            created_at: string;
+            /** Provider */
+            provider: unknown;
+            /** Source */
+            source: string;
+            /** Format */
+            format: string | null;
+            /** Description */
+            description: unknown;
+        } & {
+            [key: string]: unknown;
+        };
+        /** DataSourcePage */
+        DataSourcePage: {
+            /** Items */
+            items: components["schemas"]["DataSource"][];
+            /** Total Count */
+            total_count: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ForecastCycle */
+        ForecastCycle: {
+            /** Cycle Id */
+            cycle_id: string;
+            /** Source Id */
+            source_id: string;
+            /** Cycle Time */
+            cycle_time: string;
+            /** Issue Time */
+            issue_time: string | null;
+            /** Status */
+            status: string;
+            /** Manifest Uri */
+            manifest_uri: string | null;
+            /** Retry Count */
+            retry_count: number;
+            /** Error Code */
+            error_code: string | null;
+            /** Error Message */
+            error_message: string | null;
+            /** Created At */
+            created_at: string;
+            /** File Count */
+            file_count: number | null;
+            /** Quality Flag */
+            quality_flag: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ForecastCycleCancelTransition */
+        ForecastCycleCancelTransition: {
+            /** Cycle Id */
+            cycle_id: string;
+            /** Previous Status */
+            previous_status: string;
+            /** Status */
+            status: string;
+            /** Preserved */
+            preserved: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ForecastCyclePage */
+        ForecastCyclePage: {
+            /** Items */
+            items: components["schemas"]["ForecastCycle"][];
+            /** Total Count */
+            total_count: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** GeoJsonGeometry */
+        GeoJsonGeometry: {
+            /** Type */
+            type: string;
+            /** Coordinates */
+            coordinates: unknown[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** HydroRunCancelTransition */
+        HydroRunCancelTransition: {
+            /** Run Id */
+            run_id: string;
+            /** Previous Status */
+            previous_status: string;
+            /** Status */
+            status: string;
+            /** Preserved */
+            preserved: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** IdempotentCancelJob */
+        IdempotentCancelJob: {
+            /** Job Id */
+            job_id: string;
+            /** Slurm Job Id */
+            slurm_job_id: string | null;
+            /** Note */
+            note: string;
+            /** Error Code */
+            error_code: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** MeshVersionRecord */
+        MeshVersionRecord: {
+            /** Mesh Version Id */
+            mesh_version_id: string;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** Version Label */
+            version_label: string;
+            /** Mesh Uri */
+            mesh_uri: string;
+            /** Checksum */
+            checksum: string | null;
+            /** Properties Json */
+            properties_json: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ModelInstanceRecord */
+        ModelInstanceRecord: {
+            /** Model Id */
+            model_id: string;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** River Network Version Id */
+            river_network_version_id: string;
+            /** Mesh Version Id */
+            mesh_version_id: string;
+            /** Calibration Version Id */
+            calibration_version_id: string;
+            /** Shud Code Version */
+            shud_code_version: string;
+            /** Rshud Code Version */
+            rshud_code_version: string | null;
+            /** Autoshud Code Version */
+            autoshud_code_version: string | null;
+            /** Container Image */
+            container_image: string | null;
+            /** Model Package Uri */
+            model_package_uri: string;
+            /** Active Flag */
+            active_flag: boolean;
+            /** Lifecycle State */
+            lifecycle_state: string;
+            /** Resource Profile */
+            resource_profile: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RiverNetworkCreateResult */
+        RiverNetworkCreateResult: {
+            river_network_version: components["schemas"]["RiverNetworkVersionRecord"];
+            /** Segment Count */
+            segment_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RiverNetworkVersionRecord */
+        RiverNetworkVersionRecord: {
+            /** River Network Version Id */
+            river_network_version_id: string;
+            /** Basin Version Id */
+            basin_version_id: string;
+            /** Version Label */
+            version_label: string;
+            /** Segment Count */
+            segment_count: number;
+            /** Source Uri */
+            source_uri: string | null;
+            /** Checksum */
+            checksum: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** StateSnapshot */
+        StateSnapshot: {
+            /** State Id */
+            state_id: string;
+            /** Model Id */
+            model_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Valid Time */
+            valid_time: string;
+            /** State Uri */
+            state_uri: string;
+            /** Checksum */
+            checksum: string;
+            /** Usable Flag */
+            usable_flag: boolean;
+            /** Created At */
+            created_at: string | null;
+            /** Source Id */
+            source_id: string | null;
+            /** Cycle Id */
+            cycle_id: string | null;
+            /** Lead Hours */
+            lead_hours: number | null;
+            /** Model Package Version */
+            model_package_version: string | null;
+            /** Model Package Checksum */
+            model_package_checksum: string | null;
+            /** Original Shud Filename */
+            original_shud_filename: string | null;
+            /** Cloned From State Id */
+            cloned_from_state_id: string | null;
+            /** Cloned From Model Id */
+            cloned_from_model_id: string | null;
+            /** Clone Gate Fingerprint */
+            clone_gate_fingerprint: string | null;
+            /** Clone Gate Kind */
+            clone_gate_kind: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** StateSnapshotPage */
+        StateSnapshotPage: {
+            /** Total Count */
+            total_count: number;
+            /** Items */
+            items: components["schemas"]["StateSnapshot"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+        } & {
+            [key: string]: unknown;
+        };
     };
     responses: {
         /** @description Live PostGIS MVT is unavailable for this canonical tile route. */
@@ -2214,8 +2639,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["BasinCreateResult"];
                     };
                 };
             };
@@ -2287,8 +2712,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["BasinVersionRecord"];
                     };
                 };
             };
@@ -2322,8 +2747,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RiverNetworkCreateResult"];
                     };
                 };
             };
@@ -2450,8 +2875,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["MeshVersionRecord"];
                     };
                 };
             };
@@ -2522,8 +2947,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelInstanceRecord"];
                     };
                 };
             };
@@ -2559,8 +2984,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelLifecycleResult"];
                     };
                 };
             };
@@ -2701,8 +3126,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["CrosswalkCreateResult"];
                     };
                 };
             };
@@ -2778,8 +3203,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["HydroRun"];
                     };
                 };
             };
@@ -2888,9 +3313,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["BestAvailableSelection"][];
                 };
             };
             /** @description Validation Error */
@@ -2922,8 +3345,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["DataSourcePage"];
                     };
                 };
             };
@@ -2961,8 +3384,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ForecastCyclePage"];
                     };
                 };
             };
@@ -3095,9 +3518,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["StateSnapshotPage"];
                 };
             };
             /** @description Validation Error */
@@ -3128,9 +3549,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["StateSnapshot"];
                 };
             };
             /** @description Validation Error */
@@ -3329,8 +3748,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["CancelRunResult"];
                     };
                 };
             };

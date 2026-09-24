@@ -497,6 +497,10 @@ API_CONTRACT_HELPERS_PATH = "tests/api_contract_helpers.py"
 API_CONTRACT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
     *API_CONTRACT_TESTS,
     "tests/test_openapi_response_conformance.py",
+    # #2348: both oracle halves build samples from these doubles (the full-row
+    # data-source/cycle/station fixtures and `_RetryGateway`).
+    "tests/test_response_model_preservation.py",
+    "tests/test_response_model_preservation_pipeline.py",
 )
 
 # #1611 partitioned tests/test_scheduler_state_index_copyback_replay.py (1378
@@ -2326,6 +2330,21 @@ CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
     "tests/test_node27_connection_attribution.py",
     "tests/test_node27_connection_attribution_delegated.py",
 )
+# #2348: the response-model preservation oracle. It captures the object each
+# JSON handler returns and proves the route's `response_model` serializes it
+# exactly as the pre-#2348 implicit `dict[str, Any]` field did, so a handler
+# edit on any of the six modelled route modules (or a model edit) that changes
+# a wire value reds it. Both halves ride together: the pipeline half imports
+# the oracle core from the base file.
+RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
+    "tests/test_response_model_preservation.py",
+    "tests/test_response_model_preservation_pipeline.py",
+)
+# #2348: binds the hand-published success schemas (static openapi/nhms.v1.yaml)
+# to the runtime response models; the only oracle that reads both sources.
+RESPONSE_MODEL_SCHEMA_PARITY_TEST = "tests/test_response_model_schema_parity.py"
+# #2222: the `/runs` public projection (SQL allowlist, serializer, route model).
+HYDRO_RUN_PUBLIC_PROJECTION_TEST = "tests/test_hydro_run_public_projection.py"
 # The route modules the unit-level guard walks from the registry: each declares
 # a module-level `_APPLICATION_NAME` and injects it into its store factories.
 # #2078: apps/api/routes/forecast.py is deliberately absent — it gained an exact
@@ -2361,10 +2380,23 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # #2617: `model_registry_*.py` are the owner modules of the model registry
 # store's methods (the facade keeps the connection); the connection-attribution
 # scans walk and parametrize them, so an owner-only diff routes like the facade.
+# #2348: the rule built from this tuple also carries the response-model
+# preservation oracle. The oracle fakes only the registry store; the route
+# pipes the faked rows through the production projections
+# `sanitize_basin_version_list_payload` / `sanitize_model_list_payload` /
+# `sanitize_model_detail_payload` (apps/api/routes/models.py:429,738,762),
+# defined in model_registry_public.py:21-31 and imported through the facade's
+# re-exports (model_registry.py:152-155), so a diff to either changes a sampled
+# payload. The sibling owner modules ride along because #2617 pins every owner
+# to select exactly what the facade selects
+# (tests/test_select_ci_tests.py::test_model_registry_owner_modules_route_like_the_facade).
+# #2348 removed object_store_forcing.py for the same reason #1990 removed
+# best_available.py: it needs the response-model preservation oracle too, so it
+# has an exact rule (next to the route members' rules in PATH_TEST_RULES) that
+# MERGES CONNECTION_ATTRIBUTION_TESTS.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
     "packages/common/model_registry.py",
     "packages/common/model_registry_*.py",
-    "packages/common/object_store_forcing.py",
 )
 # #1704: the only suite that asserts the error-response log line exists, is
 # redacted, is bounded, and that the request-id is not client-forgeable. Both
@@ -3860,6 +3892,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_best_available.py",
+            # #2348: `_selection_row_response` builds the best-available rows the
+            # preservation oracle compares with master.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
         ),
     ),
     PathTestRule(
@@ -3936,6 +3971,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            # #2222: `HYDRO_RUN_PUBLIC_COLUMNS` / `_hydro_run_response` live here;
+            # only this suite pins the `/runs` SQL allowlist (no `h.*`).
+            HYDRO_RUN_PUBLIC_PROJECTION_TEST,
+            # #2348: the preservation oracle drives the builders that live here
+            # (`_hydro_run_response`, `_qhh_latest_candidate_response`,
+            # `_qhh_identity_product`, `_data_source_response`, `_cycle_response`,
+            # `_station_response`) and compares their wire value with master.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
             "tests/test_node27_pgdata_workload.py",
             "tests/test_node27_pgdata_workload_plan.py",
             "tests/test_node27_pgdata_workload_io.py",
@@ -4044,6 +4087,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_state_manager.py",
             "tests/test_state_qc.py",
+            # #2348: `state_snapshot_to_dict` builds the state-snapshot payload
+            # the preservation oracle compares with master.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
             # #1735: the clone-lineage read path (`get_earliest_clone_row_for_
             # model_source`, `clone_lineage_signal`, `_clone_entries_for_model_
             # source`) lives in this module, but the two suites routed above
@@ -4119,8 +4165,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1644: the committed OpenAPI snapshot is the drift oracle's subject, so
         # an OpenAPI-only PR must run the drift + API-contract + 3.1-contract
         # suites. Exact set, no core-smoke fallback, no other suites.
+        # #2348: plus the response-model schema parity suite, which reads the
+        # committed openapi/nhms.v1.yaml (`SPEC_PATH`) and binds its hand data
+        # schemas to the runtime models; no other suite compares the two, so a
+        # yaml-only edit to a hand schema must run it. The preservation oracle
+        # is NOT added: it never reads this document.
         "openapi/**",
-        OPENAPI_CONTRACT_TESTS,
+        (*OPENAPI_CONTRACT_TESTS, RESPONSE_MODEL_SCHEMA_PARITY_TEST),
     ),
     PathTestRule(
         # #1644: the runtime schema owner injects every nullable node and the
@@ -4199,6 +4250,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_openapi_drift.py",
             "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_pipeline_ops_identity_envelope.py",
+            # #2348: meets the #2211 criterion. The parity suite reads the
+            # committed openapi/nhms.v1.yaml, which the drift oracle holds
+            # byte-equal to the document this module patches, and binds the
+            # hand-published data schemas this family writes (`_patch_hydro_run_
+            # openapi`, the envelope reshaping in `openapi_patching_response_
+            # models`) to the runtime models. A patch edit plus a regenerated
+            # yaml reds parity; without the regeneration drift reds. The
+            # preservation oracle never reads the document and is not added.
+            RESPONSE_MODEL_SCHEMA_PARITY_TEST,
         ),
     ),
     PathTestRule(
@@ -4227,6 +4287,36 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_display_catalog_cache.py",),
     ),
     PathTestRule(
+        # #2348: the runtime response models of the 35 JSON routes. A model edit
+        # changes the wire (preservation oracle, #2222 projection), the published
+        # document the models generate (drift, 3.1 contract, conformance) and the
+        # model side of the hand-schema binding (parity). The broad `apps/api/**`
+        # rule above adds the generic API suites.
+        "apps/api/response_models/**",
+        (
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
+            RESPONSE_MODEL_SCHEMA_PARITY_TEST,
+            HYDRO_RUN_PUBLIC_PROJECTION_TEST,
+            "tests/test_openapi_drift.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_response_conformance.py",
+        ),
+    ),
+    PathTestRule(
+        # #2348: the hand-written component schemas the parity suite binds to
+        # the response models. Not owned by the `openapi_patching*.py` glob (see
+        # that rule), so without this entry only the broad `apps/api/**` suites
+        # ran on a restored-schema-only diff and none of them reads these schemas
+        # against the models.
+        "apps/api/openapi_restored_schemas.py",
+        (
+            RESPONSE_MODEL_SCHEMA_PARITY_TEST,
+            "tests/test_openapi_drift.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_response_conformance.py",
+        ),
+    ),
+    PathTestRule(
         # #2078. `/api/v1/runs` response body (envelope + `total`/`total_count`
         # duplication) is pinned only by this suite; the `apps/api/**` rule above
         # buys the three generic API suites, none of which call `list_runs`, so a
@@ -4234,6 +4324,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/routes/forecast.py",
         (
             "tests/test_forecast_api.py",
+            # #2348/#2222: the route module declares the runs/latest-product/
+            # forecast-series response models and hands their handler objects to
+            # them; only these suites compare the wire value to master.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
+            HYDRO_RUN_PUBLIC_PROJECTION_TEST,
             # #1728's connection-attribution guards, MERGED here rather than left
             # in CONNECTION_ATTRIBUTION_ROUTE_PATHS: this module now has an exact
             # rule, and a duplicate pattern splits its ownership across two.
@@ -5709,6 +5804,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *CONNECTION_ATTRIBUTION_TESTS,
             "tests/test_pipeline_ops_identity_envelope.py",
+            # #2348: the eleven ops routes' handler objects vs their models.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
             # #2385/#2387: the read-blocked sentinel suite drives
             # `POST /runs/{run_id}/retry` through TestClient for both consumer
             # ends -- the 409 `RETRY_EVIDENCE_INVALID` refusal body and the
@@ -5734,9 +5831,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/node22_manual_retry_failed_runs.py",
         ("tests/test_file_journal_read_blocked_consumers.py",),
     ),
+    # #2348: the four route members also declare response models, so they carry
+    # the preservation oracle. A store module's diff does NOT reach the oracle
+    # through a route rule: selection is per changed path, so every store whose
+    # production builder the oracle drives names it on its own rule --
+    # forecast_store.py, best_available.py, state_manager.py (their exact rules)
+    # and object_store_forcing.py (below) -- plus the model registry facade and
+    # its `model_registry_*.py` owners on the store-path rule right after this
+    # one: the registry samples fake the store, not the `sanitize_*` projections
+    # the route applies (see CONNECTION_ATTRIBUTION_STORE_PATHS).
+    # tests/test_select_ci_tests.py derives that set from the oracle's imports
+    # plus the builders it names.
     *(
-        PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
-        for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
+        PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
+        for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS
+    ),
+    *(
+        PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
+        for path in CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        # A #1728 connection-attribution store (see CONNECTION_ATTRIBUTION_STORE_PATHS)
+        # that also holds `read_station_forcing_csv`, the builder behind the
+        # station-series payload the #2348 preservation oracle compares with
+        # master (reached through tests/test_forecast_api_met_station_series.py's
+        # client).
+        "packages/common/object_store_forcing.py",
+        (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS),
     ),
 
     PathTestRule(

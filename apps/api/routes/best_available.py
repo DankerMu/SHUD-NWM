@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from apps.api.errors import ApiError
+from apps.api.response_models.best_available_selection import BestAvailableSelectionList
 from packages.common.best_available import BestAvailableError, BestAvailableManager
 
 # #1728: this router's connection surface in pg_stat_activity.
@@ -21,7 +22,11 @@ def get_best_available_manager() -> BestAvailableManager:
         raise _api_error(error) from error
 
 
-@router.get("/met/best-available")
+@router.get(
+    "/met/best-available",
+    response_model=BestAvailableSelectionList,
+    response_model_exclude_unset=True,
+)
 def list_best_available(
     from_value: str = Query(alias="from"),
     to_value: str = Query(alias="to"),

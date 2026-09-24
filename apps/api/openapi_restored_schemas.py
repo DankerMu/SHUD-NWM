@@ -4,8 +4,10 @@ Every route covered here returns ``dict[str, Any]`` (the ``_ok()`` envelope
 pattern, or a bare store payload for ``forecast-series``), so FastAPI emits
 ``{type: object, additionalProperties: true}`` and the published contract lost
 its named components. ``apps/api/openapi_patching.py`` injects these schemas and
-rewrites the corresponding 200 bodies; nothing here touches a handler, so the
-change is runtime-inert (a ``response_model=`` would filter response bodies).
+rewrites the corresponding 200 bodies. Since #2348 each route also declares a
+runtime ``response_model`` (``apps/api/response_models/``); these hand schemas
+stay the published contract, and ``tests/test_response_model_schema_parity.py``
+binds each one to its model.
 
 **Shape oracle**: every schema below is derived from the store/handler function
 that builds the dict, not from the historical ``openapi/nhms.v1.yaml``, which was
@@ -480,18 +482,15 @@ def _run_type_schema() -> dict:
 
 
 def _hydro_run_schema() -> dict:
-    """:source: ``PsycopgForecastStore.list_runs`` (forecast_store.py:926-940
-    ``SELECT h.*, mi.river_network_version_id, bv.basin_id,
-    COALESCE(ds.adapter_name, h.source_id) AS source``) through
-    ``_hydro_run_response`` (forecast_store.py:3964), which is a pure
-    ``_json_ready(dict(row))`` pass-through.
-
-    ``h.*`` is every ``hydro.hydro_run`` column, so ``run_key``
-    (db/migrations/000050:178) and ``parsed_at`` (db/migrations/000056:22) are
-    part of the response, as are the three joined columns.
+    """:source: ``PsycopgForecastStore.get_run`` / ``list_runs``, which select the
+    ``HYDRO_RUN_PUBLIC_COLUMNS`` allowlist by name plus the three join aliases,
+    through ``_hydro_run_response``, which projects onto the same allowlist
+    (#2222). The ``HydroRun`` response model drops any other key at runtime, so
+    the schema declares no additional properties.
     """
     return {
         "type": "object",
+        "additionalProperties": False,
         "required": [
             "run_id",
             "run_type",
