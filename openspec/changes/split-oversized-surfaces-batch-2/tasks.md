@@ -36,12 +36,12 @@
 
 ## 3. #2460 — `basins_discovery.py`（1118）+ `basins_package_source_io.py`（999）
 
-- [ ] 3.1 `basins_discovery.py` 拆 owner module（`workers/model_registry/` 下），facade 与每个新模块 < 1000
-- [ ] 3.2 `basins_package_source_io.py` 抽出一块到新模块，结果 ≤ 900；新模块名不匹配 `basins_package*.py`；`_parse_declared_mapping_rows` 与 `_iter_mapping_snapshot_lines` 的调用关系留原模块（design D1）
-- [ ] 3.3 D1 seam 裁定（含 `_sha256`）逐条列出 + 突变红证
-- [ ] 3.4 D5：ADR 0009 成员不搬；若搬则标记随函数体 + 普查表同 commit 更新；ADR 0009「已具名的缺口」段对 `basins_discovery.py` 行数/豁免的描述同步
-- [ ] 3.5 删除 `workers/model_registry/basins_discovery.py` exclude，零替代
-- [ ] 3.6 Evidence：`uv run pytest -q tests/test_path_canonicalization_family_guard.py tests/test_basins_discovery.py tests/test_basins_package*.py tests/test_select_ci_tests.py` 绿；指纹零漂移
+- [x] 3.1 `basins_discovery.py` 拆 owner module（`workers/model_registry/` 下），facade 与每个新模块 < 1000
+- [x] 3.2 `basins_package_source_io.py` 抽出一块到新模块，结果 ≤ 900；新模块名不匹配 `basins_package*.py`；`_parse_declared_mapping_rows` 与 `_iter_mapping_snapshot_lines` 的调用关系留原模块（design D1）
+- [x] 3.3 D1 seam 裁定（含 `_sha256`）逐条列出 + 突变红证
+- [x] 3.4 D5：ADR 0009 成员不搬；若搬则标记随函数体 + 普查表同 commit 更新；ADR 0009「已具名的缺口」段对 `basins_discovery.py` 行数/豁免的描述同步
+- [x] 3.5 删除 `workers/model_registry/basins_discovery.py` exclude，零替代
+- [x] 3.6 Evidence：`uv run pytest -q tests/test_path_canonicalization_family_guard.py tests/test_basins_discovery.py tests/test_basins_package*.py tests/test_select_ci_tests.py` 绿；指纹零漂移
 
 ## 4. #2490（部分）— `qhh_production_bootstrap.py`（2901）+ `basins_registry_import.py`（2481）
 

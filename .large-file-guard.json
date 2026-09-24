@@ -96,7 +96,6 @@
     "tests/test_node27_pgdata_workload.py",
     "tests/test_river_ts_render.py",
     "tests/test_river_ts_text_identity_cleanup.py",
-    "workers/model_registry/basins_discovery.py",
     "services/production_closure/slurm_validation.py",
     "tests/test_production_slurm_validation.py",
     "services/slurm_gateway/real_backend.py",
