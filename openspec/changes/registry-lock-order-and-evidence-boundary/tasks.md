@@ -19,7 +19,7 @@
 - [x] 2.1 `_lock_basin_version` + 在 `import_basin_into_registry_core` 最前调用；docstring 锁序不变量
 - [x] 2.2 静态扫描测试（bv 锁先于其它写 helper）+ 突变红证
 - [x] 2.3 真实 DB 双会话交错测试（修复前红 / 修复后绿、有界）
-- [ ] 2.4 `_lock_basin_version_scope` 同类确认结论写入 PR body
+- [x] 2.4 `_lock_basin_version_scope` 同类确认结论写入 PR body
 
 ## 3. #1729 读侧
 
@@ -41,7 +41,7 @@
 - [ ] 6.1 node-27 全量 pytest（disposable DB，frozen SHA）
 - [ ] 6.2 合并后 node-27 display 部署 + 公网 curl 前后 receipt（`/api/v1/basins` 不含 evidence basin；versions 404；集合 ⊆ node-22 `manifest-last.json` basin 集合或差异有 issue 归属）
 - [ ] 6.3 **暂停等用户确认** → 执行 4.x / 5.x，receipt（前后计数、二次执行 0 行）；`evidence/restore/README.md` 更新；fixture 同步（处置按用户裁定）——随 post-merge archive PR 提交
-- [ ] 6.4 ruff、openspec strict、guard hook
+- [x] 6.4 ruff、openspec strict、guard hook
 
 ## Evidence Floor
 

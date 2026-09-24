@@ -1,8 +1,11 @@
 -- #1729: restore the rows node27_1729_delete_evidence_basin.sql deleted, from
--- the files node27_1729_delete_evidence_basin_backup.sql wrote.
+-- the six NAME.copy files that delete wrote in its own --apply transaction.
 --
 -- Run through scripts/ops/node27_oneshot_sql.py with --copy-dir pointing at
--- that backup directory; dry-run first (rolled back), then --apply. Parents
+-- the --apply delete run's directory (node-27:
+-- /home/nwm/tmp/1729-delete-apply-<ts>/ or its off-node copy) -- NOT the
+-- dry-run's directory and NOT a _backup.sql precheck directory, which may
+-- predate later writes. Dry-run first (rolled back), then --apply. Parents
 -- first (the delete's reverse FK order). COPY FROM keeps the supplied values
 -- of the GENERATED ALWAYS identity keys -- the byte-exact counterpart of
 -- INSERT ... OVERRIDING SYSTEM VALUE, proven by

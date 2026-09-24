@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 from psycopg2.extras import Json
 
@@ -223,5 +225,51 @@ def test_the_default_dry_run_rolls_back(throwaway_database_url: str, tmp_path: P
     )
 
     assert not report.committed
+    # One dry-run is the whole receipt: the same grouping before and after the UPDATE.
+    assert any("before: project_name=heihe source=qhh.tsd.forc" in notice for notice in report.notices)
+    assert not any("after: project_name=heihe source=qhh.tsd.forc" in notice for notice in report.notices)
     assert any("after: project_name=heihe source=heihe.tsd.forc" in notice for notice in report.notices)
+    before_at = min(i for i, notice in enumerate(report.notices) if "#1480 before:" in notice)
+    updated_at = next(i for i, notice in enumerate(report.notices) if "#1480 backfilled rows:" in notice)
+    assert before_at < updated_at, report.notices
     assert _state(url) == before
+
+
+def test_the_row_lock_does_not_block_a_concurrent_fk_key_share(throwaway_database_url: str, tmp_path: Path) -> None:
+    """The backfill's row lock is FOR NO KEY UPDATE, not FOR UPDATE.
+
+    Every FK insert that references a station (``met.interp_weight.station_id``,
+    ``met.forcing_station_timeseries.station_key``) takes FOR KEY SHARE on the
+    met_station row. The backfill changes only ``properties_json``, never a key,
+    so it must not queue behind -- or block -- such a writer. FOR UPDATE
+    conflicts with FOR KEY SHARE (the script's own ``lock_timeout`` of 10 s then
+    fails it with 55P03); FOR NO KEY UPDATE does not.
+    """
+    url = throwaway_database_url
+    _seed(url)
+    holder = psycopg2.connect(url)
+    try:
+        with holder.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM met.met_station WHERE station_id = 'heihe-001' FOR KEY SHARE")
+            assert cursor.fetchone() is not None
+        started = time.monotonic()
+        try:
+            report = run_sql_file(
+                BACKFILL_SQL,
+                database_url=url,
+                copy_dir=tmp_path,
+                settings={"nhms_1480.expected_rows": str(len(CHANGED))},
+                apply=True,
+            )
+        except ScriptFailedError as error:
+            raise AssertionError(
+                f"backfill failed behind a held FOR KEY SHARE after {time.monotonic() - started:.1f}s "
+                f"(pgcode={error.pgcode}): {error}"
+            ) from error
+        elapsed = time.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    assert report.committed
+    assert elapsed < 5.0, f"backfill waited {elapsed:.1f}s behind a FOR KEY SHARE"
+    assert _state(url)["heihe-001"][0]["source"] == "heihe.tsd.forc"

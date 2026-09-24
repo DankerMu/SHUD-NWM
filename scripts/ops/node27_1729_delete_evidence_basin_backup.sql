@@ -1,11 +1,18 @@
--- #1729: back up, byte-exact, every row node27_1729_delete_evidence_basin.sql
--- can delete, one COPY text file per table, BEFORE the delete runs.
+-- #1729: OPTIONAL read-only precheck -- back up, byte-exact, every row under
+-- the evidence basin, one COPY text file per table, to inspect before the
+-- delete is ever run.
+--
+-- NOT the restore source: node27_1729_delete_evidence_basin.sql locks the rows
+-- and writes the authoritative backup itself (same file names, same column
+-- lists and column-set guard, pinned identical by
+-- tests/test_node27_oneshot_sql.py) in the transaction that deletes them, and
+-- node27_1729_delete_evidence_basin_rollback.sql restores from THAT --apply
+-- run's --copy-dir. A row changed between this precheck and the delete is in
+-- the delete run's files, not in these.
 --
 -- Run through scripts/ops/node27_oneshot_sql.py with a FRESH --copy-dir
--- (node-27: /home/nwm/tmp/1729-backup-<UTC stamp>/; files are never
--- overwritten), then keep a copy off node-27. Read-only; the runner's default
--- rollback is fine. node27_1729_delete_evidence_basin_rollback.sql restores
--- these files.
+-- (node-27: /home/nwm/tmp/1729-precheck-<UTC stamp>/; files are never
+-- overwritten). Read-only; the runner's default rollback is fine.
 --
 -- Fidelity: explicit column lists, guarded below to equal the live tables;
 -- COPY text format writes geometry as hex EWKB (SRID and every coordinate
@@ -13,8 +20,7 @@
 -- extra_float_digits = 3; the GENERATED ALWAYS identity keys
 -- (basin_version_key, river_network_version_key, station_key -- referenced
 -- without FK by hydro.river_timeseries) are copied as values. The scope is
--- every row under the basin, a superset the delete asserts equals its
--- inventory.
+-- every row under the basin, a superset of the delete's exact inventory.
 
 SET LOCAL statement_timeout = '120s';
 SET LOCAL search_path = pg_catalog;

@@ -13,9 +13,10 @@ session died with ``deadlock detected``. After #2491 the function takes
 ``FOR NO KEY UPDATE`` on the basin_version row before anything else, so the
 generic import queues behind the bootstrap holding nothing.
 
-Session A is the bootstrap's parent-lock prefix spelled as its SQL (the
-advisory lock, the ``FOR UPDATE`` and the rnv ``UPDATE`` the bootstrap's own
-``import_basin_into_registry_core`` call issues first); session B is the REAL
+Session A is the bootstrap's parent-lock prefix: the REAL
+``_lock_qhh_basin_scope`` (advisory lock + ``FOR UPDATE``), then the rnv
+``UPDATE`` the bootstrap's own ``import_basin_into_registry_core`` call issues
+first; session B is the REAL
 ``import_basin_into_registry_core`` re-importing a basin the REAL generic import
 seeded, so B completes as ``already_imported`` rather than tripping
 ``CHECKSUM_CONFLICT``. Same bounded framework as
@@ -57,14 +58,6 @@ pytestmark = pytest.mark.integration
 _PGOPTIONS = "-c lock_timeout=20000 -c statement_timeout=60000"
 _POLL_SECONDS = 15.0
 _JOIN_SECONDS = 45.0
-
-# `qhh_bootstrap_registry.py::_lock_qhh_basin_scope`, spelled as its SQL.
-_BOOTSTRAP_ADVISORY_SQL = "SELECT pg_advisory_xact_lock(hashtext(%s))"
-_BOOTSTRAP_SCOPE_SQL = """
-    SELECT basin_version_id FROM core.basin_version
-    WHERE basin_version_id = %s
-    FOR UPDATE
-"""
 
 
 class _Background(threading.Thread):
@@ -171,6 +164,10 @@ def test_generic_reimport_queues_behind_a_bootstrap_holding_the_basin_version(
     while B is still waiting (the discriminant: "B waits" alone is true of both
     builds), A commits, and B's re-import then completes with zero new rows.
     """
+    # Body import, same reason as `_registry_fixture`: keep this module out of
+    # the selector's module-scope import closures. Exists before #2491.
+    from workers.model_registry.qhh_bootstrap_registry import _lock_qhh_basin_scope
+
     url = throwaway_database_url
     apply_migrations_from_zero(url)
     inventory_path, manifest_path = _registry_fixture(tmp_path, "basin-2491")
@@ -202,10 +199,9 @@ def test_generic_reimport_queues_behind_a_bootstrap_holding_the_basin_version(
         background = _Background(reimport_in_b)
         try:
             with session_a.cursor() as cursor_a:
-                # (1) A: the bootstrap's basin-version scope lock.
-                cursor_a.execute(_BOOTSTRAP_ADVISORY_SQL, (f"qhh-bootstrap:{basin_version_id}",))
-                cursor_a.execute(_BOOTSTRAP_SCOPE_SQL, (basin_version_id,))
-                assert cursor_a.fetchone() is not None
+                # (1) A: the bootstrap's real basin-version scope lock.
+                _lock_qhh_basin_scope(cursor_a, basin_version_id)
+                assert cursor_a.fetchone() is not None, "the scope lock must have found (and locked) the row"
                 # (2) B: the generic re-import, until it waits on a lock.
                 background.start()
                 _wait_for_lock_wait(observer, background, b_pid)

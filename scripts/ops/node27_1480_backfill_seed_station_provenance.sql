@@ -28,7 +28,10 @@ SET LOCAL statement_timeout = '120s';
 SET LOCAL search_path = pg_catalog;
 
 -- Lock the target rows first, so the backup below and the UPDATE after it
--- see one row set.
+-- see one row set. FOR NO KEY UPDATE, not FOR UPDATE: only properties_json
+-- changes, never a key, so the FK inserts that take FOR KEY SHARE on these
+-- station rows (met.interp_weight, met.forcing_station_timeseries ingest) are
+-- neither blocked by nor block the backfill.
 SELECT count(*) AS locked_rows
 FROM (
     SELECT 1
@@ -43,7 +46,7 @@ FROM (
                   IS DISTINCT FROM (properties_json->>'project_name') || '.tsd.forc'
           )
       )
-    FOR UPDATE
+    FOR NO KEY UPDATE
 ) AS target;
 
 -- Full original properties_json of every row about to change, by station_id.
@@ -70,6 +73,22 @@ DECLARE
     v_n        bigint;
     v_group    record;
 BEGIN
+    -- Receipt: the pre-update provenance groups of every seed row (same
+    -- grouping as the post-update receipt below, so one dry-run is the whole
+    -- before/after picture).
+    FOR v_group IN
+        SELECT properties_json->>'project_name' AS project_name,
+               properties_json->>'source' AS source,
+               properties_json#>>'{elevation_metadata,source}' AS elevation_source,
+               count(*) AS n
+        FROM met.met_station
+        WHERE properties_json->>'seed' = 'qhh_production_bootstrap'
+        GROUP BY 1, 2, 3
+        ORDER BY 1, 2, 3
+    LOOP
+        RAISE NOTICE '#1480 before: project_name=% source=% elevation_source=% count=%',
+            v_group.project_name, v_group.source, v_group.elevation_source, v_group.n;
+    END LOOP;
     UPDATE met.met_station
     SET properties_json = CASE
         WHEN jsonb_typeof(properties_json->'elevation_metadata') = 'object' THEN

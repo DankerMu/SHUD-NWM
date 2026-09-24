@@ -13,16 +13,21 @@ The file is plain SQL plus two marker comments, each applying to the ONE
     -- @copy-out NAME   COPY (...) TO STDOUT  -> <copy-dir>/NAME.copy (never overwritten)
     -- @copy-in NAME    COPY ... FROM STDIN   <- <copy-dir>/NAME.copy (must exist)
 
-Everything between markers runs as one ``execute``. ``--set key=value`` binds
-custom settings (``SELECT set_config(key, value, true)``) before the first
-statement. Dry-run by default: the transaction is rolled back and the server
-NOTICEs (counts, per-step timing) are printed; ``--apply`` commits. Exits 1 on
-any database error, after rollback.
+A file with any marker is refused without ``--copy-dir``. Every copy-out file
+is flushed and fsynced (and so is the directory) before the transaction ends,
+so a committed delete never outlives its backup on disk. Everything between
+markers runs as one ``execute``. ``--set key=value`` binds custom settings
+(``SELECT set_config(key, value, true)``) before the first statement. Dry-run
+by default: the transaction is rolled back and the server NOTICEs (counts,
+per-step timing) are printed; ``--apply`` commits. Exits 1 on any database
+error, after rollback. The backend is attributed in ``pg_stat_activity`` as
+``nhms-oneshot-sql`` (libpq ``fallback_application_name``, so an explicit
+``application_name`` in the DSN still wins); the DSN is never printed.
 
 Usage (node-27; the owner DSN stays in the sourced private env, never in argv):
     cd /home/nwm/NWM && uv run python scripts/ops/node27_oneshot_sql.py \\
         scripts/ops/node27_1729_delete_evidence_basin.sql \\
-        --dsn-env <VAR holding the owner DSN> --copy-dir /home/nwm/tmp/1729-backup-<ts> [--apply]
+        --dsn-env <VAR holding the owner DSN> --copy-dir /home/nwm/tmp/1729-delete-<fresh per run> [--apply]
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_APPLICATION_NAME = "nhms-oneshot-sql"
 _MARKER = re.compile(r"^-- @(copy-out|copy-in) ([a-z0-9_.]+)\s*$")
 _SETTING = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 
@@ -128,7 +134,7 @@ def run_sql_file(
         if not _SETTING.fullmatch(key):
             raise ValueError(f"--set {key}: only custom `prefix.name` settings are accepted")
     report = RunReport(committed=False)
-    connection = psycopg2.connect(database_url)
+    connection = psycopg2.connect(database_url, fallback_application_name=_APPLICATION_NAME)
     connection.autocommit = False
     try:
         with connection.cursor() as cursor:
@@ -139,12 +145,16 @@ def run_sql_file(
                 if segment.copy == "copy-out":
                     with (Path(copy_dir) / f"{segment.name}.copy").open("x", encoding="utf-8") as handle:
                         cursor.copy_expert(segment.sql, handle)
+                        handle.flush()
+                        os.fsync(handle.fileno())
                 elif segment.copy == "copy-in":
                     with (Path(copy_dir) / f"{segment.name}.copy").open(encoding="utf-8") as handle:
                         cursor.copy_expert(segment.sql, handle)
                 else:
                     cursor.execute(segment.sql)
                 report.steps.append((_label(segment), time.monotonic() - started))
+        if any(segment.copy == "copy-out" for segment in segments):
+            _fsync_directory(Path(copy_dir))
         if apply:
             connection.commit()
             report.committed = True
@@ -160,6 +170,15 @@ def run_sql_file(
         report.notices.extend(notice.strip() for notice in connection.notices)
         connection.close()
     return report
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make the new copy files' directory entries durable too."""
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _label(segment: Segment) -> str:

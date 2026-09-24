@@ -34,7 +34,8 @@
   - 无 FK 的 hypertable 列在 receipt 中以**论证代替扫描**：`hydro.river_timeseries.basin_version_key` / `river_network_version_key`——`run_key` 为 FK → `hydro.hydro_run`（`000059:13`），evidence basin 的 `hydro_run` 行数为 0；`met.forcing_station_timeseries_legacy.basin_version_id`——`forcing_version_id` 为 NOT NULL FK → `met.forcing_version`，evidence models 的 `forcing_version` 行数为 0（`k3-deps2.out`）；故均不可能存在引用行；
   - 非 FK 引用（`ops.audit_log`、`met.canonical_grid_*`）只清点不删（审计 append-only，保留），在 receipt 中列出；`ops.audit_log` 只用**等值谓词**计数（实测 13），禁止 `LIKE`。
 - 顺序（单事务）：子表 → `met.met_station` → `core.model_instance` → `core.mesh_version` → `core.river_network_version` → `core.basin_version` → `core.basin`；每步断言受影响行数 = 预期。
-- 备份与回滚必须**逐字节保真**：`basin_version_key` / `river_network_version_key`（`000050:185,192`）与 `met_station.station_key`（`000061:193`）是 `GENERATED ALWAYS AS IDENTITY`，且 `hydro.river_timeseries` 以无 FK 的方式引用这些 key（`000050:79`）；geometry（`MultiPolygon,4490` / `Point,4490`）经 json 会丢 SRID 与精度。因此：备份用 `COPY (SELECT <显式列，排除 STORED generated 列如 river_segment.stream_type(000048)> FROM t WHERE ...) TO STDOUT`（text 格式，geometry 以 hex EWKB）落盘到 node-27 `/home/nwm/tmp/1729-backup-<ts>/` 并在本地保存副本；回滚按反向 FK 顺序 `INSERT ... OVERRIDING SYSTEM VALUE`（或经验证等价的 COPY FROM）。测试 4.2 须逐列精确比对恢复行，含 identity key 与 `ST_AsEWKB(geom)` / SRID。
+- 备份与回滚必须**逐字节保真**：`basin_version_key` / `river_network_version_key`（`000050:185,192`）与 `met_station.station_key`（`000061:193`）是 `GENERATED ALWAYS AS IDENTITY`，且 `hydro.river_timeseries` 以无 FK 的方式引用这些 key（`000050:79`）；geometry（`MultiPolygon,4490` / `Point,4490`）经 json 会丢 SRID 与精度。因此：备份用 `COPY (SELECT <显式列，排除 STORED generated 列如 river_segment.stream_type(000048)> FROM t WHERE ...) TO STDOUT`（text 格式，geometry 以 hex EWKB）落盘到 node-27 `/home/nwm/tmp/1729-delete-apply-<ts>/`（dry-run 用独立的 `1729-delete-dry-<ts>/`，可选预检 `1729-precheck-<ts>/`；目录不复用） 并在本地保存副本；回滚按反向 FK 顺序 `INSERT ... OVERRIDING SYSTEM VALUE`（或经验证等价的 COPY FROM）。测试 4.2 须逐列精确比对恢复行，含 identity key 与 `ST_AsEWKB(geom)` / SRID。
+- 备份与删除同事务（review round 1）：delete 脚本在 id 集 / FK 断言之后、DELETE 之前，对 6 张表目标行 `SELECT … FOR UPDATE` 并以 `@copy-out` 写出备份（列集守卫同 backup 脚本），故 `--copy-dir` 必填，`--apply` 的备份恰为被删行；独立 `_backup.sql` 仅作可选只读预检。
 - 活主库负载：删 6 行 `met_station` 触发对 `met.forcing_station_timeseries`（FK `station_key`，`000061:243`）与 `_legacy`（FK `station_id`，`000005:102`，非 PK 前导列）全部 chunk 的 FK 检查；删 `model_instance` 检查 `forcing_version`/`hydro_run`/`state_snapshot`/`interp_weight`。脚本设 `lock_timeout` 与 `statement_timeout`；`BEGIN…ROLLBACK` dry-run 记录删除耗时；执行时段避开 node-27 retention/compression 作业（chunk 级锁）。`_legacy` 的 FK 检查按非前导列 `station_id` 查找，可能与被取消的探针同样慢：若 dry-run 触发 `statement_timeout`，D5 第 3 步如实报告并停下，不重试、不放宽超时，由用户决定。
 - 只清点不删（receipt 列出）：`ops.audit_log`、`met.canonical_grid_*`、`ops.pipeline_job.model_id`（`000011`）、`ops.pipeline_event.entity_id`、`ops.qc_result.target_id`、`hydro.state_snapshot.cloned_from_model_id`（`000046`）、`flood.return_period_result` 的 `model_id` / `basin_version_id` / `river_network_version_id`（无 FK，实测 0）；`hydro.river_timeseries` 无 FK key 列按上文论证处理、不扫描。
 - 执行角色：`docker exec -i nhms-db psql -U nhms -d nhms`（owner）；`\set ON_ERROR_STOP on`；先 `BEGIN; ... ROLLBACK;` dry-run 打印计数，确认后再 `COMMIT` 版。
@@ -60,7 +61,8 @@
 ## Governing invariant
 
 - 所有调用 `import_basin_into_registry_core` 的事务对父表的加锁顺序为 `basin_version → river_network_version → river_segment`。
-- `basin_group = 'evidence-only'` 的 basin 不出现在任何公开 basin 列表 / versions 响应中。
+- `basin_group = 'evidence-only'` 的 basin 及其 model 不出现在任何公开 basin 列表 / versions / models 列表 / model 详情响应中（`get_model_internal` 不过滤；scheduler 经 `list_models(active=True)` 的发现路径随之过滤，属刻意选择）。
+- #1729 删除脚本在**同一事务**内先锁定并备份将被删除的行，再执行 DELETE；无备份目录即拒绝运行。
 - 一次性数据脚本只改动其谓词精确选中的行，且可由回滚脚本逐行（含 identity key 与 geometry EWKB）恢复。
 
 ## Sibling surfaces

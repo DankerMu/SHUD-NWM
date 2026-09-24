@@ -2,7 +2,11 @@
 
 Runs the three checked-in files ``scripts/ops/node27_1729_delete_evidence_basin*.sql``
 through the same runner the operator uses on node-27
-(``scripts/ops/node27_oneshot_sql.py``), unchanged. The seed reproduces the
+(``scripts/ops/node27_oneshot_sql.py``), unchanged. The delete run itself
+writes the backup (``@copy-out``, rows locked FOR UPDATE in the same
+transaction as the DELETEs), so the rollback restores from the ``--apply``
+delete run's copy directory; ``_backup.sql`` is only an optional read-only
+precheck. The seed reproduces the
 node-27 inventory (``.workplans/k3``): the evidence basin with 1 basin_version,
 1 river_network_version, 1 mesh_version, 2 model_instance and 6 met_station
 rows, the same ids, next to a control basin that must never be touched.
@@ -195,7 +199,13 @@ def _count(database_url: str, sql: str, *params: Any) -> int:
         return int(next(iter(cursor.fetchone().values())))
 
 
-def test_backup_delete_and_rollback_round_trip_byte_exact(throwaway_database_url: str, tmp_path: Path) -> None:
+def _copy_files(directory: Path) -> dict[str, str]:
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted(directory.iterdir())}
+
+
+def test_the_apply_delete_backs_up_what_it_deletes_and_rollback_restores_it_byte_exact(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
     url = throwaway_database_url
     _seed(url)
     before = _snapshot(url, BASIN)
@@ -203,33 +213,103 @@ def test_backup_delete_and_rollback_round_trip_byte_exact(throwaway_database_url
     assert [len(before[relation]) for relation, _, _ in _SNAPSHOT] == [1, 1, 1, 1, 2, 6]
     assert {row["geom_srid"] for row in before["met.met_station"] + before["core.basin_version"]} == {4490}
     assert min(row["station_key"] for row in before["met.met_station"]) > 1
+    dry_dir, apply_dir = tmp_path / "dry-run", tmp_path / "apply"
+    dry_dir.mkdir()
+    apply_dir.mkdir()
 
-    backup = run_sql_file(BACKUP_SQL, database_url=url, copy_dir=tmp_path)
-    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
-        f"{relation}.copy" for relation, _, _ in _SNAPSHOT
-    )
-    assert len((tmp_path / "met.met_station.copy").read_text(encoding="utf-8").splitlines()) == 6
-    assert not backup.committed
-
-    dry_run = run_sql_file(DELETE_SQL, database_url=url)
+    # The default dry-run writes its own backup files but commits nothing.
+    dry_run = run_sql_file(DELETE_SQL, database_url=url, copy_dir=dry_dir)
     assert not dry_run.committed
     assert _snapshot(url, BASIN) == before, "the default dry-run must roll back"
     assert any("deleted core.basin=1" in notice for notice in dry_run.notices), dry_run.notices
+    assert sorted(_copy_files(dry_dir)) == sorted(f"{relation}.copy" for relation, _, _ in _SNAPSHOT)
 
-    applied = run_sql_file(DELETE_SQL, database_url=url, apply=True)
+    applied = run_sql_file(DELETE_SQL, database_url=url, copy_dir=apply_dir, apply=True)
     assert applied.committed
     assert any("retained ops.audit_log rows (entity_id equality): 1" in notice for notice in applied.notices)
     assert all(rows == [] for rows in _snapshot(url, BASIN).values())
     assert _snapshot(url, CONTROL) == control_before
     assert _count(url, "SELECT count(*) FROM ops.audit_log WHERE entity_id = %s", BASIN) == 1
+    written = _copy_files(apply_dir)
+    assert [len(written[f"{relation}.copy"].splitlines()) for relation, _, _ in _SNAPSHOT] == [1, 1, 1, 1, 2, 6]
+    assert written == _copy_files(dry_dir), "nothing changed between the runs, so neither may their backups"
 
-    restored = run_sql_file(ROLLBACK_SQL, database_url=url, copy_dir=tmp_path, apply=True)
+    # The restore reads the --apply delete run's own directory.
+    restored = run_sql_file(ROLLBACK_SQL, database_url=url, copy_dir=apply_dir, apply=True)
     assert restored.committed
     assert _snapshot(url, BASIN) == before
     assert _snapshot(url, CONTROL) == control_before
 
 
-def test_a_dependency_count_mismatch_raises_and_deletes_nothing(throwaway_database_url: str) -> None:
+def test_the_delete_refuses_to_run_without_a_copy_dir(throwaway_database_url: str) -> None:
+    url = throwaway_database_url
+    _seed(url)
+    before = _snapshot(url, BASIN)
+
+    with pytest.raises(ValueError, match="copy directory is required"):
+        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+
+    assert _snapshot(url, BASIN) == before
+
+
+def test_a_dry_run_copy_dir_cannot_be_reused_for_the_apply(throwaway_database_url: str, tmp_path: Path) -> None:
+    """The runner never overwrites a copy file, so --apply needs a fresh --copy-dir."""
+    url = throwaway_database_url
+    _seed(url)
+    run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path)
+    dry_files = _copy_files(tmp_path)
+    before = _snapshot(url, BASIN)
+
+    with pytest.raises(FileExistsError):
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
+
+    assert _snapshot(url, BASIN) == before
+    assert _copy_files(tmp_path) == dry_files
+
+
+def test_the_restore_carries_a_change_made_after_a_standalone_precheck(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """The authoritative backup is the one taken with the rows locked, not an earlier precheck.
+
+    A lifecycle transition and a station property write land between the
+    optional precheck and the delete; restoring from the delete run's directory
+    brings back that later state, which the precheck files do not hold.
+    """
+    url = throwaway_database_url
+    _seed(url)
+    precheck_dir, apply_dir = tmp_path / "precheck", tmp_path / "apply"
+    precheck_dir.mkdir()
+    apply_dir.mkdir()
+    precheck = run_sql_file(BACKUP_SQL, database_url=url, copy_dir=precheck_dir)
+    assert not precheck.committed
+    with psycopg_connection(url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE core.model_instance SET lifecycle_state = 'deprecated', active_flag = false WHERE model_id = %s",
+            (MODELS[0],),
+        )
+        cursor.execute(
+            'UPDATE met.met_station SET properties_json = properties_json || \'{"late": "write"}\' '
+            "WHERE station_id = %s",
+            (STATIONS[4],),
+        )
+    mutated = _snapshot(url, BASIN)
+
+    run_sql_file(DELETE_SQL, database_url=url, copy_dir=apply_dir, apply=True)
+    assert all(rows == [] for rows in _snapshot(url, BASIN).values())
+    precheck_files, delete_files = _copy_files(precheck_dir), _copy_files(apply_dir)
+    assert sorted(precheck_files) == sorted(delete_files)
+    changed = sorted(name for name in delete_files if delete_files[name] != precheck_files[name])
+    assert changed == ["core.model_instance.copy", "met.met_station.copy"], changed
+
+    run_sql_file(ROLLBACK_SQL, database_url=url, copy_dir=apply_dir, apply=True)
+    restored = _snapshot(url, BASIN)
+    assert restored == mutated
+    model = next(row for row in restored["core.model_instance"] if row["model_id"] == MODELS[0])
+    assert (model["lifecycle_state"], model["active_flag"]) == ("deprecated", False)
+
+
+def test_a_dependency_count_mismatch_raises_and_deletes_nothing(throwaway_database_url: str, tmp_path: Path) -> None:
     url = throwaway_database_url
     _seed(url)
     with psycopg_connection(url) as connection, connection.cursor() as cursor:
@@ -241,13 +321,13 @@ def test_a_dependency_count_mismatch_raises_and_deletes_nothing(throwaway_databa
     before = _snapshot(url, BASIN)
 
     with pytest.raises(ScriptFailedError, match="met_station set") as raised:
-        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
 
     assert raised.value.pgcode == "P0001"
     assert _snapshot(url, BASIN) == before
 
 
-def test_a_non_hypertable_dependent_row_raises_and_deletes_nothing(throwaway_database_url: str) -> None:
+def test_a_non_hypertable_dependent_row_raises_and_deletes_nothing(throwaway_database_url: str, tmp_path: Path) -> None:
     url = throwaway_database_url
     _seed(url)
     with psycopg_connection(url) as connection, connection.cursor() as cursor:
@@ -263,11 +343,11 @@ def test_a_non_hypertable_dependent_row_raises_and_deletes_nothing(throwaway_dat
     before = _snapshot(url, BASIN)
 
     with pytest.raises(ScriptFailedError, match=r"hydro\.hydro_run has 1 row\(s\) by basin_version_id"):
-        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
     assert _snapshot(url, BASIN) == before
 
 
-def test_a_hypertable_reference_fails_the_delete_through_its_fk(throwaway_database_url: str) -> None:
+def test_a_hypertable_reference_fails_the_delete_through_its_fk(throwaway_database_url: str, tmp_path: Path) -> None:
     """No hypertable is scanned: a referencing chunk row fails the DELETE itself.
 
     The chunk this INSERT creates carries TimescaleDB's per-chunk copies of the
@@ -307,7 +387,7 @@ def test_a_hypertable_reference_fails_the_delete_through_its_fk(throwaway_databa
     before = _snapshot(url, BASIN)
 
     with pytest.raises(ScriptFailedError) as raised:
-        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
 
     assert raised.value.pgcode == "23503", raised.value
     assert _snapshot(url, BASIN) == before
@@ -328,7 +408,7 @@ def test_a_hypertable_reference_fails_the_delete_through_its_fk(throwaway_databa
     ids=["unexpected-dependent", "missing-dependent"],
 )
 def test_a_live_fk_set_drift_raises_and_deletes_nothing(
-    throwaway_database_url: str, mutation: str, message: str
+    throwaway_database_url: str, tmp_path: Path, mutation: str, message: str
 ) -> None:
     url = throwaway_database_url
     _seed(url)
@@ -337,11 +417,11 @@ def test_a_live_fk_set_drift_raises_and_deletes_nothing(
     before = _snapshot(url, BASIN)
 
     with pytest.raises(ScriptFailedError, match=message):
-        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
     assert _snapshot(url, BASIN) == before
 
 
-def test_a_basin_that_is_not_evidence_only_is_refused(throwaway_database_url: str) -> None:
+def test_a_basin_that_is_not_evidence_only_is_refused(throwaway_database_url: str, tmp_path: Path) -> None:
     url = throwaway_database_url
     _seed(url)
     with psycopg_connection(url) as connection, connection.cursor() as cursor:
@@ -349,7 +429,7 @@ def test_a_basin_that_is_not_evidence_only_is_refused(throwaway_database_url: st
     before = _snapshot(url, BASIN)
 
     with pytest.raises(ScriptFailedError, match="basin_group=Basins"):
-        run_sql_file(DELETE_SQL, database_url=url, apply=True)
+        run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, apply=True)
     assert _snapshot(url, BASIN) == before
 
 
