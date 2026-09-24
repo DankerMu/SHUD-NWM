@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m9-basins-model-assets. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Basins inventory imports into model registry
 
 The system SHALL import validated Basins inventory records into the existing model registry tables using deterministic IDs and idempotent writes.
@@ -346,3 +348,25 @@ The repository SHALL define, in `openspec/glossary.md`, the two row classes `cor
 - **THEN** the call returns 1, not the number of same-id rows across all networks
 - **AND** A's `core.river_network_version.geometry_generation` increments by one while B's is unchanged
 
+### Requirement: Registry imports lock parent rows basin-version first
+
+Every transaction that calls `import_basin_into_registry_core` SHALL lock the target
+`core.basin_version` row with `FOR NO KEY UPDATE` before it writes or inserts any row
+that references it, so that parent-table row locks are always taken in the order
+`basin_version → river_network_version`, the same order the QHH production
+bootstrap uses. Row-level INSERT/DELETE of `core.river_segment` rows (such as the
+legacy-segment cleanup) stays outside this parent-lock invariant, as the #2157
+river-segment lock-order boundary already states.
+
+#### Scenario: bootstrap and generic import interleave on an existing basin
+
+- **WHEN** a QHH bootstrap transaction holds its basin-version scope lock and a
+  concurrent generic import of the same existing basin reaches
+  `import_basin_into_registry_core`
+- **THEN** the generic import waits for the bootstrap to finish, neither session
+  fails with `deadlock detected`, and both complete within a bounded time.
+
+#### Scenario: first import of a new basin
+
+- **WHEN** the target basin version row does not exist yet
+- **THEN** the lock statement returns no row and the import proceeds unchanged.

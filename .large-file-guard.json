@@ -104,6 +104,7 @@
     "tests/test_retry_cancel_consistency.py",
     "tests/test_monitoring_api.py",
     "services/orchestrator/file_orchestration_migration.py",
-    "tests/test_file_orchestration_migration.py"
+    "tests/test_file_orchestration_migration.py",
+    "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json"
   ]
 }
