@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
-from packages.common.model_registry import PsycopgModelRegistryStore
+from packages.common.model_registry import EVIDENCE_ONLY_BASIN_GROUP, PsycopgModelRegistryStore
 
 # Full registry: one basin with a ready (published) run, one with only a
 # non-ready (downloading) run, one with no runs at all.
@@ -97,10 +97,11 @@ def test_default_returns_all_basins_backward_compatible(
 
     ids = {b["basin_id"] for b in basins}
     assert ids == {"basins_qhh", "basins_downloading", "basins_empty"}
-    # default path issues no ready filter and passes only (limit, offset).
+    # default path issues no ready filter; only the #1729 evidence-only
+    # exclusion precedes (limit, offset).
     stmt = captured[0]
     assert "EXISTS" not in stmt["sql"]
-    assert stmt["params"] == (200, 0)
+    assert stmt["params"] == (EVIDENCE_ONLY_BASIN_GROUP, 200, 0)
 
 
 def test_non_ready_only_basin_excluded_consistent_with_latest_product(

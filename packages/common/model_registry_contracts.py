@@ -73,6 +73,11 @@ MODEL_LIFECYCLE_ACTIONS: dict[str, str] = {
     "deprecate": "models.deactivate",
 }
 
+# #1729: ``core.basin.basin_group`` of synthetic evidence fixtures. ``core.basin``
+# has no ``active_flag``, so public basin / model discovery excludes this group
+# instead (NULL and every other group stay visible).
+EVIDENCE_ONLY_BASIN_GROUP = "evidence-only"
+
 
 SELECTED_SEGMENT_GEOMETRY_MAX_COORDINATES = 10_000
 SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS = 3

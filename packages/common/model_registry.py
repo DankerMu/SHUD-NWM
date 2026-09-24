@@ -30,6 +30,7 @@ from packages.common.auth_policy import require_policy_evidence as require_polic
 from packages.common.auth_policy import trusted_internal_policy_decision as trusted_internal_policy_decision
 from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES as QHH_LATEST_READY_RUN_STATUSES
 from packages.common.model_registry_catalog import _RegistryCatalogMixin
+from packages.common.model_registry_contracts import EVIDENCE_ONLY_BASIN_GROUP as EVIDENCE_ONLY_BASIN_GROUP
 from packages.common.model_registry_contracts import MODEL_LIFECYCLE_ACTIONS as MODEL_LIFECYCLE_ACTIONS
 from packages.common.model_registry_contracts import MODEL_LIFECYCLE_STATES as MODEL_LIFECYCLE_STATES
 from packages.common.model_registry_contracts import (

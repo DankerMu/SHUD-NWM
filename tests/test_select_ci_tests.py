@@ -11141,6 +11141,28 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
             "tests/test_river_ts_read_path_surrogate_keys_integration.py",
         ),
         ("db/seeds/seed_demo.py", "tests/test_river_ts_dual_write_integration.py"),
+        # #1729 / #1480: the one-shot node-27 data scripts and their runner.
+        ("scripts/ops/node27_oneshot_sql.py", "tests/test_node27_1729_evidence_basin_delete_integration.py"),
+        (
+            "scripts/ops/node27_1729_delete_evidence_basin.sql",
+            "tests/test_node27_1729_evidence_basin_delete_integration.py",
+        ),
+        (
+            "scripts/ops/node27_1729_delete_evidence_basin_backup.sql",
+            "tests/test_node27_1729_evidence_basin_delete_integration.py",
+        ),
+        (
+            "scripts/ops/node27_1729_delete_evidence_basin_rollback.sql",
+            "tests/test_node27_1729_evidence_basin_delete_integration.py",
+        ),
+        (
+            "scripts/ops/node27_1480_backfill_seed_station_provenance.sql",
+            "tests/test_node27_1480_seed_provenance_backfill_integration.py",
+        ),
+        (
+            "scripts/ops/node27_1480_backfill_seed_station_provenance_rollback.sql",
+            "tests/test_node27_1480_seed_provenance_backfill_integration.py",
+        ),
     ),
 )
 def test_river_expand_sources_open_the_database_lane(module_path: str, suite: str) -> None:

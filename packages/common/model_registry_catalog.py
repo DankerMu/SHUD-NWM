@@ -15,6 +15,7 @@ from typing import Any
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
 from packages.common.model_registry_contracts import (
+    EVIDENCE_ONLY_BASIN_GROUP,
     DuplicateResourceError,
     InvalidPayloadError,
     InvalidReferenceError,
@@ -119,11 +120,13 @@ class _RegistryCatalogMixin:
         # should be discoverable); the concrete source/run_id is resolved later by
         # the latest-product query. So this stays a superset on source but is exact
         # on status/run_type/cycle_time.
+        # #1729: both paths drop evidence-only fixtures in SQL, before LIMIT /
+        # OFFSET, so page sizes count only public basins; NULL groups stay.
         display_filter = ""
-        parameters: tuple[Any, ...] = (limit, offset)
+        parameters: tuple[Any, ...] = (EVIDENCE_ONLY_BASIN_GROUP, limit, offset)
         if has_display_product:
             display_filter = """
-                WHERE EXISTS (
+                AND EXISTS (
                     SELECT 1
                     FROM core.basin_version bv
                     JOIN hydro.hydro_run hr
@@ -135,12 +138,13 @@ class _RegistryCatalogMixin:
                       AND hr.cycle_time IS NOT NULL
                 )
                 """
-            parameters = (list(QHH_LATEST_READY_RUN_STATUSES), limit, offset)
+            parameters = (EVIDENCE_ONLY_BASIN_GROUP, list(QHH_LATEST_READY_RUN_STATUSES), limit, offset)
         with self._transaction() as cursor:
             cursor.execute(
                 f"""
                 SELECT basin_id, basin_name, basin_group, description, created_at
                 FROM core.basin
+                WHERE basin_group IS DISTINCT FROM %s
                 {display_filter}
                 ORDER BY basin_name, basin_id
                 LIMIT %s OFFSET %s
@@ -151,7 +155,12 @@ class _RegistryCatalogMixin:
 
     def list_basin_versions(self, *, basin_id: str, limit: int, offset: int) -> list[dict[str, Any]]:
         with self._transaction() as cursor:
-            if not self._exists(cursor, "core.basin", "basin_id", basin_id):
+            # #1729: an evidence-only basin answers exactly like a missing one.
+            cursor.execute(
+                "SELECT 1 FROM core.basin WHERE basin_id = %s AND basin_group IS DISTINCT FROM %s",
+                (basin_id, EVIDENCE_ONLY_BASIN_GROUP),
+            )
+            if cursor.fetchone() is None:
                 raise MissingResourceError(f"basin_id not found: {basin_id}")
             cursor.execute(
                 """
@@ -428,7 +437,11 @@ class _RegistryCatalogMixin:
         if active is not None:
             clauses.append("active_flag = %s")
             parameters.append(active)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        # #1729: models under an evidence-only basin stay out of every active
+        # mode (count and page alike); `b.` is untouched by the requalification.
+        clauses.append("b.basin_group IS DISTINCT FROM %s")
+        parameters.append(EVIDENCE_ONLY_BASIN_GROUP)
+        where = f"WHERE {' AND '.join(clauses)}"
 
         # JOIN basin_version + basin so each row carries basin_id / basin_name —
         # parity with get_model_internal. OpenAPI ModelInstance schema declares
@@ -446,7 +459,13 @@ class _RegistryCatalogMixin:
         )
         with self._transaction() as cursor:
             cursor.execute(
-                f"SELECT COUNT(*) AS total FROM core.model_instance mi {join_where}",
+                f"""
+                SELECT COUNT(*) AS total
+                FROM core.model_instance mi
+                JOIN core.basin_version bv ON bv.basin_version_id = mi.basin_version_id
+                JOIN core.basin b ON b.basin_id = bv.basin_id
+                {join_where}
+                """,
                 tuple(parameters),
             )
             total = int(cursor.fetchone()["total"])
@@ -468,6 +487,14 @@ class _RegistryCatalogMixin:
     def get_model(self, model_id: str) -> dict[str, Any]:
         row = self.get_model_internal(model_id)
         if row is None:
+            raise MissingResourceError(f"model_id not found: {model_id}")
+        # #1729: the public detail hides an evidence-only basin's model like a
+        # missing one; ``get_model_internal`` (scheduler / lifecycle) does not,
+        # and its row stays free of ``basin_group`` so no response shape moves.
+        with self._transaction() as cursor:
+            cursor.execute("SELECT basin_group FROM core.basin WHERE basin_id = %s", (row["basin_id"],))
+            basin = cursor.fetchone()
+        if basin is not None and basin.get("basin_group") == EVIDENCE_ONLY_BASIN_GROUP:
             raise MissingResourceError(f"model_id not found: {model_id}")
         return _model_asset_detail(row)
 
