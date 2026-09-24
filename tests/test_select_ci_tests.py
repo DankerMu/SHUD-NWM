@@ -42,6 +42,9 @@ from scripts.select_ci_tests import (
     CORE_SMOKE_TESTS,
     DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
+    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
+    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
+    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     ENTROPY_AUDIT_HELPERS_PATH,
@@ -1564,7 +1567,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # test_openapi_31_contract.py are the one-hop contributions through
         # apps/api/routes/hydro_display.py and
         # apps/api/openapi_patching.py respectively.
-        "tests/test_direct_grid_display_cutover_flip.py",
+        # #2527: the flip suite is two partitions, both carried by the rule
+        # (synced from the selector's own output).
+        "tests/test_direct_grid_display_cutover_flip_atomic.py",
+        "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
         "tests/test_direct_grid_display_cutover_history.py",
         "tests/test_direct_grid_display_cutover_model_resolution.py",
         # I1 #1980: mvt.py's six river read templates are registered and
@@ -2662,6 +2668,73 @@ def test_node22_refresh_timer_health_partition_tracked_tree_is_exactly_five_suit
     for pattern in ("docs/runbooks/current-production-ops.md", PRODUCTION_OPS_SUBRUNBOOK_GLOB):
         targets = set(rule_for(pattern).tests)
         assert targets & partitions == runbook_readers, sorted((targets & partitions) ^ runbook_readers)
+
+    # The helper's support rule is only honest if it equals what the tracked
+    # tree derives.
+    helper_targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
+    assert helper_targets == partitions, sorted(helper_targets ^ partitions)
+    derived = _derived_support_module_importers([helper])[helper]
+    assert derived == partitions, sorted(derived ^ partitions)
+
+
+def test_direct_grid_display_cutover_flip_partition_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # #2527: two collectible partitions plus one non-collectible helper is a
+    # floor, not a preference. A third partition, a leftover compatibility shim
+    # for the deleted 1814-line monolith, or the helper renamed into a
+    # `test_*.py` suite all redden here. Expected membership is the selector's
+    # own tuple, never a glob result -- the glob is the MUTANT side.
+    #
+    # Both corpus filters are PREFIXES on the file NAME, so neither sweeps in the
+    # sibling cutover suites (tests/test_direct_grid_display_cutover_history.py,
+    # ..._model_resolution.py, ..._b4_leak.py); the suite prefix also catches a
+    # resurrected monolith.
+    partitions = set(DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS)
+    helper = DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH
+    atomic = DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST
+    tracked = set(_tracked_python_files("tests"))
+
+    assert len(partitions) == 2, sorted(partitions)
+    assert atomic in partitions
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    assert not Path("tests/test_direct_grid_display_cutover_flip.py").exists(), (
+        "the pre-#2527 monolith is back; it would duplicate all 15 cases and "
+        "no display rule routes it"
+    )
+    suite_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_direct_grid_display_cutover_flip")
+    }
+    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
+    helper_corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("direct_grid_display_cutover_flip")
+    }
+    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
+        return next(rule for rule in table if rule.pattern == pattern)
+
+    # Every route that carried the monolith carries the WHOLE corpus, so each
+    # still selects the 15 cases it selected before the split.
+    for pattern in ("services/tiles/mvt.py", "apps/api/routes/hydro_display*.py"):
+        targets = set(rule_for(pattern).tests)
+        assert partitions <= targets, f"{pattern} lost partition(s): {sorted(partitions - targets)}"
+
+    # The closure registries anchor on `_atomic` because it alone holds the
+    # module-scope facade import; read it from the source, not the tuple.
+    assert "_station_source_version" in _names_imported_from(atomic, "apps.api.routes.hydro_display")
+    assert atomic in _non_gated_top_level_importer_tests("apps.api.routes.hydro_display")
+
+    # #1561: the importer index walks SUITES only, so the helper's own import of
+    # tests.test_variant_activation_cutover routes nothing; each partition must
+    # carry that edge itself for a change to that suite to reach it.
+    for owner in partitions:
+        assert _names_imported_from(owner, "tests.test_variant_activation_cutover"), owner
+    cutover_selected = set(select_tests(["tests/test_variant_activation_cutover.py"], repo_root=Path(".")))
+    assert partitions <= cutover_selected, sorted(partitions - cutover_selected)
 
     # The helper's support rule is only honest if it equals what the tracked
     # tree derives.
@@ -5065,10 +5138,13 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
     # scripts/select_ci_tests.py) carries the derived direct UNION one-hop
     # non-gated importer closure; this entry makes the closure guard derive it
     # from the tracked tree, so a new importer suite reddens the guard.
+    # #2527: the flip monolith is two partitions; only `_atomic` still imports
+    # `_station_source_version` from the facade at module scope, so it is the
+    # known member.
     (
         "apps/api/routes/hydro_display.py",
         "apps.api.routes.hydro_display",
-        "tests/test_direct_grid_display_cutover_flip.py",
+        "tests/test_direct_grid_display_cutover_flip_atomic.py",
     ),
     # #2026: the two owner modules split out of the facade that tests import
     # DIRECTLY, because their patch targets moved with their whole consumer set
@@ -11867,6 +11943,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # here means the base partition stopped importing the shared stores, which
     # would mean the doubles were duplicated back into the partitions.
     ("tests/api_contract_helpers.py", "tests/test_api_contract.py"),
+    # #2527: the station-flag flip harness. Anchored on `_atomic`, the partition
+    # the hydro_display closure registries also pin.
+    (DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH, DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
@@ -13896,7 +13975,9 @@ def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
 
     # Anti-vacuity: one known direct and one known one-hop member must be in
     # the derived set, so a derivation that collapses to silence reds here.
-    assert "tests/test_direct_grid_display_cutover_flip.py" in required
+    # #2527: `_atomic` is the flip partition holding the module-scope
+    # `from apps.api.routes.hydro_display import _station_source_version`.
+    assert "tests/test_direct_grid_display_cutover_flip_atomic.py" in required
     assert "tests/test_openapi_31_contract.py" in required
     # #2156 (D-2): the geometry-identity suite is a direct importer carrying the
     # real _run_row / _river_network_source_version SQL; pinned by name so its

@@ -28,11 +28,11 @@
 
 ## 2. #2527 — `tests/test_direct_grid_display_cutover_flip.py`（1814 行）
 
-- [ ] 2.1 harness/fixtures → 非收集 helper；SUB-1 原子 flip/回滚族、SUB-2 MVT 集合族 → 两个分区，各 < 1000
-- [ ] 2.2 删除该条 exclude；`docs/runbooks/qhh-mvp-production-like-e2e-checklist.md` 豁免保留
-- [ ] 2.3 磁盘结构锁 `def _station_source_version` 断言仍读 `apps/api/routes/hydro_display_identity.py`、repo-root 解析不变；反例演练（改断言串一个字符 → 红）
-- [ ] 2.4 `scripts/select_ci_tests.py` 中 `hydro_display` / `hydro_display_catalog` importer 闭包注册表与字面量 rule target 覆盖全部新分区；`tests/test_select_ci_tests.py` 的 `GUARDED_MODULE_CLOSURES` known-member、mvt 精确集合 pin、反 vacuity 锚点改指（design D6）；新增 tracked-tree 守卫；mutation 红证
-- [ ] 2.5 Evidence：suffix 集合与 0.1 逐字节相等（记录计数）；指纹零漂移；`uv run pytest -q tests/test_direct_grid_display_cutover_*.py tests/test_select_ci_tests.py` 绿
+- [x] 2.1 harness/fixtures → 非收集 helper；SUB-1 原子 flip/回滚族、SUB-2 MVT 集合族 → 两个分区，各 < 1000
+- [x] 2.2 删除该条 exclude；`docs/runbooks/qhh-mvp-production-like-e2e-checklist.md` 豁免保留
+- [x] 2.3 磁盘结构锁 `def _station_source_version` 断言仍读 `apps/api/routes/hydro_display_identity.py`、repo-root 解析不变；反例演练（改断言串一个字符 → 红）
+- [x] 2.4 `scripts/select_ci_tests.py` 中 `hydro_display` / `hydro_display_catalog` importer 闭包注册表与字面量 rule target 覆盖全部新分区；`tests/test_select_ci_tests.py` 的 `GUARDED_MODULE_CLOSURES` known-member、mvt 精确集合 pin、反 vacuity 锚点改指（design D6）；新增 tracked-tree 守卫；mutation 红证
+- [x] 2.5 Evidence：suffix 集合与 0.1 逐字节相等（记录计数）；指纹零漂移；`uv run pytest -q tests/test_direct_grid_display_cutover_*.py tests/test_select_ci_tests.py` 绿
 
 ## 3. #2460 — `basins_discovery.py`（1118）+ `basins_package_source_io.py`（999）
 

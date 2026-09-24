@@ -1635,6 +1635,31 @@ HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS: tuple[str, ...] = tuple(
     }
 )
 
+# #2527 partitioned tests/test_direct_grid_display_cutover_flip.py (1814 lines,
+# 15 cases) into these two collectible suites plus one non-collectible helper.
+# The monolith is GONE with no compatibility shim, so every rule site that named
+# it by hand was re-pointed; a rule target that no longer exists is only a
+# WARNING here, so a forgotten site would have dropped the station-flag flip lock
+# out of the PR lane in silence.
+#
+# ONE tuple, carried whole by both display rules (`services/tiles/mvt.py` and the
+# `apps/api/routes/hydro_display*.py` glob), so each route still selects the 15
+# cases it selected before the split. This is deliberately wider than the
+# derived closure: only the `_atomic` partition imports
+# `apps.api.routes.hydro_display` (for `_station_source_version`, whose on-disk
+# body in hydro_display_identity.py it structurally locks), while the `_mvt_set`
+# partition's `_mvt_station_set` is a model of exactly that row-selection
+# predicate and imports no display module. A predicate edit that the lock
+# catches must also run the model that mirrors it. The `_atomic` partition is
+# therefore the anti-vacuity anchor in tests/test_select_ci_tests.py; the
+# tracked-tree guard there pins exactly two suites + one helper.
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH = "tests/direct_grid_display_cutover_flip_helpers.py"
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST = "tests/test_direct_grid_display_cutover_flip_atomic.py"
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (
+    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
+    "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
+)
+
 
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
@@ -1837,6 +1862,15 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # so the routed set IS the derived closure.
         "tests/hydro_display_mvt_helpers.py",
         HYDRO_DISPLAY_MVT_SCALING_TESTS,
+    ),
+    PathTestRule(
+        # #2527: the station-flag flip harness both flip partitions share -- the
+        # `met.met_station` fake, the fake cursor / transaction, the
+        # `_FlipHarnessStore` that drives the real lifecycle path, the audit
+        # recorder and the model / mirror factories. Both partitions import it at
+        # module scope, so the routed set IS the derived closure.
+        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
+        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
     ),
     PathTestRule(
         # #2074: the single home of the six mock stores, the retry gateway double
@@ -3310,7 +3344,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
             # so requiring them buys constant skips and zero assertions.
-            "tests/test_direct_grid_display_cutover_flip.py",
+            # #2527: the flip suite is two partitions; the row carries both
+            # (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS for why both).
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
@@ -3405,7 +3441,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # extended to the current mechanically derived direct UNION one-hop
         # non-gated importer closure (tests/test_select_ci_tests.py derives the
         # required set from the tracked tree, never frozen). The three cutover
-        # suites, display status-only, HHE/MVT, node-27 compression and
+        # suites (four files since #2527 split the flip suite in two; only its
+        # `_atomic` partition is a derived importer), display status-only, HHE/MVT, node-27 compression and
         # attribution suites are direct importers; the 3.1-contract and
         # runtime-mode suites are the one-hop contributions via
         # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
@@ -3434,7 +3471,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # suite imports get_hydro_display_session from this module at file
             # level, so it is a direct non-gated importer.
             "tests/test_api_errors_logging.py",
-            "tests/test_direct_grid_display_cutover_flip.py",
+            # #2527: the flip suite is two partitions; the row carries both.
+            # Only `_atomic` is a derived direct importer of this family; the
+            # `_mvt_set` partition rides along as the model of the predicate
+            # `_atomic` locks (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS).
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_display_publish_status_only.py",

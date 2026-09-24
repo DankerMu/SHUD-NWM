@@ -87,7 +87,6 @@
     "services/orchestrator/retry.py",
     "apps/api/routes/pipeline.py",
     "apps/frontend/src/api/types.ts",
-    "tests/test_direct_grid_display_cutover_flip.py",
     "tests/test_precip_overlay.py",
     "workers/canonical_converter/converter.py",
     "tests/test_canonical_converter.py",
