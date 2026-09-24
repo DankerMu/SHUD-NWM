@@ -8,6 +8,12 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
+from apps.api.response_models.forecast import (
+    ForecastSeriesResponse,
+    HydroRunEnvelope,
+    HydroRunPageEnvelope,
+    QhhLatestProductEnvelope,
+)
 from packages.common.forecast_store import (
     QHH_BASIN_ID,
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
@@ -31,7 +37,11 @@ def get_forecast_store() -> PsycopgForecastStore:
         raise _api_error(error) from error
 
 
-@router.get("/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series")
+@router.get(
+    "/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series",
+    response_model=ForecastSeriesResponse,
+    response_model_exclude_unset=True,
+)
 def get_forecast_series(
     request: Request,
     basin_version_id: str,
@@ -79,7 +89,11 @@ def get_forecast_series(
         raise _api_error(error) from error
 
 
-@router.get("/runs/{run_id}")
+@router.get(
+    "/runs/{run_id}",
+    response_model=HydroRunEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_run(
     run_id: str,
     request: Request,
@@ -91,7 +105,11 @@ def get_run(
         raise _api_error(error) from error
 
 
-@router.get("/runs")
+@router.get(
+    "/runs",
+    response_model=HydroRunPageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_runs(
     request: Request,
     basin_id: str | None = None,
@@ -133,7 +151,12 @@ def list_runs(
         raise _api_error(error) from error
 
 
-@router.get("/mvp/qhh/latest-product", operation_id="getQhhLatestProduct")
+@router.get(
+    "/mvp/qhh/latest-product",
+    operation_id="getQhhLatestProduct",
+    response_model=QhhLatestProductEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_qhh_latest_product(
     request: Request,
     source: str | None = Query(

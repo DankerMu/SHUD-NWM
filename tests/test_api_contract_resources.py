@@ -48,7 +48,23 @@ def test_data_sources_contract_uses_success_envelope() -> None:
     assert response.status_code == 200
     data = _assert_success_envelope(response.json())
     assert data == {
-        "items": [{"source_id": "GFS", "provider": "NOAA/NCEP", "format": "GRIB2"}],
+        "items": [
+            {
+                "source_id": "GFS",
+                "source_name": "GFS",
+                "source_type": "forecast",
+                "status": "enabled",
+                "native_format": "GRIB2",
+                "license_status": None,
+                "adapter_name": "gfs_adapter",
+                "config_json": {"provider": "NOAA/NCEP", "cycle_hours_utc": [0, 12]},
+                "created_at": "2026-05-14T00:00:00Z",
+                "provider": "NOAA/NCEP",
+                "source": "gfs",
+                "format": "GRIB2",
+                "description": "GFS",
+            }
+        ],
         "total_count": 1,
         "limit": 5,
         "offset": 0,
@@ -65,7 +81,22 @@ def test_data_source_cycles_contract_uses_success_envelope() -> None:
 
     assert response.status_code == 200
     data = _assert_success_envelope(response.json())
-    assert data["items"] == [{"cycle_id": "GFS_2026051400", "source_id": "GFS", "status": "raw_complete"}]
+    assert data["items"] == [
+        {
+            "cycle_id": "GFS_2026051400",
+            "source_id": "GFS",
+            "cycle_time": "2026-05-14T00:00:00Z",
+            "issue_time": "2026-05-14T00:00:00Z",
+            "status": "raw_complete",
+            "manifest_uri": "s3://nhms/raw/GFS/2026051400/manifest.json",
+            "retry_count": 0,
+            "error_code": None,
+            "error_message": None,
+            "created_at": "2026-05-14T03:00:00Z",
+            "file_count": None,
+            "quality_flag": "ok",
+        }
+    ]
     assert data["limit"] == 5
     assert data["offset"] == 0
 
@@ -80,7 +111,21 @@ def test_met_stations_contract_uses_success_envelope() -> None:
 
     assert response.status_code == 200
     data = _assert_success_envelope(response.json())
-    assert data["items"] == [{"station_id": "station_1", "basin_version_id": "basin_v1", "active_flag": True}]
+    assert data["items"] == [
+        {
+            "station_id": "station_1",
+            "basin_version_id": "basin_v1",
+            "station_name": "Station 1",
+            "name": "Station 1",
+            "longitude": 101.0,
+            "latitude": 36.0,
+            "elevation_m": 3200.0,
+            "elevation": 3200.0,
+            "station_role": "forcing_proxy",
+            "properties_json": {"source": "fixture"},
+            "created_at": "2026-05-14T00:00:00Z",
+        }
+    ]
 
 
 def test_met_stations_repeated_variables_query_binds_all_values() -> None:
@@ -472,7 +517,9 @@ def test_forecast_series_contract_accepts_include_analysis_query() -> None:
     assert data["segments"] == [
         {
             "scenario": "analysis_true_field",
+            "scenario_id": "analysis_true_field",
             "source": "ERA5",
+            "segment_role": "past_3_days",
             "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
         }
     ]

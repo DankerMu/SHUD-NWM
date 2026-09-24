@@ -18,27 +18,30 @@
 ## 1. Baselines
 
 - [x] 1.1 Live pre-state recorded in `.workplans/l1/`: 21 route snapshots, the `/runs` key set, the 3-spelling sha256, and the p50 timings. The live `hydro_run` has no `timeseries_store` column.
-- [ ] 1.2 Record the exact dump call and settings that round-trip `openapi/nhms.v1.yaml` byte for byte from `app.openapi()` on `c9f363b38` (2.4 prerequisite).
+- [x] 1.2 Record the exact dump call and settings that round-trip `openapi/nhms.v1.yaml` byte for byte from `app.openapi()` on `c9f363b38` (2.4 prerequisite).
+  - Finding: no `yaml.safe_dump` setting round-trips it. The closest, `yaml.safe_dump(app.openapi(), sort_keys=False, allow_unicode=True, width=81)`, still differs on 275 lines (hand-kept blank lines in the ops envelope blocks, unwrapped `OpsStrictIdentity` descriptions, one `|-` block, component order). The file stays hand-maintained, and `test_openapi_drift` compares it semantically (`yaml.safe_load(static) == app.openapi()`).
+  - So 2.4 regenerates structurally: replace or insert only the changed operation and component blocks, dumped with those settings, and assert the semantic round-trip.
 
 ## 2. Implementation
 
-- [ ] 2.1 #2222:
+- [x] 2.1 #2222:
   - `HYDRO_RUN_PUBLIC_COLUMNS`; explicit projection in `get_run` / `list_runs`.
   - Serializer allowlist.
   - `HydroRun` / `HydroRunPage` models on both routes.
   - Detail schema references `HydroRun`.
   - Tests with `timeseries_store` + `authority_internal` rows.
 - [x] 2.2 #2177: lowercase `source` in the cache key only, plus the tests listed in D3.
-- [ ] 2.3 #2348:
+- [x] 2.3 #2348:
   - `apps/api/response_models/` package covering all 35 JSON routes; envelope reshaping generalised.
   - Type-strict `tests/test_response_model_preservation.py` oracle over handler-object samples (every alternative success shape) and the route-table completeness check.
   - `tests/test_response_model_schema_parity.py`.
   - `ResponseValidationError` envelope handler and its test.
   - Mutation red-proofs (named samples).
-- [ ] 2.4 `openapi/nhms.v1.yaml` and `apps/frontend/src/api/types.ts` regenerated. `test_openapi_drift`, `test_openapi_response_conformance` and `pnpm check:api-types` / `test` / `build` green.
-- [ ] 2.5 Full-size `serialize_response` benchmark, master field vs new field: basin versions, river-segments, model detail, pipeline stages, forecast-series, latest-product, runs page. Numbers go in the PR body.
+  - Ops pipeline samples: `tests/test_response_model_preservation_pipeline.py`. This keeps the oracle file under the 1000-line guard.
+- [x] 2.4 `openapi/nhms.v1.yaml` and `apps/frontend/src/api/types.ts` regenerated. `test_openapi_drift`, `test_openapi_response_conformance` and `pnpm check:api-types` / `test` / `build` green.
+- [x] 2.5 Full-size `serialize_response` benchmark, master field vs new field: basin versions, river-segments, model detail, pipeline stages, forecast-series, latest-product, runs page. Numbers go in the PR body.
 - [x] 2.6 #2216: narrow-store tasks.md 1.15, per `fixtures/I1-1980.md` § Issue #2216.
-- [ ] 2.7 Selector and CI routing for the new package and tests; tracked-tree guards green.
+- [x] 2.7 Selector and CI routing for the new package and tests; tracked-tree guards green.
 
 ## 3. Verification
 

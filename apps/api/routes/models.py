@@ -11,6 +11,22 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
+from apps.api.response_models.models import (
+    BasinCreateResultEnvelope,
+    BasinListEnvelope,
+    BasinVersionListEnvelope,
+    BasinVersionRecordEnvelope,
+    CrosswalkCreateResultEnvelope,
+    MeshVersionRecordEnvelope,
+    ModelInstanceEnvelope,
+    ModelInstancePageEnvelope,
+    ModelInstanceRecordEnvelope,
+    ModelLifecycleResultEnvelope,
+    ModelOperationPreflightEnvelope,
+    RiverNetworkCreateResultEnvelope,
+    RiverSegmentEnvelope,
+    RiverSegmentFeatureCollectionEnvelope,
+)
 from packages.common.model_registry import (
     RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
     RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
@@ -331,7 +347,12 @@ def _handle_registry_error(error: Exception) -> ApiError:
     )
 
 
-@router.post("/basins", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/basins",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BasinCreateResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_basin(
     request: Request,
     payload: BasinCreatePayload,
@@ -346,7 +367,12 @@ def create_basin(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/basins/{basin_id}/versions", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/basins/{basin_id}/versions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BasinVersionRecordEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_basin_version(
     request: Request,
     basin_id: str,
@@ -362,7 +388,11 @@ def create_basin_version(
         raise _handle_registry_error(error) from error
 
 
-@router.get("/basins")
+@router.get(
+    "/basins",
+    response_model=BasinListEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_basins(
     request: Request,
     limit: int = Query(default=200, ge=1, le=500),
@@ -381,7 +411,11 @@ def list_basins(
         raise _handle_registry_error(error) from error
 
 
-@router.get("/basins/{basin_id}/versions")
+@router.get(
+    "/basins/{basin_id}/versions",
+    response_model=BasinVersionListEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_basin_versions(
     request: Request,
     basin_id: str,
@@ -402,7 +436,12 @@ def list_basin_versions(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/river-networks", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/river-networks",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RiverNetworkCreateResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_river_network(
     request: Request,
     payload: RiverNetworkCreatePayload,
@@ -424,6 +463,8 @@ def create_river_network(
             "description": "River segment GeoJSON payload budget exceeded.",
         },
     },
+    response_model=RiverSegmentFeatureCollectionEnvelope,
+    response_model_exclude_unset=True,
 )
 def list_river_segments(
     request: Request,
@@ -494,6 +535,8 @@ def list_river_segments(
             "description": "River segment GeoJSON payload budget exceeded.",
         },
     },
+    response_model=RiverSegmentEnvelope,
+    response_model_exclude_unset=True,
 )
 def get_river_segment(
     request: Request,
@@ -537,7 +580,12 @@ def _enforce_river_segment_response_budget(payload: dict[str, Any], *, max_bytes
         )
 
 
-@router.post("/mesh-versions", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/mesh-versions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=MeshVersionRecordEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_mesh_version(
     request: Request,
     payload: MeshVersionCreatePayload,
@@ -552,7 +600,12 @@ def create_mesh_version(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/models", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/models",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ModelInstanceRecordEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_model(
     request: Request,
     payload: ModelCreatePayload,
@@ -568,7 +621,11 @@ def create_model(
         raise _handle_registry_error(error) from error
 
 
-@router.put("/models/{model_id}/active")
+@router.put(
+    "/models/{model_id}/active",
+    response_model=ModelLifecycleResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def set_model_active(
     request: Request,
     model_id: str,
@@ -590,7 +647,11 @@ def set_model_active(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/models/{model_id}/preflight")
+@router.post(
+    "/models/{model_id}/preflight",
+    response_model=ModelOperationPreflightEnvelope,
+    response_model_exclude_unset=True,
+)
 def preflight_model_lifecycle(
     request: Request,
     model_id: str,
@@ -617,7 +678,11 @@ def preflight_model_lifecycle(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/models/{model_id}/lifecycle")
+@router.post(
+    "/models/{model_id}/lifecycle",
+    response_model=ModelLifecycleResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def model_lifecycle_operation(
     request: Request,
     model_id: str,
@@ -644,7 +709,11 @@ def model_lifecycle_operation(
         raise _handle_registry_error(error) from error
 
 
-@router.get("/models")
+@router.get(
+    "/models",
+    response_model=ModelInstancePageEnvelope,
+    response_model_exclude_unset=True,
+)
 def list_models(
     request: Request,
     basin_version_id: str | None = None,
@@ -679,7 +748,11 @@ def list_models(
         raise _handle_registry_error(error) from error
 
 
-@router.get("/models/{model_id}")
+@router.get(
+    "/models/{model_id}",
+    response_model=ModelInstanceEnvelope,
+    response_model_exclude_unset=True,
+)
 def get_model(
     request: Request,
     model_id: str,
@@ -693,7 +766,12 @@ def get_model(
         raise _handle_registry_error(error) from error
 
 
-@router.post("/river-segment-crosswalks", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/river-segment-crosswalks",
+    status_code=status.HTTP_201_CREATED,
+    response_model=CrosswalkCreateResultEnvelope,
+    response_model_exclude_unset=True,
+)
 def create_river_segment_crosswalks(
     request: Request,
     payload: CrosswalkCreatePayload,

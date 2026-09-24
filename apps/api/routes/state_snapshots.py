@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 
 from apps.api.errors import ApiError
+from apps.api.response_models.state_snapshots import StateSnapshot, StateSnapshotPage
 from apps.api.routes.forecast import DEFAULT_LIMIT, MAX_LIMIT
 from packages.common.state_manager import StateManager, StateManagerError, state_snapshot_to_dict
 
@@ -21,7 +22,11 @@ def get_state_manager() -> StateManager:
         raise _api_error(500, "STATE_MANAGER_UNAVAILABLE", str(error)) from error
 
 
-@router.get("/state-snapshots")
+@router.get(
+    "/state-snapshots",
+    response_model=StateSnapshotPage,
+    response_model_exclude_unset=True,
+)
 def list_state_snapshots(
     model_id: str | None = None,
     usable: bool | None = None,
@@ -40,7 +45,11 @@ def list_state_snapshots(
         raise _api_error(500, "STATE_MANAGER_ERROR", str(error)) from error
 
 
-@router.get("/state-snapshots/{state_id}")
+@router.get(
+    "/state-snapshots/{state_id}",
+    response_model=StateSnapshot,
+    response_model_exclude_unset=True,
+)
 def get_state_snapshot(
     state_id: str,
     manager: StateManager = Depends(get_state_manager),

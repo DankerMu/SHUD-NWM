@@ -24,6 +24,7 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
     _forecast_response_from_rows,
+    _hydro_run_response,
     _PsycopgTransaction,
     _ResolvedRuns,
     _spliced_response_from_rows,
@@ -71,6 +72,38 @@ def test_display_coverage_refresh_timeout_is_bounded_and_configurable(
     assert _refresh_statement_timeout_ms() == expected
 
 
+def _public_hydro_run_row(run_id: str, *, status: str) -> dict[str, Any]:
+    """A complete `get_run`/`list_runs` row (#2222 public projection, #2348)."""
+    created_at = _dt("2026-05-07T01:00:00Z")
+    return {
+        "run_id": run_id,
+        "run_type": "forecast",
+        "scenario_id": "forecast_gfs_deterministic",
+        "model_id": "model_001",
+        "basin_version_id": "basin_v1",
+        "forcing_version_id": "forc_001",
+        "init_state_id": None,
+        "source_id": "gfs",
+        "cycle_time": _dt("2026-05-07T00:00:00Z"),
+        "start_time": _dt("2026-05-07T00:00:00Z"),
+        "end_time": _dt("2026-05-14T00:00:00Z"),
+        "status": status,
+        "slurm_job_id": None,
+        "run_manifest_uri": f"s3://nhms/runs/{run_id}/input/manifest.json",
+        "output_uri": None,
+        "log_uri": None,
+        "error_code": None,
+        "error_message": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "run_key": 1,
+        "parsed_at": created_at,
+        "river_network_version_id": "network_v1",
+        "basin_id": "basin",
+        "source": "gfs",
+    }
+
+
 class FakeForecastStore:
     def __init__(self) -> None:
         self.forecast_calls: list[dict[str, Any]] = []
@@ -94,16 +127,21 @@ class FakeForecastStore:
                 }
             ],
         }
+        # #2348: segment members as `_spliced_response_from_rows` writes them.
         self.spliced_response = {
             "segments": [
                 {
                     "scenario": "analysis_true_field",
+                    "scenario_id": "analysis_true_field",
                     "source": "ERA5",
+                    "segment_role": "past_3_days",
                     "data": [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}],
                 },
                 {
                     "scenario": "forecast_gfs_deterministic",
+                    "scenario_id": "forecast_gfs_deterministic",
                     "source": "GFS",
+                    "segment_role": "future_7_days",
                     "data": [{"valid_time": "2026-05-07T00:00:00Z", "value": 11.25}],
                 },
             ],
@@ -116,7 +154,9 @@ class FakeForecastStore:
             "segments": [
                 {
                     "scenario": "analysis_true_field",
+                    "scenario_id": "analysis_true_field",
                     "source": "ERA5",
+                    "segment_role": "past_3_days",
                     "data": [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}],
                 }
             ],
@@ -266,13 +306,13 @@ class FakeForecastStore:
                 message="Run not found: missing",
                 details={"run_id": "missing"},
             )
-        return {"run_id": run_id, "status": "parsed", "source": "gfs"}
+        return _hydro_run_response(_public_hydro_run_row(run_id, status="parsed"))
 
     def list_runs(self, **kwargs: Any) -> dict[str, Any]:
         self.run_calls.append(kwargs)
         return {
             "total_count": 1,
-            "items": [{"run_id": "run_001", "status": kwargs.get("status") or "parsed"}],
+            "items": [_hydro_run_response(_public_hydro_run_row("run_001", status=kwargs.get("status") or "parsed"))],
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
         }

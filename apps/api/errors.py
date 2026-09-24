@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 
 from packages.common.auth_policy import redact_audit_payload
@@ -155,6 +155,49 @@ def register_error_handlers(app: FastAPI) -> None:
             message="Request validation failed.",
             details=details,
         )
+
+    @app.exception_handler(ResponseValidationError)
+    async def response_validation_error_handler(request: Request, exc: ResponseValidationError) -> JSONResponse:
+        """#2348: a handler payload its route's ``response_model`` rejects.
+
+        The client gets the standard envelope with ``details: null``; the one
+        server line carries only the failing locations and error types
+        (``response_validation_log_details``), never ``exc.body`` or any
+        ``input`` value -- the payload can be a multi-megabyte display body.
+        """
+        return error_response(
+            request,
+            status_code=500,
+            code=RESPONSE_VALIDATION_ERROR_CODE,
+            message=RESPONSE_VALIDATION_ERROR_MESSAGE,
+            details=None,
+            log_details=response_validation_log_details(exc),
+        )
+
+
+RESPONSE_VALIDATION_ERROR_CODE = "RESPONSE_VALIDATION_ERROR"
+RESPONSE_VALIDATION_ERROR_MESSAGE = "The server produced a response that does not match its declared schema."
+# Bounds the per-error projection written to the log line (the rendered line is
+# further bounded by `_DETAILS_RENDER_BUDGET_BYTES`).
+_RESPONSE_VALIDATION_LOG_ERROR_LIMIT = 20
+
+
+def response_validation_log_details(exc: ResponseValidationError) -> dict[str, Any]:
+    """``loc`` and ``type`` of each validation error -- nothing from the payload.
+
+    Every other member of a pydantic error (``input``, ``ctx``, ``msg``, ``url``)
+    can quote the rejected value, so none is copied. ``loc`` holds model field
+    names and list indices only: the response models' open mappings are
+    ``dict[str, Any]`` / ``extra="allow"``, which never fail on a key.
+    """
+    errors = list(exc.errors())
+    return {
+        "error_count": len(errors),
+        "errors": [
+            {"loc": ".".join(str(part) for part in error.get("loc", ())), "type": str(error.get("type", ""))}
+            for error in errors[:_RESPONSE_VALIDATION_LOG_ERROR_LIMIT]
+        ],
+    }
 
 
 def _redact_client_input_keys(value: Any) -> Any:
@@ -304,6 +347,10 @@ def _log_error_response(
         pass
 
 
+# `error_response(log_details=...)` default: log what the response carries.
+_LOG_THE_RESPONSE_DETAILS: Any = object()
+
+
 def error_response(
     request: Request,
     *,
@@ -312,6 +359,7 @@ def error_response(
     message: str,
     details: Any | None = None,
     headers: Mapping[str, str] | None = None,
+    log_details: Any = _LOG_THE_RESPONSE_DETAILS,
 ) -> JSONResponse:
     # Through the shared rule, not straight off `request.state`: this is the
     # fourth writer of the id (after the middleware, the pre-body auth path and
@@ -324,7 +372,7 @@ def error_response(
         request_id=request_id,
         status_code=status_code,
         code=code,
-        details=details,
+        details=details if log_details is _LOG_THE_RESPONSE_DETAILS else log_details,
     )
     body: dict[str, Any] = {
         "request_id": request_id,

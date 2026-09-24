@@ -716,10 +716,12 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
     # set — otherwise the patch owner could be edited in a PR lane that never
     # executes the drift or 3.1-contract oracles. Derived from the tracked tree,
     # so a new owner module that the glob fails to reach reds here.
+    # #2348 added the eighth owner, openapi_patching_response_models.py (the
+    # response-model envelope reshaping + unreferenced-component pruning).
     owner_modules = sorted(
         str(path) for path in Path("apps/api").glob("openapi_patching_*.py") if path.is_file()
     )
-    assert len(owner_modules) == 7, owner_modules
+    assert len(owner_modules) == 8, owner_modules
     for owner in owner_modules:
         assert select_tests([owner], repo_root=Path(".")) == expected, owner
     # tests/test_api.py is both a core-smoke member and a legitimate API
@@ -1495,6 +1497,8 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             *CORE_SMOKE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            # #2222: the `/runs` SQL allowlist + serializer live in this file.
+            "tests/test_hydro_run_public_projection.py",
             "tests/test_node27_pgdata_workload.py",
             "tests/test_node27_pgdata_workload_plan.py",
             "tests/test_node27_pgdata_workload_io.py",
@@ -10441,6 +10445,11 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # three `pipeline.py` metrics routes. Fixture material, not a subject — it
     # is selected by `openapi/**`, the surface it actually contracts.
     ("workers/data_adapters/base.py", "tests/test_openapi_response_conformance.py"): "edge-consumer",
+    # #2348: the pipeline half of the response-model oracle imports `cycle_id_for`
+    # to mint the cycle ids of the sqlite rows behind the ops routes it samples,
+    # exactly like the two suites above. Its subject is `apps/api/routes/pipeline.py`
+    # and `apps/api/response_models/**`, the rules that select it.
+    ("workers/data_adapters/base.py", "tests/test_response_model_preservation_pipeline.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_pipeline_logs_artifacts.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill.py"): "edge-consumer",
@@ -20666,3 +20675,70 @@ def test_the_forcing_sniff_documented_blind_spot_stays_blind(tmp_path: Path, sou
     assert set(FORCING_SQL_SHAPE_ORACLE_TESTS).isdisjoint(
         select_tests(["services/forcing_blind_spot.py"], repo_root=root)
     )
+
+
+# --------------------------------------------------------------------------- #
+# #2348 / #2222: response-model routing
+# --------------------------------------------------------------------------- #
+RESPONSE_MODEL_PRESERVATION = {
+    "tests/test_response_model_preservation.py",
+    "tests/test_response_model_preservation_pipeline.py",
+}
+RESPONSE_MODEL_PARITY = "tests/test_response_model_schema_parity.py"
+HYDRO_RUN_PROJECTION = "tests/test_hydro_run_public_projection.py"
+MODELLED_ROUTE_MODULES = (
+    "apps/api/routes/best_available.py",
+    "apps/api/routes/data_sources.py",
+    "apps/api/routes/forecast.py",
+    "apps/api/routes/models.py",
+    "apps/api/routes/pipeline.py",
+    "apps/api/routes/state_snapshots.py",
+)
+
+
+def test_every_response_model_module_selects_the_preservation_parity_and_openapi_oracles() -> None:
+    # Derived from the tree: a new module under apps/api/response_models/ that
+    # the directory rule failed to reach reds here.
+    modules = sorted(str(path) for path in Path("apps/api/response_models").glob("*.py"))
+    assert len(modules) == 8, modules
+    for module in modules:
+        selected = set(select_tests([module], repo_root=Path(".")))
+        expected = {
+            *RESPONSE_MODEL_PRESERVATION,
+            RESPONSE_MODEL_PARITY,
+            HYDRO_RUN_PROJECTION,
+            "tests/test_openapi_drift.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_response_conformance.py",
+        }
+        assert expected <= selected, (module, sorted(expected - selected))
+
+
+def test_every_modelled_route_module_selects_both_preservation_halves() -> None:
+    # The six route modules whose handlers feed a #2348 response model: the
+    # oracle is the only suite comparing their wire values with master.
+    from fastapi.routing import APIRoute
+
+    from apps.api.main import app
+
+    declared = {
+        f"apps/api/routes/{route.endpoint.__module__.rsplit('.', 1)[1]}.py"
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        and route.response_model is not None
+        and "apps.api.response_models" in repr(route.response_model)
+    }
+    assert declared == set(MODELLED_ROUTE_MODULES)
+    for module in MODELLED_ROUTE_MODULES:
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert RESPONSE_MODEL_PRESERVATION <= selected, (module, sorted(selected))
+    assert HYDRO_RUN_PROJECTION in select_tests(["apps/api/routes/forecast.py"], repo_root=Path("."))
+
+
+def test_hand_schema_owner_and_forecast_store_select_their_2348_oracles() -> None:
+    restored = set(select_tests(["apps/api/openapi_restored_schemas.py"], repo_root=Path(".")))
+    assert {RESPONSE_MODEL_PARITY, "tests/test_openapi_drift.py"} <= restored
+    assert HYDRO_RUN_PROJECTION in select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
+    # The store members of the attribution tuple do not inherit the oracle.
+    for store in ("packages/common/model_registry.py", "packages/common/object_store_forcing.py"):
+        assert not RESPONSE_MODEL_PRESERVATION & set(select_tests([store], repo_root=Path("."))), store

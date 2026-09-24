@@ -718,9 +718,27 @@ def test_warm_loop_replay_bound_is_the_module_constant(monkeypatch: pytest.Monke
     assert replayed[0][0] == hot_path
 
 
+def _run_item(run_id: str, **fields: Any) -> dict[str, Any]:
+    """A complete public `HydroRun` item: the route's response model (#2348) requires it."""
+    stamp = "2026-05-07T00:00:00Z"
+    return {
+        "run_id": run_id,
+        "run_type": "forecast",
+        "scenario_id": "forecast_gfs_deterministic",
+        "model_id": "model-a",
+        "basin_version_id": "basin-a_v1",
+        "river_network_version_id": "basin-a_rivnet",
+        "start_time": stamp,
+        "end_time": stamp,
+        "created_at": stamp,
+        "updated_at": stamp,
+        **fields,
+    }
+
+
 _EMPTY_RUNS_PAGE: dict[str, Any] = {"items": [], "total_count": 0, "limit": 1, "offset": 0}
 _ONE_RUN_PAGE: dict[str, Any] = {
-    "items": [{"run_id": "run-1", "basin_id": "basin-a", "status": "published"}],
+    "items": [_run_item("run-1", basin_id="basin-a", status="published")],
     "total_count": 1,
     "limit": 1,
     "offset": 0,
@@ -833,7 +851,7 @@ def test_a_literal_basin_id_none_does_not_fold_into_the_unfiltered_runs_entry() 
 # case; `basin_id` / `status` are exact-match filters and stay exact.
 # ---------------------------------------------------------------------------
 _GFS_RUN_PAGE: dict[str, Any] = {
-    "items": [{"run_id": "run-gfs", "basin_id": "basin-a", "source": "GFS", "status": "published"}],
+    "items": [_run_item("run-gfs", basin_id="basin-a", source="GFS", status="published")],
     "total_count": 1,
     "limit": 20,
     "offset": 0,
