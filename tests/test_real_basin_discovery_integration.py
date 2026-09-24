@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib
 import inspect
+import pkgutil
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,6 +36,26 @@ _BASIN_NO_CYCLE = f"{_PREFIX}_basin_no_cycle"
 _RUN_START = datetime(2026, 5, 14, 0, tzinfo=UTC)
 _RUN_END = datetime(2026, 5, 14, 1, tzinfo=UTC)
 _CYCLE_TIME = datetime(2026, 5, 14, 0, tzinfo=UTC)
+
+
+def _discovery_source() -> str:
+    """Source text of the model-registry facade and every ``model_registry_*`` owner module.
+
+    #2617 moved ``list_basins`` out of the facade into an owner module, so the
+    facade source alone would satisfy the absence check vacuously. The owner
+    modules are discovered from the package directory, and the module that
+    actually holds ``list_basins`` must be among them.
+    """
+    package_dir = Path(model_registry_module.__file__).parent
+    owner_names = sorted(
+        f"packages.common.{module.name}"
+        for module in pkgutil.iter_modules([str(package_dir)])
+        if module.name.startswith("model_registry_")
+    )
+    modules = [model_registry_module, *(importlib.import_module(name) for name in owner_names)]
+    list_basins_owner = sys.modules[PsycopgModelRegistryStore.list_basins.__module__]
+    assert list_basins_owner in modules, f"{list_basins_owner.__name__} holds list_basins but is not scanned"
+    return "\n".join(inspect.getsource(module) for module in modules)
 
 
 def _seed_basin(
@@ -200,8 +224,8 @@ def test_brandnew_basin_surfaces_without_any_code_change(integration_database_ur
     (absence of a literal); the live-DB assertion at the end of this test is the
     real oracle that discovery is data-driven, not whitelist-driven.
     """
-    # Weak evidence: this brand-new id is not a literal in the discovery module.
-    discovery_source = inspect.getsource(model_registry_module)
+    # Weak evidence: this brand-new id is not a literal in the discovery modules.
+    discovery_source = _discovery_source()
     assert _BASIN_BRANDNEW not in discovery_source
     # Discovery filters on a run-status set, not a basin enum.
     assert _BASIN_BRANDNEW not in model_registry_module.QHH_LATEST_READY_RUN_STATUSES

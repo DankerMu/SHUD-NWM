@@ -101,6 +101,7 @@ jobs:
               - 'packages/common/timescale_write_guard.py'
               - 'packages/common/object_store.py'
               - 'packages/common/model_registry.py'
+              - 'packages/common/model_registry_*.py'
               - 'packages/common/grid_registry_store.py'
               - 'services/tiles/mvt.py'
               - 'services/tile_publisher/publisher.py'

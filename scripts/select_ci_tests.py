@@ -2358,8 +2358,12 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # would split its ownership across two rules. CONNECTION_ATTRIBUTION_TESTS is
 # MERGED into that entry — the same disposition forecast_store.py and
 # state_manager.py already have, for the same reason.
+# #2617: `model_registry_*.py` are the owner modules of the model registry
+# store's methods (the facade keeps the connection); the connection-attribution
+# scans walk and parametrize them, so an owner-only diff routes like the facade.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
     "packages/common/model_registry.py",
+    "packages/common/model_registry_*.py",
     "packages/common/object_store_forcing.py",
 )
 # #1704: the only suite that asserts the error-response log line exists, is
