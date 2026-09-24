@@ -519,6 +519,49 @@ STATE_INDEX_COPYBACK_REPLAY_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_state_index_copyback_replay_selection.py",
 )
 
+# #2532 partitioned tests/test_node22_refresh_timer_health.py (3456 lines, 202
+# cases) into these five collectible suites plus one non-collectible helper. The
+# monolith is GONE with no compatibility shim, so the same-name derivation from
+# `scripts/node22_refresh_timer_health.py` stopped resolving (that path now has an
+# explicit row) and every rule site that named the monolith by hand was
+# re-pointed. A rule target that no longer exists is only a WARNING here, so a
+# forgotten site would have degraded the probe lane to an empty selection in
+# silence.
+#
+# Two reach classes, because the exact-set pins in tests/test_select_ci_tests.py
+# name readers, not the corpus:
+#   * NODE22_REFRESH_TIMER_HEALTH_TESTS -- the whole corpus. Every route that
+#     used to carry the monolith by membership (the probe itself, its installer
+#     and units, the refresh runner and its package modules, the refresh
+#     `.service`, the consumer-bound module) carries all five, so each such path
+#     still selects exactly the 202 cases it selected before the split.
+#   * the two reader tuples below -- the partitions that literally read the env
+#     template / the production-ops probe section, which ride exact-set rows.
+# tests/test_select_ci_tests.py closes the corpus against the tracked tree
+# (exactly five suites + one helper) and derives both reader tuples from the
+# partitions' own source.
+NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH = "scripts/node22_refresh_timer_health.py"
+NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH = "tests/node22_refresh_timer_health_helpers.py"
+NODE22_REFRESH_TIMER_HEALTH_TESTS: tuple[str, ...] = (
+    "tests/test_node22_refresh_timer_health_history.py",
+    "tests/test_node22_refresh_timer_health_installer.py",
+    "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+    "tests/test_node22_refresh_timer_health_thresholds_and_receipt.py",
+    "tests/test_node22_refresh_timer_health_verdicts.py",
+)
+# `test_the_production_path_defaults_match_every_file_that_states_them` is the
+# only case that `read_text`s infra/env/compute.scheduler-provider-refresh.env.example.
+NODE22_REFRESH_TIMER_HEALTH_ENV_TEMPLATE_TESTS: tuple[str, ...] = (
+    "tests/test_node22_refresh_timer_health_history.py",
+)
+# The partitions that read the production-ops probe section through the helper's
+# `RUNBOOK` / `_probe_runbook_section`.
+NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS: tuple[str, ...] = (
+    "tests/test_node22_refresh_timer_health_history.py",
+    "tests/test_node22_refresh_timer_health_installer.py",
+    "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+)
+
 # #1101 partitioned tests/test_scheduler_file_provider_refresh.py (9614 lines,
 # 315 cases) into these fifteen collectible suites plus two non-collectible
 # helpers. The monolith is GONE with no compatibility shim, so the same-name
@@ -571,10 +614,11 @@ SCHEDULER_REFRESH_DEPLOYMENT_TESTS: tuple[str, ...] = (
 # The whole reach of the refresh RUNNER: the fifteen partitions plus the node-22
 # probe suite, which both imports the runner and reads its source for the
 # history-receipt filename shape. Named once because #1099 gave it eleven
-# carriers (the facade and the ten package modules) instead of one.
+# carriers (the facade and the ten package modules) instead of one. #2532: the
+# probe suite is five partitions now, all carried.
 SCHEDULER_REFRESH_RUNNER_TESTS: tuple[str, ...] = (
     *SCHEDULER_REFRESH_TESTS,
-    "tests/test_node22_refresh_timer_health.py",
+    *NODE22_REFRESH_TIMER_HEALTH_TESTS,
 )
 # #1099 split the 3639-line runner into this package; the historical path stayed
 # an executable entrypoint and a re-export facade, so it keeps its own row below
@@ -1098,7 +1142,7 @@ SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST = "tests/test_slurm_gateway_deployment_co
 PRODUCTION_OPS_RUNBOOK_TESTS: tuple[str, ...] = (
     SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     "tests/test_env_templates.py",
-    "tests/test_node22_refresh_timer_health.py",
+    *NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS,
     "tests/test_node27_coverage_freshness_alert.py",
     *NODE22_ENTRYPOINT_INVARIANT_TESTS,
     PYTHON_ENVIRONMENT_TRUTH_TEST,
@@ -1591,6 +1635,31 @@ HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS: tuple[str, ...] = tuple(
     }
 )
 
+# #2527 partitioned tests/test_direct_grid_display_cutover_flip.py (1814 lines,
+# 15 cases) into these two collectible suites plus one non-collectible helper.
+# The monolith is GONE with no compatibility shim, so every rule site that named
+# it by hand was re-pointed; a rule target that no longer exists is only a
+# WARNING here, so a forgotten site would have dropped the station-flag flip lock
+# out of the PR lane in silence.
+#
+# ONE tuple, carried whole by both display rules (`services/tiles/mvt.py` and the
+# `apps/api/routes/hydro_display*.py` glob), so each route still selects the 15
+# cases it selected before the split. This is deliberately wider than the
+# derived closure: only the `_atomic` partition imports
+# `apps.api.routes.hydro_display` (for `_station_source_version`, whose on-disk
+# body in hydro_display_identity.py it structurally locks), while the `_mvt_set`
+# partition's `_mvt_station_set` is a model of exactly that row-selection
+# predicate and imports no display module. A predicate edit that the lock
+# catches must also run the model that mirrors it. The `_atomic` partition is
+# therefore the anti-vacuity anchor in tests/test_select_ci_tests.py; the
+# tracked-tree guard there pins exactly two suites + one helper.
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH = "tests/direct_grid_display_cutover_flip_helpers.py"
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST = "tests/test_direct_grid_display_cutover_flip_atomic.py"
+DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (
+    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
+    "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
+)
+
 
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
@@ -1795,6 +1864,15 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         HYDRO_DISPLAY_MVT_SCALING_TESTS,
     ),
     PathTestRule(
+        # #2527: the station-flag flip harness both flip partitions share -- the
+        # `met.met_station` fake, the fake cursor / transaction, the
+        # `_FlipHarnessStore` that drives the real lifecycle path, the audit
+        # recorder and the model / mirror factories. Both partitions import it at
+        # module scope, so the routed set IS the derived closure.
+        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
+        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+    ),
+    PathTestRule(
         # #2074: the single home of the six mock stores, the retry gateway double
         # and the eight private assertion helpers the three API-contract
         # partitions share. Without this entry the module is a non-collectible
@@ -1865,6 +1943,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # importer closure and a helper-only diff must run all four.
         STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
         STATE_INDEX_COPYBACK_REPLAY_TESTS,
+    ),
+    PathTestRule(
+        # #2532: the node-22 refresh-timer probe suite's shared fakes (the fake
+        # `systemctl`, receipt builders, `_run` / `_verdict`), installer harness
+        # and runbook section reader. All five partitions import it at module
+        # scope, so all five are its derived importer closure.
+        NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH,
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
     PathTestRule(
         # #1101: the runtime fixture surface of the fifteen refresh partitions --
@@ -3258,7 +3344,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
             # so requiring them buys constant skips and zero assertions.
-            "tests/test_direct_grid_display_cutover_flip.py",
+            # #2527: the flip suite is two partitions; the row carries both
+            # (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS for why both).
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
@@ -3353,7 +3441,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # extended to the current mechanically derived direct UNION one-hop
         # non-gated importer closure (tests/test_select_ci_tests.py derives the
         # required set from the tracked tree, never frozen). The three cutover
-        # suites, display status-only, HHE/MVT, node-27 compression and
+        # suites (four files since #2527 split the flip suite in two; only its
+        # `_atomic` partition is a derived importer), display status-only, HHE/MVT, node-27 compression and
         # attribution suites are direct importers; the 3.1-contract and
         # runtime-mode suites are the one-hop contributions via
         # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
@@ -3382,7 +3471,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # suite imports get_hydro_display_session from this module at file
             # level, so it is a direct non-gated importer.
             "tests/test_api_errors_logging.py",
-            "tests/test_direct_grid_display_cutover_flip.py",
+            # #2527: the flip suite is two partitions; the row carries both.
+            # Only `_atomic` is a derived direct importer of this family; the
+            # `_mvt_set` partition rides along as the model of the predicate
+            # `_atomic` locks (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS).
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_display_publish_status_only.py",
@@ -4337,11 +4430,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # partitioned. Only that partition reads the template, so the row stays a
     # two-target row and the exact-set pin in tests/test_select_ci_tests.py stays
     # an exact set.
+    # #2532 re-pointed the probe half the same way: only the history partition
+    # of the probe suite reads the template.
     PathTestRule(
         "infra/env/compute.scheduler-provider-refresh.env.example",
         (
             *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
-            "tests/test_node22_refresh_timer_health.py",
+            *NODE22_REFRESH_TIMER_HEALTH_ENV_TEMPLATE_TESTS,
         ),
     ),
     PathTestRule(
@@ -4553,9 +4648,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # asserts the two constants are equal, so a drop in the consumer's bound must
     # run it -- otherwise the probe keeps grading `ok` for a manifest the consumer
     # has already fail-closed on.
+    # #2532: the probe suite is five partitions; the row carries all of them.
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
-        ("tests/test_node22_refresh_timer_health.py",),
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
     # #1627 / ADR 0009: the loop-spelling measurement is the backing the
     # array-runner spec names for admitting path_modes.py's db-free
@@ -4611,11 +4707,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # red that assertion, so the probe suite is a literal reader of this path.
     # It also reads this unit's `TimeoutStartSec=` and pins the probe's default
     # stopped-dwell at three times it.
+    # #2532: the probe suite is five partitions; the row carries all of them.
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",
         (
             *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
-            "tests/test_node22_refresh_timer_health.py",
+            *NODE22_REFRESH_TIMER_HEALTH_TESTS,
         ),
     ),
     PathTestRule(
@@ -4623,25 +4720,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     ),
     # #2146: the refresh-lane health probe's installer and its two units.
-    # `tests/test_node22_refresh_timer_health.py` reads all three by path --
+    # The probe suite (five `tests/test_node22_refresh_timer_health_*.py`
+    # partitions since #2532) reads all three by path --
     # it `read_text`s both units (`Type=oneshot`, `TimeoutStartSec=`, no
     # `PrivateTmp` directive, the `ExecStart` script path, the
     # `UnsetEnvironment=` line byte-equal to the refresh service's,
     # `OnCalendar=hourly`, `Persistent=true`) and it runs the installer as a
     # subprocess against a fake systemctl, asserting the four protected units
-    # are only ever read. The probe's own `scripts/node22_refresh_timer_health.py`
-    # needs no row -- the same-name rule already routes it.
+    # are only ever read.
+    # #2532: the suite is five partitions and every row below carries all of
+    # them. The probe's own `scripts/node22_refresh_timer_health.py` needed no
+    # row while the same-name rule routed it to the monolith; with the monolith
+    # gone that derivation resolves to nothing, so it gets the explicit row.
+    PathTestRule(
+        NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH,
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
+    ),
     PathTestRule(
         "scripts/install_node22_refresh_timer_health.sh",
-        ("tests/test_node22_refresh_timer_health.py",),
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.service",
-        ("tests/test_node22_refresh_timer_health.py",),
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.timer",
-        ("tests/test_node22_refresh_timer_health.py",),
+        NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
     # #2570: the DB-free scheduler stall probe and its two units, the node-22
     # dual of the refresh probe above. `tests/test_node22_scheduler_stall_health.py`

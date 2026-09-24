@@ -7,12 +7,31 @@ import re
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum as Enum
 from errno import EACCES, ENOENT, EPERM
 from pathlib import Path
 from typing import Any
 
 from packages.common.state_qc import cfg_ic_header_shape
+
+from .basins_discovery_fs import IGNORED_SIDE_NAMES as IGNORED_SIDE_NAMES
+from .basins_discovery_fs import IGNORED_SIDE_SUFFIXES as IGNORED_SIDE_SUFFIXES
+from .basins_discovery_fs import BasinsDiscoveryError as BasinsDiscoveryError
+from .basins_discovery_fs import DiscoveryBudget as DiscoveryBudget
+from .basins_discovery_fs import DiscoveryWarning as DiscoveryWarning
+from .basins_discovery_fs import _append_warning_once as _append_warning_once
+from .basins_discovery_fs import _classify_basins_root_metadata as _classify_basins_root_metadata
+from .basins_discovery_fs import _classify_directory_kind as _classify_directory_kind
+from .basins_discovery_fs import _classify_entry_kind as _classify_entry_kind
+from .basins_discovery_fs import _classify_regular_file as _classify_regular_file
+from .basins_discovery_fs import _count_sidecars as _count_sidecars
+from .basins_discovery_fs import _ensure_readable_directory as _ensure_readable_directory
+from .basins_discovery_fs import _FileKind as _FileKind
+from .basins_discovery_fs import _is_ignored_path as _is_ignored_path
+from .basins_discovery_fs import _is_sidecar_name as _is_sidecar_name
+from .basins_discovery_fs import _iter_child_dirs as _iter_child_dirs
+from .basins_discovery_fs import _ResolvedPath as _ResolvedPath
+from .basins_discovery_fs import _ResolveState as _ResolveState
 
 # #1813: v2 dropped `forcing_csv_count`, so inventory bytes no longer move with
 # forcing CSV payload volume.
@@ -21,9 +40,6 @@ BASINS_DISCOVERY_SCHEMA_VERSION_V1 = "basins.discovery.v1"
 
 DEFAULT_BASINS_ROOT = Path("data/Basins")
 NHMS_BASINS_ROOT_ENV = "NHMS_BASINS_ROOT"
-
-IGNORED_SIDE_NAMES = {".DS_Store", "@eaDir"}
-IGNORED_SIDE_SUFFIXES = ("@SynoEAStream",)
 
 SHUD_REQUIRED_PATTERNS: tuple[tuple[str, str], ...] = (
     ("cfg_para", "*.cfg.para"),
@@ -56,88 +72,6 @@ BLOCKING_WARNING_CODES = {"BASINS_SYMLINK_OUTSIDE_ROOT", "BASINS_SYMLINK_UNRESOL
 # whitespace-separated numbers; anything past this bound is not a header line, and
 # the bound keeps discovery from pulling a multi-GB state file into memory.
 HEADER_LINE_LIMIT_BYTES = 4 * 1024
-
-
-class BasinsDiscoveryError(RuntimeError):
-    """Raised when Basins discovery cannot produce an importable inventory."""
-
-    def __init__(self, error_code: str, message: str, *, path: str | None = None) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.path = path
-
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"error_code": self.error_code, "message": str(self)}
-        if self.path is not None:
-            payload["path"] = self.path
-        return payload
-
-
-@dataclass(frozen=True)
-class DiscoveryWarning:
-    code: str
-    message: str
-    path: str | None = None
-
-    def as_dict(self) -> dict[str, str]:
-        payload = {"code": self.code, "message": self.message}
-        if self.path is not None:
-            payload["path"] = self.path
-        return payload
-
-
-class _ResolveState(Enum):
-    """First-class per-call verdict for a path under the Basins root.
-
-    Owners map the state -- never a shared-warning scan -- to their lane
-    semantics: hard directory refusal, matched-file unreadable third state,
-    optional skip, or blocking outside-root/unresolvable refusal.
-    """
-
-    RESOLVED = "resolved"
-    MISSING = "missing"
-    UNREADABLE = "unreadable"
-    OUTSIDE = "outside"
-    UNRESOLVABLE = "unresolvable"
-
-
-@dataclass(frozen=True)
-class _ResolvedPath:
-    state: _ResolveState
-    path: Path | None = None
-
-
-class _FileKind(Enum):
-    """Errno-aware final-file metadata verdict after containment passes."""
-
-    REGULAR = "regular"
-    MISSING = "missing"
-    UNREADABLE = "unreadable"
-    OTHER = "other"
-
-
-@dataclass
-class DiscoveryBudget:
-    max_depth: int
-    max_entries: int
-    error_code_prefix: str = "BASINS"
-    root: Path | None = None
-    entries_seen: int = 0
-
-    def enter(self, path: Path, *, depth: int | None = None) -> None:
-        if depth is not None and depth > self.max_depth:
-            raise BasinsDiscoveryError(
-                f"{self.error_code_prefix}_DISCOVERY_DEPTH_EXCEEDED",
-                "Basins discovery exceeded the allowed directory depth.",
-                path=str(path),
-            )
-        self.entries_seen += 1
-        if self.entries_seen > self.max_entries:
-            raise BasinsDiscoveryError(
-                f"{self.error_code_prefix}_DISCOVERY_ENTRY_LIMIT_EXCEEDED",
-                "Basins discovery exceeded the allowed entry count.",
-                path=str(self.root or path),
-            )
 
 
 def resolve_basins_root(cli_root: str | None) -> Path:
@@ -661,29 +595,6 @@ def _count_files(
     return sum(1 for _ in _walk_files(root, resolved_root, warnings, budget=budget, start_depth=depth))
 
 
-def _count_sidecars(root: Path, *, budget: DiscoveryBudget | None = None, depth: int = 0) -> int:
-    count = 0
-    stack: list[tuple[Path, int]] = [(root, depth)]
-    while stack:
-        directory, directory_depth = stack.pop()
-        if budget is not None:
-            budget.enter(directory, depth=directory_depth)
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    entry_path = Path(entry.path)
-                    if budget is not None:
-                        budget.enter(entry_path, depth=directory_depth + 1)
-                    if _is_sidecar_name(entry.name):
-                        count += 1
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append((entry_path, directory_depth + 1))
-        except OSError:
-            continue
-    return count
-
-
 def _walk_files(
     root: Path,
     resolved_root: Path,
@@ -728,25 +639,6 @@ def _walk_files(
                 f"Basins directory cannot be scanned: {directory}",
                 path=str(directory),
             ) from error
-
-
-def _iter_child_dirs(root: Path, *, budget: DiscoveryBudget | None = None, depth: int = 0) -> list[Path]:
-    try:
-        with os.scandir(root) as entries:
-            paths: list[Path] = []
-            for entry in entries:
-                path = Path(entry.path)
-                if budget is not None:
-                    budget.enter(path, depth=depth)
-                if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
-                    paths.append(path)
-            return sorted(paths, key=lambda path: path.name.lower())
-    except PermissionError as error:
-        raise BasinsDiscoveryError(
-            "BASINS_DIRECTORY_UNREADABLE",
-            f"Basins directory is not readable: {root}",
-            path=str(root),
-        ) from error
 
 
 def _require_readable_directory(
@@ -925,177 +817,6 @@ def _safe_resolve_under_root(
         ),
     )
     return _ResolvedPath(state=_ResolveState.UNRESOLVABLE)
-
-
-def _append_warning_once(warnings: list[DiscoveryWarning], warning: DiscoveryWarning) -> None:
-    if any(existing.code == warning.code and existing.path == warning.path for existing in warnings):
-        return
-    warnings.append(warning)
-
-
-def _ensure_readable_directory(path: Path, error_code: str) -> None:
-    try:
-        mode = path.stat().st_mode
-    except FileNotFoundError:
-        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
-    except NotADirectoryError:
-        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
-    except OSError as error:
-        # One structured boundary for the kind/stat probes (#1554): the old
-        # ``is_dir()`` pre-check swallowed a different OSError set per CPython
-        # (EACCES on 3.11 raised, on 3.12+ returned False and was then
-        # misreported as missing).  Permission denial stays on the caller's
-        # unreadable code, never leaks as a bare PermissionError and never
-        # becomes a NOT_FOUND mislabel.
-        raise BasinsDiscoveryError(error_code, f"Basins directory cannot be stat'ed: {path}", path=str(path)) from error
-    if not stat.S_ISDIR(mode):
-        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
-    if not mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
-        raise BasinsDiscoveryError(error_code, f"Basins directory is not readable: {path}", path=str(path))
-    if not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-        raise BasinsDiscoveryError(error_code, f"Basins directory is not searchable: {path}", path=str(path))
-
-
-def _classify_basins_root_metadata(root: Path, *, error_prefix: str = "BASINS_ROOT") -> bool:
-    """Classify the explicit root's metadata once, by errno; return source-symlink identity.
-
-    ``Path.exists()`` / ``is_dir()`` swallow different ``OSError`` sets on
-    different CPython versions (EACCES on a denied ancestor raises on 3.11 but
-    returns False from 3.12 on), so they cannot decide root classification.
-    One no-follow ``lstat`` probe identifies a source symlink and one
-    follow-target ``stat`` probe confirms the directory this classifier
-    admits.  Missing (``ENOENT``/``ENOTDIR``) is the ``*_NOT_FOUND`` verdict,
-    permission denial (``EACCES``/``EPERM``) and any other unreadable metadata
-    failure is the ``*_UNREADABLE`` verdict, and no raw ``PermissionError``
-    escapes.  Callers consume the returned symlink identity instead of
-    re-probing the root with a bare ``Path.is_symlink()`` after this
-    classifier has run (#1554).
-    """
-
-    try:
-        lstat_mode = root.lstat().st_mode
-    except FileNotFoundError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_NOT_FOUND",
-            f"Basins root does not exist: {root}",
-            path=str(root),
-        )
-    except NotADirectoryError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_NOT_FOUND",
-            f"Basins root does not exist: {root}",
-            path=str(root),
-        )
-    except PermissionError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_UNREADABLE",
-            f"Basins root is not readable: {root}",
-            path=str(root),
-        )
-    except OSError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_UNREADABLE",
-            f"Basins root cannot be inspected: {root}",
-            path=str(root),
-        )
-    is_symlink = stat.S_ISLNK(lstat_mode)
-    try:
-        mode = root.stat().st_mode
-    except FileNotFoundError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_NOT_FOUND",
-            f"Basins root does not exist: {root}",
-            path=str(root),
-        )
-    except NotADirectoryError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_NOT_FOUND",
-            f"Basins root does not exist: {root}",
-            path=str(root),
-        )
-    except PermissionError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_UNREADABLE",
-            f"Basins root is not readable: {root}",
-            path=str(root),
-        )
-    except OSError:
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_UNREADABLE",
-            f"Basins root cannot be inspected: {root}",
-            path=str(root),
-        )
-    if not stat.S_ISDIR(mode):
-        raise BasinsDiscoveryError(
-            f"{error_prefix}_NOT_FOUND",
-            f"Basins root is not a directory: {root}",
-            path=str(root),
-        )
-    return is_symlink
-
-
-def _classify_entry_kind(path: Path) -> tuple[_FileKind, int | None]:
-    """Errno-aware single follow-stat verdict shared by file and directory owners.
-
-    ``Path.is_file()`` / ``is_dir()`` each swallow a different OSError set per
-    CPython (EACCES on the final follow-stat raises on 3.11-3.13 but returns
-    False on 3.14), so neither predicate can decide final metadata.  One
-    errno-aware stat yields a verdict every interpreter agrees on and returns
-    the raw mode for the caller's type-bit check: missing / not-a-directory ->
-    MISSING, permission denial -> UNREADABLE, any other metadata failure ->
-    OTHER, otherwise REGULAR with the mode.
-    """
-
-    try:
-        mode = path.stat().st_mode
-    except FileNotFoundError:
-        return _FileKind.MISSING, None
-    except NotADirectoryError:
-        return _FileKind.MISSING, None
-    except PermissionError:
-        return _FileKind.UNREADABLE, None
-    except OSError:
-        return _FileKind.OTHER, None
-    return _FileKind.REGULAR, mode
-
-
-def _classify_regular_file(path: Path) -> _FileKind:
-    """Errno-aware final-file metadata verdict.
-
-    ``Path.is_file()`` swallows a different OSError set per CPython: EACCES on
-    the final follow-stat raises on 3.11-3.13 but returns False on 3.14
-    (cand-r1-06).  This classifier yields one verdict on every interpreter:
-    missing/not-a-dir -> MISSING, permission denial -> UNREADABLE, other
-    metadata failure -> OTHER, regular file -> REGULAR.
-    """
-
-    kind, mode = _classify_entry_kind(path)
-    if kind is _FileKind.REGULAR:
-        return _FileKind.REGULAR if mode is not None and stat.S_ISREG(mode) else _FileKind.OTHER
-    return kind
-
-
-def _classify_directory_kind(path: Path) -> _FileKind:
-    """Errno-aware final-directory metadata verdict for required-input ownership.
-
-    Mirrors ``_classify_regular_file`` for directories: the final follow-stat
-    EACCES/EPERM is UNREADABLE on every interpreter, missing/not-a-dir is
-    MISSING, a regular file at the leaf is OTHER, and an actual directory is
-    REGULAR.
-    """
-
-    kind, mode = _classify_entry_kind(path)
-    if kind is _FileKind.REGULAR:
-        return _FileKind.REGULAR if mode is not None and stat.S_ISDIR(mode) else _FileKind.OTHER
-    return kind
-
-
-def _is_sidecar_name(name: str) -> bool:
-    return name in IGNORED_SIDE_NAMES or any(name.endswith(suffix) for suffix in IGNORED_SIDE_SUFFIXES)
-
-
-def _is_ignored_path(path: Path) -> bool:
-    return any(_is_sidecar_name(part) for part in path.parts)
 
 
 def _sha256(path: Path) -> str:

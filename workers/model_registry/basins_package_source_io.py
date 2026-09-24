@@ -4,7 +4,8 @@ import hashlib
 import os
 import stat
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from dataclasses import replace as replace
 from errno import ENOENT
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -14,9 +15,16 @@ from .basins_package_contracts import (
     FORCING_SAMPLE_LINE_LIMIT,
     BasinsPackageError,
     SourceFile,
-    _json_bytes,
     _sha256_handle,
 )
+from .basins_package_contracts import _json_bytes as _json_bytes
+from .basins_source_support import _bind_mapping_source_files as _bind_mapping_source_files
+from .basins_source_support import _ensure_under_root as _ensure_under_root
+from .basins_source_support import _ensure_under_source_root as _ensure_under_source_root
+from .basins_source_support import _is_ignored_source_path as _is_ignored_source_path
+from .basins_source_support import _normalize_relative_path as _normalize_relative_path
+from .basins_source_support import _preflight_json_output_path as _preflight_json_output_path
+from .basins_source_support import _write_json_file as _write_json_file
 
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 MAX_RIVSEG_MAPPING_BYTES = 16 * 1024 * 1024
@@ -424,24 +432,6 @@ def _mapping_invalid_error(
     )
 
 
-def _bind_mapping_source_files(
-    source_files: Sequence[SourceFile],
-    *,
-    object_store: Any,
-    package_key: str,
-) -> list[SourceFile]:
-    """Bind package object locations while preserving validated mapping snapshots."""
-
-    return [
-        replace(
-            source_file,
-            object_key=f"{package_key}/{source_file.relative_path}",
-            object_uri=object_store.uri_for_key(f"{package_key}/{source_file.relative_path}"),
-        )
-        for source_file in source_files
-    ]
-
-
 def _source_file_evidence(
     path: Path,
     source_root: Path,
@@ -762,48 +752,6 @@ def _reject_source_symlink_path(
             )
 
 
-def _ensure_under_source_root(
-    path: Path,
-    source_root: Path,
-    *,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> None:
-    _ensure_under_root(
-        path,
-        source_root,
-        error_code="BASINS_PACKAGE_PATH_UNSAFE",
-        message="Basins package source path resolves outside the model source directory.",
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
-
-
-def _ensure_under_root(
-    path: Path,
-    root: Path,
-    *,
-    error_code: str,
-    message: str,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> None:
-    try:
-        path.relative_to(root)
-    except ValueError as error:
-        raise BasinsPackageError(
-            error_code,
-            message,
-            model_id=model_id,
-            version=version,
-            path=str(path),
-            manifest_uri=manifest_uri,
-        ) from error
-
-
 def _resolve_package_path(path: Path, *, model_id: str | None = None, version: str | None = None) -> Path:
     # ADR 0009 clause 1: callers dereference the admitted product before any verdict.
     # Strict resolution + errno split: non-strict resolution stopped raising on symlink
@@ -825,16 +773,6 @@ def _resolve_package_path(path: Path, *, model_id: str | None = None, version: s
             version=version,
             path=str(path),
         ) from error
-
-
-def _normalize_relative_path(value: str) -> str:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
-        raise BasinsPackageError("BASINS_PACKAGE_PATH_UNSAFE", f"Unsafe package relative path: {value}", path=value)
-    normalized = path.as_posix().strip("/")
-    if not normalized:
-        raise BasinsPackageError("BASINS_PACKAGE_PATH_UNSAFE", "Package relative path is empty.")
-    return normalized
 
 
 def _walk_source_files(root: Path, source_root: Path) -> Iterator[Path]:
@@ -941,59 +879,5 @@ def _csv_time_evidence(
             model_id=model_id,
             version=version,
             path=str(path),
-            manifest_uri=manifest_uri,
-        ) from error
-
-
-def _is_ignored_source_path(path: Path) -> bool:
-    return any(part == ".DS_Store" or part == "@eaDir" or part.endswith("@SynoEAStream") for part in path.parts)
-
-
-def _write_json_file(
-    path: str | Path,
-    payload: dict[str, Any],
-    *,
-    error_code: str,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-    before_write: Callable[[Path, int], None] | None = None,
-) -> None:
-    output = Path(path).expanduser()
-    try:
-        content = _json_bytes(payload)
-        if before_write is not None:
-            before_write(output, len(content))
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(content)
-    except OSError as error:
-        raise BasinsPackageError(
-            error_code,
-            f"Failed to write Basins output JSON: {output}: {error}",
-            model_id=model_id,
-            version=version,
-            path=str(output),
-            manifest_uri=manifest_uri,
-        ) from error
-
-
-def _preflight_json_output_path(
-    path: str | Path,
-    *,
-    error_code: str,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> None:
-    output = Path(path).expanduser()
-    try:
-        output.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise BasinsPackageError(
-            error_code,
-            f"Failed to prepare Basins output JSON path: {output}: {error}",
-            model_id=model_id,
-            version=version,
-            path=str(output),
             manifest_uri=manifest_uri,
         ) from error
