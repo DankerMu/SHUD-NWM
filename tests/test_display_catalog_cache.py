@@ -826,3 +826,104 @@ def test_a_literal_basin_id_none_does_not_fold_into_the_unfiltered_runs_entry() 
     literal_key = f"runs:'None':None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"
     assert literal_key not in display_cache._store
     assert literal_key not in display_cache._hot_paths
+
+
+# ---------------------------------------------------------------------------
+# #2177: `source` is compared with `LOWER(...)` by the store, so the key folds its
+# case; `basin_id` / `status` are exact-match filters and stay exact.
+# ---------------------------------------------------------------------------
+_GFS_RUN_PAGE: dict[str, Any] = {
+    "items": [{"run_id": "run-gfs", "basin_id": "basin-a", "source": "GFS", "status": "published"}],
+    "total_count": 1,
+    "limit": 20,
+    "offset": 0,
+}
+
+
+def _get_runs_bodies(app: FastAPI, requests: list[dict[str, str]]) -> list[Any]:
+    try:
+        with TestClient(app) as client:
+            responses = [client.get("/api/v1/runs", params=params) for params in requests]
+    finally:
+        app.dependency_overrides.clear()
+    assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
+    return [response.json()["data"] for response in responses]
+
+
+def test_runs_source_spellings_share_one_cache_entry() -> None:
+    """改前红：key 逐字节带 `source`，三种拼法各占一条 `_store` / `_hot_paths` 并各落一次 store。"""
+    app, calls = _runs_app(_GFS_RUN_PAGE)
+
+    bodies = _get_runs_bodies(app, [{"source": "GFS"}, {"source": "gfs"}, {"source": "Gfs"}])
+
+    key = f"runs:None:'gfs':None:None:{forecast_routes.DEFAULT_LIMIT}:0"
+    assert list(display_cache._store) == [key]
+    assert list(display_cache._hot_paths) == [key]
+    assert display_cache._hot_paths[key][2] == 3
+    # 只有第一次落 store，且传给 store 的仍是客户端原值（SQL 口径不变）。
+    assert [call["source"] for call in calls] == ["GFS"]
+    assert bodies[0] == bodies[1] == bodies[2] == forecast_routes._paginated_payload(_GFS_RUN_PAGE)
+    # 响应体的 `source` 来自行数据，不随查询参数的大小写变。
+    assert bodies[0]["items"][0]["source"] == "GFS"
+
+
+def test_runs_exact_match_dimensions_keep_distinct_keys() -> None:
+    app, calls = _runs_app(_GFS_RUN_PAGE)
+
+    _get_runs_bodies(
+        app,
+        [
+            {"basin_id": "Yangtze"},
+            {"basin_id": "yangtze"},
+            {"status": "Published"},
+            {"status": "published"},
+        ],
+    )
+
+    limit = forecast_routes.DEFAULT_LIMIT
+    expected = [
+        f"runs:'Yangtze':None:None:None:{limit}:0",
+        f"runs:'yangtze':None:None:None:{limit}:0",
+        f"runs:None:None:None:'Published':{limit}:0",
+        f"runs:None:None:None:'published':{limit}:0",
+    ]
+    assert list(display_cache._store) == expected
+    assert list(display_cache._hot_paths) == expected
+    assert [(call["basin_id"], call["status"]) for call in calls] == [
+        ("Yangtze", None),
+        ("yangtze", None),
+        (None, "Published"),
+        (None, "published"),
+    ]
+
+
+def test_runs_empty_source_page_is_not_cached_under_any_spelling() -> None:
+    app, calls = _runs_app(_EMPTY_RUNS_PAGE)
+
+    _get_runs_bodies(app, [{"source": "NOPE"}, {"source": "nope"}])
+
+    assert display_cache._store == {}
+    assert display_cache._hot_paths == {}
+    assert len(calls) == 2
+
+
+def test_runs_literal_source_none_stays_distinct_from_omitted_source() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _SourceFilteringStore:
+        def list_runs(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            page = _GFS_RUN_PAGE if kwargs["source"] is None else _EMPTY_RUNS_PAGE
+            return {key: list(value) if isinstance(value, list) else value for key, value in page.items()}
+
+    app = FastAPI()
+    app.state.runtime_config = SimpleNamespace(display_readonly=True, display_cache_warm_token=None)
+    app.include_router(forecast_routes.router)
+    app.dependency_overrides[forecast_routes.get_forecast_store] = _SourceFilteringStore
+
+    omitted, literal = _get_runs_bodies(app, [{}, {"source": "None"}])
+
+    assert omitted == forecast_routes._paginated_payload(_GFS_RUN_PAGE)
+    assert literal == forecast_routes._paginated_payload(_EMPTY_RUNS_PAGE)
+    assert [call["source"] for call in calls] == [None, "None"]
+    assert list(display_cache._store) == [f"runs:None:None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"]

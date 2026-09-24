@@ -498,6 +498,25 @@ def test_text_fact_columns_reports_whole_row_output_exposure(projection: str) ->
     }
 
 
+@pytest.mark.parametrize(
+    "sql",
+    ["SELECT * FROM hydro.river_timeseries rt", "SELECT * FROM hydro.river_timeseries AS rt"],
+    ids=["bare-alias", "as-alias"],
+)
+def test_text_fact_columns_reports_bare_star_output_exposure(sql: str) -> None:
+    """#2216: a bare `*` over the proven fact alias is whole-row exposure too."""
+    assert text_fact_columns(sql, "rt") == {
+        "run_id",
+        "basin_version_id",
+        "river_network_version_id",
+        "river_segment_id",
+        "variable",
+        "unit",
+        "quality_flag",
+    }
+    assert text_fact_columns("SELECT * FROM hydro.river_timeseries", "rt") == set()
+
+
 def test_text_fact_columns_does_not_confuse_a_text_column_with_its_enum_twin() -> None:
     sql = "WHERE ts.variable_e = 'q_down' AND ts.unit_e = 'm3/s' AND ts.quality_flag_e = 'ok'"
 

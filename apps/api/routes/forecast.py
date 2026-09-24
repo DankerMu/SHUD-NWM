@@ -107,8 +107,12 @@ def list_runs(
         # `!r` 隔离客户端可控的自由文本维度：字面量 `"None"` 记作 `'None'`，与「没给
         # 该维度」的 `None` 不同 key，不会折叠进无过滤条目（#2078）。有界的
         # `capped_limit`/`offset` 是 int，照旧裸插值。
+        # `source` 在存储层按 `LOWER(...)` 比较（forecast_store.list_runs），key 按同一口径
+        # 归一，GFS/gfs/Gfs 共用一条条目（#2177）；传给 store 的仍是原值。`basin_id` /
+        # `status` 是精确匹配，保持原样。
+        source_key = source.lower() if source is not None else None
         cycle_key = cycle_time.isoformat() if cycle_time else None
-        cache_key = f"runs:{basin_id!r}:{source!r}:{cycle_key!r}:{status!r}:{capped_limit}:{offset}"
+        cache_key = f"runs:{basin_id!r}:{source_key!r}:{cycle_key!r}:{status!r}:{capped_limit}:{offset}"
         page = display_catalog_cached(
             request,
             cache_key,

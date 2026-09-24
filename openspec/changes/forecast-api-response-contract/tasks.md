@@ -28,7 +28,7 @@
   - `HydroRun` / `HydroRunPage` models on both routes.
   - Detail schema references `HydroRun`.
   - Tests with `timeseries_store` + `authority_internal` rows.
-- [ ] 2.2 #2177: lowercase `source` in the cache key only, plus the tests listed in D3.
+- [x] 2.2 #2177: lowercase `source` in the cache key only, plus the tests listed in D3.
 - [ ] 2.3 #2348:
   - `apps/api/response_models/` package covering all 35 JSON routes; envelope reshaping generalised.
   - Type-strict `tests/test_response_model_preservation.py` oracle over handler-object samples (every alternative success shape) and the route-table completeness check.
@@ -37,7 +37,7 @@
   - Mutation red-proofs (named samples).
 - [ ] 2.4 `openapi/nhms.v1.yaml` and `apps/frontend/src/api/types.ts` regenerated. `test_openapi_drift`, `test_openapi_response_conformance` and `pnpm check:api-types` / `test` / `build` green.
 - [ ] 2.5 Full-size `serialize_response` benchmark, master field vs new field: basin versions, river-segments, model detail, pipeline stages, forecast-series, latest-product, runs page. Numbers go in the PR body.
-- [ ] 2.6 #2216: narrow-store tasks.md 1.15, per `fixtures/I1-1980.md` § Issue #2216.
+- [x] 2.6 #2216: narrow-store tasks.md 1.15, per `fixtures/I1-1980.md` § Issue #2216.
 - [ ] 2.7 Selector and CI routing for the new package and tests; tracked-tree guards green.
 
 ## 3. Verification
