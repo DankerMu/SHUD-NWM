@@ -2380,6 +2380,16 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # #2617: `model_registry_*.py` are the owner modules of the model registry
 # store's methods (the facade keeps the connection); the connection-attribution
 # scans walk and parametrize them, so an owner-only diff routes like the facade.
+# #2348: the rule built from this tuple also carries the response-model
+# preservation oracle. The oracle fakes only the registry store; the route
+# pipes the faked rows through the production projections
+# `sanitize_basin_version_list_payload` / `sanitize_model_list_payload` /
+# `sanitize_model_detail_payload` (apps/api/routes/models.py:429,738,762),
+# defined in model_registry_public.py:21-31 and imported through the facade's
+# re-exports (model_registry.py:152-155), so a diff to either changes a sampled
+# payload. The sibling owner modules ride along because #2617 pins every owner
+# to select exactly what the facade selects
+# (tests/test_select_ci_tests.py::test_model_registry_owner_modules_route_like_the_facade).
 # #2348 removed object_store_forcing.py for the same reason #1990 removed
 # best_available.py: it needs the response-model preservation oracle too, so it
 # has an exact rule (next to the route members' rules in PATH_TEST_RULES) that
@@ -5826,14 +5836,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # through a route rule: selection is per changed path, so every store whose
     # production builder the oracle drives names it on its own rule --
     # forecast_store.py, best_available.py, state_manager.py (their exact rules)
-    # and object_store_forcing.py (below). tests/test_select_ci_tests.py derives
-    # that set from the oracle's imports. The model registry store stays out:
-    # the oracle drives the registry routes over `FakeModelRegistryStore`.
+    # and object_store_forcing.py (below) -- plus the model registry facade and
+    # its `model_registry_*.py` owners on the store-path rule right after this
+    # one: the registry samples fake the store, not the `sanitize_*` projections
+    # the route applies (see CONNECTION_ATTRIBUTION_STORE_PATHS).
+    # tests/test_select_ci_tests.py derives that set from the oracle's imports
+    # plus the builders it names.
     *(
         PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
         for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS
     ),
-    *(PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS) for path in CONNECTION_ATTRIBUTION_STORE_PATHS),
+    *(
+        PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
+        for path in CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
     PathTestRule(
         # A #1728 connection-attribution store (see CONNECTION_ATTRIBUTION_STORE_PATHS)
         # that also holds `read_station_forcing_csv`, the builder behind the
