@@ -50,16 +50,16 @@
 
 ## 4. Review / CI
 
-- [ ] 4.1 Review rounds recorded with fix_gate. CI green, including SQL Migration Dry Run when routed.
+- [x] 4.1 Review rounds recorded with fix_gate. CI green, including SQL Migration Dry Run when routed.
 
 ## 5. After merge
 
-- [ ] 5.1 node-27 `git pull --ff-only` and display restart per `docs/runbooks/node-27-bringup-checklist.md` C1: `/health`, runtime config `display_readonly`, `/slurm/health` 404.
-- [ ] 5.2 Live receipt:
+- [x] 5.1 node-27 `git pull --ff-only` and display restart per `docs/runbooks/node-27-bringup-checklist.md` C1: `/health`, runtime config `display_readonly`, `/slurm/health` 404.
+- [x] 5.2 Live receipt:
   - Re-snapshot the 21 routes. Compare against `.workplans/l1/pre/` recursively, checking both the key set and the JSON value type at every path; values may drift with new cycles. `queue_depth` (a display error), `best_available` (`[]`) and `state_snapshots` (empty) give no structural evidence and are reported as such.
   - The 3 source spellings produce identical bodies.
   - The p50 timing gate from D2.
-  - Recorded in the post-merge archive PR.
+  - Recorded in the post-merge archive PR: `evidence/node27-live-receipt.md`. All 21 routes have an identical shape; the 3 spellings give identical bodies; every route is within the timing gate.
 
 ## Evidence Floor
 

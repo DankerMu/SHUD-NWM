@@ -4,7 +4,9 @@
 
 Define who may force the display_readonly catalog cache (`apps/api/display_cache.py::display_catalog_cached`) to skip its store lookup and recompute: only the in-process warmer and a caller holding the configured token. Every other request, whatever headers it carries, is served by the TTL / stale-while-revalidate rules.
 Also define what the cache admits and keeps: empty results are served but never stored nor replayed, both maps are bounded LRU (256, never cleared as a whole), the warmer replays at most 32 hit-ranked hot paths per tick, and `/api/v1/layers` caches the full per-`run_id` catalog and pages after the cache.
+
 ## Requirements
+
 ### Requirement: Forced refresh is granted only to the in-process warmer or a caller holding the configured token
 
 `display_catalog_cached` SHALL bypass the store lookup and recompute the value only when `_force_refresh(request)` is true. `_force_refresh` SHALL return true when, and only when, either (a) the ASGI scope carries `scope["state"]["nhms_display_cache_warm"] is True`, which only the in-process warmer's `_replay_targets` sets by wrapping the application before handing it to `httpx.ASGITransport`, or (b) the runtime configuration holds a non-empty `display_cache_warm_token` (from `NHMS_DISPLAY_CACHE_WARM_TOKEN`, stripped; blank means unset) AND the request carries an `x-nhms-cache-warm` header whose value equals the token under `hmac.compare_digest` applied to the `encode("utf-8", "surrogateescape")` encodings of both strings (never to `str` objects, and with `surrogateescape` so a token that reached `os.environ` through an invalid UTF-8 byte cannot raise either: Starlette decodes header values as latin-1 and `compare_digest` raises `TypeError` on non-ASCII `str`). The runtime configuration is read from `request.app.state.runtime_config` with the same defensive attribute access as `_display_readonly`; a request object lacking `app`, `scope` or `headers`, a non-`str` header value, or a blank token SHALL yield false, and `_force_refresh` SHALL never raise. The literal value `refresh` SHALL NOT be privileged. When the token is unset, no header value SHALL force a refresh. The non-display-role passthrough (`loader()` called directly) SHALL be unchanged. `RuntimeConfig.public_dict()` and `repr(RuntimeConfig)` SHALL NOT include the token.
@@ -114,3 +116,18 @@ Each warmer tick SHALL replay at most `DISPLAY_CATALOG_WARM_REPLAY_MAX` (32) hot
 - **WHEN** `tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema` runs
 - **THEN** it passes with the `offset` description present on `/api/v1/layers` and the `/api/v1/runs` parameters unchanged
 
+### Requirement: The run-list cache key folds source case like the store does
+
+The display cache key for `GET /api/v1/runs` SHALL lowercase the `source`
+dimension, because the store compares `source` case-insensitively. The value
+passed to the store and the response body SHALL be unchanged. The `basin_id`
+and `status` dimensions, which the store matches exactly, SHALL stay
+case-sensitive. An absent `source` SHALL remain distinct from the literal value
+`None`.
+
+#### Scenario: the same run list is requested with three source spellings
+
+- **WHEN** a display client requests `/api/v1/runs?source=GFS`, `?source=gfs`
+  and `?source=Gfs` in turn
+- **THEN** exactly one cache entry is created, the store loader runs once, and
+  the three response bodies are identical.

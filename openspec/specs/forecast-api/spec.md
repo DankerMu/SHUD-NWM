@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Forecast series query
 
 The API SHALL provide `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` to return forecast flow time series for a given river segment within a basin version. The response MUST include the segment identifier, issue time, unit, and one or more scenario series with timestamped data points.
@@ -294,3 +296,21 @@ rendered read.
 - **AND** any identity constraint that names such a column SHALL be absent from that statement, while
   remaining present in the legacy store's rendering
 
+### Requirement: Run responses expose only the public HydroRun projection
+
+`GET /api/v1/runs/{run_id}` and `GET /api/v1/runs` SHALL return run objects
+built from one explicit public field allowlist, the same for detail and list.
+The store SHALL select the allowlisted `hydro.hydro_run` columns by name, never
+`h.*`, and both routes SHALL declare the shared `HydroRun` response model. That
+model drops unknown keys at runtime, and its OpenAPI schema declares no
+additional properties. Existing public fields, including `run_key`, `parsed_at`,
+`basin_id`, `river_network_version_id` and `source`, SHALL keep their names and
+JSON value shapes.
+
+#### Scenario: a hydro_run row carries an internal column
+
+- **WHEN** the store row for a run carries `timeseries_store` or another column
+  outside the allowlist
+- **THEN** neither the detail `data` nor any list `items[]` object contains that
+  key, and every allowlisted field is still present with its previous value
+  shape.
