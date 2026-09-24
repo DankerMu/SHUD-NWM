@@ -892,7 +892,7 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
     (
         "packages/common/met_store.py",
         UNREACHABLE,
-        "import-only: packages/common/model_registry.py:21 imports workers.forcing_producer.direct_grid_contract, "
+        "import-only: packages/common/model_registry.py:156 imports workers.forcing_producer.direct_grid_contract, "
         "so workers/forcing_producer/__init__.py:10 executes producer.py, which imports this module at line 31 "
         "(it IS in the unit's runtime sys.modules). PsycopgMetStore.from_env() is called only from worker/CLI "
         "factories -- workers/canonical_converter/converter.py:55, workers/data_adapters/{era5,gfs,ifs}_adapter.py "
@@ -1312,6 +1312,15 @@ def test_display_unit_surface_names_are_unique_and_fit_the_libpq_bound() -> None
         "packages/common/forecast_store.py",
         "packages/common/best_available.py",
         "packages/common/model_registry.py",
+        # #2617: the store's methods live in these owner modules; the facade
+        # alone would pass vacuously for any literal a mixin method carries.
+        "packages/common/model_registry_catalog.py",
+        "packages/common/model_registry_contracts.py",
+        "packages/common/model_registry_lifecycle.py",
+        "packages/common/model_registry_lifecycle_support.py",
+        "packages/common/model_registry_preflight_rules.py",
+        "packages/common/model_registry_public.py",
+        "packages/common/model_registry_river_segments.py",
         "packages/common/state_manager.py",
         "packages/common/object_store_forcing.py",
     ],

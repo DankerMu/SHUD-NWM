@@ -14021,6 +14021,17 @@ INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
     "packages/common/timescale_write_guard.py",
     "packages/common/object_store.py",
     "packages/common/model_registry.py",
+    # #2617: PsycopgModelRegistryStore's SQL moved into these owner modules
+    # (the facade keeps the dataclass shell and the connection). A diff confined
+    # to one of them must still trigger the real-DB lane; ci.yml matches all
+    # seven with one `packages/common/model_registry_*.py` glob.
+    "packages/common/model_registry_catalog.py",
+    "packages/common/model_registry_contracts.py",
+    "packages/common/model_registry_lifecycle.py",
+    "packages/common/model_registry_lifecycle_support.py",
+    "packages/common/model_registry_preflight_rules.py",
+    "packages/common/model_registry_public.py",
+    "packages/common/model_registry_river_segments.py",
     "packages/common/grid_registry_store.py",
 )
 
@@ -14087,6 +14098,26 @@ def test_database_filter_covers_the_finite_integration_registry() -> None:
     assert not uncovered, (
         "integration-owned production sources not matched by the ci.yml `database:` filter: " + ", ".join(uncovered)
     )
+
+
+def test_model_registry_owner_modules_route_like_the_facade() -> None:
+    # #2617: PsycopgModelRegistryStore's methods moved into the
+    # `packages/common/model_registry_*.py` owner modules. A diff confined to
+    # one of them must select exactly what a facade diff selects and must open
+    # the real-DB lane, or K3's owner-only SQL edits would skip both.
+    facade = "packages/common/model_registry.py"
+    owners = sorted(
+        path
+        for path in _tracked_python_files("packages/common")
+        if fnmatch.fnmatch(path, "packages/common/model_registry_*.py")
+    )
+    assert owners, "no tracked packages/common/model_registry_*.py owner module; the pin is vacuous"
+    expected = set(select_tests([facade], repo_root=Path(".")))
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    for owner in owners:
+        assert set(select_tests([owner], repo_root=Path("."))) == expected, owner
+        assert owner in INTEGRATION_TRIGGER_SOURCES, f"{owner} missing from INTEGRATION_TRIGGER_SOURCES"
+        assert any(fnmatch.fnmatch(owner, pattern) for pattern in patterns), f"{owner} opens no real-DB lane"
 
 
 def test_database_filter_mutation_reds_and_names_forecast_store() -> None:

@@ -9,24 +9,24 @@
 
 ## 0. Baselines（`.workplans/split-model-registry-store/`）
 
-- [ ] 0.1 AST 指纹：顶层定义 + `PsycopgModelRegistryStore` 每个方法（按方法名取键，与 EF1 一致）
-- [ ] 0.2 facade 命名空间 `vars(module)`；`PsycopgModelRegistryStore` 的 `dir()`、每个方法源码 sha、`dataclasses.fields()`、repr/eq/hash 行为（`__qualname__`/`__module__` 为 declared drift，不作 oracle）
-- [ ] 0.3 seam 清单：类属性（14 名 / 65 处）+ `from_env` 字符串 ×23 = 15 名、模块级（实测 0，附命令）、字符串
-- [ ] 0.4 源码钉清单：每个按路径/`getsource` 读本模块的断言 → 钉住的字面量 → 所在方法
+- [x] 0.1 AST 指纹：顶层定义 + `PsycopgModelRegistryStore` 每个方法（按方法名取键，与 EF1 一致）
+- [x] 0.2 facade 命名空间 `vars(module)`；`PsycopgModelRegistryStore` 的 `dir()`、每个方法源码 sha、`dataclasses.fields()`、repr/eq/hash 行为（`__qualname__`/`__module__` 为 declared drift，不作 oracle）
+- [x] 0.3 seam 清单：类属性（14 名 / 65 处）+ `from_env` 字符串 ×23 = 15 名、模块级（实测 0，附命令）、字符串
+- [x] 0.4 源码钉清单：每个按路径/`getsource` 读本模块的断言 → 钉住的字面量 → 所在方法
 
 ## 1. 拆分
 
-- [ ] 1.1 facade + owner/mixin 模块，每个 < 1000 行
-- [ ] 1.2 facade 保留 dataclass 装饰器/字段/`__post_init__`/`from_env`/`_transaction`/`_attribution_connect_kwargs`/`_PsycopgTransaction`；mixin 为普通类；导入单向；新模块命名 `model_registry_*.py`；`list_basins`/`list_basin_versions`/`_lock_basin_version_scope` 所在模块 ≤ 900 行
-- [ ] 1.3 selector 等价路由；ci.yml `database:` 保留字面量 + 新增 `packages/common/model_registry_*.py`；`INTEGRATION_TRIGGER_SOURCES` 同步；partition oracle 不重生成
-- [ ] 1.3b `tests/test_real_basin_discovery_integration.py` 的 getsource 缺席检查扩到 facade + owner 模块；`tests/test_node27_connection_attribution.py` surface-name 扫描参数化加入新模块；write-surface scan 已核无需同步（D3）
-- [ ] 1.4 冻结消费者零 diff
+- [x] 1.1 facade + owner/mixin 模块，每个 < 1000 行
+- [x] 1.2 facade 保留 dataclass 装饰器/字段/`__post_init__`/`from_env`/`_transaction`/`_attribution_connect_kwargs`/`_PsycopgTransaction`；mixin 为普通类；导入单向；新模块命名 `model_registry_*.py`；`list_basins`/`list_basin_versions`/`_lock_basin_version_scope` 所在模块 ≤ 900 行
+- [x] 1.3 selector 等价路由；ci.yml `database:` 保留字面量 + 新增 `packages/common/model_registry_*.py`；`INTEGRATION_TRIGGER_SOURCES` 同步；partition oracle 不重生成
+- [x] 1.3b `tests/test_real_basin_discovery_integration.py` 的 getsource 缺席检查扩到 facade + owner 模块；`tests/test_node27_connection_attribution.py` surface-name 扫描参数化加入新模块；write-surface scan 已核无需同步（D3）
+- [x] 1.4 冻结消费者零 diff
 
 ## 2. 收口
 
-- [ ] 2.1 `wc -l` 全部 < 1000；`.large-file-guard.json` 零 diff
-- [ ] 2.2 `uv run ruff check .`；`openspec validate split-model-registry-store --strict --no-interactive`
-- [ ] 2.2b orchestrator 写 ci-contract-baseline MODIFIED delta（:820 场景 + :928 注册表所在 requirement）
+- [x] 2.1 `wc -l` 全部 < 1000；`.large-file-guard.json` 零 diff
+- [x] 2.2 `uv run ruff check .`；`openspec validate split-model-registry-store --strict --no-interactive`
+- [x] 2.2b orchestrator 写 ci-contract-baseline MODIFIED delta（:820 场景 + :928 注册表所在 requirement）
 - [ ] 2.3 node-27 全量 `pytest -q`（真实 DB，frozen SHA）receipt
 
 ## Evidence Floor
