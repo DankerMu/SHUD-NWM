@@ -27,9 +27,10 @@ Oversized non-excluded consumers of these modules SHALL remain unmodified.
 
 ### Requirement: Model-registry facade splits keep patch seams, write surfaces and lock order
 
-When a model-registry module is split behind a facade, the functions that call a
-monkeypatched name SHALL stay in the patched module and resolve that name through its
-module globals. `_backfill_output_segment_geometry`, `_lock_river_network_version`
+When a model-registry module is split behind a facade, every caller on the call path
+that an existing monkeypatch exercises SHALL stay in the patched module and resolve the
+patched name through its module globals, and each such seam SHALL be proven live by a
+mutation that breaks the real call site. `_backfill_output_segment_geometry`, `_lock_river_network_version`
 and `_seed_output_segment_rows` SHALL stay in their current modules, the
 river-segment write-surface scan constants SHALL be unchanged, and ADR 0009 member
 disposition markers SHALL stay inside their member function bodies.

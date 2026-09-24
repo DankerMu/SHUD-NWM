@@ -14,10 +14,10 @@
 
 ## 0. Baselines（拆前落盘到 `.workplans/split-oversized-surfaces-batch-2/`）
 
-- [ ] 0.1 `pytest --collect-only -q` suffix 集合：`tests/test_node22_refresh_timer_health.py`、`tests/test_direct_grid_display_cutover_flip.py`（排序后落盘，记录计数）
-- [ ] 0.2 AST+sha256 逐定义指纹：6 个被拆文件
-- [ ] 0.3 facade 公共面：每个被拆生产模块 `sorted(n for n in dir(mod))` 与 `python -m workers.model_registry.cli --help`（若存在）stdout
-- [ ] 0.4 monkeypatch seam 清单：对 4 个生产模块的全部 `setattr(<mod>, "<name>"`、`setattr(<mod>.<sub>, ...)`、字符串形式 `setattr("<dotted>.<name>")` / `patch("<dotted>")`（design D1 已知 seam 为下限）
+- [x] 0.1 `pytest --collect-only -q` suffix 集合：`tests/test_node22_refresh_timer_health.py`、`tests/test_direct_grid_display_cutover_flip.py`（排序后落盘，记录计数）
+- [x] 0.2 AST+sha256 逐定义指纹：6 个被拆文件
+- [x] 0.3 facade 公共面：每个被拆生产模块 `sorted(n for n in dir(mod))` 与 `python -m workers.model_registry.cli --help`（若存在）stdout
+- [x] 0.4 monkeypatch seam 清单：对 4 个生产模块的全部 `setattr(<mod>, "<name>"`、`setattr(<mod>.<sub>, ...)`、字符串形式 `setattr("<dotted>.<name>")` / `patch("<dotted>")`（design D1 已知 seam 为下限）
 
 ## 1. #2532 — `tests/test_node22_refresh_timer_health.py`（3456 行）
 
@@ -54,12 +54,12 @@
 
 ## 5. 收口
 
-- [ ] 5.1 `wc -l`：本批产出/修改的每个文件 < 1000（`scripts/select_ci_tests.py`、`tests/test_select_ci_tests.py` 已豁免除外）
-- [ ] 5.2 `git diff origin/master -- .large-file-guard.json`：恰好 -3 条（`tests/test_node22_refresh_timer_health.py`、`tests/test_direct_grid_display_cutover_flip.py`、`workers/model_registry/basins_discovery.py`），0 新增，其余逐字节不变
-- [ ] 5.3 guard hook 对每组真实 `git commit` 返回 exit 0（commit 本身经 PreToolUse hook）；另手动喂 hook 一次 staged 全量并记录 `rc=0`
-- [ ] 5.4 `git diff origin/master --stat` 不含 D2 列出的任何死锁消费者
-- [ ] 5.4b orchestrator 按实际分区名写 `specs/ci-contract-baseline/spec.md` MODIFIED delta（三条按路径点名被拆语料的 requirement）
-- [ ] 5.5 `uv run ruff check .` 绿；`openspec validate split-oversized-surfaces-batch-2 --strict --no-interactive` 绿
+- [x] 5.1 `wc -l`：本批产出/修改的每个文件 < 1000（`scripts/select_ci_tests.py`、`tests/test_select_ci_tests.py` 已豁免除外）
+- [x] 5.2 `git diff origin/master -- .large-file-guard.json`：恰好 -3 条（`tests/test_node22_refresh_timer_health.py`、`tests/test_direct_grid_display_cutover_flip.py`、`workers/model_registry/basins_discovery.py`），0 新增，其余逐字节不变
+- [x] 5.3 guard hook 对每组真实 `git commit` 返回 exit 0（commit 本身经 PreToolUse hook）；另手动喂 hook 一次 staged 全量并记录 `rc=0`
+- [x] 5.4 `git diff origin/master --stat` 不含 D2 列出的任何死锁消费者
+- [x] 5.4b orchestrator 按实际分区名写 `specs/ci-contract-baseline/spec.md` MODIFIED delta（三条按路径点名被拆语料的 requirement）
+- [x] 5.5 `uv run ruff check .` 绿；`openspec validate split-oversized-surfaces-batch-2 --strict --no-interactive` 绿
 - [ ] 5.6 node-27 frozen-SHA：`TMPDIR=/home/nwm/tmp uv run pytest -q` 全量 receipt（#2490 要求全量）
 - [ ] 5.7 PR body：不写 `Closes #2490`，记 #2490 部分交付偏离；声明 CI 定向选择 ≠ 全量
 
