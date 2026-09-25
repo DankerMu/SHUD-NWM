@@ -1,0 +1,17 @@
+-- Convergence-only (#2048). Commit b97c16e2 retired the frequency pipeline by
+-- editing 000003_enums.sql in place, removing 'frequency_done' from
+-- hydro.run_status. Applied migrations never replay, so node-27 production
+-- kept the label (an original CREATE TYPE member, between 'parsed' and
+-- 'published') while a database built from db/migrations lost it, and the two
+-- catalogs stopped agreeing. PostgreSQL cannot drop an enum value, so the only
+-- forward repair is to add it back here, at the same position.
+--
+-- 'frequency_done' is NOT a writable state and NOT display-ready: no writer may
+-- produce it, no reader may admit it, and PR #2037's removal of it from the
+-- OpenAPI RunStatus stands. The value exists only so that the two catalogs
+-- list the same labels in the same order.
+--
+-- On production this is a no-op (IF NOT EXISTS). It is a file of its own so
+-- that no statement uses the value in the transaction that adds it; 000063's
+-- rebuilt predicates do not name it either way.
+ALTER TYPE hydro.run_status ADD VALUE IF NOT EXISTS 'frequency_done' AFTER 'parsed';

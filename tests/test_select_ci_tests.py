@@ -2009,6 +2009,9 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     # #2154 adds a third leg by the supplemental route: the river-segment
     # write-surface scan reads every db/**/*.sql statement, so a migration that
     # rewrites core.river_segment or geometry_generation reds on its own PR.
+    #
+    # #2048 adds the schema-ledger convergence suite, which runs the real runner
+    # over every migration against a production-shaped catalog.
     migration = "db/migrations/000043_canonical_grid_snapshot.sql"
     assert Path(migration).exists()
     expected = [
@@ -2016,6 +2019,7 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
         "tests/test_migrations.py",
         "tests/test_node27_write_roles.py",
         "tests/test_river_segment_write_surface_scan.py",
+        "tests/test_schema_ledger_convergence_integration.py",
     ]
 
     assert select_tests([migration], repo_root=Path(".")) == expected
@@ -2025,6 +2029,28 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     # Pinned so a future switch to a path-aware matcher cannot silently drop that
     # half.
     assert select_tests(["db/migrations/2027q1/000099_x.sql"], repo_root=Path(".")) == expected
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "db/migrations/000064_drop_retired_flood_schema.sql",
+        "db/roles/node27_write_roles.sql",
+        "packages/common/migrate.py",
+    ],
+)
+def test_select_tests_maps_ledger_convergence_inputs_to_its_integration_suite(changed: str) -> None:
+    # #2048. tests/test_schema_ledger_convergence_integration.py replays the
+    # migrations (with the role block apply_migrations_from_zero lifts out of
+    # db/roles/) and drives packages.common.migrate.main() over them, so each of
+    # the three inputs can break it; `db/**` alone only buys test_migrations.py.
+    assert Path(changed).exists()
+    selected = select_tests([changed], repo_root=Path("."))
+
+    assert "tests/test_schema_ledger_convergence_integration.py" in selected
+    if changed == "packages/common/migrate.py":
+        # The runner's ledger/disk check lives behind the fake-connection seam.
+        assert "tests/test_migrate_lock_timeout.py" in selected
 
 
 def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -> None:

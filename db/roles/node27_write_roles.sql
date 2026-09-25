@@ -201,9 +201,10 @@ RESET log_min_duration_statement;
 
 \echo '## grants: nhms_ingest_rw over the six application schemas'
 -- Every schema-scoped statement is generated per EXISTING schema instead of
--- being spelled as one `IN SCHEMA core, hydro, ...` list: `flood` is
--- provisioned outside db/ and is absent in a fresh container, and a list form
--- would abort the whole run on the missing name.
+-- being spelled as one `IN SCHEMA core, hydro, ...` list: `flood` is a retired
+-- schema that 000064 drops (#2048), so it is absent on a fresh container and on
+-- node-27 after that migration, and a list form would abort the whole run on
+-- any listed schema that does not exist.
 SELECT format('GRANT USAGE ON SCHEMA %I TO nhms_ingest_rw', n.nspname)
 FROM pg_namespace n
 WHERE n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
@@ -715,24 +716,21 @@ ORDER BY 1, 2, 3;
 -- any depth) to that suite, so a new reference reddens a unit test on the
 -- migration's own PR rather than the live audit on node-27.
 --
--- Eleven entries today, in two provenance classes.  T7's first `--roles-only`
--- run against the PRODUCTION catalog (the receipt read `138 expression(s)/
--- trigger(s) scanned, 19 distinct function(s) referenced, 2 untrusted`) is what
--- put the last two there, and both were resolved by EXTENDING the list rather
--- than by widening a predicate to absorb them:
+-- Ten entries today, all derived.  T7's first `--roles-only` run against the
+-- PRODUCTION catalog (the receipt read `138 expression(s)/trigger(s) scanned,
+-- 19 distinct function(s) referenced, 2 untrusted`) found two more, and both
+-- were resolved without widening a predicate to absorb them:
 --   * pg_catalog.int8 -- derivable: the implicit int4->int8 coercion of an
 --     integer-literal DEFAULT on a BIGINT column.  The derivation gained the
 --     branch that reproduces it, so the migration side stays an equality.
---   * pg_catalog.jsonb_typeof -- NOT derivable from this repository: the
---     migrations that authored the flood.run_product_quality CHECKs are in
---     node-27's public.schema_migrations ledger but no longer in db/migrations.
---     Recorded with its reason in the test's `_LEDGER_ALLOW_LIST`, which is
---     asserted disjoint from the derived set; that keeps "the derivation
---     reproduces the derived half exactly" true instead of degrading it to a
---     subset check for the whole list.
--- Both are IMMUTABLE, STRICT and pure (measured): a width widening and a jsonb
--- type tag.  Neither reads the filesystem, evaluates a string, nor touches
--- session state.
+--     IMMUTABLE, STRICT and pure (measured): a width widening that neither
+--     reads the filesystem, evaluates a string, nor touches session state.
+--   * pg_catalog.jsonb_typeof -- was trusted only because the retired
+--     flood.run_product_quality CHECKs referenced it (authored by migrations
+--     that are in node-27's ledger but no longer in db/migrations).  000064
+--     drops the flood schema (#2048), so the entry is gone and the test's
+--     ledger-only list (`_LEDGER_ALLOW_LIST`) is empty.  Run the audit-only
+--     pass BEFORE pulling a checkout with this list while flood still exists.
 --
 -- One carve-out, and it is structural rather than enumerated: a pg_catalog
 -- function reached ONLY as `:opfuncid` -- i.e. as the implementation of an
@@ -865,8 +863,8 @@ SELECT r.relation,
               THEN 'NOT executable by nhms_ingest_rw' END,
          CASE WHEN NOT (
                 (pn.nspname || '.' || p.proname) = ANY (ARRAY[
-                  -- Two provenance classes, both migration-authored, neither
-                  -- chosen.  DERIVED from db/migrations/** (and re-derived by
+                  -- Migration-authored, not chosen.  DERIVED from
+                  -- db/migrations/** (and re-derived by
                   -- tests/test_node27_write_roles.py as an EQUALITY): DEFAULT
                   -- now() (31x), DEFAULT gen_random_uuid() (1x), BIGSERIAL ->
                   -- nextval (7x), the btrim() in 000038's CHECK, the four
@@ -880,26 +878,14 @@ SELECT r.relation,
                   --     column, stored as int8(int4 const) while pg_get_expr
                   --     prints just `0`: 000035's
                   --     hydro.run_display_coverage.{station,river}_sample_count
-                  --     and the flood.run_product_quality counters (measured,
-                  --     transcript 20 / 20.1; found by T7's first --roles-only
-                  --     sweep of the production catalog).
-                  -- LEDGER-BACKED, not derivable from this repository:
-                  --   jsonb_typeof -- flood.run_product_quality's
-                  --     residual_blockers / unavailable_products CHECKs
-                  --     (`jsonb_typeof(x) = 'array'::text`), authored by
-                  --     000034_return_period_run_quality_materialization.sql
-                  --     and 000036_run_product_quality_explicit_source.sql,
-                  --     both applied by the migration superuser per node-27's
-                  --     public.schema_migrations -- but neither file is under
-                  --     db/migrations any more (000033 -> 000035 -> 000037).
-                  --     Kept in the test's `_LEDGER_ALLOW_LIST` with that
-                  --     reason so the derived half stays an equality; the
-                  --     repo/production drift is reported out of scope.
-                  -- Both additions are IMMUTABLE, STRICT and pure: int8 is a
-                  -- width widening and jsonb_typeof returns the type tag of a
-                  -- jsonb value.  Neither reads the filesystem, executes a
-                  -- string, or touches session state -- the properties that
-                  -- made query_to_xml the round-4 P1.
+                  --     (measured, transcript 20 / 20.1; found by T7's first
+                  --     --roles-only sweep of the production catalog).
+                  -- int8 is IMMUTABLE, STRICT and pure: a width widening that
+                  -- neither reads the filesystem, executes a string, nor
+                  -- touches session state -- the properties that made
+                  -- query_to_xml the round-4 P1.  No LEDGER-BACKED entry is
+                  -- left: jsonb_typeof was trusted only for the retired
+                  -- flood.run_product_quality CHECKs, which 000064 drops (#2048).
                   'met.canonical_grid_cell_direct_delete_blocked',
                   'met.canonical_grid_cell_immutable',
                   'met.canonical_grid_snapshot_identity_immutable',
@@ -908,7 +894,6 @@ SELECT r.relation,
                   'pg_catalog.float8',
                   'pg_catalog.gen_random_uuid',
                   'pg_catalog.int8',
-                  'pg_catalog.jsonb_typeof',
                   'pg_catalog.nextval',
                   'pg_catalog.now'])
                 OR (pn.nspname = 'pg_catalog'

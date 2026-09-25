@@ -127,7 +127,8 @@ created → staged → submitted → running → succeeded → parsed → publis
 
 异常状态：`failed`、`cancelled`、`superseded`。
 
-重试再入：人工重试把 `failed` / `cancelled` run 置为 `pending`（retry job 排队中，`db/migrations/000013_enum_remediation.sql`），运行时重新登记时回到 `created` 再走上面的主线。枚举成员以 `000003_enums.sql` + `000013` 为准；`frequency_done` 已随频率展示管线退役（`b97c16e2`），不是账本成员，但仍残留在 node-27 live 枚举中。
+重试再入：人工重试把 `failed` / `cancelled` run 置为 `pending`（retry job 排队中，`db/migrations/000013_enum_remediation.sql`），运行时重新登记时回到 `created` 再走上面的主线。
+枚举成员以 `000003_enums.sql` + `000013` + `000062` 为准；`frequency_done` 已随频率展示管线退役（`b97c16e2`），自 `000062` 起是仅为账本收敛保留的成员（位于 `parsed` 与 `published` 之间，与 node-27 live 枚举一致），任何写入方都不产生它，也不是 display-ready 状态。
 
 ### 5.3 状态机与监控 UI 阶段映射
 

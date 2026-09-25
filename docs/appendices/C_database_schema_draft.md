@@ -23,11 +23,12 @@ CREATE TYPE hydro.run_type AS ENUM (
   'analysis', 'forecast', 'hindcast'
 );
 
--- Ledger: db/migrations/000003_enums.sql + 000013_enum_remediation.sql ('pending' BEFORE 'submitted').
--- 'frequency_done' is retired (b97c16e2) and not a ledger member, but still present in the live node-27 enum.
+-- Ledger: db/migrations/000003_enums.sql + 000013_enum_remediation.sql ('pending' BEFORE 'submitted')
+-- + 000062_hydro_run_status_frequency_done_convergence.sql ('frequency_done' AFTER 'parsed').
+-- 'frequency_done' is retired (b97c16e2): a convergence-only ledger member since 000062, never written.
 CREATE TYPE hydro.run_status AS ENUM (
   'created', 'staged', 'pending', 'submitted', 'running', 'succeeded',
-  'parsed', 'published',
+  'parsed', 'frequency_done', 'published',
   'failed', 'cancelled', 'superseded'
 );
 

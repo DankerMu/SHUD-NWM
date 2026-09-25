@@ -74,8 +74,8 @@ GeoJSON delivery metadata（`flood.return_period_result` → `layer_id=flood_ret
 
 - 成功条件：指定 cycle（canonical `<source>_YYYYMMDDHH`）下存在 `hydro.hydro_run.status IN ('succeeded', 'parsed', 'published')`
   的 forecast run，且 `hydro.river_timeseries` 存在该 run 的 `q_down` 行（与
-  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 不是迁移账本成员，
-  仅残留在 node-27 live 枚举中）。
+  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 自 `000062` 起是仅为账本
+  收敛保留的枚举成员，从不写入）。
 - 副作用：写 `tiles/hydro/<cycle_id>/q-down/<run_id>/<river_network_version_id>/manifest.json` 与 cycle 级
   `tiles/hydro/<cycle_id>/q-down/manifest.json`；upsert `map.tile_layer`，确定性
   `layer_id=q_down_<run_id>_<river_network_version_id>`，`layer_type=q_down_timeseries`，
