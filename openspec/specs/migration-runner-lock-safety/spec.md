@@ -4,6 +4,7 @@
 Keep the migration runner from stalling a live database behind the PostgreSQL FIFO lock queue: bounded lock waits by default with explicit precedence, and actionable, redacted lock-holder diagnostics without ledger writes on failure (#2277).
 
 ## Requirements
+
 ### Requirement: The migration runner MUST bound lock waits by default on every session it opens
 
 `packages.common.migrate.main()` MUST configure its session before the first statement (including `ensure_schema_migrations_table`). `lock_timeout` MUST resolve by precedence: an explicit `NHMS_MIGRATE_LOCK_TIMEOUT` value is applied verbatim; otherwise a non-zero session value already in effect (from `PGOPTIONS`, role or database settings) is kept; otherwise `5s` is applied. `statement_timeout` MUST be changed only when `NHMS_MIGRATE_STATEMENT_TIMEOUT` is set, so long legitimate migrations are never killed by default and a `PGOPTIONS` value keeps working. An invalid value MUST fail before any migration statement with exit code 1 and a message naming the variable. The runner MUST print the effective `lock_timeout` and `statement_timeout`, each with its `pg_settings.source`, once before applying migrations. `apply_migration`, `ensure_schema_migrations_table`, `migration_has_been_applied` and `record_migration` MUST keep their signatures and MUST NOT change the session settings of connections supplied by other callers.
@@ -60,3 +61,27 @@ When a migration statement fails with SQLSTATE `55P03` (`lock_not_available`), t
 - **WHEN** `python -m packages.common.migrate` runs with no timeout environment variables
 - **THEN** it exits 0, `public.schema_migrations` holds one row per `db/migrations/*.sql` file, and no index has `pg_index.indisvalid = false`
 
+### Requirement: The migration runner MUST refuse a ledger/disk mismatch before applying anything
+
+Before applying any migration, the runner MUST compare `public.schema_migrations` with the migration files. It MUST exit non-zero, with nothing applied and every offending name listed, when:
+
+- a ledger version has no file on disk and is not a recorded retired version;
+- two files on disk share a 6-digit prefix;
+- a file on disk has the name of a recorded retired version.
+
+Each recorded retired version MUST carry a reason naming the change that retired it. The runner's output MUST NOT contain a credential.
+
+#### Scenario: An unrecorded missing file stops the run
+
+- **WHEN** the ledger holds a version whose file is not on disk and that version is not recorded as retired
+- **THEN** the runner SHALL exit non-zero, name that version, and apply no migration
+
+#### Scenario: The recorded retirements pass
+
+- **WHEN** the ledger holds exactly the 7 versions retired by `b97c16e2` besides the on-disk files, including both `000031` rows
+- **THEN** the check SHALL pass and pending migrations SHALL be applied
+
+#### Scenario: A duplicate prefix or a returning retired name stops the run
+
+- **WHEN** two files on disk share a prefix, or a file is named like a retired version
+- **THEN** the runner SHALL exit non-zero and apply no migration

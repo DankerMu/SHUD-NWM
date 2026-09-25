@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m10-production-closure. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Production configuration is validated before release
 
 The system SHALL provide production environment templates and validation checks for all deployable services.
@@ -122,8 +124,10 @@ neither waiting for the other.
 The pending set SHALL be computed as `db/migrations/*.sql` minus `public.schema_migrations`, and applied with
 `packages.common.migrate` connected as the `nhms` owner role, so the ledger is written; `psql -f` SHALL NOT be
 used to apply, because it leaves the ledger unchanged and lets the next bring-up silently replay. Rows present
-in the ledger with no file on disk are `#2048`'s retroactive-deletion drift, are never visited by
-`packages/common/migrate.py`'s loop, and SHALL NOT block applying the pending set. The apply SHALL be wrapped
+in the ledger with no file on disk are `#2048`'s retroactive-deletion drift. The ones recorded in
+`packages/common/migrate.py`'s `RETIRED_LEDGER_VERSIONS` SHALL NOT block applying the pending set; any
+other ledger row without a file, a duplicated file prefix, or a retired name back on disk SHALL make the
+runner refuse before it applies anything. The apply SHALL be wrapped
 by a role audit on both sides — audit-only before the superuser write session, and the full
 `scripts/node27_provision_write_roles.sh` with a clean strict audit after — and SHALL run inside a window with
 the ingest and download timers stopped. Acceptance SHALL be read from the database's own catalogs (applied
@@ -188,4 +192,3 @@ reproduce its systemd branch by hand and record the deviation.
   `exe` and `NHMS_MVT_FILE_CACHE_DIR` are read from `/proc/<MainPID>/`, the other instance on the host keeps its PID,
   and the read surfaces (`/api/v1/layers`, `river-network-national`, both `hydro-national` routes) answer with zero
   500 before any timer is re-enabled; a failure at any of these points restores the whole set from the backup
-

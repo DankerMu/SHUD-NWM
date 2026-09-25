@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change mapping-variant-state-compatibility. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Fingerprint-gated state clone at cutover
 
 At cutover the mechanism SHALL clone the latest qualified `(M0, source, t*)` snapshot row in `hydro.state_snapshot` into a `(M1, source, t*)` row, and SHALL do so only when the `M0` package and the `M1` package have an equal `hydrologic_core_fingerprint`. A source snapshot is **qualified** only when it is usable (`usable_flag=true`), QC-passing, carries a valid `checksum`, is the `+12h` successor checkpoint (`lead_hours = 12`), and its `valid_time` equals the cutover cycle boundary `t*` that `M1`'s first strict cycle warm-starts from (docs §Gate G10 condition 4: snapshot valid time must satisfy runtime time consistency with the run start); a stale snapshot (`valid_time < t*`, e.g. after failed final `M0` cycles) is NOT qualified. The physical SHUD state file SHALL NOT be copied. The fingerprint equality gate SHALL reuse `workers/mapping_builder/rewrite.py::verify_hydrologic_core_fingerprint_equal` and SHALL NOT reimplement the fingerprint rule.
@@ -228,23 +230,18 @@ would reject such a row and move `t*` LATER, which silently removes the model
 from cycles it genuinely has a gap in, whereas admitting it leaves at most a
 loud stuck gap.
 
-That admission predicate binds the ANSWER, and the layer that discharges each
-clause differs by plane. On the file state-snapshot index plane one filter
-discharges all three clauses while SELECTING the entries. On the database plane
-the row-selection statement discharges only presence and a byte-literal
-difference from the row's own `model_id`; the non-empty clause, and the
-difference clause under whitespace normalisation, are discharged downstream of
-selection. Because selection there takes the earliest row and stops, a
-provenance-corrupt row — a blank `cloned_from_model_id`, or one naming the row's
-own `model_id` with surrounding whitespace — can be selected, be correctly
-refused lineage downstream, and thereby MASK a later legitimate clone row that
-the file plane would have found. Both planes give the same answer for that row;
-they can still resolve different `t*` for the same model. This masking is a
-known open gap, not a claim of compliance: on the database plane, row selection
-SHALL eventually normalise `cloned_from_model_id` before applying both clauses,
-so a corrupt row is skipped rather than merely refused. Closing it requires
-BOTH an emptiness test and a normalised self-reference test — an emptiness test
-alone leaves the padded self-reference standing.
+That admission predicate binds the ANSWER, and both planes discharge every
+clause while SELECTING the row. On the file state-snapshot index plane one
+filter discharges all three clauses on the stripped value. On the database
+plane the row-selection statement discharges presence, non-emptiness and the
+difference from the row's own `model_id` on `cloned_from_model_id` with
+surrounding whitespace removed (#2392; see the requirement "Both persistence
+planes SHALL normalise cloned_from_model_id identically before judging it").
+A provenance-corrupt row — a blank `cloned_from_model_id`, or one naming the
+row's own `model_id` with surrounding whitespace — is therefore skipped by
+selection on both planes and cannot MASK a later legitimate clone row; both
+planes resolve the same `t*` for the same model. Downstream refusal of such a
+row stays as defence in depth.
 
 Lineage resolution SHALL distinguish a resolution FAILURE from a resolved "no
 lineage". A state-snapshot index that exists but cannot be read, parsed, or
@@ -401,3 +398,21 @@ but cannot restore the overwritten one.
 - **THEN** the refusal scope is the self-clone scope, not the
   target-not-direct-grid scope and not the degenerate-gate-inputs scope.
 
+### Requirement: Both persistence planes SHALL normalise cloned_from_model_id identically before judging it
+
+"Present, non-empty, and different from the row's own `model_id`" SHALL be judged on `cloned_from_model_id` with surrounding whitespace removed, where whitespace is exactly the set of characters Python's `str.isspace()` accepts. The comparison with `model_id` SHALL use the raw `model_id`. On the DB plane this SHALL be enforced by the SQL predicate of the earliest-clone-row reader, so that `LIMIT 1` never selects a row the file plane would skip. The resolver's own normalisation SHALL stay as defence in depth. The publisher's latest-clone-row reader is not governed by this requirement.
+
+#### Scenario: A whitespace-only parent does not mask a later clone row
+
+- **WHEN** the earliest clone row of a `(model_id, source_id)` has a `cloned_from_model_id` made only of whitespace (including tab, newline or U+3000) and a later clone row names a real predecessor
+- **THEN** both planes SHALL resolve the lineage cutover from the later row
+
+#### Scenario: A padded self-reference does not mask a later clone row
+
+- **WHEN** the earliest clone row's `cloned_from_model_id` is the row's own `model_id` with surrounding whitespace and a later clone row names a real predecessor
+- **THEN** both planes SHALL resolve the lineage cutover from the later row
+
+#### Scenario: The planes agree
+
+- **WHEN** the same set of clone rows is written to the file plane and to the DB plane
+- **THEN** the two planes SHALL resolve the same `LineageCutover`
