@@ -30,7 +30,7 @@ The deny-write half is clean in the same run: 23/23 probes denied, `failed_mutat
 
 The #2420 and #2450 C2 runs (2026-09-20, `artifacts/issue2420-readonly-87236ca54/…`) show 9/9 PASS on GFS and IFS. They got there only with a **hand-supplied** tuple (`--source`/`--cycle-time …Z`/`--strict-run-id`/`--model-id`/`--job-id`, recorded in `docs/runbooks/receipts/2026-09-20-issue2420-job-provenance.json`), where the `Z` spelling happens to match the echo byte for byte. So what is broken is the validator's own contract and its discovery path, not the routes:
 
-1. `cycle_time` is compared as a string, so the same instant in `+00:00` and `Z` spelling is a MISMATCH (`readonly_db_route_smoke.py:290`). The sibling lane already compares instants (`two_node_e2e_evidence.py:2388-2408`).
+1. `cycle_time` is compared as a string, so the same instant in `+00:00` and `Z` spelling is a MISMATCH (`readonly_db_route_smoke.py:290`). The sibling lane already compares cycle hours after UTC normalisation (`two_node_e2e_evidence.py:2388-2408`).
 2. `_route_response_identity` is all-or-nothing (`:246`). One missing field makes it return `{}`, so the evidence drops the response identity and reports all four fields MISSING. That is how the 2026-09-18 receipt's first draft reasoned from the wrong symptom.
 3. Identity blockers are computed for non-2xx responses too (`:184-185`), so a 404 error body is reported as MISSING×4 on top of its real error code.
 4. `discover_display_identity` (`readonly_db_probe_adapter.py:61-113`) returns a tuple that contradicts itself:
