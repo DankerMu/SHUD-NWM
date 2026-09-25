@@ -122,16 +122,20 @@
 - **New test files.** New cases for 2.1, 2.5 and 2.7 live in new files (`tests/test_readonly_db_route_identity.py`, `tests/test_readonly_db_discovery_and_lane_statuses.py`, `tests/test_start_display_api_restart_anchor.py`, plus `tests/test_readonly_db_discovery_integration.py`, `tests/test_readonly_db_two_node_consumer.py`, `tests/test_identity_matching.py`). The reason is that `.large-file-guard.json` (maxLines 1000) blocks any edit to `tests/test_two_node_docker_runtime.py` (5496 lines), which is unchanged, and `tests/test_readonly_db_validation.py` is at 868 lines. The existing tests that 2.1 names were updated in place.
 - **Inspection command path.** The inspection command moved with the #1103 runbook split: `docs/runbooks/production-ops/gateway-and-services.md:718`, not `current-production-ops.md:1994`.
 - **Merge refusal.** The merge refuses a non-PASS source bundle at load (exit 1), not at summary build (exit 2); see the correction in D6.
-- **CI routing (3.3).** The `services/production_closure/**` rule plus same-name selection already route the changed modules. No duplicate rule was added; two `tests/test_select_ci_tests.py` cases pin the coverage.
+- **CI routing (3.3).** The new test files join `READONLY_DB_VALIDATION_TESTS`, the `services/production_closure/**` rule (for `tests/test_identity_matching.py`, added after the node-27 run on `43a3e8bb3` failed the directory-importer disposition tests; they only see tracked files, so the first local run missed it) and the `start-display-api.sh` rule. Two `tests/test_select_ci_tests.py` cases pin this, the first looping over three producers.
 
 ## 3. Verification
 
-- [ ] 3.1 Local:
+- [x] 3.1 Local:
   - `uv run ruff check .`;
   - `uv run pytest -q tests/test_readonly_db_validation.py tests/test_readonly_db_validation_routes.py tests/test_pipeline_ops_identity_envelope.py tests/test_two_node_e2e_evidence.py tests/test_two_node_docker_runtime.py <new test files> tests/test_select_ci_tests.py` (`test_pipeline_ops_identity_envelope.py` is DB-backed and may skip locally);
   - `openspec validate readonly-smoke-bound-identity-and-display-restart-anchor --strict --no-interactive`.
   - Red proofs: the new 2.1 and 2.7 tests fail on master's `readonly_db_route_smoke.py` / `start-display-api.sh` (temporary checkout of the two files, reverted), with counts in the PR.
-- [ ] 3.2 node-27 disposable-DB pytest on the frozen SHA (`/home/nwm/tmp/node27-pr-runner.sh`): the files from 3.1 plus the new real-DB discovery test, with 0 skipped for the integration file and for `tests/test_pipeline_ops_identity_envelope.py`. Then the node-27 full pytest; its failure set must equal master's (#2615 only).
+- [x] 3.2 node-27 disposable-DB pytest on the frozen SHA (`/home/nwm/tmp/node27-pr-runner.sh`): the files from 3.1 plus the new real-DB discovery test, with 0 skipped for the integration file and for `tests/test_pipeline_ops_identity_envelope.py`. Then the node-27 full pytest; its failure set must equal master's (#2615 only).
+  - **Result (node-27, 2026-09-25):**
+    - On `43a3e8bb3`: 2364 passed / 5 failed / 2 skipped. The 5 failures were all `tests/test_select_ci_tests.py` directory-importer disposition tests; fixed in `83933c914`.
+    - On `83933c914` (`/home/nwm/tmp/n-83933c9/`): **2370 passed / 2 skipped** (both `requires writable /scratch/frd_muziyao`, node-22). 0 skipped for `tests/test_readonly_db_discovery_integration.py` and `tests/test_pipeline_ops_identity_envelope.py`.
+    - Full pytest on `83933c914`: `/home/nwm/tmp/n-full-83933c9/`. Its result is recorded in the PR body and the archive receipt (no trailing commit).
 - [x] 3.3 `scripts/select_ci_tests.py` routes `services/production_closure/readonly_db_*.py`, `identity_matching.py` and `scripts/ops/start-display-api.sh` to their tests. A `tests/test_select_ci_tests.py` row is added if a route is new.
 
 ## 4. PR
