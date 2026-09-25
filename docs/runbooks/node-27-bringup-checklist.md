@@ -243,6 +243,10 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
     identity-bound 路由按字段比对 echo：`source` 大小写不敏感，`cycle_time`
     按 UTC cycle hour（`Z` 与 `+00:00` 拼写等价，不再影响结果），其余精确；echo
     矛盾是 `FAIL`，echo 缺字段是 `BLOCKED`。
+  - 运行前先 `set -a; . infra/env/display.env; set +a`，再导出只读 DSN：validator 在进程内驱动本 checkout 的
+    app，缺 `NHMS_PUBLISHED_ARTIFACT_ROOT` 时 `job_logs` 会因 `published_root_missing` 判 `BLOCKED`（400
+    `JOB_LOG_URI_UNSUPPORTED`），而线上 `:8080` 是有这个变量的（#2484 receipt §3.1）。按源拆跑再合并时，
+    per-source run id 必须是 `<合并 run id>-gfs` / `-ifs`，否则合并报 `READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH`。
   - deny-write 结论读 `summary.json` 的 `lane_statuses.deny_write`（role、permission
     probes、manual-action probes）；`lane_statuses.read_routes` 是路由 smoke 的结论，
     顶层 `status` 仍是两者取最差。
