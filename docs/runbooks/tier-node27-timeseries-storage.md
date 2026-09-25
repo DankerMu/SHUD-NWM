@@ -7946,7 +7946,9 @@ the same gadget are covered by detection only, in the same audit:
     Sequencing consequence: while `flood` still exists the current SQL's strict
     audit is red (`jsonb_typeof` untrusted), so every pre-write audit-only pass
     until `000064` has run reads the **pinned** source, wherever the checkout is:
-    `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql | docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on`
+    write `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql`
+    to a file, check it is non-empty, then feed it with `<` to the audit-only
+    command below (a plain pipe would hand psql empty input, rc 0, if `git show` failed)
     (#2048 design D3; the window procedure is in that change's `tasks.md` §5).
 
   Everything else, in any schema, is reported. Both entries T7 added were
@@ -8409,6 +8411,11 @@ docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 \
   -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on \
   < db/roles/node27_write_roles.sql
 ```
+
+Until `000064` (#2048) has run on node-27, the `flood` CHECKs make this
+command's strict audit red on `jsonb_typeof`; use the pinned source instead
+(`e340dbc10`'s roles SQL; see the `jsonb_typeof` entry of the §9 allow-list
+and #2048's `tasks.md` §5).
 
 An audit is **detection**, and a planted rule, trigger or column `DEFAULT` fires
 on the *next* superuser write — which is the session you are about to open.

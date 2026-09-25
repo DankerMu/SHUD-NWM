@@ -74,8 +74,12 @@
     - Red proofs: the D4 tests fail on master's `migrate.py` (10), the D7 SQL-shape test fails on the old SQL, the allow-list test fails on master's roles SQL, a perturbed `000063` predicate fails 2 tests, and `frequency_done` added to a status set fails the F3 test.
 - [x] 3.2 node-27 read-only: the D4 check function run against production's `schema_migrations` (`nhms_display_ro`) passes with exactly the 7 retired versions.
   - **Result (node-27, 2026-09-25, `362fdb951`):** production ledger 62 rows, 58 files, `ledger_disk_mismatches == []`, pending exactly `000062`–`000064`, 7 retired recognised. `/home/nwm/tmp/m/ledger-check-pre.txt`.
-- [ ] 3.3 node-27 disposable-DB pytest on the frozen SHA: the new integration file, `tests/test_real_database_integration.py`, `tests/test_migrations.py`, `tests/test_scheduler_lineage.py`, `tests/test_node27_write_roles.py`, `tests/test_node27_1729_evidence_basin_delete_integration.py`. Then the node-27 full pytest; its failure set must equal master's (#2615 only).
+- [x] 3.3 node-27 disposable-DB pytest on the frozen SHA: the new integration file, `tests/test_real_database_integration.py`, `tests/test_migrations.py`, `tests/test_scheduler_lineage.py`, `tests/test_node27_write_roles.py`, `tests/test_node27_1729_evidence_basin_delete_integration.py`. Then the node-27 full pytest; its failure set must equal master's (#2615 only).
 
+  - **Result (node-27, 2026-09-25):**
+    - Targeted on `362fdb951`: 224 passed / 0 skipped. Fix-delta on `a6f7a92ee` (convergence integration with the production grant shape, status-set guard, write roles, entropy, real-DB, migrations, lock-timeout, lineage): 258 passed / 0 skipped.
+    - Full run on `362fdb951`: 1 failed / 20821 passed / 62 skipped (1:49:29). The one failure is `test_canonical_precip_copyback_backfill::test_backfill_module_launch_outside_the_repo_root_fails_with_no_summary`, #2615, as on master. The skip list is master's: opt-in docker/e2e markers plus the pre-existing `test_forcing_read_path_store_routing.py:1114`.
+    - The fix pass after it changed only tests, comments and docs, and those are covered by the fix-delta run.
 ## 4. Review / CI
 
 - [ ] 4.1 Review rounds recorded with fix_gate. CI green, including SQL Migration Dry Run on the non-draft PR.
@@ -86,10 +90,14 @@
 - **Pinned pre-drop audit source (design D3).** While `flood` exists, the only audit source that can pass is master's roles SQL at `e340dbc10`, which still trusts `jsonb_typeof`. That holds wherever node-27's checkout is. Every pre-write audit in this procedure uses it:
 
   ```bash
-  git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql \
-    | docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 \
-        -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on
+  git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql > /home/nwm/tmp/m/roles-pinned.sql
+  test -s /home/nwm/tmp/m/roles-pinned.sql
+  docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 \
+    -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on \
+    < /home/nwm/tmp/m/roles-pinned.sql
   ```
+
+  The file step makes a failed `git show` stop the procedure. With a plain pipe, psql would read empty input and return rc 0.
 
   Pre-merge rehearsal (2026-09-25, read-only against production): the pinned source gives rc 0 and `0 untrusted`. The branch's SQL gives rc 3 with exactly one untrusted function, `pg_catalog.jsonb_typeof`, from the two `flood.run_product_quality` CHECKs. `/home/nwm/tmp/m/audit-{old,new}.txt`.
 
