@@ -140,12 +140,12 @@
 
 ## 4. PR
 
-- [ ] 4.1 PR with body per the project PR rules; CI green; review rounds per the fixture level; merge.
+- [x] 4.1 PR with body per the project PR rules; CI green; review rounds per the fixture level; merge.
 
 ## 5. node-27 live receipt (after merge, on the merged SHA)
 
-- [ ] 5.1 **Decoy + red proof (read-only, before pull):** launch the D9 decoy and record its pid. `pgrep -af` with the old pattern lists `:8080` and the decoy; the anchored pattern lists only `:8080`.
-- [ ] 5.2 **Deploy = C1:**
+- [x] 5.1 **Decoy + red proof (read-only, before pull):** launch the D9 decoy and record its pid. `pgrep -af` with the old pattern lists `:8080` and the decoy; the anchored pattern lists only `:8080`.
+- [x] 5.2 **Deploy = C1:**
   1. `git status --porcelain` is empty; `git pull --ff-only` to the merge SHA;
   2. `bash scripts/ops/start-display-api.sh`;
   3. the decoy pid is unchanged and alive;
@@ -154,29 +154,34 @@
   6. the public `https://test.nwm.ac.cn/` serves the dist.
 
   Write `c1-approved.json` (status, `head_sha` = `reviewed_sha` = merge SHA, checks). Stop the decoy and remove its tree.
-- [ ] 5.3 **C2:**
+- [x] 5.3 **C2:**
   1. **unattended** (no identity flags): expect `status` PASS, 9/9 routes PASS, `lane_statuses` both PASS;
   2. per source, `--source GFS` and `--source IFS`, each PASS;
   3. merged via `--merge-source-dir` (both), which gives full-scope PASS.
 
   Evidence stays under `artifacts/issue2484-n/`, with the DSN only in env. Any non-PASS is recorded as observed, not re-run into a PASS by hand-picking a tuple.
-- [ ] 5.4 **C3 (27-side cross-plane identity, both sources):** per source, the same `run_id`/`source`/`cycle_time`/`model_id`/`basin_id` is shown to chain:
+- [x] 5.4 **C3 (27-side cross-plane identity, both sources):** per source, the same `run_id`/`source`/`cycle_time`/`model_id`/`basin_id` is shown to chain:
   - the node-22-produced `hydro_run` row (`published`);
   - its published job log (`job_logs` 200 with echo);
   - `latest-product` (200, strict);
   - `/` and `/ops` in 5.5's browser lane.
 
   Recorded honestly as C3's node-27 half. The two-node producer-bundle aggregator (`validate_two_node_e2e_evidence.py`) needs a node-22 producer bundle and is not run. Whatever it cannot claim is stated.
-- [ ] 5.5 **C4:**
+- [x] 5.5 **C4:**
   1. `c1-c4-approval.json` (GFS/IFS identities and job ids from 5.3), following the #2420 layout;
   2. `node27_c4_production_acceptance.py freeze`, then `test:e2e:live-c4-display` (basin `basins_qhh`, segment `basins_qhh_shud_reach_000001`, or the checklist's current pins), then `bind` and `verify`, following the checklist C4 sequence.
 
   The verdict is recorded as observed. A basemap-throttle or source-error non-PASS is reported, not waived.
-- [ ] 5.6 The receipt `evidence/node27-live-receipt.md` in the archive PR:
+- [x] 5.6 The receipt `evidence/node27-live-receipt.md` in the archive PR:
   - C1-C4 each PASS / PARTIAL / BLOCKED, with the reason;
   - digests of the private approval and freeze files;
   - #2282's decoy survival;
   - the #2420 premise correction ("job_logs stays BLOCKED" no longer holds).
+
+## Post-merge record
+
+- 4.1: PR #2637 merged at `579b2a6f5` after round 1 (clean, P2s only) and round 2 (clean). CI `Unit Tests` hit the #2573 teardown `SIGSEGV` after `3886 passed` on both runs; the user chose to merge with an annotation, after node-27 confirmed the full suite: 1 failed (#2615) / 20929 passed.
+- §5: `evidence/node27-live-receipt.md`. Decoy survival PASS; C1, C2 (unattended, per source, merged) and C4 PASS; C3's node-27 half PASS for both sources. The first C2 attempt without `display.env` BLOCKED `job_logs` (`published_root_missing`); the runbook precondition is now written down.
 
 ## Evidence Floor
 
