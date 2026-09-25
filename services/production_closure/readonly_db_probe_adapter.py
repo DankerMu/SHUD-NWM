@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
+from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
 from packages.common.redaction import redact_text
 from services.production_closure.readonly_db_permission_probes import (
     _database_create_catalog_finding,
@@ -58,50 +59,92 @@ class PsycopgReadonlyDbProbeAdapter:
                 role = dict(cursor.fetchone() or {})
         return {**session, **role}
 
-    def discover_display_identity(self) -> dict[str, Any]:
+    def discover_display_identity(
+        self,
+        *,
+        source: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Discover one self-consistent display identity (D4, #2484).
+
+        The run is the newest display-ready ``hydro.hydro_run`` row (the
+        latest-product selector's own status gate), or exactly the configured
+        business ``run_id`` whatever its status, narrowed to the configured source
+        case-insensitively. ``job_id`` is only ever that run's own newest logged
+        job; there is no fallback to another run's job.
+        """
         identity: dict[str, Any] = {}
         try:
             with self._connection() as connection:
                 with connection.cursor() as cursor:
+                    run_conditions = [
+                        "r.source_id IS NOT NULL",
+                        "r.cycle_time IS NOT NULL",
+                        "r.model_id IS NOT NULL",
+                    ]
+                    run_params: list[Any] = []
+                    if run_id:
+                        run_conditions.append("r.run_id = %s")
+                        run_params.append(run_id)
+                    else:
+                        run_conditions.append("r.status::text = ANY(%s)")
+                        run_params.append(list(QHH_LATEST_READY_RUN_STATUSES))
+                    if source:
+                        run_conditions.append("upper(r.source_id) = upper(%s)")
+                        run_params.append(source)
                     cursor.execute(
                         """
-                        SELECT run_id, source_id AS source, cycle_time, model_id
-                        FROM hydro.hydro_run
-                        WHERE source_id IS NOT NULL
-                          AND cycle_time IS NOT NULL
-                          AND model_id IS NOT NULL
-                        ORDER BY updated_at DESC NULLS LAST, cycle_time DESC, run_id DESC
+                        SELECT r.run_id, upper(r.source_id) AS source, r.cycle_time, r.model_id, bv.basin_id
+                        FROM hydro.hydro_run r
+                        LEFT JOIN core.basin_version bv ON bv.basin_version_id = r.basin_version_id
+                        WHERE """
+                        + "\n                          AND ".join(run_conditions)
+                        + """
+                        ORDER BY r.updated_at DESC NULLS LAST, r.cycle_time DESC, r.run_id DESC
                         LIMIT 1
-                        """
+                        """,
+                        tuple(run_params),
                     )
                     row = cursor.fetchone()
                     if row:
-                        identity.update(dict(row))
+                        identity.update({key: value for key, value in dict(row).items() if value is not None})
                     if "source" not in identity or "cycle_time" not in identity:
+                        cycle_conditions = ["source_id IS NOT NULL", "cycle_time IS NOT NULL"]
+                        cycle_params: list[Any] = []
+                        if source:
+                            cycle_conditions.append("upper(source_id) = upper(%s)")
+                            cycle_params.append(source)
                         cursor.execute(
                             """
                             SELECT source_id AS source, cycle_time
                             FROM met.forecast_cycle
-                            WHERE source_id IS NOT NULL AND cycle_time IS NOT NULL
+                            WHERE """
+                            + " AND ".join(cycle_conditions)
+                            + """
                             ORDER BY cycle_time DESC, cycle_id DESC
                             LIMIT 1
-                            """
+                            """,
+                            tuple(cycle_params),
                         )
                         row = cursor.fetchone()
                         if row:
                             identity.update({key: value for key, value in dict(row).items() if value is not None})
-                    cursor.execute(
-                        """
-                        SELECT job_id
-                        FROM ops.pipeline_job
-                        WHERE log_uri IS NOT NULL
-                        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, job_id DESC
-                        LIMIT 1
-                        """
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        identity["job_id"] = row["job_id"]
+                    job_run_id = run_id or identity.get("run_id")
+                    if job_run_id:
+                        cursor.execute(
+                            """
+                            SELECT job_id
+                            FROM ops.pipeline_job
+                            WHERE run_id = %s
+                              AND log_uri IS NOT NULL
+                            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, job_id DESC
+                            LIMIT 1
+                            """,
+                            (job_run_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            identity["job_id"] = row["job_id"]
         except psycopg2.Error as error:
             identity.setdefault("blockers", []).append(
                 {

@@ -1592,6 +1592,13 @@ READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
     "tests/test_readonly_db_validation_probes.py",
     "tests/test_readonly_db_validation_routes.py",
     "tests/test_pipeline_ops_identity_envelope.py",
+    # #2484: per-field echo verdicts over real envelopes, discovery SQL + lane
+    # statuses, the real-DB discovery seed, and the two-node consumer of the
+    # route records these producers write.
+    "tests/test_readonly_db_route_identity.py",
+    "tests/test_readonly_db_discovery_and_lane_statuses.py",
+    "tests/test_readonly_db_discovery_integration.py",
+    "tests/test_readonly_db_two_node_consumer.py",
 )
 
 
@@ -3761,6 +3768,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_met_validation.py",
             *READONLY_DB_VALIDATION_TESTS,
             "tests/test_two_node_e2e_evidence.py",
+            # #2484 D3: the shared cycle-hour helper's suite also pins the
+            # two-node facade's private-name bindings, so it imports the package
+            # and two_node_e2e_evidence and must ride the directory rule.
+            "tests/test_identity_matching.py",
         ),
     ),
     PathTestRule(
@@ -5593,6 +5604,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/ops/start-display-api.sh",
         (
             "tests/test_two_node_docker_runtime.py",
+            # #2282: the checkout-anchored restart sweep's process harness.
+            "tests/test_start_display_api_restart_anchor.py",
             *ENTROPY_AUDIT_TESTS,
         ),
     ),

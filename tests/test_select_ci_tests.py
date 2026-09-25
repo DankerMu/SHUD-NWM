@@ -15288,6 +15288,44 @@ def test_canonical_readonly_validator_selects_its_contract() -> None:
         assert set(READONLY_DB_VALIDATION_TESTS) <= selected
 
 
+def test_readonly_discovery_merge_and_identity_producers_select_the_readonly_contract() -> None:
+    # #2484: discovery (adapter + protocol), lane statuses (merge) and the shared
+    # cycle-hour rule all feed the readonly evidence the contract suites pin. They
+    # reach it through the `services/production_closure/**` rule (which carries
+    # READONLY_DB_VALIDATION_TESTS and the two-node suite) plus same-name
+    # selection; this pins that reach rather than adding duplicate rules.
+    for producer in (
+        "services/production_closure/readonly_db_probe_adapter.py",
+        "services/production_closure/readonly_db_types.py",
+        "services/production_closure/readonly_db_merge.py",
+        "services/production_closure/identity_matching.py",
+    ):
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert set(READONLY_DB_VALIDATION_TESTS) <= selected, producer
+    for producer in (
+        "services/production_closure/identity_matching.py",
+        "services/production_closure/two_node_e2e_evidence.py",
+        "services/production_closure/__init__.py",
+    ):
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert {"tests/test_identity_matching.py", "tests/test_two_node_e2e_evidence.py"} <= selected, producer
+    assert {
+        "tests/test_readonly_db_route_identity.py",
+        "tests/test_readonly_db_discovery_and_lane_statuses.py",
+        "tests/test_readonly_db_discovery_integration.py",
+        "tests/test_readonly_db_two_node_consumer.py",
+    } <= set(READONLY_DB_VALIDATION_TESTS)
+
+
+def test_display_restart_script_selects_its_checkout_anchor_harness() -> None:
+    # #2282: the anchored sweep's process harness rides the restart script's rule.
+    selected = set(select_tests(["scripts/ops/start-display-api.sh"], repo_root=Path(".")))
+    assert {
+        "tests/test_two_node_docker_runtime.py",
+        "tests/test_start_display_api_restart_anchor.py",
+    } <= selected
+
+
 def test_canonical_readonly_validator_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import select_ci_tests
 

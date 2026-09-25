@@ -154,7 +154,12 @@ class ReadonlyDbMergeSourceEvidence:
 class ReadonlyDbProbeAdapter(Protocol):
     def current_role(self) -> dict[str, Any]: ...
 
-    def discover_display_identity(self) -> dict[str, Any]: ...
+    def discover_display_identity(
+        self,
+        *,
+        source: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]: ...
 
     def schema_exists(self, schema: str) -> bool: ...
 

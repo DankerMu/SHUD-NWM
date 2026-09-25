@@ -87,9 +87,16 @@ def _seed_selected_ops_cycle(store: Any, tmp_path: Path) -> None:
     )
 
 
+# The smoke's expected identity comes either from a latest-product-shaped selector
+# (``Z``) or, on the unattended path, from discovery's ``datetime.isoformat()``
+# (``+00:00``, #2484). Both spell the same cycle hour the ops echo carries as ``Z``.
+DISCOVERY_CYCLE_TIME = "2026-09-16T12:00:00+00:00"
+
+
+@pytest.mark.parametrize("expected_cycle_time", [CANONICAL_CYCLE_TIME, DISCOVERY_CYCLE_TIME])
 @pytest.mark.parametrize("requested_cycle_time", ["2026-09-16T12:00:00Z", "2026-09-16T20:00:00+08:00"])
 def test_strict_ops_success_identities_match_latest_product_shaped_canonical_selector(
-    tmp_path: Path, monkeypatch, requested_cycle_time: str
+    tmp_path: Path, monkeypatch, requested_cycle_time: str, expected_cycle_time: str
 ) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     latest_product_body = {
@@ -146,7 +153,7 @@ def test_strict_ops_success_identities_match_latest_product_shaped_canonical_sel
         ("job_logs", logs_body),
     ):
         observed = _route_response_identity(route_name, body)
-        expected = dict(canonical_selector)
+        expected = {**canonical_selector, "cycle_time": expected_cycle_time}
         if route_name == "job_logs":
             expected["job_id"] = SELECTED_JOB_ID
         assert _route_response_identity_blockers(
