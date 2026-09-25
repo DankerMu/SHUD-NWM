@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -428,6 +429,7 @@ class _FakeReadonlyAdapter:
         self.no_probe_column_targets = no_probe_column_targets or set()
         self.executed_specs: list[Any] = []
         self.persisted_mutations = 0
+        self.discovery_calls: list[dict[str, str | None]] = []
 
     def current_role(self) -> dict[str, Any]:
         return {
@@ -443,12 +445,19 @@ class _FakeReadonlyAdapter:
             **self.role_overrides,
         }
 
-    def discover_display_identity(self) -> dict[str, Any]:
+    def discover_display_identity(
+        self,
+        *,
+        source: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.discovery_calls.append({"source": source, "run_id": run_id})
         return {
             "source": "GFS",
             "cycle_time": "2026-05-03T00:00:00+00:00",
             "run_id": "run_readonly_validation",
             "model_id": "model_readonly_validation",
+            "basin_id": "basin_readonly_validation",
             "job_id": "job_readonly_validation",
         }
 
@@ -542,21 +551,136 @@ class _FakeReadonlyAdapter:
         )
 
 
+IDENTITY_BOUND_ROUTES = ("latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs")
+
+
 def _passing_route_requester(method: str, path: str) -> RouteHttpResponse:
+    """Answer each display route with its real success envelope (D7, #2484).
+
+    Identity-bound routes echo the requested identity the way the server does: the
+    ops routes in a top-level ``identity`` block, ``latest_product`` in ``data``,
+    both with the ``Z`` cycle-time spelling whatever the request used.
+    """
     del method
     name = _route_name_for_path(path)
-    body: dict[str, Any] = {"status": "ok", "data": {}}
-    if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
-        query = parse_qs(urlsplit(path).query)
-        identity = {
-            field: query[field][0] for field in ("source", "cycle_time", "run_id", "model_id") if query.get(field)
+    if name not in IDENTITY_BOUND_ROUTES:
+        return RouteHttpResponse(status_code=200, body={"request_id": "req-fixture", "status": "ok", "data": {}})
+    query = {key: values[0] for key, values in parse_qs(urlsplit(path).query).items()}
+    echo = {field: query[field] for field in ("source", "cycle_time", "run_id", "model_id") if field in query}
+    if "cycle_time" in echo:
+        echo["cycle_time"] = _server_cycle_time_spelling(echo["cycle_time"])
+    if name == "job_logs":
+        parts = [part for part in urlsplit(path).path.split("/") if part]
+        echo["job_id"] = parts[-2]
+    return RouteHttpResponse(status_code=200, body=_real_route_body(name, echo, basin_id=query.get("basin_id")))
+
+
+def _server_cycle_time_spelling(value: str) -> str:
+    """``apps/api/routes/pipeline.py:_success_identity_payload``'s spelling: UTC with ``Z``."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _real_route_body(name: str, echo: dict[str, str], *, basin_id: str | None = None) -> dict[str, Any]:
+    """One success body in the shape of the route's response-model envelope."""
+    if name == "latest_product":
+        return {"request_id": "req-fixture", "status": "ok", "data": _latest_product_data(echo, basin_id=basin_id)}
+    ops_identity = {field: echo[field] for field in ("source", "cycle_time", "run_id", "model_id") if field in echo}
+    if name == "job_logs":
+        if "job_id" in echo:
+            ops_identity["job_id"] = echo["job_id"]
+        data: Any = {"job_id": echo.get("job_id", "job-fixture"), "log_uri": "logs/fixture.log", "content": "ok"}
+    elif name == "pipeline_status":
+        data = {
+            "cycle_id": "gfs_2026050300",
+            "source": echo.get("source"),
+            "cycle_time": echo.get("cycle_time"),
+            "current_state": "published",
+            "started_at": None,
+            "updated_at": None,
+            "job_counts": {"succeeded": 1, "failed": 0, "running": 0, "pending": 0},
         }
-        if name == "job_logs":
-            parts = [part for part in urlsplit(path).path.split("/") if part]
-            if len(parts) >= 4 and parts[-1] == "logs":
-                identity["job_id"] = parts[-2]
-        body["data"] = {"identity": identity}
-    return RouteHttpResponse(status_code=200, body=body)
+    elif name == "pipeline_stages":
+        data = [
+            {
+                "stage": "forecast",
+                "display_status": "succeeded",
+                "status": "succeeded",
+                "duration_seconds": 60,
+                "basin_progress": {"completed": 1, "total": 1, "failed": 0},
+                "basin_results_limit": 50,
+                "basin_results_total": 0,
+                "basin_results_returned": 0,
+                "basin_results_truncated": False,
+                "basin_results": [],
+            }
+        ]
+    else:
+        data = {"items": [_pipeline_job_item(echo)], "total": 1, "limit": 1, "offset": 0}
+    return {"request_id": "req-fixture", "status": "ok", "data": data, "identity": ops_identity}
+
+
+def _pipeline_job_item(echo: dict[str, str]) -> dict[str, Any]:
+    return {
+        "job_id": "job-fixture",
+        "run_id": echo.get("run_id"),
+        "cycle_id": "gfs_2026050300",
+        "run_type": "forecast",
+        "scenario": "forecast_gfs_deterministic",
+        "job_type": "shud_forecast",
+        "slurm_job_id": "4242",
+        "model_id": echo.get("model_id"),
+        "status": "succeeded",
+        "stage": "forecast",
+        "submitted_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "exit_code": 0,
+        "retry_count": 0,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "logs/fixture.log",
+        "duration_seconds": 60,
+    }
+
+
+def _latest_product_data(echo: dict[str, str], *, basin_id: str | None) -> dict[str, Any]:
+    return {
+        "basin_id": basin_id or "basins_qhh",
+        "model_id": echo.get("model_id"),
+        "basin_version_id": "basins_qhh_v1",
+        "river_network_version_id": "basins_qhh_rnv_v1",
+        "source_id": echo.get("source"),
+        "cycle_time": echo.get("cycle_time"),
+        "run_id": echo.get("run_id"),
+        "forcing_version_id": "forcing-fixture",
+        "station_count": 3,
+        "expected_station_count": 3,
+        "segment_count": 5,
+        "expected_segment_count": 5,
+        "status": "ready",
+        "run_status": "published",
+        "valid_time_start": None,
+        "valid_time_end": None,
+        "river_valid_time_start": None,
+        "river_valid_time_end": None,
+        "forcing_valid_time_start": None,
+        "forcing_valid_time_end": None,
+        "available_horizon_hours": 168,
+        "expected_horizon_hours": 168,
+        "shorter_horizon": False,
+        "availability": {"ready": True, "unavailable_reasons": [], "quality_flags": [], "quality_notes": []},
+        "quality": {
+            "station_sample_count": 10,
+            "river_sample_count": 10,
+            "required_station_variables": ["PRCP"],
+            "station_variable_coverage": [],
+            "candidate_limit": 1,
+            "search_limit": 1,
+            "context_limit": 10,
+            "query_indexes": [],
+        },
+    }
 
 
 def _route_name_for_path(path: str) -> str | None:

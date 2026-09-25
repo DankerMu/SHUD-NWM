@@ -30,6 +30,10 @@ from packages.common.safe_fs import (
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
+from services.production_closure.identity_matching import (
+    cycle_time_identity_matches,
+    normalized_cycle_time_identity,
+)
 from services.production_closure.two_node_e2e_api_lane import (
     ApiLaneEvaluationHelpers,
     evaluate_api_lane,
@@ -2369,6 +2373,12 @@ def _producer_record_authoritative_identity_values(record: Mapping[str, Any], ke
     return values
 
 
+# D3 (#2484): the cycle-hour rule lives in identity_matching so the readonly DB
+# route smoke shares it; the private names stay bound for this module's callers.
+_cycle_time_identity_matches = cycle_time_identity_matches
+_normalized_cycle_time_identity = normalized_cycle_time_identity
+
+
 def _producer_identity_value_matches(field: str, observed: Any, expected: str) -> bool:
     if observed is None or not expected:
         return False
@@ -2383,31 +2393,6 @@ def _producer_identity_value_matches(field: str, observed: Any, expected: str) -
     if field == "cycle_time":
         return _cycle_time_identity_matches(observed_text, expected_text)
     return observed_text == expected_text
-
-
-def _cycle_time_identity_matches(observed: str, expected: str) -> bool:
-    if observed == expected:
-        return True
-    observed_normalized = _normalized_cycle_time_identity(observed)
-    expected_normalized = _normalized_cycle_time_identity(expected)
-    return bool(observed_normalized and expected_normalized and observed_normalized == expected_normalized)
-
-
-def _normalized_cycle_time_identity(value: str) -> str | None:
-    candidate = value.strip()
-    try:
-        if len(candidate) == 10 and candidate.isdigit():
-            parsed = datetime.strptime(candidate, "%Y%m%d%H").replace(tzinfo=UTC)
-        else:
-            iso_candidate = f"{candidate[:-1]}+00:00" if candidate.endswith("Z") else candidate
-            parsed = datetime.fromisoformat(iso_candidate)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            else:
-                parsed = parsed.astimezone(UTC)
-    except ValueError:
-        return None
-    return parsed.strftime("%Y%m%d%H")
 
 
 def _producer_check_value_matches(observed: str, expected: str) -> bool:

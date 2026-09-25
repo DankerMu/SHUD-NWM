@@ -629,9 +629,18 @@ def _merged_readonly_db_summary(
             }
         )
     status = STATUS_BLOCKED if blockers else STATUS_PASS
+    manual_actions = _merged_manual_actions([evidence.summary for evidence in source_evidence])
     summary = {
         "schema": LIVE_EVIDENCE_SCHEMA,
         "status": status,
+        # Merge status rules are unchanged (any merge blocker is BLOCKED); the lane
+        # statuses keep a source's FAIL visible next to that BLOCKED.
+        "lane_statuses": _lane_statuses(
+            role_evidence=role,
+            permission_probes=permission_probes,
+            manual_actions=manual_actions,
+            route_smoke=route_smoke,
+        ),
         "run_id": config.run_id,
         "generated_at": datetime.now(UTC).isoformat(),
         "evidence_dir": _public_path(config.lane_dir),
@@ -654,7 +663,7 @@ def _merged_readonly_db_summary(
         "role": role,
         "display_identity": display_identity,
         "route_smoke": route_smoke,
-        "manual_action_probes": _merged_manual_actions([evidence.summary for evidence in source_evidence]),
+        "manual_action_probes": manual_actions,
         "permission_probe_summary": _permission_summary(permission_probes),
         "permission_probes": permission_probes,
         "redaction": {
@@ -771,6 +780,38 @@ def _normalized_merge_permission_probes(value: Any) -> list[dict[str, Any]] | No
             probe["operations"] = normalized_operations
         probes.append(probe)
     return probes
+
+
+def _lane_statuses(
+    *,
+    role_evidence: Mapping[str, Any],
+    permission_probes: Sequence[Mapping[str, Any]],
+    manual_actions: Sequence[Mapping[str, Any]],
+    route_smoke: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """D6 (#2484): the deny-write and read-route verdicts, reported side by side.
+
+    ``deny_write`` covers the role, the permission probes and the manual-action
+    probes; ``read_routes`` covers the route smoke. Each is FAIL > BLOCKED > PASS.
+    """
+    deny_write = (
+        STATUS_FAIL
+        if role_evidence.get("role_type") == "writer_or_mutating"
+        else _worst_item_status([*permission_probes, *manual_actions])
+    )
+    return {"deny_write": deny_write, "read_routes": _worst_item_status(route_smoke)}
+
+
+def _worst_lane_status(lane_statuses: Mapping[str, str]) -> str:
+    return _worst_item_status([{"status": status} for status in lane_statuses.values()])
+
+
+def _worst_item_status(items: Sequence[Mapping[str, Any]]) -> str:
+    if any(item.get("status") == STATUS_FAIL for item in items):
+        return STATUS_FAIL
+    if any(item.get("status") == STATUS_BLOCKED for item in items):
+        return STATUS_BLOCKED
+    return STATUS_PASS
 
 
 def _permission_summary(permission_probes: list[dict[str, Any]]) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_text
+from services.production_closure.identity_matching import cycle_time_identity_matches
 from services.production_closure.readonly_db_types import (
     DISPLAY_OBJECT_STORE_ROOT_ENVS,
     ROUTE_FIXTURE_BLOCKER_ERROR_CODES,
@@ -29,11 +30,17 @@ def _display_read_routes(identity: Mapping[str, Any]) -> list[dict[str, Any]]:
     model_id = _identity_text(identity, "model_id") or "basins_qhh_shud"
     job_id = _identity_text(identity, "job_id")
     strict_identity, missing_strict_identity = _strict_route_identity(identity)
+    basin_id = _identity_text(identity, "basin_id")
     latest_route = (
         {
             "name": "latest_product",
             "method": "GET",
-            "path": _query_path("/api/v1/mvp/qhh/latest-product", strict_identity),
+            # D5 (#2484): request the discovered run's basin; the route defaults to
+            # QHH without one. The comparison target stays the four strict fields.
+            "path": _query_path(
+                "/api/v1/mvp/qhh/latest-product",
+                {**strict_identity, "basin_id": basin_id} if basin_id else strict_identity,
+            ),
             "fixture_blocker_allowed": True,
             "strict_identity": strict_identity,
         }
@@ -181,14 +188,23 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
     error = body.get("error") if isinstance(body, dict) else {}
     if not isinstance(error, dict):
         error = {}
-    response_identity = _route_response_identity(str(spec["name"]), body)
-    identity_blockers = _route_response_identity_blockers(spec, response_identity)
-    if 200 <= response.status_code < 300 and not identity_blockers:
-        status = STATUS_PASS
-        reason = "display_read_route_succeeded"
-    elif 200 <= response.status_code < 300:
-        status = STATUS_BLOCKED
-        reason = "display_read_route_response_identity_invalid"
+    response_identity: dict[str, str] = {}
+    identity_blockers: list[dict[str, Any]] = []
+    if 200 <= response.status_code < 300:
+        # D1 (#2484): a 2xx is judged by its single echoed identity, field by field.
+        response_identity = _route_response_identity(str(spec["name"]), body)
+        identity_blockers = _route_response_identity_blockers(spec, response_identity)
+        blocker_codes = {blocker["code"] for blocker in identity_blockers}
+        if "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH" in blocker_codes:
+            status = STATUS_FAIL
+            reason = "display_read_route_response_identity_mismatch"
+        elif identity_blockers:
+            status = STATUS_BLOCKED
+            reason = "display_read_route_response_identity_invalid"
+        else:
+            status = STATUS_PASS
+            reason = "display_read_route_succeeded"
+    # D2 (#2484): an error body has no identity to echo; its code alone decides.
     elif spec.get("fixture_blocker_allowed") is True and _route_fixture_blocked(response.status_code, error):
         status = STATUS_BLOCKED
         reason = "display_route_fixture_or_published_artifact_blocked"
@@ -232,7 +248,12 @@ def _route_response_identity(route_name: str, body: Mapping[str, Any]) -> dict[s
     elif isinstance(data, list):
         candidates.extend(item for item in data if isinstance(item, Mapping))
 
+    # One candidate mapping wins and fields are never stitched across candidates:
+    # the first holding every required field, else the one holding the most
+    # required fields, the earliest on a tie.
     fields = ("source", "source_id", "cycle_time", "run_id", "model_id", "job_id")
+    best: dict[str, str] = {}
+    best_count = 0
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
@@ -243,9 +264,12 @@ def _route_response_identity(route_name: str, body: Mapping[str, Any]) -> dict[s
                 identity[identity_field] = str(value).strip()
         if "source" not in identity and "source_id" in identity:
             identity["source"] = identity["source_id"]
-        if all(identity.get(field) for field in required_fields):
+        present = sum(1 for field in required_fields if identity.get(field))
+        if present == len(required_fields):
             return identity
-    return {}
+        if present > best_count:
+            best, best_count = identity, present
+    return best
 
 
 def _route_response_identity_required_fields(route_name: str) -> tuple[str, ...]:
@@ -286,6 +310,8 @@ def _route_response_identity_blockers(
             continue
         if identity_field == "source":
             matches = observed.upper() == str(expected_value or "").upper()
+        elif identity_field == "cycle_time":
+            matches = cycle_time_identity_matches(str(observed), str(expected_value or ""))
         else:
             matches = str(observed) == str(expected_value)
         if not matches:

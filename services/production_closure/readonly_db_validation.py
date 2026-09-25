@@ -17,10 +17,12 @@ import psycopg2
 from packages.common.redaction import redact_payload, redact_text
 from services.production_closure.readonly_db_merge import (
     EvidenceWriter,
+    _lane_statuses,
     _permission_summary,
     _public_path,
     _redact_database_url,
     _validation_timeout_evidence,
+    _worst_lane_status,
     merge_readonly_db_source_evidence,
 )
 from services.production_closure.readonly_db_permission_probes import run_permission_probe_matrix
@@ -62,7 +64,6 @@ from services.production_closure.readonly_db_types import (
     SAFE_DDL_SUFFIX_RE,
     SIMULATED_EVIDENCE_SCHEMA,
     STATUS_BLOCKED,
-    STATUS_FAIL,
     STATUS_PASS,
     ReadonlyDbProbeAdapter,
     ReadonlyDbValidationConfig,
@@ -73,6 +74,9 @@ from services.production_closure.readonly_db_types import (
 )
 from services.production_closure.readonly_db_types import (
     PERMISSION_PROBE_TARGETS as PERMISSION_PROBE_TARGETS,
+)
+from services.production_closure.readonly_db_types import (
+    STATUS_FAIL as STATUS_FAIL,
 )
 from services.production_closure.readonly_db_types import (
     PermissionProbeSpec as PermissionProbeSpec,
@@ -175,7 +179,7 @@ def _validate_readonly_db_boundary_prepared(
         writer.write_json(config.lane_dir / "summary.json", summary)
         return summary
 
-    discovered_identity = _safe_discover_identity(adapter)
+    discovered_identity = _safe_discover_identity(adapter, config)
     identity = _merged_identity(config, discovered_identity)
     permission_probes = run_permission_probe_matrix(adapter, ddl_suffix=_ddl_suffix(config.run_id))
     role_evidence = _role_evidence(role, permission_probes)
@@ -184,6 +188,12 @@ def _validate_readonly_db_boundary_prepared(
         manual_action_probe_runner(_manual_action_run_id(identity))
         if manual_action_probe_runner is not None
         else run_display_manual_action_probes(_manual_action_run_id(identity), database_url=database_url)
+    )
+    lane_statuses = _lane_statuses(
+        role_evidence=role_evidence,
+        permission_probes=permission_probes,
+        manual_actions=manual_actions,
+        route_smoke=route_smoke,
     )
     status = _overall_status(
         role_evidence=role_evidence,
@@ -207,6 +217,7 @@ def _validate_readonly_db_boundary_prepared(
     summary = {
         "schema": _evidence_schema(provenance),
         "status": status,
+        "lane_statuses": lane_statuses,
         "run_id": config.run_id,
         "generated_at": datetime.now(UTC).isoformat(),
         "evidence_dir": _public_path(config.lane_dir),
@@ -328,14 +339,15 @@ def _overall_status(
     route_smoke: list[dict[str, Any]],
     manual_actions: list[dict[str, Any]],
 ) -> str:
-    if role_evidence.get("role_type") == "writer_or_mutating":
-        return STATUS_FAIL
-    all_items = [*permission_probes, *route_smoke, *manual_actions]
-    if any(item.get("status") == STATUS_FAIL for item in all_items):
-        return STATUS_FAIL
-    if any(item.get("status") == STATUS_BLOCKED for item in all_items):
-        return STATUS_BLOCKED
-    return STATUS_PASS
+    """The worst of the deny-write and read-route lane statuses (D6, #2484)."""
+    return _worst_lane_status(
+        _lane_statuses(
+            role_evidence=role_evidence,
+            permission_probes=permission_probes,
+            manual_actions=manual_actions,
+            route_smoke=route_smoke,
+        )
+    )
 
 
 def _blocked_summary(
@@ -384,9 +396,9 @@ def _unexpected_validation_error_summary(
     return summary
 
 
-def _safe_discover_identity(adapter: ReadonlyDbProbeAdapter) -> dict[str, Any]:
+def _safe_discover_identity(adapter: ReadonlyDbProbeAdapter, config: ReadonlyDbValidationConfig) -> dict[str, Any]:
     try:
-        return adapter.discover_display_identity()
+        return adapter.discover_display_identity(source=config.source, run_id=config.strict_run_id)
     except Exception as error:
         return {
             "blockers": [

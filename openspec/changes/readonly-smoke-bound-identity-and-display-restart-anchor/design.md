@@ -113,7 +113,7 @@ A single helper returns `{"deny_write": …, "read_routes": …}`. `summary["lan
 
 The two paths that are stricter than worst-of-lanes stay unchanged, and the spec says so:
 - the **simulated** path still forces `BLOCKED` (`READONLY_DB_VALIDATION_SIMULATED`, `readonly_db_validation.py:189-201`) while its lanes may read `PASS`;
-- the **merged** summary's `status` is `BLOCKED` on any merge blocker, including a source bundle that is not `PASS` (`readonly_db_merge.py:538,631`), even when that bundle's lane was `FAIL`. This is exit 2, not 1, and is kept unchanged (merge rules are Must-preserve). Its `lane_statuses` is computed from the merged items (`:583-595` appends every source's routes), so a source's `FAIL` shows as `read_routes: FAIL` next to a merged `BLOCKED`. A 2.5 test pins this pairing.
+- the **merge** refuses a source bundle that is not `PASS` before any merged summary is built: `_validate_merge_source_live_provenance` raises `READONLY_DB_MERGE_SOURCE_NOT_PASS` (`readonly_db_merge.py:420-430`), and the CLI exits 1. The later `:538` blocker is unreachable from the CLI. This is kept unchanged (merge rules are Must-preserve) and pinned by a CLI test. The merged summary's `status` is `BLOCKED` on any merge blocker (`:631`). Its `lane_statuses` is computed from the merged items (`:583-595`), and a direct `_merged_readonly_db_summary` test pins that a non-PASS item shows in `lane_statuses` next to a `BLOCKED` status. *(Corrected during implementation: the fixture first said such a bundle reaches the merged summary with exit 2.)*
 
 ### D7. Fixtures are real envelopes
 
@@ -136,7 +136,7 @@ UVICORN_PATTERN="^${REPO_ROOT_RE}/\.venv/bin/python -m uvicorn apps\.api\.main:a
 - Every `pgrep` becomes `pgrep -f -- "$UVICORN_PATTERN"`. The escape set is the full ERE metacharacter set, not #2282's `][\.*^$` subset, because `pgrep` uses ERE.
 - Both branches keep the sweep. In the systemd branch it now only ever finds this checkout's orphans, such as a stale detached launch left from before the unit, which is #597's original purpose. The alternative, skipping the sweep under systemd, would leave the legacy branch killing other checkouts and drop orphan cleanup.
 - The header comment states the anchor and its condition: the unit and the detached launch both exec `$REPO_ROOT/.venv/bin/python`.
-- The node-27 inspection command at `docs/runbooks/current-production-ops.md:1994` is anchored the same way, with `/home/nwm/NWM`. The node-22 command (`:1399`) and historical receipts are not changed.
+- The node-27 inspection command at `docs/runbooks/production-ops/gateway-and-services.md:718` is anchored the same way, with `/home/nwm/NWM`. The node-22 command (`:123`) and historical receipts are not changed.
 
 **Harness** (`tests/test_two_node_docker_runtime.py`):
 - **Anchor-sensitive fake `pgrep`.** It reads a process table file (`pid<TAB>cmdline`) and prints each pid whose **cmdline field alone** (not the whole line, or `^` never matches) matches `grep -E -e "$pattern"`, **and** that is still alive and not a zombie (`kill -0` plus `ps -o stat= -p <pid>` not starting with `Z`). It accepts `-f` and `--`. Sleepers are pytest children, and a TERMed child stays a zombie until reaped, so without the zombie check `kill -0` succeeds and the script would always fall through to its 10-second SIGKILL path. The test asserts the TERM path: the stdout has no `SIGTERM timed out` line. The tests spawn two real `sleep` processes and list them:
@@ -181,7 +181,7 @@ Then the decoy is stopped by pid and its directory removed.
 - the consumer `two_node_e2e_readonly_db_lane.py:1156-1290`;
 - `tests/test_pipeline_ops_identity_envelope.py` (private-function imports `:10-13`, `:143-155`);
 - `scripts/diagnostic/display-cold-waterfall.sh:103` (calls the restart script);
-- `docs/runbooks/current-production-ops.md:1994`;
+- `docs/runbooks/production-ops/gateway-and-services.md:718`;
 - `infra/systemd/nhms-display-api.service` `ExecStart`.
 
 ## Invariants

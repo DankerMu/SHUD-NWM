@@ -6,6 +6,16 @@
 # frontend. This script is the single-command restart wrapper that always
 # sources display.env, gracefully replaces the prior uvicorn, relaunches
 # detached, and runs a basin_id smoke check before exiting.
+#
+# Issue #2282: the prior-uvicorn sweep only ever signals THIS checkout's server.
+# UVICORN_PATTERN is anchored to the ERE-escaped repository root, so it matches a
+# command line that starts with "$REPO_ROOT/.venv/bin/python -m uvicorn
+# apps.api.main:app" and nothing else; another checkout's display uvicorn running
+# as the same user is never signalled. This holds because both relaunch paths
+# exec "$REPO_ROOT/.venv/bin/python" (the user unit's ExecStart and the detached
+# fallback below), so this checkout's own orphans still carry that prefix. A
+# process started through a different spelling of the same root (for example a
+# symlinked path) is not matched.
 
 set -euo pipefail
 
@@ -20,7 +30,8 @@ readonly REPO_ROOT
 
 ENV_FILE="${REPO_ROOT}/infra/env/display.env"
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
-UVICORN_PATTERN='\.venv/bin/python -m uvicorn apps\.api\.main:app'
+REPO_ROOT_RE=$(printf '%s' "$REPO_ROOT" | sed -e 's/[][\.*^$+?(){}|]/\\&/g')
+UVICORN_PATTERN="^${REPO_ROOT_RE}/\.venv/bin/python -m uvicorn apps\.api\.main:app"
 REQUIRED_KEYS=(DATABASE_URL NHMS_ENABLE_LIVE_POSTGIS_MVT OBJECT_STORE_ROOT)
 
 # -- preflight ------------------------------------------------------------------
@@ -120,19 +131,19 @@ if command -v systemctl >/dev/null 2>&1 \
     USE_SYSTEMD=1
 fi
 
-# -- gracefully replace prior uvicorn -------------------------------------------
-prior_pids=$(pgrep -f "$UVICORN_PATTERN" || true)
+# -- gracefully replace prior uvicorn of this checkout (anchored, #2282) ---------
+prior_pids=$(pgrep -f -- "$UVICORN_PATTERN" || true)
 if [[ -n "$prior_pids" ]]; then
     echo "[start-display-api] stopping prior uvicorn pid(s): $prior_pids"
     # shellcheck disable=SC2086
     kill -TERM $prior_pids 2>/dev/null || true
     for _ in $(seq 1 20); do
-        if ! pgrep -f "$UVICORN_PATTERN" >/dev/null 2>&1; then
+        if ! pgrep -f -- "$UVICORN_PATTERN" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
     done
-    leftover=$(pgrep -f "$UVICORN_PATTERN" || true)
+    leftover=$(pgrep -f -- "$UVICORN_PATTERN" || true)
     if [[ -n "$leftover" ]]; then
         echo "[start-display-api] SIGTERM timed out; SIGKILL leftover: $leftover" >&2
         # shellcheck disable=SC2086

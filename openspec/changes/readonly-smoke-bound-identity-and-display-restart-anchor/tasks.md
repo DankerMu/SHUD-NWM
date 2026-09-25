@@ -55,7 +55,7 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 **D1 + D2** in `services/production_closure/readonly_db_route_smoke.py`: extraction, per-field comparison, the verdict order (FAIL over BLOCKED over PASS), and no echo blockers on non-2xx. Unit tests in `tests/test_readonly_db_validation.py`, each with real-shaped bodies (2.3):
+- [x] 2.1 **D1 + D2** in `services/production_closure/readonly_db_route_smoke.py`: extraction, per-field comparison, the verdict order (FAIL over BLOCKED over PASS), and no echo blockers on non-2xx. Unit tests in `tests/test_readonly_db_validation.py`, each with real-shaped bodies (2.3):
   - each of the five identity-bound routes PASSes with a `Z` echo against a `+00:00` request;
   - a tampered `run_id`, `model_id`, `cycle_time` (at least one hour off) and `job_id`, one test each → `FAIL` with a `…_MISMATCH` blocker naming only that field, `expected`/`observed` set;
   - an echo missing exactly one field → `BLOCKED`, `response_identity` present with the other fields, and exactly one `…_MISSING` blocker;
@@ -71,17 +71,17 @@
     - `:168-236` (fragmented bodies): still not `PASS`, with no stitching; `response_identity` equals the single best candidate's partial identity (for the `data.item` case, `{cycle_time, run_id}`); MISSING blockers only for the absent fields;
     - `:91-131`: its query-echo fixture is replaced by real envelopes (2.3), and its path assertions stay;
     - `tests/test_pipeline_ops_identity_envelope.py:143-155` (DB-backed, node-27): keeps importing `_route_response_identity` / `_route_response_identity_blockers`. If their signatures change, the test is adapted. It gains a case whose expected `cycle_time` uses `+00:00`.
-- [ ] 2.2 **D3:** `services/production_closure/identity_matching.py` holds the two moved functions, verbatim. `two_node_e2e_evidence.py` imports them and binds its private names to them. Unit tests for the helper:
+- [x] 2.2 **D3:** `services/production_closure/identity_matching.py` holds the two moved functions, verbatim. `two_node_e2e_evidence.py` imports them and binds its private names to them. Unit tests for the helper:
   - `Z`, `+00:00` and `+08:00` spellings of one instant are equal;
   - a naive ISO string is treated as UTC;
   - `YYYYMMDDHH` works;
   - garbage does not normalise.
 
   `tests/test_two_node_e2e_evidence.py` passes with **no edits**.
-- [ ] 2.3 **D7:** the route requester fixture emits real envelopes. The old `data.identity` echo shape is removed from every PASS-path fixture. One test validates every fixture success body through its envelope model:
+- [x] 2.3 **D7:** the route requester fixture emits real envelopes. The old `data.identity` echo shape is removed from every PASS-path fixture. One test validates every fixture success body through its envelope model:
   - `PipelineStatusEnvelope`, `PipelineStageListEnvelope`, `PipelineJobPageEnvelope` (one item, and `items: []`), `JobLogsEnvelope`, `QhhLatestProductEnvelope`;
   - and asserts the ops envelopes' `identity` validates as `OpsIdentity` / `OpsLogIdentity`.
-- [ ] 2.4 **D4 + D5:**
+- [x] 2.4 **D4 + D5:**
   - `readonly_db_probe_adapter.discover_display_identity(*, source=None, run_id=None)`, the protocol in `readonly_db_types.py`, and `_safe_discover_identity` passing `config.source` / `config.strict_run_id`;
   - `QHH_LATEST_READY_RUN_STATUSES` imported, not retyped;
   - `latest_product` carries `basin_id` when known.
@@ -98,24 +98,31 @@
     - `source="GFS"` returns the `gfs` run, with `source` returned as `GFS`;
     - `run_id=<running run>` returns it regardless of status;
     - a ready run with no logged job yields no `job_id`.
-- [ ] 2.5 **D6:** the lane-status helper, `_overall_status` expressed through it, and `summary["lane_statuses"]` in `readonly_db_validation.py` and `readonly_db_merge.py`. Tests:
+- [x] 2.5 **D6:** the lane-status helper, `_overall_status` expressed through it, and `summary["lane_statuses"]` in `readonly_db_validation.py` and `readonly_db_merge.py`. Tests:
   - a table over the role / probe / manual-action / route combinations shows overall `status` identical to master's `_overall_status` (I3). Master's function is copied into the test as the oracle;
   - the four spec cases: deny-write PASS with read BLOCKED; deny-write FAIL with read PASS; a writer role; both PASS;
-  - the merged summary carries `lane_statuses`; a source bundle with a `FAIL` route gives merged `status` `BLOCKED` (exit 2, unchanged) together with `lane_statuses.read_routes` `FAIL`.
-- [ ] 2.6 **Two-node consumer:** injected components make a run simulated, and the merge rejects simulated bundles. So the test runs `run_display_route_smoke` with the real-shaped fixtures, per source (GFS and IFS). It wraps each output in a live-schema readonly summary built the way the existing two-node readonly-DB tests build theirs (reusing their builders in `tests/test_two_node_e2e_evidence.py`), replacing only `route_smoke` and `display_identity`, including `basin_id` and `lane_statuses`. It then runs the governed entrypoint (`validate_two_node_e2e_evidence`, or `evaluate_readonly_db` as the existing `-k readonly_db` tests call it).
+  - the merged summary carries `lane_statuses`; the merge CLI still refuses a non-PASS source bundle (exit 1, `READONLY_DB_MERGE_SOURCE_NOT_PASS`, unchanged); `_merged_readonly_db_summary` with a FAIL route item gives `status` `BLOCKED` together with `lane_statuses.read_routes` `FAIL`.
+- [x] 2.6 **Two-node consumer:** injected components make a run simulated, and the merge rejects simulated bundles. So the test runs `run_display_route_smoke` with the real-shaped fixtures, per source (GFS and IFS). It wraps each output in a live-schema readonly summary built the way the existing two-node readonly-DB tests build theirs (reusing their builders in `tests/test_two_node_e2e_evidence.py`), replacing only `route_smoke` and `display_identity`, including `basin_id` and `lane_statuses`. It then runs the governed entrypoint (`validate_two_node_e2e_evidence`, or `evaluate_readonly_db` as the existing `-k readonly_db` tests call it).
   - Assert: the readonly DB lane has no `TWO_NODE_E2E_READONLY_DB_ROUTE_*` blocker or finding.
   - Assert: a route record with an echo MISMATCH (now `FAIL`) yields `TWO_NODE_E2E_READONLY_DB_ROUTE_CHILD_NOT_PASS`.
-- [ ] 2.7 **D8** in `scripts/ops/start-display-api.sh`: `REPO_ROOT_RE`, the anchored `UVICORN_PATTERN`, `pgrep -f --` at all three call sites, and the header comment. Harness tests in `tests/test_two_node_docker_runtime.py`:
+- [x] 2.7 **D8** in `scripts/ops/start-display-api.sh`: `REPO_ROOT_RE`, the anchored `UVICORN_PATTERN`, `pgrep -f --` at all three call sites, and the header comment. Harness tests in `tests/test_two_node_docker_runtime.py`:
   - the anchor-sensitive fake `pgrep` over real `sleep` children;
   - the fake `systemctl` with the staged unit;
   - the legacy branch;
   - the metacharacter repo path.
 
   Each asserts this checkout's sleeper is terminated and the foreign one is alive, with cleanup in `finally`. The existing 7 harness cases stay green. Their fake `pgrep` must accept `--`.
-- [ ] 2.8 **Docs:**
-  - `docs/runbooks/current-production-ops.md:1994` inspection command anchored to `/home/nwm/NWM`;
+- [x] 2.8 **Docs:**
+  - `docs/runbooks/production-ops/gateway-and-services.md:718` inspection command anchored to `/home/nwm/NWM`;
   - `docs/runbooks/node-27-bringup-checklist.md` C2: discovery binds the tuple itself, a hand-supplied tuple is optional, `lane_statuses` is where the deny-write verdict is read, and the `cycle_time` spelling no longer matters;
   - `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md` readonly DB row (unconditional, per `services/production_closure/AGENTS.md`): the additive `lane_statuses` / `display_identity.basin_id`, the MISMATCH→FAIL route semantics, and the cycle-hour comparison.
+
+## Implementation deviations
+
+- **New test files.** New cases for 2.1, 2.5 and 2.7 live in new files (`tests/test_readonly_db_route_identity.py`, `tests/test_readonly_db_discovery_and_lane_statuses.py`, `tests/test_start_display_api_restart_anchor.py`, plus `tests/test_readonly_db_discovery_integration.py`, `tests/test_readonly_db_two_node_consumer.py`, `tests/test_identity_matching.py`). The reason is that `.large-file-guard.json` (maxLines 1000) blocks any edit to `tests/test_two_node_docker_runtime.py` (5496 lines), which is unchanged, and `tests/test_readonly_db_validation.py` is at 868 lines. The existing tests that 2.1 names were updated in place.
+- **Inspection command path.** The inspection command moved with the #1103 runbook split: `docs/runbooks/production-ops/gateway-and-services.md:718`, not `current-production-ops.md:1994`.
+- **Merge refusal.** The merge refuses a non-PASS source bundle at load (exit 1), not at summary build (exit 2); see the correction in D6.
+- **CI routing (3.3).** The `services/production_closure/**` rule plus same-name selection already route the changed modules. No duplicate rule was added; two `tests/test_select_ci_tests.py` cases pin the coverage.
 
 ## 3. Verification
 
@@ -125,7 +132,7 @@
   - `openspec validate readonly-smoke-bound-identity-and-display-restart-anchor --strict --no-interactive`.
   - Red proofs: the new 2.1 and 2.7 tests fail on master's `readonly_db_route_smoke.py` / `start-display-api.sh` (temporary checkout of the two files, reverted), with counts in the PR.
 - [ ] 3.2 node-27 disposable-DB pytest on the frozen SHA (`/home/nwm/tmp/node27-pr-runner.sh`): the files from 3.1 plus the new real-DB discovery test, with 0 skipped for the integration file and for `tests/test_pipeline_ops_identity_envelope.py`. Then the node-27 full pytest; its failure set must equal master's (#2615 only).
-- [ ] 3.3 `scripts/select_ci_tests.py` routes `services/production_closure/readonly_db_*.py`, `identity_matching.py` and `scripts/ops/start-display-api.sh` to their tests. A `tests/test_select_ci_tests.py` row is added if a route is new.
+- [x] 3.3 `scripts/select_ci_tests.py` routes `services/production_closure/readonly_db_*.py`, `identity_matching.py` and `scripts/ops/start-display-api.sh` to their tests. A `tests/test_select_ci_tests.py` row is added if a route is new.
 
 ## 4. PR
 

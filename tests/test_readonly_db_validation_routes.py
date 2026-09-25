@@ -33,7 +33,9 @@ from tests.test_readonly_db_validation import (
     _evidence_root,
     _gnu_stat_available,
     _mixed_route_requester,
+    _passing_route_requester,
     _portable_stat_script,
+    _real_route_body,
     _route_name_for_path,
     _run_id,
     _stat_output,
@@ -104,17 +106,10 @@ def test_display_route_smoke_constructs_strict_identity_paths() -> None:
     observed_paths: dict[str, str] = {}
 
     def strict_route_requester(method: str, path: str) -> RouteHttpResponse:
-        del method
         name = _route_name_for_path(path)
         if name:
             observed_paths[name] = path
-        body: dict[str, Any] = {"status": "ok", "data": {}}
-        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
-            response_identity = {key: identity[key] for key in ("source", "cycle_time", "run_id", "model_id")}
-            if name == "job_logs":
-                response_identity["job_id"] = identity["job_id"]
-            body["data"] = {"identity": response_identity}
-        return RouteHttpResponse(status_code=200, body=body)
+        return _passing_route_requester(method, path)
 
     results = run_display_route_smoke(config, identity, route_requester=strict_route_requester)
 
@@ -131,7 +126,7 @@ def test_display_route_smoke_constructs_strict_identity_paths() -> None:
     assert urlsplit(observed_paths["job_logs"]).path == "/api/v1/jobs/job_routes/logs"
 
 
-def test_display_route_smoke_blocks_2xx_identity_mismatch() -> None:
+def test_display_route_smoke_fails_2xx_identity_mismatch() -> None:
     config = ReadonlyDbValidationConfig.from_env(
         evidence_root=_evidence_root(),
         run_id=_run_id("route-response-mismatch"),
@@ -146,23 +141,28 @@ def test_display_route_smoke_blocks_2xx_identity_mismatch() -> None:
     }
 
     def mismatched_route_requester(method: str, path: str) -> RouteHttpResponse:
-        del method
         name = _route_name_for_path(path)
-        body: dict[str, Any] = {"status": "ok", "data": {}}
-        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
-            response_identity = {key: identity[key] for key in ("source", "cycle_time", "run_id", "model_id")}
-            response_identity["model_id"] = "wrong-model"
-            if name == "job_logs":
-                response_identity["job_id"] = identity["job_id"]
-            body["data"] = {"identity": response_identity}
-        return RouteHttpResponse(status_code=200, body=body)
+        response = _passing_route_requester(method, path)
+        if name == "latest_product":
+            response.body["data"]["model_id"] = "wrong-model"
+        elif name is not None:
+            response.body["identity"]["model_id"] = "wrong-model"
+        return response
 
     results = run_display_route_smoke(config, identity, route_requester=mismatched_route_requester)
 
-    latest = next(item for item in results if item["name"] == "latest_product")
-    assert latest["status"] == "BLOCKED"
-    assert latest["reason"] == "display_read_route_response_identity_invalid"
-    assert latest["identity_blockers"][0]["code"] == "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH"
+    by_name = {item["name"]: item for item in results}
+    for name in ("latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"):
+        assert by_name[name]["status"] == "FAIL", name
+        assert by_name[name]["reason"] == "display_read_route_response_identity_mismatch"
+        assert by_name[name]["identity_blockers"] == [
+            {
+                "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH",
+                "field": "model_id",
+                "expected": "model_routes",
+                "observed": "wrong-model",
+            }
+        ]
 
 
 def test_display_route_smoke_blocks_fragmented_identity_across_response_objects() -> None:
@@ -196,10 +196,16 @@ def test_display_route_smoke_blocks_fragmented_identity_across_response_objects(
     latest = next(item for item in results if item["name"] == "latest_product")
     assert latest["status"] == "BLOCKED"
     assert latest["reason"] == "display_read_route_response_identity_invalid"
-    assert "response_identity" not in latest
-    assert {blocker["code"] for blocker in latest["identity_blockers"]} == {
-        "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING"
+    # No stitching: the single best candidate (``data.item``, two of four fields) is
+    # recorded as it is, and only the fields it lacks are blocked.
+    assert latest["response_identity"] == {
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
     }
+    assert [(blocker["code"], blocker["field"]) for blocker in latest["identity_blockers"]] == [
+        ("READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING", "source"),
+        ("READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING", "model_id"),
+    ]
 
 
 def test_display_route_smoke_blocks_fragmented_identity_across_list_rows() -> None:
@@ -232,8 +238,16 @@ def test_display_route_smoke_blocks_fragmented_identity_across_list_rows() -> No
     jobs = next(item for item in results if item["name"] == "jobs")
     assert jobs["status"] == "BLOCKED"
     assert jobs["reason"] == "display_read_route_response_identity_invalid"
-    assert "response_identity" not in jobs
-    assert {blocker["code"] for blocker in jobs["identity_blockers"]} == {"READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING"}
+    # Both rows carry two of the four fields; the earlier row wins, unstitched.
+    assert jobs["response_identity"] == {
+        "source_id": "GFS",
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+    }
+    assert [(blocker["code"], blocker["field"]) for blocker in jobs["identity_blockers"]] == [
+        ("READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING", "run_id"),
+        ("READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING", "model_id"),
+    ]
 
 
 def test_display_route_smoke_blocks_identity_bound_routes_when_strict_identity_missing() -> None:
@@ -306,18 +320,17 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
                 }
             )
             name = _route_name_for_path(f"/{path}")
-            body: dict[str, Any] = {"status": "ok"}
-            if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
-                identity = {
-                    "source": "GFS",
-                    "cycle_time": "2026-05-03T00:00:00+00:00",
-                    "run_id": "run_routes",
-                    "model_id": "model_routes",
-                }
-                if name == "job_logs":
-                    identity["job_id"] = "job_routes"
-                body["data"] = {"identity": identity}
-            return body
+            if name is None:
+                return {"request_id": "req-fixture", "status": "ok", "data": {}}
+            echo = {
+                "source": "GFS",
+                "cycle_time": "2026-05-03T00:00:00Z",
+                "run_id": "run_routes",
+                "model_id": "model_routes",
+            }
+            if name == "job_logs":
+                echo["job_id"] = "job_routes"
+            return _real_route_body(name, echo)
 
         return app
 

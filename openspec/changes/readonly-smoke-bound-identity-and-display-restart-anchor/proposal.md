@@ -101,7 +101,7 @@ The defect still stands: the canonical restart command kills any same-user uvico
   - a real-DB discovery test;
   - `tests/test_two_node_e2e_evidence.py`, which must stay green unchanged.
 - Docs:
-  - the `docs/runbooks/current-production-ops.md:1994` inspection command is anchored;
+  - the `docs/runbooks/production-ops/gateway-and-services.md:718` inspection command is anchored;
   - `docs/runbooks/node-27-bringup-checklist.md` C2 notes that discovery needs no hand-supplied tuple;
   - `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`, readonly DB row: the additive evidence fields and the MISMATCH→FAIL semantics, as `services/production_closure/AGENTS.md` requires.
 - No HTTP route, OpenAPI, or frontend change. No DB write. No migration.

@@ -63,4 +63,4 @@ The display service SHALL be validated with readonly database credentials for di
 - **THEN** the summary reports a deny-write lane status (role, permission probes, manual-action probes) and a read-route lane status (route smoke) next to the overall status
 - **AND** for a single live run the overall status is the worst of the two, so a read-route `BLOCKED` never hides a deny-write `FAIL` and a clean deny-write lane is visible when a read route is not clean
 - **AND** a simulated summary is never `PASS`, whatever its lane statuses
-- **AND** a merged summary's status is `BLOCKED` on any merge blocker, including a source bundle that is not `PASS`, while its lane statuses carry the worst verdict of the merged items, so a source's `FAIL` stays visible in the merged lane statuses
+- **AND** the per-source merge refuses a source bundle that is not `PASS`, and a merged summary's status is `BLOCKED` on any merge blocker while its lane statuses carry the worst verdict of the merged items

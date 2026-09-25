@@ -715,7 +715,8 @@ else
   printf 'DATABASE_URL=<missing>\n'
 fi
 
-pgrep -af 'uvicorn apps[.]api[.]main'
+# 只列本 checkout 的 display uvicorn（与 start-display-api.sh 同一锚定，#2282）
+pgrep -af '^/home/nwm/NWM/[.]venv/bin/python -m uvicorn apps[.]api[.]main:app'
 ss -ltnp 2>/dev/null | grep -E ':(55432|8080)\b'
 curl -fsS --max-time 5 http://127.0.0.1:8080/health
 curl -fksS --max-time 5 https://test.nwm.ac.cn/health
