@@ -15,7 +15,11 @@ dependencies = [
     # so an uncapped range silently drifts onto the breaking release.
     "fastapi>=0.110.0,<0.137",
     "uvicorn[standard]>=0.29.0",
-    "sqlalchemy>=2.0.25",
+    # Cap <2.1: 2.1.0 made psycopg (v3) the default driver for plain
+    # `postgresql://` URLs; this project installs only psycopg2, so every
+    # create_engine on such a URL fails with ModuleNotFoundError. Same CI
+    # drift as the fastapi cap above.
+    "sqlalchemy>=2.0.25,<2.1",
     "asyncpg>=0.29.0",
     "psycopg2-binary>=2.9.9",
     "alembic>=1.13.0",
