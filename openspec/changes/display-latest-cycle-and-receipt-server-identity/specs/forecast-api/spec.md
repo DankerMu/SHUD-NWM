@@ -36,5 +36,13 @@ is eligible whatever its status.
 #### Scenario: the default request stays inside the buffer gate
 
 - **WHEN** the production default request (`issue_time=latest`, a single segment,
-  one or two sources) runs warm on node-27
+  one or two sources) runs warm on node-27 for a segment that has retained fact
+  rows
 - **THEN** the discovery statement touches at most 5000 shared buffers.
+
+#### Scenario: a segment has no retained fact rows
+
+- **WHEN** no candidate run of the basin has retained fact rows for the segment
+- **THEN** every candidate is probed once and the result is empty. The cost is
+  bounded by the number of candidates times the number of chunks, and it is not
+  covered by the 5000-buffer gate.

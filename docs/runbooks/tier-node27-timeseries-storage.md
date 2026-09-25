@@ -822,8 +822,9 @@ FROM pg_control_system()` as `nhms_display_ro` on the primary). Limitation:
 `initdb` sets the identifier and every physical clone copies it (pg_basebackup,
 a PGDATA copy or snapshot, a streaming standby), so it tells independently
 initialised clusters apart (a disposable test database shows a different value)
-but not a physical copy from its origin; the archived node-22 :55433 cluster may
-share node-27's lineage. Read the block as cluster lineage, not as host
+but not a physical copy from its origin; the node-22 :55433 cluster (archived,
+stopped rollback archive, not current topology, do not connect) may share
+node-27's lineage. Read the block as cluster lineage, not as host
 identity. It names the SQL-sample cluster only: API samples go through the
 display API's own DSN. Archived `1.0` receipts have no `server` block and stay
 as they are.

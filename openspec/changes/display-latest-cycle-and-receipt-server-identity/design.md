@@ -160,6 +160,12 @@ ORDER BY scen.scenario_id
 
 ## Risks / Trade-offs
 
+- **Empty-result pins probe every candidate** (measured in 3.3). When no candidate of the basin has retained rows for the segment (for example basins whose runs are all older than retention), every candidate is probed once per chunk before the result `{}`.
+  - Measured: 76 empty pins; max 25447 hit / 68 ms (`basins_zhaochen_*`, GFS+IFS).
+  - Pins with data (364) are all within the gate: max 3301, p95 2530.
+  - The old statement cost ~1.1 s p50 and up to its 30 s timeout on these pins.
+  - A safe bound (a `valid_time` lower bound or a retention-aware candidate cap) needs its own semantic proof. Follow-up: #2630.
+
 - **D1 EXISTS is not fenced.** Laziness (probe candidates in order and stop at the first hit) relies on the planner keeping the EXISTS as a per-candidate probe. At thousands of estimated candidates it could choose a hashed semi-join, which rescans the segment's rows. Correctness is unaffected, because of the outer `ORDER BY`. An `OFFSET 0` inside the EXISTS would force the SubPlan; it is not added (review round 1 note; the live plan is lazy).
 
 - **The `server` block covers the SQL-sample cluster only.** API samples go through the display API's own DSN, so the receipt does not name the API's backing cluster. This is recorded, not fixed.
