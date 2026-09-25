@@ -186,6 +186,31 @@ def test_every_member_is_a_declared_enum_member_except_complete() -> None:
     assert code_clearing - {"complete"} <= enum_members
 
 
+def test_convergence_only_frequency_done_is_in_no_status_set() -> None:
+    """#2048: 000062 makes `frequency_done` a declared member, and nothing may treat it as a state.
+
+    The sweep above now admits it (it is an ADD VALUE in the tree), so the
+    subset checks alone would stay green if someone "completed" a set with it.
+    It is convergence-only: never written, never active, never a durable success
+    and never a reason to clear a recorded error code.
+    """
+
+    assert "frequency_done" in _hydro_run_status_enum_members()
+    status_sets = {
+        "ACTIVE_HYDRO_STATUSES": scheduler_state_types_module.ACTIVE_HYDRO_STATUSES,
+        "DURABLE_HYDRO_SUCCESS_STATUSES": scheduler_state_types_module.DURABLE_HYDRO_SUCCESS_STATUSES,
+        "HYDRO_RUN_CODE_CLEARING_STATUSES": scheduler_state_types_module.HYDRO_RUN_CODE_CLEARING_STATUSES,
+        "chain.COMPLETED_HYDRO_STATUSES": chain_module.COMPLETED_HYDRO_STATUSES,
+        "journal.ACTIVE_HYDRO_STATUSES": journal_module.ACTIVE_HYDRO_STATUSES,
+        "journal.HYDRO_RUN_CODE_CLEARING_STATUSES": journal_module.HYDRO_RUN_CODE_CLEARING_STATUSES,
+        "chain_forecast_trigger._completed_hydro_statuses()": (
+            chain_forecast_trigger_module._completed_hydro_statuses()
+        ),
+    }
+    holding = sorted(name for name, members in status_sets.items() if "frequency_done" in members)
+    assert holding == [], f"`frequency_done` is convergence-only (000062) and must not be in {holding}"
+
+
 def test_active_hydro_statuses_are_the_same_object() -> None:
     """The six sites bind ONE set, and `"pending"` is in it.
 

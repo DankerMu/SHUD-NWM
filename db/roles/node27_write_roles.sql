@@ -729,8 +729,11 @@ ORDER BY 1, 2, 3;
 --     flood.run_product_quality CHECKs referenced it (authored by migrations
 --     that are in node-27's ledger but no longer in db/migrations).  000064
 --     drops the flood schema (#2048), so the entry is gone and the test's
---     ledger-only list (`_LEDGER_ALLOW_LIST`) is empty.  Run the audit-only
---     pass BEFORE pulling a checkout with this list while flood still exists.
+--     ledger-only list (`_LEDGER_ALLOW_LIST`) is empty.  While flood still
+--     exists THIS file's strict audit is red (jsonb_typeof untrusted), so every
+--     pre-write audit-only pass until 000064 has run reads the PINNED source
+--     `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql`,
+--     wherever the checkout is (#2048 design D3, tasks section 5).
 --
 -- One carve-out, and it is structural rather than enumerated: a pg_catalog
 -- function reached ONLY as `:opfuncid` -- i.e. as the implementation of an

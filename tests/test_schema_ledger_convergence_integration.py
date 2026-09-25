@@ -120,6 +120,38 @@ _FLOOD_DDL = (
     )
     """,
 )
+# Production's grant shape around the retired schema (db/roles/node27_write_roles.sql
+# default-privileges block): the tables belong to the runtime owner, and the
+# migration role carries a default ACL row IN SCHEMA flood. 000064's DROP SCHEMA
+# has no CASCADE, so it must get past that pg_default_acl row (an AUTO dependency
+# on the namespace) exactly as it will on node-27. The role comes from the role
+# block `apply_migrations_from_zero` runs for 000059's owner handover.
+_FLOOD_GRANT_SHAPE = (
+    *(f"ALTER TABLE flood.{table} OWNER TO nhms_ingest_rw" for table in _FLOOD_TABLES),
+    """
+    DO $grants$
+    BEGIN
+      EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA flood '
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO nhms_ingest_rw',
+        current_user);
+    END
+    $grants$
+    """,
+)
+_FLOOD_DEFAULT_ACL_COUNT_SQL = """
+    SELECT count(*)
+    FROM pg_default_acl d
+    JOIN pg_namespace n ON n.oid = d.defaclnamespace
+    WHERE n.nspname = 'flood'
+"""
+_ORPHAN_DEFAULT_ACL_COUNT_SQL = """
+    SELECT count(*)
+    FROM pg_default_acl d
+    LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+    WHERE d.defaclnamespace <> 0 AND n.oid IS NULL
+"""
+
 # One row per flood table, each satisfying that table's foreign key.
 _FLOOD_ROW_INSERTS = {
     "flood_frequency_curve": (
@@ -230,6 +262,9 @@ def _build_production_drift(database_url: str) -> None:
     apply_migrations_from_zero(database_url, through="000061")
     _execute(database_url, "ALTER TYPE hydro.run_status ADD VALUE 'frequency_done' AFTER 'parsed'")
     seed_issue_126_data(database_url)
+    assert _fetchall(database_url, "SELECT 1 FROM pg_roles WHERE rolname = 'nhms_ingest_rw'"), (
+        "the harness no longer creates nhms_ingest_rw; the flood grant shape needs it"
+    )
     stale_indexes: list[str] = []
     for name, tail in _STALE_HYDRO_RUN_INDEXES.items():
         stale_indexes.append(f"DROP INDEX hydro.{name}")
@@ -237,6 +272,7 @@ def _build_production_drift(database_url: str) -> None:
     _execute(
         database_url,
         *_FLOOD_DDL,
+        *_FLOOD_GRANT_SHAPE,
         *stale_indexes,
         # Production's hypertable has had rows; an emptied chunk must go with it.
         _FLOOD_ROW_INSERTS["return_period_result"],
@@ -289,6 +325,12 @@ def test_runner_converges_a_production_shaped_database(
     stale = _hydro_run_indexes(url)
     assert all(stale[name][0] != fresh_indexes[name][0] for name in _STALE_HYDRO_RUN_INDEXES), stale
     assert _flood_relations(url) == set(_FLOOD_TABLES)
+    assert _fetchall(url, _FLOOD_DEFAULT_ACL_COUNT_SQL) == [(1,)]
+    assert _fetchall(
+        url,
+        "SELECT DISTINCT pg_get_userbyid(c.relowner) FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'flood' AND c.relkind = 'r'",
+    ) == [("nhms_ingest_rw",)]
     chunks = _flood_chunks(url)
     assert chunks, "the emptied hypertable kept no chunk; the chunk-drop assertion would be vacuous"
     assert set(migrate.RETIRED_LEDGER_VERSIONS) <= _ledger(url)
@@ -302,6 +344,8 @@ def test_runner_converges_a_production_shaped_database(
     assert _hydro_run_indexes(url) == fresh_indexes
     assert all(valid for _definition, valid in fresh_indexes.values())
     assert not _flood_schema_exists(url)
+    # The default ACL row went with the namespace, not left dangling.
+    assert _fetchall(url, _ORPHAN_DEFAULT_ACL_COUNT_SQL) == [(0,)]
     assert _fetchall(url, "SELECT to_regclass(chunk) FROM unnest(%s::text[]) AS chunk", (chunks,)) == [
         (None,)
     ] * len(chunks)

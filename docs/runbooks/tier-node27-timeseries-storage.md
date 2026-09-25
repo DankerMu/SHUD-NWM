@@ -7943,8 +7943,11 @@ the same gadget are covered by detection only, in the same audit:
     drops the retired `flood` schema, the `CHECK`s go with it, and the entry
     was removed from the SQL array and from `_LEDGER_ALLOW_LIST` (now empty;
     a test refuses any reason sourced from a retired `flood` migration).
-    Sequencing consequence: while `flood` still exists, run the audit-only pass
-    from a checkout that predates the removal (#2048 design D3).
+    Sequencing consequence: while `flood` still exists the current SQL's strict
+    audit is red (`jsonb_typeof` untrusted), so every pre-write audit-only pass
+    until `000064` has run reads the **pinned** source, wherever the checkout is:
+    `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql | docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on`
+    (#2048 design D3; the window procedure is in that change's `tasks.md` §5).
 
   Everything else, in any schema, is reported. Both entries T7 added were
   `IMMUTABLE`, `STRICT` and pure (measured): a width widening and a jsonb type
@@ -8180,7 +8183,8 @@ holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
 - tables/partitioned tables before sequences (an `OWNED BY` sequence follows its
   table; a standalone `ALTER SEQUENCE … OWNER TO` on one is refused), then views
   and materialized views;
-- an absent schema (`flood` is provisioned outside `db/`) and an absent
+- an absent schema (`flood`, provisioned outside `db/` when this was written, is a
+  retired schema dropped by `000064`, #2048) and an absent
   `nhms_cold` tablespace are tolerated, not fatal.
 
 **Exhaustion is a partial, audit-visible transfer, never a rollback.** The audit

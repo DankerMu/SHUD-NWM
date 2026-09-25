@@ -61,8 +61,10 @@
 # DEFAULT; int8 was found by T7's first --roles-only run against the production
 # catalog, not predicted).  The one ledger-only entry, jsonb_typeof, was trusted
 # for the retired flood CHECKs and left with them when 000064 dropped the flood
-# schema (#2048); run the audit-only pass before pulling this list onto a node
-# whose flood schema still exists.
+# schema (#2048).  While a node's flood schema still exists this list's strict
+# audit is red, so every pre-write audit-only pass until 000064 has run reads the
+# pinned source `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql`
+# rather than this checkout (#2048 design D3, tasks section 5).
 # Not covered, and a follow-up rather than a fix here: removing the
 # superuser-write half itself.
 #

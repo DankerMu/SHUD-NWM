@@ -42,7 +42,8 @@ Batch M of the 10-batch serial run (master `e340dbc10`, after L2 #2629 / #2633).
 ### Modified Capabilities
 
 - `migration-runner-lock-safety`: the runner refuses a ledger/disk mismatch before applying anything.
-- `fingerprint-gated-state-clone`: both planes normalise `cloned_from_model_id` identically before judging it.
+- `fingerprint-gated-state-clone`: both planes normalise `cloned_from_model_id` identically before judging it; the "known open gap" paragraph of the scheduling-time consumer requirement is replaced by the closed state.
+- `runtime-service-role-boundary`: the superuser-writer function allow-list no longer names `jsonb_typeof` (removed with the `flood` CHECKs).
 - `production-ops-readiness`: the migration-ledger requirement no longer says the drift rows are never visited; recorded retirements pass, anything else is refused.
 
 ## Impact
