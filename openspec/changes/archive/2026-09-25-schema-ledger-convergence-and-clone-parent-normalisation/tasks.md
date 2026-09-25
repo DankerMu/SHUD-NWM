@@ -82,8 +82,9 @@
     - The fix pass after it changed only tests, comments and docs, and those are covered by the fix-delta run.
 ## 4. Review / CI
 
-- [ ] 4.1 Review rounds recorded with fix_gate. CI green, including SQL Migration Dry Run on the non-draft PR.
+- [x] 4.1 Review rounds recorded with fix_gate. CI green, including SQL Migration Dry Run on the non-draft PR.
 
+  - **Result:** round 1 (3 seats) not clean, all P2; fix pass 1 `a6f7a92ee`; round 2 clean. CI on `b3ae01bd6` green, including SQL Migration Dry Run (294 passed, all 9 convergence tests). Merged as `4b7d1f43f`.
 ## 5. After merge
 
 - **Standing rule from merge until 5.4 is done:** any `packages.common.migrate` run on node-27 applies `000062`–`000064`. So no migration may run on node-27 before 5.1 is captured and the go-ahead (5.2) is given. A later PR that brings its own migration waits for this window or joins it.
@@ -101,15 +102,17 @@
 
   Pre-merge rehearsal (2026-09-25, read-only against production): the pinned source gives rc 0 and `0 untrusted`. The branch's SQL gives rc 3 with exactly one untrusted function, `pg_catalog.jsonb_typeof`, from the two `flood.run_product_quality` CHECKs. `/home/nwm/tmp/m/audit-{old,new}.txt`.
 
-- [ ] 5.1 Pre-apply capture on node-27, read-only:
+- [x] 5.1 Pre-apply capture on node-27, read-only:
   - the `flood` row counts (must be 0 / 0 / 0) and `pg_depend` entries on `'flood'::regnamespace`;
   - TimescaleDB state of `flood.return_period_result`: jobs, compression settings, chunks and continuous aggregates. A pre-merge read (2026-09-25) found 0 of each;
   - the six `indexdef`s and `indisvalid`;
   - the `run_status` labels;
   - the `schema_migrations` count;
   - `pg_dump -Fc -n flood` to `/home/nwm/tmp/m/flood-pre-000064.dump`, verified with `pg_restore --list`.
-- [ ] 5.2 **Stop and ask the user for the production go-ahead.** Present 5.1, the window steps (5.3) and the rollback (D3). Nothing below runs without a yes.
-- [ ] 5.3 The window, in order, recording each step's time and output (precedent: `docs/runbooks/receipts/2026-09-12-issue-2145-geometry-generation-migration-node27.md`):
+  - **Result (2026-09-25T12:42Z, checkout `2024a5e4`, read-only):** `flood` rows 0/0/0; `pg_depend` on `flood` = 3 `pg_class` + 2 `pg_default_acl`; jobs, compression, chunks and caggs all 0; six stale `indexdef`s, all valid; `run_status` 12 labels; ledger 62 rows. Dump `/home/nwm/tmp/m/flood-pre-000064.dump` (19018 B, sha256 `c9304994…16b5`; `pg_restore --list` lists 30 TABLE/INDEX/CONSTRAINT/TRIGGER entries).
+- [x] 5.2 **Stop and ask the user for the production go-ahead.** Present 5.1, the window steps (5.3) and the rollback (D3). Nothing below runs without a yes.
+  - **Result:** the user authorized the window on 2026-09-25 ("授权，现在执行窗口").
+- [x] 5.3 The window, in order, recording each step's time and output (precedent: `docs/runbooks/receipts/2026-09-12-issue-2145-geometry-generation-migration-node27.md`):
   1. stop `nhms-node27-autopipe.timer` and `nhms-node27-download.timer`, and wait for in-flight runs to drain;
   2. **audit-only from the pinned source** (above). It must be clean, otherwise abort and restart the timers;
   3. `git status --porcelain` empty, then `git pull --ff-only`;
@@ -121,13 +124,21 @@
   6. restart both timers and confirm they are `active`.
   - **Abort in the window** (the operator gives up after step 3 with `flood` still present): restart the timers and record the state. The checkout is post-merge, and some of `000062`/`000063` may be applied. Until `000064` has run, every pre-write audit on node-27, for any purpose, uses the pinned source. The next window starts again at step 1.
   - **Rollback of `000064`** (D3): `pg_restore` of the dump, plus deleting the `000064` ledger row. It brings the CHECKs back, so from then on the pinned source is again the only passing audit source, and the post-provision strict audit (step 5) would be red until `000064` is reapplied. Record both.
-- [ ] 5.4 Post-apply receipt:
+  - **Result (`/home/nwm/tmp/m/window.log`):**
+    - step 1 at 12:42:48Z: timers inactive, nothing in flight;
+    - step 2 at 12:42:56Z: pinned audit rc 0 / 0 untrusted;
+    - step 3 at 12:43:05Z: `2024a5e4` → `4b7d1f43`;
+    - step 4: attempt 1 at 12:43:07Z stopped before connecting (`DATABASE_URL` is not in `/home/nwm/NWM/.env`; nothing applied). Attempt 2 at 12:43:23Z with the `nhms` DSN (as in the #2145 receipt) applied `000062`, `000063` and `000064` in about 1 s, rc 0, with no lock timeouts;
+    - step 5 at 12:43:32Z: full provision rc 0, audit clean (0 untrusted);
+    - step 6 at 12:43:33Z: both timers active.
+- [x] 5.4 Post-apply receipt:
   - the catalog diff (`evidence/catalog_diff.py` at the merged SHA, same command as 1.1) is empty in every category;
   - the D4 check passes read-only;
   - the six `indexdef`s are all valid;
   - `EXPLAIN` of `display_ready_run`'s statement records the plan chosen;
   - display API `/health` is 200 and there are no new 500s.
   - Recorded in the archive PR, with the SHA of the probe used.
+  - **Result:** `evidence/node27-post-apply-receipt.md` in the archived change.
 
 ## Evidence Floor
 
