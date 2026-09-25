@@ -112,13 +112,15 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
         "forecast_store:latest_product_fallback",
     }
     assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS | PARSER_NARROW_WRITER_KEYS
-    assert len(REGISTRY) == 13
+    # 14 since #2424 D1 registered `_per_source_latest_cycles`' membership probe.
+    assert len(REGISTRY) == 14
     assert ROUTED_SOURCE_KEYS == {
         "publisher:qdown_discovery",
         "forcing_copyback_backfill:discover_backfill_runs",
         "display_coverage:refresh",
         "forecast_store:segment_rows_source",
         "forecast_store:latest_product_river_source",
+        "forecast_store:latest_cycle_fact_probe",
         "mvt:postgis_tile_sql_hydro",
         "mvt:hydro_national_identity_source",
         "mvt:hydro_national_data_source",
@@ -143,8 +145,8 @@ def test_the_renderer_preserves_every_current_template_predicate(entry) -> None:
     It was ``test_legacy_renderer_preserves_...`` and rendered
     ``entry.source("legacy")``; task 6.3 leaves one store, so the rendering half
     is now an identity (pinned inside ``_narrow_chains``) and what remains is the
-    golden comparison. Three of the thirteen registered entries have golden data
-    to compare against — the other ten are ``ROUTED_SOURCE_KEYS``, whose live
+    golden comparison. Three of the fourteen registered entries have golden data
+    to compare against — the other eleven are ``ROUTED_SOURCE_KEYS``, whose live
     owners are composed statements the golden records separately — and the
     sibling is the entry this cut delta'd, which is exactly why it must still be
     compared rather than dropped.
@@ -174,6 +176,7 @@ def test_the_renderer_preserves_every_current_template_predicate(entry) -> None:
     (
         ("forecast_store:segment_rows_source", "_segment_rows_source_template", "h"),
         ("forecast_store:latest_product_river_source", "_latest_product_river_source_template", "cr"),
+        ("forecast_store:latest_cycle_fact_probe", "_latest_cycle_fact_probe_template", "o"),
     ),
 )
 def test_routed_registry_render_matches_actual_store_source(key, factory_name, route_alias) -> None:

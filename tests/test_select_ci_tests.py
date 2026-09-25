@@ -1503,6 +1503,10 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             *CORE_SMOKE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            # #2424 D1 / #2516 D3: the latest-cycle discovery shape and the narrow
+            # station leg's membership fence are pinned only by these two suites.
+            "tests/test_latest_cycle_discovery_shape.py",
+            "tests/test_station_membership_fence.py",
             # #2222: the `/runs` SQL allowlist + serializer live in this file.
             "tests/test_hydro_run_public_projection.py",
             # #2348: the preservation oracle drives this file's payload builders.
@@ -12109,6 +12113,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
         "tests/test_scheduler_state_index_copyback_replay_selection.py",
     ),
+    # #2516 D3: master's frozen station legs; the shape suite is its only
+    # non-gated importer (the integration suite is gated, so not an anchor).
+    ("tests/station_membership_fence_oracle.py", "tests/test_station_membership_fence.py"),
+    # #2424 D1: master's frozen latest-cycle statement; the shape suite (which pins
+    # its sha256) is its only non-gated importer (the integration suite is gated).
+    ("tests/latest_cycle_discovery_oracle.py", "tests/test_latest_cycle_discovery_shape.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -20160,9 +20170,32 @@ def test_pgdata_workload_owners_select_their_suite() -> None:
         "tests/test_node27_pgdata_workload.py",
         "tests/test_node27_pgdata_workload_plan.py",
         "tests/test_node27_pgdata_workload_io.py",
+        "tests/test_node27_pgdata_workload_server_identity.py",
     ):
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert expected <= selected, f"{producer} lost PGDATA workload suite: {sorted(expected - selected)}"
+    # #2418 D4: the server-identity suite is a member of the corpus, not a sibling.
+    assert "tests/test_node27_pgdata_workload_server_identity.py" in expected
+
+
+@pytest.mark.parametrize(
+    ("producer", "suites"),
+    [
+        # #2424 D1: the hydro_run-driven latest-cycle discovery and its registered
+        # fact probe are pinned only by the shape suite.
+        ("packages/common/forecast_store.py", ("tests/test_latest_cycle_discovery_shape.py",)),
+        ("tests/river_ts_template_registry.py", ("tests/test_latest_cycle_discovery_shape.py",)),
+        # The frozen pre-#2424 oracle routes to the suite that pins it to master.
+        ("tests/latest_cycle_discovery_oracle.py", ("tests/test_latest_cycle_discovery_shape.py",)),
+        ("tests/station_membership_fence_oracle.py", ("tests/test_station_membership_fence.py",)),
+        # #2516 D3: both narrow station legs route to the membership-fence pin.
+        ("packages/common/forecast_store.py", ("tests/test_station_membership_fence.py",)),
+        ("packages/common/display_coverage.py", ("tests/test_station_membership_fence.py",)),
+    ],
+)
+def test_l2_read_path_owners_select_their_shape_suites(producer: str, suites: tuple[str, ...]) -> None:
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert set(suites) <= selected, f"{producer} lost {sorted(set(suites) - selected)}"
 
 
 def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:

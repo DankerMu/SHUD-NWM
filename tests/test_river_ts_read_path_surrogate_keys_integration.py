@@ -1265,7 +1265,10 @@ def test_complete_registry_prepares_against_expanded_catalog(
     import re
 
     from tests.river_ts_template_registry import REGISTRY
-    from tests.test_river_ts_text_identity_cleanup import _latest_product_fallback_execution
+    from tests.test_river_ts_text_identity_cleanup import (
+        _latest_product_fallback_execution,
+        _segment_block_executions,
+    )
 
     url, session = seeded
     _expand(session, post_expand_forecast_database)
@@ -1276,6 +1279,8 @@ def test_complete_registry_prepares_against_expanded_catalog(
     contexts = {
         "display_coverage:refresh": _coverage_oracle_statement(),
         "forecast_store:latest_product_river_source": _latest_product_fallback_execution(),
+        # #2424 D1: the correlated probe only exists inside the discovery statement.
+        "forecast_store:latest_cycle_fact_probe": _segment_block_executions()["per_source_latest_cycles"],
         "mvt:hydro_national_identity_source": (postgis_tile_sql("hydro-national"), national_params),
         "mvt:hydro_national_data_source": (postgis_tile_sql("hydro-national"), national_params),
     }

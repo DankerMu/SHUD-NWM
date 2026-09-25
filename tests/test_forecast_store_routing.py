@@ -24,6 +24,7 @@ from packages.common import forecast_store
 from packages.common.forecast_store import ForecastStoreError
 from tests.river_ts_template_registry import AID_MARKER_TAG, FORECAST_STORE_EXECUTIONS
 from tests.test_forecast_api import SqlCaptureForecastStore, _qhh_candidate_row
+from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
 from tests.test_river_ts_text_identity_cleanup import _CaptureCursor
 
 GFS = datetime(2026, 9, 1, 6, tzinfo=UTC)
@@ -140,17 +141,15 @@ A9_RESPONSE = {
 PROJECTION = "SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e"
 
 # These are the old outer query contracts, not extracted from the new builder.
+# `per_source_latest_cycles` left this table with #2424 D1: it no longer reads
+# the shared segment source under a `MAX(h.cycle_time)` outer layer, so it has no
+# PROJECTION to count and no outer clause of this kind. Its shape is pinned
+# whole by `assert_latest_cycle_discovery` (test_latest_cycle_discovery_shape).
 OUTER_CLAUSES = {
     "latest_issue_time": (
         "SELECT h.cycle_time",
         "WHERE h.cycle_time IS NOT NULL",
         "ORDER BY h.cycle_time DESC LIMIT 1",
-    ),
-    "per_source_latest_cycles": (
-        "MAX(h.cycle_time) AS cycle_time",
-        "WHERE h.run_type = 'forecast'",
-        "AND h.cycle_time IS NOT NULL",
-        "GROUP BY h.scenario_id ORDER BY h.scenario_id",
     ),
     "latest_analysis_issue_time": (
         "SELECT h.end_time",
@@ -257,6 +256,13 @@ def assert_narrow_fact_read(sql: str, params: Mapping) -> str:
             branch,
         )
     return " ".join((sql[:start] + " SOURCE_ROWS " + sql[end:]).split())
+
+
+def test_outer_clause_owners_are_every_segment_execution_but_latest_cycle_discovery():
+    """The table above may not shrink silently: exactly one owner left it, by name."""
+    departed = {"per_source_latest_cycles", "latest_product_fallback"}
+    assert set(OUTER_CLAUSES) == set(FORECAST_STORE_EXECUTIONS) - departed
+    assert_latest_cycle_discovery(*FORECAST_STORE_EXECUTIONS["per_source_latest_cycles"]())
 
 
 @pytest.mark.parametrize("owner", tuple(OUTER_CLAUSES))
@@ -407,11 +413,12 @@ def test_public_latest_forecast_keeps_independent_cycles_and_exact_payload():
     }
     facts = [(sql, params) for sql, params in store.cursor.executions if "hydro.river_timeseries" in sql]
     assert len(facts) == 2
-    # The cycle discovery read spans runs by design and pushes nothing (#2424);
-    # the fact read it feeds is the one that converges on a resolved run set.
-    # Both are the same single narrow read now that routing is gone.
-    for sql, params in facts:
-        assert_narrow_fact_read(sql, params)
+    # The cycle discovery (#2424 D1) is driven from hydro_run and probes the fact
+    # table only inside its correlated EXISTS; the fact read it feeds is the one
+    # that converges on a resolved run set, on the single narrow read.
+    assert_latest_cycle_discovery(*facts[0])
+    assert_narrow_fact_read(*facts[1])
+    for _sql, params in facts:
         assert params["scenario_tokens"] == ["gfs", "ifs"]
         assert params["scenario_ids"] == ["forecast_gfs_deterministic", "forecast_ifs_deterministic", "gfs", "ifs"]
     selected = facts[1][1]
@@ -613,7 +620,10 @@ def test_public_splice_preserves_cross_store_analysis_winner():
     }
     facts = [(sql, params) for sql, params in store.cursor.executions if "hydro.river_timeseries" in sql]
     assert len(facts) == 3
-    for sql, params in facts:
+    # #2424 D1: the first is the latest-cycle discovery, the other two the
+    # analysis fallbacks on the shared narrow source.
+    assert_latest_cycle_discovery(*facts[0])
+    for sql, params in facts[1:]:
         assert_narrow_fact_read(sql, params)
     assert "SELECT DISTINCT ON (rt.valid_time)" in facts[-1][0]
     assert "ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC" in facts[-1][0]

@@ -28,7 +28,7 @@ Executed forecast statements
 ---------------------------
 
 ``FORECAST_STORE_EXECUTIONS`` captures all eight segment queries plus the
-known-run latest-product fallback, separately from the 13 raw ``REGISTRY``
+known-run latest-product fallback, separately from the 14 raw ``REGISTRY``
 inputs. Composed executed SQL is never passed wholesale to the renderer.
 The capture harness remains in ``tests/test_river_ts_text_identity_cleanup.py``.
 Imports stay inside callables because the owning test modules import this
@@ -267,6 +267,12 @@ def _latest_product_river_source(store: str) -> str:
     return forecast_store._latest_product_river_source_template(store)
 
 
+def _latest_cycle_fact_probe(store: str) -> str:
+    from packages.common import forecast_store
+
+    return forecast_store._latest_cycle_fact_probe_template(store)
+
+
 def _segment_execution(label: str) -> Callable:
     def capture():
         from tests.test_river_ts_text_identity_cleanup import _segment_block_executions
@@ -305,6 +311,17 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
         params="named",
         mentions=1,
         source=_latest_product_river_source,
+    ),
+    # #2424 D1: `_per_source_latest_cycles`' only fact read, the correlated
+    # membership probe. Registered like every read site, so the closure census
+    # and the shape oracles own it; not in the golden (it postdates 51f9d273).
+    TemplateEntry(
+        key="forecast_store:latest_cycle_fact_probe",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="named",
+        mentions=1,
+        source=_latest_cycle_fact_probe,
     ),
 )
 
@@ -509,6 +526,7 @@ ROUTED_SOURCE_KEYS = frozenset({
     "display_coverage:refresh",
     "forecast_store:segment_rows_source",
     "forecast_store:latest_product_river_source",
+    "forecast_store:latest_cycle_fact_probe",
     "mvt:postgis_tile_sql_hydro",
     "mvt:hydro_national_identity_source",
     "mvt:hydro_national_data_source",

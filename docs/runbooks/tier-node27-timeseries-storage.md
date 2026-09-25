@@ -807,6 +807,27 @@ To reproduce the recorded digest, normalize captured SQL with
 envelope, serialize compact key-sorted JSON `{sql,parameters}` with
 `ensure_ascii=False` and `allow_nan=False`, encode UTF-8, then SHA-256.
 General redaction still applies; only that validated parameter block is restored.
+Every receipt (`schema_version` `1.1`, #2418) also carries a `server` block,
+taken on the measuring session after the readonly proof and before any sample:
+`database` (`current_database()`), `system_identifier` (`pg_control_system()`,
+a decimal string), `server_version`, and `server_addr` / `server_port`
+(`inet_server_addr()` / `inet_server_port()`: NULL over a unix socket, the
+container-internal `127.0.0.1:5432` over TCP on node-27). It holds no DSN, user
+or password. When the identifier cannot be read (`pg_control_system()` not
+executable by the session role, failing, or NULL) a `live` run refuses
+`SERVER_IDENTITY_MISSING` and writes no file; an `isolated` run records `null`
+and keeps sampling under the same `SET LOCAL` timeouts. **A live receipt's
+`server.system_identifier` must equal node-27's** (`SELECT system_identifier
+FROM pg_control_system()` as `nhms_display_ro` on the primary). Limitation:
+`initdb` sets the identifier and every physical clone copies it (pg_basebackup,
+a PGDATA copy or snapshot, a streaming standby), so it tells independently
+initialised clusters apart (a disposable test database shows a different value)
+but not a physical copy from its origin; the node-22 :55433 cluster (archived,
+stopped rollback archive, not current topology, do not connect) may share
+node-27's lineage. Read the block as cluster lineage, not as host
+identity. It names the SQL-sample cluster only: API samples go through the
+display API's own DSN. Archived `1.0` receipts have no `server` block and stay
+as they are.
 Receipts are written through a private staged sibling and exclusive publication
 so the final path is mode-0600 from the first byte and a pre-publish
 write/fsync failure leaves no partial final.
@@ -6540,7 +6561,8 @@ or separately reviewed exact-query manual acquisition, including both network
 pins, before closing these gates. For the SQL/API legs that executor is the
 PGDATA workload CLI under "Retained PGDATA and display workloads": acquire its
 `--evidence-kind live` receipt by that section's procedure, since an isolated
-receipt never implies live acceptance. The #1895 oracle and the compression
+receipt never implies live acceptance, and check that its
+`server.system_identifier` equals node-27's (the `server` block described there). The #1895 oracle and the compression
 benchmark/live-evidence lineage above remain unrepaired.
 Live lag and range_end may delay the first eligible one-day narrow chunk by
 days; schedule the compressed-state leg later, never force production

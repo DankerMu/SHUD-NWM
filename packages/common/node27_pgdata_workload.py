@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from packages.common.node27_pgdata_workload_io import utc_now
+from packages.common.node27_pgdata_workload_io import prove_server_identity, utc_now
 from packages.common.node27_pgdata_workload_measure import (
     evaluate_api_samples,
     evaluate_sql_samples,
@@ -33,7 +33,9 @@ from packages.common.node27_pgdata_workload_types import PgdataWorkloadError, re
 from packages.common.redaction import redact_payload
 
 ARTIFACT = "nhms-pgdata-workload"
-SCHEMA_VERSION = "1.0"
+#: 1.1 (#2418) adds the ``server`` block. Archived 1.0 receipts are historical
+#: artifacts: no code path re-reads or re-validates them.
+SCHEMA_VERSION = "1.1"
 
 
 def _expected_identity(captured: Mapping[str, Any]) -> dict[str, Any]:
@@ -91,6 +93,17 @@ def measure_workload(
     if (sql_probe is None) != (api_probe is None):
         refuse(
             "mixed injected and live performance configuration is refused", code="INJECTION_MIXED", stage="performance"
+        )
+    # The caller has already proved this session readonly (``prove_readonly_session``);
+    # the cluster identity is taken on the SAME connection and transaction,
+    # before any sample. A live receipt must name its cluster; an isolated one
+    # records ``None`` and keeps measuring with the SET LOCAL timeouts intact.
+    server = prove_server_identity(connection)
+    if evidence_kind == "live" and server["system_identifier"] is None:
+        refuse(
+            "live receipt cannot name its cluster: pg_control_system() identifier unavailable",
+            code="SERVER_IDENTITY_MISSING",
+            stage="performance",
         )
     expected = _expected_identity(captured)
     candidates = load_window_candidates(
@@ -155,6 +168,7 @@ def measure_workload(
             "api_origin": origin,
             "api_path": captured["api_path"],
         },
+        "server": dict(server),
         "sql": sql_eval,
         "api": api_eval,
         "candidates": {

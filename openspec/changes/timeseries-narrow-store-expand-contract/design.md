@@ -134,6 +134,15 @@ stderr/OnFailure 同步报告目的路径/设备与峰值/余量。完整契约�
 ### D12 回退（expand 后、contract 前可执行的反向序列）
 停 timers 与 API/parser → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → 回滚代码到 change 之前版本 → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'`（列保留，旧代码不读它）→ 启动。窄表中已写入的 run 在回退后对读路径不可见（旧代码只读正名表）；这些 run 按旧 parser 重解析进（现为正名的）旧表；`narrow_rollback` 表要么由显式 post-D12 re-forward（change `node27-post-d12-reforward`：保留双 OID 与 ledger、不重跑 expand 迁移、按保留事实与 D12 快照推导 route）原样重挂，要么在从零重新 expand 前 DROP。允许的中间态"store 回置 legacy 且窄表残留行存在"写进 spec。contract 之后不可回退。
 
+### D13 `issue_time=latest` 找 cycle 的查询形状（#2424，2026-09-24 用户裁决）
+形状裁决见 change `display-latest-cycle-and-receipt-server-identity` 的 design D1。要点如下：
+- `_per_source_latest_cycles` 改为从 `hydro.hydro_run` 驱动，不再扫事实表求 `MAX`。候选 run 物化一次，每个 scenario 按 `cycle_time DESC` 排序后逐个用 EXISTS 探测（`OFFSET 0` 作为排序屏障），取第一个有该河段行的 run 的 cycle。
+- 不引入 `status` 谓词，保持现有语义。
+- 候选按 `h.basin_version_id` 收窄，由 node-27 逐流域等价回归作证。
+- 返回仍按 scenario 粒度。
+- 两个同形状邻居：`_latest_issue_time` 没有生产调用方，不改；`_latest_analysis_issue_time` 已有 `analysis_true_field` 下推，实测 1299，不改。
+- D11 门：同 pin warm 从 409069 降到 1386 / 1464（单源 / 双源）。
+
 ## Sketch seams under test
 
 1. **渲染 SQL 形状 oracle**（最高、已有）：`tests/test_sql_shape_helpers.py` 机制作用于 `render_river_ts_sql` 的输出（跨-store statement helper 已在 #1996 第二次 gate 删除；task 1.4/Decision 26 改为 caller-owned occurrence-local 组合）——legacy 变体与规范化后的模板逐字等价（表名除外）、规范化后的模板与规范化前的 pin 语义等价（census/shape pin 重钉）、narrow 变体不含 text 身份列/标记行且键谓词完整。理由：一个 seam 覆盖 13 处读方 + 2 个 smoke 脚本。

@@ -353,6 +353,88 @@ def prove_readonly_session(connection: Any) -> dict[str, Any]:
     return {"transaction_read_only": True, "current_user": current_user}
 
 
+#: The receipt ``server`` block (#2418 D4), in its published key order. None of
+#: these is a credential: no DSN, user or password is ever read into it.
+SERVER_IDENTITY_KEYS = ("database", "system_identifier", "server_version", "server_addr", "server_port")
+SERVER_IDENTITY_SAVEPOINT = "nhms_pgdata_server_identity"
+SERVER_CONTROL_PRIVILEGE_SQL = (
+    "SELECT has_function_privilege('pg_catalog.pg_control_system()', 'EXECUTE') AS control_executable"
+)
+_SERVER_IDENTITY_COLUMNS_SQL = """
+    current_database() AS database,
+    {system_identifier} AS system_identifier,
+    current_setting('server_version') AS server_version,
+    host(inet_server_addr()) AS server_addr,
+    inet_server_port() AS server_port"""
+SERVER_IDENTITY_SQL = "SELECT" + _SERVER_IDENTITY_COLUMNS_SQL.format(
+    system_identifier="(SELECT system_identifier::text FROM pg_catalog.pg_control_system())"
+)
+#: Used when ``pg_control_system()`` is not executable: the rest of the block is
+#: still recorded, and the function is never called, so no privilege error can
+#: abort the measuring transaction.
+SERVER_IDENTITY_WITHOUT_CONTROL_SQL = "SELECT" + _SERVER_IDENTITY_COLUMNS_SQL.format(
+    system_identifier="NULL::text"
+)
+_DECIMAL_RE = re.compile(r"^[0-9]{1,20}$")
+
+
+def _identity_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _identity_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, Mapping):
+        values = [row.get(key) for key in SERVER_IDENTITY_KEYS]
+    elif isinstance(row, (list, tuple)) and len(row) == len(SERVER_IDENTITY_KEYS):
+        values = list(row)
+    else:
+        return dict.fromkeys(SERVER_IDENTITY_KEYS)
+    database, system_identifier, server_version, server_addr, server_port = values
+    identifier = _identity_text(system_identifier)
+    port = server_port if isinstance(server_port, int) and not isinstance(server_port, bool) else None
+    return {
+        "database": _identity_text(database),
+        "system_identifier": identifier if identifier is not None and _DECIMAL_RE.match(identifier) else None,
+        "server_version": _identity_text(server_version),
+        "server_addr": _identity_text(server_addr),
+        "server_port": port if port is not None and 0 < port < 65536 else None,
+    }
+
+
+def prove_server_identity(connection: Any) -> dict[str, Any]:
+    """Name the cluster that answers this session (#2418 D4), without raising.
+
+    Runs on the measuring connection and inside its transaction, so the
+    ``SET LOCAL`` timeouts ``open_readonly_connection`` issued stay in force.
+    ``pg_control_system()`` is only called once ``has_function_privilege`` says
+    it is executable, and the probe runs under a savepoint: any failure is rolled
+    back to it (which keeps every earlier ``SET LOCAL``) and reported as a
+    ``None`` field, never as an exception. Whether a missing
+    ``system_identifier`` is acceptable is the caller's decision.
+
+    ``system_identifier`` is set by ``initdb`` and copied by physical clones, so
+    it identifies cluster lineage, not a host.
+    """
+    identity: dict[str, Any] = dict.fromkeys(SERVER_IDENTITY_KEYS)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SAVEPOINT {SERVER_IDENTITY_SAVEPOINT}")
+            try:
+                cursor.execute(SERVER_CONTROL_PRIVILEGE_SQL)
+                executable = _fetchone(cursor) is True
+                cursor.execute(SERVER_IDENTITY_SQL if executable else SERVER_IDENTITY_WITHOUT_CONTROL_SQL)
+                identity = _identity_row(cursor.fetchone())
+            except Exception:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT {SERVER_IDENTITY_SAVEPOINT}")
+                identity = dict.fromkeys(SERVER_IDENTITY_KEYS)
+            cursor.execute(f"RELEASE SAVEPOINT {SERVER_IDENTITY_SAVEPOINT}")
+    except Exception:
+        return dict.fromkeys(SERVER_IDENTITY_KEYS)
+    return identity
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 

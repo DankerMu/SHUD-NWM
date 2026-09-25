@@ -139,7 +139,9 @@ def _answers(shape: str) -> list[tuple[str, list[dict[str, Any]]]]:
     scenario_ids = [_TARGET_SCENARIO, _DECOY_SCENARIO] if shape == "latest" else [_TARGET_SCENARIO]
     return [
         ("pushdown_run_keys", _fact_rows(scenario_ids)),
-        ("MAX(h.cycle_time) AS cycle_time", [{"scenario_id": name, "cycle_time": _CYCLE} for name in scenario_ids]),
+        # #2424 D1: latest-cycle discovery, keyed on its candidate CTE (it used
+        # to be the `MAX(h.cycle_time)` aggregate over the segment's facts).
+        ("cand AS MATERIALIZED", [{"scenario_id": name, "cycle_time": _CYCLE} for name in scenario_ids]),
         # #2417's run-identity resolution. It projected `h.run_key, h.run_id`
         # while the reader still bound a `pushdown_run_ids` text twin; #1342's
         # contract (task 6.3) deleted the twin, so only the key is selected.
@@ -304,13 +306,18 @@ def test_the_run_bound_shape_captures_the_bound_run_pushdown_statement() -> None
 
 def test_the_latest_shape_has_two_fact_statements_and_picks_the_cycle_window_one() -> None:
     """tasks.md 1.1: ``_per_source_latest_cycles`` and the cycle-window segment
-    read both inline ``_segment_rows_source_sql``. Selecting "the only one"
-    would raise; selecting the first would measure the wrong statement."""
+    read both name ``hydro.river_timeseries`` (the discovery only inside its
+    membership ``EXISTS`` since #2424 D1). Selecting "the only one" would raise;
+    selecting the first would measure the wrong statement."""
     statement, companions, _, _ = _capture("latest")
     assert "%(pushdown_run_keys)s" in statement["sql"]
     assert "pushdown_window_start" in statement["sql"]
     assert len(companions) == 1
-    assert "MAX(h.cycle_time)" in companions[0]["sql"]
+    # #2424 D1: the companion is the hydro_run-driven discovery, whose only fact
+    # read is the correlated membership probe.
+    assert "cand AS MATERIALIZED" in companions[0]["sql"]
+    assert "WHERE EXISTS (" in companions[0]["sql"]
+    assert "MAX(h.cycle_time)" not in companions[0]["sql"]
     assert "pushdown_run_keys" not in companions[0]["sql"]
 
 
