@@ -7916,8 +7916,9 @@ the same gadget are covered by detection only, in the same audit:
   so one column `DEFAULT` restored both round-3 gadgets with the strict audit at
   exit 0 (measured; thirteen more `*_to_xml*` siblings share the shape).
   Enumerating effects cannot close a function whose effect is "run this string",
-  so the list was inverted. Trusted is exactly eleven names, in **two
-  provenance classes**:
+  so the list was inverted. Trusted was eleven names in **two provenance
+  classes** until `000064` (#2048); it is now the ten derived names and the
+  ledger-backed class is empty:
   - **derived from `db/migrations/**`** (ten): the four `met` trigger functions
     from `000043`, and `pg_catalog.{now, nextval, gen_random_uuid, btrim,
     float8, int8}`. The last two are catalog references nobody writes as a
@@ -7928,19 +7929,29 @@ the same gadget are covered by detection only, in the same audit:
     `pg_get_expr` prints just `0`, while the stored tree holds
     `int8(<int4 const>)`). A unit test re-derives this set from the tree and
     asserts **equality**, so a derivation that stops deriving is red;
-  - **ledger-backed, not derivable here** (one): `pg_catalog.jsonb_typeof`,
-    reached by `flood.run_product_quality`'s `residual_blockers` /
-    `unavailable_products` `CHECK`s. Their migrations
+  - **ledger-backed, not derivable here** (none since `000064`; one before):
+    `pg_catalog.jsonb_typeof` WAS on the list, reached by
+    `flood.run_product_quality`'s `residual_blockers` / `unavailable_products`
+    `CHECK`s. Their migrations
     (`000034_return_period_run_quality_materialization.sql`,
     `000036_run_product_quality_explicit_source.sql`) are recorded as applied by
     the migration superuser in node-27's `public.schema_migrations`, but neither
     file is under `db/migrations` any more (the listing jumps
-    `000033 → 000035 → 000037`). It is pinned in the test's
+    `000033 → 000035 → 000037`). It was pinned in the test's
     `_LEDGER_ALLOW_LIST` with that reason, asserted disjoint from the derived
-    set. The repo/production migration drift itself is reported out of this
-    change's scope.
+    set. #2048 then repaired that repo/production drift forward: `000064`
+    drops the retired `flood` schema, the `CHECK`s go with it, and the entry
+    was removed from the SQL array and from `_LEDGER_ALLOW_LIST` (now empty;
+    a test refuses any reason sourced from a retired `flood` migration).
+    Sequencing consequence: while `flood` still exists the current SQL's strict
+    audit is red (`jsonb_typeof` untrusted), so every pre-write audit-only pass
+    until `000064` has run reads the **pinned** source, wherever the checkout is:
+    write `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql`
+    to a file, check it is non-empty, then feed it with `<` to the audit-only
+    command below (a plain pipe would hand psql empty input, rc 0, if `git show` failed)
+    (#2048 design D3; the window procedure is in that change's `tasks.md` §5).
 
-  Everything else, in any schema, is reported. Both added entries are
+  Everything else, in any schema, is reported. Both entries T7 added were
   `IMMUTABLE`, `STRICT` and pure (measured): a width widening and a jsonb type
   tag — no filesystem, no string evaluation, no session state.
   **T7 first contact, and how it was resolved.** The first `--roles-only` run
@@ -7951,7 +7962,7 @@ the same gadget are covered by detection only, in the same audit:
   them**: the derivation gained an implicit-coercion branch that reproduces
   `int8` from `000035` (measured mapping, transcript §20.1), and `jsonb_typeof`
   got a ledger-only provenance record naming the two retired `flood`
-  migrations. Widening a predicate — "trust `pg_catalog` casts", "trust
+  migrations (removed again with the `flood` `CHECK`s by `000064`, #2048). Widening a predicate — "trust `pg_catalog` casts", "trust
   `IMMUTABLE` functions" — would have re-opened exactly the round-4 hole, since
   `query_to_xml` is `pg_catalog`-resident and `PUBLIC`-executable too.
   **One structural carve-out:** a `pg_catalog` function reached *only* as an
@@ -8174,7 +8185,8 @@ holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
 - tables/partitioned tables before sequences (an `OWNED BY` sequence follows its
   table; a standalone `ALTER SEQUENCE … OWNER TO` on one is refused), then views
   and materialized views;
-- an absent schema (`flood` is provisioned outside `db/`) and an absent
+- an absent schema (`flood`, provisioned outside `db/` when this was written, is a
+  retired schema dropped by `000064`, #2048) and an absent
   `nhms_cold` tablespace are tolerated, not fatal.
 
 **Exhaustion is a partial, audit-visible transfer, never a rollback.** The audit
@@ -8277,8 +8289,10 @@ sweep of the production catalog read `138 expression(s)/trigger(s) scanned, 19
 distinct function(s) referenced, 2 untrusted for a superuser writer` — the two
 being `pg_catalog.int8` (`000035`'s `BIGINT DEFAULT 0` counters and the `flood`
 counters) and `pg_catalog.jsonb_typeof` (the `flood.run_product_quality`
-`CHECK`s). Both are now on the allow-list with their provenance recorded
-(§9.1), so the T7 re-run must read **`0 untrusted`**; the scanned and distinct
+`CHECK`s). Both went on the allow-list with their provenance recorded (§9.1);
+since `000064` (#2048) dropped `flood`, `jsonb_typeof` is off the list again
+because nothing references it. Either way the T7 re-run must read
+**`0 untrusted`**; the scanned and distinct
 counts are catalog-shaped and will move with the catalog. A **non-zero** count
 on the re-run is a new finding and is read the same way the first two were:
 identify the authoring migration before touching the list, and extend the list
@@ -8398,6 +8412,11 @@ docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 \
   < db/roles/node27_write_roles.sql
 ```
 
+Until `000064` (#2048) has run on node-27, the `flood` CHECKs make this
+command's strict audit red on `jsonb_typeof`; use the pinned source instead
+(`e340dbc10`'s roles SQL; see the `jsonb_typeof` entry of the §9 allow-list
+and #2048's `tasks.md` §5).
+
 An audit is **detection**, and a planted rule, trigger or column `DEFAULT` fires
 on the *next* superuser write — which is the session you are about to open.
 Running it only afterwards means the first thing it can detect has already
@@ -8460,7 +8479,8 @@ introduced, extend the array in `db/roles/node27_write_roles.sql`, re-run the
 unit test, and re-run this audit; do not switch to non-strict to get past it.
 
 That is not hypothetical: T7's first `--roles-only` run reported exactly two
-such names, `pg_catalog.int8` and `pg_catalog.jsonb_typeof` (§9.1, §9.3). The
+such names, `pg_catalog.int8` and `pg_catalog.jsonb_typeof` (§9.1, §9.3; the
+latter was later retired with the `flood` `CHECK`s by `000064`, #2048). The
 procedure that closed them is the procedure to repeat. **Find the authoring
 migration first**, and the finding falls into one of two cases:
 
@@ -8471,9 +8491,12 @@ migration first**, and the finding falls into one of two cases:
 2. the migration is in `public.schema_migrations` but **not** in the repository
    — check with
    `psql -U nhms -d nhms -Atc "SELECT version FROM public.schema_migrations ORDER BY 1"`
-   against `ls db/migrations`. Then add the name to `_LEDGER_ALLOW_LIST` with a
-   reason that names the migration file, and file the repo/production drift
-   separately; it is a real finding of its own.
+   against `ls db/migrations`. Then add the name to `_LEDGER_ALLOW_LIST` (empty
+   since #2048) with a reason that names the migration file, and file the
+   repo/production drift separately; it is a real finding of its own. Prefer
+   repairing that drift forward, as `000064` did for `jsonb_typeof`: a ledger
+   version with no file is already refused by `packages/common/migrate.py`
+   unless it is listed in `RETIRED_LEDGER_VERSIONS`.
 
 There is no third case. A name whose authoring migration cannot be identified in
 either place is **not** a list-extension candidate — it is the finding the sweep

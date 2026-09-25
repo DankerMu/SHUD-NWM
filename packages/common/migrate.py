@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import psycopg2
@@ -13,6 +15,30 @@ from packages.common.redaction import REDACTION_MARKER, redact_database_dsn
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "db" / "migrations"
 SCHEMA_MIGRATIONS_TABLE = "public.schema_migrations"
+
+_B97C16E2_RETIREMENT = (
+    "removed from db/migrations by commit b97c16e2 (frequency pipeline retirement) after it had been "
+    "applied; the ledger row is true history and stays (#2048)"
+)
+# Ledger versions that are applied on node-27 but, by decision, have no file on disk. The runner's
+# ledger/disk check (`ledger_disk_mismatches`) passes these and refuses every other ledger row
+# without a file. Their objects were converged by 000062-000064. A name here must never come back
+# to disk: the runner would skip it as applied.
+RETIRED_LEDGER_VERSIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "000007_flood.sql": _B97C16E2_RETIREMENT,
+        "000015_flood_return_period_identity_indexes.sql": _B97C16E2_RETIREMENT,
+        "000017_return_period_max_over_window_identity.sql": _B97C16E2_RETIREMENT,
+        "000020_valid_time_discovery_indexes.sql": _B97C16E2_RETIREMENT,
+        "000031_search_discovery_return_period_performance.sql": (
+            "renamed by commit b97c16e2 to 000031_search_discovery_performance.sql after it had been "
+            "applied; the successor was applied again under its new name, so both rows stay (#2048)"
+        ),
+        "000034_return_period_run_quality_materialization.sql": _B97C16E2_RETIREMENT,
+        "000036_run_product_quality_explicit_source.sql": _B97C16E2_RETIREMENT,
+    }
+)
+_MIGRATION_PREFIX_CHARS = 6
 
 LOCK_TIMEOUT_ENV = "NHMS_MIGRATE_LOCK_TIMEOUT"
 STATEMENT_TIMEOUT_ENV = "NHMS_MIGRATE_STATEMENT_TIMEOUT"
@@ -154,6 +180,46 @@ def migration_has_been_applied(connection: PsycopgConnection, version: str) -> b
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT 1 FROM {SCHEMA_MIGRATIONS_TABLE} WHERE version = %s", (version,))
         return cursor.fetchone() is not None
+
+
+def read_ledger_versions(connection: PsycopgConnection) -> list[str]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT version FROM {SCHEMA_MIGRATIONS_TABLE} ORDER BY version")
+        return [str(version) for (version,) in cursor.fetchall()]
+
+
+def ledger_disk_mismatches(ledger_versions: Iterable[str], migration_names: Iterable[str]) -> list[str]:
+    """Every way the ledger and the migration files disagree, one line per offending name.
+
+    The runner only walks files, so without this a deleted or renamed applied migration
+    passes silently (#2048). An empty list means the runner may apply:
+
+    - R1: a ledger version with no file is refused unless it is in ``RETIRED_LEDGER_VERSIONS``;
+    - R2: two files sharing a 6-digit prefix are refused;
+    - R3: a file named like a retired version is refused (the runner would skip it as applied).
+    """
+    ledger = set(ledger_versions)
+    names = sorted(set(migration_names))
+    on_disk = set(names)
+    problems = [
+        f"ledger version {version} has no migration file and is not a recorded retirement"
+        for version in sorted(ledger - on_disk)
+        if version not in RETIRED_LEDGER_VERSIONS
+    ]
+    by_prefix: dict[str, list[str]] = {}
+    for name in names:
+        by_prefix.setdefault(name[:_MIGRATION_PREFIX_CHARS], []).append(name)
+    problems.extend(
+        f"migration prefix {prefix} is shared by {', '.join(shared)}"
+        for prefix, shared in sorted(by_prefix.items())
+        if len(shared) > 1
+    )
+    problems.extend(
+        f"migration file {name} reuses the name of a retired ledger version"
+        for name in names
+        if name in RETIRED_LEDGER_VERSIONS
+    )
+    return problems
 
 
 def record_migration(connection: PsycopgConnection, version: str) -> None:
@@ -336,6 +402,16 @@ def main() -> None:
         current: str | None = None
         try:
             ensure_schema_migrations_table(connection)
+            # Before the first apply, inside this handler: a lock/statement timeout on the ledger
+            # read is reported as the ledger check (`current` is None) with the same diagnostics.
+            mismatches = ledger_disk_mismatches(
+                read_ledger_versions(connection), (path.name for path in migration_files)
+            )
+            if mismatches:
+                print("Migration ledger/disk mismatch; nothing was applied:")
+                for mismatch in mismatches:
+                    print(f"  {redact_migration_text(mismatch, database_url)}")
+                raise SystemExit(1)
 
             for migration_file in migration_files:
                 current = None

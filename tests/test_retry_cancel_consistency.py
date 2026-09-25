@@ -1268,6 +1268,9 @@ def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
 
 def test_enum_sets_match_migration() -> None:
     assert HYDRO_RUN_STATUS_ENUM <= _migration_enum_values("hydro.run_status")
+    # #2048: 000062 re-adds `frequency_done` to the DB enum as a convergence-only
+    # label. It is not a status the retry/cancel lanes may write or accept.
+    assert "frequency_done" not in HYDRO_RUN_STATUS_ENUM
     assert _migration_enum_values("met.cycle_status") == MET_CYCLE_STATUS_ENUM
 
 

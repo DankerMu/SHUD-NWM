@@ -253,10 +253,11 @@ def test_run_detail_and_list_publish_the_same_closed_hydro_run_contract() -> Non
 
 
 def test_route_passes_db_enum_labels_outside_the_published_enum_through_verbatim(client: TestClient) -> None:
-    # Live node-27 (2026-09-24): `enum_range(NULL::hydro.run_status)` carries
-    # `frequency_done`, which no migration under db/migrations/ creates. A DB
-    # label the repo does not know must pass through verbatim, as it did on
-    # master, never 500 the page. `reforecast` stands in for a future run_type.
+    # `enum_range(NULL::hydro.run_status)` carries `frequency_done`: retired, a
+    # convergence-only ledger member since 000062, never written, and absent from
+    # the published `RunStatus`. A DB label the published enum does not know must
+    # pass through verbatim, as it did on master, never 500 the page.
+    # `reforecast` stands in for a future run_type.
     drifted = {**_post_i7_row(), "status": "frequency_done", "run_type": "reforecast"}
     app.dependency_overrides[forecast_routes.get_forecast_store] = lambda: _SqlShapeStore([drifted])
 

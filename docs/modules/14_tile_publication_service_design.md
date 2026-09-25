@@ -66,8 +66,8 @@ metadata（`flood.return_period_result`、`layer_id=flood_return_period_<run_id>
 
 - `_discover_qdown_runs` 从 `hydro.hydro_run` + `hydro.river_timeseries` 中发现指定 cycle 的
   `status IN ('succeeded', 'parsed', 'published')` 且存在 `q_down` 行的 forecast run（与
-  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 不是迁移账本成员，
-  仅残留在 node-27 live 枚举中）。
+  `docs/runbooks/forcing-copyback-backfill.md` 的候选口径一致；已退役的 `frequency_done` 自 `000062` 起是仅为账本
+  收敛保留的枚举成员，从不写入）。
 - `_upsert_qdown_layer` 以确定性 `layer_id=q_down_<run_id>_<river_network_version_id>` upsert
   `map.tile_layer`，`layer_type=q_down_timeseries`，`tile_format=geojson_timeseries`，
   `tile_uri_template` 为 `tiles/hydro/<cycle_id>/q-down/<run_id>/<river_network_version_id>/manifest.json`

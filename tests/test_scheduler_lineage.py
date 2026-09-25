@@ -24,6 +24,7 @@ production deadlock:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from typing import Any
 import pytest
 
 from packages.common.state_manager import (
+    STR_STRIP_WHITESPACE,
     FileStateSnapshotIndexRepository,
     PsycopgStateSnapshotRepository,
     StateSnapshot,
@@ -766,13 +768,36 @@ def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any
     )
     assert "ORDER BY valid_time ASC, created_at ASC" in captured["statement"]
     assert "cloned_from_model_id IS NOT NULL" in captured["statement"]
-    # A1: a row naming itself is not a predecessor and confers no lineage.
-    assert "cloned_from_model_id <> model_id" in captured["statement"]
+    # #2392: both tests judge the parent after the file plane's `.strip()`, so
+    # `LIMIT 1` cannot spend its one row on a blank or padded-self parent the
+    # file plane skips. A1: a row naming itself is not a predecessor.
+    assert "AND btrim(cloned_from_model_id, %s) <> ''" in captured["statement"]
+    assert "AND btrim(cloned_from_model_id, %s) <> model_id" in captured["statement"]
+    # No raw-bytes self test left behind: it would pass the padded self-reference.
+    assert "AND cloned_from_model_id <> model_id" not in captured["statement"]
     # #1739 negative pin: fingerprint is provenance, not an admission condition.
     assert "clone_gate_fingerprint" not in captured["statement"]
     # A2 negative pin: no usable_flag filter, in any spelling.
     assert "usable_flag" not in captured["statement"]
-    assert captured["parameters"] == ("model_a_prime", "gfs")
+    assert captured["parameters"] == (
+        "model_a_prime",
+        "gfs",
+        STR_STRIP_WHITESPACE,
+        STR_STRIP_WHITESPACE,
+    )
+
+
+def test_trim_set_is_exactly_what_argumentless_str_strip_removes() -> None:
+    """#2392: `btrim(x, STR_STRIP_WHITESPACE)` equals `x.strip()` only if the set is `str.isspace()`'s.
+
+    The constant is a literal so importing state_manager does not scan 1.1M code
+    points; this test is what keeps the literal honest. Plain `btrim(x)` strips
+    spaces only, and a set missing one character leaves that shape divergent.
+    """
+    computed = "".join(ch for ch in map(chr, range(sys.maxunicode + 1)) if ch.isspace())
+
+    assert STR_STRIP_WHITESPACE == computed
+    assert len(STR_STRIP_WHITESPACE) == 29
 
 
 def test_publisher_latest_clone_row_query_keeps_the_fingerprint_filter(monkeypatch: Any) -> None:

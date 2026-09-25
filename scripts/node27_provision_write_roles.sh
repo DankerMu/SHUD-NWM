@@ -53,16 +53,18 @@
 # as the caller" -- measured walking straight through the deny-list at exit 0.
 # The allow-list has to be EXTENDED when a migration references a new function;
 # a unit test derives that set from db/migrations/** so the failure lands there
-# and not on the live audit.  Eleven entries today, in two provenance classes:
-# ten derived from db/migrations/** (the four 000043 trigger functions plus
-# btrim / float8 / gen_random_uuid / int8 / nextval / now -- float8 and int8
-# being catalog references nobody writes as a call, an explicit `::double
-# precision` cast and the implicit int4->int8 coercion of a BIGINT column's
-# integer-literal DEFAULT), and one -- jsonb_typeof -- that is migration-
-# authored per node-27's public.schema_migrations ledger but whose authoring
-# files are no longer in db/migrations, so it is pinned with a written reason
-# instead of being derived.  Both were found by T7's first --roles-only run
-# against the production catalog, not predicted.
+# and not on the live audit.  Ten entries today, all derived from
+# db/migrations/** (the four 000043 trigger functions plus btrim / float8 /
+# gen_random_uuid / int8 / nextval / now -- float8 and int8 being catalog
+# references nobody writes as a call, an explicit `::double precision` cast and
+# the implicit int4->int8 coercion of a BIGINT column's integer-literal
+# DEFAULT; int8 was found by T7's first --roles-only run against the production
+# catalog, not predicted).  The one ledger-only entry, jsonb_typeof, was trusted
+# for the retired flood CHECKs and left with them when 000064 dropped the flood
+# schema (#2048).  While a node's flood schema still exists this list's strict
+# audit is red, so every pre-write audit-only pass until 000064 has run reads the
+# pinned source `git -C /home/nwm/NWM show e340dbc10:db/roles/node27_write_roles.sql`
+# rather than this checkout (#2048 design D3, tasks section 5).
 # Not covered, and a follow-up rather than a fix here: removing the
 # superuser-write half itself.
 #

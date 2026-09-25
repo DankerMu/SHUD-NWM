@@ -1,4 +1,5 @@
-"""Unit seam for the migration runner's session guard and lock-failure diagnostics (#2277).
+"""Unit seam for the migration runner's session guard and lock-failure diagnostics (#2277),
+and for its ledger/disk check (#2048).
 
 `packages.common.migrate.main()` is driven with a fake psycopg2 connection that
 emulates the session GUCs, the `public.schema_migrations` ledger and
@@ -71,6 +72,10 @@ class FakeCursor:
             self._all = list(conn.holders)
         elif text.startswith("CREATE TABLE IF NOT EXISTS public.schema_migrations"):
             pass
+        elif text.startswith("SELECT version FROM public.schema_migrations"):
+            if conn.ledger_read_error is not None:
+                raise conn.ledger_read_error
+            self._all = [(version,) for version in sorted(conn.ledger)]
         elif text.startswith("SELECT 1 FROM public.schema_migrations"):
             if conn.ledger_check_error is not None:
                 raise conn.ledger_check_error
@@ -103,6 +108,7 @@ class FakeConnection:
         self.statement_errors: dict[str, Exception] = {}
         self.diagnostic_error: Exception | None = None
         self.ledger_check_error: Exception | None = None
+        self.ledger_read_error: Exception | None = None
         self.autocommit = False
         self.closed = False
 
@@ -454,3 +460,152 @@ def test_sql_password_literal_forms_are_redacted(text: str, secret: str) -> None
 
     assert secret not in redacted
     assert "[redacted]" in redacted
+
+
+# ---------------------------------------------------------------------------
+# Requirement: refuse a ledger/disk mismatch before applying anything (#2048)
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_check_names_every_unrecorded_missing_version() -> None:
+    problems = migrate.ledger_disk_mismatches(
+        ["000001_a.sql", "000009_gone.sql", "000010_also_gone.sql"], ["000001_a.sql"]
+    )
+
+    assert len(problems) == 2
+    assert "000009_gone.sql" in problems[0]
+    assert "000010_also_gone.sql" in problems[1]
+
+
+def test_ledger_check_names_both_files_of_a_duplicated_prefix() -> None:
+    problems = migrate.ledger_disk_mismatches([], ["000001_a.sql", "000002_b.sql", "000002_c.sql"])
+
+    assert len(problems) == 1
+    assert "000002_b.sql" in problems[0] and "000002_c.sql" in problems[0]
+
+
+def test_ledger_check_refuses_a_retired_name_back_on_disk() -> None:
+    problems = migrate.ledger_disk_mismatches(
+        ["000007_flood.sql"], ["000006_hydro.sql", "000007_flood.sql"]
+    )
+
+    assert len(problems) == 1
+    assert "000007_flood.sql" in problems[0]
+
+
+def test_ledger_check_passes_the_production_shaped_ledger_and_an_empty_one() -> None:
+    """node-27's ledger: every file applied plus the 7 retired rows, both `000031` rows included."""
+    on_disk = [path.name for path in sorted(migrate.MIGRATIONS_DIR.glob("*.sql"))]
+    production_ledger = [*on_disk, *migrate.RETIRED_LEDGER_VERSIONS]
+    assert "000031_search_discovery_performance.sql" in on_disk
+    assert "000031_search_discovery_return_period_performance.sql" in production_ledger
+
+    assert migrate.ledger_disk_mismatches(production_ledger, on_disk) == []
+    assert migrate.ledger_disk_mismatches([], on_disk) == []
+
+
+def test_every_retired_ledger_version_names_the_retiring_change() -> None:
+    assert len(migrate.RETIRED_LEDGER_VERSIONS) == 7
+    for version, reason in migrate.RETIRED_LEDGER_VERSIONS.items():
+        assert re.fullmatch(r"\d{6}_[a-z0-9_]+\.sql", version), version
+        assert "b97c16e2" in reason and "#2048" in reason, version
+
+
+def test_ledger_check_runs_after_session_and_table_before_first_apply(
+    migrations_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(migrations_dir, "000001_a.sql", "CREATE TABLE a (id int);")
+    connection = FakeConnection()
+    _install(monkeypatch, connection)
+
+    migrate.main()
+
+    ledger_read = connection.index_of("SELECT version FROM public.schema_migrations")
+    assert connection.index_of("SELECT set_config") < connection.index_of("CREATE TABLE IF NOT EXISTS")
+    assert connection.index_of("CREATE TABLE IF NOT EXISTS") < ledger_read
+    assert ledger_read < connection.index_of("SELECT 1 FROM public.schema_migrations")
+    assert ledger_read < connection.sql_texts().index("CREATE TABLE a (id int);")
+    assert connection.ledger == {"000001_a.sql"}
+
+
+def test_unrecorded_ledger_version_refuses_before_any_apply(
+    migrations_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(migrations_dir, "000001_a.sql", "CREATE TABLE a (id int);")
+    _write(migrations_dir, "000002_b.sql", "CREATE TABLE b (id int);")
+    connection = FakeConnection()
+    connection.ledger = {"000001_a.sql", "000050_unrecorded.sql"}
+    _install(monkeypatch, connection)
+
+    with pytest.raises(SystemExit) as raised:
+        migrate.main()
+
+    out = capsys.readouterr().out
+    assert raised.value.code == 1
+    assert "nothing was applied" in out
+    assert "000050_unrecorded.sql" in out
+    assert "CREATE TABLE b (id int);" not in connection.sql_texts()
+    assert not [t for t in connection.sql_texts() if t.startswith(("INSERT", "SELECT 1 FROM"))]
+    assert connection.ledger == {"000001_a.sql", "000050_unrecorded.sql"}
+    assert "s3cretpw" not in out
+    assert connection.closed
+
+
+def test_duplicate_prefix_on_disk_refuses_before_any_apply(
+    migrations_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(migrations_dir, "000001_a.sql", "CREATE TABLE a (id int);")
+    _write(migrations_dir, "000001_b.sql", "CREATE TABLE b (id int);")
+    connection = FakeConnection()
+    _install(monkeypatch, connection)
+
+    with pytest.raises(SystemExit) as raised:
+        migrate.main()
+
+    out = capsys.readouterr().out
+    assert raised.value.code == 1
+    assert "000001_a.sql" in out and "000001_b.sql" in out
+    assert not [t for t in connection.sql_texts() if t.startswith("CREATE TABLE a") or t.startswith("CREATE TABLE b")]
+    assert connection.ledger == set()
+
+
+@pytest.mark.parametrize(
+    ("error", "diagnostic"),
+    [
+        (
+            FakeLockNotAvailable("canceling statement due to lock timeout"),
+            "Lock wait exceeded effective lock_timeout=5s.",
+        ),
+        (
+            FakeQueryCanceled("canceling statement due to statement timeout"),
+            "Statement canceled; effective statement_timeout=0.",
+        ),
+    ],
+)
+def test_timeout_on_the_ledger_read_is_reported_as_the_ledger_check(
+    error: Exception,
+    diagnostic: str,
+    migrations_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(migrations_dir, "000001_a.sql", "CREATE TABLE a (id int);")
+    connection = FakeConnection()
+    connection.holders = list(_HOLDERS)
+    connection.ledger_read_error = error
+    _install(monkeypatch, connection)
+
+    with pytest.raises(SystemExit) as raised:
+        migrate.main()
+
+    out = capsys.readouterr().out
+    assert raised.value.code == 1
+    assert "Failed migration: public.schema_migrations ledger check" in out
+    assert diagnostic in out
+    if isinstance(error, FakeLockNotAvailable):
+        assert "pid=4242" in out and "pid=4243" in out
+    # No migration was being applied, so there is no per-file partial-commit notice.
+    assert "NOT recorded" not in out
+    assert not [t for t in connection.sql_texts() if t.startswith(("INSERT", "SELECT 1 FROM", "CREATE TABLE a"))]
+    assert connection.ledger == set()
+    assert connection.closed

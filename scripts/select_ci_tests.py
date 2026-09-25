@@ -2376,6 +2376,8 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
 RESPONSE_MODEL_SCHEMA_PARITY_TEST = "tests/test_response_model_schema_parity.py"
 # #2222: the `/runs` public projection (SQL allowlist, serializer, route model).
 HYDRO_RUN_PUBLIC_PROJECTION_TEST = "tests/test_hydro_run_public_projection.py"
+# #2048: 000062-000064 and the runner's ledger/disk check against a production-shaped catalog.
+SCHEMA_LEDGER_CONVERGENCE_INTEGRATION_TEST = "tests/test_schema_ledger_convergence_integration.py"
 # The route modules the unit-level guard walks from the registry: each declares
 # a module-level `_APPLICATION_NAME` and injects it into its store factories.
 # #2078: apps/api/routes/forecast.py is deliberately absent — it gained an exact
@@ -4441,6 +4443,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # tests/test_migrations.py, which never parses the enum. 9 tests in
             # 0.29s, DB-free.
             "tests/test_hydro_status_set_parity.py",
+        ),
+    ),
+    # #2048. The schema-ledger convergence suite rebuilds node-27's drift and runs
+    # the real runner over db/migrations, with the role block `apply_migrations_
+    # from_zero` lifts out of db/roles/, so a change to any of the three can break
+    # it. `db/**` above buys only tests/test_migrations.py. The suite is
+    # integration-marked (it skips in the PR unit lane and executes in "SQL
+    # Migration Dry Run"); selecting it here keeps the routing explicit.
+    PathTestRule(
+        "db/migrations/**",
+        (SCHEMA_LEDGER_CONVERGENCE_INTEGRATION_TEST,),
+    ),
+    PathTestRule(
+        "db/roles/**",
+        (SCHEMA_LEDGER_CONVERGENCE_INTEGRATION_TEST,),
+    ),
+    PathTestRule(
+        # The runner's ledger/disk check and session guard are pinned by the fake
+        # connection suite, which has no same-name pairing with migrate.py.
+        "packages/common/migrate.py",
+        (
+            SCHEMA_LEDGER_CONVERGENCE_INTEGRATION_TEST,
+            "tests/test_migrate_lock_timeout.py",
         ),
     ),
     # the converted lanes with no pre-existing rule to merge into. The

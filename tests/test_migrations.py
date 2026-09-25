@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from packages.common.migrate import split_sql_statements
+from packages.common.migrate import RETIRED_LEDGER_VERSIONS, split_sql_statements
 from packages.common.river_ts_render import render_river_ts_sql
 from services.tiles.mvt import _valid_times_any_source_template, _valid_times_named_source_template
 from tests.test_sql_shape_helpers import (
@@ -11,7 +11,76 @@ from tests.test_sql_shape_helpers import (
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
 
-EXPECTED_MIGRATIONS = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+# The migration inventory, as a checked-in fact (#2510). It used to be computed from
+# the very glob the inventory test compares it with, so a deleted, renamed or
+# mis-numbered migration stayed green. Adding a migration is therefore a two-place
+# edit: the file and this tuple.
+#
+# The six prefix gaps (000007, 000015, 000017, 000020, 000034, 000036) are not
+# missing files: they are the b97c16e2 retirements (#2048), applied on node-27 and
+# listed in packages/common/migrate.py's RETIRED_LEDGER_VERSIONS. The seventh
+# retired name, 000031_search_discovery_return_period_performance.sql, was a
+# rename, so its prefix lives on in 000031_search_discovery_performance.sql.
+EXPECTED_MIGRATIONS: tuple[str, ...] = (
+    "000001_extensions.sql",
+    "000002_schemas.sql",
+    "000003_enums.sql",
+    "000004_core.sql",
+    "000005_met.sql",
+    "000006_hydro.sql",
+    "000008_map.sql",
+    "000009_ops.sql",
+    "000010_indexes.sql",
+    "000011_pipeline_job_model_id.sql",
+    "000012_pipeline_job_array_task.sql",
+    "000013_enum_remediation.sql",
+    "000014_best_available_lineage.sql",
+    "000016_river_segment_pagination_indexes.sql",
+    "000018_tile_cache_m16_contract.sql",
+    "000019_hydro_mvt_identity_lookup_idx.sql",
+    "000021_latest_ready_run_discovery_idx.sql",
+    "000022_model_asset_lifecycle.sql",
+    "000023_interp_weight_grid_signature.sql",
+    "000024_qhh_latest_display_product_indexes.sql",
+    "000025_active_manual_retry_guard.sql",
+    "000026_ops_strict_identity_indexes.sql",
+    "000027_cycle_status_canonical_incomplete.sql",
+    "000028_state_lineage.sql",
+    "000029_pipeline_reservation.sql",
+    "000030_qhh_latest_display_parsed_status_index.sql",
+    "000031_search_discovery_performance.sql",
+    "000032_source_specific_state_snapshot.sql",
+    "000033_station_mvt_active_source_index.sql",
+    "000035_qhh_display_coverage_materialization.sql",
+    "000037_river_segment_multilinestring.sql",
+    "000038_direct_grid_interp_weight_constraints.sql",
+    "000039_crosswalk_external_identity.sql",
+    "000040_display_ready_succeeded_status_index.sql",
+    "000041_drop_redundant_river_qhh_latest_window_idx.sql",
+    "000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+    "000043_canonical_grid_snapshot.sql",
+    "000044_canonical_grid_snapshot_identity_unique.sql",
+    "000045_hydro_run_type_hindcast.sql",
+    "000046_state_snapshot_clone_provenance.sql",
+    "000047_hypertable_compression_settings.sql",
+    "000048_river_segment_stream_type.sql",
+    "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql",
+    "000050_river_identity_normalization.sql",
+    "000051_river_ts_surrogate_key_read_index.sql",
+    "000052_authority_stats_hygiene_trgm_expression_index.sql",
+    "000053_state_snapshot_clone_gate_kind.sql",
+    "000054_met_station_trgm_expression_index.sql",
+    "000055_ops_ingest_recompute_decline.sql",
+    "000056_hydro_run_parsed_at.sql",
+    "000057_river_network_version_geometry_generation.sql",
+    "000058_hot_timeseries_chunk_interval_3d.sql",
+    "000059_river_timeseries_narrow_expand.sql",
+    "000060_river_timeseries_contract.sql",
+    "000061_forcing_station_timeseries_narrow_expand.sql",
+    "000062_hydro_run_status_frequency_done_convergence.sql",
+    "000063_hydro_run_partial_index_predicate_convergence.sql",
+    "000064_drop_retired_flood_schema.sql",
+)
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "map", "ops"}
 EXPECTED_TABLES = {
@@ -71,7 +140,28 @@ def _migration_sql() -> list[tuple[str, str]]:
 def test_all_migration_files_exist_with_expected_names() -> None:
     migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
 
-    assert migration_names == EXPECTED_MIGRATIONS
+    assert migration_names == list(EXPECTED_MIGRATIONS)
+
+
+def test_migration_names_have_unique_strictly_increasing_padded_prefixes() -> None:
+    """Both the runner and `apply_migrations_from_zero` apply `sorted(glob)`, so the name IS the order."""
+    for name in EXPECTED_MIGRATIONS:
+        assert re.fullmatch(r"\d{6}_[a-z0-9_]+\.sql", name), f"{name} needs a 6-digit zero-padded prefix"
+    prefixes = [int(name[:6]) for name in EXPECTED_MIGRATIONS]
+    assert all(earlier < later for earlier, later in zip(prefixes, prefixes[1:])), (
+        f"prefixes must be unique and strictly increasing: {prefixes}"
+    )
+
+
+def test_migration_prefix_gaps_are_exactly_the_recorded_retirements() -> None:
+    """A gap is a retirement the runner knows about, never a file that quietly went missing (#2048)."""
+    assert not set(EXPECTED_MIGRATIONS) & set(RETIRED_LEDGER_VERSIONS)
+    live = {int(name[:6]) for name in EXPECTED_MIGRATIONS}
+    gaps = set(range(1, max(live) + 1)) - live
+    retired_prefixes = {int(name[:6]) for name in RETIRED_LEDGER_VERSIONS}
+
+    assert gaps == retired_prefixes - live
+    assert gaps == {7, 15, 17, 20, 34, 36}
 
 
 def test_migration_files_are_non_empty_sql() -> None:
@@ -266,6 +356,82 @@ def test_latest_ready_run_discovery_migration_matches_query_predicate_and_order(
     assert "WHERE h.status IN ('succeeded', 'parsed', 'published')" in function_source
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in function_source
     assert "LIMIT 1" in function_source
+
+    # #2048 acceptance 3: the index predicate -- as defined AND as 000063 rebuilds it
+    # on production -- names exactly the statuses the query filters on. Before
+    # 000063 production's copy said ('frequency_done', 'published') and could never
+    # serve this query.
+    query_statuses = _status_list(function_source)
+    assert query_statuses == ("succeeded", "parsed", "published")
+    rebuild = dict(_migration_sql())[_PARTIAL_INDEX_CONVERGENCE_MIGRATION]
+    for sql in (migration, rebuild):
+        assert _status_list(_index_statement(sql, "hydro_run_latest_ready_run_idx")) == query_statuses
+
+
+# 000063 (#2048) rebuilds these six, in this order, from their defining files.
+_PARTIAL_INDEX_CONVERGENCE_MIGRATION = "000063_hydro_run_partial_index_predicate_convergence.sql"
+_CONVERGED_HYDRO_RUN_INDEXES = (
+    ("hydro_run_latest_ready_run_idx", "000021_latest_ready_run_discovery_idx.sql"),
+    ("hydro_run_qhh_latest_candidate_idx", "000024_qhh_latest_display_product_indexes.sql"),
+    ("hydro_run_qhh_latest_candidate_parsed_idx", "000030_qhh_latest_display_parsed_status_index.sql"),
+    ("hydro_run_display_product_basin_status_idx", "000031_search_discovery_performance.sql"),
+    ("hydro_run_display_ready_candidate_idx", "000040_display_ready_succeeded_status_index.sql"),
+    ("hydro_run_display_ready_basin_status_idx", "000040_display_ready_succeeded_status_index.sql"),
+)
+
+
+def _statements_without_comments(sql: str) -> list[str]:
+    return [" ".join(statement.split()) for statement in split_sql_statements(re.sub(r"--[^\n]*", "", sql))]
+
+
+def _index_statement(sql: str, index_name: str) -> str:
+    """The one whitespace-normalised `CREATE INDEX ... <index_name> ...;` statement in ``sql``."""
+    pattern = rf"CREATE INDEX (?:CONCURRENTLY )?IF NOT EXISTS {index_name} "
+    matches = [statement for statement in _statements_without_comments(sql) if re.match(pattern, statement)]
+    assert len(matches) == 1, f"expected one CREATE INDEX for {index_name}, found {matches}"
+    return matches[0]
+
+
+def _status_list(sql: str) -> tuple[str, ...]:
+    match = re.search(r"\bstatus IN \(([^)]*)\)", sql)
+    assert match is not None, f"no `status IN (...)` in {sql!r}"
+    return tuple(re.findall(r"'([^']+)'", match.group(1)))
+
+
+def test_hydro_run_status_convergence_migration_adds_frequency_done_after_parsed_only() -> None:
+    """000062 (#2048): production's label order, idempotently, and nothing else."""
+    statements = _statements_without_comments(
+        dict(_migration_sql())["000062_hydro_run_status_frequency_done_convergence.sql"]
+    )
+
+    assert statements == [
+        "ALTER TYPE hydro.run_status ADD VALUE IF NOT EXISTS 'frequency_done' AFTER 'parsed';"
+    ]
+
+
+def test_partial_index_convergence_rebuilds_each_index_exactly_as_defined() -> None:
+    """000063 (#2048): DROP then CREATE, CONCURRENTLY, with the defining file's column list and predicate.
+
+    Compared after the `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS <name>` head, so
+    the `ON hydro.hydro_run (<columns>) WHERE <predicate>` tail must be the same
+    bytes (whitespace-normalised) as the defining migration's. A drifted copy
+    would converge production to a definition no fresh database has.
+    """
+    migrations = dict(_migration_sql())
+    statements = _statements_without_comments(migrations[_PARTIAL_INDEX_CONVERGENCE_MIGRATION])
+
+    expected_statements: list[str] = []
+    for index_name, defining_file in _CONVERGED_HYDRO_RUN_INDEXES:
+        definition = _index_statement(migrations[defining_file], index_name)
+        head = re.match(rf"CREATE INDEX (?:CONCURRENTLY )?IF NOT EXISTS {index_name} ", definition)
+        assert head is not None
+        expected_statements.append(f"DROP INDEX CONCURRENTLY IF EXISTS hydro.{index_name};")
+        expected_statements.append(
+            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} {definition[head.end():]}"
+        )
+        assert _status_list(definition) == ("succeeded", "parsed", "published"), defining_file
+
+    assert statements == expected_statements
 
 
 def test_river_segment_stream_type_is_generated_and_indexed() -> None:

@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from packages.common.migrate import RETIRED_LEDGER_VERSIONS
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SQL_PATH = _ROOT / "db" / "roles" / "node27_write_roles.sql"
 _RUNNER_PATH = _ROOT / "scripts" / "node27_provision_write_roles.sh"
@@ -137,24 +139,11 @@ _MIGRATION_ALLOW_LIST = (
 # authored the reference (pinned by test). An entry here is a claim about
 # PRODUCTION state that this repository cannot re-derive, so it is the one place
 # in leg (iv) where a name is on the list because a human recorded why.
-_LEDGER_ALLOW_LIST: dict[str, str] = {
-    "pg_catalog.jsonb_typeof": (
-        "flood.run_product_quality carries two CHECK constraints of the shape "
-        "`jsonb_typeof(residual_blockers) = 'array'::text` "
-        "(run_product_quality_residual_blockers_array_chk and "
-        "run_product_quality_unavailable_products_array_chk), measured on "
-        "node-27 by the T7 --roles-only sweep. They were authored by "
-        "000034_return_period_run_quality_materialization.sql and "
-        "000036_run_product_quality_explicit_source.sql, both recorded as "
-        "applied by the migration superuser in node-27's "
-        "public.schema_migrations ledger (2026-06-14 / 2026-06-17) -- but "
-        "neither file is under db/migrations any more (the repository listing "
-        "jumps 000033 -> 000035 -> 000037). The reference is therefore "
-        "migration-authored and superuser-owned, yet structurally underivable "
-        "from the repository tree. The repo/production migration drift itself "
-        "is reported out of this change's scope."
-    ),
-}
+#
+# Empty since #2048. Its one entry, `pg_catalog.jsonb_typeof`, was trusted only
+# because the retired flood.run_product_quality CHECKs referenced it; 000064
+# drops the flood schema, so no production expression references it any more.
+_LEDGER_ALLOW_LIST: dict[str, str] = {}
 
 _MIGRATIONS_DIR = _ROOT / "db" / "migrations"
 
@@ -1181,20 +1170,26 @@ def test_the_two_allow_list_provenance_classes_are_disjoint_and_explained() -> N
     properties keep that honest: the classes may not overlap (a name in both
     would satisfy the union test while making the derivation equality
     unsatisfiable), and every ledger reason must name the migration file that
-    authored the reference -- `pg_catalog.jsonb_typeof` is trusted because
-    000034/000036 are in node-27's `public.schema_migrations`, not because
-    somebody found the finding inconvenient.
+    authored the reference, so a name is trusted because a ledger row says a
+    migration wrote it, not because somebody found the finding inconvenient.
+
+    #2048: no reason may lean on a `b97c16e2` retirement. `pg_catalog.jsonb_typeof`
+    was trusted for the retired `flood.run_product_quality` CHECKs; 000064 drops
+    the flood schema, so an entry sourced from a retired flood migration would
+    trust a function on behalf of an object that no longer exists.
     """
     overlap = set(_MIGRATION_ALLOW_LIST) & set(_LEDGER_ALLOW_LIST)
     assert not overlap, (
         "these names claim both provenance classes; a derived name must not be "
         f"in the ledger list and vice versa: {sorted(overlap)}"
     )
-    assert _LEDGER_ALLOW_LIST, (
-        "the ledger list is empty -- if the retired flood migrations really "
-        "stopped being production truth, drop the SQL entry too"
-    )
+    assert "pg_catalog.jsonb_typeof" not in _LEDGER_ALLOW_LIST
     for name, reason in _LEDGER_ALLOW_LIST.items():
+        retired_sources = [version for version in RETIRED_LEDGER_VERSIONS if version[:7] in reason]
+        assert not retired_sources and "flood." not in reason, (
+            f"{name}'s ledger reason is sourced from a retired flood migration "
+            f"{retired_sources}; 000064 dropped what it referenced: {reason!r}"
+        )
         assert re.search(r"0000\d\d_", reason), (
             f"{name}'s ledger reason must name the migration FILE that authored "
             f"the reference (e.g. `000034_...sql`), not just describe it: {reason!r}"
@@ -1852,7 +1847,10 @@ def test_every_generated_schema_list_covers_all_six_schemas(sql_text: str) -> No
 
 
 def test_schema_scoped_grants_are_generated_not_listed(sql_text: str) -> None:
-    """`flood` is provisioned outside db/; a literal `IN SCHEMA a, b, flood` aborts."""
+    """`flood` is a retired schema 000064 drops (#2048); a literal `IN SCHEMA a, b, flood` aborts without it.
+
+    Per-existing-schema generation keeps tolerating any listed schema being absent.
+    """
     section = _sql_code(_psql_section(sql_text, "do_roles"))
     assert not re.search(r"IN SCHEMA\s+core\s*,", section), (
         "a comma list over the six schemas fails outright when `flood` is absent; "

@@ -132,7 +132,7 @@ uv run python -m services.tile_publisher.forcing_copyback_backfill \
 历史 dry-run 会扫描数据库表；当前这类 DB scan 必须改在 node-27 对 `:55432`
 执行，node-22 不再提供 `DATABASE_URL`：
 
-- `hydro.hydro_run.status IN ('succeeded', 'parsed', 'published')`（与 `services/tile_publisher/forcing_copyback_backfill.py` 的查询一致；已退役的 `frequency_done` 不是迁移账本成员，仅残留在 node-27 live 枚举中，全新建库上作为字面量会报 `invalid input value for enum`）
+- `hydro.hydro_run.status IN ('succeeded', 'parsed', 'published')`（与 `services/tile_publisher/forcing_copyback_backfill.py` 的查询一致；已退役的 `frequency_done` 自 `000062` 起是仅为账本收敛保留的枚举成员，从不写入，不属于候选状态）
 - `hydro.river_timeseries.variable = 'q_down'`
 - `met.forcing_version` 中 joined 的 `forcing_package_uri`、`checksum`、`lineage_json`
 

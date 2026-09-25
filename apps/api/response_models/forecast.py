@@ -29,9 +29,10 @@ class HydroRun(BaseModel):
 
     ``run_type`` / ``status`` are ``str``, not the published ``RunType`` /
     ``RunStatus`` enums: the value is the live ``hydro.run_type`` /
-    ``hydro.run_status`` label, and the live enum is not bounded by the repo
-    migrations (node-27, 2026-09-24: ``run_status`` carries ``frequency_done``,
-    which no migration creates). A closed runtime enum would 500 the whole
+    ``hydro.run_status`` label, and the DB enum is wider than the published one
+    (``run_status`` carries ``frequency_done``: retired, a convergence-only
+    ledger member since ``000062``, never written, and absent from the published
+    ``RunStatus``). A closed runtime enum would 500 the whole
     ``/runs`` page on such a row, where master passed the label through; the
     hand schema stays the published contract.
     """

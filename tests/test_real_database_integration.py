@@ -12,7 +12,7 @@ from sqlalchemy import text
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from packages.common.migrate import MIGRATIONS_DIR
-from packages.common.state_manager import PsycopgStateSnapshotRepository
+from packages.common.state_manager import STR_STRIP_WHITESPACE, PsycopgStateSnapshotRepository
 from services.orchestrator import scheduler_lineage
 from tests.integration_helpers import (
     BASIN_ID,
@@ -35,6 +35,8 @@ from tests.integration_helpers import (
 from tests.integration_helpers import (
     post_expand_forecast_database as post_expand_forecast_database,
 )
+from tests.lineage_state_index_fixtures import index_entry as lineage_index_entry
+from tests.lineage_state_index_fixtures import index_repository as lineage_index_repository
 
 pytestmark = pytest.mark.integration
 
@@ -610,6 +612,7 @@ def _insert_issue_1739_clone_row(
     state_id: str,
     valid_time: datetime,
     clone_gate_fingerprint: str | None,
+    cloned_from_model_id: str = _ISSUE_1739_PREDECESSOR_MODEL_ID,
 ) -> None:
     """Commit one clone row under the seeded `(MODEL_ID, SOURCE_ID)` pair.
 
@@ -642,25 +645,20 @@ def _insert_issue_1739_clone_row(
                     SOURCE_ID,
                     CYCLE_ID,
                     STATE_ID,
-                    _ISSUE_1739_PREDECESSOR_MODEL_ID,
+                    cloned_from_model_id,
                     clone_gate_fingerprint,
                     "state_compatibility",
                 ),
             )
 
 
-def _delete_issue_1739_clone_rows(database_url: str) -> None:
+def _delete_issue_1739_clone_rows(
+    database_url: str,
+    state_ids: tuple[str, ...] = (_ISSUE_1739_NULL_FINGERPRINT_STATE_ID, _ISSUE_1739_FINGERPRINTED_STATE_ID),
+) -> None:
     with psycopg_connection(database_url) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM hydro.state_snapshot WHERE state_id = ANY(%s)",
-                (
-                    [
-                        _ISSUE_1739_NULL_FINGERPRINT_STATE_ID,
-                        _ISSUE_1739_FINGERPRINTED_STATE_ID,
-                    ],
-                ),
-            )
+            cursor.execute("DELETE FROM hydro.state_snapshot WHERE state_id = ANY(%s)", (list(state_ids),))
 
 
 def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
@@ -701,10 +699,11 @@ def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
     in fact redundant against `<> model_id` outright, not just against a NULL
     parent: by SQL three-valued logic `x <> model_id` can be TRUE only when `x`
     is non-NULL, so for any bound `model_id` the extra conjunct cannot change
-    the WHERE clause's truth value. An EMPTY-STRING parent passes BOTH conjuncts
-    and is admitted by the SQL; what rejects it is the `.strip()` in the
-    resolver's `_from_clone_row`, downstream of the query (design D3 note 2 —
-    the normalisation axis, tracked as #2392). This fixture builds no such row.
+    the WHERE clause's truth value. An empty or whitespace-only parent, and a
+    padded self-reference, are the normalisation axis (#2392): the SQL now
+    rejects them itself with `btrim(cloned_from_model_id, <trim set>)`, pinned
+    by `test_real_earliest_clone_row_skips_a_masking_parent_like_the_file_plane`
+    below. This fixture builds no such row.
     """
 
     apply_migrations_from_zero(integration_database_url)
@@ -764,6 +763,116 @@ def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
         assert cutover.cutover_time == _ISSUE_1739_CLONE_VALID_TIME
     finally:
         _delete_issue_1739_clone_rows(integration_database_url)
+
+
+# Issue #2392: an earliest clone row whose parent the file plane's `.strip()`
+# skips -- blank, or the row's own id with padding -- followed by a legitimate
+# one. Same it126 prefix and cleanup discipline as the #1739 rows above; distinct
+# instants from them for the same unique key.
+_ISSUE_2392_MASKING_STATE_ID = f"{ISSUE_126_PREFIX}_it2392_clone_masking"
+_ISSUE_2392_LEGITIMATE_STATE_ID = f"{ISSUE_126_PREFIX}_it2392_clone_legitimate"
+_ISSUE_2392_MASKING_VALID_TIME = datetime(2026, 5, 6, 0, tzinfo=UTC)
+_ISSUE_2392_LEGITIMATE_VALID_TIME = datetime(2026, 5, 7, 0, tzinfo=UTC)
+_ISSUE_2392_MASKING_PARENTS = {
+    "spaces": "   ",
+    "tab": "\t",
+    "newline": "\n",
+    "ideographic_space": "\u3000",
+    "padded_self": f" {MODEL_ID} ",
+}
+
+
+def _iso_z(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("masking_parent", _ISSUE_2392_MASKING_PARENTS.values(), ids=_ISSUE_2392_MASKING_PARENTS)
+def test_real_earliest_clone_row_skips_a_masking_parent_like_the_file_plane(
+    integration_database_url: str, tmp_path: Path, masking_parent: str
+) -> None:
+    """#2392 / I4: the DB plane's `LIMIT 1` skips what the file plane skips, and both resolve the same t*.
+
+    Before the fix the SQL judged raw bytes: the masking row won `LIMIT 1`, the
+    resolver's `.strip()` rejected it, and the DB plane answered "no lineage"
+    while the file plane, which skips the row during selection, found the later
+    legitimate clone. The file plane is built from the SAME two rows through the
+    production publish path, so the equality is plane against plane, not against
+    a hand-written expectation.
+    """
+
+    apply_migrations_from_zero(integration_database_url)
+    seed_issue_126_data(integration_database_url)
+    repository = PsycopgStateSnapshotRepository(integration_database_url)
+    rows = (
+        (_ISSUE_2392_MASKING_STATE_ID, _ISSUE_2392_MASKING_VALID_TIME, masking_parent),
+        (_ISSUE_2392_LEGITIMATE_STATE_ID, _ISSUE_2392_LEGITIMATE_VALID_TIME, _ISSUE_1739_PREDECESSOR_MODEL_ID),
+    )
+
+    try:
+        for state_id, valid_time, parent in rows:
+            _insert_issue_1739_clone_row(
+                integration_database_url,
+                state_id=state_id,
+                valid_time=valid_time,
+                clone_gate_fingerprint="sha256:" + "d" * 64,
+                cloned_from_model_id=parent,
+            )
+
+        earliest = repository.get_earliest_clone_row_for_model_source(model_id=MODEL_ID, source_id=SOURCE_ID)
+        assert earliest is not None, "the masking row hid the legitimate clone row from the DB plane"
+        assert earliest.state_id == _ISSUE_2392_LEGITIMATE_STATE_ID
+        db_cutover = scheduler_lineage.resolve_lineage_cutover(repository, model_id=MODEL_ID, source_id=SOURCE_ID)
+
+        object_root = tmp_path / "objects"
+        object_root.mkdir(parents=True)
+        file_repository = lineage_index_repository(
+            tmp_path,
+            [
+                lineage_index_entry(
+                    object_root=object_root,
+                    model_id=MODEL_ID,
+                    source_id=SOURCE_ID,
+                    valid_time=_iso_z(valid_time),
+                    cloned_from_model_id=parent,
+                    state_id=state_id,
+                )
+                for state_id, valid_time, parent in rows
+            ],
+            generated_at="2026-05-08T00:00:00Z",
+            now="2026-05-08T06:00:00Z",
+        )
+        file_cutover = scheduler_lineage.resolve_lineage_cutover(
+            file_repository, model_id=MODEL_ID, source_id=SOURCE_ID
+        )
+
+        assert db_cutover is not None
+        assert db_cutover.predecessor_model_id == _ISSUE_1739_PREDECESSOR_MODEL_ID
+        assert db_cutover.cutover_time == _ISSUE_2392_LEGITIMATE_VALID_TIME
+        assert file_cutover == db_cutover
+    finally:
+        _delete_issue_1739_clone_rows(
+            integration_database_url, (_ISSUE_2392_MASKING_STATE_ID, _ISSUE_2392_LEGITIMATE_STATE_ID)
+        )
+
+
+def test_real_btrim_with_the_trim_set_equals_python_strip(integration_database_url: str) -> None:
+    """#2392: `btrim(x, STR_STRIP_WHITESPACE)` is `x.strip()` on this server, every character of the set included.
+
+    The equivalence is per code point, so it holds only under a UTF8 server
+    encoding; asserted here rather than assumed.
+    """
+
+    padded = STR_STRIP_WHITESPACE + "model a" + STR_STRIP_WHITESPACE[::-1]
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT btrim(%s, %s) AS trimmed, current_setting('server_encoding') AS server_encoding",
+                (padded, STR_STRIP_WHITESPACE),
+            )
+            row = cursor.fetchone()
+
+    assert row["server_encoding"] == "UTF8"
+    assert row["trimmed"] == padded.strip() == "model a"
 
 
 # ---------------------------------------------------------------------------

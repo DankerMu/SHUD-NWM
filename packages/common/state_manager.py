@@ -87,6 +87,15 @@ STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNOR
 STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum"})
 STATE_INDEX_REPAIR_LANES = ("reference", "destination")
 _STATE_INDEX_REPAIR_POST_CAS_PHASES = frozenset({"replace_uncertain", "postcommit", "release_uncertain"})
+# Exactly the characters for which ``str.isspace()`` is true, i.e. what argument-less
+# ``str.strip()`` removes (#2392). Passed as ``btrim``'s character set so the SQL plane
+# normalises ``cloned_from_model_id`` like the file plane; plain ``btrim(x)`` strips spaces
+# only. A literal, not a scan of every code point at import; a unit test pins the equality.
+STR_STRIP_WHITESPACE = (
+    "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def default_database_url() -> str:
@@ -928,7 +937,8 @@ class PsycopgStateSnapshotRepository:
         ``lineage-scoped-cycle-completion`` D4).
 
         Lineage admission keys on ``cloned_from_model_id`` ALONE (#1739):
-        present, and different from the row's own ``model_id``.
+        present, non-empty, and different from the row's own ``model_id``, all
+        judged on the value with surrounding whitespace removed (#2392).
         ``clone_gate_fingerprint`` is pure provenance — it records WHICH gate
         admitted a clone and at WHAT value, not WHETHER this identity came
         into existence — so it is deliberately NOT a condition here, and this
@@ -945,13 +955,24 @@ class PsycopgStateSnapshotRepository:
         filter on purpose — see its docstring; the asymmetry is a ruling, not
         an oversight.
 
-        A row naming ITSELF as its own predecessor is rejected
-        (``cloned_from_model_id <> model_id``): the spec defines lineage as a
-        clone from a *predecessor* model, and an identity is not its own
-        predecessor, so such a row is corrupt provenance rather than an
-        existence-start.  No ``usable_flag`` filter — an unusable clone row
-        still proves the identity started then, and skipping it would move the
-        boundary later (the silent-hide direction).
+        A row naming ITSELF as its own predecessor is rejected: the spec
+        defines lineage as a clone from a *predecessor* model, and an identity
+        is not its own predecessor, so such a row is corrupt provenance rather
+        than an existence-start.  No ``usable_flag`` filter — an unusable clone
+        row still proves the identity started then, and skipping it would move
+        the boundary later (the silent-hide direction).
+
+        Both the emptiness and the self test run on
+        ``btrim(cloned_from_model_id, STR_STRIP_WHITESPACE)``, the SQL spelling
+        of the file plane's ``.strip()`` (:func:`_clone_entries_for_model_source`),
+        compared with the RAW ``model_id`` exactly as that plane compares with
+        its key.  The two planes therefore skip the same rows during SELECTION:
+        a whitespace-only parent or a padded self-reference can no longer win
+        ``LIMIT 1`` here, be rejected by the resolver, and mask a later
+        legitimate clone row the file plane would have found.  The resolver's
+        own ``.strip()`` in ``scheduler_lineage._from_clone_row`` stays as
+        defence in depth.  Equivalence with ``.strip()`` assumes a UTF8 server
+        encoding (node-27 and CI).
 
         Returns ``None`` when the pair has no clone row — cold start, fresh
         basin, or legacy target — which the caller reads as "no lineage".
@@ -963,11 +984,12 @@ class PsycopgStateSnapshotRepository:
             WHERE model_id = %s
               AND source_id = %s
               AND cloned_from_model_id IS NOT NULL
-              AND cloned_from_model_id <> model_id
+              AND btrim(cloned_from_model_id, %s) <> ''
+              AND btrim(cloned_from_model_id, %s) <> model_id
             ORDER BY valid_time ASC, created_at ASC
             LIMIT 1
             """,
-            (model_id, source_id),
+            (model_id, source_id, STR_STRIP_WHITESPACE, STR_STRIP_WHITESPACE),
         )
         return _snapshot_from_row(row) if row is not None else None
 
@@ -3750,51 +3772,23 @@ def _clone_entries_for_model_source(
     so both planes key lineage admission on ``cloned_from_model_id`` alone.
     This function has never read the fingerprint.
 
-    What survives is a different axis — ``cloned_from_model_id``
-    NORMALISATION — and it has TWO shapes, not one.  This plane ``.strip()``\\ s
-    the value before judging it; the SQL judges the raw bytes:
+    On the ``cloned_from_model_id`` NORMALISATION axis they agree too (#2392).
+    This plane ``.strip()``\\ s the value and skips an entry whose parent is
+    then empty or equals ``key[0]`` (the RAW ``model_id``); the SQL applies the
+    same two tests to ``btrim(cloned_from_model_id, STR_STRIP_WHITESPACE)``,
+    whose character set is exactly what ``.strip()`` removes. Both planes
+    therefore reject such a row during SELECTION and move on to the next
+    candidate, so neither of the two masking shapes survives:
 
-    * a WHITESPACE-ONLY parent — this plane strips it to empty and skips it,
-      while the DB plane accepts it: BOTH conjuncts hold (``IS NOT NULL`` is
-      TRUE, and ``<> model_id`` is TRUE for any model id that is not that same
-      whitespace string), and nothing in the SQL rejects it;
-    * a self-reference WITH SURROUNDING WHITESPACE (``'model_a_prime '`` under
-      ``model_id = 'model_a_prime'``) — this plane strips it and skips it as
-      self-referential, while the SQL's ``cloned_from_model_id <> model_id``
-      compares literally, finds the two strings unequal, and accepts it.
+    * a WHITESPACE-ONLY parent (``'   '``, ``'\\t'``, ``'\\u3000'``, ...);
+    * a self-reference WITH SURROUNDING WHITESPACE (``' model_a_prime '`` under
+      ``model_id = 'model_a_prime'``).
 
-    Row-for-row the two planes still give the same ANSWER — neither confers
-    lineage from a blank or from a self-naming parent — but in BOTH shapes the
-    DB plane lets such a row win its ``LIMIT 1``, the resolver then rejects it
-    and reports "no lineage", and a later LEGITIMATE clone row is MASKED — the
-    row this plane would have found.  Three notes for whoever reads this next:
-
-    * Dropping the fingerprint condition widened that exposure slightly. A row
-      with a blank parent AND no fingerprint was previously unselectable on the
-      DB plane; it is now a ``LIMIT 1`` candidate. The direction is recorded
-      honestly. The node-27 live census found zero such rows, but that is a
-      WEAK reading: ``hydro.state_snapshot`` was empty end to end at receipt
-      time, so it is "zero out of zero", not "zero half-written among many"
-      (``docs/runbooks/receipts/2026-09-15-issue-1739-clone-provenance-count-node27.md``).
-    * The spec's "present, non-empty, and different" is satisfied on the DB
-      plane by the resolver's own ``.strip()``
-      (``services/orchestrator/scheduler_lineage.py``'s ``_from_clone_row``),
-      NOT by the SQL. Reading that sentence as "the SQL should also say
-      ``btrim(...) <> ''``" would change which row ``LIMIT 1`` returns, which
-      is a separate ruling on the ``cloned_from_model_id`` NORMALISATION axis —
-      out of scope for #1739's fingerprint ruling, and tracked as #2392.
-    * That ``btrim(...) <> ''`` sketch closes the FIRST shape only. The padded
-      self-reference needs ``btrim(cloned_from_model_id) <> model_id`` as well;
-      a follow-up that adds only the emptiness test would leave the second
-      masking shape standing and look finished.
-
-    A row naming ITSELF as its own predecessor confers no lineage on either
-    plane — lineage is a clone from a *predecessor* model, and an identity is
-    not its own predecessor — but WHERE that is enforced differs, and the
-    difference is what the second shape above exploits. This plane rejects it
-    during SELECTION, so the next candidate is considered. The DB plane rejects
-    it at the RESOLVER, after ``LIMIT 1`` has already spent the single row it
-    returns; the SQL's own ``<> model_id`` catches only the byte-exact case.
+    Before #2392 the SQL judged the raw bytes, so either shape could win the DB
+    plane's ``LIMIT 1``; the resolver then rejected it and reported "no
+    lineage", masking a later LEGITIMATE clone row this plane found. The
+    resolver's own ``.strip()`` (``services/orchestrator/scheduler_lineage.py``'s
+    ``_from_clone_row``) is kept as defence in depth.
 
     Ordering is ``(valid_time, created_at)`` ASC — see
     :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal` for why
